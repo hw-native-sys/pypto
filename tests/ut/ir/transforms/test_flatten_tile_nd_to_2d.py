@@ -19,6 +19,18 @@ from pypto.ir import IRBuilder
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile as tile_ops
 
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+
+# (param_name, original_shape) — dtype is shared across the program.
+InSpec = tuple[str, list[int]]
+
+# (ib, in_tiles) -> final compute tile. Body may emit intermediate ``ib.let``
+# bindings; the helper wraps the final value with ``ib.let("y_tile", ...)``
+# unless it is already a Var.
+TileBody = Callable[[IRBuilder, list[ir.Expr]], ir.Expr]
+
 
 def _load2d(
     tensor: ir.Expr,
@@ -27,19 +39,135 @@ def _load2d(
     flat_shape: list,
     dtype: DataType,
 ) -> ir.Call:
-    """Create tile.load Call with original tensor-rank offsets/shapes and a 2D TileType.
+    """Build tile.load that keeps tensor-rank offsets/shapes but yields a 2D TileType.
 
-    After the refactor, FlattenTileNdTo2D keeps the original tensor-rank
-    offsets/shapes in tile.load but overrides the result TileType to 2D.
-    This helper constructs that expected IR shape.
+    After flattening, ``FlattenTileNdTo2D`` keeps the original tensor-rank
+    offsets/shapes in ``tile.load`` but overrides the result ``TileType`` to be
+    2D (with a fresh ``tile_view``/``memory_space``). This helper builds that
+    expected IR shape for tests.
     """
     nd_call = tile_ops.load(tensor, offsets, shapes, span=ir.Span.unknown())
-    # Create a reference 2D tile.load to get the correct type (with proper tile_view + memory_space)
     ref_tensor = ir.Var("_ref", ir.TensorType(flat_shape, dtype), ir.Span.unknown())
-    ref_offsets = [0] * len(flat_shape)
-    ref_call = tile_ops.load(ref_tensor, ref_offsets, flat_shape, span=ir.Span.unknown())
+    ref_call = tile_ops.load(ref_tensor, [0] * len(flat_shape), flat_shape, span=ir.Span.unknown())
     flat_type = cast(ir.TileType, ref_call.type)
     return ir.Call(nd_call.op, list(nd_call.args), nd_call.kwargs, flat_type, nd_call.span)
+
+
+def _wrap_main(
+    ib: IRBuilder,
+    prog,
+    incore_gvar: ir.GlobalVar,
+    in_specs: list[InSpec],
+    out_shape: list[int],
+    dtype: DataType,
+) -> None:
+    """Append the standard ``main`` orchestration function used by every test."""
+    out_type = ir.TensorType(out_shape, dtype)
+    with ib.function("main") as f:
+        in_vars = [f.param(name, ir.TensorType(sh, dtype)) for name, sh in in_specs]
+        f.return_type(out_type)
+        out_v = ib.let("out_0", tensor_ops.create(out_shape, dtype))
+        y = ib.let("y", ir.Call(incore_gvar, [*in_vars, out_v], ir.Span.unknown()))
+        ib.return_stmt(y)
+    prog.add_function(f.get_result())
+
+
+def _emit_compute(ib: IRBuilder, in_tiles: list[ir.Expr], body: TileBody) -> ir.Expr:
+    """Run ``body`` and ensure its result is bound (as ``y_tile`` if not already a Var)."""
+    result = body(ib, in_tiles)
+    if isinstance(result, ir.Var):
+        return result
+    return ib.let("y_tile", result)
+
+
+def _build_before_nd(
+    in_specs: list[InSpec],
+    out_shape: list[int],
+    dtype: DataType,
+    body: TileBody,
+    *,
+    func_name: str = "main_incore_0",
+    func_type: ir.FunctionType = ir.FunctionType.InCore,
+) -> ir.Program:
+    """Build a Before program: ``tile.load(orig) -> body -> tile.store(orig)``.
+
+    Args:
+        in_specs: Tensor input parameters (name + original shape).
+        out_shape: Original shape of the ``out_0`` tensor parameter.
+        dtype: Element dtype shared by tensors and tiles.
+        body: Callable returning the final tile expression to store.
+        func_name: InCore-variant function name.
+        func_type: Function type (``InCore`` / ``AIC`` / ``AIV``).
+    """
+    span = ir.Span.unknown()
+    out_zeros = [0] * len(out_shape)
+    out_type = ir.TensorType(out_shape, dtype)
+
+    ib = IRBuilder()
+    with ib.program("main") as prog:
+        gvar = prog.declare_function(func_name)
+        prog.declare_function("main")
+
+        with ib.function(func_name, type=func_type) as f:
+            in_vars = [f.param(name, ir.TensorType(sh, dtype)) for name, sh in in_specs]
+            out_p = f.param("out_0", out_type, direction=ir.ParamDirection.Out)
+            f.return_type(out_type)
+            in_tiles: list[ir.Expr] = [
+                ib.let(f"{name}_tile", tile_ops.load(v, [0] * len(sh), sh, span=span))
+                for (name, sh), v in zip(in_specs, in_vars, strict=True)
+            ]
+            result = _emit_compute(ib, in_tiles, body)
+            out_r = ib.let("out_0", tile_ops.store(result, out_zeros, out_p))
+            ib.return_stmt(out_r)
+        prog.add_function(f.get_result())
+
+        _wrap_main(ib, prog, gvar, in_specs, out_shape, dtype)
+    return prog.get_result()
+
+
+def _build_expected_2d(
+    in_specs: list[InSpec],
+    out_shape: list[int],
+    flat_in_shapes: list[list[int]],
+    dtype: DataType,
+    body: TileBody,
+    *,
+    func_name: str = "main_incore_0",
+    func_type: ir.FunctionType = ir.FunctionType.InCore,
+) -> ir.Program:
+    """Build an Expected program after flattening: ``_load2d(...) -> body -> tile.store(orig, shapes=)``.
+
+    For inputs whose original rank is ``<= 2``, a regular ``tile.load`` is
+    emitted instead of ``_load2d``. The ``tile.store`` always carries the
+    original ``out_shape`` as ``shapes=`` when ``out_shape`` is >2D.
+    """
+    span = ir.Span.unknown()
+    out_zeros = [0] * len(out_shape)
+    out_type = ir.TensorType(out_shape, dtype)
+
+    ib = IRBuilder()
+    with ib.program("main") as prog:
+        gvar = prog.declare_function(func_name)
+        prog.declare_function("main")
+
+        with ib.function(func_name, type=func_type) as f:
+            in_vars = [f.param(name, ir.TensorType(sh, dtype)) for name, sh in in_specs]
+            out_p = f.param("out_0", out_type, direction=ir.ParamDirection.Out)
+            f.return_type(out_type)
+            in_tiles: list[ir.Expr] = []
+            for (name, sh), v, flat in zip(in_specs, in_vars, flat_in_shapes, strict=True):
+                if len(sh) > 2:
+                    in_tiles.append(ib.let(f"{name}_tile", _load2d(v, [0] * len(sh), sh, flat, dtype)))
+                else:
+                    in_tiles.append(ib.let(f"{name}_tile", tile_ops.load(v, [0] * len(sh), sh, span=span)))
+            result = _emit_compute(ib, in_tiles, body)
+            store_shapes = out_shape if len(out_shape) > 2 else None
+            out_r = ib.let("out_0", tile_ops.store(result, out_zeros, out_p, store_shapes))
+            ib.return_stmt(out_r)
+        prog.add_function(f.get_result())
+
+        _wrap_main(ib, prog, gvar, in_specs, out_shape, dtype)
+    return prog.get_result()
 
 
 def _build_expected_single_op(
@@ -51,114 +179,206 @@ def _build_expected_single_op(
     func_name: str = "main_incore_0",
     func_type: ir.FunctionType = ir.FunctionType.InCore,
 ) -> ir.Program:
-    """Build the IRBuilder ``Expected`` IR for a single-op InCore-variant + ``main`` wrapper.
-
-    The shape after FlattenTileNdTo2D is always (load 2D -> compute -> store ND), so we
-    only need to vary the original/flat shapes, the element dtype and the compute step.
-    ``func_name``/``func_type`` allow the same shape to be tested under
-    ``InCore``/``AIC``/``AIV`` variants without duplicating the boilerplate.
-
-    Args:
-        orig_shape: original tensor-rank shape (e.g. ``[2, 3, 4]``).
-        flat_shape: 2D flattened tile shape produced by the pass (e.g. ``[6, 4]``).
-        dtype: element dtype shared by tensors and tiles in the program.
-        compute_op: callable that, given the loaded tile expression, returns the
-            ``tile.<op>`` call placed between load and store. Use a lambda to
-            inject scalar arguments (e.g. ``lambda t: tile_ops.muls(t, 2.0)``).
-        func_name: name of the InCore-variant function being built.
-        func_type: function type (``InCore`` / ``AIC`` / ``AIV``).
-
-    Returns:
-        Fully built ``ir.Program`` ready to compare against the pass output.
-    """
-    span = ir.Span.unknown()
-    zeros = [0] * len(orig_shape)
-    tensor_type = ir.TensorType(orig_shape, dtype)
-
-    ib = IRBuilder()
-    with ib.program("main") as prog:
-        incore_gvar = prog.declare_function(func_name)
-        prog.declare_function("main")
-
-        with ib.function(func_name, type=func_type) as f:
-            x = f.param("x", tensor_type)
-            out_0 = f.param("out_0", tensor_type, direction=ir.ParamDirection.Out)
-            f.return_type(tensor_type)
-            x_tile = ib.let("x_tile", _load2d(x, zeros, orig_shape, flat_shape, dtype))
-            y_tile = ib.let("y_tile", compute_op(x_tile))
-            out_0_r = ib.let("out_0", tile_ops.store(y_tile, zeros, out_0, orig_shape))
-            ib.return_stmt(out_0_r)
-        prog.add_function(f.get_result())
-
-        with ib.function("main") as f:
-            x = f.param("x", tensor_type)
-            f.return_type(tensor_type)
-            out_0 = ib.let("out_0", tensor_ops.create(orig_shape, dtype))
-            y = ib.let("y", ir.Call(incore_gvar, [x, out_0], span))
-            ib.return_stmt(y)
-        prog.add_function(f.get_result())
-    return prog.get_result()
+    """Single-input convenience wrapper around :func:`_build_expected_2d`."""
+    return _build_expected_2d(
+        [("x", orig_shape)],
+        orig_shape,
+        [flat_shape],
+        dtype,
+        lambda _ib, ts: compute_op(ts[0]),
+        func_name=func_name,
+        func_type=func_type,
+    )
 
 
-class TestFlattenTileNdTo2D:
-    """Test FlattenTileNdTo2D pass."""
+# ----------------------------------------------------------------------------
+# Element-wise / scalar single-input ops on ND tiles -> 2D
+# ----------------------------------------------------------------------------
 
-    def test_3d_tile_element_wise(self):
-        """3D tile [2, 3, 4] with tile.add -> flattened to [6, 4]."""
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
+class TestFlattenTileNdTo2DSingleInput:
+    """Single-input element-wise / unary / scalar ops on >2D tiles get flattened."""
 
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        Expected = _build_expected_single_op([2, 3, 4], [6, 4], DataType.FP32, lambda t: tile_ops.add(t, t))
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_4d_tile(self):
-        """4D tile [2, 3, 4, 5] with tile.mul -> flattened to [24, 5]."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4, 5], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4, 5], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4, 5], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4, 5], pl.FP32] = pl.load(x, [0, 0, 0, 0], [2, 3, 4, 5])
-                y_tile: pl.Tile[[2, 3, 4, 5], pl.FP32] = pl.tile.mul(x_tile, x_tile)
-                out_0: pl.Tensor[[2, 3, 4, 5], pl.FP32] = pl.store(y_tile, [0, 0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4, 5], pl.FP32]) -> pl.Tensor[[2, 3, 4, 5], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4, 5], pl.FP32] = pl.create_tensor([2, 3, 4, 5], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4, 5], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
+    @pytest.mark.parametrize(
+        "orig_shape, flat_shape, dtype, op_factory, func_type, func_name",
+        [
+            # Element-wise binary op (same operand twice)
+            (
+                [2, 3, 4],
+                [6, 4],
+                DataType.FP32,
+                lambda t: tile_ops.add(t, t),
+                ir.FunctionType.InCore,
+                "main_incore_0",
+            ),
+            (
+                [2, 3, 4, 5],
+                [24, 5],
+                DataType.FP32,
+                lambda t: tile_ops.mul(t, t),
+                ir.FunctionType.InCore,
+                "main_incore_0",
+            ),
+            (
+                [2, 2, 2, 2, 4],
+                [16, 4],
+                DataType.FP32,
+                lambda t: tile_ops.add(t, t),
+                ir.FunctionType.InCore,
+                "main_incore_0",
+            ),
+            # Unary ops
+            ([2, 3, 4], [6, 4], DataType.FP32, tile_ops.exp, ir.FunctionType.InCore, "main_incore_0"),
+            ([4, 2, 8], [8, 8], DataType.FP32, tile_ops.neg, ir.FunctionType.InCore, "main_incore_0"),
+            # Tile-scalar ops
+            (
+                [2, 3, 4],
+                [6, 4],
+                DataType.FP32,
+                lambda t: tile_ops.muls(t, 2.0),
+                ir.FunctionType.InCore,
+                "main_incore_0",
+            ),
+            (
+                [2, 4, 8],
+                [8, 8],
+                DataType.FP32,
+                lambda t: tile_ops.adds(t, 1.0),
+                ir.FunctionType.InCore,
+                "main_incore_0",
+            ),
+            # AIC / AIV variants behave the same as InCore
+            (
+                [2, 3, 4],
+                [6, 4],
+                DataType.FP32,
+                lambda t: tile_ops.add(t, t),
+                ir.FunctionType.AIC,
+                "aic_func",
+            ),
+            ([4, 2, 8], [8, 8], DataType.FP32, tile_ops.exp, ir.FunctionType.AIV, "aiv_func"),
+            # Different element dtype
+            (
+                [2, 4, 8],
+                [8, 8],
+                DataType.FP16,
+                lambda t: tile_ops.add(t, t),
+                ir.FunctionType.InCore,
+                "main_incore_0",
+            ),
+        ],
+        ids=[
+            "add_3d_fp32",
+            "mul_4d_fp32",
+            "add_5d_fp32",
+            "exp_3d_fp32",
+            "neg_3d_fp32",
+            "muls_3d_fp32",
+            "adds_3d_fp32",
+            "add_3d_aic",
+            "exp_3d_aiv",
+            "add_3d_fp16",
+        ],
+    )
+    def test_single_input_op(self, orig_shape, flat_shape, dtype, op_factory, func_type, func_name):
+        Before = _build_before_nd(
+            [("x", orig_shape)],
+            orig_shape,
+            dtype,
+            lambda _ib, ts: op_factory(ts[0]),
+            func_name=func_name,
+            func_type=func_type,
+        )
         Expected = _build_expected_single_op(
-            [2, 3, 4, 5], [24, 5], DataType.FP32, lambda t: tile_ops.mul(t, t)
+            orig_shape, flat_shape, dtype, op_factory, func_name=func_name, func_type=func_type
         )
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_2d_tile_unchanged(self):
-        """2D tile [32, 64] -> no change."""
+
+# ----------------------------------------------------------------------------
+# Two-input element-wise ops on ND tiles -> 2D
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DTwoInput:
+    """Two-input element-wise ops on >2D tiles get flattened."""
+
+    @pytest.mark.parametrize(
+        "orig_shape, flat_shape, op_factory",
+        [
+            ([2, 3, 4], [6, 4], lambda a, b: tile_ops.add(a, b)),
+            ([3, 4, 5], [12, 5], lambda a, b: tile_ops.sub(a, b)),
+        ],
+        ids=["add_3d", "sub_3d"],
+    )
+    def test_two_input_op(self, orig_shape, flat_shape, op_factory):
+        in_specs: list[InSpec] = [("x", orig_shape), ("y", orig_shape)]
+        body: TileBody = lambda _ib, ts: op_factory(ts[0], ts[1])  # noqa: E731
+        Before = _build_before_nd(in_specs, orig_shape, DataType.FP32, body)
+        Expected = _build_expected_2d(in_specs, orig_shape, [flat_shape, flat_shape], DataType.FP32, body)
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+# ----------------------------------------------------------------------------
+# Reduce ops along the last axis on ND tiles -> 2D
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DReduceOps:
+    """Reduce ops along the last axis are remapped to axis=1 after flatten."""
+
+    @pytest.mark.parametrize(
+        "orig_shape, flat_shape, out_shape, reduce_op",
+        [
+            ([2, 3, 4], [6, 4], [2, 3, 1], tile_ops.sum),
+            ([2, 4, 8], [8, 8], [2, 4, 1], tile_ops.max),
+        ],
+        ids=["sum_3d", "max_3d"],
+    )
+    def test_reduce_last_axis(self, orig_shape, flat_shape, out_shape, reduce_op):
+        before_axis = len(orig_shape) - 1
+        Before = _build_before_nd(
+            [("x", orig_shape)],
+            out_shape,
+            DataType.FP32,
+            lambda _ib, ts: reduce_op(ts[0], axis=before_axis, keepdim=True),
+        )
+        Expected = _build_expected_2d(
+            [("x", orig_shape)],
+            out_shape,
+            [flat_shape],
+            DataType.FP32,
+            lambda _ib, ts: reduce_op(ts[0], axis=1, keepdim=True),
+        )
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+# ----------------------------------------------------------------------------
+# Programs that should be left unchanged by the pass
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DUnchanged:
+    """Programs the pass must not modify."""
+
+    @pytest.mark.parametrize(
+        "shape",
+        [[32, 64], [64]],
+        ids=["2d_tile", "1d_tile"],
+    )
+    def test_low_rank_tile_unchanged(self, shape):
+        """≤2D tiles in InCore functions are left as-is."""
+        Before = _build_before_nd(
+            [("x", shape)], shape, DataType.FP32, lambda _ib, ts: tile_ops.add(ts[0], ts[0])
+        )
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_non_incore_function_unchanged(self):
+        """Non-InCore (regular) functions with 2D tiles are not modified."""
 
         @pl.program
         class Before:
@@ -182,482 +402,143 @@ class TestFlattenTileNdTo2D:
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Before)
 
-    def test_1d_tile_unchanged(self):
-        """1D tile [64] -> no change."""
+    def test_group_function_unchanged(self):
+        """Group function is not an InCore variant -> unchanged."""
 
         @pl.program
         class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[64], pl.FP32]],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                y_tile: pl.Tile[[64], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out_0)
-                return out_0
+            @pl.function(type=pl.FunctionType.Group)
+            def group_func(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                return x
 
             @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                out_0: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
-                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x, out_0)
+            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.group_func(x)
                 return y
 
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Before)
 
-    def test_tile_load_store_reshape(self):
-        """Two 3D loads -> tile.add -> tile.store."""
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                y: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(y, [0, 0, 0], [2, 3, 4])
-                z_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(x_tile, y_tile)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(z_tile, [0, 0, 0], out_0)
-                return out_0
+# ----------------------------------------------------------------------------
+# Pass-level errors (CHECK macros surface as ValueError)
+# ----------------------------------------------------------------------------
 
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                y: pl.Tensor[[2, 3, 4], pl.FP32],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                z: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
 
-        ib = IRBuilder()
-        with ib.program("main") as prog:
-            incore_gvar = prog.declare_function("main_incore_0")
-            prog.declare_function("main")
+class TestFlattenTileNdTo2DErrors:
+    """Pass-level errors surface as ``ValueError`` from C++ ``CHECK`` macros."""
 
-            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                y = f.param("y", ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
-                y_tile = ib.let("y_tile", _load2d(y, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
-                z_tile = ib.let("z_tile", tile_ops.add(x_tile, y_tile))
-                out_0_r = ib.let("out_0", tile_ops.store(z_tile, [0, 0, 0], out_0, [2, 3, 4]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("main") as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                y = f.param("y", ir.TensorType([2, 3, 4], DataType.FP32))
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = ib.let("out_0", tensor_ops.create([2, 3, 4], DataType.FP32))
-                z = ib.let("z", ir.Call(incore_gvar, [x, y, out_0], ir.Span.unknown()))
-                ib.return_stmt(z)
-            prog.add_function(f.get_result())
-        Expected = prog.get_result()
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_tile_create_shape_flattened(self):
-        """tile.create([2,3,4]) -> tile.create([6,4])."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                tmp: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.create([2, 3, 4], dtype=pl.FP32)
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(x_tile, tmp)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        ib = IRBuilder()
-        with ib.program("main") as prog:
-            incore_gvar = prog.declare_function("main_incore_0")
-            prog.declare_function("main")
-
-            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
-                tmp = ib.let("tmp", tile_ops.create([6, 4], DataType.FP32))
-                y_tile = ib.let("y_tile", tile_ops.add(x_tile, tmp))
-                out_0_r = ib.let("out_0", tile_ops.store(y_tile, [0, 0, 0], out_0, [2, 3, 4]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("main") as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = ib.let("out_0", tensor_ops.create([2, 3, 4], DataType.FP32))
-                y = ib.let("y", ir.Call(incore_gvar, [x, out_0], ir.Span.unknown()))
-                ib.return_stmt(y)
-            prog.add_function(f.get_result())
-        Expected = prog.get_result()
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_reduce_last_axis(self):
-        """tile.sum on 3D tile [2, 3, 4] with axis=2 -> axis=1 after flatten."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 1], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 1], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 3, 1], pl.FP32] = pl.tile.sum(x_tile, axis=2, keepdim=True)
-                out_0: pl.Tensor[[2, 3, 1], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 1], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 1], pl.FP32] = pl.create_tensor([2, 3, 1], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 1], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        ib = IRBuilder()
-        with ib.program("main") as prog:
-            incore_gvar = prog.declare_function("main_incore_0")
-            prog.declare_function("main")
-
-            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([2, 3, 1], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([2, 3, 1], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
-                y_tile = ib.let("y_tile", tile_ops.sum(x_tile, axis=1, keepdim=True))
-                out_0_r = ib.let("out_0", tile_ops.store(y_tile, [0, 0, 0], out_0, [2, 3, 1]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("main") as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                f.return_type(ir.TensorType([2, 3, 1], DataType.FP32))
-                out_0 = ib.let("out_0", tensor_ops.create([2, 3, 1], DataType.FP32))
-                y = ib.let("y", ir.Call(incore_gvar, [x, out_0], ir.Span.unknown()))
-                ib.return_stmt(y)
-            prog.add_function(f.get_result())
-        Expected = prog.get_result()
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_reduce_non_last_axis_error(self):
-        """tile.sum with axis=0 on 3D tile -> CHECK error."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[1, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[1, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[1, 3, 4], pl.FP32] = pl.tile.sum(x_tile, axis=0, keepdim=True)
-                out_0: pl.Tensor[[1, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[1, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[1, 3, 4], pl.FP32] = pl.create_tensor([1, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[1, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        with pytest.raises(Exception, match="must reduce along the last axis"):
+    @pytest.mark.parametrize(
+        "orig_shape, out_shape, reduce_op, axis",
+        [
+            ([2, 3, 4], [1, 3, 4], tile_ops.sum, 0),
+            ([2, 3, 4], [2, 1, 4], tile_ops.min, 1),
+        ],
+        ids=["sum_axis_0", "min_axis_1"],
+    )
+    def test_reduce_non_last_axis_error(self, orig_shape, out_shape, reduce_op, axis):
+        """tile reduce ops must reduce the last axis on >2D tiles."""
+        Before = _build_before_nd(
+            [("x", orig_shape)],
+            out_shape,
+            DataType.FP32,
+            lambda _ib, ts: reduce_op(ts[0], axis=axis, keepdim=True),
+        )
+        with pytest.raises(ValueError, match="must reduce along the last axis"):
             passes.flatten_tile_nd_to_2d()(Before)
 
     def test_dynamic_shape_error(self):
         """Dynamic (non-ConstInt) tile shape on >2D tile -> CHECK error."""
         span = ir.Span.unknown()
-
-        # Create a dynamic dimension via a Var (not ConstInt)
         n_var = ir.Var("n", ir.ScalarType(DataType.INT32), span)
         dim2 = ir.ConstInt(3, DataType.INT32, span)
         dim3 = ir.ConstInt(4, DataType.INT32, span)
-
-        # 3D tile type with one dynamic dimension
         dyn_tile_type = ir.TileType([n_var, dim2, dim3], DataType.FP32)
-
-        # Create vars with this tile type
         x_tile = ir.Var("x_tile", dyn_tile_type, span)
-
-        # Create tile.add call with dynamic-shaped tile
-        add_op = ir.Op("tile.add")
-        add_call = ir.Call(add_op, [x_tile, x_tile], dyn_tile_type, span)
+        add_call = ir.Call(ir.Op("tile.add"), [x_tile, x_tile], dyn_tile_type, span)
         y_tile = ir.Var("y_tile", dyn_tile_type, span)
         body = ir.AssignStmt(y_tile, add_call, span)
-
-        # Wrap in InCore function
-        func = ir.Function(
-            "incore_func",
-            [x_tile],
-            [dyn_tile_type],
-            body,
-            span,
-            type=ir.FunctionType.InCore,
-        )
+        func = ir.Function("incore_func", [x_tile], [dyn_tile_type], body, span, type=ir.FunctionType.InCore)
         program = ir.Program([func], "test_dyn", span)
 
-        with pytest.raises(Exception, match="must be static"):
+        with pytest.raises(ValueError, match="must be static"):
             passes.flatten_tile_nd_to_2d()(program)
 
-    def test_non_incore_unchanged(self):
-        """Orchestration functions are not modified."""
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[32, 64], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
-            ) -> pl.Tensor[[32, 64], pl.FP32]:
-                x_tile: pl.Tile[[32, 64], pl.FP32] = pl.load(x, [0, 0], [32, 64])
-                y_tile: pl.Tile[[32, 64], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[32, 64], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[32, 64], pl.FP32]) -> pl.Tensor[[32, 64], pl.FP32]:
-                out_0: pl.Tensor[[32, 64], pl.FP32] = pl.create_tensor([32, 64], dtype=pl.FP32)
-                y: pl.Tensor[[32, 64], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Before)
-
-
-class TestFlattenTileNdTo2DUnaryOps:
-    """Test unary tile operations on ND tiles."""
-
-    def test_unary_exp_3d(self):
-        """tile.exp on 3D tile [2, 3, 4] -> flattened to [6, 4]."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.exp(x_tile)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        Expected = _build_expected_single_op([2, 3, 4], [6, 4], DataType.FP32, tile_ops.exp)
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_unary_neg_3d(self):
-        """tile.neg on 3D tile [4, 2, 8] -> flattened to [8, 8]."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[4, 2, 8], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[4, 2, 8], pl.FP32]],
-            ) -> pl.Tensor[[4, 2, 8], pl.FP32]:
-                x_tile: pl.Tile[[4, 2, 8], pl.FP32] = pl.load(x, [0, 0, 0], [4, 2, 8])
-                y_tile: pl.Tile[[4, 2, 8], pl.FP32] = pl.tile.neg(x_tile)
-                out_0: pl.Tensor[[4, 2, 8], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[4, 2, 8], pl.FP32]) -> pl.Tensor[[4, 2, 8], pl.FP32]:
-                out_0: pl.Tensor[[4, 2, 8], pl.FP32] = pl.create_tensor([4, 2, 8], dtype=pl.FP32)
-                y: pl.Tensor[[4, 2, 8], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        Expected = _build_expected_single_op([4, 2, 8], [8, 8], DataType.FP32, tile_ops.neg)
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-
-class TestFlattenTileNdTo2DScalarOps:
-    """Test tile-scalar operations on ND tiles."""
-
-    def test_muls_3d(self):
-        """tile.muls on 3D tile [2, 3, 4] with scalar -> flattened to [6, 4]."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.muls(x_tile, 2.0)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        Expected = _build_expected_single_op(
-            [2, 3, 4], [6, 4], DataType.FP32, lambda t: tile_ops.muls(t, 2.0)
-        )
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_adds_3d(self):
-        """tile.adds on 3D tile [2, 4, 8] with scalar -> flattened to [8, 8]."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 4, 8], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 4, 8], pl.FP32]],
-            ) -> pl.Tensor[[2, 4, 8], pl.FP32]:
-                x_tile: pl.Tile[[2, 4, 8], pl.FP32] = pl.load(x, [0, 0, 0], [2, 4, 8])
-                y_tile: pl.Tile[[2, 4, 8], pl.FP32] = pl.tile.adds(x_tile, 1.0)
-                out_0: pl.Tensor[[2, 4, 8], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 4, 8], pl.FP32]) -> pl.Tensor[[2, 4, 8], pl.FP32]:
-                out_0: pl.Tensor[[2, 4, 8], pl.FP32] = pl.create_tensor([2, 4, 8], dtype=pl.FP32)
-                y: pl.Tensor[[2, 4, 8], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        Expected = _build_expected_single_op(
-            [2, 4, 8], [8, 8], DataType.FP32, lambda t: tile_ops.adds(t, 1.0)
-        )
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-
-class TestFlattenTileNdTo2DReduceOps:
-    """Test reduction operations on ND tiles."""
-
-    def test_tile_max_reduce_last_axis(self):
-        """tile.max on 3D tile [2, 4, 8] with axis=2 -> axis=1 after flatten."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 4, 8], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 4, 1], pl.FP32]],
-            ) -> pl.Tensor[[2, 4, 1], pl.FP32]:
-                x_tile: pl.Tile[[2, 4, 8], pl.FP32] = pl.load(x, [0, 0, 0], [2, 4, 8])
-                y_tile: pl.Tile[[2, 4, 1], pl.FP32] = pl.tile.max(x_tile, axis=2, keepdim=True)
-                out_0: pl.Tensor[[2, 4, 1], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 4, 8], pl.FP32]) -> pl.Tensor[[2, 4, 1], pl.FP32]:
-                out_0: pl.Tensor[[2, 4, 1], pl.FP32] = pl.create_tensor([2, 4, 1], dtype=pl.FP32)
-                y: pl.Tensor[[2, 4, 1], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        ib = IRBuilder()
-        with ib.program("main") as prog:
-            incore_gvar = prog.declare_function("main_incore_0")
-            prog.declare_function("main")
-
-            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([2, 4, 8], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([2, 4, 1], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([2, 4, 1], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 4, 8], [8, 8], DataType.FP32))
-                y_tile = ib.let("y_tile", tile_ops.max(x_tile, axis=1, keepdim=True))
-                out_0_r = ib.let("out_0", tile_ops.store(y_tile, [0, 0, 0], out_0, [2, 4, 1]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("main") as f:
-                x = f.param("x", ir.TensorType([2, 4, 8], DataType.FP32))
-                f.return_type(ir.TensorType([2, 4, 1], DataType.FP32))
-                out_0 = ib.let("out_0", tensor_ops.create([2, 4, 1], DataType.FP32))
-                y = ib.let("y", ir.Call(incore_gvar, [x, out_0], ir.Span.unknown()))
-                ib.return_stmt(y)
-            prog.add_function(f.get_result())
-        Expected = prog.get_result()
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_tile_min_reduce_non_last_axis_error(self):
-        """tile.min with axis=1 on 3D tile -> CHECK error."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 1, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 1, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 1, 4], pl.FP32] = pl.tile.min(x_tile, axis=1, keepdim=True)
-                out_0: pl.Tensor[[2, 1, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 1, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 1, 4], pl.FP32] = pl.create_tensor([2, 1, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 1, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        with pytest.raises(Exception, match="must reduce along the last axis"):
-            passes.flatten_tile_nd_to_2d()(Before)
+# ----------------------------------------------------------------------------
+# Chained / multi-step bodies that exercise more than one tile op
+# ----------------------------------------------------------------------------
 
 
 class TestFlattenTileNdTo2DChainedOps:
-    """Test chained operations on ND tiles."""
+    """Chained sequences of tile ops on >2D tiles get flattened in lock-step."""
 
     def test_chained_load_exp_add_muls_store(self):
-        """Long chain: load -> exp -> add -> muls -> store on 3D tile."""
+        """``load -> exp -> add -> muls -> store`` chain on a 3D tile."""
+
+        def body(ib: IRBuilder, ts: list[ir.Expr]) -> ir.Expr:
+            (x_tile,) = ts
+            a = ib.let("a_tile", tile_ops.exp(x_tile))
+            b = ib.let("b_tile", tile_ops.add(a, x_tile))
+            return ib.let("c_tile", tile_ops.muls(b, 0.5))
+
+        in_specs: list[InSpec] = [("x", [2, 3, 4])]
+        Before = _build_before_nd(in_specs, [2, 3, 4], DataType.FP32, body)
+        Expected = _build_expected_2d(in_specs, [2, 3, 4], [[6, 4]], DataType.FP32, body)
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_sum_then_add_3d(self):
+        """``load -> sum(keepdim=True, last axis) -> add -> store`` on a 3D tile."""
+
+        def make_body(axis: int) -> TileBody:
+            def body(ib: IRBuilder, ts: list[ir.Expr]) -> ir.Expr:
+                s = ib.let("s_tile", tile_ops.sum(ts[0], axis=axis, keepdim=True))
+                return ib.let("r_tile", tile_ops.add(s, s))
+
+            return body
+
+        in_specs: list[InSpec] = [("x", [2, 3, 4])]
+        Before = _build_before_nd(in_specs, [2, 3, 1], DataType.FP32, make_body(2))
+        Expected = _build_expected_2d(in_specs, [2, 3, 1], [[6, 4]], DataType.FP32, make_body(1))
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+# ----------------------------------------------------------------------------
+# tile.create / tile.full inside the chain
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DConstantOps:
+    """``tile.create`` / ``tile.full`` shapes get flattened alongside the tile."""
+
+    @pytest.mark.parametrize(
+        "constant_factory",
+        [
+            lambda shape: tile_ops.create(shape, DataType.FP32),
+            lambda shape: tile_ops.full(shape, DataType.FP32, 0.0),
+        ],
+        ids=["create", "full"],
+    )
+    def test_constant_op_shape_flattened(self, constant_factory):
+        """``tile.<create|full>([2,3,4]) -> tile.add(load, c) -> store`` is flattened to ``[6, 4]``."""
+
+        def make_body(shape: list[int]) -> TileBody:
+            def body(ib: IRBuilder, ts: list[ir.Expr]) -> ir.Expr:
+                tmp = ib.let("tmp", constant_factory(shape))
+                return ib.let("y_tile", tile_ops.add(ts[0], tmp))
+
+            return body
+
+        in_specs: list[InSpec] = [("x", [2, 3, 4])]
+        Before = _build_before_nd(in_specs, [2, 3, 4], DataType.FP32, make_body([2, 3, 4]))
+        Expected = _build_expected_2d(in_specs, [2, 3, 4], [[6, 4]], DataType.FP32, make_body([6, 4]))
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_create_full_add_chain(self):
+        """``tile.create + tile.full + tile.add`` chain (no input tile.load) on 3D tiles."""
 
         @pl.program
         class Before:
@@ -667,10 +548,9 @@ class TestFlattenTileNdTo2DChainedOps:
                 x: pl.Tensor[[2, 3, 4], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                a_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.exp(x_tile)
-                b_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(a_tile, x_tile)
-                c_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.muls(b_tile, 0.5)
+                a_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.create([2, 3, 4], dtype=pl.FP32)
+                b_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.full([2, 3, 4], dtype=pl.FP32, value=1.0)
+                c_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(a_tile, b_tile)
                 out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(c_tile, [0, 0, 0], out_0)
                 return out_0
 
@@ -680,135 +560,42 @@ class TestFlattenTileNdTo2DChainedOps:
                 y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        ib = IRBuilder()
-        with ib.program("main") as prog:
-            incore_gvar = prog.declare_function("main_incore_0")
-            prog.declare_function("main")
-
-            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
-                a_tile = ib.let("a_tile", tile_ops.exp(x_tile))
-                b_tile = ib.let("b_tile", tile_ops.add(a_tile, x_tile))
-                c_tile = ib.let("c_tile", tile_ops.muls(b_tile, 0.5))
-                out_0_r = ib.let("out_0", tile_ops.store(c_tile, [0, 0, 0], out_0, [2, 3, 4]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("main") as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = ib.let("out_0", tensor_ops.create([2, 3, 4], DataType.FP32))
-                y = ib.let("y", ir.Call(incore_gvar, [x, out_0], ir.Span.unknown()))
-                ib.return_stmt(y)
-            prog.add_function(f.get_result())
-        Expected = prog.get_result()
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_two_loads_sub_store(self):
-        """Two 3D loads -> tile.sub -> store."""
-
         @pl.program
-        class Before:
+        class Expected:
             @pl.function(type=pl.FunctionType.InCore)
             def main_incore_0(
                 self,
-                x: pl.Tensor[[3, 4, 5], pl.FP32],
-                y: pl.Tensor[[3, 4, 5], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[3, 4, 5], pl.FP32]],
-            ) -> pl.Tensor[[3, 4, 5], pl.FP32]:
-                x_tile: pl.Tile[[3, 4, 5], pl.FP32] = pl.load(x, [0, 0, 0], [3, 4, 5])
-                y_tile: pl.Tile[[3, 4, 5], pl.FP32] = pl.load(y, [0, 0, 0], [3, 4, 5])
-                z_tile: pl.Tile[[3, 4, 5], pl.FP32] = pl.tile.sub(x_tile, y_tile)
-                out_0: pl.Tensor[[3, 4, 5], pl.FP32] = pl.store(z_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[3, 4, 5], pl.FP32],
-                y: pl.Tensor[[3, 4, 5], pl.FP32],
-            ) -> pl.Tensor[[3, 4, 5], pl.FP32]:
-                out_0: pl.Tensor[[3, 4, 5], pl.FP32] = pl.create_tensor([3, 4, 5], dtype=pl.FP32)
-                z: pl.Tensor[[3, 4, 5], pl.FP32] = self.main_incore_0(x, y, out_0)
-                return z
-
-        ib = IRBuilder()
-        with ib.program("main") as prog:
-            incore_gvar = prog.declare_function("main_incore_0")
-            prog.declare_function("main")
-
-            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([3, 4, 5], DataType.FP32))
-                y = f.param("y", ir.TensorType([3, 4, 5], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([3, 4, 5], DataType.FP32), direction=ir.ParamDirection.Out
+                x: pl.Tensor[[2, 3, 4], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                a_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.create([6, 4], dtype=pl.FP32)
+                b_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.full([6, 4], dtype=pl.FP32, value=1.0)
+                c_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.add(a_tile, b_tile)
+                out_store: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(
+                    c_tile, [0, 0, 0], out_0, shapes=[2, 3, 4]
                 )
-                f.return_type(ir.TensorType([3, 4, 5], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [3, 4, 5], [12, 5], DataType.FP32))
-                y_tile = ib.let("y_tile", _load2d(y, [0, 0, 0], [3, 4, 5], [12, 5], DataType.FP32))
-                z_tile = ib.let("z_tile", tile_ops.sub(x_tile, y_tile))
-                out_0_r = ib.let("out_0", tile_ops.store(z_tile, [0, 0, 0], out_0, [3, 4, 5]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("main") as f:
-                x = f.param("x", ir.TensorType([3, 4, 5], DataType.FP32))
-                y = f.param("y", ir.TensorType([3, 4, 5], DataType.FP32))
-                f.return_type(ir.TensorType([3, 4, 5], DataType.FP32))
-                out_0 = ib.let("out_0", tensor_ops.create([3, 4, 5], DataType.FP32))
-                z = ib.let("z", ir.Call(incore_gvar, [x, y, out_0], ir.Span.unknown()))
-                ib.return_stmt(z)
-            prog.add_function(f.get_result())
-        Expected = prog.get_result()
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-
-class TestFlattenTileNdTo2DHigherDims:
-    """Test higher-dimensional tiles (5D+)."""
-
-    def test_5d_tile(self):
-        """5D tile [2, 2, 2, 2, 4] -> [16, 4]."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 2, 2, 2, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 2, 2, 2, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 2, 2, 2, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 2, 2, 2, 4], pl.FP32] = pl.load(x, [0, 0, 0, 0, 0], [2, 2, 2, 2, 4])
-                y_tile: pl.Tile[[2, 2, 2, 2, 4], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[2, 2, 2, 2, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0, 0, 0], out_0)
-                return out_0
+                return out_store
 
             @pl.function
-            def main(self, x: pl.Tensor[[2, 2, 2, 2, 4], pl.FP32]) -> pl.Tensor[[2, 2, 2, 2, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 2, 2, 2, 4], pl.FP32] = pl.create_tensor([2, 2, 2, 2, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 2, 2, 2, 4], pl.FP32] = self.main_incore_0(x, out_0)
+            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
                 return y
 
-        Expected = _build_expected_single_op(
-            [2, 2, 2, 2, 4], [16, 4], DataType.FP32, lambda t: tile_ops.add(t, t)
-        )
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
 
 
-class TestFlattenTileNdTo2DMixedDims:
-    """Test programs with mixed 2D and 3D tile operations."""
+# ----------------------------------------------------------------------------
+# Multi-store / mixed-rank / multi-function programs
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DMultiOutput:
+    """Programs with multiple stores, mixed ranks, or multiple InCore functions."""
 
     def test_mixed_2d_and_3d_tiles(self):
-        """Some tiles 2D (unchanged), some 3D (flattened) in same function."""
+        """3D path is flattened, 2D path is left unchanged within the same function."""
 
         @pl.program
         class Before:
@@ -820,11 +607,9 @@ class TestFlattenTileNdTo2DMixedDims:
                 out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
                 out_1: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
             ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                # 3D tile -> should be flattened
                 x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
                 a_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.exp(x_tile)
                 out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(a_tile, [0, 0, 0], out_0)
-                # 2D tile -> should be unchanged
                 y_tile: pl.Tile[[32, 64], pl.FP32] = pl.load(y, [0, 0], [32, 64])
                 b_tile: pl.Tile[[32, 64], pl.FP32] = pl.tile.add(y_tile, y_tile)
                 out_1: pl.Tensor[[32, 64], pl.FP32] = pl.store(b_tile, [0, 0], out_1)
@@ -856,11 +641,9 @@ class TestFlattenTileNdTo2DMixedDims:
                     "out_1", ir.TensorType([32, 64], DataType.FP32), direction=ir.ParamDirection.Out
                 )
                 f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                # 3D -> flattened
                 x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
                 a_tile = ib.let("a_tile", tile_ops.exp(x_tile))
                 out_0_r = ib.let("out_0", tile_ops.store(a_tile, [0, 0, 0], out_0, [2, 3, 4]))
-                # 2D -> unchanged
                 y_tile = ib.let("y_tile", tile_ops.load(y, [0, 0], [32, 64]))
                 b_tile = ib.let("b_tile", tile_ops.add(y_tile, y_tile))
                 ib.let("out_1", tile_ops.store(b_tile, [0, 0], out_1))
@@ -881,12 +664,8 @@ class TestFlattenTileNdTo2DMixedDims:
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
 
-
-class TestFlattenTileNdTo2DMultipleStores:
-    """Test multiple tile.store operations in same function."""
-
     def test_two_stores_same_shape(self):
-        """Two separate load-compute-store chains on same 3D shape."""
+        """Two separate load-compute-store chains on the same 3D shape."""
 
         @pl.program
         class Before:
@@ -946,12 +725,8 @@ class TestFlattenTileNdTo2DMultipleStores:
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
 
-
-class TestFlattenTileNdTo2DMultipleFunctions:
-    """Test programs with multiple InCore functions."""
-
     def test_multiple_incore_functions(self):
-        """Two InCore functions with 3D tiles: both get transformed."""
+        """Two sibling InCore functions are independently transformed."""
 
         @pl.program
         class Before:
@@ -995,29 +770,24 @@ class TestFlattenTileNdTo2DMultipleFunctions:
             incore_b_gvar = prog.declare_function("incore_b")
             prog.declare_function("main")
 
-            with ib.function("incore_a", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
-                y_tile = ib.let("y_tile", tile_ops.add(x_tile, x_tile))
-                out_0_r = ib.let("out_0", tile_ops.store(y_tile, [0, 0, 0], out_0, [2, 3, 4]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("incore_b", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([3, 4, 5], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([3, 4, 5], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([3, 4, 5], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [3, 4, 5], [12, 5], DataType.FP32))
-                y_tile = ib.let("y_tile", tile_ops.mul(x_tile, x_tile))
-                out_0_r = ib.let("out_0", tile_ops.store(y_tile, [0, 0, 0], out_0, [3, 4, 5]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
+            for fname, in_shape, flat_shape, op in [
+                ("incore_a", [2, 3, 4], [6, 4], tile_ops.add),
+                ("incore_b", [3, 4, 5], [12, 5], tile_ops.mul),
+            ]:
+                with ib.function(fname, type=ir.FunctionType.InCore) as f:
+                    x = f.param("x", ir.TensorType(in_shape, DataType.FP32))
+                    out_0 = f.param(
+                        "out_0", ir.TensorType(in_shape, DataType.FP32), direction=ir.ParamDirection.Out
+                    )
+                    f.return_type(ir.TensorType(in_shape, DataType.FP32))
+                    x_tile = ib.let(
+                        "x_tile",
+                        _load2d(x, [0] * len(in_shape), in_shape, flat_shape, DataType.FP32),
+                    )
+                    y_tile = ib.let("y_tile", op(x_tile, x_tile))
+                    out_0_r = ib.let("out_0", tile_ops.store(y_tile, [0] * len(in_shape), out_0, in_shape))
+                    ib.return_stmt(out_0_r)
+                prog.add_function(f.get_result())
 
             with ib.function("main") as f:
                 x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
@@ -1035,248 +805,17 @@ class TestFlattenTileNdTo2DMultipleFunctions:
         ir.assert_structural_equal(After, Expected)
 
 
-class TestFlattenTileNdTo2DFull:
-    """Test tile.full on ND tiles."""
-
-    def test_tile_full_3d_flattened(self):
-        """tile.full([2, 3, 4], value=0.0) -> tile.full([6, 4], value=0.0)."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                z_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.full([2, 3, 4], dtype=pl.FP32, value=0.0)
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(x_tile, z_tile)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        ib = IRBuilder()
-        with ib.program("main") as prog:
-            incore_gvar = prog.declare_function("main_incore_0")
-            prog.declare_function("main")
-
-            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([2, 3, 4], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
-                z_tile = ib.let("z_tile", tile_ops.full([6, 4], DataType.FP32, 0.0))
-                y_tile = ib.let("y_tile", tile_ops.add(x_tile, z_tile))
-                out_0_r = ib.let("out_0", tile_ops.store(y_tile, [0, 0, 0], out_0, [2, 3, 4]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("main") as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                f.return_type(ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = ib.let("out_0", tensor_ops.create([2, 3, 4], DataType.FP32))
-                y = ib.let("y", ir.Call(incore_gvar, [x, out_0], ir.Span.unknown()))
-                ib.return_stmt(y)
-            prog.add_function(f.get_result())
-        Expected = prog.get_result()
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-
-class TestFlattenTileNdTo2DFunctionTypes:
-    """Test AIC/AIV function types (specialized InCore variants)."""
-
-    def test_aic_function_transformed(self):
-        """AIC function with 3D tiles is transformed."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIC)
-            def aic_func(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.aic_func(x, out_0)
-                return y
-
-        Expected = _build_expected_single_op(
-            [2, 3, 4],
-            [6, 4],
-            DataType.FP32,
-            lambda t: tile_ops.add(t, t),
-            func_name="aic_func",
-            func_type=ir.FunctionType.AIC,
-        )
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_aiv_function_transformed(self):
-        """AIV function with 3D tiles is transformed."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.AIV)
-            def aiv_func(
-                self,
-                x: pl.Tensor[[4, 2, 8], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[4, 2, 8], pl.FP32]],
-            ) -> pl.Tensor[[4, 2, 8], pl.FP32]:
-                x_tile: pl.Tile[[4, 2, 8], pl.FP32] = pl.load(x, [0, 0, 0], [4, 2, 8])
-                y_tile: pl.Tile[[4, 2, 8], pl.FP32] = pl.tile.exp(x_tile)
-                out_0: pl.Tensor[[4, 2, 8], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[4, 2, 8], pl.FP32]) -> pl.Tensor[[4, 2, 8], pl.FP32]:
-                out_0: pl.Tensor[[4, 2, 8], pl.FP32] = pl.create_tensor([4, 2, 8], dtype=pl.FP32)
-                y: pl.Tensor[[4, 2, 8], pl.FP32] = self.aiv_func(x, out_0)
-                return y
-
-        Expected = _build_expected_single_op(
-            [4, 2, 8],
-            [8, 8],
-            DataType.FP32,
-            tile_ops.exp,
-            func_name="aiv_func",
-            func_type=ir.FunctionType.AIV,
-        )
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_group_function_unchanged(self):
-        """Group function is not an InCore variant -> unchanged."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.Group)
-            def group_func(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                return x
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.group_func(x)
-                return y
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Before)
-
-
-class TestFlattenTileNdTo2DDataTypes:
-    """Test different data types."""
-
-    def test_fp16_3d_tile(self):
-        """FP16 3D tile [2, 4, 8] -> [8, 8]."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 4, 8], pl.FP16],
-                out_0: pl.Out[pl.Tensor[[2, 4, 8], pl.FP16]],
-            ) -> pl.Tensor[[2, 4, 8], pl.FP16]:
-                x_tile: pl.Tile[[2, 4, 8], pl.FP16] = pl.load(x, [0, 0, 0], [2, 4, 8])
-                y_tile: pl.Tile[[2, 4, 8], pl.FP16] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[2, 4, 8], pl.FP16] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 4, 8], pl.FP16]) -> pl.Tensor[[2, 4, 8], pl.FP16]:
-                out_0: pl.Tensor[[2, 4, 8], pl.FP16] = pl.create_tensor([2, 4, 8], dtype=pl.FP16)
-                y: pl.Tensor[[2, 4, 8], pl.FP16] = self.main_incore_0(x, out_0)
-                return y
-
-        Expected = _build_expected_single_op([2, 4, 8], [8, 8], DataType.FP16, lambda t: tile_ops.add(t, t))
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-
-class TestFlattenTileNdTo2DVerifier:
-    """Test TileOps2D property verifier."""
-
-    def test_verifier_passes_after_flatten(self):
-        """TileOps2D verifier passes on correctly flattened program."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-
-        # Verify TileOps2D property holds
-        props = passes.IRPropertySet()
-        props.insert(passes.IRProperty.TileOps2D)
-        passes.verify_properties(props, After, "test_verifier")
-
-    def test_verifier_fails_on_unflatten_program(self):
-        """TileOps2D verifier fails on program with >2D tile ops."""
-
-        @pl.program
-        class Unflatten:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                y_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(x_tile, x_tile)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(y_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        # Verifying TileOps2D on unflatten program should fail
-        props = passes.IRPropertySet()
-        props.insert(passes.IRProperty.TileOps2D)
-        with pytest.raises(Exception):
-            passes.verify_properties(props, Unflatten, "test_verifier_fails")
+# ----------------------------------------------------------------------------
+# Pass property declarations and TileOps2D verifier
+# ----------------------------------------------------------------------------
 
 
 class TestFlattenTileNdTo2DPassProperties:
-    """Test pass property declarations."""
+    """Pass declarations and the ``TileOps2D`` property verifier."""
 
     def test_pass_properties(self):
         """Verify the pass declares correct required/produced properties."""
         p = passes.flatten_tile_nd_to_2d()
-
         required = p.get_required_properties()
         assert required.contains(passes.IRProperty.SSAForm)
         assert required.contains(passes.IRProperty.IncoreTileOps)
@@ -1290,153 +829,97 @@ class TestFlattenTileNdTo2DPassProperties:
         p = passes.flatten_tile_nd_to_2d()
         assert p.get_name() == "FlattenTileNdTo2D"
 
-
-class TestFlattenTileNdTo2DReduceAndCompute:
-    """Test reduce followed by further computation on 3D tiles."""
-
-    def test_sum_then_add_3d(self):
-        """Load 3D -> sum(keepdim) -> add with another tile -> store."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 1], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 1], pl.FP32]:
-                x_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.load(x, [0, 0, 0], [2, 3, 4])
-                s_tile: pl.Tile[[2, 3, 1], pl.FP32] = pl.tile.sum(x_tile, axis=2, keepdim=True)
-                r_tile: pl.Tile[[2, 3, 1], pl.FP32] = pl.tile.add(s_tile, s_tile)
-                out_0: pl.Tensor[[2, 3, 1], pl.FP32] = pl.store(r_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 1], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 1], pl.FP32] = pl.create_tensor([2, 3, 1], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 1], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        ib = IRBuilder()
-        with ib.program("main") as prog:
-            incore_gvar = prog.declare_function("main_incore_0")
-            prog.declare_function("main")
-
-            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                out_0 = f.param(
-                    "out_0", ir.TensorType([2, 3, 1], DataType.FP32), direction=ir.ParamDirection.Out
-                )
-                f.return_type(ir.TensorType([2, 3, 1], DataType.FP32))
-                x_tile = ib.let("x_tile", _load2d(x, [0, 0, 0], [2, 3, 4], [6, 4], DataType.FP32))
-                s_tile = ib.let("s_tile", tile_ops.sum(x_tile, axis=1, keepdim=True))
-                r_tile = ib.let("r_tile", tile_ops.add(s_tile, s_tile))
-                out_0_r = ib.let("out_0", tile_ops.store(r_tile, [0, 0, 0], out_0, [2, 3, 1]))
-                ib.return_stmt(out_0_r)
-            prog.add_function(f.get_result())
-
-            with ib.function("main") as f:
-                x = f.param("x", ir.TensorType([2, 3, 4], DataType.FP32))
-                f.return_type(ir.TensorType([2, 3, 1], DataType.FP32))
-                out_0 = ib.let("out_0", tensor_ops.create([2, 3, 1], DataType.FP32))
-                y = ib.let("y", ir.Call(incore_gvar, [x, out_0], ir.Span.unknown()))
-                ib.return_stmt(y)
-            prog.add_function(f.get_result())
-        Expected = prog.get_result()
-
+    def test_verifier_passes_after_flatten(self):
+        """``TileOps2D`` verifier passes on a correctly flattened program."""
+        Before = _build_before_nd(
+            [("x", [2, 3, 4])], [2, 3, 4], DataType.FP32, lambda _ib, ts: tile_ops.add(ts[0], ts[0])
+        )
         After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TileOps2D)
+        passes.verify_properties(props, After, "test_verifier")
 
-    def test_create_full_add_chain(self):
-        """tile.create + tile.full + tile.add chain on 3D tiles."""
+    def test_verifier_fails_on_unflatten_program(self):
+        """``TileOps2D`` verifier fails on a program with >2D tile ops."""
+        Unflatten = _build_before_nd(
+            [("x", [2, 3, 4])], [2, 3, 4], DataType.FP32, lambda _ib, ts: tile_ops.add(ts[0], ts[0])
+        )
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.TileOps2D)
+        with pytest.raises(Exception, match="TileOps2D"):
+            passes.verify_properties(props, Unflatten, "test_verifier_fails")
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                a_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.create([2, 3, 4], dtype=pl.FP32)
-                b_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.full([2, 3, 4], dtype=pl.FP32, value=1.0)
-                c_tile: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(a_tile, b_tile)
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(c_tile, [0, 0, 0], out_0)
-                return out_0
 
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        @pl.program
-        class Expected:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                a_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.create([6, 4], dtype=pl.FP32)
-                b_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.full([6, 4], dtype=pl.FP32, value=1.0)
-                c_tile: pl.Tile[[6, 4], pl.FP32] = pl.tile.add(a_tile, b_tile)
-                out_store: pl.Tensor[[2, 3, 4], pl.FP32] = pl.store(
-                    c_tile, [0, 0, 0], out_0, shapes=[2, 3, 4]
-                )
-                return out_store
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
-                return y
-
-        After = passes.flatten_tile_nd_to_2d()(Before)
-        ir.assert_structural_equal(After, Expected)
+# ----------------------------------------------------------------------------
+# Control-flow regression coverage (#648: return_vars matched by identity)
+# ----------------------------------------------------------------------------
 
 
 class TestFlattenTileNdTo2DControlFlow:
-    """Tests for FlattenTileNdTo2D with control-flow (ForStmt/IfStmt/WhileStmt).
+    """Tests for ``ForStmt`` / ``IfStmt`` / ``WhileStmt`` with 3D tile carriers."""
 
-    Regression coverage for #648: return_vars must be matched by identity, not name_hint.
-    """
+    @pytest.mark.parametrize(
+        "loop_kind",
+        ["for", "while"],
+    )
+    def test_loop_with_tile_iter_arg(self, loop_kind):
+        """``ForStmt`` / ``WhileStmt`` with 3D tile iter_arg -> verifier reports ``TileOps2D``."""
 
-    def test_for_stmt_tile_iter_arg(self):
-        """ForStmt with 3D tile iter_arg -> iter_arg and return_var flattened to 2D."""
+        if loop_kind == "for":
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                t = pl.load(x, [0, 0, 0], [2, 3, 4])
-                for i in pl.range(4):
-                    t = pl.tile.add(t, t)
-                out_0 = pl.store(t, [0, 0, 0], out_0)
-                return out_0
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.InCore)
+                def main_incore_0(
+                    self,
+                    x: pl.Tensor[[2, 3, 4], pl.FP32],
+                    out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+                ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                    t = pl.load(x, [0, 0, 0], [2, 3, 4])
+                    for i in pl.range(4):
+                        t = pl.tile.add(t, t)
+                    out_0 = pl.store(t, [0, 0, 0], out_0)
+                    return out_0
 
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y = self.main_incore_0(x, out_0)
-                return y
+                @pl.function
+                def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                    out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                    y = self.main_incore_0(x, out_0)
+                    return y
+
+        else:
+
+            @pl.program
+            class Before:
+                @pl.function(type=pl.FunctionType.InCore)
+                def main_incore_0(
+                    self,
+                    x: pl.Tensor[[2, 3, 4], pl.FP32],
+                    out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+                ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                    t = pl.load(x, [0, 0, 0], [2, 3, 4])
+                    cond = True
+                    while cond:
+                        t = pl.tile.add(t, t)
+                        cond = False
+                    out_0 = pl.store(t, [0, 0, 0], out_0)
+                    return out_0
+
+                @pl.function
+                def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                    out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                    y = self.main_incore_0(x, out_0)
+                    return y
 
         Before = passes.convert_to_ssa()(Before)
         After = passes.flatten_tile_nd_to_2d()(Before)
-
-        # Verify: all tile ops in InCore functions use ≤2D tiles
         props = passes.IRPropertySet()
         props.insert(passes.IRProperty.TileOps2D)
-        passes.verify_properties(props, After, "test_for_stmt_tile_iter_arg")
+        passes.verify_properties(props, After, f"test_{loop_kind}_stmt_tile_iter_arg")
 
     def test_for_stmt_tile_iter_arg_structural(self):
-        """ForStmt with 3D tile iter_arg -> structural equality check."""
+        """``ForStmt`` with 3D tile iter_arg -> structural equality with explicit 2D Expected."""
 
-        # Before: SSA form with 3D tiles (built with IRBuilder for full control)
         ib = IRBuilder()
         with ib.program("main") as prog:
             incore_gvar = prog.declare_function("main_incore_0")
@@ -1471,7 +954,6 @@ class TestFlattenTileNdTo2DControlFlow:
 
         After = passes.flatten_tile_nd_to_2d()(Before)
 
-        # Expected: same structure but with 2D tiles
         ib = IRBuilder()
         with ib.program("main") as prog:
             incore_gvar = prog.declare_function("main_incore_0")
@@ -1507,9 +989,8 @@ class TestFlattenTileNdTo2DControlFlow:
         ir.assert_structural_equal(After, Expected)
 
     def test_if_stmt_tile_return_var(self):
-        """IfStmt with 3D tile return_vars -> flattened to 2D via yield type matching."""
+        """``IfStmt`` with 3D tile return_vars -> flattened to 2D via yield-type matching."""
 
-        # Before: SSA form with IfStmt that yields 3D tiles
         ib = IRBuilder()
         with ib.program("main") as prog:
             incore_gvar = prog.declare_function("main_incore_0")
@@ -1550,7 +1031,6 @@ class TestFlattenTileNdTo2DControlFlow:
 
         After = passes.flatten_tile_nd_to_2d()(Before)
 
-        # Expected: same structure with 2D tiles
         ib = IRBuilder()
         with ib.program("main") as prog:
             incore_gvar = prog.declare_function("main_incore_0")
@@ -1568,7 +1048,7 @@ class TestFlattenTileNdTo2DControlFlow:
                 t0 = ib.let("t", load_call)
 
                 with ib.if_stmt(cond_param) as if_blk:
-                    # return_var type must match yield type (which includes tile_view from op_registry)
+                    # return_var type must match yield type (which carries tile_view from op_registry)
                     if_blk.return_var("rv", load_call.type)
                     a = ib.let("a", tile_ops.add(t0, t0))
                     ib.emit(ir.YieldStmt([a], ir.Span.unknown()))
@@ -1593,46 +1073,18 @@ class TestFlattenTileNdTo2DControlFlow:
 
         ir.assert_structural_equal(After, Expected)
 
-    def test_while_stmt_tile_iter_arg(self):
-        """WhileStmt with 3D tile iter_arg -> iter_arg and return_var flattened to 2D."""
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                x: pl.Tensor[[2, 3, 4], pl.FP32],
-                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
-            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                t = pl.load(x, [0, 0, 0], [2, 3, 4])
-                cond = True
-                while cond:
-                    t = pl.tile.add(t, t)
-                    cond = False
-                out_0 = pl.store(t, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
-                out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
-                y = self.main_incore_0(x, out_0)
-                return y
-
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.flatten_tile_nd_to_2d()(Before)
-
-        # Verify: all tile ops in InCore functions use ≤2D tiles
-        props = passes.IRPropertySet()
-        props.insert(passes.IRProperty.TileOps2D)
-        passes.verify_properties(props, After, "test_while_stmt_tile_iter_arg")
+# ----------------------------------------------------------------------------
+# tile.batch_matmul lowering
+# ----------------------------------------------------------------------------
 
 
 class TestFlattenTileNdTo2DBatchMatmul:
-    """Tests for tile.batch_matmul lowering inside FlattenTileNdTo2D."""
+    """Tests for ``tile.batch_matmul`` lowering inside ``FlattenTileNdTo2D``."""
 
     @staticmethod
     def _flattened_incore(before: ir.Program) -> ir.Function:
-        """Run FlattenTileNdTo2D and return `main_incore_0`."""
+        """Run ``FlattenTileNdTo2D`` and return ``main_incore_0``."""
         after = passes.flatten_tile_nd_to_2d()(before)
         after_func = after.get_function("main_incore_0")
         assert after_func is not None
@@ -1640,22 +1092,22 @@ class TestFlattenTileNdTo2DBatchMatmul:
 
     @staticmethod
     def _top_level_calls(func: ir.Function) -> list[ir.Call]:
-        """Return top-level AssignStmt call values from a function body."""
+        """Return top-level ``AssignStmt`` call values from a function body."""
         body = cast(ir.SeqStmts, func.body)
-        calls: list[ir.Call] = []
-        for stmt in body.stmts:
-            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-                calls.append(stmt.value)
-        return calls
+        return [
+            stmt.value
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+        ]
 
     @staticmethod
     def _tuple_const_values(expr: ir.Expr) -> list[int]:
-        """Extract integer values from a MakeTuple of ConstInt expressions."""
+        """Extract integer values from a ``MakeTuple`` of ``ConstInt`` expressions."""
         tup = cast(ir.MakeTuple, expr)
         return [cast(ir.ConstInt, elem).value for elem in tup.elements]
 
     def test_batch_matmul_broadcasts_and_unrolls(self):
-        """Broadcasted tile.batch_matmul [2,1,M,K]x[1,3,K,N] expands to 6 per-batch 2D tile.matmul."""
+        """Broadcasted ``[2,1,M,K] x [1,3,K,N]`` expands to 6 per-batch 2D ``tile.matmul``."""
 
         @pl.program
         class Before:
@@ -1778,7 +1230,7 @@ class TestFlattenTileNdTo2DBatchMatmul:
         ir.assert_structural_equal(after_func, expected_func)
 
     def test_batch_matmul_with_both_operands_load_transpose_unrolls_per_batch(self):
-        """Both operands use load(transpose=True): per-batch load with transpose kwarg, no tile.transpose."""
+        """Both operands use ``load(transpose=True)``: per-batch transpose load, no extra transpose op."""
 
         @pl.program
         class Before:
@@ -1884,234 +1336,176 @@ class TestFlattenTileNdTo2DBatchMatmul:
         assert expected_func is not None
         ir.assert_structural_equal(after_func, expected_func)
 
-    def test_batch_matmul_with_named_load_transpose_unrolls_per_batch(self):
-        """Named load(transpose=True) operands: same output as inline load transpose."""
+    @pytest.mark.parametrize(
+        "case",
+        [
+            # 3D no transpose, 2 batches
+            {
+                "lhs_shape": [2, 16, 128],
+                "rhs_shape": [2, 128, 64],
+                "out_shape": [2, 16, 64],
+                "lhs_transpose": False,
+                "rhs_transpose": False,
+                "expected_op_seq": ["tile.load", "tile.load", "tile.matmul", "tile.store"] * 2,
+                "expected_lhs_offsets": [[0, 0, 0], [1, 0, 0]],
+                "expected_rhs_offsets": [[0, 0, 0], [1, 0, 0]],
+                "expected_lhs_shapes": [[1, 16, 128], [1, 16, 128]],
+                "expected_rhs_shapes": [[1, 128, 64], [1, 128, 64]],
+                "expected_store_offsets": [[0, 0, 0], [1, 0, 0]],
+                "expected_store_shapes": [[1, 16, 64], [1, 16, 64]],
+                "expected_lhs_t_seq": [False, False],
+                "expected_rhs_t_seq": [False, False],
+            },
+            # 3D, single batch
+            {
+                "lhs_shape": [1, 16, 128],
+                "rhs_shape": [1, 128, 64],
+                "out_shape": [1, 16, 64],
+                "lhs_transpose": False,
+                "rhs_transpose": False,
+                "expected_op_seq": ["tile.load", "tile.load", "tile.matmul", "tile.store"],
+                "expected_lhs_offsets": [[0, 0, 0]],
+                "expected_rhs_offsets": [[0, 0, 0]],
+                "expected_lhs_shapes": [[1, 16, 128]],
+                "expected_rhs_shapes": [[1, 128, 64]],
+                "expected_store_offsets": [[0, 0, 0]],
+                "expected_store_shapes": [[1, 16, 64]],
+                "expected_lhs_t_seq": [False],
+                "expected_rhs_t_seq": [False],
+            },
+            # lhs uses load(transpose=True), rhs does not
+            {
+                "lhs_shape": [2, 128, 16],
+                "rhs_shape": [2, 128, 64],
+                "out_shape": [2, 16, 64],
+                "lhs_transpose": True,
+                "rhs_transpose": False,
+                "expected_op_seq": ["tile.load", "tile.load", "tile.matmul", "tile.store"] * 2,
+                "expected_lhs_offsets": [[0, 0, 0], [1, 0, 0]],
+                "expected_rhs_offsets": [[0, 0, 0], [1, 0, 0]],
+                "expected_lhs_shapes": [[1, 128, 16], [1, 128, 16]],
+                "expected_rhs_shapes": [[1, 128, 64], [1, 128, 64]],
+                "expected_store_offsets": [[0, 0, 0], [1, 0, 0]],
+                "expected_store_shapes": [[1, 16, 64], [1, 16, 64]],
+                "expected_lhs_t_seq": [True, True],
+                "expected_rhs_t_seq": [False, False],
+            },
+        ],
+        ids=["3d_no_transpose", "single_batch", "lhs_load_transpose"],
+    )
+    def test_batch_matmul_unrolls_kwargs(self, case):
+        """Per-batch ``tile.load``/``tile.store`` kwargs match the broadcast/transpose plan."""
+        lhs_shape = case["lhs_shape"]
+        rhs_shape = case["rhs_shape"]
+        out_shape = case["out_shape"]
+        lhs_transpose = case["lhs_transpose"]
+        rhs_transpose = case["rhs_transpose"]
 
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
-                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
-                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
-            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
-                lhs_t: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
-                    lhs, [0, 0, 0], [2, 128, 16], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
-                rhs_t: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
-                    rhs, [0, 0, 0], [2, 64, 128], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
-                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_t, rhs_t)
-                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
-                return out_0
+        # The DSL hard-codes shapes/types so we synthesize Before via IRBuilder
+        # to keep this test parametrizable across batch / transpose variants.
+        span = ir.Span.unknown()
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            incore_gvar = prog.declare_function("main_incore_0")
+            prog.declare_function("main")
 
-            @pl.function
-            def main(
-                self,
-                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
-                rhs: pl.Tensor[[2, 64, 128], pl.FP16],
-            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
-                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
-                y = self.main_incore_0(lhs, rhs, out_0)
-                return y
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                lhs = f.param("lhs", ir.TensorType(lhs_shape, DataType.FP16))
+                rhs = f.param("rhs", ir.TensorType(rhs_shape, DataType.FP16))
+                out_p = f.param(
+                    "out_0", ir.TensorType(out_shape, DataType.FP16), direction=ir.ParamDirection.Out
+                )
+                f.return_type(ir.TensorType(out_shape, DataType.FP16))
+
+                # Inferred logical lhs tile shape: same as rhs[K]/[N]; if transposed
+                # in load, last two dims swap.
+                def load_tile_shape(shape: list[int], transpose: bool) -> list[int]:
+                    if transpose:
+                        return [*shape[:-2], shape[-1], shape[-2]]
+                    return shape
+
+                lhs_tile_shape = load_tile_shape(lhs_shape, lhs_transpose)
+                rhs_tile_shape = load_tile_shape(rhs_shape, rhs_transpose)
+
+                lhs_load = tile_ops.load(
+                    lhs,
+                    [0] * len(lhs_shape),
+                    lhs_shape,
+                    target_memory=ir.MemorySpace.Mat,
+                    transpose=lhs_transpose,
+                    span=span,
+                )
+                lhs_call = ir.Call(
+                    lhs_load.op,
+                    list(lhs_load.args),
+                    lhs_load.kwargs,
+                    ir.TileType(lhs_tile_shape, DataType.FP16),
+                    lhs_load.span,
+                )
+                lhs_tile = ib.let("lhs_tile", lhs_call)
+
+                rhs_load = tile_ops.load(
+                    rhs,
+                    [0] * len(rhs_shape),
+                    rhs_shape,
+                    target_memory=ir.MemorySpace.Mat,
+                    transpose=rhs_transpose,
+                    span=span,
+                )
+                rhs_call = ir.Call(
+                    rhs_load.op,
+                    list(rhs_load.args),
+                    rhs_load.kwargs,
+                    ir.TileType(rhs_tile_shape, DataType.FP16),
+                    rhs_load.span,
+                )
+                rhs_tile = ib.let("rhs_tile", rhs_call)
+
+                bmm_op = ir.Op("tile.batch_matmul")
+                out_tile = ib.let(
+                    "out_tile",
+                    ir.Call(bmm_op, [lhs_tile, rhs_tile], ir.TileType(out_shape, DataType.FP32), span),
+                )
+                out_r = ib.let("out_0", tile_ops.store(out_tile, [0] * len(out_shape), out_p))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+
+            with ib.function("main") as f:
+                lhs = f.param("lhs", ir.TensorType(lhs_shape, DataType.FP16))
+                rhs = f.param("rhs", ir.TensorType(rhs_shape, DataType.FP16))
+                f.return_type(ir.TensorType(out_shape, DataType.FP16))
+                out_v = ib.let("out_0", tensor_ops.create(out_shape, DataType.FP16))
+                y = ib.let("y", ir.Call(incore_gvar, [lhs, rhs, out_v], span))
+                ib.return_stmt(y)
+            prog.add_function(f.get_result())
+        Before = prog.get_result()
 
         func = self._flattened_incore(Before)
         calls = self._top_level_calls(func)
-        assert [call.op.name for call in calls] == [
-            "tile.load",
-            "tile.load",
-            "tile.matmul",
-            "tile.store",
-            "tile.load",
-            "tile.load",
-            "tile.matmul",
-            "tile.store",
-        ]
+        assert [call.op.name for call in calls] == case["expected_op_seq"]
+
         load_calls = [call for call in calls if call.op.name == "tile.load"]
-        assert len(load_calls) == 4
-        assert all(call.kwargs["transpose"] is True for call in load_calls)
-        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [
-            [0, 0, 0],
-            [0, 0, 0],
-            [1, 0, 0],
-            [1, 0, 0],
-        ]
-        assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [
-            [1, 128, 16],
-            [1, 64, 128],
-            [1, 128, 16],
-            [1, 64, 128],
-        ]
+        # Loads alternate lhs, rhs, lhs, rhs, ...
+        actual_lhs_offsets = [self._tuple_const_values(call.args[1]) for call in load_calls[0::2]]
+        actual_rhs_offsets = [self._tuple_const_values(call.args[1]) for call in load_calls[1::2]]
+        actual_lhs_shapes = [self._tuple_const_values(call.args[2]) for call in load_calls[0::2]]
+        actual_rhs_shapes = [self._tuple_const_values(call.args[2]) for call in load_calls[1::2]]
+        actual_lhs_t = [call.kwargs.get("transpose", False) for call in load_calls[0::2]]
+        actual_rhs_t = [call.kwargs.get("transpose", False) for call in load_calls[1::2]]
+        assert actual_lhs_offsets == case["expected_lhs_offsets"]
+        assert actual_rhs_offsets == case["expected_rhs_offsets"]
+        assert actual_lhs_shapes == case["expected_lhs_shapes"]
+        assert actual_rhs_shapes == case["expected_rhs_shapes"]
+        assert actual_lhs_t == case["expected_lhs_t_seq"]
+        assert actual_rhs_t == case["expected_rhs_t_seq"]
+
         store_calls = [call for call in calls if call.op.name == "tile.store"]
-        assert [self._tuple_const_values(call.args[1]) for call in store_calls] == [[0, 0, 0], [1, 0, 0]]
-        assert [self._tuple_const_values(call.args[3]) for call in store_calls] == [[1, 16, 64], [1, 16, 64]]
-
-    def test_batch_matmul_3d_no_transpose_unrolls(self):
-        """tile.batch_matmul [2,M,K]x[2,K,N] expands to 2 per-batch 2D tile.matmul."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
-                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
-                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
-            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
-                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
-                    lhs, [0, 0, 0], [2, 16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
-                    rhs, [0, 0, 0], [2, 128, 64], target_memory=pl.MemorySpace.Mat
-                )
-                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
-                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(
-                self,
-                lhs: pl.Tensor[[2, 16, 128], pl.FP16],
-                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
-            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
-                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
-                y = self.main_incore_0(lhs, rhs, out_0)
-                return y
-
-        func = self._flattened_incore(Before)
-        calls = self._top_level_calls(func)
-        assert [call.op.name for call in calls] == [
-            "tile.load",
-            "tile.load",
-            "tile.matmul",
-            "tile.store",
-            "tile.load",
-            "tile.load",
-            "tile.matmul",
-            "tile.store",
+        assert [self._tuple_const_values(call.args[1]) for call in store_calls] == case[
+            "expected_store_offsets"
         ]
-        load_calls = [call for call in calls if call.op.name == "tile.load"]
-        assert [call.kwargs["transpose"] for call in load_calls] == [False, False, False, False]
-        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [
-            [0, 0, 0],
-            [0, 0, 0],
-            [1, 0, 0],
-            [1, 0, 0],
+        assert [self._tuple_const_values(call.args[3]) for call in store_calls] == case[
+            "expected_store_shapes"
         ]
-        assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [
-            [1, 16, 128],
-            [1, 128, 64],
-            [1, 16, 128],
-            [1, 128, 64],
-        ]
-        store_calls = [call for call in calls if call.op.name == "tile.store"]
-        assert [self._tuple_const_values(call.args[1]) for call in store_calls] == [[0, 0, 0], [1, 0, 0]]
-        assert [self._tuple_const_values(call.args[3]) for call in store_calls] == [[1, 16, 64], [1, 16, 64]]
-
-    def test_batch_matmul_single_batch_unrolls(self):
-        """tile.batch_matmul [1,M,K]x[1,K,N] expands to 1 per-batch 2D tile.matmul."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                lhs: pl.Tensor[[1, 16, 128], pl.FP16],
-                rhs: pl.Tensor[[1, 128, 64], pl.FP16],
-                out_0: pl.Out[pl.Tensor[[1, 16, 64], pl.FP16]],
-            ) -> pl.Tensor[[1, 16, 64], pl.FP16]:
-                lhs_tile: pl.Tile[[1, 16, 128], pl.FP16] = pl.load(
-                    lhs, [0, 0, 0], [1, 16, 128], target_memory=pl.MemorySpace.Mat
-                )
-                rhs_tile: pl.Tile[[1, 128, 64], pl.FP16] = pl.load(
-                    rhs, [0, 0, 0], [1, 128, 64], target_memory=pl.MemorySpace.Mat
-                )
-                out_tile: pl.Tile[[1, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
-                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(
-                self,
-                lhs: pl.Tensor[[1, 16, 128], pl.FP16],
-                rhs: pl.Tensor[[1, 128, 64], pl.FP16],
-            ) -> pl.Tensor[[1, 16, 64], pl.FP16]:
-                out_0 = pl.create_tensor([1, 16, 64], dtype=pl.FP16)
-                y = self.main_incore_0(lhs, rhs, out_0)
-                return y
-
-        func = self._flattened_incore(Before)
-        calls = self._top_level_calls(func)
-        assert [call.op.name for call in calls] == ["tile.load", "tile.load", "tile.matmul", "tile.store"]
-        load_calls = [call for call in calls if call.op.name == "tile.load"]
-        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [[0, 0, 0], [0, 0, 0]]
-        assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [[1, 16, 128], [1, 128, 64]]
-        store_call = next(call for call in calls if call.op.name == "tile.store")
-        assert self._tuple_const_values(store_call.args[1]) == [0, 0, 0]
-        assert self._tuple_const_values(store_call.args[3]) == [1, 16, 64]
-
-    def test_batch_matmul_with_load_transpose_unrolls_per_batch(self):
-        """One operand uses load(transpose=True): per-batch load with transpose kwarg."""
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def main_incore_0(
-                self,
-                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
-                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
-                out_0: pl.Out[pl.Tensor[[2, 16, 64], pl.FP16]],
-            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
-                lhs_tile: pl.Tile[[2, 16, 128], pl.FP16] = pl.load(
-                    lhs, [0, 0, 0], [2, 128, 16], target_memory=pl.MemorySpace.Mat, transpose=True
-                )
-                rhs_tile: pl.Tile[[2, 128, 64], pl.FP16] = pl.load(
-                    rhs, [0, 0, 0], [2, 128, 64], target_memory=pl.MemorySpace.Mat
-                )
-                out_tile: pl.Tile[[2, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
-                out_0 = pl.store(out_tile, [0, 0, 0], out_0)
-                return out_0
-
-            @pl.function
-            def main(
-                self,
-                lhs: pl.Tensor[[2, 128, 16], pl.FP16],
-                rhs: pl.Tensor[[2, 128, 64], pl.FP16],
-            ) -> pl.Tensor[[2, 16, 64], pl.FP16]:
-                out_0 = pl.create_tensor([2, 16, 64], dtype=pl.FP16)
-                y = self.main_incore_0(lhs, rhs, out_0)
-                return y
-
-        func = self._flattened_incore(Before)
-        calls = self._top_level_calls(func)
-        assert [call.op.name for call in calls] == [
-            "tile.load",
-            "tile.load",
-            "tile.matmul",
-            "tile.store",
-            "tile.load",
-            "tile.load",
-            "tile.matmul",
-            "tile.store",
-        ]
-        load_calls = [call for call in calls if call.op.name == "tile.load"]
-        assert [call.kwargs["transpose"] for call in load_calls] == [True, False, True, False]
-        assert [self._tuple_const_values(call.args[1]) for call in load_calls] == [
-            [0, 0, 0],
-            [0, 0, 0],
-            [1, 0, 0],
-            [1, 0, 0],
-        ]
-        assert [self._tuple_const_values(call.args[2]) for call in load_calls] == [
-            [1, 128, 16],
-            [1, 128, 64],
-            [1, 128, 16],
-            [1, 128, 64],
-        ]
-        store_calls = [call for call in calls if call.op.name == "tile.store"]
-        assert [self._tuple_const_values(call.args[1]) for call in store_calls] == [[0, 0, 0], [1, 0, 0]]
-        assert [self._tuple_const_values(call.args[3]) for call in store_calls] == [[1, 16, 64], [1, 16, 64]]
 
 
 if __name__ == "__main__":
