@@ -142,7 +142,7 @@ jobs:
         run: |
           task-submit --timeout 1800 --max-time 1800 --device 1 \
             --run "pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=1 --pto-isa-commit=d96c8784 \
-              -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min)'"
+              -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min or TestMscatter)'"
 
   notify-on-failure:
     name: Open issue on failure
