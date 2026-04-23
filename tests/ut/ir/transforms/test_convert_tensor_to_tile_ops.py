@@ -199,6 +199,34 @@ def _assert_convert_equal(before: ir.Program, expected: ir.Program) -> None:
     ir.assert_structural_equal(after, expected)
 
 
+class _FirstCallFinder(ir.IRVisitor):
+    """Record the first ``Call`` whose callee ``Op`` has the given name.
+
+    Matches both function-typed calls (``Call.op`` is a ``GlobalVar`` whose
+    ``name`` equals the function name) and op-typed calls (``Call.op`` is a
+    built-in ``Op``, e.g. ``"tensor.create"``).
+    """
+
+    def __init__(self, op_name: str) -> None:
+        super().__init__()
+        self.op_name = op_name
+        self.found: ir.Call | None = None
+
+    def visit_call(self, op: ir.Call) -> None:
+        if self.found is None and op.op.name == self.op_name:
+            self.found = op
+        super().visit_call(op)
+
+
+def _find_first_call_to(func: ir.Function, op_name: str) -> ir.Call | None:
+    """Return the first Call in ``func.body`` whose callee ``Op`` has name
+    ``op_name``. Used by wrapper-propagation tests to inspect per-call arg
+    counts after the pass rewrites them."""
+    finder = _FirstCallFinder(op_name)
+    finder.visit_stmt(func.body)
+    return finder.found
+
+
 # ---------------------------------------------------------------------------
 # Op family parametrization tables.
 # ---------------------------------------------------------------------------
@@ -1922,6 +1950,167 @@ class TestConvertGatherOp:
             tile_op=lambda ts: tile_ops.gather(ts[0], mask_pattern=1),
         )
         _assert_convert_equal(before, expected)
+
+
+class TestWrapperForwardPropagation:
+    """Phase 2a: propagate Phase-1 added Out params through Spmd/Group wrappers.
+
+    When TransformIncoreFunction appends Out tensor params to an InCore
+    signature, each Spmd/Group wrapper that forwards into that InCore must
+    mirror the appended params on its own signature and forward them through
+    the inner call — otherwise orchestration codegen's
+    BuildWrapperReorderedParams invariant (every inner-call Var arg maps to a
+    wrapper param) breaks and downstream codegen references an undeclared
+    identifier.
+    """
+
+    def test_spmd_wrapper_forwards_added_output(self):
+        """Spmd wrapper gains Out param mirroring the InCore's appended Out."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
+            def wrapper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.kernel(x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.wrapper(x)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+
+        kernel = After.get_function("kernel")
+        wrapper = After.get_function("wrapper")
+        main = After.get_function("main")
+        assert kernel is not None and wrapper is not None and main is not None
+
+        # InCore gained one Out param (Phase 1).
+        assert kernel.func_type == ir.FunctionType.InCore
+        assert len(kernel.params) == 2
+        assert kernel.param_directions[-1] == ir.ParamDirection.Out
+
+        # Wrapper mirrors the signature change (Phase 2a) — still Spmd, same
+        # attrs, one extra param matching the InCore's Out param type.
+        assert wrapper.func_type == ir.FunctionType.Spmd
+        assert wrapper.attrs.get("core_num") == 4
+        assert len(wrapper.params) == 2
+        assert wrapper.param_directions[0] == ir.ParamDirection.In
+        assert wrapper.param_directions[-1] == ir.ParamDirection.Out
+        assert ir.structural_equal(wrapper.params[-1].type, kernel.params[-1].type)
+
+        # Wrapper's inner call now forwards the new Out arg (1 in + 1 out).
+        inner_call = _find_first_call_to(wrapper, "kernel")
+        assert inner_call is not None
+        assert len(inner_call.args) == 2
+
+        # Orchestration allocates the Out tensor and passes it to the wrapper
+        # (Phase 2b, now covering both transformed InCore and transformed
+        # wrappers via the merged callee map).
+        assert main.func_type == ir.FunctionType.Orchestration
+        assert _find_first_call_to(main, "tensor.create") is not None
+        orch_call = _find_first_call_to(main, "wrapper")
+        assert orch_call is not None
+        assert len(orch_call.args) == 2
+
+    def test_group_wrapper_forwards_added_output(self):
+        """Group wrapper gains Out param mirroring the InCore's appended Out."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Group)
+            def wrapper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.kernel(x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.wrapper(x)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+
+        kernel = After.get_function("kernel")
+        wrapper = After.get_function("wrapper")
+        main = After.get_function("main")
+        assert kernel is not None and wrapper is not None and main is not None
+
+        assert wrapper.func_type == ir.FunctionType.Group
+        assert len(wrapper.params) == 2
+        assert wrapper.param_directions[-1] == ir.ParamDirection.Out
+        assert ir.structural_equal(wrapper.params[-1].type, kernel.params[-1].type)
+
+        inner_call = _find_first_call_to(wrapper, "kernel")
+        assert inner_call is not None
+        assert len(inner_call.args) == 2
+
+        orch_call = _find_first_call_to(main, "wrapper")
+        assert orch_call is not None
+        assert len(orch_call.args) == 2
+
+    def test_wrapper_without_transformed_incore_unchanged(self):
+        """Wrapper that does NOT forward to a transformed InCore is pass-through.
+
+        The callee InCore is already pure-tile (no tensor ops to lower), so
+        Phase 1 appends zero Out params, ForwardedCallFinder finds no
+        matching call, and Phase 2a leaves the wrapper's signature and its
+        inner call arg list unchanged.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
+                out_: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out)
+                return out_
+
+            @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
+            def wrapper(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out_: pl.Tensor[[64], pl.FP32] = self.kernel(x, out)
+                return out_
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out_: pl.Tensor[[64], pl.FP32] = self.wrapper(x, out)
+                return out_
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+
+        before_wrapper = Before.get_function("wrapper")
+        after_wrapper = After.get_function("wrapper")
+        assert before_wrapper is not None and after_wrapper is not None
+        # Wrapper's signature and call-forwarding are untouched by Phase 2a.
+        assert len(after_wrapper.params) == len(before_wrapper.params)
+        assert after_wrapper.param_directions == before_wrapper.param_directions
+        inner_call = _find_first_call_to(after_wrapper, "kernel")
+        before_inner_call = _find_first_call_to(before_wrapper, "kernel")
+        assert inner_call is not None and before_inner_call is not None
+        assert len(inner_call.args) == len(before_inner_call.args)
 
 
 if __name__ == "__main__":
