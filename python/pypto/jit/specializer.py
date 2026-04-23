@@ -293,6 +293,8 @@ class _BodyTransformer(ast.NodeTransformer):
         dynvar_python_names: dict[str, str],
         dep_names: set[str],
         dynvar_var_names: set[str],
+        param_names: list[str] | None = None,
+        initial_used_names: set[str] | None = None,
     ) -> None:
         super().__init__()
         self._meta = tensor_meta
@@ -320,6 +322,15 @@ class _BodyTransformer(ast.NodeTransformer):
         # updates and must NOT be renamed.
         self._assign_depth: dict[str, int] = {}
         self._scope_depth: int = 0
+        # Pre-register function parameters as "already assigned at depth 0" so
+        # that body assignments like `x = pl.load(x, ...)` are treated as
+        # rebindings and get alpha-renamed to `x_v1`.
+        for name in param_names or []:
+            self._assign_count[name] = 1
+            self._assign_depth[name] = 0
+        # Track all names pre-defined by the user (params + all Store targets) to
+        # avoid generating aliases that collide with user-defined variables.
+        self._used_names: set[str] = (initial_used_names or set()) | set(param_names or [])
 
     # ------------------------------------------------------------------
     # Helpers
@@ -330,18 +341,25 @@ class _BodyTransformer(ast.NodeTransformer):
         if var_name not in self._assign_count:
             self._assign_count[var_name] = 1
             self._assign_depth[var_name] = self._scope_depth
+        self._used_names.add(var_name)
 
     def _rebind(self, var_name: str) -> str:
         """Generate a fresh name for a rebinding of ``var_name``.
 
         Returns the new name and updates ``_var_renames`` so subsequent reads
-        of ``var_name`` resolve to the new alias.
+        of ``var_name`` resolve to the new alias.  Skips candidate names that
+        are already used by the user to avoid collisions.
         """
         count = self._assign_count[var_name]
         new_name = f"{var_name}_v{count}"
-        self._assign_count[var_name] += 1
+        # Skip any candidate that collides with a user-defined name.
+        while new_name in self._used_names:
+            count += 1
+            new_name = f"{var_name}_v{count}"
+        self._assign_count[var_name] = count + 1
         self._var_renames[var_name] = new_name
         self._alias_to_original[new_name] = var_name
+        self._used_names.add(new_name)
         return new_name
 
     @property
@@ -618,7 +636,6 @@ class _BodyTransformer(ast.NodeTransformer):
 
 def _infer_return_type(
     func_def: ast.FunctionDef,
-    param_names: list[str],
     tensor_meta: dict[str, TensorMeta],
     dynamic_dims: set[tuple[str, int]],
     dynvar_names: dict[str, str],
@@ -900,7 +917,6 @@ class Specializer:
         # Infer return type
         ret_type = _infer_return_type(
             func_def,
-            all_param_names,
             ctx.tensor_meta,
             ctx.dynamic_dims,
             self._dv_bindings,
@@ -911,6 +927,12 @@ class Specializer:
         # Transform body
         dep_names = set(ctx.dep_names)
         dynvar_var_names = set(self._iter_dynvar_names(ctx))
+        # Collect all names defined anywhere in the function to seed collision avoidance.
+        all_defined = {
+            node.id
+            for node in ast.walk(func_def)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
         transformer = _BodyTransformer(
             tensor_meta=ctx.tensor_meta,
             scalar_values=ctx.scalar_values,
@@ -918,10 +940,17 @@ class Specializer:
             dynvar_python_names=self._dv_bindings,
             dep_names=dep_names,
             dynvar_var_names=dynvar_var_names,
+            param_names=all_param_names,
+            initial_used_names=all_defined,
         )
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         # Accumulate alias→original renames for error message rewriting.
-        self._rename_map.update(transformer.rename_map)
+        # Don't overwrite entries from earlier functions — in multi-function JIT,
+        # two functions may independently generate the same alias (e.g. t_v1) for
+        # different user variables.  First-seen wins; per-function context is more
+        # accurate than a global override.
+        for alias, original in transformer.rename_map.items():
+            self._rename_map.setdefault(alias, original)
         # Filter out None (deleted statements) and flatten lists
         flat_body: list[ast.stmt] = []
         for item in new_body:

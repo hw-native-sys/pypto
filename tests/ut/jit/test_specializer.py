@@ -653,6 +653,12 @@ class TestVariableRebinding:
         src = textwrap.dedent(src)
         tree = ast.parse(src)
         func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+        param_names = [arg.arg for arg in func_def.args.args]
+        all_defined = {
+            node.id
+            for node in ast.walk(func_def)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
         transformer = _BodyTransformer(
             tensor_meta=tensor_meta or {},
             scalar_values={},
@@ -660,6 +666,8 @@ class TestVariableRebinding:
             dynvar_python_names={},
             dep_names=set(),
             dynvar_var_names=set(),
+            param_names=param_names,
+            initial_used_names=all_defined,
         )
         new_body = []
         for stmt in func_def.body:
@@ -757,6 +765,31 @@ class TestVariableRebinding:
         # M is inlined (static), then M = some_call(...) becomes M_v1 = some_call(64)
         # y = M should resolve to y = M_v1
         assert "y = M_v1" in out
+
+    def test_param_rebind_generates_alias(self):
+        """Assigning to a function parameter generates a renamed alias."""
+        src = """
+            def f(x):
+                x = some_call(x)
+                y = x
+        """
+        out = self._transform(src)
+        # x is a param, so re-assignment generates x_v1; reads of x after rebinding → x_v1
+        assert "x_v1 = some_call(x)" in out
+        assert "y = x_v1" in out
+
+    def test_alias_skips_collision(self):
+        """Generated alias skips names already defined by the user."""
+        src = """
+            def f():
+                x = a
+                x_v1 = b
+                x = c
+        """
+        out = self._transform(src)
+        # x_v1 is taken by user, so rebinding of x should skip to x_v2
+        assert "x_v2 =" in out
+        assert "x_v1 = b" in out
 
 
 if __name__ == "__main__":
