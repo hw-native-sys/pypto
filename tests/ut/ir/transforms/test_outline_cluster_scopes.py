@@ -365,6 +365,48 @@ class TestOutlineClusterScopes:
         After = passes.outline_cluster_scopes()(After)
         ir.assert_structural_equal(After, Expected)
 
+    def test_outline_spmd_for_loop_marks_assemble_dest_as_inout(self):
+        """`for n0 in pl.spmd(N): out = pl.assemble(out, slice, [n0, ...])`
+        must make `out` an InOut parameter on both the outlined InCore and
+        Spmd wrapper. Without this, the orchestration codegen later drops the
+        SSA-result alias for the inout call and emits a use of an undeclared
+        ``out__ssa_vN`` C++ identifier.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for n0 in pl.spmd(4):
+                    offset = n0 * 128
+                    chunk: pl.Tensor[[128, 128], pl.FP32] = pl.slice(a, [128, 128], [offset, 0])
+                    out = pl.assemble(out, chunk, [offset, 0])
+                return out
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.outline_incore_scopes()(Before)
+        After = passes.outline_cluster_scopes()(After)
+
+        spmd_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.Spmd]
+        assert len(spmd_funcs) == 1, "expected exactly one outlined Spmd wrapper"
+        spmd_func = spmd_funcs[0]
+        assert ir.ParamDirection.InOut in spmd_func.param_directions, (
+            "spmd wrapper's assemble-destination parameter should be InOut, "
+            f"got {list(spmd_func.param_directions)}"
+        )
+
+        incore_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.InCore]
+        assert len(incore_funcs) == 1, "expected exactly one outlined InCore wrapper"
+        incore_func = incore_funcs[0]
+        assert ir.ParamDirection.InOut in incore_func.param_directions, (
+            "incore wrapper's assemble-destination parameter should be InOut, "
+            f"got {list(incore_func.param_directions)}"
+        )
+
     def test_cluster_outlined_verifier_rejects_cluster_in_incore(self):
         """Test that ClusterOutlined verifier flags Cluster scopes in InCore functions."""
 

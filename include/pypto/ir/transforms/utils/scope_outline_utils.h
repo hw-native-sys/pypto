@@ -842,25 +842,65 @@ class ScopeOutliner : public IRMutator {
   /// Infer parameter directions for the outlined function by examining the scope body.
   ///
   /// Strategy:
-  ///   1. Find the first function call in the scope body
-  ///   2. Look up the callee's param_directions_ via program_
-  ///   3. Map input_vars to callee args by Var pointer identity
-  ///   4. Copy callee directions; store targets get InOut; rest default to In
+  ///   1. Mark tile.store targets (from ``store_output_set``) as InOut
+  ///   2. Mark tensor.assemble destinations as InOut (SSA-pure but
+  ///      semantically a destination update; without this the spmd wrapper for
+  ///      ``for n0 in pl.spmd(...): out = pl.assemble(out, slice, [...])``
+  ///      keeps direction In on the shared output and the orchestration
+  ///      codegen drops the SSA-result alias for the inout call)
+  ///   3. Merge ``Out``/``InOut`` directions from inner GlobalVar calls
   std::vector<ParamDirection> InferParamDirections(
       const std::vector<VarPtr>& input_vars, const StmtPtr& body,
       const std::unordered_set<const Var*>& store_output_set) const {
     std::vector<ParamDirection> directions(input_vars.size(), ParamDirection::In);
 
-    // Mark store targets as InOut
+    // Build input_var pointer → index map (shared by every inference step below).
+    std::unordered_map<const Var*, size_t> var_to_idx;
+    for (size_t i = 0; i < input_vars.size(); ++i) {
+      var_to_idx[input_vars[i].get()] = i;
+    }
+
+    // Step 1: mark tile.store targets as InOut
     for (size_t i = 0; i < input_vars.size(); ++i) {
       if (store_output_set.count(input_vars[i].get())) {
         directions[i] = ParamDirection::InOut;
       }
     }
 
+    // Step 2: mark tensor.assemble destinations as InOut. ``tensor.assemble``
+    // is SSA-pure (returns a fresh Tensor) but the first arg is a destination
+    // that the result aliases — when the destination is a parameter the
+    // function effectively reads and writes the same backing buffer.
+    class AssembleDestUpgrader : public IRVisitor {
+     public:
+      AssembleDestUpgrader(const std::unordered_map<const Var*, size_t>& var_to_idx,
+                           std::vector<ParamDirection>& directions)
+          : var_to_idx_(var_to_idx), directions_(directions) {}
+
+     protected:
+      void VisitExpr_(const CallPtr& call) override {
+        auto opnode = std::dynamic_pointer_cast<const Op>(call->op_);
+        if (opnode && opnode->name_ == "tensor.assemble" && !call->args_.empty()) {
+          if (auto var = As<Var>(call->args_[0])) {
+            auto it = var_to_idx_.find(var.get());
+            if (it != var_to_idx_.end() && directions_[it->second] == ParamDirection::In) {
+              directions_[it->second] = ParamDirection::InOut;
+            }
+          }
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+
+     private:
+      const std::unordered_map<const Var*, size_t>& var_to_idx_;
+      std::vector<ParamDirection>& directions_;
+    };
+    AssembleDestUpgrader(var_to_idx, directions).VisitStmt(body);
+
     if (!program_) return directions;
 
-    // Collect all GlobalVar function calls in the body to infer directions across all of them.
+    // Step 3: collect all GlobalVar function calls in the body and merge
+    // ``Out``/``InOut`` directions from their callees onto our parameters.
     class CallFinder : public IRVisitor {
      public:
       std::vector<CallPtr> found_calls;
@@ -875,12 +915,6 @@ class ScopeOutliner : public IRMutator {
     CallFinder finder;
     finder.VisitStmt(body);
     if (finder.found_calls.empty()) return directions;
-
-    // Build input_var pointer → index map
-    std::unordered_map<const Var*, size_t> var_to_idx;
-    for (size_t i = 0; i < input_vars.size(); ++i) {
-      var_to_idx[input_vars[i].get()] = i;
-    }
 
     // Merge directions from all calls, preferring Out/InOut over In
     for (const auto& call : finder.found_calls) {
