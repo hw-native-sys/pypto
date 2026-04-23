@@ -15,11 +15,13 @@ harness package (migrated from pto-testing-framework).
 """
 
 import inspect
+import os
 import random
 import re
 import shutil
 import sys
 import tempfile
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +57,10 @@ from pypto.runtime.runner import RunConfig  # noqa: E402
 # Cleaned up in pytest_sessionfinish.
 _temp_precompile_dirs: list[Path] = []
 
+# Per-device test counter populated by ``_report_device`` and dumped at
+# session end via ``pytest_terminal_summary``.
+_device_counter: Counter[int] = Counter()
+
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_simpler_dependency(request):
@@ -87,9 +93,15 @@ def pytest_addoption(parser):
     parser.addoption(
         "--device",
         action="store",
-        default=0,
-        type=int,
-        help="Device ID for hardware tests (default: 0)",
+        default="0",
+        type=str,
+        help=(
+            "Device id(s) for hardware tests. Accepts a single id ('0'), an "
+            "inclusive range ('0-7'), or a comma-separated list ('0,1,12'). "
+            "Ranges and lists may be mixed ('0-3,8,12-15'). When pytest-xdist "
+            "is active, each worker picks one device round-robin; otherwise "
+            "the first id is used (default: 0)."
+        ),
     )
     parser.addoption(
         "--strategy",
@@ -164,6 +176,54 @@ def pytest_addoption(parser):
     )
 
 
+def _parse_device_option(raw: str | int) -> list[int]:
+    """Parse the ``--device`` option into a list of device ids.
+
+    Accepts a single integer (``"0"`` or ``0``), an inclusive range
+    (``"0-7"``), a comma-separated list (``"0,1,12"``), or any combination
+    (``"0-3,8,12-15"``). Device ids may be non-contiguous.
+    """
+    text = str(raw).strip()
+    if not text:
+        raise pytest.UsageError("--device must not be empty")
+
+    devices: list[int] = []
+    for token in text.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_str, end_str = token.split("-", 1)
+            start, end = int(start_str), int(end_str)
+            if end < start:
+                raise pytest.UsageError(
+                    f"--device range must be non-decreasing, got {token!r}"
+                )
+            devices.extend(range(start, end + 1))
+        else:
+            devices.append(int(token))
+
+    if not devices:
+        raise pytest.UsageError(f"--device yielded no device ids: {raw!r}")
+    # Preserve order while deduplicating (user ordering dictates worker mapping).
+    return list(dict.fromkeys(devices))
+
+
+def _resolve_device_id(raw: str | int) -> int:
+    """Pick a single device id from the ``--device`` option.
+
+    When pytest-xdist is active (``PYTEST_XDIST_WORKER=gwN``), each worker
+    takes a slot round-robin from the available range so concurrent workers
+    target distinct cards. Otherwise the first id in the range is used.
+    """
+    devices = _parse_device_option(raw)
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+    match = re.fullmatch(r"gw(\d+)", worker)
+    if match and len(devices) > 1:
+        return devices[int(match.group(1)) % len(devices)]
+    return devices[0]
+
+
 def _parse_platform_filter(raw: str) -> tuple[str, ...]:
     """Parse the comma-separated ``--platform`` value into an ordered tuple.
 
@@ -186,6 +246,37 @@ def _parse_platform_filter(raw: str) -> tuple[str, ...]:
             f"--platform must include at least one of: {', '.join(ALL_PLATFORM_IDS)}; got {raw!r}"
         )
     return valid
+
+
+@pytest.fixture(autouse=True)
+def _report_device(request) -> None:
+    """Print the resolved device id at the start of every hardware test.
+
+    Helps diagnose multi-card CI scheduling when ``--device`` is a range or
+    list. The line is prefixed so it stands out in pytest's per-test output:
+
+        [DEVICE] tests/st/runtime/test_x.py::test_y -> device 12 (worker=gw3)
+
+    Aggregate per-device counts are emitted at session end via
+    ``pytest_terminal_summary``.
+    """
+    device_id = _resolve_device_id(request.config.getoption("--device"))
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    sys.stdout.write(
+        f"\n[DEVICE] {request.node.nodeid} -> device {device_id} (worker={worker})\n"
+    )
+    sys.stdout.flush()
+    _device_counter[device_id] += 1
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # noqa: ARG001
+    """Emit a per-device test count summary at the end of the session."""
+    if not _device_counter:
+        return
+    total = sum(_device_counter.values())
+    terminalreporter.write_sep("=", f"per-device test count ({total} total)")
+    for dev in sorted(_device_counter):
+        terminalreporter.write_line(f"  device {dev:>3}: {_device_counter[dev]} tests")
 
 
 @pytest.fixture(scope="session")
@@ -213,7 +304,7 @@ def test_config(request) -> RunConfig:
 
     return RunConfig(
         platform=fallback_platform,
-        device_id=request.config.getoption("--device"),
+        device_id=_resolve_device_id(request.config.getoption("--device")),
         save_kernels=save_kernels,
         save_kernels_dir=save_kernels_dir,
         dump_passes=request.config.getoption("--dump-passes"),
