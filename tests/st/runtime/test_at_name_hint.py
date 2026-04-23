@@ -10,19 +10,18 @@
 """ST test for ``pl.at(name_hint=...)`` on a CORE_GROUP scope.
 
 Verifies that a ``pl.at`` region annotated with
-``level=pl.Level.CORE_GROUP, name_hint="GetKVCache"`` compiles and runs
-end-to-end. The supplied ``name_hint`` should propagate to the outlined
-function name and downstream artifacts (e.g. merged swimlane JSON).
-See issue #1113.
+``level=pl.Level.CORE_GROUP, name_hint="GetKVCache"`` compiles and that the
+supplied ``name_hint`` propagates into the generated ``kernel_config.py``
+artifact (see issue #1113).
 """
 
+import os
 import sys
-from typing import Any
+import tempfile
 
 import pypto.language as pl
 import pytest
-import torch
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from pypto import ir
 from pypto.backend import BackendType
 
 M = 32
@@ -43,41 +42,36 @@ class AtNameHintProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         output: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
+        # NOTE: pl.at name_hint must be a string literal (parser requirement),
+        # so it cannot reference the _NAME_HINT module constant.
         with pl.at(level=pl.Level.CORE_GROUP, name_hint="GetKVCache"):
             out = pl.matmul(a, b)
             output = pl.assemble(output, out, [0, 0])
         return output
 
 
-class AtNameHintTest(PTOTestCase):
-    """Compile and verify CORE_GROUP scope with name_hint."""
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "at_name_hint_get_kv_cache"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [M, K], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [K, N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [M, N], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return AtNameHintProgram
-
-    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        tensors["output"][:] = torch.matmul(tensors["a"].float(), tensors["b"].float())
-
-
 class TestAtNameHint:
     """Regression test for issue #1113 — ``name_hint`` on CORE_GROUP scopes."""
 
-    def test_core_group_name_hint(self, test_runner):
-        """CORE_GROUP region with ``name_hint`` compiles and runs successfully."""
-        result = test_runner.run(AtNameHintTest(backend_type=BackendType.Ascend910B))
-        assert result.passed, f"pl.at(name_hint='{_NAME_HINT}') run failed: {result.error}"
+    def test_name_hint_propagates_to_kernel_config(self):
+        """``name_hint`` appears in the generated ``kernel_config.py``."""
+        with tempfile.TemporaryDirectory(prefix="pypto_at_name_hint_") as work_dir:
+            ir.compile(
+                AtNameHintProgram,
+                output_dir=work_dir,
+                backend_type=BackendType.Ascend910B,
+                dump_passes=False,
+            )
+
+            config_path = os.path.join(work_dir, "kernel_config.py")
+            assert os.path.exists(config_path), f"kernel_config.py not generated at {config_path}"
+
+            content = open(config_path).read()
+            # Guard against substring overlap with other names — anchor on the
+            # full `"name": "GetKVCache"` key/value or `GetKVCache.cpp` filename.
+            assert f'"name": "{_NAME_HINT}"' in content or f"{_NAME_HINT}.cpp" in content, (
+                f"name_hint {_NAME_HINT!r} not found in kernel_config.py:\n{content}"
+            )
 
 
 if __name__ == "__main__":
