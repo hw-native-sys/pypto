@@ -459,6 +459,26 @@ class TestSpmdForLoop:
                     _ = i
                 return a
 
+    def test_for_spmd_rejects_float_core_num(self):
+        """core_num must resolve to an integer-typed expression."""
+        with pytest.raises(ParserSyntaxError, match="must be an integer expression"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(1.5):  # type: ignore[arg-type]
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_bool_core_num(self):
+        """A boolean literal is not an acceptable core_num."""
+        with pytest.raises(ParserSyntaxError, match="must be an integer expression"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(True):  # type: ignore[arg-type]
+                    _ = i
+                return a
+
     def test_for_spmd_rejects_duplicate_core_num(self):
         """Supplying ``core_num`` positionally *and* as a kwarg is rejected."""
         with pytest.raises(ParserSyntaxError, match="multiple values for argument 'core_num'"):

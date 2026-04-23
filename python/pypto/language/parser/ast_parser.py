@@ -2423,11 +2423,36 @@ class ASTParser:
         the pipeline.
         """
 
+        # Tuple (not set): nanobind DataType values have __eq__ that compares by
+        # value but non-coherent __hash__, so set membership misses. `in` on a
+        # tuple falls back to linear `==` comparison and works as expected.
+        integer_dtypes = (
+            DataType.INT4,
+            DataType.INT8,
+            DataType.INT16,
+            DataType.INT32,
+            DataType.INT64,
+            DataType.UINT4,
+            DataType.UINT8,
+            DataType.UINT16,
+            DataType.UINT32,
+            DataType.UINT64,
+            DataType.INDEX,
+        )
+
         def _parse_core_num_node(value_node: ast.AST, source: ast.AST) -> "ir.Expr":
             # ast.AST covers any expression; parse_expression expects ast.expr.
             # The grammar for keyword values and positional args always gives
             # ast.expr here, but cast for mypy's sake.
             expr = self.parse_expression(cast("ast.expr", value_node))
+            expr_type = expr.type
+            is_integer = isinstance(expr_type, ir.ScalarType) and expr_type.dtype in integer_dtypes
+            if not is_integer:
+                raise ParserSyntaxError(
+                    f"core_num must be an integer expression, got {python_print(expr_type, format=False)}",
+                    span=self.span_tracker.get_span(source),
+                    hint=usage_hint,
+                )
             if isinstance(expr, ir.ConstInt) and expr.value <= 0:
                 raise ParserSyntaxError(
                     f"core_num must be a positive integer, got {expr.value}",
