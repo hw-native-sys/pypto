@@ -292,9 +292,7 @@ def _fused_compile_task(
         _compile_for_cache(tc, work_dir, dump_passes)
         from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-        chip_callable, runtime_name = compile_and_assemble(
-            work_dir, resolved, pto_isa_commit=pto_isa_commit
-        )
+        chip_callable, runtime_name = compile_and_assemble(work_dir, resolved, pto_isa_commit=pto_isa_commit)
         return CompileArtifact(
             work_dir=work_dir,
             resolved_platform=resolved,
@@ -414,7 +412,7 @@ def start_pipeline(
     ``set_backend_type`` single-shot invariant without stalling pytest's
     progress reporting during collection.
     """
-    global _device_pool, _execute_pool, _pipeline_ctx
+    global _device_pool, _execute_pool, _pipeline_ctx  # noqa: PLW0603
 
     # Resolve PTO_ISA_ROOT once on the main thread before any compile workers
     # start.  Otherwise concurrent workers race on `git clone` into the same
@@ -437,9 +435,7 @@ def start_pipeline(
         "runtime_profiling": runtime_profiling,
     }
     n_devices = device_pool.qsize()
-    _execute_pool = ThreadPoolExecutor(
-        max_workers=max(1, n_devices), thread_name_prefix="pypto-exec"
-    )
+    _execute_pool = ThreadPoolExecutor(max_workers=max(1, n_devices), thread_name_prefix="pypto-exec")
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
@@ -449,9 +445,7 @@ def start_pipeline(
     for i, (backend_type, group) in enumerate(group_items):
         is_last = i == len(group_items) - 1
         set_backend_type(backend_type)
-        compile_pool = ThreadPoolExecutor(
-            max_workers=compile_workers, thread_name_prefix="pypto-compile"
-        )
+        compile_pool = ThreadPoolExecutor(max_workers=compile_workers, thread_name_prefix="pypto-compile")
         _compile_pools.append(compile_pool)
         group_futs: list[Future] = []
         for tc in group:
@@ -486,7 +480,7 @@ def start_pipeline(
 
 def shutdown_pipeline() -> None:
     """Tear down compile/execute pools; called from ``pytest_sessionfinish``."""
-    global _execute_pool, _compile_pools
+    global _execute_pool, _compile_pools  # noqa: PLW0603
     for pool in _compile_pools:
         pool.shutdown(wait=False, cancel_futures=True)
     _compile_pools = []
