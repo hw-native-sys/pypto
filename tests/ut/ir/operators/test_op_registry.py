@@ -491,6 +491,12 @@ def test_tile_slice_pad_value_kwarg_schema():
     assert tile_slice_op.has_attr("pad_value")
 
 
+def test_tensor_slice_pad_value_kwarg_schema():
+    """Test that tensor.slice declares pad_value in its kwarg schema."""
+    tensor_slice_op = ir.get_op("tensor.slice")
+    assert tensor_slice_op.has_attr("pad_value")
+
+
 class TestOpMemorySpecRegistry:
     """Test that op memory specs are correctly registered and queryable."""
 

@@ -154,17 +154,33 @@ std::string TensorLayoutToString(TensorLayout layout);
 TensorLayout StringToTensorLayout(const std::string& str);
 
 /**
+ * @brief Tile pad enumeration
+ *
+ * Defines the padding mode for out-of-bound tile/tensor view accesses:
+ * - null: No padding
+ * - zero: Pad with zero
+ * - max: Pad with maximum value of the element type
+ * - min: Pad with minimum value of the element type
+ */
+enum class PadValue {
+  null,  ///< No padding
+  zero,  ///< Zero padding
+  max,   ///< Max value padding
+  min    ///< Min value padding
+};
+
+/**
  * @brief Tensor view representation
  *
- * Represents the view information for a tensor, including stride and layout.
- * The shape is stored in TensorType itself, so TensorView only needs
- * stride and layout information.
+ * Represents the view information for a tensor, including stride, layout,
+ * valid_shape, and pad mode. The shape is stored in TensorType itself.
  */
 struct TensorView {
   std::vector<ExprPtr> stride;  ///< Stride for each dimension
   TensorLayout layout;          ///< Tensor layout type
   std::vector<ExprPtr>
-      valid_shape;  ///< Valid shape for each dimension (optional, empty means use full shape)
+      valid_shape;                ///< Valid shape for each dimension (optional, empty means use full shape)
+  PadValue pad = PadValue::null;  ///< Pad mode for out-of-bound accesses inside valid_shape
 
   /**
    * @brief Default constructor with ND layout and empty stride/valid_shape
@@ -177,9 +193,11 @@ struct TensorView {
    * @param stride Stride for each dimension
    * @param layout Tensor layout type
    * @param valid_shape Valid shape for each dimension (optional, defaults to empty)
+   * @param pad Pad mode (optional, defaults to PadValue::null)
    */
-  TensorView(std::vector<ExprPtr> stride, TensorLayout layout, std::vector<ExprPtr> valid_shape = {})
-      : stride(std::move(stride)), layout(layout), valid_shape(std::move(valid_shape)) {}
+  TensorView(std::vector<ExprPtr> stride, TensorLayout layout, std::vector<ExprPtr> valid_shape = {},
+             PadValue pad = PadValue::null)
+      : stride(std::move(stride)), layout(layout), valid_shape(std::move(valid_shape)), pad(pad) {}
 
   /**
    * @brief Constructor with integer stride and valid_shape (auto-converted to ConstInt)
@@ -187,9 +205,10 @@ struct TensorView {
    * @param stride Stride for each dimension (int64, converted to ConstInt with INDEX dtype)
    * @param layout Tensor layout type
    * @param valid_shape Valid shape for each dimension (int64, defaults to empty)
+   * @param pad Pad mode (optional, defaults to PadValue::null)
    */
   TensorView(const std::vector<int64_t>& stride, TensorLayout layout,
-             const std::vector<int64_t>& valid_shape = {});
+             const std::vector<int64_t>& valid_shape = {}, PadValue pad = PadValue::null);
 
   /**
    * @brief Get field descriptors for reflection-based visitation
@@ -199,7 +218,8 @@ struct TensorView {
   static constexpr auto GetFieldDescriptors() {
     return std::make_tuple(reflection::UsualField(&TensorView::stride, "stride"),
                            reflection::UsualField(&TensorView::layout, "layout"),
-                           reflection::UsualField(&TensorView::valid_shape, "valid_shape"));
+                           reflection::UsualField(&TensorView::valid_shape, "valid_shape"),
+                           reflection::UsualField(&TensorView::pad, "pad"));
   }
 };
 
@@ -226,22 +246,6 @@ std::string TileLayoutToString(TileLayout layout);
  * @brief Convert string to TileLayout enum
  */
 TileLayout StringToTileLayout(const std::string& str);
-
-/**
- * @brief Tile pad enumeration
- *
- * Defines the padding mode for out-of-bound tile accesses:
- * - null: No padding
- * - zero: Pad with zero
- * - max: Pad with maximum value of the element type
- * - min: Pad with minimum value of the element type
- */
-enum class PadValue {
-  null,  ///< No padding
-  zero,  ///< Zero padding
-  max,   ///< Max value padding
-  min    ///< Min value padding
-};
 
 /**
  * @brief Tile view representation

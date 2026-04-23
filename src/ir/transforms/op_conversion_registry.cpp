@@ -214,10 +214,23 @@ void OpConversionRegistry::RegisterMemoryOps() {
         const auto& shape = args[1];
         const auto& offset = args[2];
 
+        // Extract pad_value kwarg (if any) to forward to the emitted tile.slice.
+        std::vector<std::pair<std::string, std::any>> forward_kwargs;
+        for (const auto& kv : kwargs) {
+          if (kv.first == "pad_value") {
+            forward_kwargs.push_back(kv);
+            break;
+          }
+        }
+
         auto tensor_type = As<TensorType>(input->GetType());
         auto tile_type = As<TileType>(input->GetType());
 
         if (tensor_type) {
+          // The tile.load path does not currently accept pad_value. If the user set
+          // pad_value on a tensor.slice over a TensorType input, the pad intent is
+          // lost here — a follow-up tile.fillpad is the workaround until tile.load
+          // grows its own pad_value kwarg.
           auto valid_shapes = (args.size() == 4) ? args[3] : shape;
           std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
                                                                        {"transpose", false}};
@@ -231,7 +244,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
           if (args.size() == 4) {
             slice_args.push_back(args[3]);
           }
-          auto slice_call = op_reg.Create("tile.slice", slice_args, span);
+          auto slice_call = op_reg.Create("tile.slice", slice_args, forward_kwargs, span);
           return ConversionResult{slice_call};
         }
 

@@ -140,12 +140,13 @@ class _TensorViewMeta(type):
         stride: Sequence[Expr | int] | None = None,
         layout: TensorLayout | None = None,
         valid_shape: Sequence[Expr | int] | None = None,
+        pad: PadValue = PadValue.null,
     ) -> "_TensorViewBase":
-        if stride is None and layout is None and valid_shape is None:
+        if stride is None and layout is None and valid_shape is None and pad == PadValue.null:
             return _TensorViewBase()
         if layout is None:
-            raise ValueError("layout is required when stride or valid_shape is provided")
-        return _TensorViewBase(_normalize_seq(stride), layout, _normalize_seq(valid_shape))
+            raise ValueError("layout is required when stride, valid_shape, or pad is provided")
+        return _TensorViewBase(_normalize_seq(stride), layout, _normalize_seq(valid_shape), pad)
 
 
 class TensorView(metaclass=_TensorViewMeta):

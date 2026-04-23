@@ -292,7 +292,22 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
         } else {
           CHECK(false) << "Unknown TensorLayout: " << layout_str;
         }
+      } else if (key == "pad") {
+        std::string pad_str;
+        p->val.convert(pad_str);
+        if (pad_str == "null") {
+          tensor_view.pad = PadValue::null;
+        } else if (pad_str == "zero") {
+          tensor_view.pad = PadValue::zero;
+        } else if (pad_str == "max") {
+          tensor_view.pad = PadValue::max;
+        } else if (pad_str == "min") {
+          tensor_view.pad = PadValue::min;
+        } else {
+          CHECK(false) << "Unknown PadValue: " << pad_str;
+        }
       }
+      // Older serialized IR may omit "pad"; default stays PadValue::null.
     }
 
     return tensor_view;

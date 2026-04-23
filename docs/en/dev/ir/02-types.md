@@ -50,6 +50,11 @@ tensor_with_view = ir.TensorType([128, 256], DataType.FP32, memref=None, tensor_
 # With valid_shape
 tensor_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.ND, valid_shape=[64, 128])
 
+# With pad mode for out-of-valid-shape accesses (symmetric with TileView)
+tensor_view = ir.TensorView(
+    stride=[1, 128], layout=ir.TensorLayout.ND, valid_shape=[64, 128], pad=ir.PadValue.zero
+)
+
 # Different layouts
 nd_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.ND)  # ND layout
 dn_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.DN)  # DN layout
@@ -69,6 +74,15 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
 - `ND`: ND layout
 - `DN`: DN layout
 - `NZ`: NZ layout
+
+**TensorView fields:**
+
+- `stride`: stride for each dimension
+- `layout`: `TensorLayout.ND` / `DN` / `NZ`
+- `valid_shape`: optional valid-region dimensions (empty means use full shape)
+- `pad`: `PadValue.null` (default) / `zero` / `max` / `min` — padding mode used
+  when loads/slices read outside the `valid_shape`. Peer of `TileView.pad`;
+  `tensor.slice(..., pad_value=PadValue.zero)` writes this field.
 
 ### TileType
 

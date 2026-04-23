@@ -766,6 +766,32 @@ class TestTypeSerialization:
         # Verify structural equality
         ir.assert_structural_equal(var, restored_var, enable_auto_mapping=True)
 
+    def test_tensortype_tensorview_pad_survives_round_trip(self):
+        """TensorView::pad is preserved through serialize/deserialize."""
+        span = ir.Span.unknown()
+        shape = [
+            ir.ConstInt(16, DataType.INT64, span),
+            ir.ConstInt(16, DataType.INT64, span),
+        ]
+        tensor_view = ir.TensorView(
+            stride=[],
+            layout=ir.TensorLayout.ND,
+            pad=ir.PadValue.zero,
+        )
+        tensor_type = ir.TensorType(shape, DataType.FP32, None, tensor_view)
+        var = ir.Var("tensor_var", tensor_type, span)
+
+        serialized = ir.serialize(var)
+        restored = ir.deserialize(serialized)
+        restored_var = cast(ir.Var, restored)
+
+        restored_tensor_type = restored_var.type
+        assert isinstance(restored_tensor_type, ir.TensorType)
+        assert restored_tensor_type.tensor_view is not None
+        assert restored_tensor_type.tensor_view.pad == ir.PadValue.zero
+
+        ir.assert_structural_equal(var, restored_var, enable_auto_mapping=True)
+
     def test_tiletype_with_memref_and_memory_space(self):
         """TileType with both memref and memory_space preserves both."""
         # Create MemRef

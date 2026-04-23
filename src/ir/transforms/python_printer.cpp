@@ -1931,12 +1931,13 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
 
   bool has_stride = !tensor_view.stride.empty();
   bool has_non_default_layout = (tensor_view.layout != TensorLayout::ND);
+  bool has_non_default_pad = (tensor_view.pad != PadValue::null);
 
-  // If valid_shape matched and stride/layout are at defaults, skip TensorView entirely
-  if (first && !has_stride && !has_non_default_layout) return "";
+  // If all fields are at defaults, skip TensorView entirely
+  if (first && !has_stride && !has_non_default_layout && !has_non_default_pad) return "";
 
   // When TensorView is non-trivial, always emit both stride and layout to satisfy
-  // the C++ constructor signature TensorView(stride, layout, valid_shape=[]).
+  // the C++ constructor signature TensorView(stride, layout, valid_shape=[], pad=null).
   // Omitting either required arg causes TypeError when Python eagerly evaluates
   // function parameter annotations during exec() in the text parser.
   maybe_comma();
@@ -1949,6 +1950,26 @@ std::string IRPythonPrinter::PrintTensorView(const TensorView& tensor_view,
 
   maybe_comma();
   oss << "layout=" << prefix_ << ".TensorLayout." << TensorLayoutToString(tensor_view.layout);
+
+  // pad — omit if null (default)
+  if (has_non_default_pad) {
+    maybe_comma();
+    oss << "pad=" << prefix_ << ".PadValue.";
+    switch (tensor_view.pad) {
+      case PadValue::null:
+        oss << "null";
+        break;
+      case PadValue::zero:
+        oss << "zero";
+        break;
+      case PadValue::max:
+        oss << "max";
+        break;
+      case PadValue::min:
+        oss << "min";
+        break;
+    }
+  }
 
   oss << ")";
   return oss.str();

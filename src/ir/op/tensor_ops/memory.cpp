@@ -199,12 +199,30 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
     }
   }
 
-  // View preserves dtype but has new shape (which can have different rank than input)
-  // If valid_shape is provided as 4th argument, store it in TensorView
+  // Read optional pad_value kwarg (default PadValue::null = no padding).
+  PadValue pad_value = PadValue::null;
+  for (const auto& [k, v] : kwargs) {
+    if (k != "pad_value") continue;
+    CHECK(v.type() == typeid(PadValue))
+        << "tensor.slice pad_value must be a PadValue enum, got " << v.type().name();
+    pad_value = std::any_cast<PadValue>(v);
+    CHECK(pad_value == PadValue::null || pad_value == PadValue::zero || pad_value == PadValue::max ||
+          pad_value == PadValue::min)
+        << "tensor.slice pad_value has invalid enum value: " << static_cast<int>(pad_value);
+    break;
+  }
+
+  // View preserves dtype but has new shape (which can have different rank than input).
+  // If valid_shape is provided as 4th argument or pad_value is set, build a TensorView.
   if (args.size() == 4) {
     auto valid_shape_tuple = As<MakeTuple>(args[3]);
     CHECK(valid_shape_tuple) << "tensor.slice valid_shape (4th argument) must be a MakeTuple";
-    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_);
+    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_, pad_value);
+    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
+                                        std::make_optional(std::move(tensor_view)));
+  }
+  if (pad_value != PadValue::null) {
+    TensorView tensor_view(std::vector<ExprPtr>{}, TensorLayout::ND, std::vector<ExprPtr>{}, pad_value);
     return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
                                         std::make_optional(std::move(tensor_view)));
   }
@@ -356,6 +374,7 @@ REGISTER_OP("tensor.slice")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
     .set_output_memory_inherit_input()
+    .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorSliceType(args, kwargs);

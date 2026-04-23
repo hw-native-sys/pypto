@@ -17,6 +17,9 @@ Tests cover:
 - Python helper functions
 """
 
+import math
+
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir.op import tensor
@@ -985,6 +988,105 @@ def test_tensor_slice_with_valid_shape():
     assert len(call.args) == 4
     assert result_type.tensor_view is not None
     assert len(result_type.tensor_view.valid_shape) == 2
+
+
+def _make_slice_tensor_var():
+    """Build a [16, 32] FP16 tensor Var for slice pad_value tests."""
+    span = ir.Span.unknown()
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim16, dim32], DataType.FP16)
+    return ir.Var("t", tensor_type, span)
+
+
+def test_tensor_slice_with_pad_value():
+    """tensor.slice writes pad_value=zero to the output tensor_view.pad."""
+    tensor_var = _make_slice_tensor_var()
+    call = tensor.slice(tensor_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=ir.PadValue.zero)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.slice"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.pad == ir.PadValue.zero
+    assert len(result_type.tensor_view.valid_shape) == 2
+
+    # Sanity-check min/max variants reach the same field.
+    for pad in (ir.PadValue.min, ir.PadValue.max):
+        call_p = tensor.slice(tensor_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=pad)
+        result_type_p = call_p.type
+        assert isinstance(result_type_p, ir.TensorType)
+        assert result_type_p.tensor_view is not None
+        assert result_type_p.tensor_view.pad == pad
+
+
+def test_tensor_slice_default_pad_is_null():
+    """tensor.slice without pad_value defaults to PadValue.null (backward compat)."""
+    tensor_var = _make_slice_tensor_var()
+
+    # No tensor_view created when both valid_shape and pad_value are absent.
+    call = tensor.slice(tensor_var, [8, 16], [0, 0])
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.tensor_view is None
+
+    # With only valid_shape provided, tensor_view is present and pad defaults to null.
+    call_vs = tensor.slice(tensor_var, [8, 16], [0, 0], valid_shape=[8, 4])
+    result_type_vs = call_vs.type
+    assert isinstance(result_type_vs, ir.TensorType)
+    assert result_type_vs.tensor_view is not None
+    assert result_type_vs.tensor_view.pad == ir.PadValue.null
+
+
+def test_tensor_slice_rejects_bad_pad_value():
+    """tensor.slice rejects a non-PadValue pad_value kwarg via registry validation."""
+    tensor_var = _make_slice_tensor_var()
+    span = tensor_var.span
+    shape_tuple = ir.MakeTuple(
+        [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)], span
+    )
+    offset_tuple = ir.MakeTuple(
+        [ir.ConstInt(0, DataType.INT32, span), ir.ConstInt(0, DataType.INT32, span)], span
+    )
+    valid_shape_tuple = ir.MakeTuple(
+        [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(4, DataType.INT32, span)], span
+    )
+    with pytest.raises(TypeError, match="'pad_value'.*incompatible type"):
+        ir.create_op_call(
+            "tensor.slice",
+            [tensor_var, shape_tuple, offset_tuple, valid_shape_tuple],
+            {"pad_value": 5},
+            span,
+        )
+
+
+def test_tensor_slice_accepts_numeric_sugar_pad_value():
+    """tensor.slice maps 0 / math.inf / -math.inf onto PadValue zero/max/min."""
+    tensor_var = _make_slice_tensor_var()
+    for literal, expected_pad in [
+        (0, ir.PadValue.zero),
+        (math.inf, ir.PadValue.max),
+        (-math.inf, ir.PadValue.min),
+    ]:
+        call = tensor.slice(tensor_var, [8, 16], [0, 0], valid_shape=[8, 4], pad_value=literal)
+        result_type = call.type
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is not None
+        assert result_type.tensor_view.pad == expected_pad
+
+
+def test_tensor_slice_pad_without_valid_shape_warns():
+    """DSL emits a UserWarning when pad_value is set but valid_shape is None."""
+    span = ir.Span.unknown()
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    dim32 = ir.ConstInt(32, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim16, dim32], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    tensor_arg = pl.Tensor(expr=tensor_var)
+    with pytest.warns(UserWarning, match="pad_value has no effect"):
+        pl.tensor.slice(tensor_arg, [8, 16], [0, 0], pad_value=pl.PadValue.zero)
 
 
 def test_tensor_fillpad_clears_valid_shape():

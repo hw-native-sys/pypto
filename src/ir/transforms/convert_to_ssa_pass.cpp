@@ -298,7 +298,7 @@ class SSAConverter {
         auto [st, st_changed] = SubstExprVec(tv.stride);
         if (vs_changed || st_changed) {
           changed = true;
-          new_tv = TensorView(std::move(st), tv.layout, std::move(vs));
+          new_tv = TensorView(std::move(st), tv.layout, std::move(vs), tv.pad);
         }
       }
       if (changed) {

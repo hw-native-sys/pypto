@@ -291,18 +291,30 @@ void BindIR(nb::module_& m) {
       .value("NZ", TensorLayout::NZ, "NZ layout")
       .export_values();
 
+  // PadValue enum - must be before both TensorView and TileView since both carry it
+  nb::enum_<PadValue>(ir, "PadValue", "Tile pad mode enumeration")
+      .value("null", PadValue::null, "No padding")
+      .value("zero", PadValue::zero, "Zero padding")
+      .value("max", PadValue::max, "Max value padding")
+      .value("min", PadValue::min, "Min value padding")
+      .export_values();
+
   // TensorView - struct for tensor view information - must be before TensorType
-  nb::class_<TensorView>(ir, "TensorView", "Tensor view representation with stride, layout and valid shape")
+  nb::class_<TensorView>(ir, "TensorView",
+                         "Tensor view representation with stride, layout, valid shape, and pad mode")
       .def(nb::init<>(), "Create an empty tensor view")
-      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&>(),
+      .def(nb::init<const std::vector<ExprPtr>&, TensorLayout, const std::vector<ExprPtr>&, PadValue>(),
            nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<ExprPtr>{},
-           "Create a tensor view with stride, layout and optional valid shape")
-      .def(nb::init<const std::vector<int64_t>&, TensorLayout, const std::vector<int64_t>&>(),
+           nb::arg("pad") = PadValue::null,
+           "Create a tensor view with stride, layout, optional valid shape, and optional pad")
+      .def(nb::init<const std::vector<int64_t>&, TensorLayout, const std::vector<int64_t>&, PadValue>(),
            nb::arg("stride"), nb::arg("layout"), nb::arg("valid_shape") = std::vector<int64_t>{},
-           "Create a tensor view with integer stride, layout and optional integer valid shape")
+           nb::arg("pad") = PadValue::null,
+           "Create a tensor view with integer stride, layout, optional integer valid shape, and optional pad")
       .def_rw("stride", &TensorView::stride, "Stride for each dimension")
       .def_rw("layout", &TensorView::layout, "Tensor layout type")
-      .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension");
+      .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension")
+      .def_rw("pad", &TensorView::pad, "Pad mode for out-of-valid-shape accesses");
 
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");
@@ -390,14 +402,6 @@ void BindIR(nb::module_& m) {
       .value("none_box", TileLayout::none_box, "No layout constraint")
       .value("row_major", TileLayout::row_major, "Row-major layout")
       .value("col_major", TileLayout::col_major, "Column-major layout")
-      .export_values();
-
-  // PadValue enum - must be before TileView
-  nb::enum_<PadValue>(ir, "PadValue", "Tile pad mode enumeration")
-      .value("null", PadValue::null, "No padding")
-      .value("zero", PadValue::zero, "Zero padding")
-      .value("max", PadValue::max, "Max value padding")
-      .value("min", PadValue::min, "Min value padding")
       .export_values();
 
   // TileView - struct for tile view information

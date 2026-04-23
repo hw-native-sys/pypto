@@ -357,6 +357,24 @@ class IRSerializer::Impl {
     // Serialize layout enum
     tv_map["layout"] = msgpack::object(TensorLayoutToString(tensor_view->layout), zone);
 
+    // Serialize pad enum (same string encoding as TileView::pad)
+    std::string pad_str;
+    switch (tensor_view->pad) {
+      case PadValue::null:
+        pad_str = "null";
+        break;
+      case PadValue::zero:
+        pad_str = "zero";
+        break;
+      case PadValue::max:
+        pad_str = "max";
+        break;
+      case PadValue::min:
+        pad_str = "min";
+        break;
+    }
+    tv_map["pad"] = msgpack::object(pad_str, zone);
+
     return msgpack::object(tv_map, zone);
   }
 

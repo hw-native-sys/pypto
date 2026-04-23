@@ -366,7 +366,7 @@ class PadValue(enum.Enum):
     """Min value padding."""
 
 class TensorView:
-    """Tensor view representation with stride, layout and valid shape."""
+    """Tensor view representation with stride, layout, valid shape, and pad mode."""
 
     stride: Sequence[Expr]
     """Stride for each dimension."""
@@ -376,6 +376,9 @@ class TensorView:
 
     valid_shape: Sequence[Expr]
     """Valid shape for each dimension (empty means use full shape)."""
+
+    pad: PadValue
+    """Pad mode for out-of-valid-shape accesses (default PadValue.null)."""
 
     @overload
     def __init__(self) -> None:
@@ -387,13 +390,15 @@ class TensorView:
         stride: Sequence[Expr | int | Scalar],
         layout: TensorLayout,
         valid_shape: Sequence[Expr | int | Scalar] = ...,
+        pad: PadValue = ...,
     ) -> None:
-        """Create a tensor view with stride, layout and optional valid shape.
+        """Create a tensor view with stride, layout, optional valid shape, and optional pad.
 
         Args:
             stride: Stride for each dimension (Expr, int, or Scalar/DynVar)
             layout: Tensor layout type (ND, DN, or NZ)
             valid_shape: Valid shape for each dimension (optional, defaults to empty)
+            pad: Pad mode for out-of-valid-shape accesses (defaults to PadValue.null)
         """
 
 class TensorType(ShapedType):

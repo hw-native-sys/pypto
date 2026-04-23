@@ -1035,6 +1035,13 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
         }
         return false;
       }
+      // Compare pad
+      if (lhs_tv.pad != rhs_tv.pad) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("TensorView pad mismatch", IRNodePtr(), IRNodePtr(), "", "");
+        }
+        return false;
+      }
     }
     return true;
   } else if (auto lhs_tile = As<TileType>(lhs)) {

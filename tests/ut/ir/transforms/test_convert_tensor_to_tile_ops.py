@@ -1154,6 +1154,32 @@ class TestGmLocalTensorConversion:
         )
         _assert_convert_equal(before, expected)
 
+    def test_local_tensor_slice_with_pad_value_forwards_to_tile_slice(self):
+        """tensor.slice(..., pad_value=X) on a local tensor lowers to tile.slice(..., pad_value=X)."""
+        in_specs: list[InSpec] = [("x", [8, 32], DataType.FP32)]
+
+        def before_body(ib, ins):
+            t = ib.let("t", tensor_ops.create([16, 64], DataType.FP32))
+            s = ib.let(
+                "s",
+                tensor_ops.slice(t, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=PadValue.min),
+            )
+            return ib.let("y", tensor_ops.add(s, ins[0]))
+
+        def expected_body(ib, tiles):
+            t_tile = ib.let("t_tile", tile_ops.create([16, 64], DataType.FP32))
+            s_tile = ib.let(
+                "s_tile",
+                tile_ops.slice(t_tile, [8, 32], [0, 0], valid_shape=[8, 8], pad_value=PadValue.min),
+            )
+            return ib.let("y_tile", tile_ops.add(s_tile, tiles[0]))
+
+        before = _make_before(in_specs=in_specs, out_shape=[8, 32], out_dtype=DataType.FP32, body=before_body)
+        expected = _make_expected(
+            in_specs=in_specs, out_shape=[8, 32], out_dtype=DataType.FP32, body=expected_body
+        )
+        _assert_convert_equal(before, expected)
+
     def test_tensor_fillpad_converts_to_tile_fillpad(self):
         """tensor.fillpad should lower to tile.fillpad after loading the tensor."""
         before, expected = _make_pair(

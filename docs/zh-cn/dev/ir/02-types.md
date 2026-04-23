@@ -50,6 +50,11 @@ tensor_with_view = ir.TensorType([128, 256], DataType.FP32, memref=None, tensor_
 # With valid_shape
 tensor_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.ND, valid_shape=[64, 128])
 
+# With pad mode for out-of-valid-shape accesses (symmetric with TileView)
+tensor_view = ir.TensorView(
+    stride=[1, 128], layout=ir.TensorLayout.ND, valid_shape=[64, 128], pad=ir.PadValue.zero
+)
+
 # Different layouts
 nd_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.ND)  # ND layout
 dn_view = ir.TensorView(stride=[1, 128], layout=ir.TensorLayout.DN)  # DN layout
@@ -69,6 +74,15 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
 - `ND`：ND 布局
 - `DN`：DN 布局
 - `NZ`：NZ 布局
+
+**TensorView 字段：**
+
+- `stride`：每个维度的步长
+- `layout`：`TensorLayout.ND` / `DN` / `NZ`
+- `valid_shape`：可选的有效区域维度（为空表示使用完整 shape）
+- `pad`：`PadValue.null`（默认）/ `zero` / `max` / `min`，用于访问超出
+  `valid_shape` 部分时的填充模式。与 `TileView.pad` 对称；
+  `tensor.slice(..., pad_value=PadValue.zero)` 会写入该字段。
 
 ### TileType
 

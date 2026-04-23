@@ -13,6 +13,7 @@ This module provides type-safe wrappers around pypto.ir.op.tensor operations
 that accept and return Tensor types instead of raw Expr/Call objects.
 """
 
+import warnings
 from collections.abc import Sequence
 from typing import overload
 
@@ -168,6 +169,7 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
+    pad_value: PadValue | int | float | None = None,
 ) -> Tensor:
     """Create a slice of a tensor with new shape and optional valid shape.
 
@@ -176,10 +178,26 @@ def slice(
         shape: New shape dimensions
         offset: Offset dimensions for the slice
         valid_shape: Valid shape dimensions. When omitted, the full shape is valid.
+        pad_value: Optional padding mode for out-of-valid-shape elements.
+            ``None`` or ``PadValue.null`` means no padding (the default).
+            Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
+            the literal sugars ``0``, ``math.inf``, ``-math.inf`` (same
+            spelling as :func:`tensor.fillpad`). Only meaningful when
+            ``valid_shape`` is smaller than ``shape``.
 
     Returns:
         Tensor wrapping the slice operation
     """
+    if pad_value is not None and pad_value is not PadValue.null and valid_shape is None:
+        warnings.warn(
+            f"tensor.slice received pad_value={pad_value!r} but no valid_shape. "
+            f"pad_value has no effect unless valid_shape is smaller than shape. "
+            f"If you intend to narrow the valid region later via "
+            f"tensor.set_validshape, you can ignore this warning; otherwise "
+            f"pass valid_shape=... to tensor.slice.",
+            stacklevel=2,
+        )
+
     tensor_expr = tensor.unwrap()
     normalized_valid_shape = None if valid_shape is None else _normalize_intlike(valid_shape)
     call_expr = _ir_ops.slice(
@@ -187,6 +205,7 @@ def slice(
         _normalize_intlike(shape),
         _normalize_intlike(offset),
         normalized_valid_shape,
+        pad_value=pad_value,
     )
     return Tensor(expr=call_expr)
 

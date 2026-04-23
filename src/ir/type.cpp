@@ -115,8 +115,8 @@ ShapedType::ShapedType(DataType dtype, const std::vector<int64_t>& shape, std::o
 }
 
 TensorView::TensorView(const std::vector<int64_t>& stride_ints, TensorLayout layout_,
-                       const std::vector<int64_t>& valid_shape_ints)
-    : layout(layout_) {
+                       const std::vector<int64_t>& valid_shape_ints, PadValue pad_)
+    : layout(layout_), pad(pad_) {
   for (int64_t s : stride_ints) {
     stride.push_back(std::make_shared<ConstInt>(s, DataType::INDEX, Span::unknown()));
   }
