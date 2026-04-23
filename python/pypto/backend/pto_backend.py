@@ -564,6 +564,7 @@ def _generate_config_file(
         ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
         lines.append(
             f'\t{{"func_id": {func_id}, '
+            f'"name": "{name}", '
             f'"source": str(_ROOT_DIR / "kernels" / "{ct_str}" / "{name}.cpp"), '
             f'"core_type": "{ct_str}"}},'
         )
