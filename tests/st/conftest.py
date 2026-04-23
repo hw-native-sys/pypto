@@ -190,16 +190,17 @@ def _parse_device_option(raw: str | int) -> list[int]:
         token = token.strip()
         if not token:
             continue
-        if "-" in token:
-            start_str, end_str = token.split("-", 1)
-            start, end = int(start_str), int(end_str)
-            if end < start:
-                raise pytest.UsageError(
-                    f"--device range must be non-decreasing, got {token!r}"
-                )
-            devices.extend(range(start, end + 1))
-        else:
-            devices.append(int(token))
+        try:
+            if "-" in token:
+                start_str, end_str = token.split("-", 1)
+                start, end = int(start_str), int(end_str)
+                if end < start:
+                    raise pytest.UsageError(f"--device range must be non-decreasing, got {token!r}")
+                devices.extend(range(start, end + 1))
+            else:
+                devices.append(int(token))
+        except ValueError:
+            raise pytest.UsageError(f"Invalid device ID or range in --device: {token!r}") from None
 
     if not devices:
         raise pytest.UsageError(f"--device yielded no device ids: {raw!r}")
@@ -260,9 +261,7 @@ def _report_device(request) -> None:
     _last_device["value"] = None
     if device_id is None:
         return
-    sys.stdout.write(
-        f"\n[DEVICE] {request.node.nodeid} -> device {device_id}\n"
-    )
+    sys.stdout.write(f"\n[DEVICE] {request.node.nodeid} -> device {device_id}\n")
     sys.stdout.flush()
     _device_counter[device_id] += 1
 
