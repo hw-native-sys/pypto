@@ -68,10 +68,10 @@ Setup is derived from the split bodies:
 
 When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved.
 
-For consumer-side cross-core tiles, the `tfree` repair step preserves the incoming `tpop` / user order
-and only repairs the matching `tfree` placement when needed. Missing frees are auto-generated after the
-last live use of the popped tile, and remapped boundary `tpop` results keep their `tfree` attached to
-the canonical tile value.
+For consumer-side cross-core tiles, the pass also normalizes statement order to satisfy the PTO requirement
+`tpop -> direct users -> tfree -> next tpop`. When AIC must post-process a `tile.tpop_from_aiv` result with a same-side
+`tile.move` (for example Mat -> Left/Right/Bias), that move is treated as the last direct user and the auto-generated
+`system.tfree_to_aiv(...)` is emitted after it.
 
 For Ascend910B (a2a3), mixed kernels with **no function split mode** (`split` unset or `SplitMode.None`) are also
 supported. In that case the pass keeps a single AIV kernel body, marks it for **dual AIV dispatch**, and later lowering
@@ -315,9 +315,10 @@ class After:
 - `tile.tpop_from_aic` in AIV lands in `MemorySpace::Vec`
 - AIC/AIV functions with cross-core `tpush`/`tpop` also contain the required pipe setup
 - every AIC/AIV `tile.tpop_*` has a matching `system.tfree_*`
+- top-level cross-core consumer chains follow `tpop -> direct users -> tfree -> next tpop`
 - cross-core tile ops have statically known tile shapes (required for auto pipe setup)
 
-This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` / `import_peer_buffer`, missing `tfree`, non-static tile sizes) from PTO codegen / `ptoas` time to immediately after `ExpandMixedKernel`.
+This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` / `import_peer_buffer`, missing `tfree`, non-static tile sizes, invalid `tpop` ordering) from PTO codegen / `ptoas` time to immediately after `ExpandMixedKernel`.
 
 ## Design Decisions
 
@@ -336,5 +337,5 @@ This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` 
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |
 | Two-stage post-split loop-state repair | First makes loop-carried state valid, then re-strips iter_args after DCE removes dead shared aliases, with a final DCE to clean up exposed init-value chains |
 | Auto-generated pipe setup | Tensor-level mixed kernels do not need handwritten `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`; the pass derives them from cross-core tile ops |
-| Auto-generated tfree chains | Consumer-side split kernels release each popped slot in IR after its last live use while preserving interleaved `tpop` / user order |
+| Auto-generated tfree chains | Consumer-side split kernels release each popped slot in IR, so PTO codegen sees the required `tpop -> use -> tfree -> next tpop` order directly |
 | Max-slot-size policy | Uses `max(all tile byte sizes)` as the single `initialize_pipe.slot_size`, matching the backend assumption of one reserve/import buffer per function while supporting mixed tile sizes across directions |

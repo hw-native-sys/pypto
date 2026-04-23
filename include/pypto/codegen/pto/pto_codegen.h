@@ -23,6 +23,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/codegen/pto/tpop_chain_reorder.h"
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -35,11 +36,6 @@
 namespace pypto {
 
 namespace codegen {
-
-struct TpopResultInfo {
-  int split = 0;
-  std::string op_name;
-};
 
 /**
  * @brief PTO MLIR code generator
@@ -336,6 +332,14 @@ class PTOCodegen : public CodegenBase {
    * @brief Generate PTO-ISA MLIR for a single function
    */
   void GenerateFunction(const ir::FunctionPtr& func);
+
+  /**
+   * @brief Reorder top-level statements so each tpop chain follows pop-use-free order
+   *
+   * Hardware requires: tpop(tile) → use(tile) → tfree(tile) before the next tpop.
+   * Groups tpop assignment, its direct users, and its tfree into sequential chains.
+   */
+  std::vector<ir::StmtPtr> ReorderTpopChains(const std::vector<ir::StmtPtr>& stmts) const;
 
   /**
    * @brief Build variable identity to MemRef mapping from function body

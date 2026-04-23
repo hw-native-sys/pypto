@@ -142,14 +142,26 @@ std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, core
 
   std::map<const Var*, TpopChain> chains;
   std::vector<const Var*> tpop_order;
+  std::vector<bool> in_chain(normalized_inputs.size(), false);
+  std::unordered_map<const Var*, size_t> def_indices;
+  bool seen_first_tpop = false;
 
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
+    auto assign = std::dynamic_pointer_cast<const AssignStmt>(normalized_inputs[i]);
+    const auto stmt_defs = var_collectors::CollectStmtDefinedVars(normalized_inputs[i]);
+    for (const auto* def : var_collectors::GetSortedVarRefs(stmt_defs)) {
+      def_indices.try_emplace(def, i);
+    }
     VarPtr tpop_var;
-    if (IsTpopAssignStmt(normalized_inputs[i], &tpop_var)) {
+    if (assign && IsTpopAssignStmt(normalized_inputs[i], &tpop_var)) {
+      seen_first_tpop = true;
       chains.emplace(tpop_var.get(), TpopChain{i, {}, std::numeric_limits<size_t>::max(), tpop_var, i});
       tpop_order.push_back(tpop_var.get());
+      in_chain[i] = true;
       continue;
     }
+
+    if (!seen_first_tpop) continue;
 
     VarPtr tfree_var;
     std::string tfree_op_name;
@@ -163,10 +175,33 @@ std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, core
           CreateTfree(side, chains.find(tfree_key)->second.tpop_var, normalized_inputs[i]->span_),
           normalized_inputs[i]->span_);
       chains.find(tfree_key)->second.tfree_idx = i;
+      in_chain[i] = true;
       continue;
     }
 
-    auto refs = CollectCallArgVarRefs(normalized_inputs[i]);
+    std::unordered_set<const Var*> refs;
+    CallPtr call;
+    if (assign) {
+      call = std::dynamic_pointer_cast<const Call>(assign->value_);
+    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(normalized_inputs[i])) {
+      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
+    }
+    if (call) {
+      auto CollectExprRefs = [&](const ExprPtr& expr) {
+        if (auto var_like = AsVarLike(expr)) {
+          refs.insert(var_like.get());
+          return;
+        }
+        outline_utils::VarDefUseCollector collector;
+        collector.VisitExpr(expr);
+        refs.insert(collector.var_uses.begin(), collector.var_uses.end());
+      };
+      for (const auto& arg : call->args_) {
+        CollectExprRefs(arg);
+      }
+    } else {
+      refs = CollectStmtVarRefs(normalized_inputs[i]);
+    }
     const auto sorted_refs = var_collectors::GetSortedVarRefs(refs);
     for (const auto* ref : sorted_refs) {
       const Var* canonical_ref = CanonicalizeTpopRef(ref, tpop_var_remap);
@@ -175,36 +210,90 @@ std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, core
             std::max(chains.find(canonical_ref)->second.last_use_idx, i);
       }
     }
+    const Var* referenced_tpop = nullptr;
+    bool has_multi_tpop_refs = false;
+    for (const auto* ref : sorted_refs) {
+      const Var* canonical_ref = CanonicalizeTpopRef(ref, tpop_var_remap);
+      if (canonical_ref && chains.count(canonical_ref) > 0) {
+        if (referenced_tpop && referenced_tpop != canonical_ref) {
+          has_multi_tpop_refs = true;
+          break;
+        }
+        referenced_tpop = canonical_ref;
+      }
+    }
+    bool has_unsafe_dep = false;
+    if (referenced_tpop && !has_multi_tpop_refs) {
+      size_t tpop_idx = chains.find(referenced_tpop)->second.tpop_idx;
+      for (const auto* ref : sorted_refs) {
+        const Var* canonical_ref = CanonicalizeTpopRef(ref, tpop_var_remap);
+        if (canonical_ref == referenced_tpop) continue;
+        auto def_it = def_indices.find(ref);
+        if (def_it != def_indices.end() && def_it->second > tpop_idx && def_it->second < i) {
+          has_unsafe_dep = true;
+          break;
+        }
+      }
+    }
+    if (referenced_tpop && !has_multi_tpop_refs && !has_unsafe_dep) {
+      chains.find(referenced_tpop)->second.user_idxs.push_back(i);
+      in_chain[i] = true;
+    }
   }
 
   if (tpop_order.empty()) return normalized_inputs;
 
-  std::vector<bool> skip_existing_tfree(normalized_inputs.size(), false);
-  std::vector<std::vector<StmtPtr>> insert_after(normalized_inputs.size());
+  size_t first_tpop = chains[tpop_order[0]].tpop_idx;
+  std::vector<StmtPtr> result;
+  result.reserve(normalized_inputs.size() + tpop_order.size());
+  std::unordered_map<size_t, std::vector<StmtPtr>> deferred_tfrees;
+  for (size_t i = 0; i < first_tpop; ++i) {
+    result.push_back(normalized_inputs[i]);
+  }
+
   for (const auto* var : tpop_order) {
-    const auto& chain = chains[var];
-    if (chain.tfree_idx == std::numeric_limits<size_t>::max()) {
-      insert_after[chain.last_use_idx].push_back(std::make_shared<EvalStmt>(
+    auto& chain = chains[var];
+    result.push_back(normalized_inputs[chain.tpop_idx]);
+    for (size_t user_idx : chain.user_idxs) {
+      result.push_back(normalized_inputs[user_idx]);
+    }
+    size_t last_grouped_idx = chain.user_idxs.empty() ? chain.tpop_idx : chain.user_idxs.back();
+    if (chain.last_use_idx <= last_grouped_idx) {
+      if (chain.tfree_idx != std::numeric_limits<size_t>::max()) {
+        result.push_back(normalized_inputs[chain.tfree_idx]);
+        in_chain[chain.tfree_idx] = true;
+      } else {
+        result.push_back(std::make_shared<EvalStmt>(
+            CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_),
+            normalized_inputs[chain.tpop_idx]->span_));
+      }
+    } else if (chain.tfree_idx == std::numeric_limits<size_t>::max() ||
+               chain.tfree_idx < chain.last_use_idx) {
+      if (chain.tfree_idx != std::numeric_limits<size_t>::max()) {
+        in_chain[chain.tfree_idx] = true;
+      }
+      deferred_tfrees[chain.last_use_idx].push_back(std::make_shared<EvalStmt>(
           CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_),
           normalized_inputs[chain.tpop_idx]->span_));
+    } else if (chain.tfree_idx > chain.last_use_idx) {
+      // Keep an existing tfree in its original position when it already follows
+      // the true last use and moving it earlier would be unsafe.
       continue;
-    }
-    if (chain.tfree_idx < chain.last_use_idx) {
-      skip_existing_tfree[chain.tfree_idx] = true;
-      insert_after[chain.last_use_idx].push_back(std::make_shared<EvalStmt>(
-          CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tfree_idx]->span_),
-          normalized_inputs[chain.tfree_idx]->span_));
+    } else {
+      deferred_tfrees[chain.last_use_idx].push_back(std::make_shared<EvalStmt>(
+          CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_),
+          normalized_inputs[chain.tpop_idx]->span_));
+      in_chain[chain.tfree_idx] = true;
     }
   }
 
-  std::vector<StmtPtr> result;
-  result.reserve(normalized_inputs.size() + tpop_order.size());
-  for (size_t i = 0; i < normalized_inputs.size(); ++i) {
-    if (!skip_existing_tfree[i]) {
+  for (size_t i = first_tpop; i < normalized_inputs.size(); ++i) {
+    if (!in_chain[i]) {
       result.push_back(normalized_inputs[i]);
     }
-    if (!insert_after[i].empty()) {
-      result.insert(result.end(), insert_after[i].begin(), insert_after[i].end());
+    auto deferred_it = deferred_tfrees.find(i);
+    if (deferred_it != deferred_tfrees.end()) {
+      result.insert(result.end(), deferred_it->second.begin(), deferred_it->second.end());
     }
   }
   return result;

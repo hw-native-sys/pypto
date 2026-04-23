@@ -1802,13 +1802,13 @@ class TestPropertyVerification:
         ):
             passes.verify_properties(prop_set, BadProgram, "test")
 
-    def test_verifier_allows_interleaved_tpop_tfree(self):
-        """Multiple tpop results may be freed after their combined users."""
+    def test_verifier_rejects_next_tpop_before_tfree(self):
+        """A second tpop cannot appear before the previous chain is freed."""
 
         @pl.program
-        class GoodProgram:
+        class BadProgram:
             @pl.function(type=pl.FunctionType.AIC)
-            def good_aic(self):
+            def bad_aic(self):
                 pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
                 pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
                 first: pl.Tile[
@@ -1831,7 +1831,11 @@ class TestPropertyVerification:
 
         prop_set = passes.IRPropertySet()
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
-        passes.verify_properties(prop_set, GoodProgram, "test")
+
+        with pytest.raises(
+            Exception, match="must order cross-core tpop chains as 'tpop -> use -> tfree -> next tpop'"
+        ):
+            passes.verify_properties(prop_set, BadProgram, "test")
 
     def test_verifier_rejects_late_pipe_setup(self):
         """Pipe setup must appear before the first cross-core op."""

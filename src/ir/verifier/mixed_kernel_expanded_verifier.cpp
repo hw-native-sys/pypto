@@ -9,7 +9,6 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
@@ -46,6 +45,7 @@ using cross_core_pipe::CollectDominatingPipeSetupMetadata;
 using cross_core_pipe::CrossCorePipeMetadata;
 using tpop_chain::IsExpectedTpopAssignStmt;
 using tpop_chain::IsTfreeStmt;
+using tpop_chain::StmtReferencesVar;
 
 namespace {
 
@@ -371,58 +371,65 @@ void VerifyNestedTpopTfreeOrder(const StmtPtr& stmt, const FunctionPtr& func,
 
 void VerifyTpopTfreeOrderInBlock(const std::vector<StmtPtr>& stmts, const FunctionPtr& func,
                                  std::vector<Diagnostic>& diagnostics) {
-  struct OpenTpop {
-    VarPtr var;
-    std::string op_name;
-    const Span* span = nullptr;
-  };
-
   const std::string expected_tfree =
       (func->func_type_ == FunctionType::AIC) ? "system.tfree_to_aiv" : "system.tfree_to_aic";
-  std::vector<OpenTpop> open_tpops;
+  VarPtr open_tpop_var;
+  std::string open_tpop_op_name;
+  const Span* open_tpop_span = &func->span_;
 
   for (const auto& stmt : stmts) {
     VerifyNestedTpopTfreeOrder(stmt, func, diagnostics);
 
     VarPtr tpop_var;
     if (IsExpectedTpopAssignStmt(stmt, func->func_type_, &tpop_var)) {
-      open_tpops.push_back(OpenTpop{tpop_var, dce::GetStmtOpName(stmt), &stmt->span_});
+      if (open_tpop_var) {
+        diagnostics.emplace_back(
+            DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+            "Function '" + func->name_ +
+                "' must order cross-core tpop chains as 'tpop -> use -> tfree -> next tpop'",
+            stmt->span_);
+      }
+      open_tpop_var = tpop_var;
+      open_tpop_span = &stmt->span_;
+      open_tpop_op_name = dce::GetStmtOpName(stmt);
       continue;
     }
 
     VarPtr tfree_var;
     std::string tfree_op_name;
     if (IsTfreeStmt(stmt, &tfree_var, &tfree_op_name)) {
-      if (!tfree_var) {
+      if (!open_tpop_var) {
         continue;
       }
-
-      auto open_it = std::find_if(open_tpops.begin(), open_tpops.end(), [&](const OpenTpop& open) {
-        return open.var && open.var.get() == tfree_var.get();
-      });
-      if (open_it == open_tpops.end()) {
-        continue;
-      }
-
-      if (tfree_op_name != expected_tfree) {
+      if (tfree_op_name != expected_tfree || !tfree_var || tfree_var.get() != open_tpop_var.get()) {
         diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
                                  ((func->func_type_ == FunctionType::AIC) ? "AIC" : "AIV") +
                                      std::string(" function '") + func->name_ + "' must match " +
-                                     open_it->op_name + " with '" + expected_tfree +
+                                     open_tpop_op_name + " with '" + expected_tfree +
                                      "' on the same tile value",
                                  stmt->span_);
       } else {
-        open_tpops.erase(open_it);
+        open_tpop_var.reset();
       }
+      continue;
+    }
+
+    if (open_tpop_var && !StmtReferencesVar(stmt, open_tpop_var.get())) {
+      diagnostics.emplace_back(
+          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+          "Function '" + func->name_ +
+              "' must order cross-core tpop chains as 'tpop -> use -> tfree -> next tpop'",
+          stmt->span_);
+      open_tpop_var.reset();
     }
   }
 
-  for (const auto& open_tpop : open_tpops) {
+  if (open_tpop_var) {
     diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
                              ((func->func_type_ == FunctionType::AIC) ? "AIC" : "AIV") +
-                                 std::string(" function '") + func->name_ + "' uses " + open_tpop.op_name +
+                                 std::string(" function '") + func->name_ + "' uses " + open_tpop_op_name +
                                  " but has no matching '" + expected_tfree + "' call",
-                             open_tpop.span ? *open_tpop.span : func->span_);
+                             *open_tpop_span);
   }
 }
 
