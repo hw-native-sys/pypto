@@ -325,11 +325,11 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     current_split_ = op->split_;
     current_name_hint_ = op->name_hint_;
     auto new_body = VisitStmt(op->body_);
-    inside_auto_incore_ = prev;
-    current_split_ = prev_split;
     // Consume the AutoInCore wrapper — return body directly.
     // Wrap any statements that lack InCore coverage, propagating split and name_hint.
-    new_body = WrapNonIncoreStatementsInInCore(new_body, op->span_, op->split_, op->name_hint_);
+    new_body = WrapNonIncoreStatementsInInCore(new_body, op->span_, current_split_, current_name_hint_);
+    inside_auto_incore_ = prev;
+    current_split_ = prev_split;
     current_name_hint_ = prev_name_hint;
     return new_body;
   }
