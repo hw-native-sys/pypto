@@ -67,11 +67,16 @@ _log = logging.getLogger(__name__)
 # DevicePool.  Pytest's per-item loop then calls ``TestRunner.run`` which
 # blocks on the matching execute future and returns the cached RunResult.
 
-# cache_key → Future[RunResult] populated in start_pipeline().
-_run_futures: dict[str, Future] = {}
+# cache_key → Future[CompileArtifact] populated in start_pipeline().
+# TestRunner.run blocks on the compile future, rewrites golden.py with the
+# real RunConfig, then submits the execute task itself.  This keeps execute
+# work synchronised with pytest's per-item lifecycle so (a) RunConfig
+# tolerances reach golden.py and (b) C++ stdout from execute lands in the
+# right test's capture window.
+_compile_futures: dict[str, Future] = {}
 
 # cache_key → device id actually used by the execute task.  Read by
-# TestRunner.run after fut.result() and forwarded to the _report_device
+# TestRunner.run after exec_fut.result() and forwarded to the _report_device
 # fixture via _last_device.
 _executed_device: dict[str, int] = {}
 
@@ -312,10 +317,12 @@ def _fused_execute_task(
 ) -> RunResult:
     """Acquire a device slot, execute on device.
 
-    Runs on an execute-pool worker thread.  Called only after the matching
-    compile task has completed (via ``add_done_callback`` in
-    :func:`_schedule_execute`), so this task never blocks on compilation —
-    exec workers are free to grab the next device slot immediately.
+    Submitted by ``TestRunner.run`` after the compile future resolves and
+    after golden.py has been rewritten with the real ``RunConfig``.  Runs
+    on an execute-pool worker thread; multiple exec tasks can be in flight
+    when several pytest items resolve their compile futures concurrently
+    (e.g. under xdist), but the device pool bounds parallelism to the
+    number of devices in ``--device``.
     """
     start = time.time()
     name = tc.get_name()
@@ -362,54 +369,23 @@ def _fused_execute_task(
         _device_pool.put(device_id)
 
 
-def _schedule_execute(
+def _schedule_exec_after_golden(
     tc: "PTOTestCase",
     cache_key: str,
-    compile_fut: "Future",
-    result_fut: "Future",
-) -> None:
-    """Chain a compile future to an execute-pool submission.
+    artifact: "CompileArtifact",
+) -> Future:
+    """Rewrite ``golden.py`` for *tc* and submit the execute task.
 
-    When ``compile_fut`` completes, submit an execute task and forward its
-    result to ``result_fut``.  This avoids tying up execute-pool workers
-    waiting on slow compiles — workers only receive work that is ready to
-    run, so the device pool stays evenly loaded even when compile latency
-    varies between cases.
+    Called from ``TestRunner.run`` once the compile future has resolved.
+    The compile-time golden was written from a default-constructed
+    ``PTOTestCase`` (no ``RunConfig``) and therefore uses default 1e-5
+    tolerances; rewriting here picks up the real ``RunConfig`` passed by
+    the test body.
     """
-    name = tc.get_name()
-
-    def _on_compile_done(cf: "Future") -> None:
-        try:
-            artifact = cf.result()
-        except Exception as exc:
-            result_fut.set_result(
-                RunResult(
-                    passed=False,
-                    test_name=name,
-                    error=f"compile task crashed: {exc}\n{traceback.format_exc()}",
-                    execution_time=0.0,
-                )
-            )
-            return
-        assert _execute_pool is not None, "execute pool not initialised"
-        exec_fut = _execute_pool.submit(_fused_execute_task, tc, cache_key, artifact)
-
-        def _on_exec_done(ef: "Future") -> None:
-            try:
-                result_fut.set_result(ef.result())
-            except Exception as exc:
-                result_fut.set_result(
-                    RunResult(
-                        passed=False,
-                        test_name=name,
-                        error=f"execute task crashed: {exc}\n{traceback.format_exc()}",
-                        execution_time=0.0,
-                    )
-                )
-
-        exec_fut.add_done_callback(_on_exec_done)
-
-    compile_fut.add_done_callback(_on_compile_done)
+    if artifact.error is None and not _pipeline_ctx.get("codegen_only"):
+        _write_golden_for_test_case(tc, artifact.work_dir / "golden.py")
+    assert _execute_pool is not None, "execute pool not initialised"
+    return _execute_pool.submit(_fused_execute_task, tc, cache_key, artifact)
 
 
 def start_pipeline(
@@ -424,7 +400,7 @@ def start_pipeline(
     device_pool: "queue.Queue[int]",
     runtime_profiling: bool = False,
 ) -> None:
-    """Spin up the compile→execute pipeline and populate :data:`_run_futures`.
+    """Spin up the compile pipeline and populate :data:`_compile_futures`.
 
     Called from ``pytest_collection_finish``.  Test cases are grouped by
     backend type (``set_backend_type`` is a global one-time setter); within
@@ -488,20 +464,17 @@ def start_pipeline(
                 dump_passes,
                 pto_isa_commit,
             )
-            # result_fut is what TestRunner.run() waits on.  It's completed by
-            # the exec-done callback inside _schedule_execute, which submits
-            # the execute task only after compile finishes — so exec-pool
-            # workers never block on compilation and the device pool is
-            # evenly drained across devices.
-            result_fut: Future = Future()
-            _schedule_execute(tc, key, cfut, result_fut)
-            _run_futures[key] = result_fut
-            group_futs.append(result_fut)
+            # TestRunner.run() blocks on this compile future, rewrites
+            # golden.py with the real RunConfig, then submits the exec
+            # task itself.  Keeping exec submission on the main thread
+            # aligns C++ stdout with pytest's per-test capture window and
+            # ensures the real tolerances reach golden.py.
+            _compile_futures[key] = cfut
+            group_futs.append(cfut)
         if is_last:
             # Don't block: let pytest's per-item loop start running while
-            # compiles/executes continue in the background.  The compile
-            # pool stays alive; shutdown_pipeline() tears it down at
-            # session end.
+            # compiles continue in the background.  The compile pool stays
+            # alive; shutdown_pipeline() tears it down at session end.
             continue
         # Non-final group: drain before the next set_backend_type so the
         # global backend state transitions cleanly.
@@ -549,11 +522,12 @@ class TestRunner:
     def run(self, test_case: PTOTestCase) -> RunResult:
         """Run a test case and return results.
 
-        When the test case was discovered at collection time, the compile→
-        execute pipeline has already produced its ``RunResult``; this method
-        returns it directly (blocking briefly if the execute future is still
-        in flight).  Otherwise the legacy inline compile+execute path runs on
-        the calling thread, using ``self.config.device_id`` as the device.
+        When the test case was discovered at collection time, this method
+        waits for its compile future, rewrites ``golden.py`` with the
+        test's real ``RunConfig`` (compile-time golden used default 1e-5
+        tolerances because test classes are instantiated without args at
+        collection), then submits and awaits the execute task.  Otherwise
+        the legacy inline path runs on the calling thread.
 
         Args:
             test_case: The test case to run.
@@ -563,16 +537,27 @@ class TestRunner:
         """
         resolved_platform = _resolve_platform(self.config.platform, test_case)
         cache_k = _cache_key(test_case, resolved_platform)
-        fut = _run_futures.get(cache_k)
-        if fut is not None:
+        cfut = _compile_futures.get(cache_k)
+        if cfut is not None:
             try:
-                result = fut.result()
+                artifact = cfut.result()
             except Exception as exc:
                 _last_device["value"] = None
                 return RunResult(
                     passed=False,
                     test_name=test_case.get_name(),
-                    error=f"pipeline future crashed: {exc}\n{traceback.format_exc()}",
+                    error=f"compile task crashed: {exc}\n{traceback.format_exc()}",
+                    execution_time=0.0,
+                )
+            exec_fut = _schedule_exec_after_golden(test_case, cache_k, artifact)
+            try:
+                result = exec_fut.result()
+            except Exception as exc:
+                _last_device["value"] = None
+                return RunResult(
+                    passed=False,
+                    test_name=test_case.get_name(),
+                    error=f"execute task crashed: {exc}\n{traceback.format_exc()}",
                     execution_time=0.0,
                 )
             _last_device["value"] = _executed_device.get(cache_k)
