@@ -734,6 +734,30 @@ class TestVariableRebinding:
         # y should be assigned the latest alias x_v1
         assert "y = x_v1" in out
 
+    def test_ann_assign_rebind(self):
+        """Annotated assignment rebinding is alpha-renamed."""
+        src = """
+            def f():
+                x = a
+                x: int = b
+        """
+        out = self._transform(src)
+        assert "x =" in out
+        assert "x_v1:" in out
+
+    def test_rebind_supersedes_shape_inline(self):
+        """After a shape-inlined variable is rebound, reads see the new alias."""
+        src = """
+            def f(a):
+                M, N = a.shape
+                M = some_call(M)
+                y = M
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64, 32), DataType.FP32)})
+        # M is inlined (static), then M = some_call(...) becomes M_v1 = some_call(64)
+        # y = M should resolve to y = M_v1
+        assert "y = M_v1" in out
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

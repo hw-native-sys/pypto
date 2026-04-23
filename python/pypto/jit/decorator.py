@@ -85,7 +85,12 @@ def _rewrite_jit_error(exc: Exception, rename_map: dict[str, str]) -> Exception:
         msg = re.sub(rf"\b{re.escape(alias)}\b", original, msg)
     if msg == str(exc):
         return exc
-    new_exc = type(exc)(msg)
+    try:
+        new_exc = type(exc)(msg)
+    except Exception:  # noqa: BLE001
+        # Custom exception constructors may have non-standard signatures;
+        # fall back to a plain exception of the same type to avoid masking.
+        new_exc = Exception(msg)
     new_exc.__cause__ = exc.__cause__
     new_exc.__suppress_context__ = exc.__suppress_context__
     return new_exc
@@ -675,7 +680,7 @@ class JITFunction:
             skip_ptoas = not _ptoas_available()
             return ir_compile(parsed, skip_ptoas=skip_ptoas, platform=platform)
         except Exception as exc:
-            raise _rewrite_jit_error(exc, rename_map) from exc.__cause__
+            raise _rewrite_jit_error(exc, rename_map) from exc
 
     def _compile_to_program(
         self,
@@ -701,7 +706,7 @@ class JITFunction:
         try:
             return pl.parse(source)
         except Exception as exc:
-            raise _rewrite_jit_error(exc, rename_map) from exc.__cause__
+            raise _rewrite_jit_error(exc, rename_map) from exc
 
     def _build_contexts(
         self,

@@ -531,6 +531,19 @@ class TestVariableRebinding:
         assert "t_v10" not in str(rewritten)
         assert "t_v1" not in str(rewritten)
 
+    def test_rewrite_non_standard_exception_falls_back(self):
+        """Exceptions with non-standard constructors fall back to plain Exception."""
+
+        class WeirdError(Exception):
+            def __init__(self, code: int, msg: str) -> None:
+                super().__init__(msg)
+                self.code = code
+
+        exc = WeirdError(42, "Variable 'x_v1' is invalid")
+        result = _rewrite_jit_error(exc, {"x_v1": "x"})
+        assert "x_v1" not in str(result)
+        assert "x" in str(result)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

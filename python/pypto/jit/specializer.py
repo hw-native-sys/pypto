@@ -445,22 +445,29 @@ class _BodyTransformer(ast.NodeTransformer):
                 stmts: list[ast.stmt] = []
                 for tgt, (i, dim) in zip(target_names, enumerate(meta.shape)):
                     if isinstance(tgt, ast.Name):
-                        self._record_first_assign(tgt.id)
                         if (param_name, i) in self._dynamic_dims:
                             # Dynamic dim: emit assignment (M = <dynvar ref>),
                             # but skip if it would be a no-op (LHS name == RHS name).
                             val: ast.expr = self._shape_dim_node(param_name, i)
                             if not (isinstance(val, ast.Name) and val.id == tgt.id):
+                                lhs_name = tgt.id
+                                if lhs_name in self._assign_count:
+                                    lhs_name = self._rebind(lhs_name)
+                                else:
+                                    self._record_first_assign(tgt.id)
                                 stmts.append(
                                     ast.Assign(
-                                        targets=[ast.Name(id=tgt.id, ctx=ast.Store())],
+                                        targets=[ast.Name(id=lhs_name, ctx=ast.Store())],
                                         value=val,
                                         lineno=node.lineno,
                                         col_offset=node.col_offset,
                                     )
                                 )
+                            else:
+                                self._record_first_assign(tgt.id)
                         else:
                             # Static dim: inline constant, suppress assignment
+                            self._record_first_assign(tgt.id)
                             self._shape_inlined[tgt.id] = dim
                 return stmts if stmts else None
 
@@ -491,6 +498,31 @@ class _BodyTransformer(ast.NodeTransformer):
 
         return cast("ast.stmt", self.generic_visit(node))
 
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt | None:
+        """Handle annotated assignments (``x: T = value``) with alpha-renaming."""
+        if node.value is None:
+            return cast("ast.stmt", self.generic_visit(node))
+        if not isinstance(node.target, ast.Name):
+            return cast("ast.stmt", self.generic_visit(node))
+        var_name = node.target.id
+        node.value = self.visit(node.value)
+        if var_name in self._assign_count:
+            if self._scope_depth == self._assign_depth[var_name]:
+                new_name = self._rebind(var_name)
+                new_node = ast.AnnAssign(
+                    target=ast.Name(id=new_name, ctx=ast.Store()),
+                    annotation=node.annotation,
+                    value=node.value,
+                    simple=node.simple,
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                )
+                ast.fix_missing_locations(new_node)
+                return new_node
+        else:
+            self._record_first_assign(var_name)
+        return cast("ast.stmt", node)
+
     # ------------------------------------------------------------------
     # Expression-level transforms
     # ------------------------------------------------------------------
@@ -498,12 +530,13 @@ class _BodyTransformer(ast.NodeTransformer):
     def visit_Name(self, node: ast.Name) -> ast.expr:
         """Replace scalar param references, inlined shape constants, and renamed rebindings."""
         if isinstance(node.ctx, ast.Load):
+            # Check active renames first — a rebinding supersedes any earlier inlining.
+            if node.id in self._var_renames:
+                return ast.Name(id=self._var_renames[node.id], ctx=ast.Load())
             if node.id in self._scalars:
                 return ast.Constant(value=self._scalars[node.id])
             if node.id in self._shape_inlined:
                 return ast.Constant(value=self._shape_inlined[node.id])
-            if node.id in self._var_renames:
-                return ast.Name(id=self._var_renames[node.id], ctx=ast.Load())
         return node
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
