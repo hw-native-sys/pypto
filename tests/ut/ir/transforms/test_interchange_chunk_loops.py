@@ -1140,5 +1140,138 @@ class TestEndToEndNoComputeLeaks:
         self._assert_no_compute_leaks(After, min_incore_funcs=1)
 
 
+class TestNameHintPropagation:
+    """Tests that ``name_hint`` on AutoInCore is propagated to generated InCore scopes.
+
+    The pass creates InCoreScopeStmts at several sites (interchange wrapping,
+    sub-remainder wrapping, non-chunk statement wrapping, yield-aware wrapping).
+    All of them must carry the AutoInCore's ``name_hint`` so the downstream
+    outlining pass can name the resulting function.
+    """
+
+    @staticmethod
+    def _collect_incore_scopes(program: ir.Program) -> list[ir.InCoreScopeStmt]:
+        found: list[ir.InCoreScopeStmt] = []
+
+        class Collector(ir.IRVisitor):
+            def visit_in_core_scope_stmt(self, op: ir.InCoreScopeStmt) -> None:
+                found.append(op)
+                super().visit_in_core_scope_stmt(op)
+
+        Collector().visit_program(program)
+        return found
+
+    def _assert_all_incore_have_hint(self, program: ir.Program, hint: str) -> None:
+        scopes = self._collect_incore_scopes(program)
+        assert scopes, "expected at least one InCoreScopeStmt in the program"
+        for scope in scopes:
+            assert scope.name_hint == hint, (
+                f"InCoreScopeStmt has name_hint={scope.name_hint!r}, expected {hint!r}"
+            )
+
+    def test_single_parallel_chunk_propagates_hint(self):
+        """Single parallel chunk: generated InCore carries the AutoInCore name_hint."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimization=pl.chunked_loop_optimizer,
+                    name_hint="my_kernel",
+                ):
+                    for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        self._assert_all_incore_have_hint(After, "my_kernel")
+
+    def test_nested_parallel_chunks_propagate_hint(self):
+        """Two nested parallel chunks (full interchange): all InCores get the hint."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimization=pl.chunked_loop_optimizer,
+                    name_hint="nested_hint",
+                ):
+                    for b in pl.parallel(0, 16, 1, chunk=4, chunk_policy="leading_full"):
+                        for h in pl.parallel(0, 8, 1, chunk=2, chunk_policy="leading_full"):
+                            x = pl.add(x, y)
+                return x
+
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        self._assert_all_incore_have_hint(After, "nested_hint")
+
+    def test_non_chunk_statement_wrapping_propagates_hint(self):
+        """Standalone tensor op inside AutoInCore: the wrapping InCore gets the hint."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimization=pl.chunked_loop_optimizer,
+                    name_hint="wrap_hint",
+                ):
+                    x = pl.add(x, 1.0)
+                return x
+
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        self._assert_all_incore_have_hint(After, "wrap_hint")
+
+    def test_empty_name_hint_default(self):
+        """No name_hint provided: generated InCores have empty name_hint (regression guard)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        self._assert_all_incore_have_hint(After, "")
+
+    def test_chunk_remainder_wrapping_propagates_hint(self):
+        """Non-divisible nested chunks produce ChunkRemainder sub-loops; the
+        remainder-wrapping path (WrapSubRemainderLoopsInInCore) must also
+        propagate the hint.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimization=pl.chunked_loop_optimizer,
+                    name_hint="remainder_hint",
+                ):
+                    for b in pl.parallel(0, 6, 1, chunk=4, chunk_policy="leading_full"):
+                        for h in pl.parallel(0, 14, 1, chunk=4, chunk_policy="leading_full"):
+                            x = pl.add(x, y)
+                return x
+
+        After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        self._assert_all_incore_have_hint(After, "remainder_hint")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
