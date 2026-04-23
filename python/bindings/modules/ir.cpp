@@ -292,7 +292,7 @@ void BindIR(nb::module_& m) {
       .export_values();
 
   // PadValue enum - must be before both TensorView and TileView since both carry it
-  nb::enum_<PadValue>(ir, "PadValue", "Tile pad mode enumeration")
+  nb::enum_<PadValue>(ir, "PadValue", "Pad mode enumeration for tile/tensor views")
       .value("null", PadValue::null, "No padding")
       .value("zero", PadValue::zero, "Zero padding")
       .value("max", PadValue::max, "Max value padding")

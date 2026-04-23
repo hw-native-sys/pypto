@@ -154,9 +154,10 @@ std::string TensorLayoutToString(TensorLayout layout);
 TensorLayout StringToTensorLayout(const std::string& str);
 
 /**
- * @brief Tile pad enumeration
+ * @brief Pad mode enumeration (shared by TileView and TensorView)
  *
- * Defines the padding mode for out-of-bound tile/tensor view accesses:
+ * Defines the padding mode applied when a tile/tensor view access falls
+ * outside `valid_shape` but still within the physical shape:
  * - null: No padding
  * - zero: Pad with zero
  * - max: Pad with maximum value of the element type
@@ -180,7 +181,7 @@ struct TensorView {
   TensorLayout layout;          ///< Tensor layout type
   std::vector<ExprPtr>
       valid_shape;                ///< Valid shape for each dimension (optional, empty means use full shape)
-  PadValue pad = PadValue::null;  ///< Pad mode for out-of-bound accesses inside valid_shape
+  PadValue pad = PadValue::null;  ///< Pad mode for accesses outside valid_shape but within shape
 
   /**
    * @brief Default constructor with ND layout and empty stride/valid_shape
