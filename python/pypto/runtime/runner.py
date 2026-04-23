@@ -492,6 +492,11 @@ def _generate_swimlane(
     """
     swimlane_script = simpler_root / "tools" / "swimlane_converter.py"
     if not swimlane_script.exists():
+        print(
+            f"Warning: swimlane_converter.py not found at {swimlane_script}, "
+            f"skipping auto-conversion. Run manually with: "
+            f"python examples/swimlane_converter.py <perf_swimlane_*.json>"
+        )
         return
 
     if perf_file is None:
