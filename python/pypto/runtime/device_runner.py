@@ -484,6 +484,28 @@ def execute_on_device(
         enable_profiling: Enable runtime profiling.
         runtime_env: Optional per-example environment variable overrides.
     """
+    # Cap block_dim at actual AICore count to avoid TSCH dispatch hang
+    # on binned devices (e.g. 910B3 Bin6 has 20 cores, not 24).
+    # Also round down to nearest multiple of scheduler_thread_num so the
+    # C++ runtime can evenly distribute blocks across scheduler threads.
+    if not platform.endswith("sim"):
+        try:
+            import ctypes
+            _rt = ctypes.CDLL("libruntime.so")
+            _cnt = ctypes.c_uint32()
+            if _rt.rtGetAiCoreCount(ctypes.byref(_cnt)) == 0 and _cnt.value > 0:
+                hw_max = _cnt.value
+                if block_dim > hw_max:
+                    sched_threads = max(aicpu_thread_num - 1, 1)
+                    new_bd = (hw_max // sched_threads) * sched_threads
+                    if new_bd < 1:
+                        new_bd = sched_threads
+                    print(f"[WARN] block_dim={block_dim} exceeds AICore count={hw_max}; "
+                          f"clamping to {new_bd} (divisible by {sched_threads}).")
+                    block_dim = new_bd
+        except Exception:
+            pass  # best-effort; fall through to user-specified block_dim
+
     worker = Worker(level=2, device_id=device_id, platform=platform, runtime=runtime_name)
     worker.init()
 
