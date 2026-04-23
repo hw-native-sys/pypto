@@ -440,6 +440,17 @@ def start_pipeline(
     """
     global _device_pool, _execute_pool, _pipeline_ctx
 
+    # Resolve PTO_ISA_ROOT once on the main thread before any compile workers
+    # start.  Otherwise concurrent workers race on `git clone` into the same
+    # path — the first wins, the rest fail with "destination already exists"
+    # and propagate "PTO_ISA_ROOT could not be resolved" as a pre-compilation
+    # error.  Once the env var is set, workers short-circuit via the env-var
+    # branch in ensure_pto_isa_root().
+    if not codegen_only:
+        from pypto.runtime.device_runner import ensure_pto_isa_root  # noqa: PLC0415
+
+        ensure_pto_isa_root(commit=pto_isa_commit, clone_protocol="https")
+
     _device_pool = device_pool
     _pipeline_ctx = {
         "cache_dir": cache_dir,
