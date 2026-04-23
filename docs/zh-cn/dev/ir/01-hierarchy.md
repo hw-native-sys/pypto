@@ -174,7 +174,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **AutoInCoreScopeStmt** | `name_hint_`, `body_`, `split_`（可选） | Auto-InCore 区域；由 `InterchangeChunkLoops` 消费 |
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster 区域；由 `OutlineClusterScopes` 提取为 `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选） | 给定 Level/Role 的流水线阶段区域 |
-| **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`（Expr，Simplify 后需折叠为正 ConstInt）, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
+| **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`（整型 `Expr`）, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
 | **EvalStmt** | `expr_` | 为副作用求值表达式 |
 | **SeqStmts** | `stmts_` | 通用语句序列 |
