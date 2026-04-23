@@ -573,16 +573,16 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     stream_ << op_name << "(";
   }
 
-  // Special handling for tile.full: print as keyword args to match Python API
+  // Special handling for tile.full / tensor.full: print as keyword args to match Python API
   // IR stores: args_=[shape, value_expr], kwargs_={"dtype": dtype}
   // Python API: full(shape, dtype, value) — print as full(shape, dtype=.., value=..)
   // because pl.FP32 as positional is rejected by the parser (standalone attribute access)
-  if (op->op_->name_ == "tile.full" && op->args_.size() >= 2) {
+  if ((op->op_->name_ == "tile.full" || op->op_->name_ == "tensor.full") && op->args_.size() >= 2) {
     VisitExpr(op->args_[0]);  // shape (positional)
     for (const auto& [key, val] : op->kwargs_) {
       if (key == "dtype") {
         stream_ << ", dtype=" << prefix_ << "."
-                << DataTypeToString(AnyCast<DataType>(val, "tile.full dtype"));
+                << DataTypeToString(AnyCast<DataType>(val, op->op_->name_ + " dtype"));
         break;
       }
     }

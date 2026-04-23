@@ -12,8 +12,12 @@
 import keyword
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+import torch
+
+import pypto.language as pl
 from pypto import DataType
 from pypto import ir as _ir
 
@@ -53,6 +57,8 @@ _CMP_OPS: dict[int, str] = {
     4: ">",  # GT
     5: ">=",  # GE
 }
+
+_SSA_SUFFIX_RE = re.compile(r"__ssa_v\d+$")
 
 # ---------------------------------------------------------------------------
 # Preamble inserted at top of every generated script
@@ -700,6 +706,108 @@ def _handle_tpop_from_aiv(_a: list[str], kw: dict[str, Any]) -> str:
     return f"_cross_core_rt.pop_from_aiv({_split_kwarg(kw)})"
 
 
+_CROSS_CORE_SPLIT_OPS = {
+    "tile.tpush_to_aiv",
+    "tile.tpush_to_aic",
+    "tile.tpop_from_aic",
+    "tile.tpop_from_aiv",
+}
+
+
+def _collect_cross_core_split_from_expr(expr: _ir.Expr, out: set[int]) -> None:
+    if isinstance(expr, _ir.Call):
+        op_name = expr.op.name
+        if op_name in _CROSS_CORE_SPLIT_OPS:
+            kw = dict(expr.kwargs) if expr.kwargs else {}
+            out.add(_split_kwarg(kw))
+        for arg in expr.args:
+            _collect_cross_core_split_from_expr(arg, out)
+        return
+
+    if isinstance(expr, _ir.MakeTuple):
+        for e in expr.elements:
+            _collect_cross_core_split_from_expr(e, out)
+        return
+
+    if isinstance(expr, _ir.TupleGetItemExpr):
+        _collect_cross_core_split_from_expr(expr.tuple, out)
+        return
+
+    if isinstance(expr, _ir.BinaryExpr):
+        _collect_cross_core_split_from_expr(expr.left, out)
+        _collect_cross_core_split_from_expr(expr.right, out)
+        return
+
+    if isinstance(expr, _ir.UnaryExpr):
+        _collect_cross_core_split_from_expr(expr.operand, out)
+        return
+
+
+def _collect_cross_core_split_from_stmt(stmt: _ir.Stmt, out: set[int]) -> None:
+    if isinstance(stmt, _ir.SeqStmts):
+        for s in stmt.stmts:
+            _collect_cross_core_split_from_stmt(s, out)
+        return
+
+    if isinstance(stmt, (_ir.AssignStmt, _ir.EvalStmt)):
+        expr = stmt.value if isinstance(stmt, _ir.AssignStmt) else stmt.expr
+        _collect_cross_core_split_from_expr(expr, out)
+        return
+
+    if isinstance(stmt, (_ir.ReturnStmt, _ir.YieldStmt)):
+        values = stmt.value if stmt.value is not None else []
+        for v in values:
+            _collect_cross_core_split_from_expr(v, out)
+        return
+
+    if isinstance(stmt, (_ir.ForStmt, _ir.WhileStmt)):
+        if isinstance(stmt, _ir.ForStmt):
+            _collect_cross_core_split_from_expr(stmt.start, out)
+            _collect_cross_core_split_from_expr(stmt.stop, out)
+            _collect_cross_core_split_from_expr(stmt.step, out)
+        else:
+            _collect_cross_core_split_from_expr(stmt.condition, out)
+
+        iter_args = getattr(stmt, "iter_args", [])
+        for ia in iter_args:
+            if ia.initValue is not None:
+                _collect_cross_core_split_from_expr(ia.initValue, out)
+
+        _collect_cross_core_split_from_stmt(stmt.body, out)
+        return
+
+    if isinstance(stmt, _ir.IfStmt):
+        _collect_cross_core_split_from_expr(stmt.condition, out)
+        _collect_cross_core_split_from_stmt(stmt.then_body, out)
+        if stmt.else_body is not None:
+            _collect_cross_core_split_from_stmt(stmt.else_body, out)
+        return
+
+    if isinstance(stmt, _ir.ScopeStmt):
+        _collect_cross_core_split_from_stmt(stmt.body, out)
+        return
+
+
+def _collect_cross_core_splits(func: _ir.Function) -> set[int]:
+    splits: set[int] = set()
+    if func.body is not None:
+        _collect_cross_core_split_from_stmt(func.body, splits)
+    return splits
+
+
+def _resolve_group_split_from_cross_core_ops(
+    group_name: str,
+    aic_func: _ir.Function,
+    aiv_func: _ir.Function,
+) -> int | None:
+    split_values = _collect_cross_core_splits(aic_func) | _collect_cross_core_splits(aiv_func)
+    if not split_values:
+        return None
+    if len(split_values) > 1:
+        raise ValueError(f"Conflicting cross-core split kwargs in group {group_name}: {sorted(split_values)}")
+    return next(iter(split_values))
+
+
 def _build_group_meta(program: _ir.Program) -> dict[str, dict[str, Any]]:
     funcs_by_name = {func.name: func for func in program.functions.values()}
     group_meta: dict[str, dict[str, Any]] = {}
@@ -713,10 +821,16 @@ def _build_group_meta(program: _ir.Program) -> dict[str, dict[str, Any]]:
         if aic_name not in funcs_by_name or aiv_name not in funcs_by_name:
             continue
 
+        aic_func = funcs_by_name[aic_name]
         aiv_func = funcs_by_name[aiv_name]
-        split = _split_mode_to_int(func.split)
-        if split == 0:
-            split = _split_mode_to_int(aiv_func.split)
+
+        split_from_ops = _resolve_group_split_from_cross_core_ops(func.name, aic_func, aiv_func)
+        if split_from_ops is not None:
+            split = split_from_ops
+        else:
+            split = _split_mode_to_int(func.split)
+            if split == 0:
+                split = _split_mode_to_int(aiv_func.split)
         dual_aiv_dispatch = bool(getattr(aiv_func, "attrs", {}).get("dual_aiv_dispatch", False))
         group_meta[func.name] = {
             "aic": aic_name,
@@ -1357,6 +1471,127 @@ for _method_name in ("visit_neg", "visit_not", "visit_bit_not", "visit_abs", "vi
     setattr(TorchCodegen, _method_name, TorchCodegen.visit_unary_expr)
 
 
+def _select_entry_function(node: _ir.Program | _ir.Function) -> _ir.Function:
+    """Choose the callable entry function for runtime validation."""
+    if isinstance(node, _ir.Function):
+        return node
+
+    funcs = list(node.functions.values())
+    if not funcs:
+        raise ValueError(f"Program {node.name!r} has no functions")
+    if len(funcs) == 1:
+        return funcs[0]
+
+    for func in funcs:
+        if func.func_type == _ir.FunctionType.Orchestration:
+            return func
+    raise ValueError(f"Program {node.name!r} has {len(funcs)} functions but no Orchestration entry")
+
+
+def _resolve_tensor_from_dict(param_name: str, tensors: dict[str, Any]) -> Any:
+    """Resolve a parameter name against tensor dict keys with SSA fallback."""
+    if param_name in tensors:
+        return tensors[param_name]
+
+    base_name = _SSA_SUFFIX_RE.sub("", param_name)
+    if base_name in tensors:
+        return tensors[base_name]
+
+    raise KeyError(
+        f"Cannot resolve tensor for parameter {param_name!r}. Available keys: {sorted(tensors.keys())}"
+    )
+
+
+def _validate_tensor_dict_arg(name: str, value: Any) -> dict[str, torch.Tensor]:
+    if not isinstance(value, dict):
+        raise TypeError(f"{name} must be dict[str, Tensor], got {type(value).__name__}")
+
+    for key, tensor in value.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{name} key must be str, got {type(key).__name__}")
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{name}[{key!r}] must be torch.Tensor, got {type(tensor).__name__}")
+    return value
+
+
+def _validate_non_negative_float_arg(name: str, value: Any) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a non-negative float, got {value!r}")
+    casted = float(value)
+    if casted < 0:
+        raise ValueError(f"{name} must be a non-negative float, got {value!r}")
+    return casted
+
+
+def _collect_pass_ir_files(ir_dir: str) -> list[Path]:
+    ir_path = Path(ir_dir)
+    if not ir_path.exists():
+        raise FileNotFoundError(f"IR path does not exist: {ir_dir}")
+
+    if ir_path.is_file():
+        if ir_path.suffix != ".py":
+            raise ValueError(f"IR file must be a .py file, got: {ir_path}")
+        return [ir_path]
+
+    ir_files = sorted(p for p in ir_path.iterdir() if p.is_file() and p.suffix == ".py")
+    if not ir_files:
+        raise ValueError(f"No .py IR files found under: {ir_dir}")
+    return ir_files
+
+
+def _build_codegen_entry(
+    ir_file: Path,
+) -> tuple[_ir.Function, Callable[..., Any]]:
+    parsed = pl.loads(str(ir_file))
+    if not isinstance(parsed, (_ir.Program, _ir.Function)):
+        raise ValueError(
+            f"Parsed object from {ir_file} must be Program/Function, got {type(parsed).__name__}"
+        )
+
+    entry_func = _select_entry_function(parsed)
+    code = torch_codegen(parsed, check_shapes=True)
+    namespace: dict[str, Any] = {}
+    exec(code, namespace)  # noqa: S102
+
+    entry = namespace.get(entry_func.name)
+    if not callable(entry):
+        raise ValueError(f"Generated code from {ir_file} has no callable entry {entry_func.name!r}")
+    return entry_func, entry
+
+
+def _compare_expected_tensors(
+    ir_file: Path,
+    run_tensors: dict[str, torch.Tensor],
+    expected: dict[str, torch.Tensor],
+    *,
+    rtol: float,
+    atol: float,
+) -> None:
+    pass_name = ir_file.stem
+    print("=" * 20, f"{pass_name}", "=" * 20)
+    for key, exp_tensor in expected.items():
+        actual = run_tensors.get(key)
+        if actual is None:
+            raise ValueError(
+                f"{ir_file}: expected key {key!r} not found in tensors after execution; "
+                f"available keys: {sorted(run_tensors.keys())}"
+            )
+        if not isinstance(actual, torch.Tensor):
+            raise TypeError(
+                f"{ir_file}: tensors[{key!r}] must be torch.Tensor after execution, "
+                f"got {type(actual).__name__}"
+            )
+        ok = torch.allclose(actual, exp_tensor, rtol=rtol, atol=atol)
+        diff = float((actual - exp_tensor).abs().max().item())
+        print(f"validate tensor: {key!r}, max_abs_diff: {diff:.6e}, pass: {ok}")
+        if not ok:
+            raise AssertionError(
+                f"{ir_file}: tensor mismatch for key {key!r}, "
+                f"max abs diff {diff:.6e} exceeds tolerance "
+                f"(rtol={rtol:.3e}, atol={atol:.3e})"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -1395,3 +1630,55 @@ def torch_codegen(node: _ir.Program | _ir.Function, *, check_shapes: bool = Fals
 
     lines.append(cg.get_output())
     return "\n".join(lines)
+
+
+def validate_pass_ir_codegen_results(
+    ir_dir: str,
+    tensors: dict[str, torch.Tensor],
+    expected: dict[str, torch.Tensor],
+    *,
+    rtol: float = 5e-2,
+    atol: float = 5e-2,
+) -> None:
+    """Validate torch_codegen correctness on each pass IR file in a directory.
+
+    Args:
+        ir_dir: Directory that contains IR Python files (for example,
+            PassManager dump files like ``00_frontend.py``, ``01_after_xxx.py``).
+            A single ``.py`` file path is also accepted.
+        tensors: Input tensors for executing generated functions, keyed by
+            function parameter name.
+        expected: Expected tensors keyed by tensor name.
+        rtol: Relative tolerance for ``torch.allclose``.
+        atol: Absolute tolerance for ``torch.allclose``.
+
+    Prints:
+        Per-pass validation summary with max absolute differences.
+
+    Raises:
+        FileNotFoundError: If ``ir_dir`` does not exist.
+        ValueError: If no IR files found, parse result invalid, output missing,
+            or tolerance arguments are invalid.
+        TypeError: If ``tensors``/``expected`` are not
+            ``dict[str, torch.Tensor]``.
+        RuntimeError: If generated code execution fails.
+        AssertionError: If numeric comparison fails.
+    """
+    validated_tensors = _validate_tensor_dict_arg("tensors", tensors)
+    validated_expected = _validate_tensor_dict_arg("expected", expected)
+    validated_rtol = _validate_non_negative_float_arg("rtol", rtol)
+    validated_atol = _validate_non_negative_float_arg("atol", atol)
+    ir_files = _collect_pass_ir_files(ir_dir)
+
+    for ir_file in ir_files:
+        entry_func, entry = _build_codegen_entry(ir_file)
+        run_tensors = {k: v.clone() for k, v in validated_tensors.items()}
+        args = [_resolve_tensor_from_dict(param.name_hint, run_tensors) for param in entry_func.params]
+        entry(*args)
+        _compare_expected_tensors(
+            ir_file,
+            run_tensors,
+            validated_expected,
+            rtol=validated_rtol,
+            atol=validated_atol,
+        )
