@@ -15,7 +15,7 @@ harness package (migrated from pto-testing-framework).
 """
 
 import inspect
-import os
+import queue
 import random
 import re
 import shutil
@@ -45,10 +45,8 @@ from harness.core.harness import ALL_PLATFORM_IDS, PTOTestCase  # noqa: E402
 from harness.core.test_runner import (  # noqa: E402
     TestRunner,
     _cache_key,
-    _precompile_cache,
-    _resolve_platform,
-    prebuild_binaries,
-    precompile_test_cases,
+    shutdown_pipeline,
+    start_pipeline,
 )
 from pypto import LogLevel, set_log_level  # noqa: E402
 from pypto.runtime.runner import RunConfig  # noqa: E402
@@ -210,18 +208,15 @@ def _parse_device_option(raw: str | int) -> list[int]:
 
 
 def _resolve_device_id(raw: str | int) -> int:
-    """Pick a single device id from the ``--device`` option.
+    """Return a representative device id for the session RunConfig.
 
-    When pytest-xdist is active (``PYTEST_XDIST_WORKER=gwN``), each worker
-    takes a slot round-robin from the available range so concurrent workers
-    target distinct cards. Otherwise the first id in the range is used.
+    With xdist removed, per-test device selection happens inside the pipeline
+    execute task (see ``_fused_execute_task`` in ``harness.core.test_runner``).
+    This value is consulted only by the legacy inline-compile fallback in
+    :meth:`TestRunner._run_inline` when a test case was not discovered at
+    collection time.
     """
-    devices = _parse_device_option(raw)
-    worker = os.environ.get("PYTEST_XDIST_WORKER", "")
-    match = re.fullmatch(r"gw(\d+)", worker)
-    if match and len(devices) > 1:
-        return devices[int(match.group(1)) % len(devices)]
-    return devices[0]
+    return _parse_device_option(raw)[0]
 
 
 def _parse_platform_filter(raw: str) -> tuple[str, ...]:
@@ -250,20 +245,23 @@ def _parse_platform_filter(raw: str) -> tuple[str, ...]:
 
 @pytest.fixture(autouse=True)
 def _report_device(request) -> None:
-    """Print the resolved device id at the start of every hardware test.
+    """Report which device executed each test at the end of the test body.
 
-    Helps diagnose multi-card CI scheduling when ``--device`` is a range or
-    list. The line is prefixed so it stands out in pytest's per-test output:
-
-        [DEVICE] tests/st/runtime/test_x.py::test_y -> device 12 (worker=gw3)
-
-    Aggregate per-device counts are emitted at session end via
-    ``pytest_terminal_summary``.
+    ``TestRunner.run`` writes the resolved device id into a single-slot
+    stash (``_last_device``) right before returning to the test body.  We
+    read it after ``yield`` so the line shows the device the test actually
+    ran on.  Tests that don't go through ``TestRunner.run`` see ``None``
+    and are skipped from the per-device counter.
     """
-    device_id = _resolve_device_id(request.config.getoption("--device"))
-    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    yield
+    from harness.core.test_runner import _last_device  # noqa: PLC0415
+
+    device_id = _last_device["value"]
+    _last_device["value"] = None
+    if device_id is None:
+        return
     sys.stdout.write(
-        f"\n[DEVICE] {request.node.nodeid} -> device {device_id} (worker={worker})\n"
+        f"\n[DEVICE] {request.node.nodeid} -> device {device_id}\n"
     )
     sys.stdout.flush()
     _device_counter[device_id] += 1
@@ -501,13 +499,16 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     if not seen:
         return
 
-    dump_passes: bool = session.config.getoption("--dump-passes")
     max_workers: int | None = session.config.getoption("--precompile-workers")
-
-    # Without --precompile-workers the pre-compilation/cache phases are skipped
-    # entirely; each test compiles on demand inside TestRunner.run().
+    # Without --precompile-workers the pipeline is skipped entirely; each
+    # test compiles + executes inline inside TestRunner._run_inline().
     if max_workers is None:
         return
+
+    dump_passes: bool = session.config.getoption("--dump-passes")
+    codegen_only: bool = session.config.getoption("--codegen-only")
+    pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
+    runtime_profiling: bool = session.config.getoption("--runtime-profiling")
 
     # ── determine cache directory ─────────────────────────────────────────────
     save_kernels: bool = session.config.getoption("--save-kernels")
@@ -523,50 +524,38 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         cache_dir = Path(tempfile.mkdtemp(prefix="pypto_precompile_"))
         _temp_precompile_dirs.append(cache_dir)
 
-    # ── compile in parallel ───────────────────────────────────────────────────
-    test_cases = list(seen.values())
-    workers_str = str(max_workers) if max_workers is not None else "auto"
     # ``--platform`` is a CSV allowlist; the per-test value resolved by
-    # ``tc.get_platform()`` overrides this fallback inside ``TestRunner``,
-    # so any one entry from the filter is sufficient here. We compute it
-    # *before* precompilation so the cache key reflects the resolved
-    # platform for legacy (non-parametrized) test cases.
+    # ``tc.get_platform()`` overrides this fallback inside the pipeline.
     platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
-    platform: str = platform_filter[0] if platform_filter else "a2a3"
-    print(f"\n[PyPTO] Pre-compiling {len(test_cases)} test case(s) in parallel (workers={workers_str})…")
-    precompile_test_cases(
-        test_cases,
-        cache_dir,
-        platform=platform,
-        dump_passes=dump_passes,
-        max_workers=max_workers,
+    session_platform: str = platform_filter[0] if platform_filter else "a2a3"
+
+    # Build the device pool from --device.  N parallel executes max.
+    devices = _parse_device_option(session.config.getoption("--device"))
+    device_pool: queue.Queue[int] = queue.Queue()
+    for d in devices:
+        device_pool.put(d)
+
+    test_cases = list(seen.values())
+    print(
+        f"\n[PyPTO] Pipeline: {len(test_cases)} test case(s); "
+        f"compile_workers={max_workers}, devices={devices}"
     )
-
-    n_ok = sum(1 for _, err in _precompile_cache.values() if err is None)
-    n_fail = len(_precompile_cache) - n_ok
-    print(f"[PyPTO] Pre-compilation done — {n_ok} ok, {n_fail} failed\n")
-
-    # ── Phase 2: pre-build binary artifacts ──────────────────────────────
-    # Compile incore kernels and orchestration .so in parallel.
-    # Results are saved to work_dir/cache/.
-    if n_ok > 0 and not session.config.getoption("--codegen-only"):
-        ok_cases = []
-        for tc in test_cases:
-            key = _cache_key(tc, _resolve_platform(platform, tc))
-            if key in _precompile_cache and _precompile_cache[key][1] is None:
-                ok_cases.append(tc)
-        pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
-        print(
-            f"[PyPTO] Pre-building binary artifacts for {len(ok_cases)} test case(s)"
-            f" in parallel (workers={workers_str})…"
-        )
-        n_built = prebuild_binaries(
-            ok_cases, cache_dir, platform, max_workers=max_workers, pto_isa_commit=pto_isa_commit
-        )
-        print(f"[PyPTO] Binary pre-build done — {n_built} case(s) compiled\n")
+    start_pipeline(
+        test_cases=test_cases,
+        cache_dir=cache_dir,
+        session_platform=session_platform,
+        dump_passes=dump_passes,
+        codegen_only=codegen_only,
+        pto_isa_commit=pto_isa_commit,
+        compile_workers=max_workers,
+        device_pool=device_pool,
+        runtime_profiling=runtime_profiling,
+    )
+    print("[PyPTO] Pipeline scheduled — pytest item loop starting\n")
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # noqa: ARG001
-    """Clean up temporary pre-compilation directories created during the session."""
+    """Tear down the pipeline and clean up temporary precompile directories."""
+    shutdown_pipeline()
     for d in _temp_precompile_dirs:
         shutil.rmtree(d, ignore_errors=True)
