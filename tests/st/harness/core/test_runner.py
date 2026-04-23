@@ -18,16 +18,18 @@ Orchestrates the full test execution pipeline:
 5. Validate results
 """
 
-import concurrent.futures
-import importlib.util
 import logging
+import queue
 import shutil
 import tempfile
 import threading
 import time
 import traceback
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
@@ -39,7 +41,6 @@ from pypto.runtime.golden_writer import (
     _save_data_files,
     generate_golden_source,
 )
-from pypto.runtime.kernel_compiler import KernelCompiler
 from pypto.runtime.runner import (
     RunConfig,
     RunResult,
@@ -55,18 +56,36 @@ _PROJECT_ROOT = _ST_DIR.parent.parent
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Pre-compilation cache (Phase 1 / Phase 2 split)
+# Pipeline state (compile pool → device pool)
 # ---------------------------------------------------------------------------
+#
+# Replaces the old "compile-everything then run-everything" two-phase model.
+# A compile pool of ``--precompile-workers`` threads fuses IR compile + golden
+# generation + .so build into one task per test case.  As each compile future
+# completes, an execute pool (sized to the number of devices in --device)
+# picks the case up and dispatches it onto the next free device from the
+# DevicePool.  Pytest's per-item loop then calls ``TestRunner.run`` which
+# blocks on the matching execute future and returns the cached RunResult.
 
-# Maps cache_key → (work_dir, error_str | None).
-# The cache key combines test name and target platform (e.g.
-# "matmul_64x64x64@a2a3sim") so the same PTOTestCase can be compiled for
-# multiple platforms (a2a3 vs a5, sim vs onboard) without cache-key collisions.
-# Populated by precompile_test_cases() in the parent process during
-# pytest_collection_finish, before any test forks.  Forked children inherit
-# the populated dict via os.fork() copy-on-write and find their pre-compiled
-# artefacts on the filesystem under work_dir.
-_precompile_cache: dict[str, tuple[Path, str | None]] = {}
+# cache_key → Future[RunResult] populated in start_pipeline().
+_run_futures: dict[str, Future] = {}
+
+# cache_key → device id actually used by the execute task.  Read by
+# TestRunner.run after fut.result() and forwarded to the _report_device
+# fixture via _last_device.
+_executed_device: dict[str, int] = {}
+
+# Single-slot stash of the device id the most-recently-resolved test ran on.
+# pytest's item loop is single-threaded, so one slot is enough: TestRunner.run
+# writes, _report_device fixture reads.
+_last_device: dict[str, int | None] = {"value": None}
+
+# Session-scoped pipeline resources, set up by start_pipeline() and torn down
+# by shutdown_pipeline() from pytest_sessionfinish.
+_device_pool: "queue.Queue[int] | None" = None
+_execute_pool: ThreadPoolExecutor | None = None
+_compile_pools: list[ThreadPoolExecutor] = []
+_pipeline_ctx: dict = {}
 
 # set_backend_type is called once per backend-type group before the thread pool
 # starts.  Only get_program() needs serialisation because the @pl.program
@@ -232,185 +251,264 @@ def _compile_for_cache(test_case: "PTOTestCase", work_dir: Path, dump_passes: bo
     _write_golden_for_test_case(test_case, work_dir / "golden.py")
 
 
-def precompile_test_cases(
+@dataclass
+class CompileArtifact:
+    """Outcome of a fused compile task (IR → C++ → golden.py → .so).
+
+    Stored as the result of a compile-pool future and consumed by the matching
+    execute-pool task via ``_fused_execute_task``.
+    """
+
+    work_dir: Path
+    resolved_platform: str
+    error: str | None = None
+    runtime_name: str | None = None
+    chip_callable: Any | None = None
+
+
+def _fused_compile_task(
+    tc: "PTOTestCase",
+    cache_dir: Path,
+    session_platform: str,
+    dump_passes: bool,
+    pto_isa_commit: str | None,
+) -> CompileArtifact:
+    """Compile IR → kernels/orch C++ → golden.py → .so for one test case.
+
+    Runs on a compile-pool worker thread.  ``get_program`` is serialised via
+    ``_get_program_lock`` inside ``_compile_for_cache``; everything else runs
+    concurrently with other compile-pool workers.  The backend type must
+    already be set on the main thread before this task is submitted.
+    """
+    resolved = _resolve_platform(session_platform, tc)
+    work_dir = cache_dir / _cache_key(tc, resolved)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        _compile_for_cache(tc, work_dir, dump_passes)
+        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+
+        chip_callable, runtime_name = compile_and_assemble(
+            work_dir, resolved, pto_isa_commit=pto_isa_commit
+        )
+        return CompileArtifact(
+            work_dir=work_dir,
+            resolved_platform=resolved,
+            error=None,
+            runtime_name=runtime_name,
+            chip_callable=chip_callable,
+        )
+    except Exception as exc:
+        return CompileArtifact(
+            work_dir=work_dir,
+            resolved_platform=resolved,
+            error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        )
+
+
+def _fused_execute_task(
+    tc: "PTOTestCase",
+    cache_key: str,
+    artifact: "CompileArtifact",
+) -> RunResult:
+    """Acquire a device slot, execute on device.
+
+    Runs on an execute-pool worker thread.  Called only after the matching
+    compile task has completed (via ``add_done_callback`` in
+    :func:`_schedule_execute`), so this task never blocks on compilation —
+    exec workers are free to grab the next device slot immediately.
+    """
+    start = time.time()
+    name = tc.get_name()
+    if artifact.error is not None:
+        return RunResult(
+            passed=False,
+            test_name=name,
+            error=f"Pre-compilation failed: {artifact.error}",
+            execution_time=time.time() - start,
+        )
+    if _pipeline_ctx.get("codegen_only"):
+        return RunResult(
+            passed=True,
+            test_name=name,
+            execution_time=time.time() - start,
+        )
+
+    assert _device_pool is not None, "device pool not initialised"
+    device_id = _device_pool.get()
+    try:
+        _executed_device[cache_key] = device_id
+        _execute_on_device(
+            artifact.work_dir,
+            artifact.work_dir / "golden.py",
+            artifact.chip_callable,
+            artifact.runtime_name,
+            artifact.resolved_platform,
+            device_id,
+            runtime_profiling=_pipeline_ctx.get("runtime_profiling", False),
+        )
+        return RunResult(
+            passed=True,
+            test_name=name,
+            execution_time=time.time() - start,
+        )
+    except Exception as exc:
+        return RunResult(
+            passed=False,
+            test_name=name,
+            error=f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            execution_time=time.time() - start,
+        )
+    finally:
+        _device_pool.put(device_id)
+
+
+def _schedule_execute(
+    tc: "PTOTestCase",
+    cache_key: str,
+    compile_fut: "Future",
+    result_fut: "Future",
+) -> None:
+    """Chain a compile future to an execute-pool submission.
+
+    When ``compile_fut`` completes, submit an execute task and forward its
+    result to ``result_fut``.  This avoids tying up execute-pool workers
+    waiting on slow compiles — workers only receive work that is ready to
+    run, so the device pool stays evenly loaded even when compile latency
+    varies between cases.
+    """
+    name = tc.get_name()
+
+    def _on_compile_done(cf: "Future") -> None:
+        try:
+            artifact = cf.result()
+        except Exception as exc:
+            result_fut.set_result(
+                RunResult(
+                    passed=False,
+                    test_name=name,
+                    error=f"compile task crashed: {exc}\n{traceback.format_exc()}",
+                    execution_time=0.0,
+                )
+            )
+            return
+        assert _execute_pool is not None, "execute pool not initialised"
+        exec_fut = _execute_pool.submit(_fused_execute_task, tc, cache_key, artifact)
+
+        def _on_exec_done(ef: "Future") -> None:
+            try:
+                result_fut.set_result(ef.result())
+            except Exception as exc:
+                result_fut.set_result(
+                    RunResult(
+                        passed=False,
+                        test_name=name,
+                        error=f"execute task crashed: {exc}\n{traceback.format_exc()}",
+                        execution_time=0.0,
+                    )
+                )
+
+        exec_fut.add_done_callback(_on_exec_done)
+
+    compile_fut.add_done_callback(_on_compile_done)
+
+
+def start_pipeline(
+    *,
     test_cases: "list[PTOTestCase]",
     cache_dir: Path,
-    *,
-    platform: str | None = None,
-    dump_passes: bool = False,
-    max_workers: int | None = None,
+    session_platform: str,
+    dump_passes: bool,
+    codegen_only: bool,
+    pto_isa_commit: str | None,
+    compile_workers: int,
+    device_pool: "queue.Queue[int]",
+    runtime_profiling: bool = False,
 ) -> None:
-    """Compile all *test_cases* in parallel and populate :data:`_precompile_cache`.
+    """Spin up the compile→execute pipeline and populate :data:`_run_futures`.
 
-    This is **Phase 1** of the two-phase execution model.  Call this once in
-    the parent process (e.g. from a ``pytest_collection_finish`` hook) before
-    any test forks.  Forked child processes inherit the populated cache and the
-    pre-compiled artefacts on the filesystem.
+    Called from ``pytest_collection_finish``.  Test cases are grouped by
+    backend type (``set_backend_type`` is a global one-time setter); within
+    each group a compile pool of ``compile_workers`` threads feeds the shared
+    session-wide execute pool sized to the number of devices in ``device_pool``.
 
-    Because ``set_backend_type`` is a one-time global setter (calling it again
-    with a *different* value raises ``ValueError``), test cases are grouped by
-    backend type.  Each group is compiled sequentially with the backend set once;
-    ``get_program()`` is serialised within the group (via ``_get_program_lock``)
-    while ``compile_program()`` runs in parallel.  The backend is reset between
-    groups via ``reset_for_testing()``.
-
-    Args:
-        test_cases: Instances to compile (should be deduplicated by
-            ``_cache_key`` before calling).
-        cache_dir: Root output directory; each test case is compiled into
-            ``cache_dir / <cache_key>``.
-        platform: Session platform string used to resolve the cache key for
-            legacy (non-parametrized) test cases. ``None`` keeps the
-            backend-derived fallback.
-        dump_passes: If ``True``, dump intermediate IR after each pass.
-        max_workers: Thread-pool size per backend group.  Defaults to
-            ``os.cpu_count()``.
+    Only the *non-final* groups block on a barrier before the next
+    ``set_backend_type`` call; the last group returns immediately so pytest's
+    per-item loop can start consuming execute futures while compile+execute
+    are still running in the background.  This preserves the
+    ``set_backend_type`` single-shot invariant without stalling pytest's
+    progress reporting during collection.
     """
-    # Group by backend type so set_backend_type is called once per group.
+    global _device_pool, _execute_pool, _pipeline_ctx
+
+    _device_pool = device_pool
+    _pipeline_ctx = {
+        "cache_dir": cache_dir,
+        "session_platform": session_platform,
+        "dump_passes": dump_passes,
+        "codegen_only": codegen_only,
+        "pto_isa_commit": pto_isa_commit,
+        "runtime_profiling": runtime_profiling,
+    }
+    n_devices = device_pool.qsize()
+    _execute_pool = ThreadPoolExecutor(
+        max_workers=max(1, n_devices), thread_name_prefix="pypto-exec"
+    )
+
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
         groups.setdefault(tc.get_backend_type(), []).append(tc)
 
-    def _compile_one(tc: "PTOTestCase") -> tuple[str, Path, str | None]:
-        key = _cache_key(tc, _resolve_platform(platform, tc) if platform else None)
-        work_dir = cache_dir / key
-        work_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            _compile_for_cache(tc, work_dir, dump_passes)
-            return key, work_dir, None
-        except Exception as exc:
-            return key, work_dir, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-
-    for backend_type, group in groups.items():
-        # Set the backend type once for the whole group (idempotent if already
-        # set to the same value; reset_for_testing() between groups handles reuse).
+    group_items = list(groups.items())
+    for i, (backend_type, group) in enumerate(group_items):
+        is_last = i == len(group_items) - 1
         set_backend_type(backend_type)
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = {pool.submit(_compile_one, tc): tc for tc in group}
-                for fut in concurrent.futures.as_completed(futures):
-                    key, work_dir, error = fut.result()
-                    _precompile_cache[key] = (work_dir, error)
-        finally:
-            # Reset so the next group can set a different backend type.
-            reset_for_testing()
-
-
-def prebuild_binaries(
-    test_cases: "list[PTOTestCase]",
-    cache_dir: Path,
-    platform: str,
-    *,
-    max_workers: int | None = None,
-    pto_isa_commit: str | None = None,
-) -> int:
-    """Phase 2: pre-compile binary artifacts for all test cases in parallel.
-
-    Must be called AFTER :func:`precompile_test_cases` so kernel/orchestration
-    C++ sources exist under ``work_dir``. Uses PyPTO's local KernelCompiler
-    to compile incore kernels and orchestration ``.so`` files, with binary
-    caching integrated into :mod:`pypto.runtime.device_runner`.
-
-    Args:
-        test_cases: Test case instances (deduplicated by cache key).
-        cache_dir: Root output directory used during precompilation.
-        platform: Session platform string (e.g. ``"a2a3"``).
-        max_workers: Thread-pool size. Defaults to ``min(32, cpu_count + 4)``.
-        pto_isa_commit: If set, pin the pto-isa clone to this specific git
-            commit (hash or tag).  ``None`` means use latest remote HEAD.
-
-    Returns:
-        Number of test cases whose kernels and orchestration were successfully
-        pre-built.
-    """
-    from pypto.runtime.device_runner import (  # noqa: PLC0415
-        compile_single_kernel,
-        compile_single_orchestration,
-        ensure_pto_isa_root,
-    )
-
-    pto_isa_root = ensure_pto_isa_root(commit=pto_isa_commit, clone_protocol="https")
-    if pto_isa_root is None:
-        return 0
-
-    def _load_kc(work_dir: Path):
-        config_path = work_dir / "kernel_config.py"
-        if not config_path.exists():
-            return None
-        spec = importlib.util.spec_from_file_location(f"_prebin_{work_dir.name}", str(config_path))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-
-    # ── Collect configs for all valid test cases ──────────────────────────────
-    case_configs: list[tuple] = []
-    for tc in test_cases:
-        tc_platform = _resolve_platform(platform, tc)
-        key = _cache_key(tc, tc_platform)
-        if key not in _precompile_cache or _precompile_cache[key][1] is not None:
+        compile_pool = ThreadPoolExecutor(
+            max_workers=compile_workers, thread_name_prefix="pypto-compile"
+        )
+        _compile_pools.append(compile_pool)
+        group_futs: list[Future] = []
+        for tc in group:
+            key = _cache_key(tc, _resolve_platform(session_platform, tc))
+            cfut = compile_pool.submit(
+                _fused_compile_task,
+                tc,
+                cache_dir,
+                session_platform,
+                dump_passes,
+                pto_isa_commit,
+            )
+            # result_fut is what TestRunner.run() waits on.  It's completed by
+            # the exec-done callback inside _schedule_execute, which submits
+            # the execute task only after compile finishes — so exec-pool
+            # workers never block on compilation and the device pool is
+            # evenly drained across devices.
+            result_fut: Future = Future()
+            _schedule_execute(tc, key, cfut, result_fut)
+            _run_futures[key] = result_fut
+            group_futs.append(result_fut)
+        if is_last:
+            # Don't block: let pytest's per-item loop start running while
+            # compiles/executes continue in the background.  The compile
+            # pool stays alive; shutdown_pipeline() tears it down at
+            # session end.
             continue
-        work_dir = _precompile_cache[key][0]
-        mod = _load_kc(work_dir)
-        if mod is None:
-            continue
-        runtime_name = getattr(mod, "RUNTIME_CONFIG", {}).get("runtime", "host_build_graph")
-        compiler = KernelCompiler(platform=tc_platform)
-        case_configs.append(
-            (tc, compiler, tc_platform, runtime_name, mod.KERNELS, mod.ORCHESTRATION["source"])
-        )
+        # Non-final group: drain before the next set_backend_type so the
+        # global backend state transitions cleanly.
+        wait(group_futs)
+        compile_pool.shutdown(wait=True)
+        _compile_pools.remove(compile_pool)
+        reset_for_testing()
 
-    if not case_configs:
-        return 0
 
-    # ── Submit ALL tasks to a single flat pool ────────────────────────────────
-    def _compile_incore_task(compiler, tc_platform, kernel, runtime_name):
-        source = Path(kernel["source"])
-        prebuild_cache = source.parent.parent.parent / "cache"
-        compile_single_kernel(
-            kernel,
-            compiler,
-            tc_platform,
-            pto_isa_root,
-            runtime_name,
-            cache_dir=prebuild_cache,
-        )
-
-    def _compile_orch_task(compiler, runtime_name, orch_source):
-        source = Path(orch_source)
-        prebuild_cache = source.parent.parent / "cache"
-        compile_single_orchestration(
-            orch_source,
-            compiler,
-            runtime_name,
-            cache_dir=prebuild_cache,
-        )
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        all_futs: list = []
-
-        # Per-test-case: each kernel and orchestration as independent tasks
-        tc_kernel_futs: list[tuple[list, concurrent.futures.Future]] = []
-        for tc, compiler, tc_platform, runtime_name, kernels, orch_source in case_configs:
-            kfuts = [
-                pool.submit(_compile_incore_task, compiler, tc_platform, k, runtime_name) for k in kernels
-            ]
-            ofut = pool.submit(_compile_orch_task, compiler, runtime_name, orch_source)
-            tc_kernel_futs.append((kfuts, ofut))
-            all_futs.extend(kfuts)
-            all_futs.append(ofut)
-
-        for fut in concurrent.futures.as_completed(all_futs):
-            try:
-                fut.result()
-            except Exception as e:
-                _log.debug("Pre-build task failed (will fall back to live compilation): %s", e)
-
-    n_ok = sum(
-        1
-        for kfuts, ofut in tc_kernel_futs
-        if all(f.exception() is None for f in kfuts) and ofut.exception() is None
-    )
-    return n_ok
+def shutdown_pipeline() -> None:
+    """Tear down compile/execute pools; called from ``pytest_sessionfinish``."""
+    global _execute_pool, _compile_pools
+    for pool in _compile_pools:
+        pool.shutdown(wait=False, cancel_futures=True)
+    _compile_pools = []
+    if _execute_pool is not None:
+        _execute_pool.shutdown(wait=False, cancel_futures=True)
+    _execute_pool = None
 
 
 class TestRunner:
@@ -440,68 +538,48 @@ class TestRunner:
     def run(self, test_case: PTOTestCase) -> RunResult:
         """Run a test case and return results.
 
+        When the test case was discovered at collection time, the compile→
+        execute pipeline has already produced its ``RunResult``; this method
+        returns it directly (blocking briefly if the execute future is still
+        in flight).  Otherwise the legacy inline compile+execute path runs on
+        the calling thread, using ``self.config.device_id`` as the device.
+
         Args:
             test_case: The test case to run.
 
         Returns:
             RunResult with pass/fail status and details.
         """
-        start_time = time.time()
-        test_name = test_case.get_name()
         resolved_platform = _resolve_platform(self.config.platform, test_case)
         cache_k = _cache_key(test_case, resolved_platform)
-
-        # --- Phase 2: pre-compiled artifacts available — skip compilation ---
-        if cache_k in _precompile_cache:
-            cached_dir, cached_error = _precompile_cache[cache_k]
-            if cached_error is not None:
-                return RunResult(
-                    passed=False,
-                    test_name=test_name,
-                    error=f"Pre-compilation failed: {cached_error}",
-                    execution_time=time.time() - start_time,
-                )
-            if self.config.codegen_only:
-                return RunResult(
-                    passed=True,
-                    test_name=test_name,
-                    execution_time=time.time() - start_time,
-                )
+        fut = _run_futures.get(cache_k)
+        if fut is not None:
             try:
-                # Re-write golden.py with the actual test case's tolerances.
-                # The pre-compiled golden.py may have been written with default
-                # tolerances (1e-5) because pytest_collection_finish instantiates
-                # test cases without their RunConfig constructor args.
-                _write_golden_for_test_case(test_case, cached_dir / "golden.py")
-                from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
-
-                chip_callable, runtime_name = compile_and_assemble(
-                    cached_dir, resolved_platform, pto_isa_commit=self.config.pto_isa_commit
-                )
-                _execute_on_device(
-                    cached_dir,
-                    cached_dir / "golden.py",
-                    chip_callable,
-                    runtime_name,
-                    resolved_platform,
-                    self.config.device_id,
-                )
-                return RunResult(
-                    passed=True,
-                    test_name=test_name,
-                    execution_time=time.time() - start_time,
-                )
-            except Exception as e:
+                result = fut.result()
+            except Exception as exc:
+                _last_device["value"] = None
                 return RunResult(
                     passed=False,
-                    test_name=test_name,
-                    error=f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
-                    execution_time=time.time() - start_time,
+                    test_name=test_case.get_name(),
+                    error=f"pipeline future crashed: {exc}\n{traceback.format_exc()}",
+                    execution_time=0.0,
                 )
+            _last_device["value"] = _executed_device.get(cache_k)
+            return result
+        _last_device["value"] = self.config.device_id
+        return self._run_inline(test_case, resolved_platform)
 
-        # --- Original path: no cache, compile + execute in one step ---
+    def _run_inline(self, test_case: PTOTestCase, resolved_platform: str) -> RunResult:
+        """Compile + execute on the calling thread.
 
-        # Determine work directory based on save_kernels configuration
+        Used when ``--precompile-workers`` was not passed (pipeline disabled)
+        or for test cases that were not discoverable at collection time
+        (e.g. constructed dynamically inside a test body).  Single device only:
+        ``self.config.device_id`` (the first id in ``--device``).
+        """
+        start_time = time.time()
+        test_name = test_case.get_name()
+
         if self.config.save_kernels:
             if self.config.save_kernels_dir:
                 work_dir = Path(self.config.save_kernels_dir) / test_name
@@ -514,11 +592,9 @@ class TestRunner:
             use_temp = True
 
         try:
-            # Set PyPTO backend type for code generation
             backend_type = test_case.get_backend_type()
             set_backend_type(backend_type)
 
-            # 1. Get program
             program = test_case.get_program()
             if program is None:
                 raise ValueError(
@@ -526,7 +602,6 @@ class TestRunner:
                     "to return a @pl.program class or ir.Program"
                 )
 
-            # 2. Compile: generates kernels/, orchestration/ and patches headers
             strategy = test_case.get_strategy()
             compile_program(
                 program,
@@ -536,7 +611,6 @@ class TestRunner:
                 dump_passes=self.config.dump_passes,
             )
 
-            # 3. Validate that kernels and orchestration were generated
             if not list((work_dir / "kernels").rglob("*.cpp")):
                 raise ValueError(f"No kernels generated for {test_name}")
             if not list((work_dir / "orchestration").glob("*.cpp")):
@@ -546,11 +620,9 @@ class TestRunner:
                     "(decorated with @pl.function(type=pl.FunctionType.Orchestration))."
                 )
 
-            # 4. Generate golden.py in work_dir
             golden_path = work_dir / "golden.py"
             _write_golden_for_test_case(test_case, golden_path)
 
-            # 5. Execute via CodeRunner (skip if codegen_only)
             if self.config.codegen_only:
                 return RunResult(
                     passed=True,
@@ -558,18 +630,17 @@ class TestRunner:
                     execution_time=time.time() - start_time,
                 )
 
-            platform = resolved_platform
             from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
             chip_callable, runtime_name = compile_and_assemble(
-                work_dir, platform, pto_isa_commit=self.config.pto_isa_commit
+                work_dir, resolved_platform, pto_isa_commit=self.config.pto_isa_commit
             )
             _execute_on_device(
                 work_dir,
                 golden_path,
                 chip_callable,
                 runtime_name,
-                platform,
+                resolved_platform,
                 self.config.device_id,
                 runtime_profiling=self.config.runtime_profiling,
             )

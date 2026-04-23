@@ -157,7 +157,7 @@ jobs:
         run: ccache -s || true
 
       - name: Test system tests
-        run: pytest tests/st -v --device="$DEVICE_RANGE" -n 3 --precompile-workers=128 --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
+        run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=64 --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
 
       - name: Test swimlane output
         run: |
