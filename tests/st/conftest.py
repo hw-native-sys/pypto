@@ -96,9 +96,10 @@ def pytest_addoption(parser):
         help=(
             "Device id(s) for hardware tests. Accepts a single id ('0'), an "
             "inclusive range ('0-7'), or a comma-separated list ('0,1,12'). "
-            "Ranges and lists may be mixed ('0-3,8,12-15'). When pytest-xdist "
-            "is active, each worker picks one device round-robin; otherwise "
-            "the first id is used (default: 0)."
+            "Ranges and lists may be mixed ('0-3,8,12-15'). All ids are "
+            "placed into a session-wide pool that bounds execute-task "
+            "parallelism; per-test device selection happens inside the "
+            "pipeline execute task (default: 0)."
         ),
     )
     parser.addoption(
@@ -209,13 +210,14 @@ def _parse_device_option(raw: str | int) -> list[int]:
 
 
 def _resolve_device_id(raw: str | int) -> int:
-    """Return a representative device id for the session RunConfig.
+    """Return a representative device id for the session ``RunConfig``.
 
-    With xdist removed, per-test device selection happens inside the pipeline
-    execute task (see ``_fused_execute_task`` in ``harness.core.test_runner``).
+    Per-test device selection happens inside the pipeline execute task
+    (see ``_fused_execute_task`` in ``harness.core.test_runner``), which
+    pulls from a session-wide pool seeded with every id from ``--device``.
     This value is consulted only by the legacy inline-compile fallback in
     :meth:`TestRunner._run_inline` when a test case was not discovered at
-    collection time.
+    collection time, so the first id is sufficient.
     """
     return _parse_device_option(raw)[0]
 

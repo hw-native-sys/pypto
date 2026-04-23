@@ -290,6 +290,16 @@ def _fused_compile_task(
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
         _compile_for_cache(tc, work_dir, dump_passes)
+        # Codegen-only runs skip assembly: the .so is never loaded by the
+        # execute task (see _fused_execute_task) and assembling here would
+        # both waste work and race on PTO_ISA_ROOT (start_pipeline skips
+        # the pre-resolve under codegen_only).
+        if _pipeline_ctx.get("codegen_only"):
+            return CompileArtifact(
+                work_dir=work_dir,
+                resolved_platform=resolved,
+                error=None,
+            )
         from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
         chip_callable, runtime_name = compile_and_assemble(work_dir, resolved, pto_isa_commit=pto_isa_commit)

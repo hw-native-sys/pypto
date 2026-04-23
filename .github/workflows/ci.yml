@@ -157,6 +157,7 @@ jobs:
         run: ccache -s || true
 
       - name: Test system tests
+        timeout-minutes: 15
         run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
 
       - name: Test swimlane output
