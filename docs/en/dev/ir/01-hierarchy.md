@@ -320,9 +320,9 @@ spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
   are not control flow (execute once, linearly).
 - Required fields are enforced at construction: `HierarchyScopeStmt.level_`
   is non-optional; `SpmdScopeStmt.core_num_` is a non-null `ExprPtr`. The
-  "`core_num` must fold to a positive `ConstInt`" invariant is verified
-  centrally by the `CoreNumResolved` property verifier (produced by
-  `Simplify`, required by `OutlineClusterScopes`).
+  expression can be any integer-typed IR value — `Simplify` folds closure
+  arithmetic to `ConstInt`, and codegen resolves `Var` references against
+  the enclosing function scope.
 - `InCoreScopeStmt` / `AutoInCoreScopeStmt` are scheduled for deprecation;
   prefer `HierarchyScopeStmt` or other surviving kinds in new code.
 - Pass behavior:

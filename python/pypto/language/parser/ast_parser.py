@@ -2415,12 +2415,12 @@ class ASTParser:
         Python value that resolves to an IR expression is accepted here —
         closure-captured integers fold to ``ConstInt`` via ``parse_name``'s
         closure fallback, and closure arithmetic folds via ``parse_binop``'s
-        constant-folding path. The "must be a compile-time positive integer"
-        invariant is enforced later by the ``CoreNumResolved`` property
-        verifier (after ``Simplify``). The parser keeps one early diagnostic:
-        if ``core_num`` parses to a literal ``ConstInt`` with a non-positive
-        value, we raise here so the common ``pl.spmd(0)`` mistake reports at
-        source rather than deep in the pipeline.
+        constant-folding path. Non-foldable expressions (e.g. a Var) are
+        passed through unchanged; codegen is responsible for emitting them.
+        The parser keeps one early diagnostic: if ``core_num`` parses to a
+        literal ``ConstInt`` with a non-positive value, we raise here so the
+        common ``pl.spmd(0)`` mistake reports at source rather than deep in
+        the pipeline.
         """
 
         def _parse_core_num_node(value_node: ast.AST, source: ast.AST) -> "ir.Expr":

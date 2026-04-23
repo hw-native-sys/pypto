@@ -200,7 +200,6 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_inout_use.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/verify_call_directions.cpp
-    src/ir/verifier/verify_core_num_resolved.cpp
     src/ir/verifier/warning_verifier_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
 

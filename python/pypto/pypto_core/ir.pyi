@@ -1955,7 +1955,7 @@ class SpmdScopeStmt(ScopeStmt):
     """SPMD dispatch scope."""
 
     core_num: Final[Expr]
-    """SPMD block count expression (must fold to a positive ConstInt)."""
+    """SPMD block count expression."""
 
     sync_start: Final[bool]
     """Require sync-start for SPMD dispatch."""
@@ -1972,8 +1972,7 @@ class SpmdScopeStmt(ScopeStmt):
         """Create an SPMD scope statement.
 
         Accepts either a Python ``int`` (auto-wrapped as ``ConstInt``) or any
-        ``Expr`` that folds to a positive integer; verified centrally by the
-        ``CoreNumResolved`` property verifier.
+        ``Expr`` of integer type.
         """
 
 class SeqStmts(Stmt):

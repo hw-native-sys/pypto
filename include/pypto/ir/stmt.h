@@ -871,11 +871,12 @@ using HierarchyScopeStmtPtr = std::shared_ptr<const HierarchyScopeStmt>;
  *
  * Required `core_num` expression; `sync_start` defaults to false.
  *
- * `core_num_` is stored as a generic `ExprPtr` so compile-time-known
- * integer expressions (closure variables, closure arithmetic, etc.) can
- * flow through the parser without a special-cased evaluation path. The
- * "must fold to a positive `ConstInt`" invariant is enforced centrally
- * by the `CoreNumResolved` property verifier, which runs after Simplify.
+ * `core_num_` is a generic `ExprPtr` so compile-time-known integer
+ * expressions (closure variables, closure arithmetic, etc.) flow through
+ * the parser unchanged. Codegen emits it as a scalar C++ expression —
+ * constants produce a literal, scalar Vars resolve to the enclosing scope's
+ * parameter. `Simplify` folds closure-derived arithmetic to `ConstInt`
+ * whenever possible.
  */
 class SpmdScopeStmt : public ScopeStmt {
  public:
@@ -898,7 +899,7 @@ class SpmdScopeStmt : public ScopeStmt {
   }
 
  public:
-  ExprPtr core_num_;  ///< SPMD block count expression (must fold to positive ConstInt)
+  ExprPtr core_num_;  ///< SPMD block count expression
   bool sync_start_;   ///< Require sync-start for SPMD dispatch
 };
 

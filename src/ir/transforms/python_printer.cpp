@@ -1358,6 +1358,8 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << (AnyCast<bool>(value, "func attr key: " + key) ? "True" : "False");
       } else if (value.type() == typeid(std::string)) {
         stream_ << std::quoted(AnyCast<std::string>(value, "func attr key: " + key));
+      } else if (value.type() == typeid(ExprPtr)) {
+        VisitExpr(AnyCast<ExprPtr>(value, "func attr key: " + key));
       } else {
         INTERNAL_CHECK(false) << "Unsupported function attrs value type for key '" << key
                               << "': " << DemangleTypeName(value.type().name());

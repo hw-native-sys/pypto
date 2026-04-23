@@ -284,9 +284,9 @@ spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
 - 所有作用域语句对 SSA 透明（无 iter_args/return_vars），且不是控制流
   （执行一次，线性执行）。
 - 必填字段在构造时强制校验：`HierarchyScopeStmt.level_` 不可为空；
-  `SpmdScopeStmt.core_num_` 为非空 `ExprPtr`。"`core_num` 必须折叠为正
-  `ConstInt`" 的不变量由 `CoreNumResolved` 属性校验器统一保证（由
-  `Simplify` 产出，`OutlineClusterScopes` 消费）。
+  `SpmdScopeStmt.core_num_` 为非空 `ExprPtr`。表达式可以是任何整型 IR
+  值——`Simplify` 会折叠闭包算术为 `ConstInt`，codegen 则按闭合函数作用
+  域解析 `Var` 引用。
 - `InCoreScopeStmt` / `AutoInCoreScopeStmt` 已计划弃用；新代码应优先使用
   `HierarchyScopeStmt` 或其它将保留的子类。
 - Pass 行为：

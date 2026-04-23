@@ -16,10 +16,9 @@
 
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
-#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -36,27 +35,20 @@ namespace pass {
 namespace {
 
 /// Unwrap nested Spmd scopes in a Group function body:
-/// Extract core_num/sync_start from the Spmd scope and add as function attrs,
-/// then replace the ScopeStmt(Spmd) with its body.
-///
-/// The Spmd scope's `core_num_` is an ExprPtr but must have folded to a
-/// positive ConstInt by this pass (guaranteed by the CoreNumResolved property
-/// verifier, produced by Simplify and required here via pass_properties).
+/// Copy core_num/sync_start from the Spmd scope to the Group function's attrs,
+/// then replace the ScopeStmt(Spmd) with its body. core_num is propagated as
+/// an ExprPtr — codegen is responsible for evaluating it.
 FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
   class SpmdUnwrapper : public IRMutator {
    public:
-    std::optional<int> core_num;
+    ExprPtr core_num;
     std::optional<bool> sync_start;
 
    protected:
     StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
-      CHECK(!core_num.has_value())  // NOLINT(misc-include-cleaner)
+      CHECK(core_num == nullptr)  // NOLINT(misc-include-cleaner)
           << "Only one pl.spmd() block is allowed per cluster scope";
-      auto ci = As<ConstInt>(op->core_num_);
-      INTERNAL_CHECK(ci != nullptr)
-          << "SpmdScopeStmt core_num did not fold to ConstInt before OutlineClusterScopes; "
-             "the CoreNumResolved verifier should have caught this";
-      core_num = static_cast<int>(ci->value_);
+      core_num = op->core_num_;
       sync_start = op->sync_start_;
       return VisitStmt(op->body_);
     }
@@ -64,13 +56,13 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
 
   SpmdUnwrapper unwrapper;
   auto new_body = unwrapper.VisitStmt(group_func->body_);
-  if (!unwrapper.core_num.has_value()) {
+  if (unwrapper.core_num == nullptr) {
     return group_func;
   }
 
   auto mutable_func = MutableCopy(group_func);
   mutable_func->body_ = new_body;
-  mutable_func->attrs_.emplace_back("core_num", *unwrapper.core_num);
+  mutable_func->attrs_.emplace_back("core_num", unwrapper.core_num);
   if (unwrapper.sync_start.has_value() && *unwrapper.sync_start) {
     mutable_func->attrs_.emplace_back("sync_start", true);
   }

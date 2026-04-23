@@ -27,7 +27,6 @@
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verification_error.h"
-#include "pypto/ir/verifier/verifier.h"
 #include "pypto/ir/verifier/warning_verifier_registry.h"
 
 namespace nb = nanobind;
@@ -77,9 +76,7 @@ void BindPass(nb::module_& m) {
       .value("PipelineResolved", IRProperty::PipelineResolved,
              "No ForKind::Pipeline survives; produced by CanonicalizeIOOrder")
       .value("CallDirectionsResolved", IRProperty::CallDirectionsResolved,
-             "Every non-builtin Call has explicit attrs['arg_directions'] (see Call::GetArgDirections)")
-      .value("CoreNumResolved", IRProperty::CoreNumResolved,
-             "Every SpmdScopeStmt::core_num_ folds to a positive ConstInt; produced by Simplify");
+             "Every non-builtin Call has explicit attrs['arg_directions'] (see Call::GetArgDirections)");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")

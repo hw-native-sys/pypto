@@ -901,10 +901,10 @@ def spmd(
 
     Args:
         core_num: Number of blocks for SPMD dispatch. Positional; accepts a
-            Python ``int`` or any ``ir.Expr`` that folds to a positive integer
-            at compile time (e.g. a closure-captured integer constant). Runtime
-            IR values are rejected by the ``CoreNumResolved`` verifier before
-            codegen.
+            Python ``int`` or any ``ir.Expr`` of integer type. Closure-captured
+            integer constants and closure arithmetic are folded to ``ConstInt``
+            by the parser and ``Simplify``; non-foldable expressions flow
+            through to codegen unchanged.
         sync_start: If True, all blocks start execution simultaneously (default: False).
         name_hint: Optional name hint for the outlined function.
 

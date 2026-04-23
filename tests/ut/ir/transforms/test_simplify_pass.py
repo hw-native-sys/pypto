@@ -67,11 +67,9 @@ class TestPassMetadata:
         p = passes.simplify()
         assert p.get_required_properties().empty()
 
-    def test_pass_produces_core_num_resolved(self):
-        """Simplify folds SpmdScopeStmt::core_num_ to ConstInt, producing CoreNumResolved."""
+    def test_pass_no_produced_properties(self):
         p = passes.simplify()
-        produced = p.get_produced_properties()
-        assert produced.contains(passes.IRProperty.CoreNumResolved)
+        assert p.get_produced_properties().empty()
 
 
 # ============================================================================

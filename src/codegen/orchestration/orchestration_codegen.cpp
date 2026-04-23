@@ -703,12 +703,31 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return params;
   }
 
+  // Emit a scalar IR expression as a C++ expression string for orchestration codegen.
+  // Covers the subset of expressions that may appear as the SpmdScopeStmt core_num —
+  // ConstInt (compile-time literal) and Var (a scalar parameter of the orchestration
+  // function, visible in the same C++ scope). Anything else is an internal error;
+  // callers must Simplify the IR before reaching codegen if needed.
+  static std::string EmitScalarExprForCodegen(const ExprPtr& expr) {
+    if (auto ci = As<ConstInt>(expr)) {
+      return std::to_string(ci->value_);
+    }
+    if (auto v = As<Var>(expr)) {
+      return v->name_hint_;
+    }
+    INTERNAL_CHECK_SPAN(false, expr->span_)
+        << "Unsupported scalar expression kind for orchestration codegen: "
+        << "expected ConstInt or Var, got kind=" << static_cast<int>(expr->GetKind());
+    return "";
+  }
+
   void EmitLaunchSpec(const std::string& ind, const std::string& task_var, const FunctionPtr& launch_func) {
-    int core_num = launch_func->GetAttr<int>("core_num", 0);
+    auto core_num_expr = launch_func->GetAttr<ExprPtr>("core_num", nullptr);
     bool sync_start = launch_func->GetAttr<bool>("sync_start", false);
-    if (core_num > 0) {
+    if (core_num_expr) {
       const std::string method = pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod();
-      code_ << ind << task_var << ".launch_spec." << method << "(" << core_num << ");\n";
+      code_ << ind << task_var << ".launch_spec." << method << "(" << EmitScalarExprForCodegen(core_num_expr)
+            << ");\n";
     }
     if (sync_start) {
       code_ << ind << task_var << ".launch_spec.set_require_sync_start(true);\n";

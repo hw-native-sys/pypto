@@ -704,8 +704,7 @@ static IRNodePtr DeserializeSpmdScopeStmt(const msgpack::object& fields_obj, msg
                                           DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
 
-  // core_num is stored as a full Expr node (must fold to a positive ConstInt;
-  // enforced by the CoreNumResolved verifier before codegen).
+  // core_num is stored as a full Expr node.
   auto core_num = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("core_num"), zone));
 
   // sync_start is required (bool, defaults to false if missing)
