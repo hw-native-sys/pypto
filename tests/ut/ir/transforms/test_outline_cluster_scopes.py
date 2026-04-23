@@ -391,20 +391,32 @@ class TestOutlineClusterScopes:
         After = passes.outline_incore_scopes()(Before)
         After = passes.outline_cluster_scopes()(After)
 
+        def directions_by_hint(func):
+            return {p.name_hint: d for p, d in zip(func.params, func.param_directions)}
+
+        def find_param(hints, prefix):
+            matches = [h for h in hints if h == prefix or h.startswith(prefix + "__")]
+            assert len(matches) == 1, f"expected exactly one param starting with {prefix!r}, got {matches}"
+            return matches[0]
+
         spmd_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.Spmd]
         assert len(spmd_funcs) == 1, "expected exactly one outlined Spmd wrapper"
-        spmd_func = spmd_funcs[0]
-        assert ir.ParamDirection.InOut in spmd_func.param_directions, (
-            "spmd wrapper's assemble-destination parameter should be InOut, "
-            f"got {list(spmd_func.param_directions)}"
+        spmd_dirs = directions_by_hint(spmd_funcs[0])
+        assert spmd_dirs[find_param(spmd_dirs, "out")] == ir.ParamDirection.InOut, (
+            f"spmd wrapper's `out` param should be InOut, got {spmd_dirs}"
+        )
+        assert spmd_dirs[find_param(spmd_dirs, "a")] == ir.ParamDirection.In, (
+            f"spmd wrapper's `a` param should remain In, got {spmd_dirs}"
         )
 
         incore_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.InCore]
         assert len(incore_funcs) == 1, "expected exactly one outlined InCore wrapper"
-        incore_func = incore_funcs[0]
-        assert ir.ParamDirection.InOut in incore_func.param_directions, (
-            "incore wrapper's assemble-destination parameter should be InOut, "
-            f"got {list(incore_func.param_directions)}"
+        incore_dirs = directions_by_hint(incore_funcs[0])
+        assert incore_dirs[find_param(incore_dirs, "out")] == ir.ParamDirection.InOut, (
+            f"incore wrapper's `out` param should be InOut, got {incore_dirs}"
+        )
+        assert incore_dirs[find_param(incore_dirs, "a")] == ir.ParamDirection.In, (
+            f"incore wrapper's `a` param should remain In, got {incore_dirs}"
         )
 
     def test_cluster_outlined_verifier_rejects_cluster_in_incore(self):
