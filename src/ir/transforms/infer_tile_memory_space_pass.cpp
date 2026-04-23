@@ -292,7 +292,15 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     }
     if (entry.HasRetargetableMemoryKwarg()) {
       auto demand_it = demands_.find(out_var);
-      if (demand_it != demands_.end()) return demand_it->second;
+      if (demand_it != demands_.end()) {
+        MemorySpace demand = demand_it->second;
+        // Retargetable DDR-facing producers (tile.load) can only directly
+        // produce {Vec, Mat}; specialized demands (Left/Right/Acc/Bias) from
+        // downstream compute ops (matmul etc.) must be reached via a
+        // tile.move inserted by Phase 2 MoveCollector. Clamping here keeps
+        // the producer's output hardware-valid and preserves the move chain.
+        if (demand == MemorySpace::Vec || demand == MemorySpace::Mat) return demand;
+      }
     }
     return InheritFromInput(call).value_or(MemorySpace::Vec);
   }

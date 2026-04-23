@@ -396,10 +396,14 @@ class OpRegistryEntry {
   /// (e.g. `tile.load`, `tile.create`): the op carries a writable `target_memory`
   /// kwarg that InferTileMemorySpace can rewrite to match consumer demand.
   /// Inherit-input and fixed-output ops don't participate in retargeting.
+  /// Distinguishes true deferral (resolver returns nullopt when the kwarg is
+  /// absent) from ops that carry a `target_memory` kwarg but still produce a
+  /// concrete default (e.g. `tile.move` → Vec) — those are not retargetable.
   [[nodiscard]] bool HasRetargetableMemoryKwarg() const {
     if (!memory_spec_.has_value() || !memory_spec_->deduce_output_memory) return false;
     if (memory_spec_->output_inherits_input) return false;
-    return op_ && op_->HasAttr("target_memory");
+    if (!op_ || !op_->HasAttr("target_memory")) return false;
+    return !memory_spec_->deduce_output_memory({}).has_value();
   }
 
   /// Declare that this op's output reuses the MemRef of the input at arg_index.
