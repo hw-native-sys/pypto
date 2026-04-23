@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from pypto.language.typing import Scalar, Tensor, Tile
     from pypto.pypto_core import ir
 
+from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import SplitMode
 
 from .optimizations import Optimization
@@ -846,7 +847,7 @@ class SpmdContext:
 
     def __init__(
         self,
-        core_num: int,
+        core_num: int | _ir.Expr,
         sync_start: bool = False,
         name_hint: str = "",
     ) -> None:
@@ -875,7 +876,7 @@ class SpmdContext:
 
 
 def spmd(
-    core_num: int,
+    core_num: int | _ir.Expr,
     *,
     sync_start: bool = False,
     name_hint: str = "",
@@ -899,8 +900,11 @@ def spmd(
        declaration.
 
     Args:
-        core_num: Number of blocks for SPMD dispatch. Positional; must be a
-            positive integer.
+        core_num: Number of blocks for SPMD dispatch. Positional; accepts a
+            Python ``int`` or any ``ir.Expr`` of integer type. Closure-captured
+            integer constants and closure arithmetic are folded to ``ConstInt``
+            by the parser and ``Simplify``; non-foldable expressions flow
+            through to codegen unchanged.
         sync_start: If True, all blocks start execution simultaneously (default: False).
         name_hint: Optional name hint for the outlined function.
 
@@ -924,7 +928,9 @@ def spmd(
         ...     with pl.spmd(4, sync_start=True):
         ...         out = self.kernel(a, b, out)
     """
-    if not isinstance(core_num, int) or isinstance(core_num, bool) or core_num <= 0:
+    if isinstance(core_num, bool) or not isinstance(core_num, (int, _ir.Expr)):
+        raise ValueError(f"core_num must be a positive integer or ir.Expr, got {core_num!r}")
+    if isinstance(core_num, int) and core_num <= 0:
         raise ValueError(f"core_num must be a positive integer, got {core_num!r}")
     return SpmdContext(core_num=core_num, sync_start=sync_start, name_hint=name_hint)
 

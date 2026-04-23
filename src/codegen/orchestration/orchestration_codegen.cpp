@@ -703,12 +703,29 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return params;
   }
 
+  // Render the launched function's core_num attribute as a C++ scalar expression.
+  // Accepts a ConstInt literal or a Var resolving to an orchestration-scope scalar
+  // variable (routed through TryGetVarName so SSA/emit-name mapping is respected).
+  [[nodiscard]] std::string RenderLaunchCoreNum(const ExprPtr& expr) const {
+    if (auto ci = As<ConstInt>(expr)) {
+      return std::to_string(ci->value_);
+    }
+    if (As<Var>(expr) != nullptr) {
+      return TryGetVarName(expr);
+    }
+    INTERNAL_CHECK_SPAN(false, expr->span_)
+        << "Unsupported core_num expression kind for orchestration codegen: "
+        << "expected ConstInt or Var, got kind=" << static_cast<int>(expr->GetKind());
+    return "";
+  }
+
   void EmitLaunchSpec(const std::string& ind, const std::string& task_var, const FunctionPtr& launch_func) {
-    int core_num = launch_func->GetAttr<int>("core_num", 0);
+    auto core_num_expr = launch_func->GetAttr<ExprPtr>("core_num", nullptr);
     bool sync_start = launch_func->GetAttr<bool>("sync_start", false);
-    if (core_num > 0) {
+    if (core_num_expr) {
       const std::string method = pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod();
-      code_ << ind << task_var << ".launch_spec." << method << "(" << core_num << ");\n";
+      code_ << ind << task_var << ".launch_spec." << method << "(" << RenderLaunchCoreNum(core_num_expr)
+            << ");\n";
     }
     if (sync_start) {
       code_ << ind << task_var << ".launch_spec.set_require_sync_start(true);\n";

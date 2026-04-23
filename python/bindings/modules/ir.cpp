@@ -130,6 +130,9 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<LoopOrigin>(item.second));
     } else if (nb::isinstance<ArgDirection>(item.second)) {
       kwargs.emplace_back(key, nb::cast<ArgDirection>(item.second));
+    } else if (nb::isinstance<Expr>(item.second)) {
+      // IR expression (e.g. SpmdScopeStmt core_num stored as Function attr).
+      kwargs.emplace_back(key, nb::cast<ExprPtr>(item.second));
     } else if (nb::isinstance<nb::bool_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<bool>(item.second));
     } else if (nb::isinstance<nb::int_>(item.second)) {
@@ -158,12 +161,12 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
 }
 
 std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nb::object& attrs_or_none) {
-  if (attrs_or_none.is_none()) return {};
-  if (nb::isinstance<nb::dict>(attrs_or_none)) {
-    return ConvertKwargsDict(nb::cast<nb::dict>(attrs_or_none));
-  }
-  if (nb::isinstance<nb::list>(attrs_or_none)) {
-    std::vector<std::pair<std::string, std::any>> attrs;
+  std::vector<std::pair<std::string, std::any>> attrs;
+  if (attrs_or_none.is_none()) {
+    // no-op
+  } else if (nb::isinstance<nb::dict>(attrs_or_none)) {
+    attrs = ConvertKwargsDict(nb::cast<nb::dict>(attrs_or_none));
+  } else if (nb::isinstance<nb::list>(attrs_or_none)) {
     for (auto item : nb::cast<nb::list>(attrs_or_none)) {
       auto tup = nb::cast<nb::tuple>(item);
       nb::dict d;
@@ -171,9 +174,20 @@ std::vector<std::pair<std::string, std::any>> ConvertAttrsFromPython(const nb::o
       auto converted = ConvertKwargsDict(d);
       attrs.push_back(converted[0]);
     }
-    return attrs;
+  } else {
+    throw pypto::TypeError("attrs must be a dict, list of (key, value) tuples, or None");
   }
-  throw pypto::TypeError("attrs must be a dict, list of (key, value) tuples, or None");
+  // Ergonomic auto-wrap: Function attrs["core_num"] is typed as ExprPtr, but
+  // users and text-parser reparse sites commonly supply a plain int — wrap it
+  // as ConstInt(DataType::INDEX) so the codegen-side ExprPtr read is uniform.
+  for (auto& [key, value] : attrs) {
+    if (key == "core_num" && value.type() == typeid(int)) {
+      auto n = std::any_cast<int>(value);
+      value = std::static_pointer_cast<const Expr>(
+          std::make_shared<const ConstInt>(n, DataType::INDEX, Span::unknown()));
+    }
+  }
+  return attrs;
 }
 
 /// Conditionally apply the registered format callback.
@@ -1044,9 +1058,21 @@ void BindIR(nb::module_& m) {
   // SpmdScopeStmt
   auto spmd_scope_stmt_class =
       nb::class_<SpmdScopeStmt, ScopeStmt>(ir, "SpmdScopeStmt", "SPMD dispatch scope");
-  spmd_scope_stmt_class.def(nb::init<int, bool, std::string, const StmtPtr&, const Span&>(),
+  spmd_scope_stmt_class.def(nb::init<ExprPtr, bool, std::string, const StmtPtr&, const Span&>(),
                             nb::arg("core_num"), nb::arg("sync_start") = false, nb::arg("name_hint") = "",
                             nb::arg("body"), nb::arg("span"), "Create an SPMD scope statement");
+  // Convenience overload: accept a plain Python int for core_num and wrap it as
+  // ConstInt(DataType::INDEX) automatically, mirroring the surface of pl.spmd()
+  // and IRBuilder.scope() so callers can write ir.SpmdScopeStmt(core_num=4, ...).
+  spmd_scope_stmt_class.def(
+      "__init__",
+      [](SpmdScopeStmt* self, int64_t core_num, bool sync_start, std::string name_hint, const StmtPtr& body,
+         const Span& span) {
+        auto core_num_expr = std::make_shared<const ConstInt>(core_num, DataType::INDEX, span);
+        new (self) SpmdScopeStmt(core_num_expr, sync_start, std::move(name_hint), body, span);
+      },
+      nb::arg("core_num"), nb::arg("sync_start") = false, nb::arg("name_hint") = "", nb::arg("body"),
+      nb::arg("span"), "Create an SPMD scope statement (int core_num is wrapped as ConstInt)");
   BindFields<SpmdScopeStmt>(spmd_scope_stmt_class);
 
   // SeqStmts - const shared_ptr
@@ -1215,6 +1241,8 @@ void BindIR(nb::module_& m) {
             result[key.c_str()] = AnyCast<TileLayout>(value, "converting to Python: " + key);
           } else if (value.type() == typeid(PadValue)) {
             result[key.c_str()] = AnyCast<PadValue>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(ExprPtr)) {
+            result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
           }
         }
         return result;

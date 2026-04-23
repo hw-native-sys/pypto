@@ -301,7 +301,7 @@ class IRBuilder {
    */
   void BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level = std::nullopt,
                   std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
-                  std::string name_hint = "", std::optional<int> core_num = std::nullopt,
+                  std::string name_hint = "", ExprPtr core_num = nullptr,
                   std::optional<bool> sync_start = std::nullopt);
 
   /**
@@ -722,7 +722,7 @@ class ScopeContext : public BuildContext {
  public:
   ScopeContext(ScopeKind scope_kind, Span span, std::optional<Level> level = std::nullopt,
                std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
-               std::string name_hint = "", std::optional<int> core_num = std::nullopt,
+               std::string name_hint = "", ExprPtr core_num = nullptr,
                std::optional<bool> sync_start = std::nullopt)
       : BuildContext(Type::SCOPE, std::move(span)),
         scope_kind_(scope_kind),
@@ -730,7 +730,7 @@ class ScopeContext : public BuildContext {
         role_(role),
         split_(split),
         name_hint_(std::move(name_hint)),
-        core_num_(core_num),
+        core_num_(std::move(core_num)),
         sync_start_(sync_start) {}
 
   void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
@@ -740,7 +740,7 @@ class ScopeContext : public BuildContext {
   [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
   [[nodiscard]] std::optional<SplitMode> GetSplit() const { return split_; }
   [[nodiscard]] const std::string& GetNameHint() const { return name_hint_; }
-  [[nodiscard]] std::optional<int> GetCoreNum() const { return core_num_; }
+  [[nodiscard]] const ExprPtr& GetCoreNum() const { return core_num_; }
   [[nodiscard]] std::optional<bool> GetSyncStart() const { return sync_start_; }
   [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
 
@@ -750,7 +750,7 @@ class ScopeContext : public BuildContext {
   std::optional<Role> role_;
   std::optional<SplitMode> split_;
   std::string name_hint_;
-  std::optional<int> core_num_;
+  ExprPtr core_num_;
   std::optional<bool> sync_start_;
   std::vector<StmtPtr> stmts_;
 };

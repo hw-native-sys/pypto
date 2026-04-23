@@ -641,11 +641,17 @@ StmtPtr IRMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
 }
 
 StmtPtr IRMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->core_num_, op->span_) << "SpmdScopeStmt has null core_num";
+  auto new_core_num = ExprFunctor<ExprPtr>::VisitExpr(op->core_num_);
+  INTERNAL_CHECK_SPAN(new_core_num, op->span_) << "SpmdScopeStmt core_num mutated to null";
+
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "SpmdScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK_SPAN(new_body, op->span_) << "SpmdScopeStmt body mutated to null";
-  if (new_body.get() != op->body_.get()) {
+
+  if (new_core_num.get() != op->core_num_.get() || new_body.get() != op->body_.get()) {
     auto result = MutableCopy(op);
+    result->core_num_ = std::move(new_core_num);
     result->body_ = std::move(new_body);
     return result;
   }

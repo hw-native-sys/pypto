@@ -260,7 +260,7 @@ class IRBuilder:
         role: ir.Role | None = None,
         split: ir.SplitMode | None = None,
         name_hint: str = "",
-        core_num: int | None = None,
+        core_num: int | ir.Expr | None = None,
         sync_start: bool | None = None,
     ) -> Iterator["ScopeBuilder"]:
         """Context manager for building scope statements.
@@ -272,7 +272,9 @@ class IRBuilder:
             role: Function role (for ScopeKind.Hierarchy)
             split: Split mode for cross-core transfer (for AutoInCore scopes)
             name_hint: User-provided scope name hint (empty = auto-generate)
-            core_num: SPMD block count (for ScopeKind.Spmd scopes)
+            core_num: SPMD block count for ScopeKind.Spmd scopes. Accepts a
+                Python ``int`` (auto-wrapped as ``ir.ConstInt``) or any
+                ``ir.Expr`` that folds to a positive integer.
             sync_start: Require sync-start for SPMD dispatch (for ScopeKind.Spmd scopes)
 
         Yields:
@@ -288,7 +290,10 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_scope(scope_kind, begin_span, level, role, split, name_hint, core_num, sync_start)
+        core_num_expr = _normalize_expr(core_num, begin_span) if core_num is not None else None
+        self._builder.begin_scope(
+            scope_kind, begin_span, level, role, split, name_hint, core_num_expr, sync_start
+        )
         builder_obj = ScopeBuilder(self)
         try:
             yield builder_obj

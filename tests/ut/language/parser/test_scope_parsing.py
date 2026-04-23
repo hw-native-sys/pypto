@@ -256,7 +256,8 @@ class TestSpmdForLoop:
 
         main_func = list(TestProgram.functions.values())[0]
         spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
-        assert spmd.core_num == 4
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 4
         assert spmd.sync_start is False
         incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
 
@@ -287,7 +288,59 @@ class TestSpmdForLoop:
 
         main_func = list(TestProgram.functions.values())[0]
         spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
-        assert spmd.core_num == 4
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 4
+
+    def test_for_spmd_accepts_closure_int_variable(self):
+        """Closure-captured Python ints resolve to ConstInt via parse_name.
+
+        Regression test for issue #1125 — parameterized builder functions
+        need to pass ``core_num`` as a Python variable.
+        """
+        max_ctx_blocks = 64  # Plain Python int in the enclosing scope.
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(core_num=max_ctx_blocks):
+                    offset = i * 8
+                    t: pl.Tile[[8, 128], pl.FP32] = pl.load(a, [offset, 0], [8, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 64
+
+    def test_for_spmd_accepts_closure_binop(self):
+        """Closure arithmetic folds to ConstInt via parse_binop's fold path."""
+        MAX_CTX_BLOCKS = 128
+        SB_BATCH = 2
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(core_num=MAX_CTX_BLOCKS // SB_BATCH):
+                    offset = i * 8
+                    t: pl.Tile[[8, 128], pl.FP32] = pl.load(a, [offset, 0], [8, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 64
 
     def test_for_spmd_sync_start_and_name_hint(self):
         """sync_start= and name_hint= pass through to SpmdScopeStmt."""
@@ -308,7 +361,8 @@ class TestSpmdForLoop:
 
         main_func = list(TestProgram.functions.values())[0]
         spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
-        assert spmd.core_num == 8
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 8
         assert spmd.sync_start is True
         assert spmd.name_hint == "my_kernel"
 
@@ -402,6 +456,26 @@ class TestSpmdForLoop:
             @pl.function
             def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 for i in pl.spmd(0):
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_float_core_num(self):
+        """core_num must resolve to an integer-typed expression."""
+        with pytest.raises(ParserSyntaxError, match="must be an integer expression"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(1.5):  # type: ignore[arg-type]
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_bool_core_num(self):
+        """A boolean literal is not an acceptable core_num."""
+        with pytest.raises(ParserSyntaxError, match="must be an integer expression"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(True):  # type: ignore[arg-type]
                     _ = i
                 return a
 

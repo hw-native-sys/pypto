@@ -27,7 +27,6 @@
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/verifier/property_verifier_registry.h"
 #include "pypto/ir/verifier/verification_error.h"
-#include "pypto/ir/verifier/verifier.h"
 #include "pypto/ir/verifier/warning_verifier_registry.h"
 
 namespace nb = nanobind;
