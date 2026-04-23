@@ -307,7 +307,7 @@ class _BodyTransformer(ast.NodeTransformer):
         # to inline constants and by visit_Assign to suppress the assignment.
         self._shape_inlined: dict[str, int] = {}
         # Alpha-renaming support: tracks how many times each local has been assigned
-        # (so we can generate x__1, x__2, ... on rebindings).
+        # (so we can generate x_v1, x_v2, ... on rebindings).
         self._assign_count: dict[str, int] = {}
         # Maps local variable name → current (latest) renamed alias.
         # Empty until the variable is assigned a second time.

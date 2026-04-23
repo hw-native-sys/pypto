@@ -689,7 +689,7 @@ class TestVariableRebinding:
         """
         out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
         assert "x =" in out
-        assert "x__1" not in out
+        assert "x_v1" not in out
 
     def test_rebind_generates_fresh_name(self):
         src = """
