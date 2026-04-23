@@ -1436,6 +1436,8 @@ class WrapperForwardMutator : public TypePropagatingMutator {
         transformed_incore_funcs_(transformed_incore_funcs),
         new_output_vars_(std::move(new_output_vars)) {}
 
+  [[nodiscard]] bool applied() const { return applied_; }
+
  protected:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto new_value = VisitExpr(op->value_);
@@ -1514,8 +1516,14 @@ WrapperTransformResult PropagateOutputsThroughWrapper(
   auto gv = std::dynamic_pointer_cast<const GlobalVar>(target_call->op_);
   INTERNAL_CHECK_SPAN(gv != nullptr, target_call->span_)
       << "Internal error: forwarded call op is not a GlobalVar";
-  size_t num_added = incore_added_outputs.at(gv->name_);
-  const auto& incore_func = transformed_incore_funcs.at(gv->name_);
+  auto added_outputs_it = incore_added_outputs.find(gv->name_);
+  INTERNAL_CHECK_SPAN(added_outputs_it != incore_added_outputs.end(), target_call->span_)
+      << "Internal error: missing added-output metadata for forwarded callee " << gv->name_;
+  auto transformed_incore_func_it = transformed_incore_funcs.find(gv->name_);
+  INTERNAL_CHECK_SPAN(transformed_incore_func_it != transformed_incore_funcs.end(), target_call->span_)
+      << "Internal error: missing transformed InCore function for forwarded callee " << gv->name_;
+  size_t num_added = added_outputs_it->second;
+  const auto& incore_func = transformed_incore_func_it->second;
 
   // Mirror the InCore's appended Out params on the wrapper: same type, Out
   // direction. Names are scoped to the wrapper so the clone is safe.
@@ -1534,6 +1542,14 @@ WrapperTransformResult PropagateOutputsThroughWrapper(
 
   WrapperForwardMutator mutator(incore_added_outputs, transformed_incore_funcs, new_output_vars);
   auto new_body = mutator.VisitStmt(func->body_);
+  // Outlined Spmd/Group wrappers always forward via an `out = self.kernel(x, ...);
+  // return out` AssignStmt — WrapperForwardMutator rewrites that shape. If
+  // ForwardedCallFinder found a target call but the mutator failed to apply,
+  // the wrapper's signature has been mirrored but its inner call was not
+  // updated — a silent mis-rewrite. Fail fast instead.
+  INTERNAL_CHECK_SPAN(mutator.applied(), target_call->span_)
+      << "Wrapper forward propagation identified a forwarded call in " << func->name_
+      << " but could not rewrite it (call not in AssignStmt RHS form expected by outlining invariant)";
 
   std::vector<TypePtr> new_return_types = incore_func->return_types_;
   auto new_func =
@@ -1704,6 +1720,12 @@ Pass ConvertTensorToTileOps() {
     std::vector<FunctionPtr> functions_phase2b;
     functions_phase2b.reserve(functions_phase2a.size());
     for (const auto& func : functions_phase2a) {
+      // Skip InCore (rewritten in Phase 1) and every Spmd/Group (rewritten in
+      // Phase 2a when forwarding a transformed InCore; otherwise nothing to
+      // forward because ForwardedCallFinder rejects callees that gained zero
+      // Out params). The postcondition check in PropagateOutputsThroughWrapper
+      // turns any finder/mutator mismatch into a hard INTERNAL_CHECK rather
+      // than a silent mis-rewrite.
       if (func->func_type_ == FunctionType::InCore || func->func_type_ == FunctionType::Spmd ||
           func->func_type_ == FunctionType::Group) {
         functions_phase2b.push_back(func);
