@@ -641,5 +641,99 @@ class TestSpecializerIntegration:
         ir.assert_structural_equal(got, Expected)
 
 
+# ---------------------------------------------------------------------------
+# TestVariableRebinding
+# ---------------------------------------------------------------------------
+
+
+class TestVariableRebinding:
+    """Tests for alpha-renaming of variable rebindings in _BodyTransformer."""
+
+    def _transform(self, src: str, tensor_meta: dict | None = None) -> str:
+        src = textwrap.dedent(src)
+        tree = ast.parse(src)
+        func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+        transformer = _BodyTransformer(
+            tensor_meta=tensor_meta or {},
+            scalar_values={},
+            dynamic_dims=set(),
+            dynvar_python_names={},
+            dep_names=set(),
+            dynvar_var_names=set(),
+        )
+        new_body = []
+        for stmt in func_def.body:
+            result = transformer.visit(stmt)
+            if result is None:
+                continue
+            if isinstance(result, list):
+                new_body.extend(result)
+            else:
+                new_body.append(result)
+        new_func = ast.FunctionDef(
+            name="f",
+            args=func_def.args,
+            body=new_body or [ast.Pass()],
+            decorator_list=[],
+            returns=None,
+            lineno=1,
+            col_offset=0,
+        )
+        ast.fix_missing_locations(new_func)
+        return ast.unparse(new_func)
+
+    def test_single_assignment_unchanged(self):
+        src = """
+            def f(a):
+                x = pl.load(a)
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
+        assert "x =" in out
+        assert "x__1" not in out
+
+    def test_rebind_generates_fresh_name(self):
+        src = """
+            def f(a):
+                x = a
+                x = pl.load(x)
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
+        assert "x =" in out
+        assert "x_v1 =" in out
+
+    def test_rebind_rhs_references_prior_alias(self):
+        src = """
+            def f(a):
+                x = a
+                x = pl.load(x)
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
+        # The RHS of x_v1 = ... should reference the original x, not x_v1
+        assert "x_v1 = pl.load(x)" in out
+
+    def test_rebind_multiple_times(self):
+        src = """
+            def f():
+                x = a
+                x = b
+                x = c
+        """
+        out = self._transform(src)
+        assert "x =" in out
+        assert "x_v1 =" in out
+        assert "x_v2 =" in out
+
+    def test_later_reads_see_latest_alias(self):
+        src = """
+            def f(a):
+                x = a
+                x = pl.mul(x, 2.0)
+                y = x
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
+        # y should be assigned the latest alias x_v1
+        assert "y = x_v1" in out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

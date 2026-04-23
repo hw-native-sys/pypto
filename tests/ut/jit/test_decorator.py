@@ -13,8 +13,9 @@ import pypto.language as pl
 import pytest
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
-from pypto.jit.decorator import JITFunction, _discover_deps, jit
-from pypto.pypto_core import ir
+from pypto.jit.decorator import JITFunction, _discover_deps, _rewrite_jit_error, jit
+from pypto.jit.specializer import TensorMeta
+from pypto.pypto_core import DataType, ir
 
 # ---------------------------------------------------------------------------
 # Decoration tests (no torch needed)
@@ -474,6 +475,61 @@ class TestRoundTrip:
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         expected_post_pass = pm.run_passes(Expected)
         ir.assert_structural_equal(got, expected_post_pass)
+
+
+# ---------------------------------------------------------------------------
+# Variable rebinding (Issue #1121)
+# ---------------------------------------------------------------------------
+
+
+class TestVariableRebinding:
+    """Tests for Python-style variable rebinding in @pl.jit (Issue #1121)."""
+
+    def test_rebind_same_type_compiles(self):
+        """Rebinding a Tile variable to a new Tile value must compile without error."""
+
+        @jit
+        def kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(x, [0, 0], [128, 128])
+                t = pl.mul(t, t)  # rebind: Tile → Tile (same type)
+                pl.store(t, [0, 0], out)
+            return out
+
+        result = kernel._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((128, 128), DataType.FP32),
+                "out": TensorMeta((128, 128), DataType.FP32),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            dynamic_dims=set(),
+            pl=pl,
+        )
+        assert result is not None
+
+    def test_rebind_error_shows_original_name(self):
+        """When a JIT compilation error occurs, error messages must show the
+        user's original variable name, not the internal renamed alias."""
+        rename_map = {"t_v1": "t", "x_v2": "x"}
+        exc = ValueError("Variable 't_v1' has type Tile but expected Scalar")
+        rewritten = _rewrite_jit_error(exc, rename_map)
+        assert "t_v1" not in str(rewritten)
+        assert "'t'" in str(rewritten)
+
+    def test_no_rename_map_returns_original_exception(self):
+        """With an empty rename map, the original exception object is returned."""
+        exc = ValueError("some error")
+        result = _rewrite_jit_error(exc, {})
+        assert result is exc
+
+    def test_rebind_longer_alias_replaced_first(self):
+        """Longer aliases are replaced before shorter ones to avoid partial matches."""
+        rename_map = {"t_v1": "t", "t_v10": "t"}
+        exc = ValueError("'t_v10' and 't_v1' are both invalid")
+        rewritten = _rewrite_jit_error(exc, rename_map)
+        assert "t_v10" not in str(rewritten)
+        assert "t_v1" not in str(rewritten)
 
 
 if __name__ == "__main__":

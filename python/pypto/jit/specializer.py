@@ -306,10 +306,73 @@ class _BodyTransformer(ast.NodeTransformer):
         # constant values when all dimensions are static.  Used by visit_Name
         # to inline constants and by visit_Assign to suppress the assignment.
         self._shape_inlined: dict[str, int] = {}
+        # Alpha-renaming support: tracks how many times each local has been assigned
+        # (so we can generate x__1, x__2, ... on rebindings).
+        self._assign_count: dict[str, int] = {}
+        # Maps local variable name → current (latest) renamed alias.
+        # Empty until the variable is assigned a second time.
+        self._var_renames: dict[str, str] = {}
+        # Reverse map: generated alias → original user variable name.
+        # Used to rewrite error messages so users see their original names.
+        self._alias_to_original: dict[str, str] = {}
+        # Tracks the scope depth at which each variable was first assigned.
+        # Rebindings at a deeper scope (e.g. inside a for/with) are loop-carried
+        # updates and must NOT be renamed.
+        self._assign_depth: dict[str, int] = {}
+        self._scope_depth: int = 0
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _record_first_assign(self, var_name: str) -> None:
+        """Record a first (or tuple-unpack) assignment so later rebindings can be renamed."""
+        if var_name not in self._assign_count:
+            self._assign_count[var_name] = 1
+            self._assign_depth[var_name] = self._scope_depth
+
+    def _rebind(self, var_name: str) -> str:
+        """Generate a fresh name for a rebinding of ``var_name``.
+
+        Returns the new name and updates ``_var_renames`` so subsequent reads
+        of ``var_name`` resolve to the new alias.
+        """
+        count = self._assign_count[var_name]
+        new_name = f"{var_name}_v{count}"
+        self._assign_count[var_name] += 1
+        self._var_renames[var_name] = new_name
+        self._alias_to_original[new_name] = var_name
+        return new_name
+
+    @property
+    def rename_map(self) -> dict[str, str]:
+        """Return mapping from generated alias → original user variable name."""
+        return dict(self._alias_to_original)
+
+    def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
+        """Handle a single-target name assignment with alpha-renaming support."""
+        var_name = cast(ast.Name, node.targets[0]).id
+        visited_value = self.visit(node.value)
+        if var_name in self._assign_count:
+            # Only rename at the same scope where the variable was first defined.
+            # Rebindings at a deeper scope (inside for/with) are loop-carried
+            # updates — do not rename them.
+            if self._scope_depth == self._assign_depth[var_name]:
+                new_name = self._rebind(var_name)
+                new_node = ast.Assign(
+                    targets=[ast.Name(id=new_name, ctx=ast.Store())],
+                    value=visited_value,
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                )
+                ast.fix_missing_locations(new_node)
+                return new_node
+            node.value = visited_value
+            return node
+        # First assignment: record and keep original name.
+        self._record_first_assign(var_name)
+        node.value = visited_value
+        return node
 
     def _shape_tuple_node(self, param_name: str) -> ast.Tuple:
         meta = self._meta[param_name]
@@ -382,6 +445,7 @@ class _BodyTransformer(ast.NodeTransformer):
                 stmts: list[ast.stmt] = []
                 for tgt, (i, dim) in zip(target_names, enumerate(meta.shape)):
                     if isinstance(tgt, ast.Name):
+                        self._record_first_assign(tgt.id)
                         if (param_name, i) in self._dynamic_dims:
                             # Dynamic dim: emit assignment (M = <dynvar ref>),
                             # but skip if it would be a no-op (LHS name == RHS name).
@@ -417,7 +481,13 @@ class _BodyTransformer(ast.NodeTransformer):
             if (param_name, dim_idx) not in self._dynamic_dims:
                 meta = self._meta[param_name]
                 self._shape_inlined[node.targets[0].id] = meta.shape[dim_idx]
+                self._record_first_assign(node.targets[0].id)
                 return None
+
+        # Default: visit the RHS first (applies existing renames to operands),
+        # then handle rebinding rename on the LHS.
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            return self._visit_simple_assign(node)
 
         return cast("ast.stmt", self.generic_visit(node))
 
@@ -426,12 +496,14 @@ class _BodyTransformer(ast.NodeTransformer):
     # ------------------------------------------------------------------
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
-        """Replace scalar param references and inlined shape constants."""
+        """Replace scalar param references, inlined shape constants, and renamed rebindings."""
         if isinstance(node.ctx, ast.Load):
             if node.id in self._scalars:
                 return ast.Constant(value=self._scalars[node.id])
             if node.id in self._shape_inlined:
                 return ast.Constant(value=self._shape_inlined[node.id])
+            if node.id in self._var_renames:
+                return ast.Name(id=self._var_renames[node.id], ctx=ast.Load())
         return node
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
@@ -475,6 +547,35 @@ class _BodyTransformer(ast.NodeTransformer):
             ast.copy_location(new_node, node)
             return cast("ast.expr", self.generic_visit(new_node))
         return cast("ast.expr", self.generic_visit(node))
+
+    def _visit_scoped_body(self, statements: list[ast.stmt]) -> list[ast.stmt]:
+        """Visit statements within a nested scope, flattening lists and dropping None."""
+        result: list[ast.stmt] = []
+        for stmt in statements:
+            visited = self.visit(stmt)
+            if visited is None:
+                pass
+            elif isinstance(visited, list):
+                result.extend(visited)
+            else:
+                result.append(visited)
+        return result or [ast.Pass()]
+
+    def visit_For(self, node: ast.For) -> ast.stmt:
+        """Visit For loop, incrementing scope depth for its body."""
+        node.iter = self.visit(node.iter)
+        self._scope_depth += 1
+        node.body = self._visit_scoped_body(node.body)
+        self._scope_depth -= 1
+        return node
+
+    def visit_With(self, node: ast.With) -> ast.stmt:
+        """Visit With block, incrementing scope depth for its body."""
+        node.items = [self.visit(item) for item in node.items]
+        self._scope_depth += 1
+        node.body = self._visit_scoped_body(node.body)
+        self._scope_depth -= 1
+        return node
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +784,16 @@ class Specializer:
         self._contexts = contexts
         self._dv_bindings = dynvar_bindings
         self._dv_literals = dynvar_literals or {}
+        # Accumulated alias→original map across all specialized functions.
+        self._rename_map: dict[str, str] = {}
+
+    @property
+    def rename_map(self) -> dict[str, str]:
+        """Return mapping from generated alias → original user variable name.
+
+        Only populated after ``specialize()`` has been called.
+        """
+        return dict(self._rename_map)
 
     def specialize(self) -> str:
         """Generate @pl.program source code string.
@@ -776,6 +887,8 @@ class Specializer:
             dynvar_var_names=dynvar_var_names,
         )
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
+        # Accumulate alias→original renames for error message rewriting.
+        self._rename_map.update(transformer.rename_map)
         # Filter out None (deleted statements) and flatten lists
         flat_body: list[ast.stmt] = []
         for item in new_body:
