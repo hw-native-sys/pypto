@@ -18,6 +18,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -36,6 +37,10 @@ namespace {
 /// Unwrap nested Spmd scopes in a Group function body:
 /// Extract core_num/sync_start from the Spmd scope and add as function attrs,
 /// then replace the ScopeStmt(Spmd) with its body.
+///
+/// The Spmd scope's `core_num_` is an ExprPtr but must have folded to a
+/// positive ConstInt by this pass (guaranteed by the CoreNumResolved property
+/// verifier, produced by Simplify and required here via pass_properties).
 FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
   class SpmdUnwrapper : public IRMutator {
    public:
@@ -46,7 +51,11 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
     StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
       CHECK(!core_num.has_value())  // NOLINT(misc-include-cleaner)
           << "Only one pl.spmd() block is allowed per cluster scope";
-      core_num = op->core_num_;
+      auto ci = As<ConstInt>(op->core_num_);
+      INTERNAL_CHECK(ci != nullptr)
+          << "SpmdScopeStmt core_num did not fold to ConstInt before OutlineClusterScopes; "
+             "the CoreNumResolved verifier should have caught this";
+      core_num = static_cast<int>(ci->value_);
       sync_start = op->sync_start_;
       return VisitStmt(op->body_);
     }

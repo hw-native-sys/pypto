@@ -69,6 +69,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "PipelineResolved";
     case IRProperty::CallDirectionsResolved:
       return "CallDirectionsResolved";
+    case IRProperty::CoreNumResolved:
+      return "CoreNumResolved";
     default:
       return "Unknown";
   }

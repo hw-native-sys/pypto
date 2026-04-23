@@ -1954,15 +1954,15 @@ class HierarchyScopeStmt(ScopeStmt):
 class SpmdScopeStmt(ScopeStmt):
     """SPMD dispatch scope."""
 
-    core_num: Final[int]
-    """SPMD block count (required, >0)."""
+    core_num: Final[Expr]
+    """SPMD block count expression (must fold to a positive ConstInt)."""
 
     sync_start: Final[bool]
     """Require sync-start for SPMD dispatch."""
 
     def __init__(
         self,
-        core_num: int,
+        core_num: Expr,
         sync_start: bool = False,
         name_hint: str = "",
         *,
@@ -2731,7 +2731,7 @@ class IRBuilder:
         role: Role | None = None,
         split: SplitMode | None = None,
         name_hint: str = "",
-        core_num: int | None = None,
+        core_num: Expr | None = None,
         sync_start: bool | None = None,
     ) -> None:
         """Begin building a scope statement.
@@ -2743,7 +2743,7 @@ class IRBuilder:
             role: Hierarchy scope role (default: None)
             split: Split mode for cross-core transfer (default: None)
             name_hint: User-provided scope name hint (default: empty, auto-generated)
-            core_num: SPMD block count (default: None)
+            core_num: SPMD block count expression (default: None)
             sync_start: Require sync-start for SPMD dispatch (default: None)
         """
 

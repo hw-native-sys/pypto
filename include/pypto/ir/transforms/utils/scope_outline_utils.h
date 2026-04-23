@@ -29,6 +29,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -658,7 +659,12 @@ class ScopeOutliner : public IRMutator {
     } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
       append_split_attr(auto_incore->split_);
     } else if (auto spmd = As<SpmdScopeStmt>(op)) {
-      outlined_attrs.emplace_back("core_num", spmd->core_num_);
+      // core_num_ is an ExprPtr; the CoreNumResolved verifier guarantees it
+      // has folded to a positive ConstInt before OutlineClusterScopes runs.
+      auto ci = As<ConstInt>(spmd->core_num_);
+      INTERNAL_CHECK(ci != nullptr) << "SpmdScopeStmt core_num did not fold to ConstInt; the "
+                                       "CoreNumResolved verifier should have caught this";
+      outlined_attrs.emplace_back("core_num", static_cast<int>(ci->value_));
       if (spmd->sync_start_) {
         outlined_attrs.emplace_back("sync_start", true);
       }

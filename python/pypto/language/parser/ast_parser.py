@@ -15,7 +15,7 @@ import warnings
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
@@ -2403,34 +2403,38 @@ class ASTParser:
         call: ast.Call,
         *,
         usage_hint: str,
-    ) -> tuple[int, bool, str]:
+    ) -> tuple["ir.Expr", bool, str]:
         """Parse ``pl.spmd(core_num, *, sync_start=, name_hint=)`` arguments.
 
         The first positional argument is ``core_num`` (range-like). Returns
         ``(core_num, sync_start, name_hint)`` with ``sync_start`` defaulting
         to ``False`` (matching the DSL default). Raises ParserSyntaxError for
-        missing core_num, non-literal values, unexpected kwargs, or
-        ``**kwargs`` unpacking.
+        missing core_num, unexpected kwargs, or ``**kwargs`` unpacking.
+
+        ``core_num`` is lowered through :meth:`parse_expression`, so any
+        Python value that resolves to an IR expression is accepted here —
+        closure-captured integers fold to ``ConstInt`` via ``parse_name``'s
+        closure fallback, and closure arithmetic folds via ``parse_binop``'s
+        constant-folding path. The "must be a compile-time positive integer"
+        invariant is enforced later by the ``CoreNumResolved`` property
+        verifier (after ``Simplify``). The parser keeps one early diagnostic:
+        if ``core_num`` parses to a literal ``ConstInt`` with a non-positive
+        value, we raise here so the common ``pl.spmd(0)`` mistake reports at
+        source rather than deep in the pipeline.
         """
 
-        def _validate_core_num_node(value_node: ast.AST, source: ast.AST) -> int:
-            if (
-                not isinstance(value_node, ast.Constant)
-                or not isinstance(value_node.value, int)
-                or isinstance(value_node.value, bool)
-            ):
+        def _parse_core_num_node(value_node: ast.AST, source: ast.AST) -> "ir.Expr":
+            # ast.AST covers any expression; parse_expression expects ast.expr.
+            # The grammar for keyword values and positional args always gives
+            # ast.expr here, but cast for mypy's sake.
+            expr = self.parse_expression(cast("ast.expr", value_node))
+            if isinstance(expr, ir.ConstInt) and expr.value <= 0:
                 raise ParserSyntaxError(
-                    "core_num must be an integer literal",
+                    f"core_num must be a positive integer, got {expr.value}",
                     span=self.span_tracker.get_span(source),
                     hint=usage_hint,
                 )
-            if value_node.value <= 0:
-                raise ParserSyntaxError(
-                    f"core_num must be a positive integer, got {value_node.value}",
-                    span=self.span_tracker.get_span(source),
-                    hint=usage_hint,
-                )
-            return value_node.value
+            return expr
 
         if len(call.args) > 1:
             raise ParserSyntaxError(
@@ -2438,9 +2442,9 @@ class ASTParser:
                 span=self.span_tracker.get_span(call.args[1]),
                 hint=usage_hint,
             )
-        core_num: int | None = None
+        core_num: ir.Expr | None = None
         if call.args:
-            core_num = _validate_core_num_node(call.args[0], call.args[0])
+            core_num = _parse_core_num_node(call.args[0], call.args[0])
         sync_start: bool = False
         name_hint = ""
         for kw in call.keywords:
@@ -2461,7 +2465,7 @@ class ASTParser:
                         span=self.span_tracker.get_span(kw.value),
                         hint=usage_hint,
                     )
-                core_num = _validate_core_num_node(kw.value, kw.value)
+                core_num = _parse_core_num_node(kw.value, kw.value)
             elif kw.arg == "sync_start":
                 if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
                     raise ParserSyntaxError(
@@ -2598,7 +2602,7 @@ class ASTParser:
         role: "ir.Role | None" = None,
         split: "ir.SplitMode | None" = None,
         name_hint: str = "",
-        core_num: int | None = None,
+        core_num: "ir.Expr | None" = None,
         sync_start: bool | None = None,
     ) -> None:
         """Build a scope statement from a with-statement body."""

@@ -53,6 +53,7 @@ enum class IRProperty : uint64_t {
   InOutUseValid,            ///< No reads of InOut/Out-passed variables after the call (RFC #1026)
   PipelineResolved,         ///< No ForKind::Pipeline survives; produced by CanonicalizeIOOrder
   CallDirectionsResolved,   ///< Every non-builtin Call has explicit attrs['arg_directions']
+  CoreNumResolved,          ///< Every SpmdScopeStmt::core_num_ folds to a positive ConstInt
   kCount                    ///< Sentinel (must be last)
 };
 

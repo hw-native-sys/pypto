@@ -177,7 +177,7 @@ field from the `Stmt` base class. See [Leading comments on statements](#leading-
 | **AutoInCoreScopeStmt** | `name_hint_`, `body_`, `split_` (optional) | Auto-InCore region; consumed by `InterchangeChunkLoops` |
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster region; outlined to `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_` (optional) | Pipeline-stage region for a given Level/Role |
-| **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`, `sync_start_` | SPMD launch region; outlined to `Function(Spmd)` |
+| **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_` (Expr → positive ConstInt post-Simplify), `sync_start_` | SPMD launch region; outlined to `Function(Spmd)` |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
@@ -299,8 +299,8 @@ hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
                              name_hint="", body=body, span=span)
 
 # with pl.spmd(8):
-spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
-                        name_hint="", body=body, span=span)
+spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
+                        sync_start=False, name_hint="", body=body, span=span)
 
 # for i in pl.spmd(8):                    # loop-style surface syntax
 #     offset = i * 64
@@ -319,7 +319,10 @@ spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
 - All scope statements are transparent to SSA (no iter_args/return_vars) and
   are not control flow (execute once, linearly).
 - Required fields are enforced at construction: `HierarchyScopeStmt.level_`
-  is non-optional; `SpmdScopeStmt` rejects `core_num <= 0`.
+  is non-optional; `SpmdScopeStmt.core_num_` is a non-null `ExprPtr`. The
+  "`core_num` must fold to a positive `ConstInt`" invariant is verified
+  centrally by the `CoreNumResolved` property verifier (produced by
+  `Simplify`, required by `OutlineClusterScopes`).
 - `InCoreScopeStmt` / `AutoInCoreScopeStmt` are scheduled for deprecation;
   prefer `HierarchyScopeStmt` or other surviving kinds in new code.
 - Pass behavior:

@@ -869,16 +869,22 @@ using HierarchyScopeStmtPtr = std::shared_ptr<const HierarchyScopeStmt>;
 /**
  * @brief SPMD dispatch scope.
  *
- * Required `core_num` (>0); `sync_start` defaults to false.
+ * Required `core_num` expression; `sync_start` defaults to false.
+ *
+ * `core_num_` is stored as a generic `ExprPtr` so compile-time-known
+ * integer expressions (closure variables, closure arithmetic, etc.) can
+ * flow through the parser without a special-cased evaluation path. The
+ * "must fold to a positive `ConstInt`" invariant is enforced centrally
+ * by the `CoreNumResolved` property verifier, which runs after Simplify.
  */
 class SpmdScopeStmt : public ScopeStmt {
  public:
-  SpmdScopeStmt(int core_num, bool sync_start, std::string name_hint, StmtPtr body, Span span,
+  SpmdScopeStmt(ExprPtr core_num, bool sync_start, std::string name_hint, StmtPtr body, Span span,
                 std::vector<std::string> leading_comments = {})
       : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
-        core_num_(core_num),
+        core_num_(std::move(core_num)),
         sync_start_(sync_start) {
-    CHECK(core_num_ > 0) << "core_num must be positive, got " << core_num_;
+    INTERNAL_CHECK(core_num_ != nullptr) << "SpmdScopeStmt core_num must not be null";
   }
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::SpmdScopeStmt; }
@@ -892,8 +898,8 @@ class SpmdScopeStmt : public ScopeStmt {
   }
 
  public:
-  int core_num_;     ///< SPMD block count (required, >0)
-  bool sync_start_;  ///< Require sync-start for SPMD dispatch
+  ExprPtr core_num_;  ///< SPMD block count expression (must fold to positive ConstInt)
+  bool sync_start_;   ///< Require sync-start for SPMD dispatch
 };
 
 using SpmdScopeStmtPtr = std::shared_ptr<const SpmdScopeStmt>;

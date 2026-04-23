@@ -252,7 +252,7 @@ void BindIRBuilder(nb::module_& m) {
            "    role: Hierarchy scope role (default: None)\n"
            "    split: Split mode for cross-core transfer (default: None)\n"
            "    name_hint: User-provided scope name hint (default: empty, auto-generated)\n"
-           "    core_num: SPMD block count (default: None)\n"
+           "    core_num: SPMD block count expression (default: None)\n"
            "    sync_start: Require sync-start for SPMD dispatch (default: None)\n\n"
            "Raises:\n"
            "    RuntimeError: If not inside a function or loop")

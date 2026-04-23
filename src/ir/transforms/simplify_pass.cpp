@@ -198,6 +198,21 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return result;
   }
 
+  StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
+    // Fold the core_num expression so the CoreNumResolved verifier sees a
+    // ConstInt whenever the value is compile-time-derivable. Closure-captured
+    // Python ints arrive as ConstInt already, but closure arithmetic (e.g.
+    // `core_num=MAX // TILE` where both operands are closure ints) may still
+    // need one simplify pass after SSA conversion.
+    auto new_core_num = SimplifyExpr(op->core_num_);
+    auto new_body = VisitStmt(op->body_);
+    if (new_core_num.get() == op->core_num_.get() && new_body.get() == op->body_.get()) return op;
+    auto result = MutableCopy(op);
+    result->core_num_ = new_core_num;
+    result->body_ = new_body;
+    return result;
+  }
+
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     auto new_condition = SimplifyExpr(op->condition_);
 

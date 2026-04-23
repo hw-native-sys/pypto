@@ -292,13 +292,13 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 
 void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level,
                            std::optional<Role> role, std::optional<SplitMode> split, std::string name_hint,
-                           std::optional<int> core_num, std::optional<bool> sync_start) {
+                           ExprPtr core_num, std::optional<bool> sync_start) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
   CHECK(scope_kind != ScopeKind::Hierarchy || level.has_value())
       << "Hierarchy scope requires a level at " << span.to_string();
-  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role, split,
-                                                          std::move(name_hint), core_num, sync_start));
+  context_stack_.push_back(std::make_unique<ScopeContext>(
+      scope_kind, span, level, role, split, std::move(name_hint), std::move(core_num), sync_start));
 }
 
 StmtPtr IRBuilder::EndScope(const Span& end_span) {
@@ -345,8 +345,8 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
           std::make_shared<const HierarchyScopeStmt>(*level, role, std::move(name_hint), body, combined_span);
       break;
     case ScopeKind::Spmd:
-      CHECK(core_num.has_value()) << "Spmd scope requires core_num";
-      scope_stmt = std::make_shared<const SpmdScopeStmt>(*core_num, sync_start.value_or(false),
+      CHECK(core_num != nullptr) << "Spmd scope requires core_num";
+      scope_stmt = std::make_shared<const SpmdScopeStmt>(core_num, sync_start.value_or(false),
                                                          std::move(name_hint), body, combined_span);
       break;
   }

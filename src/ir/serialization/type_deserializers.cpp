@@ -11,7 +11,6 @@
 
 #include <any>
 #include <cstdint>
-#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -705,16 +704,9 @@ static IRNodePtr DeserializeSpmdScopeStmt(const msgpack::object& fields_obj, msg
                                           DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
 
-  // core_num is required
-  auto core_num_obj = GET_FIELD_OBJ("core_num");
-  CHECK(core_num_obj.type == msgpack::type::POSITIVE_INTEGER ||
-        core_num_obj.type == msgpack::type::NEGATIVE_INTEGER)
-      << "SpmdScopeStmt core_num must be an integer, got msgpack type "
-      << static_cast<int>(core_num_obj.type);
-  auto raw = core_num_obj.as<int64_t>();
-  CHECK(raw > 0 && raw <= std::numeric_limits<int>::max())
-      << "SpmdScopeStmt core_num must be a positive integer that fits in int, got " << raw;
-  int core_num = static_cast<int>(raw);
+  // core_num is stored as a full Expr node (must fold to a positive ConstInt;
+  // enforced by the CoreNumResolved verifier before codegen).
+  auto core_num = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("core_num"), zone));
 
   // sync_start is required (bool, defaults to false if missing)
   bool sync_start = false;

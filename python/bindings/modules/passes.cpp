@@ -77,7 +77,9 @@ void BindPass(nb::module_& m) {
       .value("PipelineResolved", IRProperty::PipelineResolved,
              "No ForKind::Pipeline survives; produced by CanonicalizeIOOrder")
       .value("CallDirectionsResolved", IRProperty::CallDirectionsResolved,
-             "Every non-builtin Call has explicit attrs['arg_directions'] (see Call::GetArgDirections)");
+             "Every non-builtin Call has explicit attrs['arg_directions'] (see Call::GetArgDirections)")
+      .value("CoreNumResolved", IRProperty::CoreNumResolved,
+             "Every SpmdScopeStmt::core_num_ folds to a positive ConstInt; produced by Simplify");
 
   // Bind IRPropertySet
   nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")

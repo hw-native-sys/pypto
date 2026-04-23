@@ -1040,7 +1040,7 @@ void BindIR(nb::module_& m) {
   // SpmdScopeStmt
   auto spmd_scope_stmt_class =
       nb::class_<SpmdScopeStmt, ScopeStmt>(ir, "SpmdScopeStmt", "SPMD dispatch scope");
-  spmd_scope_stmt_class.def(nb::init<int, bool, std::string, const StmtPtr&, const Span&>(),
+  spmd_scope_stmt_class.def(nb::init<ExprPtr, bool, std::string, const StmtPtr&, const Span&>(),
                             nb::arg("core_num"), nb::arg("sync_start") = false, nb::arg("name_hint") = "",
                             nb::arg("body"), nb::arg("span"), "Create an SPMD scope statement");
   BindFields<SpmdScopeStmt>(spmd_scope_stmt_class);

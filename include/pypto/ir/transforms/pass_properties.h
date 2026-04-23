@@ -59,8 +59,13 @@ inline const PassProperties kNormalizeStmtStructureProperties{
     .produced = {IRProperty::NormalizedStmtStructure}};
 
 // -- Simplification pass ------------------------------------------------------
+//
+// Folds closure-derived arithmetic on ``SpmdScopeStmt::core_num_`` to a
+// positive ``ConstInt``. This is the moment the ``CoreNumResolved`` property
+// becomes true for well-formed programs; downstream passes that depend on
+// ``core_num_`` being a concrete integer declare it as ``required``.
 
-inline const PassProperties kSimplifyProperties{};
+inline const PassProperties kSimplifyProperties{.produced = {IRProperty::CoreNumResolved}};
 
 // -- Outlining pass -----------------------------------------------------------
 
@@ -68,9 +73,14 @@ inline const PassProperties kOutlineIncoreScopesProperties{
     .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch}};
 
 // -- Cluster outlining pass ---------------------------------------------------
+//
+// Requires ``CoreNumResolved`` so that unwrapping the Spmd scope can extract
+// the concrete integer value of ``core_num_`` into the Group function's
+// attribute list (consumed by orchestration codegen).
 
 inline const PassProperties kOutlineClusterScopesProperties{
-    .required = {IRProperty::SSAForm}, .produced = {IRProperty::SSAForm, IRProperty::ClusterOutlined}};
+    .required = {IRProperty::SSAForm, IRProperty::CoreNumResolved},
+    .produced = {IRProperty::SSAForm, IRProperty::ClusterOutlined}};
 
 // -- Hierarchy outlining pass -------------------------------------------------
 

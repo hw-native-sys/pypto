@@ -174,7 +174,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **AutoInCoreScopeStmt** | `name_hint_`, `body_`, `split_`（可选） | Auto-InCore 区域；由 `InterchangeChunkLoops` 消费 |
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster 区域；由 `OutlineClusterScopes` 提取为 `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选） | 给定 Level/Role 的流水线阶段区域 |
-| **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
+| **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`（Expr，Simplify 后需折叠为正 ConstInt）, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
 | **EvalStmt** | `expr_` | 为副作用求值表达式 |
 | **SeqStmts** | `stmts_` | 通用语句序列 |
@@ -264,8 +264,8 @@ hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.Worker,
                              name_hint="", body=body, span=span)
 
 # with pl.spmd(8):
-spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
-                        name_hint="", body=body, span=span)
+spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
+                        sync_start=False, name_hint="", body=body, span=span)
 
 # for i in pl.spmd(8):                    # loop-style 语法糖
 #     offset = i * 64
@@ -284,7 +284,9 @@ spmd = ir.SpmdScopeStmt(core_num=8, sync_start=False,
 - 所有作用域语句对 SSA 透明（无 iter_args/return_vars），且不是控制流
   （执行一次，线性执行）。
 - 必填字段在构造时强制校验：`HierarchyScopeStmt.level_` 不可为空；
-  `SpmdScopeStmt` 拒绝 `core_num <= 0`。
+  `SpmdScopeStmt.core_num_` 为非空 `ExprPtr`。"`core_num` 必须折叠为正
+  `ConstInt`" 的不变量由 `CoreNumResolved` 属性校验器统一保证（由
+  `Simplify` 产出，`OutlineClusterScopes` 消费）。
 - `InCoreScopeStmt` / `AutoInCoreScopeStmt` 已计划弃用；新代码应优先使用
   `HierarchyScopeStmt` 或其它将保留的子类。
 - Pass 行为：

@@ -275,6 +275,24 @@ PropertyVerifierPtr CreatePipelineResolvedPropertyVerifier();
  */
 PropertyVerifierPtr CreateCallDirectionsResolvedPropertyVerifier();
 
+/**
+ * @brief Factory function for creating CoreNumResolved property verifier
+ *
+ * Verifies that every ``SpmdScopeStmt::core_num_`` in the program folds to a
+ * positive ``ConstInt``. This is the single enforcement point for the
+ * "``pl.spmd(core_num=…)`` must be a compile-time positive integer"
+ * invariant — the parser accepts any expression, and Simplify folds
+ * closure-derived arithmetic; anything that has not resolved by the time
+ * this verifier runs is an error.
+ *
+ * Produced by ``Simplify`` (which folds compile-time-known expressions)
+ * and required by ``OutlineClusterScopes`` (which extracts the integer
+ * value into a Function attribute).
+ *
+ * @return Shared pointer to CoreNumResolved PropertyVerifier
+ */
+PropertyVerifierPtr CreateCoreNumResolvedPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 
