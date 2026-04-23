@@ -231,6 +231,103 @@ class V2CNoSplitTest(PTOTestCase):
 
 
 @pl.program
+class V2CInterleavedA2A3Program:
+    """Manual a2a3 V2C program with interleaved tpop/free ordering."""
+
+    @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+    def vector_producer(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+    ):
+        v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
+        pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
+
+        tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+        tile_b: pl.Tile[[16, 16], pl.FP16] = pl.load(b, [0, 0], [16, 16])
+        result_add: pl.Tile[[16, 16], pl.FP16] = pl.add(tile_a, tile_b)
+        result_sub: pl.Tile[[16, 16], pl.FP16] = pl.sub(tile_a, tile_b)
+
+        pl.tpush_to_aic(result_add, split=0)
+        pl.tpush_to_aic(result_sub, split=0)
+
+    @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+    def cube_consumer(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+        pl.aic_initialize_pipe(pl.const(0, pl.INT32), pipe_buf, dir_mask=2, slot_size=512)
+
+        received_add: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+        received_sub: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+        received_add_left = pl.move(received_add, target_memory=pl.MemorySpace.Left)
+        received_sub_right = pl.move(received_sub, target_memory=pl.MemorySpace.Right)
+        mm_result: pl.Tile[[16, 16], pl.FP32] = pl.matmul(received_add_left, received_sub_right)
+        pl.tfree_to_aiv(received_add)
+        pl.tfree_to_aiv(received_sub)
+
+        updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(mm_result, [0, 0], output)
+        return updated
+
+    @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+    def group_func(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        updated = self.cube_consumer(a, b, output, gm_pipe_buffer)
+        self.vector_producer(a, b, output, gm_pipe_buffer)
+        return updated
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
+            [1024],
+            dtype=pl.FP32,
+            layout=pl.TensorLayout.ND,
+        )
+        out = self.group_func(a, b, output, gm_pipe_buffer_0)
+        return out
+
+
+class V2CInterleavedA2A3Test(PTOTestCase):
+    """Cross-core a2a3 manual V2C: interleaved tpop/free remains valid."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "cross_core_v2c_interleaved_a2a3"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [16, 16], DataType.FP16, init_value=1.0),
+            TensorSpec("b", [16, 16], DataType.FP16, init_value=2.0),
+            TensorSpec("output", [16, 16], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return V2CInterleavedA2A3Program
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        a = tensors["a"].float()
+        b = tensors["b"].float()
+        tensors["output"][:] = torch.matmul(a + b, a - b)
+
+
+@pl.program
 class C2VLRProgram:
     """C2V left-right-split cross-core program.
 
@@ -561,6 +658,15 @@ class TestCrossCore:
         """V2C no-split pipe: compile through full pipeline and verify correctness."""
         result = test_runner.run(V2CNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core V2C no-split compilation failed: {result.error}"
+
+    def test_tpush_tpop_v2c_interleaved_a2a3(self, request, test_runner):
+        """Manual a2a3 V2C pipe: verify interleaved tpop/free executes end-to-end."""
+        platform = _resolve_platform(request.config)
+        if platform not in {"a2a3", "a2a3sim"}:
+            pytest.skip("Manual interleaved V2C case is only valid on a2a3 platforms")
+
+        result = test_runner.run(V2CInterleavedA2A3Test(platform=platform))
+        assert result.passed, f"Cross-core V2C interleaved a2a3 execution failed: {result.error}"
 
     def test_tpop_c2v_leftright(self, test_runner, backend_type):
         """C2V left-right pipe: compile through full pipeline and verify correctness."""
