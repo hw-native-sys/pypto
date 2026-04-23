@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -48,6 +49,14 @@ class CoreNumChecker : public IRVisitor {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "CoreNumResolved", 1,
                                 "pl.spmd core_num in function '" + func_name_ + "' must be positive, got " +
                                     std::to_string(ci->value_),
+                                op->span_);
+    } else if (ci->value_ > std::numeric_limits<int>::max()) {
+      // Downstream orchestration codegen reads core_num as int via Function::GetAttr<int>.
+      // Enforce the bound centrally so all consumers can safely narrow int64 → int.
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "CoreNumResolved", 2,
+                                "pl.spmd core_num in function '" + func_name_ +
+                                    "' exceeds the int32 range; got " + std::to_string(ci->value_) +
+                                    ", max is " + std::to_string(std::numeric_limits<int>::max()),
                                 op->span_);
     }
     IRVisitor::VisitStmt_(op);

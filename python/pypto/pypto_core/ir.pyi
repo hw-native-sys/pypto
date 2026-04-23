@@ -1962,14 +1962,19 @@ class SpmdScopeStmt(ScopeStmt):
 
     def __init__(
         self,
-        core_num: Expr,
+        core_num: int | Expr,
         sync_start: bool = False,
         name_hint: str = "",
         *,
         body: Stmt,
         span: Span,
     ) -> None:
-        """Create an SPMD scope statement."""
+        """Create an SPMD scope statement.
+
+        Accepts either a Python ``int`` (auto-wrapped as ``ConstInt``) or any
+        ``Expr`` that folds to a positive integer; verified centrally by the
+        ``CoreNumResolved`` property verifier.
+        """
 
 class SeqStmts(Stmt):
     """Sequence of statements: a sequence of statements."""

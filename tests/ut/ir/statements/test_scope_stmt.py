@@ -92,6 +92,17 @@ class TestScopeStmt:
         assert scope.core_num.value == 4
         assert scope.scope_kind == ir.ScopeKind.Spmd
 
+    def test_spmd_scope_core_num_int_overload(self):
+        """The nanobind ctor accepts a Python int and auto-wraps it as ConstInt."""
+        span = ir.Span("test.py", 1, 1, 1, 10)
+        var_x = ir.Var("x", ir.TensorType([64], DataType.FP32), span)
+        var_y = ir.Var("y", ir.TensorType([64], DataType.FP32), span)
+        body = ir.AssignStmt(var_y, var_x, span)
+
+        scope = ir.SpmdScopeStmt(core_num=8, body=body, span=span)
+        assert isinstance(scope.core_num, ir.ConstInt)
+        assert scope.core_num.value == 8
+
     def test_hierarchy_scope_typed_fields(self):
         """HierarchyScopeStmt exposes level (required) and role (optional)."""
         span = ir.Span("test.py", 1, 1, 1, 10)
