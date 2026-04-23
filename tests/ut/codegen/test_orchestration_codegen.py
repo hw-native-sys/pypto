@@ -141,7 +141,7 @@ class TestOrchestration:
                     Arg params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
-                    params_t0.add_inout(c);
+                    params_t0.add_output(c);
                     pto2_rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add
@@ -393,20 +393,20 @@ class TestOrchestration:
                     Arg params_t0;
                     params_t0.add_input(ext_a);
                     params_t0.add_input(ext_b);
-                    params_t0.add_inout(c);
+                    params_t0.add_output(c);
                     pto2_rt_submit_aiv_task(0, params_t0);
 
                     // Task 1: kernel_add_scalar
                     Arg params_t1;
                     params_t1.add_input(c);
-                    params_t1.add_inout(d);
+                    params_t1.add_output(d);
                     params_t1.add_scalar(to_u64(1.000000f));
                     pto2_rt_submit_aiv_task(1, params_t1);
 
                     // Task 2: kernel_add_scalar
                     Arg params_t2;
                     params_t2.add_input(c);
-                    params_t2.add_inout(e);
+                    params_t2.add_output(e);
                     params_t2.add_scalar(to_u64(2.000000f));
                     pto2_rt_submit_aiv_task(1, params_t2);
 
@@ -414,7 +414,7 @@ class TestOrchestration:
                     Arg params_t3;
                     params_t3.add_input(d);
                     params_t3.add_input(e);
-                    params_t3.add_inout(g);
+                    params_t3.add_output(g);
                     pto2_rt_submit_aiv_task(2, params_t3);
 
                     // Task 4: kernel_add
@@ -1525,8 +1525,11 @@ class TestOrchestration:
         assert code.count("TensorCreateInfo ret0__out_ci(") == 1
         assert code.count("TensorCreateInfo ret0__out_1_ci(") == 1
         assert "alloc_tensors(ret0__out_ci, ret0__out_1_ci)" in code
-        assert "params_t0.add_inout(ret0__out)" in code
-        assert "params_t1.add_inout(ret0__out_1)" in code
+        # Each ret0__out{,_1} is the unique writer of its local root in this scope
+        # and has no sequential ancestor, so DeriveCallDirections keeps both as
+        # OutputExisting (→ add_output) rather than promoting to InOut.
+        assert "params_t0.add_output(ret0__out)" in code
+        assert "params_t1.add_output(ret0__out_1)" in code
         assert "const Tensor& first = ret0__out;" in code
         assert "const Tensor& second" not in code
 
@@ -2355,6 +2358,100 @@ class TestLocalAllocWAWPromotion:
 
         assert "add_output(ext_out)" in code, (
             f"External (parameter) tensor should keep add_output. Generated code:\n{code}"
+        )
+
+    def test_parallel_loop_local_buf_keeps_add_output(self):
+        """Issue #1086: a single ``pl.parallel`` writer of a local buffer must
+        emit ``add_output`` (not ``add_inout``).
+
+        Promoting Out → InOut here injects a spurious WAW dependency that
+        forces the runtime to serialize otherwise independent iterations of
+        the parallel loop, causing the regression observed in Qwen3 decode.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SingleParallelProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def task(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                buf: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                for _i in pl.parallel(4):
+                    buf = self.task(a, buf)
+                out = self.task(buf, out)
+                return out
+
+        code = _generate_orch_code(SingleParallelProgram)
+
+        assert "add_output(buf)" in code, (
+            f"Local buf written from a single pl.parallel loop must use add_output, "
+            f"not add_inout (issue #1086). Generated code:\n{code}"
+        )
+        assert "add_inout(buf)" not in code, (
+            f"Local buf must not be promoted to add_inout when only a single "
+            f"pl.parallel loop writes it. Generated code:\n{code}"
+        )
+
+    def test_two_parallel_loops_promote_only_second(self):
+        """Two consecutive ``pl.parallel`` loops writing the same local buffer.
+
+        The first loop is the only writer-unit at its scope and stays
+        ``add_output``; the second loop hits R-prior so it is promoted to
+        ``add_inout`` to keep the cross-loop WAW dependency.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class TwoParallelProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def task(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                buf: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                for _i in pl.parallel(4):
+                    buf = self.task(a, buf)
+                for _j in pl.parallel(4):
+                    buf = self.task(a, buf)
+                out = self.task(buf, out)
+                return out
+
+        code = _generate_orch_code(TwoParallelProgram)
+
+        # Both add_output (first loop, R-prior not yet active) and add_inout
+        # (second loop, R-prior fires) must be present for the same `buf`.
+        assert "add_output(buf)" in code, (
+            f"First pl.parallel writer of buf should remain add_output. Generated code:\n{code}"
+        )
+        assert "add_inout(buf)" in code, (
+            f"Second pl.parallel writer of buf should be promoted to add_inout via R-prior. "
+            f"Generated code:\n{code}"
         )
 
 

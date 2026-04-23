@@ -22,6 +22,7 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -45,16 +46,230 @@ bool IsTensorTypedArg(const ExprPtr& arg) {
   return false;
 }
 
-/// IRMutator that rewrites every non-builtin Call in a function body and writes
-/// the per-argument ArgDirection vector based on callee param directions and the
-/// pre-computed buffer-root map for that function.
-class CallDirectionMutator : public IRMutator {
+/// Compute the per-position ParamDirection vector for a callee, expanding Group/Spmd
+/// callees whose effective directions depend on inner-task call sites.
+std::vector<ParamDirection> ResolveCalleeDirections(const ProgramPtr& program, const CallPtr& call,
+                                                    const FunctionPtr& callee) {
+  if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
+    return ComputeGroupEffectiveDirections(callee, program);
+  }
+  return callee->param_directions_;
+}
+
+/// Resolve the buffer root for an argument expression and decide whether that root
+/// is locally allocated (i.e. not rooted at a function parameter).
+/// Returns the root Var* if local, nullptr otherwise (non-var arg, unknown root,
+/// or root that maps to an external function parameter).
+const Var* ResolveLocalRoot(const ExprPtr& arg,
+                            const std::unordered_map<const Var*, const Var*>& buffer_roots,
+                            const std::unordered_set<const Var*>& param_vars) {
+  auto var = AsVarLike(arg);
+  if (!var) return nullptr;
+  auto it = buffer_roots.find(var.get());
+  if (it == buffer_roots.end()) return nullptr;
+  const Var* root = it->second;
+  if (param_vars.count(root) > 0) return nullptr;
+  return root;
+}
+
+/// Pre-pass that decides, per (Call, local root), whether the call is the "first
+/// writer" of that root within its enclosing scope, treating ForStmt/WhileStmt/
+/// IfStmt as opaque writer-units. ScopeStmt and SeqStmts are transparent.
+///
+/// Two phases:
+///   1. PrecomputeWrittenRoots: bottom-up cache of the union of local roots
+///      written by any non-builtin call inside each subtree.
+///   2. AnalyzeScope: top-down scan that maintains a `seen_roots` set of roots
+///      already written by prior siblings; for each Call, every Out-param arg
+///      whose root is *not* in `seen_roots` is recorded as "first writer".
+class PriorWriterCollector {
  public:
-  CallDirectionMutator(ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
+  PriorWriterCollector(ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
                        const std::unordered_set<const Var*>& param_vars)
       : program_(std::move(program)), buffer_roots_(buffer_roots), param_vars_(param_vars) {}
 
+  void Run(const StmtPtr& body) {
+    if (!body) return;
+    PrecomputeWrittenRoots(body);
+    std::unordered_set<const Var*> seen;
+    AnalyzeScope(body, seen);
+  }
+
+  /// Per-Call set of roots for which the call is the first writer in its scope.
+  /// Roots not in the set (or Calls absent from the map) are by definition
+  /// preceded by another writer-unit and therefore subject to R-prior promotion.
+  std::unordered_map<const Call*, std::unordered_set<const Var*>> first_writer_roots;
+
+ private:
+  /// Compute (and cache) the set of local roots written by any non-builtin Call
+  /// inside the subtree rooted at `stmt`. The result is treated as the "writer
+  /// footprint" of the stmt when it appears as a sibling in an outer scope.
+  const std::unordered_set<const Var*>& PrecomputeWrittenRoots(const StmtPtr& stmt) {
+    auto cached = written_roots_.find(stmt.get());
+    if (cached != written_roots_.end()) return cached->second;
+    auto& result = written_roots_[stmt.get()];
+    if (!stmt) return result;
+
+    if (auto seq = As<SeqStmts>(stmt)) {
+      for (const auto& s : seq->stmts_) {
+        const auto& child = PrecomputeWrittenRoots(s);
+        result.insert(child.begin(), child.end());
+      }
+    } else if (auto for_stmt = As<ForStmt>(stmt)) {
+      const auto& body_roots = PrecomputeWrittenRoots(for_stmt->body_);
+      result.insert(body_roots.begin(), body_roots.end());
+    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+      const auto& body_roots = PrecomputeWrittenRoots(while_stmt->body_);
+      result.insert(body_roots.begin(), body_roots.end());
+    } else if (auto if_stmt = As<IfStmt>(stmt)) {
+      const auto& then_roots = PrecomputeWrittenRoots(if_stmt->then_body_);
+      result.insert(then_roots.begin(), then_roots.end());
+      if (if_stmt->else_body_.has_value() && if_stmt->else_body_.value()) {
+        const auto& else_roots = PrecomputeWrittenRoots(if_stmt->else_body_.value());
+        result.insert(else_roots.begin(), else_roots.end());
+      }
+    } else if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
+      const auto& body_roots = PrecomputeWrittenRoots(scope->body_);
+      result.insert(body_roots.begin(), body_roots.end());
+    } else if (auto assign = As<AssignStmt>(stmt)) {
+      CollectCallWrittenRoots(assign->value_, result);
+    } else if (auto eval = As<EvalStmt>(stmt)) {
+      CollectCallWrittenRoots(eval->expr_, result);
+    }
+    // YieldStmt / ReturnStmt / BreakStmt / ContinueStmt: no writes.
+    return result;
+  }
+
+  /// If `expr` is a non-builtin Call, add every Out/InOut local root it writes
+  /// into `out`.
+  void CollectCallWrittenRoots(const ExprPtr& expr, std::unordered_set<const Var*>& out) {
+    auto call = As<Call>(expr);
+    if (!call) return;
+    if (IsBuiltinOp(call->op_->name_)) return;
+    auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+    if (!callee) return;
+
+    auto dirs = ResolveCalleeDirections(program_, call, callee);
+    for (size_t i = 0; i < dirs.size() && i < call->args_.size(); ++i) {
+      if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
+      if (const Var* root = ResolveLocalRoot(call->args_[i], buffer_roots_, param_vars_)) {
+        out.insert(root);
+      }
+    }
+  }
+
+  /// Top-down analysis. `seen` carries the set of local roots already written by
+  /// prior siblings (or ancestors' prior siblings) in the surrounding scope.
+  /// For/While/If subtrees are entered with a *snapshot copy* of `seen`, so that
+  /// writes within the subtree do not leak into the outer scope's sibling tracking.
+  /// The unit's pre-computed `written_roots` is then merged into the outer `seen`.
+  /// ScopeStmt and SeqStmts are transparent and share the same `seen`.
+  void AnalyzeScope(const StmtPtr& stmt, std::unordered_set<const Var*>& seen) {
+    if (!stmt) return;
+    if (auto seq = As<SeqStmts>(stmt)) {
+      for (const auto& s : seq->stmts_) {
+        AnalyzeScope(s, seen);
+      }
+    } else if (auto for_stmt = As<ForStmt>(stmt)) {
+      auto inner = seen;
+      AnalyzeScope(for_stmt->body_, inner);
+      const auto& written = PrecomputeWrittenRoots(for_stmt->body_);
+      seen.insert(written.begin(), written.end());
+    } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+      auto inner = seen;
+      AnalyzeScope(while_stmt->body_, inner);
+      const auto& written = PrecomputeWrittenRoots(while_stmt->body_);
+      seen.insert(written.begin(), written.end());
+    } else if (auto if_stmt = As<IfStmt>(stmt)) {
+      auto then_seen = seen;
+      AnalyzeScope(if_stmt->then_body_, then_seen);
+      if (if_stmt->else_body_.has_value() && if_stmt->else_body_.value()) {
+        auto else_seen = seen;
+        AnalyzeScope(if_stmt->else_body_.value(), else_seen);
+      }
+      const auto& written_then = PrecomputeWrittenRoots(if_stmt->then_body_);
+      seen.insert(written_then.begin(), written_then.end());
+      if (if_stmt->else_body_.has_value() && if_stmt->else_body_.value()) {
+        const auto& written_else = PrecomputeWrittenRoots(if_stmt->else_body_.value());
+        seen.insert(written_else.begin(), written_else.end());
+      }
+    } else if (auto scope = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
+      AnalyzeScope(scope->body_, seen);
+    } else if (auto assign = As<AssignStmt>(stmt)) {
+      AnalyzeCall(assign->value_, seen);
+    } else if (auto eval = As<EvalStmt>(stmt)) {
+      AnalyzeCall(eval->expr_, seen);
+    }
+    // Other stmts (Yield/Return/Break/Continue): no Calls to analyze.
+  }
+
+  /// For a single Call expression, mark "first writer" roots and update `seen`.
+  void AnalyzeCall(const ExprPtr& expr, std::unordered_set<const Var*>& seen) {
+    auto call = As<Call>(expr);
+    if (!call) return;
+    if (IsBuiltinOp(call->op_->name_)) return;
+    auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+    if (!callee) return;
+
+    auto dirs = ResolveCalleeDirections(program_, call, callee);
+    std::unordered_set<const Var*> roots_this_call;
+    for (size_t i = 0; i < dirs.size() && i < call->args_.size(); ++i) {
+      // Only Out is decision-relevant for promotion (InOut is already InOut).
+      // We still register InOut roots into `roots_this_call` so subsequent
+      // siblings see them as prior writers.
+      if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
+      const Var* root = ResolveLocalRoot(call->args_[i], buffer_roots_, param_vars_);
+      if (!root) continue;
+      if (dirs[i] == ParamDirection::Out && seen.count(root) == 0) {
+        first_writer_roots[call.get()].insert(root);
+      }
+      roots_this_call.insert(root);
+    }
+    seen.insert(roots_this_call.begin(), roots_this_call.end());
+  }
+
+  ProgramPtr program_;
+  const std::unordered_map<const Var*, const Var*>& buffer_roots_;
+  const std::unordered_set<const Var*>& param_vars_;
+  std::unordered_map<const Stmt*, std::unordered_set<const Var*>> written_roots_;
+};
+
+/// IRMutator that rewrites every non-builtin Call in a function body and writes
+/// the per-argument ArgDirection vector based on callee param directions, the
+/// pre-computed buffer-root map, and prior-writer / sequential-context analysis.
+///
+/// Promotion rules for callee Out + locally-allocated buffer:
+///   - R-seq:   any sequential ancestor (For{Sequential,Unroll,Pipeline} or While)  → InOut
+///   - R-prior: a prior writer-unit in the same scope wrote to the same root        → InOut
+///   - default: OutputExisting (write into a pre-allocated buffer that the runtime
+///              treats as an output slot, no extra dependency edge introduced).
+class CallDirectionMutator : public IRMutator {
+ public:
+  CallDirectionMutator(
+      ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
+      const std::unordered_set<const Var*>& param_vars,
+      const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots)
+      : program_(std::move(program)),
+        buffer_roots_(buffer_roots),
+        param_vars_(param_vars),
+        first_writer_roots_(first_writer_roots) {}
+
  protected:
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    bool is_sequential = op->kind_ != ForKind::Parallel;
+    if (is_sequential) ++sequential_depth_;
+    auto out = IRMutator::VisitStmt_(op);
+    if (is_sequential) --sequential_depth_;
+    return out;
+  }
+
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    ++sequential_depth_;
+    auto out = IRMutator::VisitStmt_(op);
+    --sequential_depth_;
+    return out;
+  }
+
   ExprPtr VisitExpr_(const CallPtr& op) override {
     // First descend so nested Calls also get arg_directions assigned.
     auto base = IRMutator::VisitExpr_(op);
@@ -71,11 +286,7 @@ class CallDirectionMutator : public IRMutator {
       return call;
     }
 
-    std::vector<ParamDirection> effective = callee->param_directions_;
-    if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
-      effective = ComputeGroupEffectiveDirections(callee, program_);
-    }
-
+    auto effective = ResolveCalleeDirections(program_, call, callee);
     if (effective.size() != call->args_.size()) {
       // Safety: if the length disagrees we can't produce a sound mapping.
       // Leave directions empty so the verify pass surfaces a clear error.
@@ -89,6 +300,14 @@ class CallDirectionMutator : public IRMutator {
     if (call->HasArgDirections()) {
       return call;
     }
+
+    // Look up first-writer info computed against the *original* Call object.
+    // The mutator may produce a new shared_ptr above (when nested Calls are
+    // rewritten), but the prior-writer collector keyed on the original op.
+    const Call* original_call = op.get();
+    auto fw_it = first_writer_roots_.find(original_call);
+    const std::unordered_set<const Var*>* first_writer_set =
+        fw_it != first_writer_roots_.end() ? &fw_it->second : nullptr;
 
     std::vector<ArgDirection> dirs;
     dirs.reserve(call->args_.size());
@@ -106,21 +325,26 @@ class CallDirectionMutator : public IRMutator {
       } else if (cd == ParamDirection::InOut) {
         dirs.push_back(ArgDirection::InOut);
       } else {
-        // ParamDirection::Out
-        if (auto arg_var = AsVarLike(arg)) {
-          if (IsLocallyAllocated(arg_var.get())) {
-            // WAW promotion: the runtime needs InOut to chain dependencies on
-            // a pre-allocated local buffer being reused across tasks.
-            dirs.push_back(ArgDirection::InOut);
-          } else {
-            // External (param-rooted) buffer: treat as write-only into an existing tensor.
-            dirs.push_back(ArgDirection::OutputExisting);
-          }
-        } else {
-          // Non-var Out argument is unusual; fall back to OutputExisting which is
-          // the conservative choice (no allocation done by the runtime).
+        // ParamDirection::Out — apply the promotion rules.
+        const Var* local_root = ResolveLocalRoot(arg, buffer_roots_, param_vars_);
+        if (!local_root) {
+          // External/param-rooted destination: write into an existing tensor.
           dirs.push_back(ArgDirection::OutputExisting);
+          continue;
         }
+        // R-seq: any sequential ancestor forces InOut to keep iteration WAW chains correct.
+        if (sequential_depth_ > 0) {
+          dirs.push_back(ArgDirection::InOut);
+          continue;
+        }
+        // R-prior: a prior writer-unit in this scope already wrote to this root → InOut.
+        bool is_first_writer = first_writer_set != nullptr && first_writer_set->count(local_root) > 0;
+        if (!is_first_writer) {
+          dirs.push_back(ArgDirection::InOut);
+          continue;
+        }
+        // Default: locally-allocated, first writer, no sequential ancestor → OutputExisting.
+        dirs.push_back(ArgDirection::OutputExisting);
       }
     }
 
@@ -135,16 +359,11 @@ class CallDirectionMutator : public IRMutator {
   }
 
  private:
-  bool IsLocallyAllocated(const Var* var) const {
-    auto it = buffer_roots_.find(var);
-    if (it == buffer_roots_.end()) return false;
-    const Var* root = it->second;
-    return param_vars_.count(root) == 0;
-  }
-
   ProgramPtr program_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
   const std::unordered_set<const Var*>& param_vars_;
+  const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots_;
+  int sequential_depth_ = 0;
 };
 
 }  // namespace
@@ -171,7 +390,11 @@ Pass DeriveCallDirections() {
         param_vars.insert(p.get());
       }
 
-      CallDirectionMutator mutator(program, br_collector.buffer_roots, param_vars);
+      PriorWriterCollector pw_collector(program, br_collector.buffer_roots, param_vars);
+      pw_collector.Run(func->body_);
+
+      CallDirectionMutator mutator(program, br_collector.buffer_roots, param_vars,
+                                   pw_collector.first_writer_roots);
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
 

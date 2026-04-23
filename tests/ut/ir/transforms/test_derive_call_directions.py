@@ -162,8 +162,16 @@ class TestDeriveDirectionMatrix:
         assert len(calls) == 1
         assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
 
-    def test_out_param_local_buffer_promoted_to_inout(self):
-        """Callee Out + locally allocated buffer → InOut (WAW promotion)."""
+    def test_out_param_local_buffer_kept_output_existing(self):
+        """Callee Out + single-write locally allocated buffer → OutputExisting.
+
+        A buffer that is allocated locally and written to by exactly one Call at
+        top level (no sequential ancestor, no prior writer-unit in the same
+        scope) does not need the WAW chaining that ``InOut`` provides; keeping
+        it as ``OutputExisting`` lets the runtime treat the slot as an ordinary
+        output and avoids the spurious dependency that would otherwise serialize
+        the task with subsequent siblings.
+        """
 
         @pl.program
         class Prog:
@@ -186,7 +194,319 @@ class TestDeriveDirectionMatrix:
         out = passes.derive_call_directions()(Prog)
         calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
         assert len(calls) == 1
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+
+    def test_two_calls_top_level_second_promoted(self):
+        """Two consecutive top-level calls writing the same local root.
+
+        First writer keeps ``OutputExisting`` (no prior writes); the second
+        writer hits R-prior and is promoted to ``InOut`` so the runtime can
+        chain WAW dependencies on the shared buffer.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                local = self.kernel(x, local)
+                local = self.kernel(x, local)
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 2
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_out_local_in_parallel_keeps_output_existing(self):
+        """Single ``pl.parallel`` writer of a local buffer → ``OutputExisting``.
+
+        Regression test for issue #1086: tiled writes inside a ``pl.parallel``
+        loop should not be promoted to ``InOut`` just because they happen
+        inside a loop, because doing so injects a spurious dependency that
+        serializes otherwise independent iterations.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for _i in pl.parallel(4):
+                    local = self.kernel(x, local)
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+
+    def test_two_parallel_loops_promote_only_second(self):
+        """Two consecutive ``pl.parallel`` loops writing the same root.
+
+        The first loop is the only writer-unit at its scope and stays
+        ``OutputExisting``; the second loop hits R-prior and is promoted to
+        ``InOut`` so the cross-loop WAW dependency is preserved.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for _i in pl.parallel(4):
+                    local = self.kernel(x, local)
+                for _j in pl.parallel(4):
+                    local = self.kernel(x, local)
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 2
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_seq_inside_parallel_keeps_inout(self):
+        """``pl.range`` (sequential) inside ``pl.parallel`` triggers R-seq.
+
+        Even if the inner sequential loop is the only writer-unit, the
+        sequential ancestor forces ``InOut`` so cross-iteration WAW chains in
+        the inner loop body are preserved.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for _i in pl.parallel(4):
+                    for _j in pl.range(4):
+                        local = self.kernel(x, local)
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
         assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_parallel_inside_seq_keeps_inout(self):
+        """``pl.parallel`` inside ``pl.range`` still triggers R-seq.
+
+        The outer sequential loop is enough for R-seq, regardless of the kind
+        of inner loops it contains.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                for _i in pl.range(4):
+                    for _j in pl.parallel(4):
+                        local = self.kernel(x, local)
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_top_level_call_then_parallel_promoted(self):
+        """Top-level writer followed by ``pl.parallel`` writer hits R-prior.
+
+        Mirror of the ``k2(local) for _ in pl.parallel: k1(local)`` scenario:
+        the first call is the sole writer-unit, the parallel loop sees a
+        prior writer-unit at sibling scope and is therefore promoted.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                local = self.kernel(x, local)
+                for _i in pl.parallel(4):
+                    local = self.kernel(x, local)
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 2
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_while_keeps_inout(self):
+        """``while`` loop body triggers R-seq (sequential writer-unit).
+
+        ``WhileStmt`` is treated like a sequential for loop: the body may run
+        any number of iterations, so cross-iteration WAW dependencies must be
+        preserved by promoting Out → InOut.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                i: pl.Scalar[pl.INDEX] = 0
+                while i < n:
+                    local = self.kernel(x, local)
+                    i = i + 1
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_if_first_writer_keeps_output_existing(self):
+        """First writer inside an ``if`` branch is the only writer-unit.
+
+        With no prior writer and no sequential ancestor, the call inside the
+        branch keeps ``OutputExisting``. Each branch is analyzed against an
+        independent ``seen_roots`` snapshot from the enclosing scope.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                if flag:
+                    local = self.kernel(x, local)
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+
+    def test_if_after_top_level_writer_promoted(self):
+        """``if`` branch following a top-level writer hits R-prior.
+
+        The outer scope's prior-writer set already contains the local root
+        when the ``if`` is entered, so the branch's snapshot starts with the
+        root in ``seen``; the call inside is no longer the first writer.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                local = self.kernel(x, local)
+                if flag:
+                    local = self.kernel(x, local)
+                return local
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 2
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
 
     def test_builtin_calls_left_untouched(self):
         """tensor.create / tile.* are builtin and keep arg_directions empty."""
