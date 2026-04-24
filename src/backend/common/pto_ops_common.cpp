@@ -533,11 +533,11 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
 
 // Helper function for MrgSort format2: emits pto.tmrgsort
 // Supports 2-4 way merge. tmp is the last ins operand and carries the
-// {exhausted} attribute; outs holds dst plus the synthesized excuted vector:
+// {exhausted} attribute; outs holds dst plus the synthesized executed vector:
 //   2-way: ins(src0, src1, tmp {exhausted} : src_types..., tmp_type)
-//          outs(dst, excuted : dst_type, vector<4xi16>)
-//   3-way: ins(src0, src1, src2, tmp {exhausted} : ...) outs(dst, excuted : ...)
-//   4-way: ins(src0, src1, src2, src3, tmp {exhausted} : ...) outs(dst, excuted : ...)
+//          outs(dst, executed : dst_type, vector<4xi16>)
+//   3-way: ins(src0, src1, src2, tmp {exhausted} : ...) outs(dst, executed : ...)
+//   4-way: ins(src0, src1, src2, src3, tmp {exhausted} : ...) outs(dst, executed : ...)
 static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
@@ -557,7 +557,7 @@ static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const C
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
   std::string tmp = codegen.GetExprAsCode(op->args_[n_srcs]);
   std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[n_srcs]);
-  std::string executed_vec = codegen.NewNamedTemp("excuted_vec");
+  std::string executed_vec = codegen.NewNamedTemp("executed_vec");
   codegen.Emit(executed_vec + " = arith.constant dense<0> : vector<4xi16>");
 
   bool exhausted = op->GetKwarg<bool>("exhausted", false);
@@ -570,7 +570,7 @@ static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const C
   }
   oss << tmp << " " << exhausted_attr;
 
-  bool has_types = false;
+  bool has_types = !tmp_type.empty();
   for (const auto& t : src_types) {
     if (!t.empty()) {
       has_types = true;
