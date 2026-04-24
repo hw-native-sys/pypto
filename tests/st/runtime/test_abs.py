@@ -12,8 +12,10 @@ Element-wise absolute value (abs) System Tests.
 
 Covers both DSL layers exposed by issue #1138 (tensor.abs):
 
-  TileAbsTest    : Tile level, pl.tile.abs(t)        out = abs(a)
-  TensorAbsTest  : Tensor level, pl.abs(x)           out = abs(x)
+  TileAbsTest         : Tile level,   pl.tile.abs(t)      out = abs(a)
+  TensorAbsTestFP16   : Tensor level, pl.abs(x)  FP16     out = abs(x)
+  TensorAbsTestFP32   : Tensor level, pl.abs(x)  FP32     out = abs(x)
+  TensorAbsTestLarge  : Tensor level, pl.abs(x)  FP32 64x128 — exercises chunked_loop split
 """
 
 from typing import Any
@@ -89,8 +91,8 @@ class TileAbsTest(PTOTestCase):
 
 
 @pl.program
-class TensorAbsProgram:
-    """Tensor-level absolute value (lowered to tile.abs by ConvertTensorToTileOps)."""
+class TensorAbsProgramFP16:
+    """Tensor-level absolute value, FP16 (lowered to tile.abs by ConvertTensorToTileOps)."""
 
     @pl.function(type=pl.FunctionType.Opaque)
     def main(
@@ -107,14 +109,14 @@ class TensorAbsProgram:
         return out
 
 
-class TensorAbsTest(PTOTestCase):
-    """Tensor abs: out = pl.abs(x). Issue #1138 requested BF16, but pto.tabs only
+class TensorAbsTestFP16(PTOTestCase):
+    """Tensor abs FP16: out = pl.abs(x). Issue #1138 requested BF16, but pto.tabs only
     supports f16/f32, so we use FP16 here."""
 
     __test__ = False
 
     def get_name(self) -> str:
-        return "tensor_abs"
+        return "tensor_abs_fp16"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -123,7 +125,96 @@ class TensorAbsTest(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TensorAbsProgram
+        return TensorAbsProgramFP16
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.abs(tensors["x"])
+
+
+@pl.program
+class TensorAbsProgramFP32:
+    """Tensor-level absolute value, FP32."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        x: pl.Tensor[[M, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+        ):
+            y = pl.abs(x)
+            out = pl.assemble(out, y, [0, 0])
+        return out
+
+
+class TensorAbsTestFP32(PTOTestCase):
+    """Tensor abs FP32: out = pl.abs(x)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tensor_abs_fp32"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [M, N], DataType.FP32, init_value=_signed_input([M, N])),
+            TensorSpec("out", [M, N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorAbsProgramFP32
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.abs(tensors["x"])
+
+
+LARGE_M = 64
+LARGE_N = 128
+
+
+@pl.program
+class TensorAbsProgramLarge:
+    """Tensor-level abs on a larger shape (64x128) to exercise the chunked-loop split path."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        x: pl.Tensor[[LARGE_M, LARGE_N], pl.FP32],
+        out: pl.Out[pl.Tensor[[LARGE_M, LARGE_N], pl.FP32]],
+    ) -> pl.Tensor[[LARGE_M, LARGE_N], pl.FP32]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+        ):
+            y = pl.abs(x)
+            out = pl.assemble(out, y, [0, 0])
+        return out
+
+
+class TensorAbsTestLarge(PTOTestCase):
+    """Tensor abs on 64x128 FP32 — validates codegen under chunked-loop splitting."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "tensor_abs_large"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "x",
+                [LARGE_M, LARGE_N],
+                DataType.FP32,
+                init_value=_signed_input([LARGE_M, LARGE_N]),
+            ),
+            TensorSpec("out", [LARGE_M, LARGE_N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorAbsProgramLarge
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
         tensors["out"][:] = torch.abs(tensors["x"])
@@ -142,10 +233,20 @@ class TestAbs:
         result = test_runner.run(TileAbsTest())
         assert result.passed, f"Tile abs failed: {result.error}"
 
-    def test_tensor_abs(self, test_runner):
-        """Tensor-level pl.abs (issue #1138)."""
-        result = test_runner.run(TensorAbsTest())
-        assert result.passed, f"Tensor abs failed: {result.error}"
+    def test_tensor_abs_fp16(self, test_runner):
+        """Tensor-level pl.abs, FP16 (issue #1138)."""
+        result = test_runner.run(TensorAbsTestFP16())
+        assert result.passed, f"Tensor abs FP16 failed: {result.error}"
+
+    def test_tensor_abs_fp32(self, test_runner):
+        """Tensor-level pl.abs, FP32."""
+        result = test_runner.run(TensorAbsTestFP32())
+        assert result.passed, f"Tensor abs FP32 failed: {result.error}"
+
+    def test_tensor_abs_large(self, test_runner):
+        """Tensor-level pl.abs on 64x128 — exercises chunked-loop split."""
+        result = test_runner.run(TensorAbsTestLarge())
+        assert result.passed, f"Tensor abs large failed: {result.error}"
 
 
 if __name__ == "__main__":
