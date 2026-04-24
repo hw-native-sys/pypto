@@ -15,6 +15,7 @@ from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import JITFunction, _discover_deps, _rewrite_jit_error, jit
 from pypto.jit.specializer import TensorMeta
+from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 from pypto.pypto_core import DataType, ir
 
 # ---------------------------------------------------------------------------
@@ -531,8 +532,18 @@ class TestVariableRebinding:
         assert "t_v10" not in str(rewritten)
         assert "t_v1" not in str(rewritten)
 
+    def test_rewrite_preserves_exception_fields(self):
+        """copy.copy preserves extra fields (e.g. message) for ParserError-style exceptions."""
+        exc = ParserTypeError("Variable 'x_v1' has wrong type", hint="use x instead")
+        result = _rewrite_jit_error(exc, {"x_v1": "x"})
+        assert "x_v1" not in str(result)
+        assert "x" in str(result)
+        # Extra fields are preserved via copy.copy
+        assert isinstance(result, ParserTypeError)
+        assert result.hint == "use x instead"  # type: ignore[attr-defined]
+
     def test_rewrite_non_standard_exception_falls_back(self):
-        """Exceptions with non-standard constructors fall back to plain Exception."""
+        """Exceptions where copy.copy fails fall back to plain Exception."""
 
         class WeirdError(Exception):
             def __init__(self, code: int, msg: str) -> None:
