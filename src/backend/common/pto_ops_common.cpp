@@ -1198,9 +1198,16 @@ static std::string MakeTpopFromAicCodegenPTO(const CallPtr& op, codegen::Codegen
   INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_)
       << "tpop_from_aic requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+  auto [valid_row, valid_col] = codegen.GetCurrentResultTpopValidShapeOperands();
 
   std::ostringstream oss;
-  oss << result_buf << " = pto.tpop_from_aic {split = " << split << "}";
+  oss << result_buf << " = pto.tpop_from_aic";
+  if (!valid_row.empty() || !valid_col.empty()) {
+    INTERNAL_CHECK_SPAN(!valid_row.empty() && !valid_col.empty(), op->span_)
+        << "Internal error: tpop_from_aic dynamic valid_shape requires both valid_row and valid_col";
+    oss << "(" << valid_row << ", " << valid_col << ")";
+  }
+  oss << " {split = " << split << "}";
   if (!result_type.empty()) {
     oss << " -> " << result_type;
   }
@@ -1223,9 +1230,16 @@ static std::string MakeTpopFromAivCodegenPTO(const CallPtr& op, codegen::Codegen
   INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_)
       << "tpop_from_aiv requires assignment target (tile_buf)";
   std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+  auto [valid_row, valid_col] = codegen.GetCurrentResultTpopValidShapeOperands();
 
   std::ostringstream oss;
-  oss << result_buf << " = pto.tpop_from_aiv {split = " << split << "}";
+  oss << result_buf << " = pto.tpop_from_aiv";
+  if (!valid_row.empty() || !valid_col.empty()) {
+    INTERNAL_CHECK_SPAN(!valid_row.empty() && !valid_col.empty(), op->span_)
+        << "Internal error: tpop_from_aiv dynamic valid_shape requires both valid_row and valid_col";
+    oss << "(" << valid_row << ", " << valid_col << ")";
+  }
+  oss << " {split = " << split << "}";
   if (!result_type.empty()) {
     oss << " -> " << result_type;
   }

@@ -295,6 +295,91 @@ class TestCrossCoreTpushTpopCodegen:
         assert "{split = " in tfree_line, f"tfree should have split attribute: {tfree_line}"
         assert "pto.tmatmul" in cube_code, "Should contain matmul (Cube op)"
 
+    def test_tpop_dynamic_valid_shape_operands(self):
+        """Dynamic tpop result valid_shape should emit PTOAS frontend operands."""
+        span = ir.Span.unknown()
+        valid_row = ir.Var("valid_row", ir.ScalarType(pl.INDEX), span)
+        valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 16 * 64 * 4, 0)
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [valid_row, valid_col]
+        tile_type = ir.TileType([16, 64], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
+        recv_tile = ir.Var("recv_tile", tile_type, span)
+        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 2}, tile_type, span)
+        body = ir.SeqStmts([ir.AssignStmt(recv_tile, tpop_call, span)], span)
+        func = ir.Function(
+            "dynamic_tpop",
+            [(valid_row, ir.ParamDirection.In), (valid_col, ir.ParamDirection.In)],
+            [],
+            body,
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_program", span))
+        tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aic" in line)
+
+        assert "pto.tpop_from_aic(%arg0, %arg1) {split = 2}" in tpop_line
+        assert "v_row=?" in tpop_line
+        assert "v_col=?" in tpop_line
+        assert "pto.alloc_tile" not in mlir_code
+
+    def test_tpop_dynamic_valid_shape_keeps_static_counterpart_operand(self):
+        """If one tpop valid_shape dim is dynamic, the other dim is still passed explicitly."""
+        span = ir.Span.unknown()
+        valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 16 * 64 * 4, 0)
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(8, pl.INT64, span), valid_col]
+        tile_type = ir.TileType([16, 64], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
+        recv_tile = ir.Var("recv_tile", tile_type, span)
+        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
+        body = ir.SeqStmts([ir.AssignStmt(recv_tile, tpop_call, span)], span)
+        func = ir.Function(
+            "dynamic_tpop_static_row",
+            [(valid_col, ir.ParamDirection.In)],
+            [],
+            body,
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_static_row_program", span))
+        tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aic" in line)
+
+        assert "pto.tpop_from_aic(%c8_index, %arg0) {split = 0}" in tpop_line
+        assert "v_row=?" in tpop_line
+        assert "v_col=?" in tpop_line
+
+    def test_tpop_dynamic_valid_shape_rejects_bool_operand(self):
+        """Dynamic tpop valid_shape operands must be integer or index typed."""
+        span = ir.Span.unknown()
+        valid_row = ir.Var("valid_row", ir.ScalarType(pl.BOOL), span)
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 16 * 64 * 4, 0)
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [valid_row, ir.ConstInt(64, pl.INT64, span)]
+        tile_type = ir.TileType([16, 64], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
+        recv_tile = ir.Var("recv_tile", tile_type, span)
+        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
+        body = ir.SeqStmts([ir.AssignStmt(recv_tile, tpop_call, span)], span)
+        func = ir.Function(
+            "dynamic_tpop_bool_row",
+            [(valid_row, ir.ParamDirection.In)],
+            [],
+            body,
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        with pytest.raises(Exception, match="tpop valid_shape operand must be integer or index type, got i1"):
+            codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_bool_row_program", span))
+
     def test_tpop_chain_ordering(self):
         """Test that tpop chains follow pop-use-free ordering per hardware requirement."""
         codes = self._compile_and_generate(CrossCoreTpushTpopProgram)

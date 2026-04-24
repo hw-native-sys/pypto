@@ -142,8 +142,8 @@ print(pto_code)
 | --------------- | ----------------- | ----------- |
 | `tile.tpush_to_aiv(tile, split=N)` | `pto.tpush_to_aiv ins(%tile : type) {split = N}` | Cube → Vector push |
 | `tile.tpush_to_aic(tile, split=N)` | `pto.tpush_to_aic ins(%tile : type) {split = N}` | Vector → Cube push |
-| `tile.tpop_from_aic(split=N)` | `pto.tpop_from_aic outs(%buf : type) {split = N}` | Pop from Cube pipe |
-| `tile.tpop_from_aiv(split=N)` | `pto.tpop_from_aiv outs(%buf : type) {split = N}` | Pop from Vector pipe |
+| `tile.tpop_from_aic(split=N)` | `%buf = pto.tpop_from_aic {split = N} -> type` | Pop from Cube pipe |
+| `tile.tpop_from_aiv(split=N)` | `%buf = pto.tpop_from_aiv {split = N} -> type` | Pop from Vector pipe |
 | `system.tfree_to_aic(tile_from_tpop)` | `pto.tfree_from_aic {split = N}` | Release a consumer slot back to Cube |
 | `system.tfree_to_aiv(tile_from_tpop)` | `pto.tfree_from_aiv {split = N}` | Release a consumer slot back to Vector |
 | `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube pipe init |
@@ -153,7 +153,8 @@ print(pto_code)
 
 **Notes:**
 
-- Push ops use `ins()` clause with typed tile buffer; pop ops use `outs()` clause
+- Push ops use an `ins()` clause with a typed tile buffer; frontend pop ops produce an SSA result with a `-> !pto.tile_buf<...>` result type
+- When a tpop result `TileView.valid_shape` contains dynamic expressions, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. The tile type keeps `?` for the dynamic valid shape while the operands carry runtime extents.
 - `system.tfree_*` derives `split` from its tile argument, so the frontend must free the exact SSA value produced by `tile.tpop_*`, even though the PTO instruction itself does not take the tile as an explicit operand
 - `ExpandMixedKernel` now auto-generates consumer-side `system.tfree_*` after split-generated `tile.tpop_*`, preserving `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` and `import_reserved_buffer` return `i32` SSA values; `initialize_pipe` references them as operands

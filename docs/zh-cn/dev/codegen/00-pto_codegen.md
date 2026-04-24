@@ -142,8 +142,8 @@ print(pto_code)
 | ---------- | -------------- | ---- |
 | `tile.tpush_to_aiv(tile, split=N)` | `pto.tpush_to_aiv ins(%tile : type) {split = N}` | Cube → Vector 推送 |
 | `tile.tpush_to_aic(tile, split=N)` | `pto.tpush_to_aic ins(%tile : type) {split = N}` | Vector → Cube 推送 |
-| `tile.tpop_from_aic(split=N)` | `pto.tpop_from_aic outs(%buf : type) {split = N}` | 从 Cube 管道弹出 |
-| `tile.tpop_from_aiv(split=N)` | `pto.tpop_from_aiv outs(%buf : type) {split = N}` | 从 Vector 管道弹出 |
+| `tile.tpop_from_aic(split=N)` | `%buf = pto.tpop_from_aic {split = N} -> type` | 从 Cube 管道弹出 |
+| `tile.tpop_from_aiv(split=N)` | `%buf = pto.tpop_from_aiv {split = N} -> type` | 从 Vector 管道弹出 |
 | `system.tfree_to_aic(tile_from_tpop)` | `pto.tfree_from_aic {split = N}` | 将消费侧槽位释放回 Cube |
 | `system.tfree_to_aiv(tile_from_tpop)` | `pto.tfree_from_aiv {split = N}` | 将消费侧槽位释放回 Vector |
 | `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube 管道初始化 |
@@ -153,7 +153,8 @@ print(pto_code)
 
 **说明：**
 
-- Push 操作使用带类型的 `ins()` 子句；Pop 操作使用 `outs()` 子句
+- Push 操作使用带类型 tile buffer 的 `ins()` 子句；前端 Pop 操作生成 SSA 结果，并带 `-> !pto.tile_buf<...>` 结果类型
+- 当 tpop 结果的 `TileView.valid_shape` 包含动态表达式时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。tile 类型中动态 valid shape 仍保留为 `?`，运行时范围由操作数传递。
 - `system.tfree_*` 的 `split` 来自其 tile 参数，因此前端必须释放由 `tile.tpop_*` 产生的那个确切 SSA 值，即使 PTO 指令本身并不显式接收该 tile 作为操作数
 - `ExpandMixedKernel` 现在会在 split 生成的消费侧 `tile.tpop_*` 之后自动补 `system.tfree_*`，保持 `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` 和 `import_reserved_buffer` 返回 `i32` SSA 值；`initialize_pipe` 以操作数引用这些值

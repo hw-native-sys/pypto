@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -31,6 +32,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
@@ -179,6 +181,27 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
   return MakeFloorDiv(dim_size, two, dim_size->span_);
 }
 
+ExprPtr MakeConstLike(const ExprPtr& ref, int64_t value, const Span& span) {
+  return std::make_shared<ConstInt>(value, GetScalarDtype(ref), span);
+}
+
+ExprPtr LocalizeValidDimForSplit(const ExprPtr& valid_dim, const ExprPtr& original_dim,
+                                 const ExprPtr& half_dim_size, const ExprPtr& subblock_idx) {
+  if (!valid_dim) return valid_dim;
+  if (!subblock_idx) {
+    return half_dim_size;
+  }
+  if (AreExprsEqual(valid_dim, original_dim)) {
+    return half_dim_size;
+  }
+
+  auto span = valid_dim->span_;
+  auto zero = MakeConstLike(valid_dim, 0, span);
+  auto subblock_offset = MakeMul(subblock_idx, half_dim_size, span);
+  auto remaining = MakeSub(valid_dim, subblock_offset, span);
+  return MakeMax(MakeMin(remaining, half_dim_size, span), zero, span);
+}
+
 CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
@@ -196,19 +219,21 @@ CallPtr RebuildCallWithSplit(const CallPtr& call, int split_int) {
   return std::make_shared<Call>(call->op_, call->args_, std::move(new_kwargs), call->GetType(), call->span_);
 }
 
-TypePtr HalveTileShape(const TypePtr& type, int dim) {
+TypePtr HalveTileShape(const TypePtr& type, int dim, const ExprPtr& subblock_idx) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
   if (!tt || dim < 0 || dim >= static_cast<int>(tt->shape_.size())) return type;
 
   std::vector<ExprPtr> new_shape = tt->shape_;
   new_shape[dim] = ComputeHalfDimSize(tt->shape_[dim]);
 
-  // Keep TileView.valid_shape consistent with halved physical shape (was left at pre-split size).
+  // Keep TileView.valid_shape consistent with halved physical shape, and for
+  // partial valid regions localize the split dimension to the current subblock.
   std::optional<TileView> new_tile_view = tt->tile_view_;
   if (const auto& tile_view = tt->tile_view_; tile_view.has_value()) {
     TileView tv = tile_view.value();
     if (dim < static_cast<int>(tv.valid_shape.size())) {
-      tv.valid_shape[dim] = ComputeHalfDimSize(tv.valid_shape[dim]);
+      tv.valid_shape[dim] =
+          LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], new_shape[dim], subblock_idx);
     }
     new_tile_view = std::move(tv);
   }
@@ -224,8 +249,19 @@ ExprPtr HalveTupleElement(const ExprPtr& tuple_expr, int dim) {
   return std::make_shared<MakeTuple>(std::move(new_elements), tuple_expr->span_);
 }
 
-CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_int, int split_dim) {
-  auto new_result_type = HalveTileShape(call->GetType(), split_dim);
+ExprPtr LocalizeTupleElementForSplit(const ExprPtr& tuple_expr, int dim, const ExprPtr& original_dim,
+                                     const ExprPtr& half_dim_size, const ExprPtr& subblock_idx) {
+  auto tuple = std::dynamic_pointer_cast<const MakeTuple>(tuple_expr);
+  if (!tuple || dim < 0 || dim >= static_cast<int>(tuple->elements_.size())) return tuple_expr;
+  std::vector<ExprPtr> new_elements = tuple->elements_;
+  new_elements[dim] =
+      LocalizeValidDimForSplit(tuple->elements_[dim], original_dim, half_dim_size, subblock_idx);
+  return std::make_shared<MakeTuple>(std::move(new_elements), tuple_expr->span_);
+}
+
+CallPtr RebuildTpopWithHalvedShape(const CallPtr& call, int split_int, int split_dim,
+                                   const ExprPtr& subblock_idx) {
+  auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
 
   std::vector<std::pair<std::string, std::any>> new_kwargs;
   bool has_split = false;
@@ -282,7 +318,8 @@ ExprPtr AdjustOffsets(const ExprPtr& offsets_expr, int split_dim, const ExprPtr&
   return std::make_shared<MakeTuple>(std::move(new_elements), offsets->span_);
 }
 
-TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_dim_size) {
+TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_dim_size,
+                              const ExprPtr& subblock_idx) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
   if (!tt || dim < 0 || dim >= static_cast<int>(tt->shape_.size())) return type;
 
@@ -293,7 +330,8 @@ TypePtr ApplyTrackedTileShape(const TypePtr& type, int dim, const ExprPtr& half_
   if (const auto& tile_view = tt->tile_view_; tile_view.has_value()) {
     TileView tv = tile_view.value();
     if (dim < static_cast<int>(tv.valid_shape.size())) {
-      tv.valid_shape[dim] = half_dim_size;
+      tv.valid_shape[dim] =
+          LocalizeValidDimForSplit(tv.valid_shape[dim], tt->shape_[dim], half_dim_size, subblock_idx);
     }
     new_tile_view = std::move(tv);
   }
@@ -329,7 +367,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
     }
     if (op_name == "tile.tpop_from_aic") {
       auto tt = std::dynamic_pointer_cast<const TileType>(call->GetType());
-      auto new_call = RebuildTpopWithHalvedShape(call, split_int, split_dim);
+      auto new_call = RebuildTpopWithHalvedShape(call, split_int, split_dim, subblock_idx);
       auto new_var =
           std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
       if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
@@ -352,27 +390,26 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
         return stmt;
       }
 
-      ExprPtr half_dim_size;
-      if (tt && split_dim < static_cast<int>(tt->shape_.size())) {
-        half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
+      // Rank-deficient tiles (for example rank-1 loads under LEFT_RIGHT) do
+      // not carry the split axis, so they must bypass split-specific rewrites.
+      if (!tt || split_dim >= static_cast<int>(tt->shape_.size())) {
+        return stmt;
       }
+      ExprPtr half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
 
-      auto new_result_type = HalveTileShape(call->GetType(), split_dim);
+      auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
       std::vector<ExprPtr> new_args = call->args_;
-      if (half_dim_size) {
-        new_args[1] = AdjustOffsets(call->args_[1], split_dim, half_dim_size, subblock_idx);
-      }
+      new_args[1] = AdjustOffsets(call->args_[1], split_dim, half_dim_size, subblock_idx);
       new_args[2] = HalveTupleElement(call->args_[2], split_dim);
-      new_args[3] = HalveTupleElement(call->args_[3], split_dim);
+      new_args[3] = LocalizeTupleElementForSplit(call->args_[3], split_dim, tt->shape_[split_dim],
+                                                 half_dim_size, subblock_idx);
 
       auto new_call =
           std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_result_type, call->span_);
       auto new_var = std::make_shared<Var>(assign->var_->name_hint_, new_result_type, assign->var_->span_);
-      if (half_dim_size) {
-        TileInfo info{half_dim_size};
-        tile_vars[assign->var_.get()] = info;
-        tile_vars[new_var.get()] = info;
-      }
+      TileInfo info{half_dim_size};
+      tile_vars[assign->var_.get()] = info;
+      tile_vars[new_var.get()] = info;
       var_replacements[assign->var_.get()] = new_var;
       return std::make_shared<AssignStmt>(new_var, new_call, assign->span_);
     }
@@ -409,7 +446,7 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
           return stmt;
         }
         auto half_dim_size = ComputeHalfDimSize(tt->shape_[split_dim]);
-        auto new_result_type = HalveTileShape(call->GetType(), split_dim);
+        auto new_result_type = HalveTileShape(call->GetType(), split_dim, subblock_idx);
         std::vector<ExprPtr> new_args = call->args_;
         if ((op_name == "tile.full" || op_name == "tile.create") && call->args_.size() >= 1) {
           new_args[0] = HalveTupleElement(call->args_[0], split_dim);
@@ -485,7 +522,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
             has_tracked_tile = true;
             tracked_info = it->second;
             tile_vars[ia.get()] = it->second;
-            new_type = ApplyTrackedTileShape(ia->GetType(), split_dim, it->second.half_dim_size);
+            new_type =
+                ApplyTrackedTileShape(ia->GetType(), split_dim, it->second.half_dim_size, subblock_idx);
           }
         }
       }
@@ -526,8 +564,8 @@ StmtPtr ProcessStmt(const StmtPtr& stmt, SplitMode mode, int split_int, int spli
       auto it = tile_vars.find(new_iter_args[i].get());
       if (it != tile_vars.end()) {
         tile_vars[new_return_vars[i].get()] = it->second;
-        auto new_type =
-            ApplyTrackedTileShape(new_return_vars[i]->GetType(), split_dim, it->second.half_dim_size);
+        auto new_type = ApplyTrackedTileShape(new_return_vars[i]->GetType(), split_dim,
+                                              it->second.half_dim_size, subblock_idx);
         if (new_type != new_return_vars[i]->GetType()) {
           auto new_return_var =
               std::make_shared<Var>(new_return_vars[i]->name_hint_, new_type, new_return_vars[i]->span_);

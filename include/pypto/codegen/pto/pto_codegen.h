@@ -206,6 +206,16 @@ class PTOCodegen : public CodegenBase {
   std::string GetCurrentResultTileBufTypeStringFromTileType() const;
 
   /**
+   * @brief Get tpop result valid_shape operands as index-typed SSA values.
+   *
+   * PTOAS frontend tpop accepts optional `(valid_row, valid_col)` operands only
+   * when the result tile type carries dynamic valid shape (`v_row=?, v_col=?`).
+   * Returns empty strings when the current result does not require dynamic
+   * valid_shape operands.
+   */
+  std::pair<std::string, std::string> GetCurrentResultTpopValidShapeOperands();
+
+  /**
    * @brief Get tile_buf type string directly from a TileType
    *
    * Unlike GetTileBufTypeString(memref), this uses the shape/layout from the

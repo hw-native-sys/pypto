@@ -90,6 +90,11 @@ static std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(
   return {valid_row_expr, valid_col_expr};
 }
 
+static bool HasDynamicTileValidShape(const std::shared_ptr<const ir::TileType>& tile_type) {
+  auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
+  return valid_row_expr || valid_col_expr;
+}
+
 // Visitor to collect all MemRef objects from TileType variables
 class MemRefCollectorVisitor : public ir::IRVisitor {
  public:
@@ -229,7 +234,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
     // can query it before per-variable alloc_tile emission runs.
-    std::string type_str = GetTileBufTypeStringFromTileType(tile_type, HasFillpadConsumer(tile_var.get()));
+    bool force_all_dynamic =
+        HasFillpadConsumer(tile_var.get()) ||
+        (fs_.tpop_result_vars.count(tile_var.get()) > 0 && HasDynamicTileValidShape(tile_type));
+    std::string type_str = GetTileBufTypeStringFromTileType(tile_type, force_all_dynamic);
     fs_.ssa_to_tile_buf_type[ssa_name] = type_str;
 
     auto memref = ir::GetDefinedMemRef(tile_type);
@@ -890,8 +898,10 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // This ensures that even when multiple variables share a MemRef, each
       // variable's SSA value carries its correct typed annotation.
       if (result_tile_type && !fs_.current_result_buf.empty()) {
-        bool fillpad_force = HasFillpadConsumer(op->var_.get());
-        std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type, fillpad_force);
+        bool force_all_dynamic =
+            HasFillpadConsumer(op->var_.get()) ||
+            (fs_.tpop_result_vars.count(op->var_.get()) > 0 && HasDynamicTileValidShape(result_tile_type));
+        std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type, force_all_dynamic);
         if (!var_type_str.empty()) {
           fs_.ssa_to_tile_buf_type[fs_.current_result_buf] = var_type_str;
         }
@@ -1185,6 +1195,81 @@ std::string PTOCodegen::GetCurrentResultTileBufTypeStringFromTileType() const {
     return GetTileBufTypeStringFromTileType(fs_.current_result_tile_type, fillpad_force);
   }
   return "";
+}
+
+std::pair<std::string, std::string> PTOCodegen::GetCurrentResultTpopValidShapeOperands() {
+  if (!fs_.current_result_tile_type) {
+    return {"", ""};
+  }
+
+  if (!fs_.current_result_tile_type->tile_view_.has_value()) {
+    return {"", ""};
+  }
+
+  const auto& valid_shape = fs_.current_result_tile_type->tile_view_->valid_shape;
+  ExprPtr valid_row_expr;
+  ExprPtr valid_col_expr;
+  bool has_dynamic_valid_shape = false;
+  if (valid_shape.size() >= 1 && valid_shape[0]) {
+    valid_row_expr = valid_shape[0];
+    has_dynamic_valid_shape = !As<ir::ConstInt>(valid_row_expr);
+  }
+  if (valid_shape.size() >= 2 && valid_shape[1]) {
+    valid_col_expr = valid_shape[1];
+    has_dynamic_valid_shape = has_dynamic_valid_shape || !As<ir::ConstInt>(valid_col_expr);
+  }
+  if (!has_dynamic_valid_shape) {
+    return {"", ""};
+  }
+
+  auto cast_scalar_to_index = [&](const std::string& ssa, const ScalarType* scalar_type) -> std::string {
+    bool is_integer_or_index = scalar_type->dtype_.IsInt() || scalar_type->dtype_ == DataType::INDEX;
+    CHECK(is_integer_or_index && scalar_type->dtype_.GetBit() != 1)
+        << "tpop valid_shape operand must be integer or index type, got "
+        << GetTypeString(scalar_type->dtype_);
+    if (scalar_type->dtype_ == DataType::INDEX) {
+      return ssa;
+    }
+    std::string idx = NewTemp();
+    std::string src_type = GetTypeString(scalar_type->dtype_);
+    Emit(idx + " = arith.index_cast " + ssa + " : " + src_type + " to index");
+    return idx;
+  };
+
+  auto get_index_operand = [&](const ExprPtr& expr, size_t dim_idx) -> std::string {
+    if (expr) {
+      if (auto const_int = As<ir::ConstInt>(expr)) {
+        return GetOrEmitConstant(const_int->value_, DataType::INDEX);
+      }
+      std::string ssa = GetExprAsCode(expr);
+      if (auto scalar_type = As<ScalarType>(expr->GetType())) {
+        return cast_scalar_to_index(ssa, scalar_type.get());
+      }
+      return ssa;
+    }
+
+    const auto& shape = fs_.current_result_tile_type->shape_;
+    ExprPtr shape_dim;
+    if (shape.size() >= 2 && dim_idx < shape.size()) {
+      shape_dim = shape[dim_idx];
+    } else if (shape.size() == 1) {
+      if (dim_idx == 0) {
+        return GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+      }
+      shape_dim = shape[0];
+    }
+    INTERNAL_CHECK(shape_dim) << "Internal error: tpop result tile type is missing shape dim " << dim_idx;
+    if (auto const_int = As<ir::ConstInt>(shape_dim)) {
+      return GetOrEmitConstant(const_int->value_, DataType::INDEX);
+    }
+    std::string ssa = GetExprAsCode(shape_dim);
+    if (auto scalar_type = As<ScalarType>(shape_dim->GetType())) {
+      return cast_scalar_to_index(ssa, scalar_type.get());
+    }
+    return ssa;
+  };
+
+  return {get_index_operand(valid_row_expr, 0), get_index_operand(valid_col_expr, 1)};
 }
 
 }  // namespace codegen

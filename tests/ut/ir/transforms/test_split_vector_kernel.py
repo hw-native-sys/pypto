@@ -9,6 +9,8 @@
 
 """Unit tests for SplitVectorKernel pass."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
@@ -126,6 +128,43 @@ class TestSplitVectorKernelUpDown:
                 return out_0_store
 
         _assert_split_matches_expected(Before, Expected)
+
+    def test_tpop_dynamic_valid_shape_is_localized_per_subblock(self):
+        """Dynamic valid_shape on split dim is localized to each AIV subblock."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aiv(
+                self,
+                valid_rows: pl.Scalar[pl.INDEX],
+                valid_cols: pl.Scalar[pl.INDEX],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                z_vec: pl.Tile[
+                    [16, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                ] = pl.tpop_from_aic(split=1)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0_store
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+        assert "pl.tile.get_subblock_idx()" in printed
+        assert re.search(r"pl\.tile\.tpop_from_aic\(\s*split=1\s*\)", printed)
+        assert "pl.max(pl.min(valid_rows__ssa_v0 - subblock_idx * 8, 8), 0)" in printed
+        assert "valid_rows__ssa_v0 // 2" not in printed
 
     def test_load_shape_halved_and_offset_adjusted(self):
         """tile.load in AIV: shape halved, offset adjusted in split dim (includes add of halved tiles)."""
@@ -600,6 +639,27 @@ class TestSplitVectorKernelLeftRight:
         assert "pl.tile.load(gamma__ssa_v0, [0, 0], [16, 1], [16, 1]" in printed
         assert "pl.tile.row_expand_mul(" in printed
         assert "pl.tile.store(" in printed
+
+    def test_rank1_load_is_preserved_when_left_right_split_axis_is_absent(self):
+        """Rank-1 tile.load must not be rewritten for LEFT_RIGHT split."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+            def main_aiv(
+                self, data: pl.Tensor[[128], pl.FP32], out_0: pl.Out[pl.Tensor[[128], pl.FP32]]
+            ) -> pl.Tensor[[128], pl.FP32]:
+                loaded: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0], [128], target_memory=pl.MemorySpace.Vec
+                )
+                out: pl.Tensor[[128], pl.FP32] = pl.store(loaded, [0], out_0)
+                return out
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+        assert "pl.tile.load(data__ssa_v0, [0], [128], [128]" in printed
+        assert "pl.tile.store(loaded__ssa_v0, [0], out_0__ssa_v0)" in printed
+        assert "subblock_idx *" not in printed
 
 
 class TestSplitVectorKernelNoSplitA2A3:
