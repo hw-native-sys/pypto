@@ -26,6 +26,7 @@ __all__ = [
     "maximum",
     "exp",
     "neg",
+    "abs",
     "recip",
     "sqrt",
     "rsqrt",
@@ -179,6 +180,15 @@ def neg(input: T) -> T:
     if isinstance(input, Tile):
         return _tile.neg(input)
     raise TypeError(f"neg: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def abs(input: T) -> T:
+    """Element-wise absolute value, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.abs(input)
+    if isinstance(input, Tile):
+        return _tile.abs(input)
+    raise TypeError(f"abs: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def recip(input: T) -> T:

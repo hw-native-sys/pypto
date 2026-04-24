@@ -11,7 +11,7 @@
 
 /**
  * @file unary.cpp
- * @brief Unary tensor operations (neg, recip, exp, sqrt, rsqrt, cast)
+ * @brief Unary tensor operations (neg, recip, exp, sqrt, rsqrt, cast, abs)
  *
  * This file implements unary operations for tensors that operate element-wise.
  */
@@ -41,6 +41,18 @@ TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
                      << args[0]->GetType()->TypeName();
 
   // Negation preserves dtype (valid for both int and float)
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+}
+
+TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
+                            const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << "tensor.abs requires exactly 1 argument, but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.abs requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  // Absolute value preserves dtype (valid for both int and float)
   return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
 }
 
@@ -159,6 +171,15 @@ REGISTER_OP("tensor.neg")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorNegType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.abs")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise absolute value operation")
+    .add_argument("input", "Input tensor (TensorType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorAbsType(args, kwargs);
     });
 
 REGISTER_OP("tensor.recip")

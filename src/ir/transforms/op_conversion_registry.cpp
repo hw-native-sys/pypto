@@ -103,6 +103,7 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
   RegisterSimple("tensor.divs", "tile.divs");
 
   RegisterSimple("tensor.neg", "tile.neg");
+  RegisterSimple("tensor.abs", "tile.abs");
   RegisterSimple("tensor.recip", "tile.recip");
   RegisterSimple("tensor.exp", "tile.exp");
   RegisterSimple("tensor.sqrt", "tile.sqrt");

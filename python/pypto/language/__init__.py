@@ -96,7 +96,6 @@ from .op.system_ops import (
 from .op.tensor_ops import assemble, create_tensor, dim, expand_clone, full, scatter_update
 from .op.tile_ops import (
     MemRefType,
-    abs,
     addc,
     addsc,
     and_,
@@ -141,6 +140,7 @@ from .op.tile_ops import (
     mscatter as mscatter,
 )
 from .op.unified_ops import (
+    abs,
     add,
     batch_matmul,
     cast,
@@ -293,6 +293,7 @@ __all__ = [
     "expand_clone",
     "expands",
     "neg",
+    "abs",
     "recip",
     "read",
     "write",
@@ -306,7 +307,6 @@ __all__ = [
     "sqrt",
     "rsqrt",
     "log",
-    "abs",
     "relu",
     "matmul_acc",
     "matmul_bias",

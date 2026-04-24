@@ -3895,7 +3895,6 @@ class ASTParser:
         "gemv",
         "gemv_acc",
         "gemv_bias",
-        "abs",
         "create_tile",
         "tpush_to_aiv",
         "tpush_to_aic",

@@ -271,6 +271,42 @@ def test_tensor_neg_int_dtype():
 
 
 # =============================================================================
+# Tensor abs tests
+# =============================================================================
+
+
+def test_tensor_abs():
+    """Test tensor.abs operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.BF16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.abs(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.abs"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.BF16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_abs_int_dtype():
+    """Test tensor.abs preserves integer dtype."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64], DataType.INT32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.abs(tensor_var)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT32
+
+
+# =============================================================================
 # Tensor recip tests
 # =============================================================================
 

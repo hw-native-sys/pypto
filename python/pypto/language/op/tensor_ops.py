@@ -53,6 +53,7 @@ __all__ = [
     "expand_clone",
     "exp",
     "neg",
+    "abs",
     "recip",
     "sqrt",
     "rsqrt",
@@ -705,6 +706,20 @@ def neg(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.neg(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def abs(input: Tensor) -> Tensor:
+    """Element-wise absolute value operation.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the abs operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.abs(input_expr)
     return Tensor(expr=call_expr)
 
 
