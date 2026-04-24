@@ -92,7 +92,7 @@ def _rewrite_jit_error(exc: Exception, rename_map: dict[str, str]) -> Exception:
         new_exc = copy.copy(exc)
         new_exc.args = (msg,)
         if hasattr(new_exc, "message"):
-            new_exc.message = msg
+            object.__setattr__(new_exc, "message", msg)
     except Exception:  # noqa: BLE001
         # If copy fails (e.g. non-standard __init__), fall back to plain Exception.
         new_exc = Exception(msg)
