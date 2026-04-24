@@ -791,6 +791,40 @@ class TestVariableRebinding:
         assert "x_v2 =" in out
         assert "x_v1 = b" in out
 
+    def test_if_branch_rebind_not_renamed(self):
+        """Assignments inside if branches are not alpha-renamed.
+
+        The Parser handles if-branch variables via leak_vars=True (variables
+        are visible after the if), so renaming here would produce an alias
+        that only conditionally exists, breaking code after the if.
+        """
+        src = """
+            def f():
+                t = a
+                if cond:
+                    t = b
+                y = t
+        """
+        out = self._transform(src)
+        # t inside the if must NOT be renamed — it should remain 't = b'
+        assert "t_v1" not in out
+        assert "y = t" in out
+
+    def test_if_else_branch_rebind_not_renamed(self):
+        """Assignments in both if/else branches are not alpha-renamed."""
+        src = """
+            def f():
+                t = a
+                if cond:
+                    t = b
+                else:
+                    t = c
+                y = t
+        """
+        out = self._transform(src)
+        assert "t_v1" not in out
+        assert "y = t" in out
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

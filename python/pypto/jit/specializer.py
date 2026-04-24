@@ -620,6 +620,21 @@ class _BodyTransformer(ast.NodeTransformer):
         self._scope_depth -= 1
         return node
 
+    def visit_If(self, node: ast.If) -> ast.stmt:
+        """Visit If statement, incrementing scope depth for both branches.
+
+        If-branch assignments are loop-carried in the Parser's view (variables
+        leak to outer scope via exit_scope(leak_vars=True)) so they must NOT be
+        alpha-renamed at this layer — the Parser and ConvertToSSA handle them.
+        """
+        node.test = self.visit(node.test)
+        self._scope_depth += 1
+        node.body = self._visit_scoped_body(node.body)
+        if node.orelse:
+            node.orelse = self._visit_scoped_body(node.orelse)
+        self._scope_depth -= 1
+        return node
+
     def visit_With(self, node: ast.With) -> ast.stmt:
         """Visit With block, incrementing scope depth for its body."""
         node.items = [self.visit(item) for item in node.items]
