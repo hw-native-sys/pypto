@@ -825,6 +825,51 @@ class TestVariableRebinding:
         assert "t_v1" not in out
         assert "y = t" in out
 
+    def test_parallel_for_rebind_with_bridge(self):
+        """Two parallel for loops assigning the same variable get a bridge assignment."""
+        src = """
+            def f():
+                for i in range(n):
+                    x = a
+                for j in range(m):
+                    x = some_op(x)
+                y = x
+        """
+        out = self._transform(src)
+        # Bridge assignment inserted before the second loop
+        assert "x_v1 = x" in out
+        # Both LHS and RHS inside the second loop use x_v1
+        assert "x_v1 = some_op(x_v1)" in out
+        # Final read uses the latest alias
+        assert "y = x_v1" in out
+
+    def test_parallel_for_simple_rebind(self):
+        """Two parallel for loops with simple (non-loop-carried) rebinding."""
+        src = """
+            def f():
+                for i in range(n):
+                    x = a
+                for j in range(m):
+                    x = b
+                y = x
+        """
+        out = self._transform(src)
+        assert "x_v1 = x" in out
+        assert "y = x_v1" in out
+
+    def test_single_for_loop_carried_unchanged(self):
+        """A single for loop with loop-carried variable is NOT renamed."""
+        src = """
+            def f():
+                x = init_val
+                for i in range(n):
+                    x = some_op(x)
+                y = x
+        """
+        out = self._transform(src)
+        assert "x_v1" not in out
+        assert "y = x" in out
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

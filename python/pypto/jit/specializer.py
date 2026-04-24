@@ -385,6 +385,12 @@ class _BodyTransformer(ast.NodeTransformer):
                 )
                 ast.fix_missing_locations(new_node)
                 return new_node
+            # Deeper scope: if the variable has an active rename (from a bridge
+            # assignment), apply it to the LHS so the loop body consistently
+            # uses the renamed alias (e.g. x_v1 = some_op(x_v1)).
+            if var_name in self._var_renames:
+                renamed = self._var_renames[var_name]
+                node.targets = [ast.Name(id=renamed, ctx=ast.Store())]
             node.value = visited_value
             return node
         # First assignment: record and keep original name.
@@ -612,12 +618,91 @@ class _BodyTransformer(ast.NodeTransformer):
                 result.append(visited)
         return result or [ast.Pass()]
 
-    def visit_For(self, node: ast.For) -> ast.stmt:
-        """Visit For loop, incrementing scope depth for its body."""
+    def _scan_for_rebinds(self, statements: list[ast.stmt]) -> list[str]:
+        """Scan a body for variable names that would trigger alpha-renaming.
+
+        Returns variable names that are already in ``_assign_count`` and whose
+        first assignment was at the same scope depth as the current depth.
+        These need bridge assignments (``x_v1 = x``) before entering the scope
+        so that loop-carried reads inside the body resolve to the new alias.
+        """
+        rebind_vars: list[str] = []
+        seen: set[str] = set()
+        for stmt in statements:
+            # Check direct single-target assignments
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target = stmt.targets[0]
+                if isinstance(target, ast.Name):
+                    name = target.id
+                    if (
+                        name not in seen
+                        and name in self._assign_count
+                        and self._scope_depth == self._assign_depth.get(name, -1)
+                    ):
+                        rebind_vars.append(name)
+                        seen.add(name)
+            # Check annotated assignments
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                name = stmt.target.id
+                if (
+                    name not in seen
+                    and name in self._assign_count
+                    and self._scope_depth == self._assign_depth.get(name, -1)
+                ):
+                    rebind_vars.append(name)
+                    seen.add(name)
+        return rebind_vars
+
+    def _make_bridge_assignments(self, rebind_vars: list[str]) -> list[ast.stmt]:
+        """Create bridge assignments (``x_v1 = x``) and apply renames for each variable.
+
+        After this call, ``_var_renames`` is updated so that subsequent reads of the
+        original name resolve to the new alias.  The ``_assign_depth`` is updated to
+        the current (outer) scope depth so that assignments inside the loop body are
+        treated as deeper-scope (loop-carried) and NOT renamed again.
+
+        The returned statements should be inserted before the scope that contains
+        the rebinding assignments.
+        """
+        bridges: list[ast.stmt] = []
+        for var_name in rebind_vars:
+            # Get the current read-name for this variable (could already be an alias)
+            current_name = self._var_renames.get(var_name, var_name)
+            new_name = self._rebind(var_name)
+            # Update assign_depth to the outer scope so the loop body sees a
+            # depth mismatch and does NOT trigger another rebind.
+            self._assign_depth[var_name] = self._scope_depth
+            bridge = ast.Assign(
+                targets=[ast.Name(id=new_name, ctx=ast.Store())],
+                value=ast.Name(id=current_name, ctx=ast.Load()),
+                lineno=0,
+                col_offset=0,
+            )
+            ast.fix_missing_locations(bridge)
+            bridges.append(bridge)
+        return bridges
+
+    def visit_For(self, node: ast.For) -> ast.stmt | list[ast.stmt]:
+        """Visit For loop, incrementing scope depth for its body.
+
+        Before entering the body, scan for variables that would be rebound at
+        the same depth.  For each such variable, insert a bridge assignment
+        (``x_v1 = x``) before the loop and apply the rename so that both LHS
+        and RHS inside the loop body use the new alias.  This preserves
+        loop-carried semantics when two parallel for loops assign to the same
+        variable.
+        """
         node.iter = self.visit(node.iter)
+        self._scope_depth += 1
+        # Scan for rebinds and insert bridge assignments before the loop
+        rebind_vars = self._scan_for_rebinds(node.body)
+        self._scope_depth -= 1
+        bridges = self._make_bridge_assignments(rebind_vars)
         self._scope_depth += 1
         node.body = self._visit_scoped_body(node.body)
         self._scope_depth -= 1
+        if bridges:
+            return bridges + [node]
         return node
 
     def visit_If(self, node: ast.If) -> ast.stmt:
