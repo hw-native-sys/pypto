@@ -86,8 +86,8 @@ jobs:
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTOAS_VERSION: v0.26
-      PTOAS_SHA256: 8e8239f92b169d88fd117f7d4841739c129ecbdd8d3a01f96087df576ecd7814
+      PTOAS_VERSION: v0.30
+      PTOAS_SHA256: 83cd91f1bbe3c1b5bc7b01462adeb73603fb22b1b56d8b39bd90644b373ba2a1
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -169,8 +169,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTOAS_VERSION: v0.26
-      PTOAS_SHA256: 5abf99f9729997e171bee08bdb25662a7a24b62921c5ecfc05790a56a6e1b076
+      PTOAS_VERSION: v0.30
+      PTOAS_SHA256: 9a918aa5e8e17e3a194db8aa6af2f945a6c177d5bc0813494c30ff5d15ca2740
     container:
       image: ghcr.io/hw-native-sys/pypto/github-ci:latest
     steps:

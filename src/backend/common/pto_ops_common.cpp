@@ -532,10 +532,12 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
 }
 
 // Helper function for MrgSort format2: emits pto.tmrgsort
-// Supports 2-4 way merge:
-//   2-way (4 args): ins(src0, src1 {exhausted} : types...) outs(dst, tmp, executed : ...)
-//   3-way (5 args): ins(src0, src1, src2 {exhausted} : types...) outs(dst, tmp, executed : ...)
-//   4-way (6 args): ins(src0, src1, src2, src3 {exhausted} : types...) outs(dst, tmp, executed : ...)
+// Supports 2-4 way merge. tmp is the last ins operand and carries the
+// {exhausted} attribute; outs holds dst plus the synthesized excuted vector:
+//   2-way: ins(src0, src1, tmp {exhausted} : src_types..., tmp_type)
+//          outs(dst, excuted : dst_type, vector<4xi16>)
+//   3-way: ins(src0, src1, src2, tmp {exhausted} : ...) outs(dst, excuted : ...)
+//   4-way: ins(src0, src1, src2, src3, tmp {exhausted} : ...) outs(dst, excuted : ...)
 static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
@@ -545,19 +547,17 @@ static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const C
 
   size_t n_srcs = op->args_.size() - 2;
 
-  // Collect ins: src tiles (args 0..n_srcs-1)
   std::vector<std::string> srcs, src_types;
   for (size_t i = 0; i < n_srcs; ++i) {
     srcs.push_back(codegen.GetExprAsCode(op->args_[i]));
     src_types.push_back(codegen.GetExprTypeAnnotation(op->args_[i]));
   }
 
-  // outs: dst (result target), tmp (args[n_srcs]), executed (args[n_srcs+1])
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
   std::string tmp = codegen.GetExprAsCode(op->args_[n_srcs]);
   std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[n_srcs]);
-  std::string executed_vec = codegen.NewNamedTemp("executed_vec");
+  std::string executed_vec = codegen.NewNamedTemp("excuted_vec");
   codegen.Emit(executed_vec + " = arith.constant dense<0> : vector<4xi16>");
 
   bool exhausted = op->GetKwarg<bool>("exhausted", false);
@@ -566,10 +566,9 @@ static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const C
   std::ostringstream oss;
   oss << pto_op_name << " ins(";
   for (size_t i = 0; i < n_srcs; ++i) {
-    if (i > 0) oss << ", ";
-    oss << srcs[i];
+    oss << srcs[i] << ", ";
   }
-  oss << " " << exhausted_attr;
+  oss << tmp << " " << exhausted_attr;
 
   bool has_types = false;
   for (const auto& t : src_types) {
@@ -581,14 +580,14 @@ static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const C
   if (has_types) {
     oss << " : ";
     for (size_t i = 0; i < n_srcs; ++i) {
-      if (i > 0) oss << ", ";
-      oss << src_types[i];
+      oss << src_types[i] << ", ";
     }
+    oss << tmp_type;
   }
 
-  oss << ") outs(" << dst << ", " << tmp << ", " << executed_vec;
-  if (!dst_type.empty() || !tmp_type.empty()) {
-    oss << " : " << dst_type << ", " << tmp_type << ", vector<4xi16>";
+  oss << ") outs(" << dst << ", " << executed_vec;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type << ", vector<4xi16>";
   }
   oss << ")";
 
