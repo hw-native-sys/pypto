@@ -392,7 +392,7 @@ def _snapshot_profiling_state(platform: str, device_id: int) -> tuple[set[Path],
             pre_run_logs = set(device_log_dir.glob("*.log"))
 
     _OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    pre_run_perf_files = set(_OUTPUTS_DIR.glob("perf_swimlane_*.json"))
+    pre_run_perf_files = set(_OUTPUTS_DIR.glob("l2_perf_records_*.json"))
 
     return pre_run_logs, device_log_dir, pre_run_perf_files
 
@@ -407,14 +407,14 @@ def _collect_swimlane_data(
 ) -> None:
     """Collect swimlane profiling data after a profiled device execution.
 
-    Moves ``perf_swimlane_*.json`` into ``work_dir/swimlane_data/`` and runs
+    Moves ``l2_perf_records_*.json`` into ``work_dir/swimlane_data/`` and runs
     Simpler's ``swimlane_converter.py`` (if available) to produce merged JSON.
     """
     simpler_root = _get_simpler_root()
     swimlane_dir = work_dir / "swimlane_data"
     swimlane_dir.mkdir(parents=True, exist_ok=True)
 
-    new_perf_files = set(_OUTPUTS_DIR.glob("perf_swimlane_*.json")) - pre_run_perf_files
+    new_perf_files = set(_OUTPUTS_DIR.glob("l2_perf_records_*.json")) - pre_run_perf_files
     perf_file: Path | None = None
     if new_perf_files:
         perf_file = max(new_perf_files, key=lambda p: p.stat().st_mtime)
@@ -477,7 +477,7 @@ def _generate_swimlane(
 ) -> None:
     """Run Simpler's swimlane_converter.py to generate ``merged_swimlane_*.json``.
 
-    Output is written to *swimlane_dir* alongside the input ``perf_swimlane_*.json``.
+    Output is written to *swimlane_dir* alongside the input ``l2_perf_records_*.json``.
 
     Args:
         work_dir: Directory containing ``kernel_config.py``.
@@ -486,7 +486,7 @@ def _generate_swimlane(
         pre_run_logs: Set of log files that existed before the run.
         simpler_root: Path to the Simpler submodule root.
         swimlane_dir: Directory where swimlane JSON files are written.
-        perf_file: Path to the ``perf_swimlane_*.json`` file produced by
+        perf_file: Path to the ``l2_perf_records_*.json`` file produced by
             CodeRunner and already moved into *swimlane_dir*.  When ``None``,
             swimlane conversion is skipped.
     """
@@ -495,7 +495,7 @@ def _generate_swimlane(
         return
 
     if perf_file is None:
-        print("No perf_swimlane_*.json found, skipping swimlane conversion")
+        print("No l2_perf_records_*.json found, skipping swimlane conversion")
         return
 
     kernel_config_path = work_dir / "kernel_config.py"

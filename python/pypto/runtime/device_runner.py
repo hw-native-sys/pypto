@@ -389,7 +389,7 @@ def compile_and_assemble(
     runtime_name = runtime_config.get("runtime", "host_build_graph")
 
     # Ensure PTO-ISA root
-    pto_isa_root = ensure_pto_isa_root(commit=pto_isa_commit, clone_protocol="ssh")
+    pto_isa_root = ensure_pto_isa_root(commit=pto_isa_commit, clone_protocol="https")
     if pto_isa_root is None:
         raise OSError(
             "PTO_ISA_ROOT could not be resolved.\n"
