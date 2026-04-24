@@ -33,7 +33,7 @@ program_tiled = convert_pass(program)
 
 ## Algorithm
 
-The pass operates in two program-level phases:
+The pass operates in three program-level phases:
 
 ### Phase 1: Transform InCore Functions
 
@@ -47,12 +47,38 @@ For each `FunctionType::InCore` function:
 
 4. **Insert tile.store (exit stores)**: For each return value converted from `TensorType` to `TileType`, add an `Out` parameter and insert `tile.store(tile, zeros, out_param)`. If the return value comes from a `tile.assemble` loop, the loop is rewritten to use `tile.store` directly (conversion-time assemble-loop rewrite; distinct from `OptimizeOrchTensors` Pattern 3 which handles cross-function optimization).
 
-### Phase 2: Update Call Sites
+### Phase 2a: Propagate Added Outputs Through Spmd/Group Wrappers
 
-For each non-InCore function that calls a transformed InCore function:
+`OutlineClusterScopes` produces Spmd/Group wrappers that are transparent 1:1
+forwarders of their params to a single inner InCore call. When Phase 1 appends
+`Out` params to that InCore callee, the wrapper must mirror the appended params
+on its own signature and forward them through the inner call — otherwise
+orchestration codegen's `BuildWrapperReorderedParams` invariant (every inner-call
+`Var` arg resolves to a wrapper param) breaks.
+
+For each `FunctionType::Spmd` / `FunctionType::Group` function:
+
+1. `ForwardedCallFinder` locates the first call to a transformed InCore (one
+   whose Phase 1 added at least one `Out` param).
+2. If found, the wrapper signature is extended with matching `Out` params (same
+   type as the InCore's appended params, reusing the `name_hint_`), and
+   `WrapperForwardMutator` rewrites the inner call to append the new vars as
+   forward args and adopt the callee's new return type. `tensor.create` is
+   *not* synthesised in the wrapper — allocation remains the caller's
+   responsibility.
+3. If no forwarded transformed-InCore call is found, the wrapper is left
+   unchanged.
+
+### Phase 2b: Update Orchestration Call Sites
+
+For each orchestration / opaque function that calls a transformed InCore
+function or a wrapper that absorbed output params in Phase 2a:
 
 1. Insert `tensor.create` for each added output parameter
 2. Append created tensors as extra arguments to the call
+
+InCore, Spmd, and Group functions are skipped from this phase — they were
+already rewritten in Phase 1 / 2a.
 
 ## MatmulSlice Pattern
 
@@ -131,13 +157,16 @@ Key changes:
 | `MatmulSlicePatternCollector` | IRVisitor — finds slice→matmul patterns for Mat-space loads |
 | `TypePropagatingMutator` | Base IRMutator — propagates type changes through control flow |
 | `TensorToTileMutator` | IRMutator — converts tensor ops to tile ops via OpConversionRegistry |
-| `CallSiteUpdateMutator` | IRMutator — inserts tensor.create at orchestration call sites |
+| `ForwardedCallFinder` | IRVisitor — locates the wrapper's call into a transformed InCore (Phase 2a) |
+| `WrapperForwardMutator` | IRMutator — appends new Out args to the wrapper's inner call (Phase 2a) |
+| `CallSiteUpdateMutator` | IRMutator — inserts tensor.create at orchestration call sites (Phase 2b) |
 | `IncoreTileOpsVerifier` | IRVisitor — verifies no TensorType ops remain in InCore functions |
 
 ## Scope
 
 | Function type | Action |
 | ------------- | ------ |
-| InCore | Converted (tensor ops → tile ops) |
-| Orchestration / Opaque | Call sites updated (tensor.create inserted) |
-| Group | Unchanged |
+| InCore | Converted (tensor ops → tile ops); Phase 1 may append `Out` params |
+| Spmd / Group (forwarding to a transformed InCore) | Signature mirrors the InCore's new `Out` params; inner call forwards them (Phase 2a) |
+| Spmd / Group (no transformed-InCore forwarding) | Unchanged |
+| Orchestration / Opaque | Call sites updated — `tensor.create` inserted for each new `Out` param (Phase 2b) |

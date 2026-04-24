@@ -1382,9 +1382,187 @@ IncoreTransformResult TransformIncoreFunction(const FunctionPtr& func) {
 }
 
 // ============================================================================
+// Wrapper forward propagation: Spmd/Group wrappers produced by
+// OutlineClusterScopes are transparent 1:1 forwarders from their params to a
+// single inner InCore call. When the InCore callee gains output params
+// (Phase 1), the wrapper must mirror those params on its own signature and
+// forward them to the inner call, instead of synthesising tensor.create in
+// the wrapper body. Orchestration codegen's BuildWrapperReorderedParams
+// relies on every inner-call Var arg resolving to a wrapper param.
+// ============================================================================
+
+/// Find the first Call in a stmt tree whose callee is a transformed InCore
+/// function (listed in `incore_added_outputs` with >0 added outputs). Used to
+/// pre-size the wrapper's new Out params before the mutator runs.
+class ForwardedCallFinder : public IRVisitor {
+ public:
+  explicit ForwardedCallFinder(const std::unordered_map<std::string, size_t>& incore_added_outputs)
+      : incore_added_outputs_(incore_added_outputs) {}
+
+  [[nodiscard]] const CallPtr& GetFound() const { return found_; }
+
+  void VisitExpr_(const CallPtr& op) override {
+    if (!found_) {
+      auto gv = std::dynamic_pointer_cast<const GlobalVar>(op->op_);
+      if (gv) {
+        auto it = incore_added_outputs_.find(gv->name_);
+        if (it != incore_added_outputs_.end() && it->second > 0) {
+          found_ = op;
+          return;
+        }
+      }
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
+ private:
+  const std::unordered_map<std::string, size_t>& incore_added_outputs_;
+  CallPtr found_;
+};
+
+/// Mutator that rewrites a wrapper's forwarding call: append the
+/// pre-allocated `new_output_vars_` (wrapper-level Out params) to the call's
+/// arg list and update the call's return type to match the transformed
+/// InCore callee. Does NOT insert tensor.create — the allocation is the
+/// responsibility of the wrapper's caller. Recurses through nested control
+/// flow via IRMutator's base behavior, so forwarded calls inside ForStmt /
+/// IfStmt / WhileStmt bodies are handled correctly.
+class WrapperForwardMutator : public TypePropagatingMutator {
+ public:
+  WrapperForwardMutator(const std::unordered_map<std::string, size_t>& incore_added_outputs,
+                        const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs,
+                        std::vector<VarPtr> new_output_vars)
+      : incore_added_outputs_(incore_added_outputs),
+        transformed_incore_funcs_(transformed_incore_funcs),
+        new_output_vars_(std::move(new_output_vars)) {}
+
+  [[nodiscard]] bool applied() const { return applied_; }
+
+ protected:
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto new_value = VisitExpr(op->value_);
+    auto call = As<Call>(new_value);
+    if (!call) return HandlePassThroughAssign(op, new_value);
+    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+    if (!global_var) return HandlePassThroughAssign(op, new_value);
+
+    auto it = incore_added_outputs_.find(global_var->name_);
+    if (it == incore_added_outputs_.end() || it->second == 0) {
+      return HandlePassThroughAssign(op, new_value);
+    }
+
+    INTERNAL_CHECK_SPAN(!applied_, call->span_)
+        << "Wrapper forward propagation saw more than one forwarded call; outlining invariant violated";
+    INTERNAL_CHECK_SPAN(it->second == new_output_vars_.size(), call->span_)
+        << "Wrapper new-output count mismatch: callee added " << it->second << ", wrapper prepared "
+        << new_output_vars_.size();
+
+    auto incore_func_it = transformed_incore_funcs_.find(global_var->name_);
+    INTERNAL_CHECK_SPAN(incore_func_it != transformed_incore_funcs_.end(), call->span_)
+        << "Internal error: transformed InCore function not found: " << global_var->name_;
+    const auto& incore_func = incore_func_it->second;
+
+    std::vector<ExprPtr> new_args = call->args_;
+    for (const auto& v : new_output_vars_) {
+      new_args.push_back(v);
+    }
+
+    TypePtr new_return_type;
+    if (incore_func->return_types_.empty()) {
+      new_return_type = nullptr;
+    } else if (incore_func->return_types_.size() == 1) {
+      new_return_type = incore_func->return_types_[0];
+    } else {
+      new_return_type = std::make_shared<TupleType>(incore_func->return_types_);
+    }
+
+    auto new_call = new_return_type ? std::make_shared<Call>(call->op_, new_args, call->kwargs_,
+                                                             new_return_type, call->span_)
+                                    : std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->span_);
+
+    auto new_assign_var = std::make_shared<Var>(op->var_->name_hint_, new_return_type, op->var_->span_);
+    auto new_assign = MutableCopy(op);
+    new_assign->var_ = new_assign_var;
+    new_assign->value_ = new_call;
+    var_remap_[op->var_.get()] = new_assign_var;
+    applied_ = true;
+    return new_assign;
+  }
+
+ private:
+  const std::unordered_map<std::string, size_t>& incore_added_outputs_;
+  const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs_;
+  std::vector<VarPtr> new_output_vars_;
+  bool applied_ = false;
+};
+
+struct WrapperTransformResult {
+  FunctionPtr func;
+  size_t num_added_outputs;
+};
+
+/// Propagate a transformed InCore's added output params through a Spmd/Group
+/// wrapper: mirror them on the wrapper's signature and forward them to the
+/// inner call. Returns {func, 0} if the wrapper does not forward to any
+/// transformed InCore callee.
+WrapperTransformResult PropagateOutputsThroughWrapper(
+    const FunctionPtr& func, const std::unordered_map<std::string, size_t>& incore_added_outputs,
+    const std::unordered_map<std::string, FunctionPtr>& transformed_incore_funcs) {
+  ForwardedCallFinder finder(incore_added_outputs);
+  finder.VisitStmt(func->body_);
+  const auto& target_call = finder.GetFound();
+  if (!target_call) return {func, 0};
+
+  auto gv = std::dynamic_pointer_cast<const GlobalVar>(target_call->op_);
+  INTERNAL_CHECK_SPAN(gv != nullptr, target_call->span_)
+      << "Internal error: forwarded call op is not a GlobalVar";
+  auto added_outputs_it = incore_added_outputs.find(gv->name_);
+  INTERNAL_CHECK_SPAN(added_outputs_it != incore_added_outputs.end(), target_call->span_)
+      << "Internal error: missing added-output metadata for forwarded callee " << gv->name_;
+  auto transformed_incore_func_it = transformed_incore_funcs.find(gv->name_);
+  INTERNAL_CHECK_SPAN(transformed_incore_func_it != transformed_incore_funcs.end(), target_call->span_)
+      << "Internal error: missing transformed InCore function for forwarded callee " << gv->name_;
+  size_t num_added = added_outputs_it->second;
+  const auto& incore_func = transformed_incore_func_it->second;
+
+  // Mirror the InCore's appended Out params on the wrapper: same type, Out
+  // direction. Names are scoped to the wrapper so the clone is safe.
+  std::vector<VarPtr> new_params = func->params_;
+  std::vector<ParamDirection> new_dirs = func->param_directions_;
+  std::vector<VarPtr> new_output_vars;
+  new_output_vars.reserve(num_added);
+  size_t orig_incore_param_count = incore_func->params_.size() - num_added;
+  for (size_t i = 0; i < num_added; ++i) {
+    const auto& out_param = incore_func->params_[orig_incore_param_count + i];
+    auto new_var = std::make_shared<Var>(out_param->name_hint_, out_param->GetType(), func->span_);
+    new_params.push_back(new_var);
+    new_dirs.push_back(ParamDirection::Out);
+    new_output_vars.push_back(new_var);
+  }
+
+  WrapperForwardMutator mutator(incore_added_outputs, transformed_incore_funcs, new_output_vars);
+  auto new_body = mutator.VisitStmt(func->body_);
+  // Outlined Spmd/Group wrappers always forward via an `out = self.kernel(x, ...);
+  // return out` AssignStmt — WrapperForwardMutator rewrites that shape. If
+  // ForwardedCallFinder found a target call but the mutator failed to apply,
+  // the wrapper's signature has been mirrored but its inner call was not
+  // updated — a silent mis-rewrite. Fail fast instead.
+  INTERNAL_CHECK_SPAN(mutator.applied(), target_call->span_)
+      << "Wrapper forward propagation identified a forwarded call in " << func->name_
+      << " but could not rewrite it (call not in AssignStmt RHS form expected by outlining invariant)";
+
+  std::vector<TypePtr> new_return_types = incore_func->return_types_;
+  auto new_func =
+      std::make_shared<Function>(func->name_, new_params, new_dirs, new_return_types, new_body, func->span_,
+                                 func->func_type_, func->level_, func->role_, func->attrs_);
+  return {new_func, num_added};
+}
+
+// ============================================================================
 // CallSiteUpdateMutator: updates call sites in orchestration/opaque functions.
-// For each call to a transformed InCore function, inserts tensor.create for
-// output params and adds them as extra arguments.
+// For each call to a transformed InCore function or a wrapper that has
+// absorbed output params, inserts tensor.create for each output param and
+// appends them as extra arguments.
 // ============================================================================
 
 class CallSiteUpdateMutator : public TypePropagatingMutator {
@@ -1511,17 +1689,52 @@ Pass ConvertTensorToTileOps() {
       }
     }
 
-    // Phase 2: Update call sites in non-InCore functions
-    std::vector<FunctionPtr> functions_phase2;
+    // Phase 2a: Propagate added output params through Spmd/Group wrappers so
+    // they remain transparent 1:1 forwarders of their params to the inner
+    // call (an invariant relied on by orchestration codegen).
+    std::unordered_map<std::string, size_t> wrapper_added_outputs;
+    std::unordered_map<std::string, FunctionPtr> transformed_wrapper_funcs;
+    std::vector<FunctionPtr> functions_phase2a;
+    functions_phase2a.reserve(functions_phase1.size());
     for (const auto& func : functions_phase1) {
-      if (func->func_type_ != FunctionType::InCore) {
-        functions_phase2.push_back(UpdateCallSites(func, incore_added_outputs, transformed_incore_funcs));
+      if (func->func_type_ == FunctionType::Spmd || func->func_type_ == FunctionType::Group) {
+        auto result = PropagateOutputsThroughWrapper(func, incore_added_outputs, transformed_incore_funcs);
+        functions_phase2a.push_back(result.func);
+        if (result.num_added_outputs > 0) {
+          wrapper_added_outputs[func->name_] = result.num_added_outputs;
+          transformed_wrapper_funcs[func->name_] = result.func;
+        }
       } else {
-        functions_phase2.push_back(func);
+        functions_phase2a.push_back(func);
       }
     }
 
-    return std::make_shared<Program>(functions_phase2, program->name_, program->span_);
+    // Phase 2b: Update call sites in orchestration/opaque functions. The
+    // callee map covers both transformed InCore functions and wrappers that
+    // absorbed their output params.
+    std::unordered_map<std::string, size_t> all_added_outputs = incore_added_outputs;
+    all_added_outputs.insert(wrapper_added_outputs.begin(), wrapper_added_outputs.end());
+    std::unordered_map<std::string, FunctionPtr> all_transformed_funcs = transformed_incore_funcs;
+    all_transformed_funcs.insert(transformed_wrapper_funcs.begin(), transformed_wrapper_funcs.end());
+
+    std::vector<FunctionPtr> functions_phase2b;
+    functions_phase2b.reserve(functions_phase2a.size());
+    for (const auto& func : functions_phase2a) {
+      // Skip InCore (rewritten in Phase 1) and every Spmd/Group (rewritten in
+      // Phase 2a when forwarding a transformed InCore; otherwise nothing to
+      // forward because ForwardedCallFinder rejects callees that gained zero
+      // Out params). The postcondition check in PropagateOutputsThroughWrapper
+      // turns any finder/mutator mismatch into a hard INTERNAL_CHECK rather
+      // than a silent mis-rewrite.
+      if (func->func_type_ == FunctionType::InCore || func->func_type_ == FunctionType::Spmd ||
+          func->func_type_ == FunctionType::Group) {
+        functions_phase2b.push_back(func);
+      } else {
+        functions_phase2b.push_back(UpdateCallSites(func, all_added_outputs, all_transformed_funcs));
+      }
+    }
+
+    return std::make_shared<Program>(functions_phase2b, program->name_, program->span_);
   };
 
   return CreateProgramPass(pass_func, "ConvertTensorToTileOps", kConvertTensorToTileOpsProperties);
