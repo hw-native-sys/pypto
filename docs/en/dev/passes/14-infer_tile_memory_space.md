@@ -82,7 +82,7 @@ The pass *never* overrides a present `target_memory` kwarg in Phase 1. If a user
 
 ### Phase 2 — Move collection (`MoveCollector`)
 
-Walks the function body again. For every `Call` whose op has `input_constraints`, it checks each constrained input variable's resolved `var_memory_` against the allowed list. Any mismatch is recorded as a `MoveKey = (producer_var, target_space)` in `needed_moves_`, where `target_space` is the first allowed space for that input slot. Phase 3 will materialize one `tile.move` per unique key.
+Walks the function body again. For every `Call` whose op has `input_constraints`, it checks each constrained input variable's resolved `var_memory_` against the allowed list. Any mismatch is recorded as a `MoveKey = (producer_var, target_space)` in `needed_moves_`, where `target_space` is the first allowed space for that input slot. Phase 3 will materialize at most one `tile.move` per unique key per enclosing `SeqStmts` scope (i.e. per insertion-site cache scope), so the same `(producer_var, target_space)` may still appear in sibling scopes such as `then` / `else` branches.
 
 ### Phase 3 — Mutation (`TileMemorySpaceMutator`)
 

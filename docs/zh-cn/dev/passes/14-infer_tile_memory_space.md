@@ -82,7 +82,7 @@ program_inferred = infer_pass(program)
 
 ### 阶段 2 — Move 收集（`MoveCollector`）
 
-再次遍历函数体。对每个其算子带 `input_constraints` 的 `Call`，检查每个受约束输入变量在 `var_memory_` 中的解析结果是否在允许列表内。任何不匹配都会记录为 `MoveKey = (producer_var, target_space)` 加入 `needed_moves_`，其中 `target_space` 取该输入槽允许列表的第一个。阶段 3 会为每个唯一 key 物化一个 `tile.move`。
+再次遍历函数体。对每个其算子带 `input_constraints` 的 `Call`，检查每个受约束输入变量在 `var_memory_` 中的解析结果是否在允许列表内。任何不匹配都会记录为 `MoveKey = (producer_var, target_space)` 加入 `needed_moves_`，其中 `target_space` 取该输入槽允许列表的第一个。阶段 3 会在每个外层 `SeqStmts` 作用域（即每个插入点缓存作用域）内最多为每个唯一 key 物化一个 `tile.move`，因此同一 `(producer_var, target_space)` 仍可能在兄弟作用域（如 `then` / `else` 分支）中分别物化。
 
 ### 阶段 3 — 重写（`TileMemorySpaceMutator`）
 
