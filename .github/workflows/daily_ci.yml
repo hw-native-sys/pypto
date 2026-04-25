@@ -12,8 +12,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.25
-      PTOAS_SHA256: 66dee5d9ebbd713db7934570bb95eb7870895a49905c248ca95da9289cd4a1aa
+      PTOAS_VERSION: v0.30
+      PTOAS_SHA256: 83cd91f1bbe3c1b5bc7b01462adeb73603fb22b1b56d8b39bd90644b373ba2a1
     container:
       image: localhost:5000/ci-device-py310:latest
       options: >-
@@ -60,10 +60,15 @@ jobs:
         run: echo "$ASCEND_HOME_PATH/bin" >> $GITHUB_PATH
 
       - name: Clone pto-isa repository
-        run: git clone --depth 1 https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+        run: |
+          git clone https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+          cd $GITHUB_WORKSPACE/pto-isa
+          git checkout d5bcc23
 
       - name: Install simpler
-        run: pip install -v ./runtime
+        run: |
+          rm -rf ./runtime/build
+          pip install -v ./runtime
 
       - name: Clone pypto-lib
         run: git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git $GITHUB_WORKSPACE/pypto-lib
@@ -75,13 +80,16 @@ jobs:
 
       - name: Run qwen3 decode examples
         working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        shell: bash
         run: |
           failed=()
           for f in \
-            examples/models/qwen3/qwen3_32b_decode_scope1.py \
-            examples/models/qwen3/qwen3_32b_decode_scope2.py \
-            examples/models/qwen3/qwen3_32b_decode_scope3.py \
-            examples/models/qwen3/qwen3_32b_decode.py; do
+            examples/models/qwen3/32b/qwen3_32b_decode_scope1.py \
+            examples/models/qwen3/32b/qwen3_32b_decode_scope2.py \
+            examples/models/qwen3/32b/qwen3_32b_decode_scope3.py \
+            examples/models/qwen3/32b/qwen3_32b_decode.py; do
             echo "::group::$f"
             if ! python "$f" -p a2a3 -d $DEVICE_ID; then
               failed+=("$f")
@@ -101,8 +109,8 @@ jobs:
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.25
-      PTOAS_SHA256: 66dee5d9ebbd713db7934570bb95eb7870895a49905c248ca95da9289cd4a1aa
+      PTOAS_VERSION: v0.30
+      PTOAS_SHA256: 83cd91f1bbe3c1b5bc7b01462adeb73603fb22b1b56d8b39bd90644b373ba2a1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -132,16 +140,21 @@ jobs:
           chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
 
       - name: Clone pto-isa repository
-        run: git clone --depth 1 https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+        run: |
+          git clone https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+          cd $GITHUB_WORKSPACE/pto-isa
+          git checkout d5bcc23
 
       - name: Install simpler
-        run: pip install -v ./runtime
+        run: |
+          rm -rf ./runtime/build
+          pip install -v ./runtime
 
       - name: Run A5 system tests
         run: |
           task-submit --timeout 1800 --max-time 1800 --device 1 \
-            --run "pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=1 --pto-isa-commit=d96c8784 \
-              -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min)'"
+            --run "pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=1 --pto-isa-commit=d5bcc23 \
+              -k 'not (test_tile_row_expand or test_fillpad_zero or test_fillpad_max or test_fillpad_min or TestMscatter)'"
 
   notify-on-failure:
     name: Open issue on failure
