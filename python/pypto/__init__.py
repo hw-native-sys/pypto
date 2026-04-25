@@ -15,8 +15,7 @@ This package provides Python bindings for the PyPTO C++ library.
 
 from typing import cast
 
-# Import IR module (includes operations and core IR types)
-from . import compile_profiling, ir, language, runtime
+from . import _bootstrap, compile_profiling, ir, language, runtime
 from .pypto_core import (
     DataType,
     InternalError,
@@ -35,6 +34,9 @@ from .pypto_core import (
     set_log_level,
     testing,
 )
+
+assert _bootstrap is not None
+del _bootstrap
 
 # Convenient dtype constants
 DT_BOOL: DataType = cast(DataType, DataType.BOOL)
