@@ -3880,6 +3880,7 @@ class ASTParser:
         "dim",
         "assemble",
         "full",
+        "arange",
     }
     _TILE_ONLY_OPS = {
         "load",
