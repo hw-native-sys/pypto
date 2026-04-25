@@ -26,7 +26,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 11 | `11-convert_tensor_to_tile_ops.md` | 11th pass |
 | 12 | `12-optimize_orch_tensors.md` | 12th pass |
 | 13 | `13-flatten_tile_nd_to_2d.md` | 13th pass |
-| 14 | *(no doc yet)* | 14th pass (`InferTileMemorySpace`) |
+| 14 | `14-infer_tile_memory_space.md` | 14th pass |
 | 15 | *(no doc yet)* | 15th pass (`ResolveTransposeLayout`) |
 | 16 | *(no doc yet)* | 16th pass (`ResolveBackendOpLayouts`) |
 | 17 | `17-expand_mixed_kernel.md` | 17th pass |
