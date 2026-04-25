@@ -42,8 +42,6 @@ from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core.passes import WarningCheckSet, WarningLevel
 
-from .env_manager import get_simpler_root as _get_simpler_root
-
 _OUTPUTS_DIR = Path("outputs")
 
 
@@ -408,9 +406,9 @@ def _collect_swimlane_data(
     """Collect swimlane profiling data after a profiled device execution.
 
     Moves ``l2_perf_records_*.json`` into ``work_dir/swimlane_data/`` and runs
-    Simpler's ``swimlane_converter.py`` (if available) to produce merged JSON.
+    Simpler's swimlane converter via ``python -m simpler_setup.tools.swimlane_converter``
+    (if available) to produce merged JSON.
     """
-    simpler_root = _get_simpler_root()
     swimlane_dir = work_dir / "swimlane_data"
     swimlane_dir.mkdir(parents=True, exist_ok=True)
 
@@ -432,7 +430,6 @@ def _collect_swimlane_data(
             device_id,
             device_log_dir,
             pre_run_logs,
-            simpler_root,
             swimlane_dir,
             perf_file,
         )
@@ -471,11 +468,10 @@ def _generate_swimlane(
     device_id: int,
     device_log_dir: Path | None,
     pre_run_logs: set[Path],
-    simpler_root: Path,
     swimlane_dir: Path,
     perf_file: Path | None,
 ) -> None:
-    """Run Simpler's swimlane_converter.py to generate ``merged_swimlane_*.json``.
+    """Run ``python -m simpler_setup.tools.swimlane_converter`` to generate ``merged_swimlane_*.json``.
 
     Output is written to *swimlane_dir* alongside the input ``l2_perf_records_*.json``.
 
@@ -484,14 +480,18 @@ def _generate_swimlane(
         device_id: Hardware device index (fallback when no device log found).
         device_log_dir: CANN device log directory snapshotted before the run.
         pre_run_logs: Set of log files that existed before the run.
-        simpler_root: Path to the Simpler submodule root.
         swimlane_dir: Directory where swimlane JSON files are written.
         perf_file: Path to the ``l2_perf_records_*.json`` file produced by
             CodeRunner and already moved into *swimlane_dir*.  When ``None``,
             swimlane conversion is skipped.
     """
-    swimlane_script = simpler_root / "tools" / "swimlane_converter.py"
-    if not swimlane_script.exists():
+    converter_module = "simpler_setup.tools.swimlane_converter"
+    try:
+        spec = importlib.util.find_spec(converter_module)
+    except ImportError:
+        spec = None
+    if spec is None:
+        print(f"Module {converter_module} not found, skipping swimlane conversion")
         return
 
     if perf_file is None:
@@ -504,7 +504,8 @@ def _generate_swimlane(
 
     cmd = [
         sys.executable,
-        str(swimlane_script),
+        "-m",
+        converter_module,
         str(perf_file),
         "-o",
         str(output_path),
@@ -525,7 +526,10 @@ def _generate_swimlane(
         subprocess.run(cmd, check=True)
         print(f"Swimlane JSON written to: {output_path}")
     except subprocess.CalledProcessError as e:
-        print(f"swimlane_converter.py failed (exit {e.returncode}), no swimlane generated")
+        print(
+            f"Swimlane converter module {converter_module!r} failed (exit {e.returncode}), "
+            "no swimlane generated"
+        )
 
 
 def _patch_orchestration_headers(work_dir: Path) -> None:
