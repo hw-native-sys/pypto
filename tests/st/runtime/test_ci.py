@@ -17,6 +17,7 @@ Covers:
 5. tensor.ci descending.
 6. pl.tile.arange alias.
 7. pl.tensor.arange alias.
+8. pl.arange (top-level alias of pl.tensor.ci).
 """
 
 from typing import Any
@@ -203,6 +204,21 @@ class TensorArangeAliasProgram:
 
 
 @pl.program
+class TopLevelArangeProgram:
+    """pl.arange — top-level alias of pl.tensor.ci."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        output: pl.Out[pl.Tensor[[ROWS, COLS], pl.INT32]],
+    ) -> pl.Tensor[[ROWS, COLS], pl.INT32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            seq = pl.arange(0, [ROWS, COLS], dtype=pl.INT32)
+            output = pl.assemble(output, seq, [0, 0])
+        return output
+
+
+@pl.program
 class CiUint32AscendProgram:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
@@ -381,6 +397,20 @@ class TensorArangeAliasTestCase(_CiBaseTestCase):
         tensors["output"][:] = torch.arange(N - 1, -1, -1, dtype=torch.int32).reshape(ROWS, COLS)
 
 
+class TopLevelArangeTestCase(_CiBaseTestCase):
+    def get_name(self) -> str:
+        return "top_level_arange"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [TensorSpec("output", [ROWS, COLS], DataType.INT32, is_output=True)]
+
+    def get_program(self) -> Any:
+        return TopLevelArangeProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["output"][:] = torch.arange(0, N, dtype=torch.int32).reshape(ROWS, COLS)
+
+
 class CiUint32AscendTestCase(_CiBaseTestCase):
     def get_name(self) -> str:
         return "ci_uint32_ascend"
@@ -449,6 +479,10 @@ class TestCi:
 
     def test_tensor_arange_ascending(self, test_runner):
         result = test_runner.run(TensorArangeAscendingTestCase())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_top_level_arange(self, test_runner):
+        result = test_runner.run(TopLevelArangeTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
     def test_ci_uint32_ascend(self, test_runner):

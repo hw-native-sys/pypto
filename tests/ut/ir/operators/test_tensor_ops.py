@@ -2286,6 +2286,9 @@ class TestTensorCiOp:
     def test_tensor_arange_alias_is_ci(self):
         assert pl.tensor.arange is pl.tensor.ci
 
+    def test_top_level_arange_is_tensor_ci(self):
+        assert pl.arange is pl.tensor.ci
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
