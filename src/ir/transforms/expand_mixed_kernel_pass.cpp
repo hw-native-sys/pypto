@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -23,11 +22,10 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
-#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/memory_space.h"
@@ -40,11 +38,13 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/tpop_chain_normalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -83,59 +83,58 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 // Recursive Affinity Analysis
 // ============================================================================
 
-/// Collect Vars defined by tpop operations (tile.tpop_from_aiv / tile.tpop_from_aic).
-/// Used to avoid misclassifying tile.move from a tpop result as a cross-core boundary.
-std::unordered_set<const Var*> CollectTpopVars(const std::vector<StmtPtr>& stmts) {
-  std::unordered_set<const Var*> result;
-  for (const auto& stmt : stmts) {
-    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
-        if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
-          if (op->name_ == "tile.tpop_from_aiv" || op->name_ == "tile.tpop_from_aic") {
-            result.insert(assign->var_.get());
+using TpopDefs = std::unordered_map<const Var*, CallPtr>;
+
+/// Collect tpop (tile.tpop_from_aiv / tile.tpop_from_aic) result Vars and their defining Calls.
+/// Used for two purposes: (1) avoid misclassifying tile.move from a tpop result as a
+/// cross-core boundary, and (2) propagate kwargs (e.g., split) from the original tpop to the
+/// boundary-generated replacement.
+TpopDefs CollectTpopDefs(const std::vector<StmtPtr>& stmts) {
+  TpopDefs result;
+  std::function<void(const std::vector<StmtPtr>&)> walk = [&](const std::vector<StmtPtr>& ss) {
+    for (const auto& stmt : ss) {
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+        if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
+          if (op_predicates::IsTPop(call)) {
+            result[assign->var_.get()] = call;
           }
         }
       }
-    }
-    // Recurse into compound statements
-    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      auto inner = CollectTpopVars(FlattenBody(for_stmt->body_));
-      result.insert(inner.begin(), inner.end());
-    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto inner = CollectTpopVars(FlattenBody(if_stmt->then_body_));
-      result.insert(inner.begin(), inner.end());
-      const auto& else_body = if_stmt->else_body_;
-      if (else_body.has_value()) {
-        auto inner2 = CollectTpopVars(FlattenBody(*else_body));
-        result.insert(inner2.begin(), inner2.end());
+      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+        walk(FlattenBody(for_stmt->body_));
+      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+        walk(FlattenBody(if_stmt->then_body_));
+        if (if_stmt->else_body_.has_value()) {
+          walk(FlattenBody(if_stmt->else_body_.value()));
+        }
+      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+        walk(FlattenBody(while_stmt->body_));
       }
-    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      auto inner = CollectTpopVars(FlattenBody(while_stmt->body_));
-      result.insert(inner.begin(), inner.end());
     }
-  }
+  };
+  walk(stmts);
   return result;
 }
 
 // Forward declare
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                 const std::unordered_set<const Var*>& tpop_vars);
+                                 const TpopDefs& tpop_defs);
 
 CoreAffinity AnalyzeStmtsAffinity(const std::vector<StmtPtr>& stmts,
                                   std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                   std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                  const std::unordered_set<const Var*>& tpop_vars = {}) {
+                                  const TpopDefs& tpop_defs = {}) {
   CoreAffinity combined = CoreAffinity::SHARED;
   for (const auto& stmt : stmts) {
-    combined = CombineAffinity(combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity, tpop_vars));
+    combined = CombineAffinity(combined, AnalyzeStmtAffinity(stmt, stmt_map, var_affinity, tpop_defs));
   }
   return combined;
 }
 
 CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                  std::unordered_map<const Var*, CoreAffinity>& var_affinity,
-                                 const std::unordered_set<const Var*>& tpop_vars) {
+                                 const TpopDefs& tpop_defs) {
   CoreAffinity result = CoreAffinity::SHARED;
 
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
@@ -143,11 +142,13 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
     if (call) {
       result = ClassifyCallAffinity(call);
       // tile.move from a tpop result is not a cross-core boundary: the data already
-      // arrived via tpop, so the move is just internal data placement on the consuming core.
-      if (result == CoreAffinity::BOUNDARY && !call->args_.empty()) {
+      // arrived via tpop, so the move is just internal data placement on the consuming
+      // core. ClassifyCallAffinity returns MIXED for *any* C/V-crossing tile.move,
+      // which for a leaf call can only be a boundary move; downgrade to the consuming
+      // core's affinity when the source is a tpop result.
+      if (result == CoreAffinity::MIXED && !call->args_.empty()) {
         if (auto src_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
-          if (tpop_vars.count(src_var.get()) > 0) {
-            // Reclassify by target memory space (the consuming core's side)
+          if (tpop_defs.count(src_var.get()) > 0) {
             for (const auto& [key, value] : call->kwargs_) {
               if (key == "target_memory") {
                 auto target = AnyCast<MemorySpace>(value, "target_memory");
@@ -164,18 +165,18 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
     auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     if (call) result = ClassifyCallAffinity(call);
   } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity, tpop_vars);
+    result = AnalyzeStmtsAffinity(FlattenBody(for_stmt->body_), stmt_map, var_affinity, tpop_defs);
   } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity, tpop_vars);
+    result = AnalyzeStmtsAffinity(FlattenBody(if_stmt->then_body_), stmt_map, var_affinity, tpop_defs);
     const auto& else_body = if_stmt->else_body_;
     if (else_body.has_value()) {
       result = CombineAffinity(
-          result, AnalyzeStmtsAffinity(FlattenBody(*else_body), stmt_map, var_affinity, tpop_vars));
+          result, AnalyzeStmtsAffinity(FlattenBody(*else_body), stmt_map, var_affinity, tpop_defs));
     }
   } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    result = AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity, tpop_vars);
+    result = AnalyzeStmtsAffinity(FlattenBody(while_stmt->body_), stmt_map, var_affinity, tpop_defs);
   } else if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(stmt)) {
-    result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity, tpop_vars);
+    result = AnalyzeStmtsAffinity(seq->stmts_, stmt_map, var_affinity, tpop_defs);
   }
 
   stmt_map[stmt.get()] = result;
@@ -191,7 +192,7 @@ CoreAffinity AnalyzeStmtAffinity(const StmtPtr& stmt, std::unordered_map<const S
 /// (e.g., split) can be propagated to the replacement tpop.
 void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
                             std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
-                            const std::unordered_map<const Var*, CallPtr>& var_to_tpop) {
+                            const TpopDefs& tpop_defs) {
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
@@ -200,31 +201,30 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
         if (dir != CVDirection::NONE) {
           INTERNAL_CHECK_SPAN(!call->args_.empty(), call->span_)
               << "Internal error: tile.move must have at least one argument";
-          // Look up whether the source tile was produced by a tpop call
-          CallPtr source_tpop;
+          // tile.move whose source comes from a tpop is not a genuine cross-core
+          // boundary — the data already crossed via the tpop; this move is just
+          // internal data placement on the consuming core. Skip recording so
+          // BuildCoreBody's boundary-membership check treats it as a plain move.
           if (auto source_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
-            auto it = var_to_tpop.find(source_var.get());
-            if (it != var_to_tpop.end()) {
-              source_tpop = it->second;
-            }
+            if (tpop_defs.count(source_var.get()) > 0) continue;
           }
           boundary_moves[stmt.get()] =
-              CVBoundaryMove{dir, assign->var_, call->args_[0], call->GetType(), source_tpop};
+              CVBoundaryMove{dir, assign->var_, call->args_[0], call->GetType(), /*source_tpop=*/nullptr};
         }
       }
     }
 
     // Recurse into compound statements
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      CollectCVBoundaryMoves(FlattenBody(for_stmt->body_), boundary_moves, var_to_tpop);
+      CollectCVBoundaryMoves(FlattenBody(for_stmt->body_), boundary_moves, tpop_defs);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      CollectCVBoundaryMoves(FlattenBody(if_stmt->then_body_), boundary_moves, var_to_tpop);
+      CollectCVBoundaryMoves(FlattenBody(if_stmt->then_body_), boundary_moves, tpop_defs);
       const auto& else_body = if_stmt->else_body_;
       if (else_body.has_value()) {
-        CollectCVBoundaryMoves(FlattenBody(*else_body), boundary_moves, var_to_tpop);
+        CollectCVBoundaryMoves(FlattenBody(*else_body), boundary_moves, tpop_defs);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      CollectCVBoundaryMoves(FlattenBody(while_stmt->body_), boundary_moves, var_to_tpop);
+      CollectCVBoundaryMoves(FlattenBody(while_stmt->body_), boundary_moves, tpop_defs);
     }
   }
 }
@@ -318,11 +318,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
   // For boundary moves: the "push" side sends data, the "pop" side receives it.
   // AIC: C→V = push to AIV, V→C = pop from AIV
   // AIV: C→V = pop from AIC, V→C = push to AIC
-  std::string push_op = (side == CoreSide::AIC) ? "tile.tpush_to_aiv" : "tile.tpush_to_aic";
-  std::string pop_op = (side == CoreSide::AIC) ? "tile.tpop_from_aiv" : "tile.tpop_from_aic";
-  // AIC pushes on C→V and pops on V→C; AIV is the reverse
-  CVDirection push_direction =
-      (side == CoreSide::AIC) ? CVDirection::CUBE_TO_VECTOR : CVDirection::VECTOR_TO_CUBE;
+  std::string push_op = core_side_ops::TPushOp(side);
+  std::string pop_op = core_side_ops::TPopOp(side);
+  CVDirection push_direction = core_side_ops::PushDirection(side);
 
   std::vector<StmtPtr> result;
 
@@ -330,10 +328,12 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     auto it = stmt_map.find(stmt.get());
     CoreAffinity affinity = (it != stmt_map.end()) ? it->second : CoreAffinity::SHARED;
 
-    if (affinity == CoreAffinity::BOUNDARY) {
-      auto bm_it = boundary_moves.find(stmt.get());
-      if (bm_it != boundary_moves.end()) {
-        // Leaf boundary move — emit tpush/tpop
+    // Leaf boundary move — emit tpush/tpop. boundary_moves is the authoritative
+    // signal for "this stmt needs cross-core split"; the stmt's CoreAffinity is
+    // MIXED here, but we handle it specially before the generic MIXED arm below.
+    auto bm_it = boundary_moves.find(stmt.get());
+    if (bm_it != boundary_moves.end()) {
+      {
         const auto& bm = bm_it->second;
         if (bm.direction == push_direction) {
           ExprPtr push_source = bm.source_tile;
@@ -414,8 +414,6 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         }
         continue;
       }
-      // Compound stmt whose children are all BOUNDARY — recurse like MIXED
-      affinity = CoreAffinity::MIXED;
     }
 
     if (affinity == skip_affinity) continue;
@@ -481,46 +479,19 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   auto stmts = FlattenBody(func->body_);
 
-  // Pre-scan for tpop result vars (needed by affinity analysis to avoid
-  // misclassifying tile.move from tpop results as cross-core boundaries)
-  auto tpop_vars = CollectTpopVars(stmts);
+  // Pre-scan for tpop result vars and their defining calls. Needed for
+  // (1) affinity analysis — avoid misclassifying tile.move from tpop results
+  // as cross-core boundaries, and (2) boundary-move kwarg propagation — carry
+  // split=1 etc. from the original tpop onto its boundary-generated replacement.
+  auto tpop_defs = CollectTpopDefs(stmts);
 
   // Recursive affinity analysis (descends into ForStmt/IfStmt/WhileStmt)
   std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
   std::unordered_map<const Var*, CoreAffinity> var_affinity;
-  AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_vars);
+  AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs);
 
-  // Collect CV boundary moves from explicit tile.move ops.
-  // First, build a map from Var -> defining tpop Call so boundary moves can
-  // propagate kwargs (e.g., split) from the original tpop to the replacement.
-  // Uses the already-collected tpop_vars set and rescans for the full Call objects.
-  std::unordered_map<const Var*, CallPtr> var_to_tpop;
-  auto collect_var_to_tpop = [&](const std::vector<StmtPtr>& ss, auto&& self) -> void {
-    for (const auto& stmt : ss) {
-      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-        if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
-          if (auto op = std::dynamic_pointer_cast<const Op>(call->op_)) {
-            if (op->name_ == "tile.tpop_from_aiv" || op->name_ == "tile.tpop_from_aic") {
-              var_to_tpop[assign->var_.get()] = call;
-            }
-          }
-        }
-      }
-      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        self(FlattenBody(for_stmt->body_), self);
-      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        self(FlattenBody(if_stmt->then_body_), self);
-        if (if_stmt->else_body_.has_value()) {
-          self(FlattenBody(if_stmt->else_body_.value()), self);
-        }
-      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        self(FlattenBody(while_stmt->body_), self);
-      }
-    }
-  };
-  collect_var_to_tpop(stmts, collect_var_to_tpop);
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
-  CollectCVBoundaryMoves(stmts, boundary_moves, var_to_tpop);
+  CollectCVBoundaryMoves(stmts, boundary_moves, tpop_defs);
 
   // Build definition map from original body for init value fixup (#533)
   std::unordered_map<const Var*, StmtPtr> original_def_map;
@@ -866,468 +837,12 @@ FunctionPtr RewriteGroupCaller(const FunctionPtr& group_func, const std::string&
 bool FunctionCallsFunction(const FunctionPtr& func, const std::string& callee_name) {
   auto stmts = FlattenBody(func->body_);
   for (const auto& stmt : stmts) {
-    CallPtr call;
-    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      call = std::dynamic_pointer_cast<const Call>(assign->value_);
-    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
-    }
-    if (call) {
+    if (auto call = transform_utils::GetCallFromStmt(stmt)) {
       auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
       if (gv && gv->name_ == callee_name) return true;
     }
   }
   return false;
-}
-
-// ============================================================================
-// GM Slot Buffer Injection (a2a3 only)
-// ============================================================================
-
-/// Well-known parameter name for the GM slot buffer.
-constexpr const char* kGMPipeBufferName = "__gm_pipe_buffer";
-
-/// Check if a statement list contains aic_initialize_pipe or aiv_initialize_pipe.
-bool HasInitializePipeOps(const std::vector<StmtPtr>& stmts) {
-  for (const auto& stmt : stmts) {
-    CallPtr call;
-    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      call = std::dynamic_pointer_cast<const Call>(assign->value_);
-    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-      call = std::dynamic_pointer_cast<const Call>(eval->expr_);
-    }
-    if (call) {
-      auto op = std::dynamic_pointer_cast<const Op>(call->op_);
-      if (op && (op->name_ == "system.aic_initialize_pipe" || op->name_ == "system.aiv_initialize_pipe")) {
-        return true;
-      }
-    }
-    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      if (HasInitializePipeOps(FlattenBody(for_stmt->body_))) return true;
-    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      if (HasInitializePipeOps(FlattenBody(if_stmt->then_body_))) return true;
-      const auto& else_body = if_stmt->else_body_;
-      if (else_body.has_value()) {
-        if (HasInitializePipeOps(FlattenBody(*else_body))) return true;
-      }
-    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      if (HasInitializePipeOps(FlattenBody(while_stmt->body_))) return true;
-    }
-  }
-  return false;
-}
-
-bool HasGMPipeBufferParam(const FunctionPtr& func) {
-  for (const auto& param : func->params_) {
-    if (param->name_hint_ == kGMPipeBufferName) return true;
-  }
-  return false;
-}
-
-void BuildCallGraphFromFunctions(const std::vector<FunctionPtr>& functions,
-                                 std::unordered_map<std::string, std::unordered_set<std::string>>& callers,
-                                 std::unordered_map<std::string, std::unordered_set<std::string>>& callees) {
-  std::unordered_set<std::string> func_names;
-  for (const auto& func : functions) func_names.insert(func->name_);
-  for (const auto& func : functions) {
-    std::function<void(const std::vector<StmtPtr>&)> walk = [&](const std::vector<StmtPtr>& stmts) {
-      for (const auto& stmt : stmts) {
-        CallPtr call;
-        if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-          call = std::dynamic_pointer_cast<const Call>(assign->value_);
-        } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-          call = std::dynamic_pointer_cast<const Call>(eval->expr_);
-        }
-        if (call) {
-          auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-          if (gv && func_names.count(gv->name_)) {
-            callees[func->name_].insert(gv->name_);
-            callers[gv->name_].insert(func->name_);
-          }
-        }
-        if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-          walk(FlattenBody(for_stmt->body_));
-        } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-          walk(FlattenBody(if_stmt->then_body_));
-          const auto& else_body = if_stmt->else_body_;
-          if (else_body.has_value()) walk(FlattenBody(*else_body));
-        } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-          walk(FlattenBody(while_stmt->body_));
-        }
-      }
-    };
-    if (func->body_) walk(FlattenBody(func->body_));
-  }
-}
-
-FunctionPtr AddGMSlotBufferParam(const FunctionPtr& func, int64_t gm_buffer_elems) {
-  auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{gm_buffer_elems}, DataType::FP32,
-                                              std::nullopt, std::nullopt);
-  auto gm_var = std::make_shared<Var>(kGMPipeBufferName, gm_type, func->span_);
-  auto new_params = func->params_;
-  new_params.push_back(gm_var);
-  auto new_directions = func->param_directions_;
-  new_directions.push_back(ParamDirection::Out);
-  auto result = MutableCopy(func);
-  result->params_ = new_params;
-  result->param_directions_ = new_directions;
-  return result;
-}
-
-StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<std::string>& modified_funcs,
-                                const VarPtr& gm_param) {
-  auto stmts = FlattenBody(body);
-  std::vector<StmtPtr> new_stmts;
-  bool any_changed = false;
-  for (const auto& stmt : stmts) {
-    auto try_rewrite = [&](const CallPtr& call) -> CallPtr {
-      if (!call) return nullptr;
-      auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-      if (!gv || !modified_funcs.count(gv->name_)) return nullptr;
-      std::vector<ExprPtr> new_args = call->args_;
-      new_args.push_back(gm_param);
-      return call->GetType() ? std::make_shared<Call>(call->op_, new_args, call->GetType(), call->span_)
-                             : std::make_shared<Call>(call->op_, new_args, call->span_);
-    };
-    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_))) {
-        auto new_assign = MutableCopy(assign);
-        new_assign->value_ = rw;
-        new_stmts.push_back(std::move(new_assign));
-        any_changed = true;
-        continue;
-      }
-    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-      if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(eval->expr_))) {
-        auto new_eval = MutableCopy(eval);
-        new_eval->expr_ = rw;
-        new_stmts.push_back(std::move(new_eval));
-        any_changed = true;
-        continue;
-      }
-    }
-    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      auto nb = RewriteCallsForGMBuffer(for_stmt->body_, modified_funcs, gm_param);
-      if (nb != for_stmt->body_) {
-        auto new_for = MutableCopy(for_stmt);
-        new_for->body_ = nb;
-        new_stmts.push_back(new_for);
-        any_changed = true;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto nt = RewriteCallsForGMBuffer(if_stmt->then_body_, modified_funcs, gm_param);
-      std::optional<StmtPtr> ne;
-      const auto& else_body = if_stmt->else_body_;
-      if (else_body.has_value()) {
-        ne = RewriteCallsForGMBuffer(*else_body, modified_funcs, gm_param);
-      }
-      bool body_changed = (nt != if_stmt->then_body_);
-      if (!body_changed && ne.has_value() && else_body.has_value()) {
-        body_changed = (*ne != *else_body);
-      }
-      if (body_changed) {
-        auto new_if = MutableCopy(if_stmt);
-        new_if->then_body_ = nt;
-        new_if->else_body_ = ne;
-        new_stmts.push_back(new_if);
-        any_changed = true;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      auto nb = RewriteCallsForGMBuffer(while_stmt->body_, modified_funcs, gm_param);
-      if (nb != while_stmt->body_) {
-        auto new_while = MutableCopy(while_stmt);
-        new_while->body_ = nb;
-        new_stmts.push_back(new_while);
-        any_changed = true;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-    } else {
-      new_stmts.push_back(stmt);
-    }
-  }
-  if (!any_changed) return body;
-  return SeqStmts::Flatten(std::move(new_stmts), body->span_);
-}
-
-/// Create a tensor.create Call for the GM pipe buffer workspace.
-CallPtr CreateGMPipeBufferTensorCreate(int64_t buffer_size_bytes, const Span& span) {
-  int64_t shape_dim = (buffer_size_bytes + 3) / 4;  // FP32 elements (ceil)
-  auto shape_elem = std::make_shared<ConstInt>(shape_dim, DataType::INDEX, span);
-  auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{shape_elem}, span);
-  return OpRegistry::GetInstance().Create("tensor.create", {shape_tuple},
-                                          {{"dtype", std::any(DataType::FP32)},
-                                           {"layout", std::any(TensorLayout::ND)},
-                                           {"manual_dep", std::any(true)}},
-                                          span);
-}
-
-/// Rewrite calls in orchestration functions to inject a per-call tensor.create for gm_pipe_buffer.
-/// Each call to a modified function gets its own unique gm_pipe_buffer_N variable.
-StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
-                                        const std::unordered_set<std::string>& modified_funcs,
-                                        int64_t gm_buffer_bytes, int64_t gm_buffer_elems, const Span& span,
-                                        int& counter) {
-  auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{gm_buffer_elems}, DataType::FP32,
-                                              std::nullopt, std::nullopt);
-  auto stmts = FlattenBody(body);
-  std::vector<StmtPtr> new_stmts;
-  bool any_changed = false;
-
-  auto try_rewrite = [&](const CallPtr& call) -> std::pair<StmtPtr, CallPtr> {
-    if (!call) return std::make_pair(StmtPtr{}, CallPtr{});
-    auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-    if (!gv || !modified_funcs.count(gv->name_)) return std::make_pair(StmtPtr{}, CallPtr{});
-
-    // Create a unique gm_pipe_buffer variable and tensor.create for this call site
-    std::string var_name = std::string("gm_pipe_buffer_") + std::to_string(counter++);
-    auto gm_var = std::make_shared<Var>(var_name, gm_type, span);
-    auto create_call = CreateGMPipeBufferTensorCreate(gm_buffer_bytes, span);
-    auto create_stmt = std::make_shared<AssignStmt>(gm_var, create_call, span);
-
-    std::vector<ExprPtr> new_args = call->args_;
-    new_args.push_back(gm_var);
-    CallPtr new_call;
-    if (auto call_type = call->GetType()) {
-      new_call = std::make_shared<Call>(call->op_, new_args, call_type, call->span_);
-    } else {
-      new_call = std::make_shared<Call>(call->op_, new_args, call->span_);
-    }
-    StmtPtr create_stmt_ptr = create_stmt;
-    return std::make_pair(create_stmt_ptr, new_call);
-  };
-
-  for (const auto& stmt : stmts) {
-    if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      auto [create, rw] = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_));
-      if (rw) {
-        new_stmts.push_back(create);
-        auto new_assign = MutableCopy(assign);
-        new_assign->value_ = rw;
-        new_stmts.push_back(std::move(new_assign));
-        any_changed = true;
-        continue;
-      }
-    } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-      auto [create, rw] = try_rewrite(std::dynamic_pointer_cast<const Call>(eval->expr_));
-      if (rw) {
-        new_stmts.push_back(create);
-        auto new_eval = MutableCopy(eval);
-        new_eval->expr_ = rw;
-        new_stmts.push_back(std::move(new_eval));
-        any_changed = true;
-        continue;
-      }
-    }
-    if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      auto nb = RewriteCallsWithPerCallGMBuffer(for_stmt->body_, modified_funcs, gm_buffer_bytes,
-                                                gm_buffer_elems, span, counter);
-      if (nb != for_stmt->body_) {
-        auto new_for = MutableCopy(for_stmt);
-        new_for->body_ = nb;
-        new_stmts.push_back(std::move(new_for));
-        any_changed = true;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto nt = RewriteCallsWithPerCallGMBuffer(if_stmt->then_body_, modified_funcs, gm_buffer_bytes,
-                                                gm_buffer_elems, span, counter);
-      std::optional<StmtPtr> ne;
-      const auto& else_body = if_stmt->else_body_;
-      if (else_body.has_value()) {
-        ne = RewriteCallsWithPerCallGMBuffer(*else_body, modified_funcs, gm_buffer_bytes, gm_buffer_elems,
-                                             span, counter);
-      }
-      bool body_changed = (nt != if_stmt->then_body_);
-      if (!body_changed && ne.has_value() && else_body.has_value()) {
-        body_changed = (*ne != *else_body);
-      }
-      if (body_changed) {
-        auto new_if = MutableCopy(if_stmt);
-        new_if->then_body_ = nt;
-        new_if->else_body_ = ne;
-        new_stmts.push_back(std::move(new_if));
-        any_changed = true;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      auto nb = RewriteCallsWithPerCallGMBuffer(while_stmt->body_, modified_funcs, gm_buffer_bytes,
-                                                gm_buffer_elems, span, counter);
-      if (nb != while_stmt->body_) {
-        auto new_while = MutableCopy(while_stmt);
-        new_while->body_ = nb;
-        new_stmts.push_back(std::move(new_while));
-        any_changed = true;
-      } else {
-        new_stmts.push_back(stmt);
-      }
-    } else {
-      new_stmts.push_back(stmt);
-    }
-  }
-  if (!any_changed) return body;
-  return SeqStmts::Flatten(std::move(new_stmts), body->span_);
-}
-
-/// Compute the GM pipe buffer size in bytes by scanning for initialize_pipe ops.
-int64_t ComputeGMBufferSizeFromPipeOps(const std::vector<FunctionPtr>& functions) {
-  int64_t max_bytes = 0;
-  std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
-  scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
-    for (const auto& stmt : stmts) {
-      CallPtr call;
-      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-        call = std::dynamic_pointer_cast<const Call>(assign->value_);
-      } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-        call = std::dynamic_pointer_cast<const Call>(eval->expr_);
-      }
-      if (call) {
-        auto op = std::dynamic_pointer_cast<const Op>(call->op_);
-        if (op && (op->name_ == "system.aic_initialize_pipe" || op->name_ == "system.aiv_initialize_pipe")) {
-          int ss = call->GetKwarg<int>("slot_size", 0);
-          int dm = call->GetKwarg<int>("dir_mask", 0);
-          if (ss > 0 && dm != 0) {
-            int64_t bytes =
-                static_cast<int64_t>(ss) * static_cast<int64_t>(cross_core_pipe::GetSlotNumForDirMask(dm));
-            if (bytes > max_bytes) {
-              max_bytes = bytes;
-            }
-          }
-        }
-      }
-      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        scan_stmts(FlattenBody(for_stmt->body_));
-      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        scan_stmts(FlattenBody(if_stmt->then_body_));
-        if (if_stmt->else_body_.has_value()) {
-          scan_stmts(FlattenBody(if_stmt->else_body_.value()));
-        }
-      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        scan_stmts(FlattenBody(while_stmt->body_));
-      }
-    }
-  };
-  for (const auto& func : functions) {
-    if (!func->body_) continue;
-    scan_stmts(FlattenBody(func->body_));
-  }
-  return max_bytes;
-}
-
-/// Inject __gm_pipe_buffer into pipe-using functions and propagate through callers.
-/// Orchestration functions get a tensor.create call instead of a parameter.
-void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
-  if (!backend::BackendConfig::IsConfigured() ||
-      !PassContext::Current()->GetBackendHandler()->RequiresGMPipeBuffer()) {
-    return;
-  }
-
-  // Build function name → FunctionPtr map and call graph
-  std::unordered_map<std::string, FunctionPtr*> func_by_name;
-  for (auto& func : functions) func_by_name[func->name_] = &func;
-
-  std::unordered_map<std::string, std::unordered_set<std::string>> callers, callees;
-  BuildCallGraphFromFunctions(functions, callers, callees);
-
-  std::unordered_set<std::string> pipe_funcs;
-  for (const auto& func : functions) {
-    if (!HasGMPipeBufferParam(func) && func->body_ && HasInitializePipeOps(FlattenBody(func->body_))) {
-      pipe_funcs.insert(func->name_);
-    }
-  }
-  if (pipe_funcs.empty()) return;
-
-  int64_t gm_buffer_bytes = ComputeGMBufferSizeFromPipeOps(functions);
-  INTERNAL_CHECK(gm_buffer_bytes > 0) << "Internal error: cross-core pipe functions found but no "
-                                         "initialize_pipe ops to determine buffer size";
-  int64_t gm_buffer_elems = (gm_buffer_bytes + 3) / 4;
-
-  // Propagate upward, but stop at Orchestration functions
-  std::unordered_set<std::string> needs_gm_param = pipe_funcs;
-  std::unordered_set<std::string> orch_needs_tensor_create;
-  std::vector<std::string> worklist(pipe_funcs.begin(), pipe_funcs.end());
-  while (!worklist.empty()) {
-    std::string name = worklist.back();
-    worklist.pop_back();
-    auto it = callers.find(name);
-    if (it == callers.end()) continue;
-    for (const auto& caller_name : it->second) {
-      auto fit = func_by_name.find(caller_name);
-      if (fit == func_by_name.end()) continue;
-      if ((*fit->second)->func_type_ == FunctionType::Orchestration) {
-        // Orchestration: don't add param, will insert tensor.create instead
-        orch_needs_tensor_create.insert(caller_name);
-      } else {
-        if (needs_gm_param.insert(caller_name).second) worklist.push_back(caller_name);
-      }
-    }
-  }
-
-  // Add __gm_pipe_buffer param to non-Orchestration functions that need it
-  for (auto& func : functions) {
-    if (needs_gm_param.count(func->name_) && !HasGMPipeBufferParam(func)) {
-      func = AddGMSlotBufferParam(func, gm_buffer_elems);
-    }
-  }
-
-  // Rewrite call sites in non-Orchestration functions (pass existing param through)
-  for (auto& func : functions) {
-    if (!needs_gm_param.count(func->name_)) continue;
-
-    VarPtr gm_param;
-    for (const auto& p : func->params_) {
-      if (p->name_hint_ == kGMPipeBufferName) {
-        gm_param = p;
-        break;
-      }
-    }
-    INTERNAL_CHECK_SPAN(gm_param, func->span_)
-        << "Internal error: " << func->name_ << " should have " << kGMPipeBufferName;
-
-    std::unordered_set<std::string> mod_callees;
-    auto ci = callees.find(func->name_);
-    if (ci != callees.end()) {
-      for (const auto& c : ci->second) {
-        if (needs_gm_param.count(c)) mod_callees.insert(c);
-      }
-    }
-
-    if (!mod_callees.empty()) {
-      auto nb = RewriteCallsForGMBuffer(func->body_, mod_callees, gm_param);
-      auto updated = MutableCopy(func);
-      updated->body_ = nb;
-      func = updated;
-    }
-  }
-
-  // For Orchestration functions: inject per-call tensor.create for each call site
-  if (orch_needs_tensor_create.empty()) return;
-
-  for (auto& func : functions) {
-    if (!orch_needs_tensor_create.count(func->name_)) continue;
-
-    std::unordered_set<std::string> mod_callees;
-    auto ci = callees.find(func->name_);
-    if (ci != callees.end()) {
-      for (const auto& c : ci->second) {
-        if (needs_gm_param.count(c)) mod_callees.insert(c);
-      }
-    }
-    if (mod_callees.empty()) continue;
-
-    int counter = 0;
-    auto new_body = RewriteCallsWithPerCallGMBuffer(func->body_, mod_callees, gm_buffer_bytes,
-                                                    gm_buffer_elems, func->span_, counter);
-    auto updated = MutableCopy(func);
-    updated->body_ = new_body;
-    func = updated;
-  }
 }
 
 }  // namespace
@@ -1377,14 +892,15 @@ Pass ExpandMixedKernel() {
 
       // Check if function is mixed (recursive analysis detects ops inside loops/conditionals)
       auto stmts = FlattenBody(func->body_);
-      auto tpop_vars = CollectTpopVars(stmts);
+      auto tpop_defs = CollectTpopDefs(stmts);
       std::unordered_map<const Stmt*, CoreAffinity> stmt_map;
       std::unordered_map<const Var*, CoreAffinity> var_affinity;
-      auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_vars);
+      auto combined = AnalyzeStmtsAffinity(stmts, stmt_map, var_affinity, tpop_defs);
 
-      // A function is mixed if the combined affinity is MIXED or BOUNDARY
-      // (both imply cube+vector presence). Pure CUBE or pure VECTOR are not mixed.
-      bool is_mixed = (combined == CoreAffinity::MIXED || combined == CoreAffinity::BOUNDARY);
+      // A function is mixed if combined affinity says so. Leaf boundary moves
+      // (tile.move across the C/V divide) classify as MIXED via ClassifyCallAffinity,
+      // so the roll-up captures them without a separate enum value.
+      bool is_mixed = (combined == CoreAffinity::MIXED);
 
       if (!is_mixed) {
         // Not mixed — convert InCore to the corresponding AIC or AIV type
@@ -1430,10 +946,6 @@ Pass ExpandMixedKernel() {
         }
       }
     }
-
-    // Phase 4: Inject GM slot buffer params for a2a3 cross-core pipe communication.
-    // On Ascend910B, cross-core pipes require a GM slot buffer as intermediary.
-    InjectGMSlotBufferInPlace(new_functions);
 
     return std::make_shared<Program>(new_functions, program->name_, program->span_);
   };

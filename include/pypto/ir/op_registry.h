@@ -35,6 +35,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/span.h"
@@ -433,6 +434,35 @@ class OpRegistryEntry {
   /// explicitly call not_inplace_safe() during registration.
   [[nodiscard]] bool IsInplaceSafe() const { return is_inplace_safe_; }
 
+  /// Declare which core executes this op. When unset, ClassifyCallAffinity
+  /// derives the affinity from the op's memory spec (output memory space, or
+  /// first tile input memory space for view/store ops). Use this for ops
+  /// whose execution side is not encoded in any memory space — cross-core
+  /// transfer ops (tpush/tpop/tfree/initialize_pipe), SPMD shared ops
+  /// (get_block_idx, get_block_num), and tile.create (shared-by-policy).
+  inline OpRegistryEntry& set_core_affinity(core_affinity::CoreAffinity a) {
+    CHECK(!core_affinity_.has_value()) << "Operator '" << name_ << "' core affinity is already set";
+    core_affinity_ = a;
+    return *this;
+  }
+
+  /// Returns the explicitly declared core affinity, or nullopt if the op
+  /// should be classified from its memory spec.
+  [[nodiscard]] std::optional<core_affinity::CoreAffinity> GetCoreAffinity() const { return core_affinity_; }
+
+  /// Declare the cross-core role of this op. Used for registry-driven predicates
+  /// (IsTPop, IsInitializePipe, ...) so passes do not have to string-compare
+  /// on specific op names.
+  inline OpRegistryEntry& set_cross_core_role(core_affinity::CrossCoreRole role) {
+    CHECK(!cross_core_role_.has_value()) << "Operator '" << name_ << "' cross-core role is already set";
+    cross_core_role_ = role;
+    return *this;
+  }
+
+  [[nodiscard]] std::optional<core_affinity::CrossCoreRole> GetCrossCoreRole() const {
+    return cross_core_role_;
+  }
+
  private:
   void EnsureMemorySpec() {
     if (!memory_spec_.has_value()) {
@@ -466,6 +496,8 @@ class OpRegistryEntry {
       deduce_type_;                               ///< Type deduction function
   std::optional<OpMemorySpaceSpec> memory_spec_;  ///< Memory space specification
   bool is_inplace_safe_{true};  ///< Whether the op supports in-place execution (src == dst buffer)
+  std::optional<core_affinity::CoreAffinity> core_affinity_;     ///< Explicit core-affinity override
+  std::optional<core_affinity::CrossCoreRole> cross_core_role_;  ///< Cross-core role (for predicates)
 };
 
 /**

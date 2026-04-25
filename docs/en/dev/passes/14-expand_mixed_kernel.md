@@ -118,14 +118,15 @@ Phase 1 — Pre-scan:
 Phase 2 — Expand each InCore function F:
   1. Recursively classify affinity of all statements (including inside loops/conditionals)
   2. Detect CV boundary moves: tile.move ops crossing cube↔vector memory spaces
-  3. If not mixed (no CUBE ops or no VECTOR ops, and no BOUNDARY moves):
+     (recorded in a separate boundary_moves map, not as a distinct affinity)
+  3. If not mixed (no CUBE ops or no VECTOR ops, and no boundary moves):
      convert FunctionType to AIC (pure Cube) or AIV (pure Vector / shared-only)
   4. Build AIC body: keep CUBE + SHARED stmts, prune VECTOR, recurse into MIXED loops
-     - For BOUNDARY (Cube→Vector): emit tpush_to_aiv(source_tile)
-     - For BOUNDARY (Vector→Cube): emit dest_var = tpop_from_aiv() with fractal TileView
+     - For boundary move (Cube→Vector): emit tpush_to_aiv(source_tile)
+     - For boundary move (Vector→Cube): emit dest_var = tpop_from_aiv() with fractal TileView
   5. Build AIV body: symmetric (keep VECTOR + SHARED, prune CUBE)
-     - For BOUNDARY (Cube→Vector): emit dest_var = tpop_from_aic() with fractal TileView
-     - For BOUNDARY (Vector→Cube): emit tile.move to adapt fractal layout, then tpush_to_aic(adapted_tile)
+     - For boundary move (Cube→Vector): emit dest_var = tpop_from_aic() with fractal TileView
+     - For boundary move (Vector→Cube): emit tile.move to adapt fractal layout, then tpush_to_aic(adapted_tile)
   5a. Assign fractal TileView to all boundary tpop result types and pre-tpush tile.move ops
       via BuildCrossCoreTransferView:
       - Ascend950: Left→NZ, Right→ZN, Mat/Vec→preserve
@@ -164,13 +165,13 @@ Phase 3 — Rewrite Group callers:
 | CUBE | `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`, `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias`, `tile.batch_matmul` | Always CUBE (op name) |
 | CUBE or VECTOR | `tile.load` | By `target_memory` kwarg: cube memory (Mat, Left, Right, Acc, Bias) → CUBE; Vec → VECTOR |
 | CUBE or VECTOR | `tile.store`, `tile.reshape` | By source tile's `memory_space`: cube memory → CUBE; Vec → VECTOR |
-| BOUNDARY | `tile.move` crossing cube↔vector memory | Source and target on different core sides (see below) |
+| MIXED | `tile.move` crossing cube↔vector memory | Leaf cross-side move — also recorded in the `boundary_moves` map (see below) |
 | CUBE or VECTOR | `tile.move` (same-side) | By source tile's `memory_space` |
 | VECTOR | All other `tile.*` ops (`tile.add`, `tile.exp`, `tile.sub`, etc.) | Always VECTOR (op name) |
 | SHARED | Non-tile ops, function calls, control flow, scalar ops | — |
 | MIXED | Compound statements containing both CUBE and VECTOR children | — |
 
-**CV boundary detection**: A `tile.move` is a CV boundary when its source tile memory and target memory are on different core sides. Cube-side memory: Mat, Left, Right, Acc, Bias. Vector-side memory: Vec. Same-side moves (e.g. Mat→Left) are classified by their source memory as usual.
+**CV boundary detection**: A `tile.move` is a CV boundary when its source tile memory and target memory are on different core sides. Cube-side memory: Mat, Left, Right, Acc, Bias. Vector-side memory: Vec. Same-side moves (e.g. Mat→Left) are classified by their source memory as usual. Boundary leaf moves are tagged `MIXED` for affinity purposes and are also recorded in a separate `boundary_moves` map; the cross-core direction (Cube→Vector vs Vector→Cube) is recovered via `ClassifyMoveDirection` at the call sites that need it (`CollectCVBoundaryMoves`, `BuildCoreBody`).
 
 **Nested structure handling**: ForStmt, IfStmt, and WhileStmt containing mixed ops are duplicated into both AIC and AIV bodies with recursively pruned contents.
 
@@ -217,7 +218,7 @@ class After:
         x_left = pl.move(x_mat, target_memory=pl.Mem.Left)   # CUBE: Mat→Left (same-side)
         y_right = pl.move(y_mat, target_memory=pl.Mem.Right)  # CUBE: Mat→Right (same-side)
         z_tile = pl.matmul(x_left, y_right)              # CUBE op
-        pl.tile.tpush_to_aiv(z_tile, split=0)        # BOUNDARY: push Acc tile to AIV
+        pl.tile.tpush_to_aiv(z_tile, split=0)        # boundary move: push Acc tile to AIV
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -325,7 +326,7 @@ This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` 
 | Decision | Rationale |
 | -------- | --------- |
 | Move-based CV boundary detection | Explicit `tile.move` ops mark boundaries — no fragile variable data-flow analysis needed |
-| BOUNDARY affinity for CV moves | Cleanly separates boundary handling from CUBE/VECTOR/MIXED logic |
+| `boundary_moves` map (not a separate enum value) | Boundary status is derivable from `ClassifyMoveDirection` at the call sites that need it; storing it as a side map keeps `CoreAffinity` to the four execution-side categories (CUBE / VECTOR / SHARED / MIXED) |
 | MemorySpace-based classification for data-movement ops | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` serve Cube or Vector depending on which memory they touch; `InferTileMemorySpace` sets this before the pass runs |
 | Fractal TileView on tpop results | tpop result types carry the fractal TileView (NZ/ZN) directly rather than stripping layout — downstream passes and codegen see the correct layout without extra inference |
 | Pre-tpush `tile.move` on AIV side | V→C transfers require data in fractal layout; inserting an explicit `tile.move` before `tpush_to_aic` makes the layout conversion visible in IR |

@@ -126,6 +126,12 @@ inline const PassProperties kExpandMixedKernelProperties{
                  IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure}};
 
+// -- GM pipe buffer injection pass (backend-gated; extracted from ExpandMixedKernel) --
+
+inline const PassProperties kInjectGMPipeBufferProperties{
+    .required = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::MixedKernelExpanded, IRProperty::NormalizedStmtStructure}};
+
 // -- Split vector kernel pass -------------------------------------------------
 
 inline const PassProperties kSplitVectorKernelProperties{

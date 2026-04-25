@@ -29,7 +29,9 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
@@ -47,9 +49,7 @@ StmtPtr NormalizeNestedTpopChains(const StmtPtr& stmt, core_affinity::CoreSide s
 
 namespace tpop_chain {
 
-std::string GetTfreeOpName(core_affinity::CoreSide side) {
-  return (side == core_affinity::CoreSide::AIC) ? "system.tfree_to_aiv" : "system.tfree_to_aic";
-}
+std::string GetTfreeOpName(core_affinity::CoreSide side) { return core_side_ops::TFreeOp(side); }
 
 CallPtr CreateTfree(core_affinity::CoreSide side, const ExprPtr& tile, const Span& span) {
   return OpRegistry::GetInstance().Create(GetTfreeOpName(side), {tile}, {}, span);
@@ -59,17 +59,16 @@ bool IsTpopAssignStmt(const StmtPtr& stmt, VarPtr* result_var) {
   auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
   if (!assign) return false;
   auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
-  auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
-  if (!op || (op->name_ != "tile.tpop_from_aiv" && op->name_ != "tile.tpop_from_aic")) {
-    return false;
-  }
+  if (!op_predicates::IsTPop(call)) return false;
   if (result_var) *result_var = assign->var_;
   return true;
 }
 
 bool IsExpectedTpopOp(const std::string& op_name, FunctionType func_type) {
-  if (func_type == FunctionType::AIC) return op_name == "tile.tpop_from_aiv";
-  if (func_type == FunctionType::AIV) return op_name == "tile.tpop_from_aic";
+  // An AIC body expects to see tpop_from_aiv (receiving from its vector peer);
+  // an AIV body expects tpop_from_aic (receiving from its cube peer).
+  if (func_type == FunctionType::AIC) return op_name == core_side_ops::TPopOp(core_affinity::CoreSide::AIC);
+  if (func_type == FunctionType::AIV) return op_name == core_side_ops::TPopOp(core_affinity::CoreSide::AIV);
   return false;
 }
 
@@ -87,12 +86,10 @@ bool IsTfreeStmt(const StmtPtr& stmt, VarPtr* tile_var, std::string* op_name) {
   auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt);
   if (!eval) return false;
   auto call = std::dynamic_pointer_cast<const Call>(eval->expr_);
-  auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
-  if (!op || (op->name_ != "system.tfree_to_aiv" && op->name_ != "system.tfree_to_aic")) {
-    return false;
-  }
+  if (!op_predicates::IsTFree(call)) return false;
+  auto op = std::dynamic_pointer_cast<const Op>(call->op_);
   if (op_name) *op_name = op->name_;
-  if (tile_var) *tile_var = call && !call->args_.empty() ? AsVarLike(call->args_[0]) : nullptr;
+  if (tile_var) *tile_var = !call->args_.empty() ? AsVarLike(call->args_[0]) : nullptr;
   return true;
 }
 

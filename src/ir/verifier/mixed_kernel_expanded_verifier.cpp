@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "pypto/core/error.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -225,7 +226,9 @@ class MixedKernelExpandedVerifier : public IRVisitor {
       has_cube_ = true;
     } else if (affinity == CoreAffinity::VECTOR) {
       has_vector_ = true;
-    } else if (affinity == CoreAffinity::BOUNDARY) {
+    } else if (affinity == CoreAffinity::MIXED) {
+      // Leaf-call MIXED can only come from a C/V-crossing tile.move — contributes
+      // to both sides for the purposes of this check.
       has_cube_ = true;
       has_vector_ = true;
     }

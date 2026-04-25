@@ -74,6 +74,19 @@ inline std::vector<StmtPtr> FlattenToStmts(const StmtPtr& stmt) {
   return {stmt};
 }
 
+/// Extract the Call value of a leaf statement, or nullptr if none.
+///
+/// Covers the two forms a Call appears in: AssignStmt.value and EvalStmt.expr.
+/// Replaces the ~10x-repeated cast ladder
+///   CallPtr call;
+///   if (auto a = dynamic_pointer_cast<const AssignStmt>(stmt)) call = ...->value_;
+///   else if (auto e = dynamic_pointer_cast<const EvalStmt>(stmt)) call = ...->expr_;
+inline CallPtr GetCallFromStmt(const StmtPtr& stmt) {
+  if (auto assign = As<AssignStmt>(stmt)) return As<Call>(assign->value_);
+  if (auto eval = As<EvalStmt>(stmt)) return As<Call>(eval->expr_);
+  return nullptr;
+}
+
 /// Collect all AssignStmt var_ (DEF sites) from a statement tree.
 ///
 /// When the body is visited multiple times (inner + remainder), the same

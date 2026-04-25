@@ -373,6 +373,11 @@ void BindPass(nb::module_& m) {
              "into `[1,N]` row-major views before the consumer and reshaping the output back when needed.");
   passes.def("expand_mixed_kernel", &pass::ExpandMixedKernel,
              "Create a pass that expands mixed InCore functions into AIC + AIV + Group");
+  passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
+             "Create a backend-gated pass that injects the __gm_pipe_buffer workspace parameter\n"
+             "into functions containing cross-core initialize_pipe ops, propagating the parameter\n"
+             "through callers (Orchestration functions materialize the buffer locally instead).\n"
+             "No-op on backends that don't require GM-backed pipe slots.");
   passes.def("split_vector_kernel", &pass::SplitVectorKernel,
              "Create a pass that splits vector kernels based on SplitMode "
              "(adjusts tpush/tpop split, halves tpop shapes, adjusts store offsets)");

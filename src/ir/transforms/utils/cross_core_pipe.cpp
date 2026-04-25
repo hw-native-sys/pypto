@@ -29,6 +29,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -178,8 +179,7 @@ CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slo
                              const Span& span) {
   CHECK(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max())
       << "Cross-core slot_size out of range: " << slot_size_bytes;
-  const std::string op_name =
-      (side == core_affinity::CoreSide::AIC) ? "system.aic_initialize_pipe" : "system.aiv_initialize_pipe";
+  const std::string op_name = core_side_ops::InitializePipeOp(side);
   return CreateSystemOpCall(op_name, {c2v_consumer_buf, v2c_consumer_buf},
                             {{"dir_mask", std::any(dir_mask)}, {"slot_size", std::any(slot_size_bytes)}},
                             span);

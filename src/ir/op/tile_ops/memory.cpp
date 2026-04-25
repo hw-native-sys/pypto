@@ -30,6 +30,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
@@ -553,6 +554,7 @@ REGISTER_OP("tile.write")
 REGISTER_OP("tile.get_block_idx")
     .set_op_category("TileOp")
     .set_description("Get the current block index")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
     .no_argument()
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -563,6 +565,7 @@ REGISTER_OP("tile.get_block_idx")
 REGISTER_OP("tile.get_subblock_idx")
     .set_op_category("TileOp")
     .set_description("Get the current sub-block (vector core) index")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .no_argument()
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -573,6 +576,7 @@ REGISTER_OP("tile.get_subblock_idx")
 REGISTER_OP("tile.get_block_num")
     .set_op_category("TileOp")
     .set_description("Get the total number of blocks in the current SPMD task")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
     .no_argument()
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
@@ -594,6 +598,7 @@ REGISTER_OP("tile.read")
 REGISTER_OP("tile.create")
     .set_op_category("TileOp")
     .set_description("Create a tile")
+    .set_core_affinity(core_affinity::CoreAffinity::SHARED)
     .add_argument("shape", "Shape dimensions (TupleType of ScalarType(INT64))")
     .set_attr<DataType>("dtype")
     .set_attr<MemorySpace>("target_memory")
@@ -727,9 +732,15 @@ REGISTER_OP("tile.move")
       return DeduceTileMoveType(args, kwargs, "tile.move");
     });
 
+// tile.alloc is emitted by InitMemRef, which runs after ExpandMixedKernel —
+// by then the program is already split into AIC/AIV functions and the
+// classification is only consulted by the expanded-kernel verifier. VECTOR
+// preserves the pre-refactor behavior (tile.* fallback → VECTOR); a future
+// refinement could classify by the memory_space arg if a use case arises.
 REGISTER_OP("tile.alloc")
     .set_op_category("TileOp")
     .set_description("Declare on-chip memory allocation, returning a Ptr")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .add_argument("memory_space", "Memory space (int enum value)")
     .add_argument("size", "Size in bytes (scalar)")
     .no_memory_spec()

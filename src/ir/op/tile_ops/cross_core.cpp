@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
@@ -38,6 +39,8 @@ TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
 REGISTER_OP("tile.tpush_to_aiv")
     .set_description("Push tile data from AIC to AIV via cross-core pipe")
     .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
     .set_attr<int>("split")
     .no_memory_spec()
@@ -47,6 +50,8 @@ REGISTER_OP("tile.tpush_to_aiv")
 REGISTER_OP("tile.tpush_to_aic")
     .set_description("Push tile data from AIV to AIC via cross-core pipe")
     .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
     .set_attr<int>("split")
     .no_memory_spec()
@@ -56,6 +61,8 @@ REGISTER_OP("tile.tpush_to_aic")
 REGISTER_OP("tile.tpop_from_aic")
     .set_description("Pop tile data from AIC cross-core pipe into AIV")
     .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .set_cross_core_role(core_affinity::CrossCoreRole::TPop)
     .no_argument()
     .set_attr<int>("split")
     .no_memory_spec()
@@ -65,6 +72,8 @@ REGISTER_OP("tile.tpop_from_aic")
 REGISTER_OP("tile.tpop_from_aiv")
     .set_description("Pop tile data from AIV cross-core pipe into AIC")
     .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .set_cross_core_role(core_affinity::CrossCoreRole::TPop)
     .no_argument()
     .set_attr<int>("split")
     .no_memory_spec()

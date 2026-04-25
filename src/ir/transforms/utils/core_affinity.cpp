@@ -13,32 +13,18 @@
 
 #include <memory>
 #include <optional>
-#include <string>
-#include <unordered_set>
 
 #include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/memory_space.h"
+#include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 namespace core_affinity {
-
-CoreAffinity CombineAffinity(CoreAffinity a, CoreAffinity b) {
-  if (a == b) return a;
-  if (a == CoreAffinity::SHARED) return b;
-  if (b == CoreAffinity::SHARED) return a;
-  return CoreAffinity::MIXED;
-}
-
-bool IsCubeOp(const std::string& name) {
-  static const std::unordered_set<std::string> cube_ops = {
-      "tile.matmul",   "tile.matmul_acc", "tile.matmul_bias", "tile.gemv",
-      "tile.gemv_acc", "tile.gemv_bias",  "tile.batch_matmul"};
-  return cube_ops.count(name) > 0;
-}
 
 bool IsCubeMemorySpace(MemorySpace ms) { return ms != MemorySpace::DDR && ms != MemorySpace::Vec; }
 
@@ -86,56 +72,47 @@ CoreAffinity ClassifyCallAffinity(const CallPtr& call) {
   }
   auto op = std::dynamic_pointer_cast<const Op>(call->op_);
   if (!op) return CoreAffinity::SHARED;
-  const auto& name = op->name_;
-  if (IsCubeOp(name)) return CoreAffinity::CUBE;
-  if (name == "tile.move") {
-    auto dir = ClassifyMoveDirection(call);
-    if (dir != CVDirection::NONE) return CoreAffinity::BOUNDARY;
+
+  auto& registry = OpRegistry::GetInstance();
+  if (!registry.IsRegistered(op->name_)) return CoreAffinity::SHARED;
+  const auto& entry = registry.GetEntry(op->name_);
+
+  // 1. Explicit override — cross-core ops, SPMD shared ops, tile.create/alloc.
+  if (auto fixed = entry.GetCoreAffinity()) return *fixed;
+
+  // 2. tile.move is the one dynamically-classified op: MIXED when the move
+  // crosses the C/V divide (the stmt logically runs on both sides — a tpush
+  // on the producer plus a tpop on the consumer), otherwise inherits from
+  // the src memory. The per-stmt "is this a boundary" decision lives in
+  // boundary_moves; MIXED here is just the affinity label so CombineAffinity
+  // rolls up correctly through compound stmts.
+  if (op->name_ == "tile.move") {
+    if (ClassifyMoveDirection(call) != CVDirection::NONE) return CoreAffinity::MIXED;
     auto ms = GetFirstTileArgMemory(call);
-    if (ms.has_value() && IsCubeMemorySpace(ms.value())) return CoreAffinity::CUBE;
-    return CoreAffinity::VECTOR;
+    return (ms && IsCubeMemorySpace(*ms)) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
   }
-  // Some tile ops inherit their execution side from the source tile rather than
-  // the result memory space. If we classify them as generic Vector ops, later
-  // passes can incorrectly drop Cube-side producers that feed C<->V boundaries
-  // (for example, tile.slice on an Acc tile before tpush_to_aiv).
-  static const std::unordered_set<std::string> tile_arg_classified_ops = {"tile.store", "tile.reshape",
-                                                                          "tile.slice", "tile.extract"};
-  if (tile_arg_classified_ops.count(name)) {
-    auto ms = GetFirstTileArgMemory(call);
-    if (ms.has_value() && IsCubeMemorySpace(ms.value())) return CoreAffinity::CUBE;
-    return CoreAffinity::VECTOR;
-  }
-  if (name == "tile.load") {
-    for (const auto& [key, value] : call->kwargs_) {
-      if (key == "target_memory") {
-        return IsCubeMemorySpace(AnyCast<MemorySpace>(value, "target_memory")) ? CoreAffinity::CUBE
-                                                                               : CoreAffinity::VECTOR;
-      }
+
+  // 3. Output memory — set_output_memory(...) / set_output_memory_from_kwarg(...).
+  // Covers matmul family (Acc -> CUBE), vector elementwise (Vec -> VECTOR),
+  // tile.load / tile.full / tile.create target_memory dispatch, and so on.
+  const auto& spec = entry.GetMemorySpec();
+  if (spec && spec->deduce_output_memory) {
+    auto out = spec->deduce_output_memory(call->kwargs_);
+    if (out.has_value()) {
+      return IsCubeMemorySpace(*out) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
     }
-    return CoreAffinity::VECTOR;
+    // nullopt means "inherit from first tile input" (set_output_memory_inherit_input)
+    // — fall through to the first-tile-input branch below.
   }
-  static const std::unordered_set<std::string> vector_cross_core_ops = {
-      "system.aiv_initialize_pipe", "system.tpush_to_aic", "system.tfree_to_aic", "tile.tpush_to_aic",
-      "tile.tpop_from_aic"};
-  if (vector_cross_core_ops.count(name)) return CoreAffinity::VECTOR;
-  static const std::unordered_set<std::string> cube_cross_core_ops = {
-      "system.aic_initialize_pipe", "system.tfree_to_aiv", "system.tpush_to_aiv", "tile.tpush_to_aiv",
-      "tile.tpop_from_aiv"};
-  if (cube_cross_core_ops.count(name)) return CoreAffinity::CUBE;
-  // Ops with no execution side. SPMD block-index ops are needed on both AIC
-  // and AIV under SPMD dispatch. tile.create is a pure declaration (no
-  // compute, no data motion); letting the catch-all below classify it as
-  // VECTOR caused pure-cube scopes whose only "vector" signal was an
-  // accumulator declaration to be routed through the mixed-kernel split
-  // path, which then produced broken AIC/AIV IR.
-  static const std::unordered_set<std::string> shared_tile_ops = {
-      "tile.get_block_idx",
-      "tile.get_block_num",
-      "tile.create",
-  };
-  if (shared_tile_ops.count(name)) return CoreAffinity::SHARED;
-  if (name.substr(0, 5) == "tile.") return CoreAffinity::VECTOR;
+
+  // 4. First tile input — covers view ops (slice/reshape/transpose/extract)
+  // and non-tile-output ops that still run on the side of their input tile
+  // (tile.store, tile.mscatter).
+  auto in_ms = GetFirstTileArgMemory(call);
+  if (in_ms.has_value()) {
+    return IsCubeMemorySpace(*in_ms) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
+  }
+
   return CoreAffinity::SHARED;
 }
 

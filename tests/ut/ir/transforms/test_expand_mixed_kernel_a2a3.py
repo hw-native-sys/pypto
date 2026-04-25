@@ -27,21 +27,23 @@ def _setup_backend():
 def _run_pipeline(program: ir.Program) -> ir.Program:
     """Run the pipeline under a VerificationLevel.NONE PassContext."""
     with passes.PassContext([], ir.VerificationLevel.NONE):
-        return passes.expand_mixed_kernel()(
-            passes.infer_tile_memory_space()(passes.convert_to_ssa()(program))
+        return passes.inject_gm_pipe_buffer()(
+            passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(passes.convert_to_ssa()(program)))
         )
 
 
 def _run_pipeline_from_tensor(program: ir.Program) -> ir.Program:
-    """Run SSA -> tensor-to-tile -> infer-memory -> expand-mixed-kernel.
+    """Run SSA -> tensor-to-tile -> infer-memory -> expand-mixed-kernel -> inject-gm-pipe-buffer.
 
     Mirrors _run_pipeline but inserts convert_tensor_to_tile_ops between SSA
     and InferTileMemorySpace, for cases that start from tensor-level IR.
     """
     with passes.PassContext([], ir.VerificationLevel.NONE):
-        return passes.expand_mixed_kernel()(
-            passes.infer_tile_memory_space()(
-                passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(program))
+        return passes.inject_gm_pipe_buffer()(
+            passes.expand_mixed_kernel()(
+                passes.infer_tile_memory_space()(
+                    passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(program))
+                )
             )
         )
 

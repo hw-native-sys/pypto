@@ -386,6 +386,16 @@ def resolve_backend_op_layouts() -> Pass:
 def expand_mixed_kernel() -> Pass:
     """Create a pass that expands mixed InCore functions into AIC + AIV + Group."""
 
+def inject_gm_pipe_buffer() -> Pass:
+    """Create a backend-gated pass that injects ``__gm_pipe_buffer`` for cross-core pipes.
+
+    On backends whose cross-core pipe rides through GM (currently Ascend910B), adds a
+    ``__gm_pipe_buffer`` Out-tensor parameter to functions that issue ``initialize_pipe``
+    ops and propagates it through callers. Orchestration functions materialize the
+    buffer locally via ``tensor.create`` instead of receiving it as a parameter. No-op
+    on backends that don't require a GM slot buffer.
+    """
+
 def split_vector_kernel() -> Pass:
     """Create a pass that splits vector kernels based on SplitMode."""
 
@@ -525,6 +535,7 @@ __all__ = [
     "resolve_backend_op_layouts",
     "normalize_return_order",
     "expand_mixed_kernel",
+    "inject_gm_pipe_buffer",
     "split_vector_kernel",
     "simplify",
     "flatten_call_expr",

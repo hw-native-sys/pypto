@@ -161,6 +161,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/resolve_transpose_layout_pass.cpp
     src/ir/transforms/python_printer.cpp
     src/ir/transforms/simplify_pass.cpp
+    src/ir/transforms/inject_gm_pipe_buffer_pass.cpp
     src/ir/transforms/split_chunked_loops_pass.cpp
     src/ir/transforms/interchange_chunk_loops_pass.cpp
     src/ir/transforms/unroll_loops_pass.cpp
@@ -169,12 +170,14 @@ set(PYPTO_SOURCES
     src/ir/transforms/structural_equal.cpp
     src/ir/transforms/structural_hash.cpp
     src/ir/transforms/utils/core_affinity.cpp
+    src/ir/transforms/utils/core_side_ops.cpp
     src/ir/transforms/utils/cross_core_pipe.cpp
     src/ir/transforms/utils/deep_clone_utils.cpp
     src/ir/transforms/utils/dead_code_elimination.cpp
     src/ir/transforms/utils/loop_state_repair.cpp
     src/ir/transforms/utils/tpop_chain_normalizer.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp
+    src/ir/transforms/utils/op_predicates.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
     src/ir/transforms/utils/stmt_dependency_analysis.cpp
     src/ir/transforms/utils/transform_utils.cpp

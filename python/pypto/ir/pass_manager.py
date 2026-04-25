@@ -143,6 +143,7 @@ class PassManager:
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
             ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
+            ("InjectGMPipeBuffer", lambda: passes.inject_gm_pipe_buffer()),
             ("SplitVectorKernel", lambda: passes.split_vector_kernel()),
             ("NormalizeReturnOrder", lambda: passes.normalize_return_order()),
             ("LowerPipelineLoops", lambda: passes.lower_pipeline_loops()),

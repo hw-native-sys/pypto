@@ -116,14 +116,15 @@ program_expanded = expand_pass(program)
 阶段 2 — 展开每个 InCore 函数 F：
   1. 递归分类所有语句的亲和性（包括循环/条件内部）
   2. 检测 CV 边界移动：跨越 cube↔vector 内存空间的 tile.move 操作
-  3. 如果不是混合的（没有 CUBE 操作或没有 VECTOR 操作，且没有 BOUNDARY 移动）：
+     （记录在独立的 boundary_moves 映射中，而不是作为单独的亲和性枚举值）
+  3. 如果不是混合的（没有 CUBE 操作或没有 VECTOR 操作，且没有边界移动）：
      将 FunctionType 转换为 AIC（纯 Cube）或 AIV（纯 Vector / 仅共享操作）
   4. 构建 AIC 函数体：保留 CUBE + SHARED 语句，删除 VECTOR，递归处理 MIXED 循环
-     - 对于 BOUNDARY（Cube→Vector）：生成 tpush_to_aiv(source_tile)
-     - 对于 BOUNDARY（Vector→Cube）：生成 dest_var = tpop_from_aiv()，携带 fractal TileView
+     - 对于边界移动（Cube→Vector）：生成 tpush_to_aiv(source_tile)
+     - 对于边界移动（Vector→Cube）：生成 dest_var = tpop_from_aiv()，携带 fractal TileView
   5. 构建 AIV 函数体：对称（保留 VECTOR + SHARED，删除 CUBE）
-     - 对于 BOUNDARY（Cube→Vector）：生成 dest_var = tpop_from_aic()，携带 fractal TileView
-     - 对于 BOUNDARY（Vector→Cube）：生成 tile.move 适配 fractal 布局，然后 tpush_to_aic(adapted_tile)
+     - 对于边界移动（Cube→Vector）：生成 dest_var = tpop_from_aic()，携带 fractal TileView
+     - 对于边界移动（Vector→Cube）：生成 tile.move 适配 fractal 布局，然后 tpush_to_aic(adapted_tile)
   5a. 通过 BuildCrossCoreTransferView 为所有边界 tpop 结果类型和 tpush 前的 tile.move 操作分配 fractal TileView：
       - Ascend950：Left→NZ，Right→ZN，Mat/Vec→保持原始
       - Ascend910B：Left→NZ，Right→NZ（Mat 仅支持 NZ），Mat/Vec→保持原始
@@ -160,13 +161,13 @@ program_expanded = expand_pass(program)
 | CUBE | `tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`、`tile.batch_matmul` | 始终为 CUBE（按操作名） |
 | CUBE 或 VECTOR | `tile.load` | 按 `target_memory` kwarg：cube 侧内存（Mat、Left、Right、Acc、Bias）→ CUBE；Vec → VECTOR |
 | CUBE 或 VECTOR | `tile.store`、`tile.reshape` | 按源 tile 的 `memory_space`：cube 侧内存 → CUBE；Vec → VECTOR |
-| BOUNDARY | 跨越 cube↔vector 内存的 `tile.move` | 源和目标位于不同核心侧（见下文） |
+| MIXED | 跨越 cube↔vector 内存的 `tile.move` | 跨核心侧的叶子移动 —— 同时记录在 `boundary_moves` 映射中（见下文） |
 | CUBE 或 VECTOR | `tile.move`（同侧） | 按源 tile 的 `memory_space` |
 | VECTOR | 所有其他 `tile.*` 操作（`tile.add`、`tile.exp`、`tile.sub` 等） | 始终为 VECTOR（按操作名） |
 | SHARED | 非 tile 操作、函数调用、控制流、标量操作 | — |
 | MIXED | 包含 CUBE 和 VECTOR 子语句的复合语句 | — |
 
-**CV 边界检测**：当 `tile.move` 的源 tile 内存和目标内存位于不同核心侧时，该移动为 CV 边界。Cube 侧内存：Mat、Left、Right、Acc、Bias。Vector 侧内存：Vec。同侧移动（如 Mat→Left）按其源内存照常分类。
+**CV 边界检测**：当 `tile.move` 的源 tile 内存和目标内存位于不同核心侧时，该移动为 CV 边界。Cube 侧内存：Mat、Left、Right、Acc、Bias。Vector 侧内存：Vec。同侧移动（如 Mat→Left）按其源内存照常分类。边界叶子移动在亲和性上被标记为 `MIXED`，并额外记录在独立的 `boundary_moves` 映射中；跨核方向（Cube→Vector vs Vector→Cube）由 `CollectCVBoundaryMoves`、`BuildCoreBody` 等调用点通过 `ClassifyMoveDirection` 即时恢复。
 
 **嵌套结构处理**：包含混合操作的 ForStmt、IfStmt 和 WhileStmt 会被复制到 AIC 和 AIV 函数体中，内部内容递归裁剪。
 
@@ -213,7 +214,7 @@ class After:
         x_left = pl.move(x_mat, target_memory=pl.Mem.Left)   # CUBE：Mat→Left（同侧）
         y_right = pl.move(y_mat, target_memory=pl.Mem.Right)  # CUBE：Mat→Right（同侧）
         z_tile = pl.matmul(x_left, y_right)              # CUBE 操作
-        pl.tile.tpush_to_aiv(z_tile, split=0)        # BOUNDARY：推送 Acc tile 到 AIV
+        pl.tile.tpush_to_aiv(z_tile, split=0)        # 边界移动：推送 Acc tile 到 AIV
 
     @pl.function(type=pl.FunctionType.AIV)
     def compute_incore_0_aiv(self, x, y, out_0) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -321,7 +322,7 @@ class After:
 | 决策 | 理由 |
 | ---- | ---- |
 | 基于 move 的 CV 边界检测 | 显式 `tile.move` 操作标记边界——无需脆弱的变量数据流分析 |
-| CV move 使用 BOUNDARY 亲和性 | 将边界处理与 CUBE/VECTOR/MIXED 逻辑清晰分离 |
+| 使用 `boundary_moves` 映射（而非独立枚举值） | 边界状态可由 `ClassifyMoveDirection` 在调用点即时推导；以侧表存储可让 `CoreAffinity` 保持四个执行侧分类（CUBE / VECTOR / SHARED / MIXED） |
 | 数据移动操作基于 MemorySpace 分类 | `tile.load`/`tile.store`/`tile.move`/`tile.reshape` 根据其操作的内存空间服务于 Cube 或 Vector；`InferTileMemorySpace` 在该 Pass 之前已设置此信息 |
 | tpop 结果携带 Fractal TileView | tpop 结果类型直接携带 fractal TileView（NZ/ZN），而非剥离布局——下游 Pass 和 codegen 无需额外推断即可看到正确布局 |
 | AIV 侧 tpush 前插入 `tile.move` | V→C 传输要求数据为 fractal 布局；在 `tpush_to_aic` 前插入显式 `tile.move` 使布局转换在 IR 中可见 |

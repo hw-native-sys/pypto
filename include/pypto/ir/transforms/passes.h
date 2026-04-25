@@ -394,6 +394,18 @@ Pass ResolveBackendOpLayouts();
 Pass ExpandMixedKernel();
 
 /**
+ * @brief Inject __gm_pipe_buffer workspace parameter for cross-core pipes
+ *
+ * Backend-gated (BackendHandler::RequiresGMPipeBuffer()). On Ascend910B the
+ * cross-core tpush/tpop path rides through a shared GM buffer; this pass adds
+ * the workspace parameter and propagates it upward through callers, stopping
+ * at Orchestration functions which materialize the buffer locally.
+ *
+ * Must run after ExpandMixedKernel.
+ */
+Pass InjectGMPipeBuffer();
+
+/**
  * @brief Split vector kernel pass
  *
  * For AIV/AIC functions with a non-None split mode:

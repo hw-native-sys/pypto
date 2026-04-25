@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
@@ -49,6 +50,8 @@ TypePtr DeduceI32ScalarType(const std::vector<ExprPtr>& args,
 REGISTER_OP("system.tfree_to_aic")
     .set_description("Release ring buffer slot back to AIC producer")
     .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .set_cross_core_role(core_affinity::CrossCoreRole::TFree)
     .add_argument("tile", "Tile buffer obtained from tpop to release")
     .f_deduce_type(DeduceUnknownType);
 
@@ -56,6 +59,8 @@ REGISTER_OP("system.tfree_to_aic")
 REGISTER_OP("system.tfree_to_aiv")
     .set_description("Release ring buffer slot back to AIV producer")
     .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .set_cross_core_role(core_affinity::CrossCoreRole::TFree)
     .add_argument("tile", "Tile buffer obtained from tpop to release")
     .f_deduce_type(DeduceUnknownType);
 
@@ -63,6 +68,8 @@ REGISTER_OP("system.tfree_to_aiv")
 REGISTER_OP("system.aic_initialize_pipe")
     .set_description("Initialize cross-core pipe on AIC side")
     .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::CUBE)
+    .set_cross_core_role(core_affinity::CrossCoreRole::InitializePipe)
     .add_argument("c2v_consumer_buf", "C2V consumer buffer base (i32 SSA)")
     .add_argument("v2c_consumer_buf", "V2C consumer buffer base (i32 SSA)")
     .set_attr<int>("dir_mask")
@@ -73,6 +80,8 @@ REGISTER_OP("system.aic_initialize_pipe")
 REGISTER_OP("system.aiv_initialize_pipe")
     .set_description("Initialize cross-core pipe on AIV side")
     .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .set_cross_core_role(core_affinity::CrossCoreRole::InitializePipe)
     .add_argument("c2v_consumer_buf", "C2V consumer buffer base (i32 SSA)")
     .add_argument("v2c_consumer_buf", "V2C consumer buffer base (i32 SSA)")
     .set_attr<int>("dir_mask")
