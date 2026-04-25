@@ -27,10 +27,10 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 12 | *(no doc yet)* | 12th pass (`InferTileMemorySpace`) |
 | 13 | *(no doc yet)* | 13th pass (`ResolveTransposeLayout`) |
 | 14 | `14-expand_mixed_kernel.md` | 14th pass |
-| 14b | `14b-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
-| 15 | `15-init_memref.md` | 15th pass |
-| 16 | `16-memory_reuse.md` | 16th pass |
-| 17 | `17-allocate_memory_addr.md` | 17th pass |
+| 15 | `15-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
+| 16 | `16-init_memref.md` | 16th pass |
+| 17 | `17-memory_reuse.md` | 17th pass |
+| 18 | `18-allocate_memory_addr.md` | 18th pass |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 
