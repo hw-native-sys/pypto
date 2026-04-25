@@ -86,9 +86,8 @@ const auto& FlattenBody = transform_utils::FlattenToStmts;
 using TpopDefs = std::unordered_map<const Var*, CallPtr>;
 
 /// Collect tpop (tile.tpop_from_aiv / tile.tpop_from_aic) result Vars and their defining Calls.
-/// Used for two purposes: (1) avoid misclassifying tile.move from a tpop result as a
-/// cross-core boundary, and (2) propagate kwargs (e.g., split) from the original tpop to the
-/// boundary-generated replacement.
+/// Used to avoid misclassifying tile.move from a tpop result as a cross-core boundary —
+/// the data already crossed via the tpop, so the move is internal to the consuming core.
 TpopDefs CollectTpopDefs(const std::vector<StmtPtr>& stmts) {
   TpopDefs result;
   std::function<void(const std::vector<StmtPtr>&)> walk = [&](const std::vector<StmtPtr>& ss) {
@@ -208,8 +207,7 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
           if (auto source_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
             if (tpop_defs.count(source_var.get()) > 0) continue;
           }
-          boundary_moves[stmt.get()] =
-              CVBoundaryMove{dir, assign->var_, call->args_[0], call->GetType(), /*source_tpop=*/nullptr};
+          boundary_moves[stmt.get()] = CVBoundaryMove{dir, assign->var_, call->args_[0], call->GetType()};
         }
       }
     }
@@ -396,13 +394,10 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
             tpop_var_remap[source_var.get()] = tpop_var;
           }
           tpop_var_remap[tpop_var.get()] = tpop_var;
-          // Propagate kwargs from the original tpop (e.g., split=1) if available
-          std::vector<std::pair<std::string, std::any>> kwargs;
-          if (bm.source_tpop_call) {
-            kwargs = bm.source_tpop_call->kwargs_;
-          }
+          // Boundary-generated tpops carry no kwargs by default — kwargs like
+          // `split=1` are added later by passes such as SplitVectorKernel.
           result.push_back(std::make_shared<AssignStmt>(
-              tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, kwargs), stmt->span_));
+              tpop_var, CreateTpop(pop_op, tpop_result_type, stmt->span_, /*kwargs=*/{}), stmt->span_));
           if (needs_post_move) {
             auto target_memory = dest_tile_type->memory_space_;
             INTERNAL_CHECK_SPAN(target_memory.has_value(), stmt->span_)
@@ -497,18 +492,12 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   std::unordered_map<const Var*, StmtPtr> original_def_map;
   BuildDefMap(stmts, original_def_map);
 
-  // Precompute the set of source Vars whose original tpop is superseded by a
-  // boundary-generated tpop.  This must be done before BuildCoreBody because
-  // the original tpop statement appears before the boundary tile.move in
-  // program order — computing it lazily inside the loop would be too late.
+  // Boundary-generated tpops never reuse the source-tpop Var (CollectCVBoundaryMoves
+  // skips moves whose source comes from a tpop), so no original-tpop statements need
+  // to be suppressed. Keep the set empty so BuildCoreBody's tpop-superseded check is
+  // a no-op in this code path; the structure is preserved in case future work
+  // reintroduces source-tpop reuse.
   std::unordered_set<const Var*> superseded_tpop_vars;
-  for (const auto& [stmt_ptr, bm] : boundary_moves) {
-    if (bm.source_tpop_call) {
-      if (auto source_var = std::dynamic_pointer_cast<const Var>(bm.source_tile)) {
-        superseded_tpop_vars.insert(source_var.get());
-      }
-    }
-  }
 
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;

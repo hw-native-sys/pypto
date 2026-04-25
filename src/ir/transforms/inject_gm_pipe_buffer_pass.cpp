@@ -150,10 +150,11 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
       if (!call) return nullptr;
       auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
       if (!gv || !modified_funcs.count(gv->name_)) return nullptr;
-      std::vector<ExprPtr> new_args = call->args_;
-      new_args.push_back(gm_param);
-      return call->GetType() ? std::make_shared<Call>(call->op_, new_args, call->GetType(), call->span_)
-                             : std::make_shared<Call>(call->op_, new_args, call->span_);
+      // Copy the original Call so kwargs_ / attrs_ (e.g. Call::arg_directions_)
+      // survive the rewrite — only args_ needs to grow.
+      auto new_call = MutableCopy(call);
+      new_call->args_.push_back(gm_param);
+      return new_call;
     };
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
       if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_))) {
@@ -251,16 +252,12 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
     auto create_call = CreateGMPipeBufferTensorCreate(gm_buffer_bytes, span);
     auto create_stmt = std::make_shared<AssignStmt>(gm_var, create_call, span);
 
-    std::vector<ExprPtr> new_args = call->args_;
-    new_args.push_back(gm_var);
-    CallPtr new_call;
-    if (auto call_type = call->GetType()) {
-      new_call = std::make_shared<Call>(call->op_, new_args, call_type, call->span_);
-    } else {
-      new_call = std::make_shared<Call>(call->op_, new_args, call->span_);
-    }
+    // Preserve the original Call's kwargs_ / attrs_ (compiler metadata such as
+    // Call::arg_directions_) by copying rather than reconstructing.
+    auto new_call = MutableCopy(call);
+    new_call->args_.push_back(gm_var);
     StmtPtr create_stmt_ptr = create_stmt;
-    return std::make_pair(create_stmt_ptr, new_call);
+    return std::make_pair(create_stmt_ptr, CallPtr(new_call));
   };
 
   for (const auto& stmt : stmts) {
@@ -347,6 +344,12 @@ int64_t ComputeGMBufferSizeFromPipeOps(const std::vector<FunctionPtr>& functions
         int ss = call->GetKwarg<int>("slot_size", 0);
         int dm = call->GetKwarg<int>("dir_mask", 0);
         if (ss > 0 && dm != 0) {
+          // Mirror the per-direction `buffer_size` formula from
+          // cross_core_pipe.cpp (buffer_size = slot_size * GetSlotNumForDirMask).
+          // For bidirectional pipes the two reserve_buffers share this workspace
+          // at runtime via the AllocateMemoryAddr layout; the AIC/AIV-side a2a3
+          // tests pin both the per-direction reserve sizes and the workspace
+          // shape and would catch any drift here.
           int64_t bytes =
               static_cast<int64_t>(ss) * static_cast<int64_t>(cross_core_pipe::GetSlotNumForDirMask(dm));
           if (bytes > max_bytes) {

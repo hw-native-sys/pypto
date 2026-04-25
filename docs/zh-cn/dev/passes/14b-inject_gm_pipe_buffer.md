@@ -104,7 +104,10 @@ class After:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, y):
         out_0 = pl.create_tensor([16, 128], dtype=pl.FP32)
-        __gm_pipe_buffer = pl.create_tensor([...], dtype=pl.UINT8)  # 由本 Pass 注入
+        # 由本 Pass 注入：工作区大小按 FP32 元素数计算（ceil(required_bytes / 4)）。
+        # 当前契约使用 FP32：tensor.create 的 shape 即元素数，配合 FP32 即可
+        # 得到 4 * elements 字节的底层缓冲。
+        __gm_pipe_buffer = pl.create_tensor([math.ceil(required_bytes / 4)], dtype=pl.FP32)
         return self.compute(x, y, out_0, __gm_pipe_buffer)
 ```
 
@@ -119,9 +122,10 @@ Pass InjectGMPipeBuffer();
 **实现**：`src/ir/transforms/inject_gm_pipe_buffer_pass.cpp`
 
 - `HasInitializePipeOps` —— 递归扫描 `aic_initialize_pipe` / `aiv_initialize_pipe`（通过 `op_predicates::IsInitializePipe`）
-- `AppendGMPipeBufferParam` —— 追加 Out-tensor 参数
-- `RewriteCallToForwardGMPipeBuffer` —— 改写调用者的调用点
-- `BuildGMPipeBufferTensorCreate` —— 构造 Orchestration 侧的 `tensor.create`
+- `AddGMSlotBufferParam` —— 追加 Out-tensor 参数
+- `RewriteCallsForGMBuffer` —— 改写调用者的调用点
+- `CreateGMPipeBufferTensorCreate` —— 构造 Orchestration 侧的 `tensor.create`
+- `RewriteCallsWithPerCallGMBuffer` —— 驱动 Orchestration 侧的改写：插入 `tensor.create` 并按调用点转发工作区
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 

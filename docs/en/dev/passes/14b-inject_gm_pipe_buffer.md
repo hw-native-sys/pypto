@@ -106,7 +106,10 @@ class After:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, y):
         out_0 = pl.create_tensor([16, 128], dtype=pl.FP32)
-        __gm_pipe_buffer = pl.create_tensor([...], dtype=pl.UINT8)  # injected
+        # Injected: workspace sized in FP32 elements (ceil(required_bytes / 4)).
+        # FP32 is the contract today because tensor.create's element-count shape
+        # paired with FP32 yields a backing of `4 * elements` bytes.
+        __gm_pipe_buffer = pl.create_tensor([math.ceil(required_bytes / 4)], dtype=pl.FP32)
         return self.compute(x, y, out_0, __gm_pipe_buffer)
 ```
 
@@ -121,9 +124,10 @@ Pass InjectGMPipeBuffer();
 **Implementation**: `src/ir/transforms/inject_gm_pipe_buffer_pass.cpp`
 
 - `HasInitializePipeOps` — recursive scan for `aic_initialize_pipe` / `aiv_initialize_pipe` (uses `op_predicates::IsInitializePipe`)
-- `AppendGMPipeBufferParam` — append the Out-tensor parameter
-- `RewriteCallToForwardGMPipeBuffer` — rewrite a caller's call sites
-- `BuildGMPipeBufferTensorCreate` — synthesize the Orchestration-side `tensor.create`
+- `AddGMSlotBufferParam` — append the Out-tensor parameter
+- `RewriteCallsForGMBuffer` — rewrite a caller's call sites
+- `CreateGMPipeBufferTensorCreate` — synthesize the Orchestration-side `tensor.create`
+- `RewriteCallsWithPerCallGMBuffer` — drive the Orchestration-side rewrite, hoisting the `tensor.create` and forwarding the workspace per call site
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 

@@ -13,7 +13,6 @@
 #define PYPTO_IR_TRANSFORMS_UTILS_CORE_AFFINITY_H_
 
 #include <optional>
-#include <string>
 
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
@@ -46,7 +45,6 @@ struct CVBoundaryMove {
   VarPtr dest_var;
   ExprPtr source_tile;
   TypePtr result_type;
-  CallPtr source_tpop_call;
 };
 
 }  // namespace core_affinity

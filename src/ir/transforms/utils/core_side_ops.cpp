@@ -13,6 +13,8 @@
 
 #include <string>
 
+#include "pypto/ir/transforms/utils/core_affinity.h"
+
 namespace pypto {
 namespace ir {
 namespace core_side_ops {
