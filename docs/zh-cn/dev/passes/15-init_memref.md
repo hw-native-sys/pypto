@@ -18,7 +18,7 @@
 
 **失效**：SSAForm（引入了新的 MemRef 变量）。
 
-**使用时机**：在静态单赋值 (SSA) 转换、提取和块操作转换之后运行。在 MemoryReuse、InsertSync 和 AllocateMemoryAddr 之前必须运行。
+**使用时机**：在静态单赋值 (SSA) 转换、提取和块操作转换之后运行。在 MemoryReuse 和 AllocateMemoryAddr 之前必须运行。
 
 ## API
 

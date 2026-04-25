@@ -18,7 +18,7 @@ Memory space is read from `TileType::memory_space_` (set by InferTileMemorySpace
 
 **Invalidates**: SSAForm (new MemRef variables are introduced).
 
-**When to use**: Run after SSA conversion, outlining, and block-op conversion. Required before MemoryReuse, InsertSync, and AllocateMemoryAddr.
+**When to use**: Run after SSA conversion, outlining, and block-op conversion. Required before MemoryReuse and AllocateMemoryAddr.
 
 ## API
 

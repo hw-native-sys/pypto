@@ -146,7 +146,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/legalize_pto_buffer_reuse_pass.cpp
     src/ir/transforms/ir_property.cpp
-    src/ir/transforms/insert_sync_pass.cpp
     src/ir/transforms/mutator.cpp
     src/ir/transforms/normalize_stmt_structure_pass.cpp
     src/ir/transforms/op_conversion_registry.cpp

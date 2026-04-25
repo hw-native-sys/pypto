@@ -166,15 +166,6 @@ Pass MemoryReuse();
 Pass LegalizePTOBufferReuse();
 
 /**
- * @brief Create an insert sync pass
- *
- * Analyzes data dependencies and inserts synchronization operations
- * (sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.
- * Uses the globally configured backend to obtain pipe info.
- */
-Pass InsertSync();
-
-/**
  * @brief Create an allocate memory address pass
  *
  * Allocates real memory addresses for existing alloc operations.

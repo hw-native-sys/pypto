@@ -30,7 +30,6 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 15 | `15-init_memref.md` | 15th pass |
 | 16 | `16-memory_reuse.md` | 16th pass |
 | 17 | `17-allocate_memory_addr.md` | 17th pass |
-| 90 | `90-insert_sync.md` | Not in Default strategy |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

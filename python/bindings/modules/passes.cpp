@@ -249,12 +249,6 @@ void BindPass(nb::module_& m) {
              "Variables with non-overlapping lifetimes in the same memory space can share MemRef objects.\n"
              "Handles nested control flow (for-loops, if/else branches) for accurate lifetime tracking.");
 
-  passes.def("insert_sync", &pass::InsertSync,
-             "Create an insert sync pass\n\n"
-             "Analyzes data dependencies and inserts synchronization operations\n"
-             "(sync_src, sync_dst, bar_v, bar_m) for correct execution across hardware pipes.\n"
-             "Uses the globally configured backend to obtain pipe information.");
-
   passes.def("legalize_pto_buffer_reuse", &pass::LegalizePTOBufferReuse,
              "Create a PTO buffer reuse legalisation pass\n\n"
              "After generic MemoryReuse, detects illegal cross-type MemRef sharing\n"

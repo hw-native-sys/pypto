@@ -275,9 +275,6 @@ def init_mem_ref() -> Pass:
 def memory_reuse() -> Pass:
     """Create a memory reuse pass."""
 
-def insert_sync() -> Pass:
-    """Create an insert sync pass."""
-
 def legalize_pto_buffer_reuse() -> Pass:
     """Create a PTO buffer reuse legalisation pass."""
 
@@ -507,7 +504,6 @@ __all__ = [
     "init_mem_ref",
     "memory_reuse",
     "legalize_pto_buffer_reuse",
-    "insert_sync",
     "allocate_memory_addr",
     "fuse_create_assemble_to_slice",
     "VerificationError",

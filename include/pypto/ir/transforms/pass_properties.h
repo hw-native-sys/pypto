@@ -145,10 +145,6 @@ inline const PassProperties kMemoryReuseProperties{
                  IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::NormalizedStmtStructure}};
 
-inline const PassProperties kInsertSyncProperties{
-    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
-                 IRProperty::TileOps2D}};
-
 inline const PassProperties kAllocateMemoryAddrProperties{
     .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
                  IRProperty::TileOps2D},
