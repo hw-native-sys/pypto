@@ -46,6 +46,15 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 
 **Gaps**: When a pass has no documentation yet, reserve its number and note it in the table. This keeps subsequent numbering aligned with execution order.
 
+## Numbering scope: pipeline passes only
+
+The main `01-89` sequence numbers **pipeline passes** — those that appear once in the `Default` strategy and have a dedicated per-pass doc. Two categories are intentionally excluded from the main sequence:
+
+- **Utility passes** that may run at multiple positions in the pipeline (e.g. `NormalizeStmtStructure`, which runs both as the 5th and 18th entry in `pass_manager.py`). Giving them a single slot in the main sequence would misrepresent execution order; reserving every invocation would make the sequence harder to read. They are documented together in `91-utility_passes.md`.
+- **Infrastructure** that is not a pipeline pass at all (e.g. the verifier registry in `99-verifier.md`).
+
+The `90+` range is reserved for these excluded categories. Pipeline passes always live in `01-89`.
+
 ## When Adding a New Pass
 
 1. Check where the pass appears in `pass_manager.py` default strategy

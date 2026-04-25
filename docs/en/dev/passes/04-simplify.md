@@ -21,7 +21,7 @@ The pass runs **twice** in the `Default` strategy of `pass_manager.py`:
 
 **Invalidates**: nothing.
 
-The empty `PassProperties` contract (`include/pypto/ir/transforms/pass_properties.h:63`) is intentional: Simplify is conservative enough to preserve every property its callers may have established (`SSAForm`, `NormalizedStmtStructure`, `IncoreTileOps`, ...) — it only rewrites expressions and prunes scalar bindings, never restructures statements.
+The empty `PassProperties` contract (`kSimplifyProperties` in `include/pypto/ir/transforms/pass_properties.h`) is intentional: Simplify is conservative enough to preserve every property its callers may have established (`SSAForm`, `NormalizedStmtStructure`, `IncoreTileOps`, ...) — it only rewrites expressions and prunes scalar bindings, never restructures statements.
 
 ## When to Use
 

@@ -21,7 +21,7 @@
 
 **失效 (Invalidates)**：无。
 
-`PassProperties` 为空（`include/pypto/ir/transforms/pass_properties.h:63`）是有意为之：Simplify 足够保守，会保留调用方此前可能已经建立的所有属性（`SSAForm`、`NormalizedStmtStructure`、`IncoreTileOps` 等）——它只重写表达式、删除标量绑定，从不改变语句结构。
+`PassProperties` 为空（`include/pypto/ir/transforms/pass_properties.h` 中的 `kSimplifyProperties`）是有意为之：Simplify 足够保守，会保留调用方此前可能已经建立的所有属性（`SSAForm`、`NormalizedStmtStructure`、`IncoreTileOps` 等）——它只重写表达式、删除标量绑定，从不改变语句结构。
 
 ## 使用时机
 
