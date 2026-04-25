@@ -5,9 +5,16 @@ Outlines Hierarchy scopes into separate functions that carry `level` and `role` 
 ## Overview
 
 This pass transforms `ScopeStmt(Hierarchy)` nodes — produced by
-`with pl.at(level=..., role=...)` for any level other than `CORE_GROUP` — into
-separate `Function(Opaque, level, role)` definitions and replaces each scope
-with a Call to the outlined function.
+`with pl.at(level=..., role=...)` — into separate
+`Function(Opaque, level, role)` definitions and replaces each scope with a
+Call to the outlined function.
+
+> **DSL note**: `pl.at(level=pl.Level.CORE_GROUP, ...)` is a special case at
+> the parser level — it produces an `InCore` (or `AutoInCore`) scope rather
+> than a Hierarchy scope, and is handled later by `OutlineIncoreScopes` (see
+> `python/pypto/language/dsl_api.py:984`). Hierarchy scopes at `CORE_GROUP`
+> can still arise from direct IR construction; the C++ name table below
+> covers all `Level` values for completeness.
 
 **Requirements**:
 
@@ -88,8 +95,8 @@ component is lowercase; the role suffix is omitted when the scope has no role.
 
 | Role enum | Suffix |
 | --------- | ------ |
-| `Orchestrator` | `_orch` |
-| `Worker` | `_worker` |
+| `Orchestrator` | `orch` |
+| `Worker` | `worker` |
 
 Examples:
 

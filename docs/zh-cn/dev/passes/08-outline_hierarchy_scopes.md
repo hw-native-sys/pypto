@@ -5,8 +5,15 @@
 ## 概述
 
 该 Pass 将 `ScopeStmt(Hierarchy)` 节点（由 `with pl.at(level=..., role=...)`
-对非 `CORE_GROUP` 层级生成）变换为独立的 `Function(Opaque, level, role)`
-定义，并将原作用域替换为对提取函数的调用。
+生成）变换为独立的 `Function(Opaque, level, role)` 定义，并将原作用域替换为
+对提取函数的调用。
+
+> **DSL 说明**：`pl.at(level=pl.Level.CORE_GROUP, ...)` 在解析层是一个特例
+> —— 它生成的是 `InCore`（或 `AutoInCore`）作用域，而非 Hierarchy 作用域，
+> 后续由 `OutlineIncoreScopes` 处理（参见
+> `python/pypto/language/dsl_api.py:984`）。`CORE_GROUP` 层级的 Hierarchy
+> 作用域仍可能通过直接构造 IR 产生；下方 C++ 命名表覆盖所有 `Level` 枚举值
+> 以保持完整。
 
 **前置条件**：
 
@@ -81,8 +88,8 @@ program_outlined = outline_pass(program)
 
 | Role 枚举 | 后缀 |
 | --------- | ---- |
-| `Orchestrator` | `_orch` |
-| `Worker` | `_worker` |
+| `Orchestrator` | `orch` |
+| `Worker` | `worker` |
 
 示例：
 
