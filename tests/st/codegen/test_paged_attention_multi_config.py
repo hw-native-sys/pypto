@@ -10,7 +10,7 @@
 """
 Tests for Paged Attention Multi-Config implementation using PyPTO frontend.
 
-Multi-config interface: N_UNROLL=8, BLOCK_SIZE=64, HEAD_DIM=128.
+Multi-config interface defaults: N_UNROLL=64, BLOCK_SIZE=64, HEAD_DIM=128.
 Orchestration pre-extracts block_indices via pl.slice() from block_table.
 Kernels receive block_indices tensor view instead of block_table + bt_offset.
 
@@ -19,11 +19,10 @@ Module-level InCore kernels:
   kernel_online_update:   Online softmax update with inplace mi/li/oi
 
 Factory-generated InCore kernels:
-  make_kernel_qk_matmul(key_cache_rows):  Multi-block QK matmul
-  make_kernel_pv_matmul(key_cache_rows):   SplitK PV matmul
+  make_kernel_qk_matmul():  Multi-block QK matmul (dynamic key_cache rows)
+  make_kernel_pv_matmul():  SplitK PV matmul (dynamic value_cache rows)
 """
 
-import struct
 from typing import Any
 
 import pypto.language as pl
@@ -190,7 +189,7 @@ class QKMatmulTestCase(PTOTestCase):
 
     def get_program(self) -> Any:
         key_cache_rows = self.key_cache_rows
-        kernel_qk = make_kernel_qk_matmul(key_cache_rows)
+        kernel_qk = make_kernel_qk_matmul()
 
         @pl.program
         class QKMatmulProgram:
@@ -266,7 +265,7 @@ class PVMatmulTestCase(PTOTestCase):
 
     def get_program(self) -> Any:
         key_cache_rows = self.key_cache_rows
-        kernel_pv = make_kernel_pv_matmul(key_cache_rows)
+        kernel_pv = make_kernel_pv_matmul()
 
         @pl.program
         class PVMatmulProgram:
@@ -426,7 +425,6 @@ class PagedAttentionMultiConfigTestCase(PTOTestCase):
         block_size: int = BLOCK_SIZE,
         context_len: int = 1024,
         max_model_len: int = 2048,
-        scale: float = 1.0,
         q_tile: int = Q_TILE,
         n_unroll: int = N_UNROLL,
         **kwargs,
@@ -440,7 +438,6 @@ class PagedAttentionMultiConfigTestCase(PTOTestCase):
         self.block_size = block_size
         self.context_len = context_len
         self.max_model_len = max_model_len
-        self.scale = scale
         self.q_tile = q_tile
         self.n_unroll = n_unroll
         self.max_num_blocks_per_req = max_model_len // block_size
@@ -459,12 +456,6 @@ class PagedAttentionMultiConfigTestCase(PTOTestCase):
         max_blocks = self.max_num_blocks_per_req
         total_pool_rows = B * max_blocks * BS
 
-        scale_bits = struct.unpack("I", struct.pack("f", self.scale))[0]
-        config = torch.tensor(
-            [B, H, 1, D, BS, max_blocks, scale_bits, self.q_tile, self.n_unroll],
-            dtype=torch.int64,
-        )
-
         def make_block_table():
             return torch.randint(
                 0,
@@ -479,10 +470,6 @@ class PagedAttentionMultiConfigTestCase(PTOTestCase):
         key_cache_rows = total_pool_rows
         block_table_flat_size = B * max_blocks
 
-        size_query = torch.tensor([query_rows * D * 2], dtype=torch.int64)
-        size_key_cache = torch.tensor([key_cache_rows * D * 2], dtype=torch.int64)
-        size_value_cache = torch.tensor([key_cache_rows * D * 2], dtype=torch.int64)
-
         return [
             TensorSpec("query", [query_rows, D], DataType.BF16, init_value=torch.randn),
             TensorSpec("key_cache", [key_cache_rows, D], DataType.BF16, init_value=torch.randn),
@@ -490,43 +477,41 @@ class PagedAttentionMultiConfigTestCase(PTOTestCase):
             TensorSpec("block_table", [block_table_flat_size], DataType.INT32, init_value=make_block_table),
             TensorSpec("context_lens", [B], DataType.INT32, init_value=context_lens),
             TensorSpec("out", [query_rows, D], DataType.FP32, is_output=True),
-            TensorSpec("config", [9], DataType.INT64, init_value=config),
-            TensorSpec("size_query", [1], DataType.INT64, init_value=size_query),
-            TensorSpec("size_key_cache", [1], DataType.INT64, init_value=size_key_cache),
-            TensorSpec("size_value_cache", [1], DataType.INT64, init_value=size_value_cache),
         ]
 
     def get_program(self) -> Any:
         return build_paged_attention_multi_config_program(
-            batch=self.batch,
-            num_heads=self.num_heads,
+            q_tile=self.q_tile,
             head_dim=self.head_dim,
             block_size=self.block_size,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            q_tile=self.q_tile,
             n_unroll=self.n_unroll,
         )
 
     def compute_expected(self, tensors, params=None):
-        config = tensors["config"]
-        batch = int(config[0].item())
-        num_heads = int(config[1].item())
-        head_dim = int(config[3].item())
-        block_size = int(config[4].item())
-        max_num_blocks_per_req = int(config[5].item())
-        scale_bits = int(config[6].item())
-        scale = struct.unpack("f", struct.pack("I", scale_bits & 0xFFFFFFFF))[0]
-
-        query = tensors["query"].float().reshape(batch, num_heads, head_dim)
-        total_pool_blocks = batch * max_num_blocks_per_req
-        key_cache = tensors["key_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
-        value_cache = tensors["value_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
-        block_table = tensors["block_table"].reshape(batch, max_num_blocks_per_req)
+        # Shape derivations mirror orchestration's pl.tensor.dim() logic;
+        # q_tile / n_unroll come from this test instance (compile-time constants).
         context_lens = tensors["context_lens"]
+        query_t = tensors["query"]
+        key_cache_t = tensors["key_cache"]
+        value_cache_t = tensors["value_cache"]
+        block_table_flat = tensors["block_table"]
+
+        batch = context_lens.shape[0]
+        num_heads = query_t.shape[0] // batch
+        head_dim = query_t.shape[1]
+        block_size = value_cache_t.shape[0] // block_table_flat.shape[0]
+        max_num_blocks_per_req = block_table_flat.shape[0] // batch
+        scale = 1.0
+
+        query = query_t.float().reshape(batch, num_heads, head_dim)
+        total_pool_blocks = batch * max_num_blocks_per_req
+        key_cache = key_cache_t.float().reshape(total_pool_blocks, block_size, head_dim)
+        value_cache = value_cache_t.float().reshape(total_pool_blocks, block_size, head_dim)
+        block_table = block_table_flat.reshape(batch, max_num_blocks_per_req)
 
         out = torch.zeros((batch, num_heads, head_dim), dtype=torch.float32)
-        q_tile = int(config[7].item())
-        n_unroll = int(config[8].item())
+        q_tile = self.q_tile
+        n_unroll = self.n_unroll
 
         def _update(oi_a, li_a, mi_a, oi_new, li_new, mi_new):
             if oi_a is None or li_a is None or mi_a is None:

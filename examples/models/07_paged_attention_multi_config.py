@@ -11,13 +11,19 @@ Paged Attention Multi-Config Example
 
 Builds a multi-config paged attention program using the PyPTO DSL with:
 - N_UNROLL block grouping per unroll iteration
-- Dynamic runtime config (batch, num_heads, block_size, etc. read from config tensor)
+- Dynamic runtime shapes derived from input tensor dimensions via pl.tensor.dim()
 - Per-request context length from context_lens tensor
 - valid_len support for partial blocks (last block may have fewer valid columns)
 - Two-pass softmax within each unroll group + online update across groups
 
 Orchestration pre-extracts block_indices via pl.slice() from block_table.
 Kernels receive block_indices tensor view (no block_table + bt_offset indirection).
+
+Dynamic axis description follows the dynamic paged-attention example: tensor
+type annotations use module-level pl.dynamic() variables, while InCore kernel
+bodies use builder closures (q_tile, head_dim, block_size) for fixed-size loads.
+Runtime values (batch, num_heads, head_dim, block_size, block_num) are derived
+from input tensor shapes inside the orchestration via pl.tensor.dim().
 
 Key interface difference vs multi-config C++ impl:
   multi-config passes N_UNROLL individual scalar block_indices to each kernel.
@@ -33,13 +39,15 @@ Tile dimensions (matching multi-config Case2, q_tile=16):
 Module-level InCore kernels (reusable, importable):
   kernel_softmax_prepare, kernel_online_update
 
-Factory functions for batch-dynamic kernels:
-  make_kernel_qk_matmul(key_cache_rows)
-  make_kernel_pv_matmul(key_cache_rows)
+Factory functions for multi-block kernels:
+  make_kernel_qk_matmul()
+  make_kernel_pv_matmul()
 """
 
+# DSL function bodies are parsed as AST — dynamic var names look undefined to pyright.
+# pyright: reportUndefinedVariable=false
+
 import argparse
-import struct
 
 import pypto.language as pl
 import torch
@@ -54,6 +62,24 @@ HEAD_DIM = 128
 N_UNROLL = 64
 N_UNROLL_Q = N_UNROLL * Q_TILE  # 1024 — static sij/pij buffer height
 
+# ── Module-level dynamic variables ───────────────────────────────────────────
+# Used only in tensor type annotations; InCore kernel bodies and orchestration
+# bodies use builder closure ints / pl.tensor.dim() Scalars for actual sizes.
+Q_HEADS = pl.dynamic("Q_HEADS")  # query tile rows (= q_tile)
+HEAD_DIM_DYN = pl.dynamic("HEAD_DIM_DYN")  # per-head feature dim on the Q/output side
+# KV-side head_dim is given a distinct dynamic var so that within a single InCore
+# kernel call (e.g. PV matmul with value_cache + oi_new outputs), the type-system
+# unification does not conflict between the orchestration-typed value_cache
+# (KEY_CACHE_ROWS_DYN, HEAD_DIM_DYN) and the create_tensor-typed oi_new buffer
+# whose head_dim is the concrete pl.tensor.dim() Scalar.  At call sites both
+# resolve to the same runtime value (head_dim_cfg).
+KV_HEAD_DIM_DYN = pl.dynamic("KV_HEAD_DIM_DYN")
+BLOCK_SIZE_DYN = pl.dynamic("BLOCK_SIZE_DYN")  # KV-cache block size (= block_size)
+BATCH_DYN = pl.dynamic("BATCH_DYN")  # number of requests
+QUERY_ROWS_DYN = pl.dynamic("QUERY_ROWS_DYN")  # batch * num_heads
+KEY_CACHE_ROWS_DYN = pl.dynamic("KEY_CACHE_ROWS_DYN")  # batch * max_blocks_per_req * block_size
+BLOCK_TABLE_FLAT_DYN = pl.dynamic("BLOCK_TABLE_FLAT_DYN")  # batch * max_blocks_per_req
+
 
 # ── Kernel factory functions ──────────────────────────────────────────────────
 
@@ -63,17 +89,17 @@ def make_kernel_softmax_prepare(q_tile: int, block_size: int, n_unroll_q: int):
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_softmax_prepare(
-        sij_buf: pl.Tensor[[n_unroll_q, block_size], pl.FP32],
+        sij_buf: pl.Tensor[[n_unroll_q, BLOCK_SIZE_DYN], pl.FP32],
         scale: pl.Scalar[pl.FP32],
-        pij_buf: pl.Out[pl.Tensor[[n_unroll_q, block_size], pl.BF16]],
-        mi_out: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
-        li_out: pl.Out[pl.Tensor[[q_tile, 1], pl.FP32]],
+        pij_buf: pl.Out[pl.Tensor[[n_unroll_q, BLOCK_SIZE_DYN], pl.BF16]],
+        mi_out: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
+        li_out: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
         n_blocks: pl.Scalar[pl.INDEX],
         last_valid_len: pl.Scalar[pl.INDEX],
     ) -> tuple[
-        pl.Tensor[[n_unroll_q, block_size], pl.BF16],
-        pl.Tensor[[q_tile, 1], pl.FP32],
-        pl.Tensor[[q_tile, 1], pl.FP32],
+        pl.Tensor[[n_unroll_q, BLOCK_SIZE_DYN], pl.BF16],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
     ]:
         """Two-pass softmax with partial-block support (VECTOR).
 
@@ -173,20 +199,20 @@ def make_kernel_online_update(q_tile: int, head_dim: int):
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_online_update(  # noqa: PLR0913
-        mij: pl.Tensor[[q_tile, 1], pl.FP32],
-        lij: pl.Tensor[[q_tile, 1], pl.FP32],
-        oi_new: pl.Tensor[[q_tile, head_dim], pl.FP32],
-        mi: pl.InOut[pl.Tensor[[q_tile, 1], pl.FP32]],
-        li: pl.InOut[pl.Tensor[[q_tile, 1], pl.FP32]],
-        oi: pl.InOut[pl.Tensor[[q_tile, head_dim], pl.FP32]],
-        dst: pl.Out[pl.Tensor[[q_tile, head_dim], pl.FP32]],
+        mij: pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        lij: pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        oi_new: pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32],
+        mi: pl.InOut[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
+        li: pl.InOut[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
+        oi: pl.InOut[pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32]],
+        dst: pl.Out[pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32]],
         is_first: pl.Scalar[pl.INDEX],
         is_last: pl.Scalar[pl.INDEX],
     ) -> tuple[
-        pl.Tensor[[q_tile, 1], pl.FP32],
-        pl.Tensor[[q_tile, 1], pl.FP32],
-        pl.Tensor[[q_tile, head_dim], pl.FP32],
-        pl.Tensor[[q_tile, head_dim], pl.FP32],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32],
+        pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32],
     ]:
         """Online softmax update with inplace mi/li/oi (VECTOR).
 
@@ -261,7 +287,6 @@ kernel_online_update = make_kernel_online_update(Q_TILE, HEAD_DIM)
 
 
 def make_kernel_qk_matmul(
-    key_cache_rows: int,
     q_tile: int = Q_TILE,
     head_dim: int = HEAD_DIM,
     block_size: int = BLOCK_SIZE,
@@ -273,9 +298,12 @@ def make_kernel_qk_matmul(
     Multi-config: receives block_indices tensor (pre-sliced by orchestration)
     instead of full block_table + bt_offset.
 
+    Tensor type annotations use module-level pl.dynamic() variables so the kernel
+    accepts any key_cache row count at runtime; load shapes use the builder
+    closure ints (q_tile / head_dim / block_size).
+
     Parameters
     ----------
-    key_cache_rows: total rows in the key cache (batch * max_blocks * block_size)
     q_tile: query tile height
     head_dim: per-head feature dimension
     block_size: KV-cache block size
@@ -285,12 +313,12 @@ def make_kernel_qk_matmul(
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_qk_matmul(
-        qi: pl.Tensor[[q_tile, head_dim], pl.BF16],
-        key_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
-        sij_buf: pl.Out[pl.Tensor[[n_unroll_q, block_size], pl.FP32]],
+        qi: pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.BF16],
+        key_cache: pl.Tensor[[KEY_CACHE_ROWS_DYN, KV_HEAD_DIM_DYN], pl.BF16],
+        sij_buf: pl.Out[pl.Tensor[[n_unroll_q, BLOCK_SIZE_DYN], pl.FP32]],
         block_indices: pl.Tensor[[n_unroll], pl.INT32],
         n_blocks: pl.Scalar[pl.INDEX],
-    ) -> pl.Tensor[[n_unroll_q, block_size], pl.FP32]:
+    ) -> pl.Tensor[[n_unroll_q, BLOCK_SIZE_DYN], pl.FP32]:
         """Multi-block QK matmul: sij[i] = qi @ kj[i].T, vertically stacked (CUBE).
 
         Loops over n_blocks, looking up physical block indices via block_indices
@@ -326,7 +354,6 @@ def make_kernel_qk_matmul(
 
 
 def make_kernel_pv_matmul(
-    key_cache_rows: int,
     q_tile: int = Q_TILE,
     head_dim: int = HEAD_DIM,
     block_size: int = BLOCK_SIZE,
@@ -338,9 +365,12 @@ def make_kernel_pv_matmul(
     Multi-config: receives block_indices tensor (pre-sliced by orchestration)
     instead of full block_table + bt_offset.
 
+    Tensor type annotations use module-level pl.dynamic() variables so the kernel
+    accepts any value_cache row count at runtime; load shapes use the builder
+    closure ints (q_tile / head_dim / block_size).
+
     Parameters
     ----------
-    key_cache_rows: total rows in the value cache (batch * max_blocks * block_size)
     q_tile: query tile height
     head_dim: per-head feature dimension
     block_size: KV-cache block size
@@ -350,12 +380,12 @@ def make_kernel_pv_matmul(
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel_pv_matmul(
-        pij_buf: pl.Tensor[[n_unroll_q, block_size], pl.BF16],
-        value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
-        oi_new: pl.Out[pl.Tensor[[q_tile, head_dim], pl.FP32]],
+        pij_buf: pl.Tensor[[n_unroll_q, BLOCK_SIZE_DYN], pl.BF16],
+        value_cache: pl.Tensor[[KEY_CACHE_ROWS_DYN, KV_HEAD_DIM_DYN], pl.BF16],
+        oi_new: pl.Out[pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32]],
         block_indices: pl.Tensor[[n_unroll], pl.INT32],
         n_blocks: pl.Scalar[pl.INDEX],
-    ) -> pl.Tensor[[q_tile, head_dim], pl.FP32]:
+    ) -> pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32]:
         """SplitK PV matmul: first block via matmul, rest via matmul_acc (CUBE).
 
         Accumulates pij[i] @ vj[i] across n_blocks on L0C, then stores result.
@@ -416,67 +446,79 @@ def make_kernel_pv_matmul(
 
 
 def build_paged_attention_multi_config_program(
-    batch: int,
-    num_heads: int,
-    head_dim: int,
-    block_size: int,
-    max_num_blocks_per_req: int,
     q_tile: int = Q_TILE,
+    head_dim: int = HEAD_DIM,
+    block_size: int = BLOCK_SIZE,
     n_unroll: int = N_UNROLL,
 ):
     """Build paged-attention @pl.program with multi-config interface.
 
-    Orchestration reads runtime config from the config tensor and per-request
-    context lengths from context_lens.  Pre-extracts block_indices via
-    pl.slice() before kernel calls.
+    Orchestration derives runtime shapes (batch, num_heads, head_dim, block_size,
+    block_num) from input tensor dimensions via pl.tensor.dim(); per-request
+    context lengths come from context_lens.  Block indices are pre-extracted
+    via pl.slice() before kernel calls.
 
     Parameters
     ----------
-    batch:                  max number of requests (tensor allocation size)
-    num_heads:              max number of query heads (tensor allocation size)
-    head_dim:               per-head feature dimension (128)
-    block_size:             KV-cache block size (64)
-    max_num_blocks_per_req: maximum number of KV blocks per request
-    q_tile:                 query-head tile size (16)
-    n_unroll:               number of blocks per unroll group
+    q_tile:     query-head tile size (compile-time constant for InCore kernels)
+    head_dim:   per-head feature dimension (compile-time constant for loads)
+    block_size: KV-cache block size (compile-time constant for loads)
+    n_unroll:   number of blocks per unroll group
     """
     n_unroll_q = n_unroll * q_tile
-    query_rows = batch * num_heads
-    key_cache_rows = batch * max_num_blocks_per_req * block_size
-    out_rows = batch * num_heads
-    block_table_flat_size = batch * max_num_blocks_per_req
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel_init_inplace(
+        oi: pl.Out[pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32]],
+        li: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
+        mi: pl.Out[pl.Tensor[[Q_HEADS, 1], pl.FP32]],
+    ) -> tuple[
+        pl.Tensor[[Q_HEADS, HEAD_DIM_DYN], pl.FP32],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
+        pl.Tensor[[Q_HEADS, 1], pl.FP32],
+    ]:
+        """No-op passthrough that binds concrete create_tensor shapes to dynamic types.
+
+        pl.create_tensor zero-initialises the buffers before this call; this
+        function exists solely to propagate dynamic-shape types at the call site
+        so downstream kernel returns can be reassigned to the same variables.
+        """
+        return oi, li, mi
 
     _sf = make_kernel_softmax_prepare(q_tile, block_size, n_unroll_q)
     _up = make_kernel_online_update(q_tile, head_dim)
-    _qk = make_kernel_qk_matmul(key_cache_rows, q_tile, head_dim, block_size, n_unroll, n_unroll_q)
-    _pv = make_kernel_pv_matmul(key_cache_rows, q_tile, head_dim, block_size, n_unroll, n_unroll_q)
+    _qk = make_kernel_qk_matmul(q_tile, head_dim, block_size, n_unroll, n_unroll_q)
+    _pv = make_kernel_pv_matmul(q_tile, head_dim, block_size, n_unroll, n_unroll_q)
 
     @pl.program
     class PagedAttentionMultiConfigProgram:
-        """Paged attention with dynamic config and valid_len support."""
+        """Paged attention with dynamic-shape orchestration and valid_len support."""
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def paged_attention(
             self,
-            query: pl.Tensor[[query_rows, head_dim], pl.BF16],
-            key_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
-            value_cache: pl.Tensor[[key_cache_rows, head_dim], pl.BF16],
-            block_table: pl.Tensor[[block_table_flat_size], pl.INT32],
-            context_lens: pl.Tensor[[batch], pl.INT32],
-            out: pl.Out[pl.Tensor[[out_rows, head_dim], pl.FP32]],
-            config: pl.Tensor[[7], pl.INT64],
-            size_query: pl.Tensor[[1], pl.INT64],
-            size_key_cache: pl.Tensor[[1], pl.INT64],
-            size_value_cache: pl.Tensor[[1], pl.INT64],
-        ) -> pl.Tensor[[out_rows, head_dim], pl.FP32]:
-            """Paged attention orchestration with dynamic config and valid_len.
+            query: pl.Tensor[[QUERY_ROWS_DYN, HEAD_DIM_DYN], pl.BF16],
+            key_cache: pl.Tensor[[KEY_CACHE_ROWS_DYN, HEAD_DIM_DYN], pl.BF16],
+            value_cache: pl.Tensor[[KEY_CACHE_ROWS_DYN, HEAD_DIM_DYN], pl.BF16],
+            block_table: pl.Tensor[[BLOCK_TABLE_FLAT_DYN], pl.INT32],
+            context_lens: pl.Tensor[[BATCH_DYN], pl.INT32],
+            out: pl.Out[pl.Tensor[[QUERY_ROWS_DYN, HEAD_DIM_DYN], pl.FP32]],
+        ) -> pl.Tensor[[QUERY_ROWS_DYN, HEAD_DIM_DYN], pl.FP32]:
+            """Paged attention orchestration with shapes derived from tensor dims.
 
-            Config: [batch, num_heads, kv_head_num, head_dim, block_size, block_num, scale_bits]
+            Shape derivations: batch = context_lens.dim(0),
+            head_dim = query.dim(1), num_heads = query.dim(0) // batch,
+            block_num = block_table.dim(0) // batch,
+            block_size = value_cache.dim(0) // block_table.dim(0).
             """
-            batch_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
-            num_heads_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
-            block_size_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [4])
-            block_num_cfg: pl.Scalar[pl.INT64] = pl.tensor.read(config, [5])
+            batch_cfg = pl.tensor.dim(context_lens, 0)
+            query_rows = pl.tensor.dim(query, 0)
+            head_dim_cfg = pl.tensor.dim(query, 1)
+            value_cache_rows = pl.tensor.dim(value_cache, 0)
+            block_table_size = pl.tensor.dim(block_table, 0)
+            num_heads_cfg = query_rows // batch_cfg
+            block_size_cfg = value_cache_rows // block_table_size
+            block_num_cfg = block_table_size // batch_cfg
             q_loop_cfg = (num_heads_cfg + q_tile - 1) // q_tile
 
             for b_idx in pl.range(batch_cfg):
@@ -485,11 +527,15 @@ def build_paged_attention_multi_config_program(
                 for q_idx in pl.range(q_loop_cfg):
                     cur_offset = b_idx * num_heads_cfg + q_idx * q_tile
 
-                    oi = pl.create_tensor([q_tile, head_dim], dtype=pl.FP32)
-                    li_update = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
-                    mi_update = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                    # Allocate accumulators with concrete shapes, then bind to
+                    # dynamic-shape types via init_inplace so they can be carried
+                    # across iterations of the bn loop without a type mismatch.
+                    oi_buf = pl.create_tensor([q_tile, head_dim_cfg], dtype=pl.FP32)
+                    li_buf = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                    mi_buf = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                    oi, li_update, mi_update = kernel_init_inplace(oi_buf, li_buf, mi_buf)
 
-                    qi = pl.slice(query, [q_tile, head_dim], [cur_offset, 0])
+                    qi = pl.slice(query, [q_tile, head_dim_cfg], [cur_offset, 0])
 
                     # ── n_unroll loop over KV blocks ──────────
                     for bn in pl.range(0, bn_this_batch, n_unroll):  # type: ignore[reportArgumentType]
@@ -505,35 +551,35 @@ def build_paged_attention_multi_config_program(
                         )
 
                         # 1. QK matmul (CUBE)
-                        sij_buf = pl.create_tensor([n_unroll_q, block_size], dtype=pl.FP32)
+                        sij_buf_in = pl.create_tensor([n_unroll_q, block_size_cfg], dtype=pl.FP32)
                         sij_buf = _qk(
                             qi,
                             key_cache,
-                            sij_buf,
+                            sij_buf_in,
                             block_indices,
                             n_blocks,
                         )
 
                         # 2. Softmax prepare (VECTOR)
-                        pij_buf = pl.create_tensor([n_unroll_q, block_size], dtype=pl.BF16)
-                        mi = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
-                        li = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                        pij_buf_in = pl.create_tensor([n_unroll_q, block_size_cfg], dtype=pl.BF16)
+                        mi_buf_in = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
+                        li_buf_in = pl.create_tensor([q_tile, 1], dtype=pl.FP32)
                         pij_buf, mi, li = _sf(
                             sij_buf,
                             1.0,
-                            pij_buf,
-                            mi,
-                            li,
+                            pij_buf_in,
+                            mi_buf_in,
+                            li_buf_in,
                             n_blocks,  # type: ignore[reportArgumentType]
                             last_valid_len,  # type: ignore[reportArgumentType]
                         )
 
                         # 3. PV matmul (CUBE)
-                        oi_new = pl.create_tensor([q_tile, head_dim], dtype=pl.FP32)
+                        oi_new_in = pl.create_tensor([q_tile, head_dim_cfg], dtype=pl.FP32)
                         oi_new = _pv(
                             pij_buf,
                             value_cache,
-                            oi_new,
+                            oi_new_in,
                             block_indices,
                             n_blocks,
                         )
@@ -549,7 +595,7 @@ def build_paged_attention_multi_config_program(
                             is_last = pl.yield_(0)
 
                         # 5. Online update (VECTOR)
-                        out_view = pl.slice(out, [q_tile, head_dim], [cur_offset, 0])
+                        out_view_buf = pl.slice(out, [q_tile, head_dim_cfg], [cur_offset, 0])
                         mi_update, li_update, oi, out_view = _up(
                             mi,
                             li,
@@ -557,7 +603,7 @@ def build_paged_attention_multi_config_program(
                             mi_update,
                             li_update,
                             oi,
-                            out_view,
+                            out_view_buf,
                             is_first,
                             is_last,
                         )
@@ -576,26 +622,35 @@ def golden_multi_config(tensors: dict, params: dict | None = None) -> None:
     Mirrors the orchestration structure: each group of up to n_unroll blocks
     uses a two-pass softmax (global row_max across all blocks in the group,
     then exp with that max).  Supports partial blocks via valid_len.
-    """
-    config = tensors["config"]
-    batch = int(config[0].item())
-    num_heads = int(config[1].item())
-    head_dim = int(config[3].item())
-    block_size = int(config[4].item())
-    max_num_blocks_per_req = int(config[5].item())
-    scale_bits = int(config[6].item())
-    scale = struct.unpack("f", struct.pack("I", scale_bits & 0xFFFFFFFF))[0]
 
-    query = tensors["query"].float().reshape(batch, num_heads, head_dim)
-    total_pool_blocks = batch * max_num_blocks_per_req
-    key_cache = tensors["key_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
-    value_cache = tensors["value_cache"].float().reshape(total_pool_blocks, block_size, head_dim)
-    block_table = tensors["block_table"].reshape(batch, max_num_blocks_per_req)
+    Shape derivations match the orchestration's pl.tensor.dim() logic.
+    Scale is hardcoded to 1.0 to match the orchestration function.
+    """
     context_lens = tensors["context_lens"]
+    query = tensors["query"]
+    key_cache_t = tensors["key_cache"]
+    value_cache_t = tensors["value_cache"]
+    block_table_flat = tensors["block_table"]
+
+    batch = context_lens.shape[0]
+    num_heads = query.shape[0] // batch
+    head_dim = query.shape[1]
+    block_size = value_cache_t.shape[0] // block_table_flat.shape[0]
+    max_num_blocks_per_req = block_table_flat.shape[0] // batch
+    scale = 1.0
+
+    query = query.float().reshape(batch, num_heads, head_dim)
+    total_pool_blocks = batch * max_num_blocks_per_req
+    key_cache = key_cache_t.float().reshape(total_pool_blocks, block_size, head_dim)
+    value_cache = value_cache_t.float().reshape(total_pool_blocks, block_size, head_dim)
+    block_table = block_table_flat.reshape(batch, max_num_blocks_per_req)
 
     out = torch.zeros((batch, num_heads, head_dim), dtype=torch.float32)
-    q_tile = min(num_heads, 128)
-    n_unroll = (params or {}).get("n_unroll", N_UNROLL)
+    params = params or {}
+    # Default q_tile clamps to num_heads so callers using num_heads < Q_TILE still
+    # get a divisible q-row tiling instead of running zero outer iterations.
+    q_tile = params.get("q_tile", min(num_heads, Q_TILE))
+    n_unroll = params.get("n_unroll", N_UNROLL)
 
     def _update(
         oi_a: torch.Tensor | None,
@@ -675,31 +730,20 @@ def build_tensors_multi_config(
     block_size: int,
     max_num_blocks_per_req: int,
     context_len: int,
-    scale: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
     """Build torch tensors for multi-config paged attention.
 
     Returns:
-        (query, key_cache, value_cache, block_table, context_lens, out,
-         config, size_query, size_key_cache, size_value_cache)
+        (query, key_cache, value_cache, block_table, context_lens, out)
     """
     query_rows = batch * num_heads
     key_cache_rows = batch * max_num_blocks_per_req * block_size
     total_cache_blocks = key_cache_rows // block_size
 
-    scale_bits = struct.unpack("I", struct.pack("f", scale))[0]
-    config = torch.tensor(
-        [batch, num_heads, 1, head_dim, block_size, max_num_blocks_per_req, scale_bits],
-        dtype=torch.int64,
-    )
     context_lens = torch.full((batch,), context_len, dtype=torch.int32)
     block_table = torch.randint(
         0, max(total_cache_blocks, 1), size=(batch, max_num_blocks_per_req), dtype=torch.int32
     ).flatten()
-
-    size_query = torch.tensor([query_rows * head_dim * 2], dtype=torch.int64)
-    size_key_cache = torch.tensor([key_cache_rows * head_dim * 2], dtype=torch.int64)
-    size_value_cache = torch.tensor([key_cache_rows * head_dim * 2], dtype=torch.int64)
 
     query = torch.randn(query_rows, head_dim, dtype=torch.bfloat16)
     key_cache = torch.randn(key_cache_rows, head_dim, dtype=torch.bfloat16)
@@ -713,10 +757,6 @@ def build_tensors_multi_config(
         block_table,
         context_lens,
         out,
-        config,
-        size_query,
-        size_key_cache,
-        size_value_cache,
     )
 
 
@@ -739,15 +779,11 @@ def main():
     block_size = BLOCK_SIZE
     max_model_len = 2048
     context_len = 1024
-    scale = 1.0
     max_num_blocks_per_req = max_model_len // block_size  # 32
 
     program = build_paged_attention_multi_config_program(
-        batch=batch,
-        num_heads=num_heads,
         head_dim=head_dim,
         block_size=block_size,
-        max_num_blocks_per_req=max_num_blocks_per_req,
     )
 
     (
@@ -757,10 +793,6 @@ def main():
         block_table,
         context_lens,
         out,
-        config_tensor,
-        size_query,
-        size_key_cache,
-        size_value_cache,
     ) = build_tensors_multi_config(
         batch=batch,
         num_heads=num_heads,
@@ -768,7 +800,6 @@ def main():
         block_size=block_size,
         max_num_blocks_per_req=max_num_blocks_per_req,
         context_len=context_len,
-        scale=scale,
     )
     run(
         program,
@@ -778,10 +809,6 @@ def main():
         block_table,
         context_lens,
         out,
-        config_tensor,
-        size_query,
-        size_key_cache,
-        size_value_cache,
         config=RunConfig(
             platform="a2a3sim",
             device_id=11,
@@ -803,10 +830,6 @@ def main():
             "block_table": block_table,
             "context_lens": context_lens,
             "out": expected_out,
-            "config": config_tensor,
-            "size_query": size_query,
-            "size_key_cache": size_key_cache,
-            "size_value_cache": size_value_cache,
         },
     )
     assert torch.allclose(out, expected_out, rtol=2e-2, atol=2e-2), (
