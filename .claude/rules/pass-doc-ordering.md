@@ -20,7 +20,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 05 | `05-flatten_call_expr.md` | 5th pass |
 | 06 | `06-split_chunked_loops.md` | 6th pass |
 | 07 | `07-interchange_chunk_loops.md` | 7th pass |
-| 08 | *(no doc yet)* | 8th pass (`OutlineHierarchyScopes`) |
+| 08 | `08-outline_hierarchy_scopes.md` | 8th pass |
 | 09 | `09-outline_incore_scopes.md` | 9th pass |
 | 10 | `10-outline_cluster_scopes.md` | 10th pass |
 | 11 | `11-convert_tensor_to_tile_ops.md` | 11th pass |
