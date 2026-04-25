@@ -16,21 +16,31 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 01 | `01-unroll_loops.md` | 1st pass |
 | 02 | `02-ctrl_flow_transform.md` | 2nd pass |
 | 03 | `03-convert_to_ssa.md` | 3rd pass |
-| 04 | `04-flatten_call_expr.md` | 4th pass |
-| 05 | `05-split_chunked_loops.md` | 5th pass |
-| 06 | `06-interchange_chunk_loops.md` | 6th pass |
-| 07 | `07-outline_incore_scopes.md` | 7th pass |
-| 08 | `08-outline_cluster_scopes.md` | 8th pass |
-| 09 | `09-convert_tensor_to_tile_ops.md` | 9th pass |
-| 10 | `10-optimize_orch_tensors.md` | 10th pass |
-| 11 | `11-flatten_tile_nd_to_2d.md` | 11th pass |
-| 12 | *(no doc yet)* | 12th pass (`InferTileMemorySpace`) |
-| 13 | *(no doc yet)* | 13th pass (`ResolveTransposeLayout`) |
-| 14 | `14-expand_mixed_kernel.md` | 14th pass |
-| 15 | `15-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
-| 16 | `16-init_memref.md` | 16th pass |
-| 17 | `17-memory_reuse.md` | 17th pass |
-| 18 | `18-allocate_memory_addr.md` | 18th pass |
+| 04 | `04-simplify.md` | 4th pass (also runs as the last pass of the tile pipeline) |
+| 05 | `05-flatten_call_expr.md` | 5th pass |
+| 06 | `06-split_chunked_loops.md` | 6th pass |
+| 07 | `07-interchange_chunk_loops.md` | 7th pass |
+| 08 | *(no doc yet)* | 8th pass (`OutlineHierarchyScopes`) |
+| 09 | `09-outline_incore_scopes.md` | 9th pass |
+| 10 | `10-outline_cluster_scopes.md` | 10th pass |
+| 11 | `11-convert_tensor_to_tile_ops.md` | 11th pass |
+| 12 | `12-optimize_orch_tensors.md` | 12th pass |
+| 13 | `13-flatten_tile_nd_to_2d.md` | 13th pass |
+| 14 | *(no doc yet)* | 14th pass (`InferTileMemorySpace`) |
+| 15 | *(no doc yet)* | 15th pass (`ResolveTransposeLayout`) |
+| 16 | *(no doc yet)* | 16th pass (`ResolveBackendOpLayouts`) |
+| 17 | `17-expand_mixed_kernel.md` | 17th pass |
+| 18 | `18-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
+| 19 | *(no doc yet)* | 19th pass (`SplitVectorKernel`) |
+| 20 | *(no doc yet)* | 20th pass (`NormalizeReturnOrder`) |
+| 21 | `21-lower_pipeline_loops.md` | 21st pass |
+| 22 | `22-canonicalize_io_order.md` | 22nd pass |
+| 23 | `23-init_memref.md` | 23rd pass |
+| 24 | `24-memory_reuse.md` | 24th pass |
+| 25 | *(no doc yet)* | 25th pass (`LegalizePTOBufferReuse`) |
+| 26 | `26-allocate_memory_addr.md` | 26th pass |
+| 27 | *(no doc yet)* | 27th pass (`FuseCreateAssembleToSlice`) |
+| 28 | *(no doc yet)* | 28th pass (`DeriveCallDirections`) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

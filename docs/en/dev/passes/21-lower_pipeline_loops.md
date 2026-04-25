@@ -133,5 +133,5 @@ After this pass, `CanonicalizeIOOrder` runs scoped to the pipeline loop's body, 
 
 ## Related
 
-- [`CanonicalizeIOOrder`](21-canonicalize_io_order.md) — the IO-order canonicalization pass that runs next, scoped to pipeline bodies
+- [`CanonicalizeIOOrder`](22-canonicalize_io_order.md) — the IO-order canonicalization pass that runs next, scoped to pipeline bodies
 - [`UnrollLoops`](01-unroll_loops.md) — full-unroll pass at slot #1, kept as the primary `pl.unroll(N)` lowering

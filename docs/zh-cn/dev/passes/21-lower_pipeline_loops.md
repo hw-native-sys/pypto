@@ -126,5 +126,5 @@ else:
 
 ## 相关
 
-- [`CanonicalizeIOOrder`](21-canonicalize_io_order.md) —— 下一个 Pass，对全程序每一个 `SeqStmts` 做 IO 顺序规范化
+- [`CanonicalizeIOOrder`](22-canonicalize_io_order.md) —— 下一个 Pass，对全程序每一个 `SeqStmts` 做 IO 顺序规范化
 - [`UnrollLoops`](01-unroll_loops.md) —— slot #1 的全展开 Pass，仍是 `pl.unroll(N)` 的主要降级路径
