@@ -364,7 +364,7 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 1. `FlattenTileNdTo2D`
 2. `InferTileMemorySpace`
 3. `ResolveTransposeLayout`
-4. `ResolveBackendOpLayouts`
+4. [`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md)
 5. `NormalizeStmtStructure`
 6. `ExpandMixedKernel`
 7. `SplitVectorKernel`
@@ -380,12 +380,13 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 without the tensor-only prefix passes. Use `Default` for normal compilation and
 for non-strategy-specific tests so the maintained pipeline stays covered.
 
-`ResolveBackendOpLayouts` repairs backend-constrained elementwise tile ops using
-registered layout metadata. For the current PTO row-major elementwise ops, it
-rewrites `[N, 1]` vector operands into `[1, N] row_major` `tile.reshape`
-operations at the constrained use site, where row-major is inferred from the
-target shape. It then reshapes the result back to the original vector shape
-when needed.
+[`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md) repairs
+backend-constrained elementwise tile ops using registered layout metadata.
+For the current PTO row-major elementwise ops, it rewrites `[N, 1]` vector
+operands into `[1, N] row_major` `tile.reshape` operations at the
+constrained use site, where row-major is inferred from the target shape.
+It then reshapes the result back to the original vector shape when
+needed.
 
 `NormalizeReturnOrder` reorders `ReturnStmt::value_` in InCore functions so that
 `return[i]` corresponds to the i-th `Out`/`InOut` parameter in declaration order,

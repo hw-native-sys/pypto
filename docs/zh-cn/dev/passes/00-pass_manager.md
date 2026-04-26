@@ -364,7 +364,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 1. `FlattenTileNdTo2D`
 2. `InferTileMemorySpace`
 3. `ResolveTransposeLayout`
-4. `ResolveBackendOpLayouts`
+4. [`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md)
 5. `NormalizeStmtStructure`
 6. `ExpandMixedKernel`
 7. `SplitVectorKernel`
@@ -380,11 +380,11 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用
 `Default`，以保证主维护流水线持续被覆盖。
 
-`ResolveBackendOpLayouts` 会根据 backend 注册的 layout 元数据修复受约束
-的逐元素 tile 操作。对于当前 PTO 上要求 `row_major` 的逐元素算子，它会
-在受约束 use-site 把 `[N, 1]` 向量操作数改写成 `[1, N]` 的
-`tile.reshape`，其 layout 由目标 shape 自动推导为 `row_major`，并在需要
-时把结果 reshape 回原始向量 shape。
+[`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md) 会根据
+backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO
+上要求 `row_major` 的逐元素算子，它会在受约束 use-site 把 `[N, 1]`
+向量操作数改写成 `[1, N]` 的 `tile.reshape`，其 layout 由目标 shape
+自动推导为 `row_major`，并在需要时把结果 reshape 回原始向量 shape。
 
 `NormalizeReturnOrder` 对 InCore 函数的 `ReturnStmt::value_` 重新排序，使
 `return[i]` 对应声明顺序中第 i 个 `Out`/`InOut` 参数，并同步更新调用点的
