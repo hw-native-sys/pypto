@@ -8,7 +8,7 @@ After `FlattenTileNdTo2D` and `ResolveTransposeLayout`, every tile op is in 2-D 
 
 1. For each `AssignStmt` / `EvalStmt` whose RHS is a `Call`, query `Backend::GetTileLayoutSpec(op_name)`.
 2. Skip if no spec is registered, or if no `[N, 1]` col-major input violates a `row_major` requirement.
-3. Otherwise insert `tile.reshape(arg, [1, N])` before the call, substitute the reshaped value into the call, and — if the original result is a `[N, 1]` col-major tile — append `tile.reshape(result, [N, 1])` to restore the user-visible shape.
+3. Otherwise insert `tile.reshape(arg, [1, N])` before the call, substitute the reshaped value into the call, and — for `AssignStmt` results, unless the result type is already a `[1, N]` row-major tile — append `tile.reshape(tmp, original_shape)` to restore the user-visible shape.
 
 The pass is **backend-driven**: the set of constrained ops and their per-input requirements come from each op's `BackendOpRegistryEntry` (see `set_input_layout` / `set_output_layout` in `pto_ops_common.cpp`). The pass code itself stays backend-agnostic — adding a new constrained op only requires registering its layout spec, not editing this pass.
 
@@ -49,22 +49,26 @@ For each function in the program:
     if no input violates spec.input_layouts (only [N,1] col-major inputs
        targeting a row_major slot are repairable): continue
 
-    For each input i that violates the requirement:
-      reshape_var = fresh temp (name derived from result + "row_major" + "arg<i>")
+    For each input i targeting a row_major slot:
+      Skip if the input is non-tile, or [1, N] row-major, or not [N, 1].
+      reshape_var = fresh temp
+        (AssignStmt: name derived from the result variable.
+         EvalStmt:  name derived from the literal "layout_fix".
+         Both forms add "row_major" + "arg<i>" qualifiers.)
       emit  reshape_var = tile.reshape(arg_i, [1, N])
       substitute reshape_var into the call
 
     repaired = OpRegistry.Create(call.op.name, new_args, call.kwargs)
 
-    If the original result is [N, 1] col-major (AssignStmt only):
-      tmp = fresh row-major temp
+    If statement is AssignStmt and result_type is not [1, N] row-major:
+      tmp = fresh row-major temp ("row_major" qualifier on the result name)
       emit  tmp = repaired
-      emit  result_var = tile.reshape(tmp, [N, 1])
+      emit  result_var = tile.reshape(tmp, original_result_shape)
     Else:
       emit  result_var = repaired   (or EvalStmt with repaired)
 ```
 
-Inputs that already satisfy the requirement, non-tile inputs (scalars, shapes), and inputs whose required layout is `nullopt` are left untouched. If a non-row-major, non-`[N, 1]` col-major input is found, the call is treated as not repairable and the statement is left alone.
+Non-tile inputs (scalars, shapes) and inputs whose required layout is `nullopt` are left untouched. For tile inputs targeting a `row_major` slot, the per-input rewrite loop reshapes any `[N, 1]` operand (col-major *or* row-major) once the call has been classified as repairable; only `[1, N]` row-major and non-`[N, 1]` shapes are skipped. The call is classified as repairable (`IsRepairableCall`) only when at least one input violates `row_major` and every violating input is `[N, 1]` col-major — if any violating input falls outside that pattern, the statement is left alone.
 
 ## Example
 
@@ -81,16 +85,16 @@ class Before:
         data: pl.Tensor[[16, 256], pl.FP32],
         out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
     ) -> pl.Tensor[[16, 1], pl.FP32]:
-        acc_0: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+        acc_0: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
             [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
-        acc_1: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(acc_0, 0.0)
-        chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, 0], [16, 256])
-        tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+        acc_1: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.muls(acc_0, 0.0)
+        chunk: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.load(data, [0, 0], [16, 256])
+        tmp: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
             [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
-        partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
-        updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(acc_1, partial)
+        partial: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.row_sum(chunk, tmp)
+        updated: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.add(acc_1, partial)
         stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(updated, [0, 0], out)
         return stored
 ```

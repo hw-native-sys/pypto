@@ -8,7 +8,7 @@
 
 1. 对每个 RHS 是 `Call` 的 `AssignStmt` / `EvalStmt`，调用 `Backend::GetTileLayoutSpec(op_name)` 查询约束。
 2. 若没有注册约束，或者没有 `[N, 1]` col-major 输入违反 `row_major` 要求，则跳过。
-3. 否则在 call 前插入 `tile.reshape(arg, [1, N])`，把 reshape 后的值代入 call；若原始结果是 `[N, 1]` col-major tile，再追加 `tile.reshape(result, [N, 1])` 把结果 reshape 回用户可见的形状。
+3. 否则在 call 前插入 `tile.reshape(arg, [1, N])`，把 reshape 后的值代入 call；对 `AssignStmt`，只要结果类型不是 `[1, N]` row-major tile，就再追加 `tile.reshape(tmp, original_shape)` 把结果 reshape 回用户可见的形状。
 
 本 Pass 是 **后端驱动** 的：被约束的 op 集合及其逐输入要求来自每个 op 的 `BackendOpRegistryEntry`（参见 `pto_ops_common.cpp` 中的 `set_input_layout` / `set_output_layout`）。Pass 自身保持后端无关——新增一个被约束的 op 只需登记它的 layout spec，无需修改本 Pass。
 
@@ -49,22 +49,26 @@ program = repair(program)
     若没有输入违反 spec.input_layouts（仅 [N,1] col-major 输入针对
        row_major 槽位时是可修复的）：跳过
 
-    对每个违反约束的输入 i：
-      reshape_var = 新临时变量（名字基于结果 + "row_major" + "arg<i>"）
+    对每个 row_major 槽位上的输入 i：
+      若输入非 tile、为 [1, N] row-major、或非 [N, 1]：跳过。
+      reshape_var = 新临时变量
+        （AssignStmt：名字基于结果变量；
+          EvalStmt：名字基于字面量 "layout_fix"。
+          两种形式都附加 "row_major" + "arg<i>" 限定符。）
       发射  reshape_var = tile.reshape(arg_i, [1, N])
       把 reshape_var 替换 call 中对应的实参
 
     repaired = OpRegistry.Create(call.op.name, new_args, call.kwargs)
 
-    若原始结果是 [N, 1] col-major（仅 AssignStmt）：
-      tmp = 新的 row-major 临时变量
+    若语句是 AssignStmt 且 result_type 不是 [1, N] row-major：
+      tmp = 新的 row-major 临时变量（结果名字加 "row_major" 限定符）
       发射  tmp = repaired
-      发射  result_var = tile.reshape(tmp, [N, 1])
+      发射  result_var = tile.reshape(tmp, original_result_shape)
     否则：
       发射  result_var = repaired   （或 EvalStmt 中以 repaired 替换）
 ```
 
-已经满足要求的输入、非 tile 输入（标量、shape）、以及对应槽位 `required_layout` 为 `nullopt` 的输入都不会被改写。如果出现既非 row-major 也非 `[N, 1]` col-major 的输入，则该 call 被视为不可修复，整条语句保持不动。
+非 tile 输入（标量、shape）以及对应槽位 `required_layout` 为 `nullopt` 的输入不会被改写。对 `row_major` 槽位上的 tile 输入，一旦 call 被判定为可修复，逐输入改写循环就会 reshape 任何 `[N, 1]` 操作数（无论 col-major 还是 row-major）；只有 `[1, N]` row-major 和非 `[N, 1]` 形状会被跳过。call 是否可修复由 `IsRepairableCall` 决定：仅当至少有一个输入违反 `row_major` 要求、且每个违反约束的输入都是 `[N, 1]` col-major 时才返回 true；若有违反约束的输入不属于该模式，整条语句保持不动。
 
 ## 示例
 
@@ -81,16 +85,16 @@ class Before:
         data: pl.Tensor[[16, 256], pl.FP32],
         out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
     ) -> pl.Tensor[[16, 1], pl.FP32]:
-        acc_0: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+        acc_0: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
             [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
-        acc_1: pl.Tile[[16, 1], pl.FP32] = pl.tile.muls(acc_0, 0.0)
-        chunk: pl.Tile[[16, 256], pl.FP32] = pl.load(data, [0, 0], [16, 256])
-        tmp: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+        acc_1: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.muls(acc_0, 0.0)
+        chunk: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.load(data, [0, 0], [16, 256])
+        tmp: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
             [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
-        partial: pl.Tile[[16, 1], pl.FP32] = pl.tile.row_sum(chunk, tmp)
-        updated: pl.Tile[[16, 1], pl.FP32] = pl.tile.add(acc_1, partial)
+        partial: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.row_sum(chunk, tmp)
+        updated: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.add(acc_1, partial)
         stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(updated, [0, 0], out)
         return stored
 ```
