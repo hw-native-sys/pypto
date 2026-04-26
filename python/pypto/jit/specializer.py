@@ -293,6 +293,8 @@ class _BodyTransformer(ast.NodeTransformer):
         dynvar_python_names: dict[str, str],
         dep_names: set[str],
         dynvar_var_names: set[str],
+        param_names: list[str] | None = None,
+        initial_used_names: set[str] | None = None,
     ) -> None:
         super().__init__()
         self._meta = tensor_meta
@@ -306,10 +308,95 @@ class _BodyTransformer(ast.NodeTransformer):
         # constant values when all dimensions are static.  Used by visit_Name
         # to inline constants and by visit_Assign to suppress the assignment.
         self._shape_inlined: dict[str, int] = {}
+        # Alpha-renaming support: tracks how many times each local has been assigned
+        # (so we can generate x_v1, x_v2, ... on rebindings).
+        self._assign_count: dict[str, int] = {}
+        # Maps local variable name → current (latest) renamed alias.
+        # Empty until the variable is assigned a second time.
+        self._var_renames: dict[str, str] = {}
+        # Reverse map: generated alias → original user variable name.
+        # Used to rewrite error messages so users see their original names.
+        self._alias_to_original: dict[str, str] = {}
+        # Tracks the scope depth at which each variable was first assigned.
+        # Rebindings at a deeper scope (e.g. inside a for/with) are loop-carried
+        # updates and must NOT be renamed.
+        self._assign_depth: dict[str, int] = {}
+        self._scope_depth: int = 0
+        # Pre-register function parameters as "already assigned at depth 0" so
+        # that body assignments like `x = pl.load(x, ...)` are treated as
+        # rebindings and get alpha-renamed to `x_v1`.
+        for name in param_names or []:
+            self._assign_count[name] = 1
+            self._assign_depth[name] = 0
+        # Track all names pre-defined by the user (params + all Store targets) to
+        # avoid generating aliases that collide with user-defined variables.
+        self._used_names: set[str] = (initial_used_names or set()) | set(param_names or [])
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _record_first_assign(self, var_name: str) -> None:
+        """Record a first (or tuple-unpack) assignment so later rebindings can be renamed."""
+        if var_name not in self._assign_count:
+            self._assign_count[var_name] = 1
+            self._assign_depth[var_name] = self._scope_depth
+        self._used_names.add(var_name)
+
+    def _rebind(self, var_name: str) -> str:
+        """Generate a fresh name for a rebinding of ``var_name``.
+
+        Returns the new name and updates ``_var_renames`` so subsequent reads
+        of ``var_name`` resolve to the new alias.  Skips candidate names that
+        are already used by the user to avoid collisions.
+        """
+        count = self._assign_count[var_name]
+        new_name = f"{var_name}_v{count}"
+        # Skip any candidate that collides with a user-defined name.
+        while new_name in self._used_names:
+            count += 1
+            new_name = f"{var_name}_v{count}"
+        self._assign_count[var_name] = count + 1
+        self._var_renames[var_name] = new_name
+        self._alias_to_original[new_name] = var_name
+        self._used_names.add(new_name)
+        return new_name
+
+    @property
+    def rename_map(self) -> dict[str, str]:
+        """Return mapping from generated alias → original user variable name."""
+        return dict(self._alias_to_original)
+
+    def _visit_simple_assign(self, node: ast.Assign) -> ast.stmt:
+        """Handle a single-target name assignment with alpha-renaming support."""
+        var_name = cast(ast.Name, node.targets[0]).id
+        visited_value = self.visit(node.value)
+        if var_name in self._assign_count:
+            # Only rename at the same scope where the variable was first defined.
+            # Rebindings at a deeper scope (inside for/with) are loop-carried
+            # updates — do not rename them.
+            if self._scope_depth == self._assign_depth[var_name]:
+                new_name = self._rebind(var_name)
+                new_node = ast.Assign(
+                    targets=[ast.Name(id=new_name, ctx=ast.Store())],
+                    value=visited_value,
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                )
+                ast.fix_missing_locations(new_node)
+                return new_node
+            # Deeper scope: if the variable has an active rename (from a bridge
+            # assignment), apply it to the LHS so the loop body consistently
+            # uses the renamed alias (e.g. x_v1 = some_op(x_v1)).
+            if var_name in self._var_renames:
+                renamed = self._var_renames[var_name]
+                node.targets = [ast.Name(id=renamed, ctx=ast.Store())]
+            node.value = visited_value
+            return node
+        # First assignment: record and keep original name.
+        self._record_first_assign(var_name)
+        node.value = visited_value
+        return node
 
     def _shape_tuple_node(self, param_name: str) -> ast.Tuple:
         meta = self._meta[param_name]
@@ -387,16 +474,24 @@ class _BodyTransformer(ast.NodeTransformer):
                             # but skip if it would be a no-op (LHS name == RHS name).
                             val: ast.expr = self._shape_dim_node(param_name, i)
                             if not (isinstance(val, ast.Name) and val.id == tgt.id):
+                                lhs_name = tgt.id
+                                if lhs_name in self._assign_count:
+                                    lhs_name = self._rebind(lhs_name)
+                                else:
+                                    self._record_first_assign(tgt.id)
                                 stmts.append(
                                     ast.Assign(
-                                        targets=[ast.Name(id=tgt.id, ctx=ast.Store())],
+                                        targets=[ast.Name(id=lhs_name, ctx=ast.Store())],
                                         value=val,
                                         lineno=node.lineno,
                                         col_offset=node.col_offset,
                                     )
                                 )
+                            else:
+                                self._record_first_assign(tgt.id)
                         else:
                             # Static dim: inline constant, suppress assignment
+                            self._record_first_assign(tgt.id)
                             self._shape_inlined[tgt.id] = dim
                 return stmts if stmts else None
 
@@ -417,17 +512,51 @@ class _BodyTransformer(ast.NodeTransformer):
             if (param_name, dim_idx) not in self._dynamic_dims:
                 meta = self._meta[param_name]
                 self._shape_inlined[node.targets[0].id] = meta.shape[dim_idx]
+                self._record_first_assign(node.targets[0].id)
                 return None
 
+        # Default: visit the RHS first (applies existing renames to operands),
+        # then handle rebinding rename on the LHS.
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            return self._visit_simple_assign(node)
+
         return cast("ast.stmt", self.generic_visit(node))
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt | None:
+        """Handle annotated assignments (``x: T = value``) with alpha-renaming."""
+        if node.value is None:
+            return cast("ast.stmt", self.generic_visit(node))
+        if not isinstance(node.target, ast.Name):
+            return cast("ast.stmt", self.generic_visit(node))
+        var_name = node.target.id
+        node.value = self.visit(node.value)
+        if var_name in self._assign_count:
+            if self._scope_depth == self._assign_depth[var_name]:
+                new_name = self._rebind(var_name)
+                new_node = ast.AnnAssign(
+                    target=ast.Name(id=new_name, ctx=ast.Store()),
+                    annotation=node.annotation,
+                    value=node.value,
+                    simple=node.simple,
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                )
+                ast.fix_missing_locations(new_node)
+                return new_node
+        else:
+            self._record_first_assign(var_name)
+        return cast("ast.stmt", node)
 
     # ------------------------------------------------------------------
     # Expression-level transforms
     # ------------------------------------------------------------------
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
-        """Replace scalar param references and inlined shape constants."""
+        """Replace scalar param references, inlined shape constants, and renamed rebindings."""
         if isinstance(node.ctx, ast.Load):
+            # Check active renames first — a rebinding supersedes any earlier inlining.
+            if node.id in self._var_renames:
+                return ast.Name(id=self._var_renames[node.id], ctx=ast.Load())
             if node.id in self._scalars:
                 return ast.Constant(value=self._scalars[node.id])
             if node.id in self._shape_inlined:
@@ -476,6 +605,129 @@ class _BodyTransformer(ast.NodeTransformer):
             return cast("ast.expr", self.generic_visit(new_node))
         return cast("ast.expr", self.generic_visit(node))
 
+    def _visit_scoped_body(self, statements: list[ast.stmt]) -> list[ast.stmt]:
+        """Visit statements within a nested scope, flattening lists and dropping None."""
+        result: list[ast.stmt] = []
+        for stmt in statements:
+            visited = self.visit(stmt)
+            if visited is None:
+                pass
+            elif isinstance(visited, list):
+                result.extend(visited)
+            else:
+                result.append(visited)
+        return result or [ast.Pass()]
+
+    def _scan_for_rebinds(self, statements: list[ast.stmt]) -> list[str]:
+        """Scan a body for variable names that would trigger alpha-renaming.
+
+        Returns variable names that are already in ``_assign_count`` and whose
+        first assignment was at the same scope depth as the current depth.
+        These need bridge assignments (``x_v1 = x``) before entering the scope
+        so that loop-carried reads inside the body resolve to the new alias.
+        """
+        rebind_vars: list[str] = []
+        seen: set[str] = set()
+        for stmt in statements:
+            # Check direct single-target assignments
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target = stmt.targets[0]
+                if isinstance(target, ast.Name):
+                    name = target.id
+                    if (
+                        name not in seen
+                        and name in self._assign_count
+                        and self._scope_depth == self._assign_depth.get(name, -1)
+                    ):
+                        rebind_vars.append(name)
+                        seen.add(name)
+            # Check annotated assignments
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                name = stmt.target.id
+                if (
+                    name not in seen
+                    and name in self._assign_count
+                    and self._scope_depth == self._assign_depth.get(name, -1)
+                ):
+                    rebind_vars.append(name)
+                    seen.add(name)
+        return rebind_vars
+
+    def _make_bridge_assignments(self, rebind_vars: list[str]) -> list[ast.stmt]:
+        """Create bridge assignments (``x_v1 = x``) and apply renames for each variable.
+
+        After this call, ``_var_renames`` is updated so that subsequent reads of the
+        original name resolve to the new alias.  The ``_assign_depth`` is updated to
+        the current (outer) scope depth so that assignments inside the loop body are
+        treated as deeper-scope (loop-carried) and NOT renamed again.
+
+        The returned statements should be inserted before the scope that contains
+        the rebinding assignments.
+        """
+        bridges: list[ast.stmt] = []
+        for var_name in rebind_vars:
+            # Get the current read-name for this variable (could already be an alias)
+            current_name = self._var_renames.get(var_name, var_name)
+            new_name = self._rebind(var_name)
+            # Update assign_depth to the outer scope so the loop body sees a
+            # depth mismatch and does NOT trigger another rebind.
+            self._assign_depth[var_name] = self._scope_depth
+            bridge = ast.Assign(
+                targets=[ast.Name(id=new_name, ctx=ast.Store())],
+                value=ast.Name(id=current_name, ctx=ast.Load()),
+                lineno=0,
+                col_offset=0,
+            )
+            ast.fix_missing_locations(bridge)
+            bridges.append(bridge)
+        return bridges
+
+    def visit_For(self, node: ast.For) -> ast.stmt | list[ast.stmt]:
+        """Visit For loop, incrementing scope depth for its body.
+
+        Before entering the body, scan for variables that would be rebound at
+        the same depth.  For each such variable, insert a bridge assignment
+        (``x_v1 = x``) before the loop and apply the rename so that both LHS
+        and RHS inside the loop body use the new alias.  This preserves
+        loop-carried semantics when two parallel for loops assign to the same
+        variable.
+        """
+        node.iter = self.visit(node.iter)
+        self._scope_depth += 1
+        # Scan for rebinds and insert bridge assignments before the loop
+        rebind_vars = self._scan_for_rebinds(node.body)
+        self._scope_depth -= 1
+        bridges = self._make_bridge_assignments(rebind_vars)
+        self._scope_depth += 1
+        node.body = self._visit_scoped_body(node.body)
+        self._scope_depth -= 1
+        if bridges:
+            return bridges + [node]
+        return node
+
+    def visit_If(self, node: ast.If) -> ast.stmt:
+        """Visit If statement, incrementing scope depth for both branches.
+
+        If-branch assignments are loop-carried in the Parser's view (variables
+        leak to outer scope via exit_scope(leak_vars=True)) so they must NOT be
+        alpha-renamed at this layer — the Parser and ConvertToSSA handle them.
+        """
+        node.test = self.visit(node.test)
+        self._scope_depth += 1
+        node.body = self._visit_scoped_body(node.body)
+        if node.orelse:
+            node.orelse = self._visit_scoped_body(node.orelse)
+        self._scope_depth -= 1
+        return node
+
+    def visit_With(self, node: ast.With) -> ast.stmt:
+        """Visit With block, incrementing scope depth for its body."""
+        node.items = [self.visit(item) for item in node.items]
+        self._scope_depth += 1
+        node.body = self._visit_scoped_body(node.body)
+        self._scope_depth -= 1
+        return node
+
 
 # ---------------------------------------------------------------------------
 # Return-type inference (Option A: from Out params)
@@ -484,7 +736,6 @@ class _BodyTransformer(ast.NodeTransformer):
 
 def _infer_return_type(
     func_def: ast.FunctionDef,
-    param_names: list[str],
     tensor_meta: dict[str, TensorMeta],
     dynamic_dims: set[tuple[str, int]],
     dynvar_names: dict[str, str],
@@ -683,6 +934,16 @@ class Specializer:
         self._contexts = contexts
         self._dv_bindings = dynvar_bindings
         self._dv_literals = dynvar_literals or {}
+        # Accumulated alias→original map across all specialized functions.
+        self._rename_map: dict[str, str] = {}
+
+    @property
+    def rename_map(self) -> dict[str, str]:
+        """Return mapping from generated alias → original user variable name.
+
+        Only populated after ``specialize()`` has been called.
+        """
+        return dict(self._rename_map)
 
     def specialize(self) -> str:
         """Generate @pl.program source code string.
@@ -756,7 +1017,6 @@ class Specializer:
         # Infer return type
         ret_type = _infer_return_type(
             func_def,
-            all_param_names,
             ctx.tensor_meta,
             ctx.dynamic_dims,
             self._dv_bindings,
@@ -767,6 +1027,12 @@ class Specializer:
         # Transform body
         dep_names = set(ctx.dep_names)
         dynvar_var_names = set(self._iter_dynvar_names(ctx))
+        # Collect all names defined anywhere in the function to seed collision avoidance.
+        all_defined = {
+            node.id
+            for node in ast.walk(func_def)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
         transformer = _BodyTransformer(
             tensor_meta=ctx.tensor_meta,
             scalar_values=ctx.scalar_values,
@@ -774,8 +1040,17 @@ class Specializer:
             dynvar_python_names=self._dv_bindings,
             dep_names=dep_names,
             dynvar_var_names=dynvar_var_names,
+            param_names=all_param_names,
+            initial_used_names=all_defined,
         )
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
+        # Accumulate alias→original renames for error message rewriting.
+        # Don't overwrite entries from earlier functions — in multi-function JIT,
+        # two functions may independently generate the same alias (e.g. t_v1) for
+        # different user variables.  First-seen wins; per-function context is more
+        # accurate than a global override.
+        for alias, original in transformer.rename_map.items():
+            self._rename_map.setdefault(alias, original)
         # Filter out None (deleted statements) and flatten lists
         flat_body: list[ast.stmt] = []
         for item in new_body:

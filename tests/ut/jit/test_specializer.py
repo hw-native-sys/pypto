@@ -641,5 +641,235 @@ class TestSpecializerIntegration:
         ir.assert_structural_equal(got, Expected)
 
 
+# ---------------------------------------------------------------------------
+# TestVariableRebinding
+# ---------------------------------------------------------------------------
+
+
+class TestVariableRebinding:
+    """Tests for alpha-renaming of variable rebindings in _BodyTransformer."""
+
+    def _transform(self, src: str, tensor_meta: dict | None = None) -> str:
+        src = textwrap.dedent(src)
+        tree = ast.parse(src)
+        func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+        param_names = [arg.arg for arg in func_def.args.args]
+        all_defined = {
+            node.id
+            for node in ast.walk(func_def)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        }
+        transformer = _BodyTransformer(
+            tensor_meta=tensor_meta or {},
+            scalar_values={},
+            dynamic_dims=set(),
+            dynvar_python_names={},
+            dep_names=set(),
+            dynvar_var_names=set(),
+            param_names=param_names,
+            initial_used_names=all_defined,
+        )
+        new_body = []
+        for stmt in func_def.body:
+            result = transformer.visit(stmt)
+            if result is None:
+                continue
+            if isinstance(result, list):
+                new_body.extend(result)
+            else:
+                new_body.append(result)
+        new_func = ast.FunctionDef(
+            name="f",
+            args=func_def.args,
+            body=new_body or [ast.Pass()],
+            decorator_list=[],
+            returns=None,
+            lineno=1,
+            col_offset=0,
+        )
+        ast.fix_missing_locations(new_func)
+        return ast.unparse(new_func)
+
+    def test_single_assignment_unchanged(self):
+        src = """
+            def f(a):
+                x = pl.load(a)
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
+        assert "x =" in out
+        assert "x_v1" not in out
+
+    def test_rebind_generates_fresh_name(self):
+        src = """
+            def f(a):
+                x = a
+                x = pl.load(x)
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
+        assert "x =" in out
+        assert "x_v1 =" in out
+
+    def test_rebind_rhs_references_prior_alias(self):
+        src = """
+            def f(a):
+                x = a
+                x = pl.load(x)
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
+        # The RHS of x_v1 = ... should reference the original x, not x_v1
+        assert "x_v1 = pl.load(x)" in out
+
+    def test_rebind_multiple_times(self):
+        src = """
+            def f():
+                x = a
+                x = b
+                x = c
+        """
+        out = self._transform(src)
+        assert "x =" in out
+        assert "x_v1 =" in out
+        assert "x_v2 =" in out
+
+    def test_later_reads_see_latest_alias(self):
+        src = """
+            def f(a):
+                x = a
+                x = pl.mul(x, 2.0)
+                y = x
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64,), DataType.FP32)})
+        # y should be assigned the latest alias x_v1
+        assert "y = x_v1" in out
+
+    def test_ann_assign_rebind(self):
+        """Annotated assignment rebinding is alpha-renamed."""
+        src = """
+            def f():
+                x = a
+                x: int = b
+        """
+        out = self._transform(src)
+        assert "x =" in out
+        assert "x_v1:" in out
+
+    def test_rebind_supersedes_shape_inline(self):
+        """After a shape-inlined variable is rebound, reads see the new alias."""
+        src = """
+            def f(a):
+                M, N = a.shape
+                M = some_call(M)
+                y = M
+        """
+        out = self._transform(src, tensor_meta={"a": TensorMeta((64, 32), DataType.FP32)})
+        # M is inlined (static), then M = some_call(...) becomes M_v1 = some_call(64)
+        # y = M should resolve to y = M_v1
+        assert "y = M_v1" in out
+
+    def test_param_rebind_generates_alias(self):
+        """Assigning to a function parameter generates a renamed alias."""
+        src = """
+            def f(x):
+                x = some_call(x)
+                y = x
+        """
+        out = self._transform(src)
+        # x is a param, so re-assignment generates x_v1; reads of x after rebinding → x_v1
+        assert "x_v1 = some_call(x)" in out
+        assert "y = x_v1" in out
+
+    def test_alias_skips_collision(self):
+        """Generated alias skips names already defined by the user."""
+        src = """
+            def f():
+                x = a
+                x_v1 = b
+                x = c
+        """
+        out = self._transform(src)
+        # x_v1 is taken by user, so rebinding of x should skip to x_v2
+        assert "x_v2 =" in out
+        assert "x_v1 = b" in out
+
+    def test_if_branch_rebind_not_renamed(self):
+        """Assignments inside if branches are not alpha-renamed.
+
+        The Parser handles if-branch variables via leak_vars=True (variables
+        are visible after the if), so renaming here would produce an alias
+        that only conditionally exists, breaking code after the if.
+        """
+        src = """
+            def f():
+                t = a
+                if cond:
+                    t = b
+                y = t
+        """
+        out = self._transform(src)
+        # t inside the if must NOT be renamed — it should remain 't = b'
+        assert "t_v1" not in out
+        assert "y = t" in out
+
+    def test_if_else_branch_rebind_not_renamed(self):
+        """Assignments in both if/else branches are not alpha-renamed."""
+        src = """
+            def f():
+                t = a
+                if cond:
+                    t = b
+                else:
+                    t = c
+                y = t
+        """
+        out = self._transform(src)
+        assert "t_v1" not in out
+        assert "y = t" in out
+
+    def test_parallel_for_rebind_with_bridge(self):
+        """Two parallel for loops assigning the same variable get a bridge assignment."""
+        src = """
+            def f():
+                for i in range(n):
+                    x = a
+                for j in range(m):
+                    x = some_op(x)
+                y = x
+        """
+        out = self._transform(src)
+        # Bridge assignment inserted before the second loop
+        assert "x_v1 = x" in out
+        # Both LHS and RHS inside the second loop use x_v1
+        assert "x_v1 = some_op(x_v1)" in out
+        # Final read uses the latest alias
+        assert "y = x_v1" in out
+
+    def test_parallel_for_simple_rebind(self):
+        """Two parallel for loops with simple (non-loop-carried) rebinding."""
+        src = """
+            def f():
+                for i in range(n):
+                    x = a
+                for j in range(m):
+                    x = b
+                y = x
+        """
+        out = self._transform(src)
+        assert "x_v1 = x" in out
+        assert "y = x_v1" in out
+
+    def test_single_for_loop_carried_unchanged(self):
+        """A single for loop with loop-carried variable is NOT renamed."""
+        src = """
+            def f():
+                x = init_val
+                for i in range(n):
+                    x = some_op(x)
+                y = x
+        """
+        out = self._transform(src)
+        assert "x_v1" not in out
+        assert "y = x" in out
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -46,8 +46,10 @@ JITFunction.__call__ flow
 from __future__ import annotations
 
 import ast
+import copy
 import inspect
 import os
+import re
 import shutil
 import textwrap
 from typing import Any
@@ -62,6 +64,40 @@ from .specializer import (
     _collect_dynamic_dims,
     build_specialize_context,
 )
+
+# ---------------------------------------------------------------------------
+# Error message rewriting for JIT compilation
+# ---------------------------------------------------------------------------
+
+
+def _rewrite_jit_error(exc: Exception, rename_map: dict[str, str]) -> Exception:
+    """Replace internal alpha-renamed aliases (e.g. ``x_v1``) with the user's
+    original variable name (``x``) in the exception message.
+
+    Uses word-boundary matching to avoid partial replacements (e.g. replacing
+    ``max_v1`` when the alias is ``x_v1``). Sorts aliases longest-first so
+    longer aliases are matched before any shorter prefix aliases.
+    """
+    if not rename_map:
+        return exc
+    msg = str(exc)
+    for alias in sorted(rename_map, key=len, reverse=True):
+        original = rename_map[alias]
+        msg = re.sub(rf"\b{re.escape(alias)}\b", original, msg)
+    if msg == str(exc):
+        return exc
+    # Use copy.copy to preserve all exception fields (span, hint, note,
+    # source_lines for ParserError subclasses) then patch the message.
+    try:
+        new_exc = copy.copy(exc)
+        new_exc.args = (msg,)
+        if hasattr(new_exc, "message"):
+            object.__setattr__(new_exc, "message", msg)
+    except Exception:  # noqa: BLE001
+        # If copy fails (e.g. non-standard __init__), fall back to plain Exception.
+        new_exc = Exception(msg)
+    return new_exc
+
 
 # ---------------------------------------------------------------------------
 # torch-optional dtype conversion
@@ -639,10 +675,18 @@ class JITFunction:
         dynvar_bindings, dynvar_literals = _build_dynvar_bindings(contexts)
         _backfill_entry_dynvar_bindings(self._func, self._get_deps(), dynvar_bindings, dynvar_literals)
         class_name = f"_jit_{self.__name__}_{self._get_source_hash()}"
-        source = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals).specialize()
-        parsed = pl.parse(source)
-        skip_ptoas = not _ptoas_available()
-        return ir_compile(parsed, skip_ptoas=skip_ptoas, platform=platform)
+        specializer = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals)
+        source = specializer.specialize()
+        rename_map = specializer.rename_map
+        try:
+            parsed = pl.parse(source)
+            skip_ptoas = not _ptoas_available()
+            return ir_compile(parsed, skip_ptoas=skip_ptoas, platform=platform)
+        except Exception as exc:
+            rewritten = _rewrite_jit_error(exc, rename_map)
+            if rewritten is exc:
+                raise
+            raise rewritten from exc
 
     def _compile_to_program(
         self,
@@ -662,8 +706,16 @@ class JITFunction:
         dynvar_bindings, dynvar_literals = _build_dynvar_bindings(contexts)
         _backfill_entry_dynvar_bindings(self._func, self._get_deps(), dynvar_bindings, dynvar_literals)
         class_name = f"_jit_{self.__name__}_{self._get_source_hash()}"
-        source = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals).specialize()
-        return pl.parse(source)
+        specializer = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals)
+        source = specializer.specialize()
+        rename_map = specializer.rename_map
+        try:
+            return pl.parse(source)
+        except Exception as exc:
+            rewritten = _rewrite_jit_error(exc, rename_map)
+            if rewritten is exc:
+                raise
+            raise rewritten from exc
 
     def _build_contexts(
         self,
