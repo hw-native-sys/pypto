@@ -359,10 +359,10 @@ Pass InferTileMemorySpace();
 /**
  * @brief Resolve transpose layout for tile.load with transpose=True
  *
- * Detects tile.load(..., transpose=True) in InCore functions and transforms
- * the source tensor parameter type from its physical shape (e.g. [N, K]) to
- * the logical transposed shape with DN layout (e.g. [K, N] + DN).
- * Propagates the type change to corresponding Orchestration function parameters.
+ * For each InCore function, detects tile.load(..., transpose=True) whose source
+ * is a function parameter and annotates that parameter's TensorType with the DN
+ * (column-major) layout. The shape is preserved -- DN is a codegen hint only.
+ * Orchestration and Opaque functions are returned unchanged.
  *
  * Requirements:
  * - Input IR must have tile ops (run ConvertTensorToTileOps first)
