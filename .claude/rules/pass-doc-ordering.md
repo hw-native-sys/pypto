@@ -27,7 +27,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 12 | `12-optimize_orch_tensors.md` | 12th pass |
 | 13 | `13-flatten_tile_nd_to_2d.md` | 13th pass |
 | 14 | `14-infer_tile_memory_space.md` | 14th pass |
-| 15 | *(no doc yet)* | 15th pass (`ResolveTransposeLayout`) |
+| 15 | `15-resolve_transpose_layout.md` | 15th pass |
 | 16 | `16-resolve_backend_op_layouts.md` | 16th pass |
 | 17 | `17-expand_mixed_kernel.md` | 17th pass |
 | 18 | `18-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |

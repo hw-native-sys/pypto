@@ -364,9 +364,10 @@ void BindPass(nb::module_& m) {
              "Create a pass that infers memory_space for TileType variables in InCore functions");
   passes.def("resolve_transpose_layout", &pass::ResolveTransposeLayout,
              "Create a pass that resolves transpose layout for tile.load with transpose=True\n\n"
-             "Detects tile.load(..., transpose=True) in InCore functions and transforms\n"
-             "the source tensor parameter type to the logical transposed shape with DN layout.\n"
-             "Propagates the type change to corresponding Orchestration function parameters.");
+             "For each InCore function, detects tile.load(..., transpose=True) whose source\n"
+             "is a function parameter and annotates that parameter's TensorType with the DN\n"
+             "(column-major) layout. The shape is preserved -- DN is a codegen hint only.\n"
+             "Orchestration and Opaque functions are returned unchanged.");
   passes.def("resolve_backend_op_layouts", &pass::ResolveBackendOpLayouts,
              "Create a pass that repairs backend-required layouts for constrained elementwise tile ops\n\n"
              "Repairs `[N,1]` col-major vector inputs at constrained use-sites by reshaping them\n"
