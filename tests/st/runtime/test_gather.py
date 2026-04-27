@@ -14,7 +14,7 @@ Covers the generalized contract beyond the original MVP (rank-2 + dim=-1):
 1. Rank-2 + dim=-1 (baseline / regression).
 2. Rank-2 + dim=-1 with ``index.shape[0] < input.shape[0]`` (smaller index leading).
 3. Rank-3 + dim=-1 (collapses leading dims via ``tile.reshape``).
-4. Rank-3 + dim=1 (middle axis — exercises the ``tile.transpose`` path).
+4. Rank-3 + dim=1 (middle axis — flat-index gather).
 5. Rank-3 + dim=-3 (negative-dim normalization on the first axis).
 
 All cases are validated against a torch ``gather`` reference.
@@ -98,7 +98,7 @@ class GatherRank3LastDimProgram:
 
 @pl.program
 class GatherRank3MiddleDimProgram:
-    """Rank-3 + dim=1 (middle axis) — exercises the ``tile.transpose`` path.
+    """Rank-3 + dim=1 (middle axis) — flat-index gather.
 
     Last dim is 8 (8×4=32 bytes) to satisfy the hardware tile column
     alignment requirement.

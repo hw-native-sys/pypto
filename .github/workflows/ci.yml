@@ -86,8 +86,8 @@ jobs:
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTOAS_VERSION: v0.30
-      PTOAS_SHA256: 83cd91f1bbe3c1b5bc7b01462adeb73603fb22b1b56d8b39bd90644b373ba2a1
+      PTOAS_VERSION: v0.31
+      PTOAS_SHA256: ca184d071cef3af989ff3f98e7ce4c7262ba1e07405738b65e9900c43065ada5
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -158,19 +158,19 @@ jobs:
 
       - name: Test system tests
         timeout-minutes: 15
-        run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
+        run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=2c607938
 
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/test_perf_swimlane.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
+            -v --device="$DEVICE_ID" --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=2c607938
 
   system-tests-a5sim:
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTOAS_VERSION: v0.30
-      PTOAS_SHA256: 9a918aa5e8e17e3a194db8aa6af2f945a6c177d5bc0813494c30ff5d15ca2740
+      PTOAS_VERSION: v0.31
+      PTOAS_SHA256: cd9121b768f7383f5bda702c89507dd160f539c28bbdf57a0585be9473081d07
     container:
       image: ghcr.io/hw-native-sys/pypto/github-ci:latest
     steps:
@@ -208,13 +208,13 @@ jobs:
           pip install -v ./runtime
 
       - name: Test A5 system tests (simulator)
-        run: pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
+        run: pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=2c607938
 
       - name: Test A5 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
+        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=2c607938
 
       - name: Test A2A3 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=5779238f2461460c1b2e87d0a6741bf10dfe4352
+        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=2c607938
 
   fuzz-tests-sim:
     runs-on: ubuntu-latest
