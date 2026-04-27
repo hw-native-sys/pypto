@@ -270,6 +270,59 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
   return "";
 }
 
+// pto.ttrans requires ins(%src, %tmp : tile_type, tile_type) where %tmp is a scratch
+// workspace tile (same type/shape as %src).
+//
+// Two IR forms are supported:
+//   3-arg form: tile.transpose(src, axis0, axis1)   -- axis ints; tmp allocated via AllocNewTileBuf
+//   4-arg form: tile.transpose(src, tmp, axis0, axis1) -- tmp pre-allocated in IR (preferred;
+//               ensures pto.alloc_tile receives a hardware address at --pto-level=level3).
+//
+// The 4-arg form is used by gather lowering (op_conversion_registry.cpp) so that the memory
+// allocator assigns a proper UB address to the tmp tile before codegen.
+// The 3-arg form is kept for FlattenTileNdTo2D which filters it out via batch_matmul_only_vars
+// before reaching the backend (so the AllocNewTileBuf fallback is rarely reached in practice).
+static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3 || op->args_.size() == 4)
+      << "tile.transpose requires 3 or 4 arguments, got " << op->args_.size();
+
+  std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+
+  std::string tmp_ssa;
+  if (op->args_.size() == 4) {
+    // 4-arg form: args_[1] is the pre-allocated tmp tile with a proper hardware address.
+    tmp_ssa = codegen.GetExprAsCode(op->args_[1]);
+    // tmp was created by tile.create (same shape as src) and has a MemRef, so its type
+    // annotation is always available.  Use it as fallback when src_type is empty (e.g. when
+    // src is a ForStmt result var or a tile.reshape view that lacks a MemRef in codegen).
+    if (src_type.empty()) {
+      src_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+    }
+  } else {
+    // 3-arg form fallback: allocate tmp via extra_alloc_tiles (no hardware addr; only safe if
+    // this code path is not reached at --pto-level=level3).
+    tmp_ssa = codegen.AllocNewTileBuf(src_type, "ttrans_tmp");
+  }
+
+  std::string result_target = codegen.GetCurrentResultTarget();
+  std::string result_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  oss << "pto.ttrans ins(" << src_ssa << ", " << tmp_ssa;
+  if (!src_type.empty()) {
+    oss << " : " << src_type << ", " << src_type;
+  }
+  oss << ") outs(" << result_target;
+  if (!result_type.empty()) {
+    oss << " : " << result_type;
+  }
+  oss << ")";
+  codegen.Emit(oss.str());
+  return std::string("");
+}
+
 // pto.tcolexpand takes only the column vector in ins(); output shape comes from outs().
 // IR tile.col_expand(target, col_vec) keeps target for shape/type inference only.
 static std::string MakeColExpandCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
@@ -1465,7 +1518,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.concat",          "pto.tconcat",          2},
     {"tile.move",            "pto.tmov",             1},
     {"tile.move_fp",         "pto.tmov.fp",          2},
-    {"tile.transpose",       "pto.ttrans",           3},
+    // tile.transpose has custom codegen (MakeTileTransposeCodegenPTO): pto.ttrans needs
+    // ins(%src, %tmp : tile_type, tile_type) where %tmp is a scratch workspace tile, NOT
+    // the axis-index integers that tile.transpose(src, axis0, axis1) carries in the IR.
     {"tile.extract",         "pto.textract",         3},
     // Gather/scatter operations
     {"tile.gather",          "pto.tgather",          3},
@@ -1539,6 +1594,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.store", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileStoreCodegenPTO(op, codegen);
+  });
+  reg("tile.transpose", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTileTransposeCodegenPTO(op, codegen);
   });
   // tile.mscatter: src and idx must be row_major (MTE3 DMA reads UB linearly)
   if (exclude_ops.count("tile.mscatter") == 0) {

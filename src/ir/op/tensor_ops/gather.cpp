@@ -13,8 +13,8 @@
  * @file gather.cpp
  * @brief Tensor-level gather operator.
  *
- * MVP scope: rank == 2 and dim == -1 (last axis). Lowered to a per-row
- * tile.gather loop by ConvertTensorToTileOps.
+ * Supports rank >= 2 and any dim (including negative). Lowered to a sequence
+ * of tile.transpose + tile.reshape + tile.gather by ConvertTensorToTileOps.
  */
 
 #include <any>
@@ -32,7 +32,6 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
-#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -59,8 +58,7 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
       << index_type->dtype_.ToString();
 
   const int64_t rank = static_cast<int64_t>(input_type->shape_.size());
-  CHECK(rank == 2) << "The operator " << op_name << " currently supports only 2D input (MVP), but got rank "
-                   << rank;
+  CHECK(rank >= 2) << "The operator " << op_name << " requires rank >= 2, but got rank " << rank;
   CHECK(static_cast<int64_t>(index_type->shape_.size()) == rank)
       << "The operator " << op_name << " requires index rank (" << index_type->shape_.size()
       << ") to match input rank (" << rank << ")";
@@ -75,14 +73,24 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
     }
   }
   CHECK(dim_seen) << "The operator " << op_name << " requires a 'dim' keyword argument";
-  CHECK(dim_val == -1 || dim_val == rank - 1)
-      << "The operator " << op_name
-      << " currently supports only dim=-1 or dim=rank-1 (MVP), but got dim=" << dim_val;
 
-  // Non-dim axis (axis 0 for 2D) must match between input and index.
-  CHECK(DimensionsEqual(input_type->shape_[0], index_type->shape_[0]))
-      << "The operator " << op_name
-      << " requires index.shape[0] to equal input.shape[0] on the non-gather axis";
+  // Normalize negative dim.
+  int norm_dim = dim_val < 0 ? dim_val + static_cast<int>(rank) : dim_val;
+  CHECK(norm_dim >= 0 && norm_dim < static_cast<int>(rank))
+      << "The operator " << op_name << " requires dim in [" << -rank << ", " << rank - 1
+      << "], but got dim=" << dim_val;
+
+  // For non-gather axes: index.shape[i] <= input.shape[i] (static check when both are ConstInt).
+  for (int64_t i = 0; i < rank; ++i) {
+    if (i == static_cast<int64_t>(norm_dim)) continue;
+    auto idx_const = As<ConstInt>(index_type->shape_[i]);
+    auto inp_const = As<ConstInt>(input_type->shape_[i]);
+    if (idx_const && inp_const) {
+      CHECK(idx_const->value_ <= inp_const->value_)
+          << "The operator " << op_name << " requires index.shape[" << i << "] (" << idx_const->value_
+          << ") <= input.shape[" << i << "] (" << inp_const->value_ << ") on non-gather axes";
+    }
+  }
 
   return std::make_shared<TensorType>(index_type->shape_, input_type->dtype_);
 }
@@ -91,7 +99,8 @@ REGISTER_OP("tensor.gather")
     .set_op_category("TensorOp")
     .set_description(
         "Gather elements of input along the specified dimension using the index tensor "
-        "(tensor-level). MVP: rank==2 and dim==-1; lowered to a per-row tile.gather loop.")
+        "(tensor-level). Supports rank>=2 and any dim; lowered via tile.transpose + "
+        "tile.reshape + tile.gather by ConvertTensorToTileOps.")
     .add_argument("input", "Input tensor (TensorType; FP16, FP32, INT16, or INT32)")
     .add_argument("index", "Index tensor (TensorType, INT32, same shape as output)")
     .set_attr<int>("dim")

@@ -846,17 +846,54 @@ void OpConversionRegistry::RegisterSortOps() {
 }
 
 // ============================================================================
-// Gather op: tensor.gather -> per-row tile.load + tile.gather + tile.assemble
-// loop over the outer (non-gather) dimension.
+// Generalized gather lowering.
 //
-// MVP supports 2D input with dim == -1 (last axis). Semantics:
-//     out[b, k] = input[b, index[b, k]]
+// Hardware constraint: pto.tgather only works correctly when the source tile
+// has exactly 1 row (rows=1).  Therefore all lowering paths use ForStmt loops
+// to decompose the gather into single-row pto.tgather calls.
 //
-// The loop yields a TileType accumulator built via tile.assemble; Phase 3 of
-// ConvertTensorToTileOps then rewrites the loop to write directly into an
-// added Out tensor parameter via tile.store (see RewriteReturnedAssembleLoop-
-// ToStore). Using per-row slicing avoids materialising a `b * N` base offset
-// tile, which would otherwise require an arange/iota op PyPTO currently lacks.
+// FlattenTileNdTo2D constraint: tile.load, tile.store, tile.reshape may
+// produce/consume >2D tiles; all other tile ops must be 2D.
+// tile.load with an N-D shape is automatically flattened to 2D by merging
+// all leading dims: [d0,...,d_{n-1}] → [d0*…*d_{n-2}, d_{n-1}].
+// Because of this, we explicitly tile.reshape every N-D tile.load result to
+// 2D before passing it to any other op.
+//
+// Storage for rank-3 output: we return a 2D tile [I0*I1, I2] (where I2 is
+// the tensor's last dim).  FlattenTileNdTo2D injects partition_shape
+// [1, I0*I1, I2] for the resulting tile.store, so element [0,j,k] maps to
+// physical j*I2+k — covering all I0*I1*I2 elements without overlap.
+// We always add a trailing tile.reshape so Phase 3 (RewriteReturnedAssemble-
+// LoopToStore) does not fire; we want the full-tile store path instead.
+//
+// Four cases (by rank and norm_dim):
+//
+// Case 1  rank==2, dim==1 (last):
+//   Loop over I0 rows: load [1,S1] and [1,K], single-row gather.
+//   Accumulator [I0, K].  Phase 3 rewrites the loop to per-row tile.store.
+//
+// Case 2  rank==3, dim==2 (last):
+//   Nested loop: outer I0 × inner I1.
+//   Load [1,1,S2]→reshape[1,S2]; Load [1,1,K]→reshape[1,K]; gather [1,K].
+//   Inner acc [I1,K]; reshape→[1,I1*K]; outer acc [I0,I1*K].
+//   Final reshape [I0,I1*K]→[I0*I1,K]; tile.store at [0,0,0].
+//
+// Case 3  rank==3, dim==0 (first):
+//   Phase A – loop a over S0: load [1,I1,I2]→reshape[1,I1*I2] → src_tile[S0,I1*I2].
+//   Transpose src_tile → src_t[I1*I2,S0].
+//   Load idx [I0,I1,I2] (type at construction [I0,I1,I2]; after flatten [I0*I1,I2])
+//     → reshape[I0,I1*I2] → transpose idx_t[I1*I2,I0].
+//   Phase B – loop r over I1*I2: slice src_t[r]→[1,S0], idx_t[r]→[1,I0],
+//     gather → [1,I0]; inner_acc[I1*I2,I0].
+//   Transpose inner_acc→[I0,I1*I2]; reshape→[I0*I1,I2]; tile.store at [0,0,0].
+//
+// Case 4  rank==3, dim==1 (middle):
+//   Outer loop over I0: load [1,S1,I2]→reshape[S1,I2]→transpose[I2,S1];
+//     load [1,I1,I2]→reshape[I1,I2]→transpose[I2,I1].
+//   Inner loop over I2: slice inp_at[c]→[1,S1], idx_at[c]→[1,I1];
+//     gather→[1,I1]; inner_acc[I2,I1].
+//   Transpose[I1,I2]; reshape→[1,I1*I2]; outer acc [I0,I1*I2].
+//   Final reshape [I0,I1*I2]→[I0*I1,I2]; tile.store at [0,0,0].
 // ============================================================================
 
 void OpConversionRegistry::RegisterGatherOps() {
@@ -872,101 +909,302 @@ void OpConversionRegistry::RegisterGatherOps() {
         const auto& index = args[1];
 
         auto input_tensor_type = As<TensorType>(input->GetType());
-        auto input_tile_type = As<TileType>(input->GetType());
-        CHECK(input_tensor_type || input_tile_type)
-            << "tensor.gather conversion: input must be TensorType or TileType, got "
+        CHECK(input_tensor_type)
+            << "tensor.gather conversion: input must be TensorType, got "
             << input->GetType()->TypeName();
         auto index_tensor_type = As<TensorType>(index->GetType());
-        auto index_tile_type = As<TileType>(index->GetType());
-        CHECK(index_tensor_type || index_tile_type)
-            << "tensor.gather conversion: index must be TensorType or TileType, got "
+        CHECK(index_tensor_type)
+            << "tensor.gather conversion: index must be TensorType, got "
             << index->GetType()->TypeName();
-        const auto& input_shape = input_tensor_type ? input_tensor_type->shape_ : input_tile_type->shape_;
-        const auto& index_shape = index_tensor_type ? index_tensor_type->shape_ : index_tile_type->shape_;
-        CHECK(input_shape.size() == 2 && index_shape.size() == 2)
-            << "tensor.gather conversion (MVP): only rank-2 inputs supported";
 
-        int dim_val = GetKwargOr<int>(kwargs, "dim", -1);
+        const auto& input_shape = input_tensor_type->shape_;
+        const auto& index_shape = index_tensor_type->shape_;
         const int64_t rank = static_cast<int64_t>(input_shape.size());
-        CHECK(dim_val == -1 || dim_val == rank - 1)
-            << "tensor.gather conversion (MVP): only dim=-1 supported, got " << dim_val;
+        CHECK(rank >= 2) << "tensor.gather conversion: rank must be >= 2, got " << rank;
 
-        DataType input_dtype = input_tensor_type ? input_tensor_type->dtype_ : input_tile_type->dtype_;
+        int dim_val  = GetKwargOr<int>(kwargs, "dim", -1);
+        int norm_dim = dim_val < 0 ? dim_val + static_cast<int>(rank) : dim_val;
+        CHECK(norm_dim >= 0 && norm_dim < static_cast<int>(rank))
+            << "tensor.gather conversion: dim out of range, got " << dim_val;
 
-        auto make_index_const = [&](int64_t value) -> ExprPtr {
+        DataType input_dtype = input_tensor_type->dtype_;
+
+        auto make_idx = [&](int64_t value) -> ExprPtr {
           return std::make_shared<ConstInt>(value, DataType::INDEX, span);
         };
-        ExprPtr zero = make_index_const(0);
-        ExprPtr one = make_index_const(1);
-
-        std::vector<StmtPtr> prologue;
-
-        // Accumulator tile, shape equal to the output tensor; Phase 3 later
-        // rewrites this init to the added Out tensor parameter.
-        auto acc_shape_tuple = MakeShapeTuple(index_shape, span);
-        std::vector<std::pair<std::string, std::any>> acc_create_kwargs = {
-            {"dtype", input_dtype}, {"target_memory", MemorySpace::Vec}};
-        auto acc_create_call = op_reg.Create("tile.create", {acc_shape_tuple}, acc_create_kwargs, span);
-        auto acc_init_var = std::make_shared<Var>("gather_out_init", acc_create_call->GetType(), span);
-        prologue.push_back(std::make_shared<AssignStmt>(acc_init_var, acc_create_call, span));
-
-        auto acc_tile_type = acc_create_call->GetType();
-        auto loop_var = std::make_shared<Var>("b", std::make_shared<ScalarType>(DataType::INDEX), span);
-        auto iter_arg = std::make_shared<IterArg>("gather_acc", acc_tile_type, acc_init_var, span);
-        auto return_var = std::make_shared<Var>("gather_result", acc_tile_type, span);
-
-        auto row_offsets = std::make_shared<MakeTuple>(std::vector<ExprPtr>{loop_var, zero}, span);
-        std::vector<ExprPtr> src_row_shape = {one, input_shape[1]};
-        std::vector<ExprPtr> idx_row_shape = {one, index_shape[1]};
-        auto src_shape_tuple = MakeShapeTuple(src_row_shape, span);
-        auto idx_shape_tuple = MakeShapeTuple(idx_row_shape, span);
+        auto make_i32 = [&](int64_t value) -> ExprPtr {
+          return std::make_shared<ConstInt>(value, DataType::INT32, span);
+        };
+        auto zero = make_idx(0);
+        auto one  = make_idx(1);
 
         std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", MemorySpace::Vec},
                                                                      {"transpose", false}};
-
-        auto make_row = [&](const ExprPtr& tensor_or_tile, bool is_tensor,
-                            const ExprPtr& row_shape_tuple) -> CallPtr {
-          if (is_tensor) {
-            return op_reg.Create("tile.load", {tensor_or_tile, row_offsets, row_shape_tuple, row_shape_tuple},
-                                 load_kwargs, span);
-          }
-          return op_reg.Create("tile.slice", {tensor_or_tile, row_shape_tuple, row_offsets, row_shape_tuple},
-                               span);
-        };
-
-        std::vector<StmtPtr> body_stmts;
-        auto src_load = make_row(input, input_tensor_type != nullptr, src_shape_tuple);
-        auto src_tile_var = std::make_shared<Var>("gather_src_row", src_load->GetType(), span);
-        body_stmts.push_back(std::make_shared<AssignStmt>(src_tile_var, src_load, span));
-
-        auto idx_load = make_row(index, index_tensor_type != nullptr, idx_shape_tuple);
-        auto idx_tile_var = std::make_shared<Var>("gather_idx_row", idx_load->GetType(), span);
-        body_stmts.push_back(std::make_shared<AssignStmt>(idx_tile_var, idx_load, span));
-
-        // Scratch workspace tile required by tile.gather (same shape as idx row, INT32).
         std::vector<std::pair<std::string, std::any>> tmp_create_kwargs = {
             {"dtype", DataType(DataType::INT32)}, {"target_memory", MemorySpace::Vec}};
-        auto tmp_create_call = op_reg.Create("tile.create", {idx_shape_tuple}, tmp_create_kwargs, span);
-        auto tmp_tile_var = std::make_shared<Var>("gather_tmp", tmp_create_call->GetType(), span);
-        body_stmts.push_back(std::make_shared<AssignStmt>(tmp_tile_var, tmp_create_call, span));
 
-        auto gather_call = op_reg.Create("tile.gather", {src_tile_var, idx_tile_var, tmp_tile_var}, span);
-        auto gather_row_var = std::make_shared<Var>("gather_row", gather_call->GetType(), span);
-        body_stmts.push_back(std::make_shared<AssignStmt>(gather_row_var, gather_call, span));
+        std::vector<StmtPtr> prologue;
 
-        // Assemble the per-row result into the accumulator; Phase 3 rewrites
-        // this tile.assemble into tile.store once the Out param is added.
-        auto assemble_call = op_reg.Create("tile.assemble", {iter_arg, gather_row_var, row_offsets}, span);
-        auto assemble_var = std::make_shared<Var>("gather_assemble", assemble_call->GetType(), span);
-        body_stmts.push_back(std::make_shared<AssignStmt>(assemble_var, assemble_call, span));
-        body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{assemble_var}, span));
+        // --- Low-level helpers ---
 
-        auto body = SeqStmts::Flatten(std::move(body_stmts), span);
-        auto for_stmt =
-            std::make_shared<ForStmt>(loop_var, zero, input_shape[0], one, std::vector<IterArgPtr>{iter_arg},
-                                      body, std::vector<VarPtr>{return_var}, span);
-        prologue.push_back(for_stmt);
-        return ConversionResult{std::move(prologue), return_var};
+        auto emit_to = [&](std::vector<StmtPtr>& stmts, const std::string& op_name,
+                           const std::vector<ExprPtr>& op_args,
+                           const std::vector<std::pair<std::string, std::any>>& op_kwargs,
+                           const std::string& name) -> VarPtr {
+          auto call = op_kwargs.empty() ? op_reg.Create(op_name, op_args, span)
+                                        : op_reg.Create(op_name, op_args, op_kwargs, span);
+          auto var = std::make_shared<Var>(name, call->GetType(), span);
+          stmts.push_back(std::make_shared<AssignStmt>(var, call, span));
+          return var;
+        };
+
+        auto emit = [&](const std::string& op_name, const std::vector<ExprPtr>& op_args,
+                        const std::vector<std::pair<std::string, std::any>>& op_kwargs,
+                        const std::string& name) -> VarPtr {
+          return emit_to(prologue, op_name, op_args, op_kwargs, name);
+        };
+
+        // Emit tile.reshape.
+        auto reshape_to = [&](std::vector<StmtPtr>& stmts, const ExprPtr& src,
+                              const std::vector<ExprPtr>& new_shape, const std::string& name) -> VarPtr {
+          return emit_to(stmts, "tile.reshape", {src, MakeShapeTuple(new_shape, span)}, {}, name);
+        };
+
+        // Emit single-row tile.gather (with scratch tile); src_row and idx_row must be 2D.
+        auto single_row_gather = [&](std::vector<StmtPtr>& stmts, const VarPtr& src_row,
+                                     const VarPtr& idx_row, int64_t idx_cols,
+                                     const std::string& name) -> VarPtr {
+          auto tmp_sh = MakeShapeTuple({one, make_idx(idx_cols)}, span);
+          auto tmp    = emit_to(stmts, "tile.create", {tmp_sh}, tmp_create_kwargs, name + "_tmp");
+          return emit_to(stmts, "tile.gather", {src_row, idx_row, tmp}, {}, name);
+        };
+
+        // Build a ForStmt that accumulates [1, acc_cols] rows into [acc_rows, acc_cols].
+        // body_builder receives (loop_var, iter_arg, body_stmts) and returns a [1, acc_cols] tile.
+        auto make_loop =
+            [&](std::vector<StmtPtr>& outer_stmts, const std::string& lname,
+                const ExprPtr& loop_stop, int64_t acc_rows, int64_t acc_cols, DataType acc_dtype,
+                const std::function<VarPtr(VarPtr, IterArgPtr, std::vector<StmtPtr>&)>& body_builder)
+            -> VarPtr {
+          std::vector<std::pair<std::string, std::any>> acc_kwargs = {{"dtype", acc_dtype},
+                                                                      {"target_memory", MemorySpace::Vec}};
+          auto acc_init = emit_to(
+              outer_stmts, "tile.create",
+              {MakeShapeTuple({make_idx(acc_rows), make_idx(acc_cols)}, span)}, acc_kwargs,
+              lname + "_acc_init");
+          auto acc_type = acc_init->GetType();
+          auto lv = std::make_shared<Var>(lname + "_lv", std::make_shared<ScalarType>(DataType::INDEX), span);
+          auto ia = std::make_shared<IterArg>(lname + "_ia", acc_type, acc_init, span);
+          auto rv = std::make_shared<Var>(lname + "_rv", acc_type, span);
+
+          std::vector<StmtPtr> body_stmts;
+          auto row_result = body_builder(lv, ia, body_stmts);
+          auto ofs   = std::make_shared<MakeTuple>(std::vector<ExprPtr>{lv, zero}, span);
+          auto asmbl = emit_to(body_stmts, "tile.assemble", {ia, row_result, ofs}, {}, lname + "_asmbl");
+          body_stmts.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{asmbl}, span));
+          auto body = SeqStmts::Flatten(std::move(body_stmts), span);
+          outer_stmts.push_back(std::make_shared<ForStmt>(lv, zero, loop_stop, one,
+                                                           std::vector<IterArgPtr>{ia}, body,
+                                                           std::vector<VarPtr>{rv}, span));
+          return rv;
+        };
+
+        // Get ConstInt value from a shape expression.
+        auto get_const = [&](const ExprPtr& expr, const char* what) -> int64_t {
+          auto c = As<ConstInt>(expr);
+          CHECK(c) << "tensor.gather: " << what << " must be ConstInt for rank>2 lowering";
+          return c->value_;
+        };
+
+        // ================================================================
+        // Case 1  rank==2, dim==1 (last dim)
+        // ================================================================
+        if (rank == 2 && norm_dim == 1) {
+          int64_t I0 = get_const(index_shape[0], "index.shape[0]");
+          int64_t S1 = get_const(input_shape[1], "input.shape[1]");
+          int64_t K  = get_const(index_shape[1], "index.shape[1]");
+
+          auto result = make_loop(
+              prologue, "gather", index_shape[0], I0, K, input_dtype,
+              [&](VarPtr lv, IterArgPtr /*ia*/, std::vector<StmtPtr>& bs) -> VarPtr {
+                auto row_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{lv, zero}, span);
+                auto inp_sh  = MakeShapeTuple({one, make_idx(S1)}, span);
+                auto inp_row = emit_to(bs, "tile.load", {input, row_ofs, inp_sh, inp_sh},
+                                       load_kwargs, "gather_inp_row");
+                auto idx_sh  = MakeShapeTuple({one, make_idx(K)}, span);
+                auto idx_row = emit_to(bs, "tile.load", {index, row_ofs, idx_sh, idx_sh},
+                                       load_kwargs, "gather_idx_row");
+                return single_row_gather(bs, inp_row, idx_row, K, "gather_row");
+              });
+          return ConversionResult{std::move(prologue), result};
+        }
+
+        // ================================================================
+        // Case 2  rank==3, dim==2 (last dim)
+        // Result tile: [I0*I1, K] where tile[i0*I1+i1, k] = output[i0, i1, k].
+        // Stored via tile.store at [0,0,0]; FlattenTileNdTo2D injects
+        // partition_shape [1, I0*I1, K] which covers all elements correctly.
+        // ================================================================
+        if (rank == 3 && norm_dim == 2) {
+          int64_t I0  = get_const(index_shape[0], "index.shape[0]");
+          int64_t I1  = get_const(index_shape[1], "index.shape[1]");
+          int64_t S2  = get_const(input_shape[2], "input.shape[2]");
+          int64_t K   = get_const(index_shape[2], "index.shape[2]");
+          int64_t I1K = I1 * K;
+
+          // Outer loop: i0=0..I0-1, accumulates [I0, I1*K].
+          auto outer_result = make_loop(
+              prologue, "gather_outer", index_shape[0], I0, I1K, input_dtype,
+              [&](VarPtr outer_lv, IterArgPtr /*oia*/, std::vector<StmtPtr>& ob) -> VarPtr {
+                // Inner loop: i1=0..I1-1, accumulates [I1, K].
+                auto inner_result = make_loop(
+                    ob, "gather_inner", index_shape[1], I1, K, input_dtype,
+                    [&](VarPtr inner_lv, IterArgPtr /*iia*/, std::vector<StmtPtr>& bs) -> VarPtr {
+                      auto ofs = std::make_shared<MakeTuple>(
+                          std::vector<ExprPtr>{outer_lv, inner_lv, zero}, span);
+                      // Load with 3D shape → 3D tile type; immediately reshape to 2D.
+                      auto inp_sh  = MakeShapeTuple({one, one, make_idx(S2)}, span);
+                      auto inp_raw = emit_to(bs, "tile.load", {input, ofs, inp_sh, inp_sh},
+                                             load_kwargs, "gather_inp_raw");
+                      auto inp_row = reshape_to(bs, inp_raw, {one, make_idx(S2)}, "gather_inp_row");
+                      auto idx_sh  = MakeShapeTuple({one, one, make_idx(K)}, span);
+                      auto idx_raw = emit_to(bs, "tile.load", {index, ofs, idx_sh, idx_sh},
+                                             load_kwargs, "gather_idx_raw");
+                      auto idx_row = reshape_to(bs, idx_raw, {one, make_idx(K)}, "gather_idx_row");
+                      return single_row_gather(bs, inp_row, idx_row, K, "gather_row");
+                    });
+                // Reshape [I1, K] → [1, I1*K] for outer assemble.
+                return reshape_to(ob, inner_result, {one, make_idx(I1K)}, "gather_inner_flat");
+              });
+          // Reshape [I0, I1*K] → [I0*I1, K].  Prevents Phase 3 and gives correct 2D layout.
+          int64_t I0I1 = I0 * I1;
+          auto out_2d = reshape_to(prologue, outer_result, {make_idx(I0I1), make_idx(K)}, "gather_out");
+          return ConversionResult{std::move(prologue), out_2d};
+        }
+
+        // ================================================================
+        // Case 3  rank==3, dim==0 (first dim)
+        // out[i0, i1, k] = inp[idx[i0, i1, k], i1, k]
+        // Result tile: [I0*I1, I2] where tile[i0*I1+i1, k] = output[i0, i1, k].
+        //
+        // Uses flat-index gather to avoid intermediate tiles with I0 (potentially
+        // non-8-aligned) columns, which would violate hardware 32-byte row alignment.
+        // For each output row r = i0*I1+i1:
+        //   inp_flat = inp[:, i1, :].flatten()  → [1, S0*I2]
+        //   idx_row  = idx[i0, i1, :]           → [1, I2]
+        //   flat_idx = idx_row * I2 + [0..I2-1] → [1, I2]
+        //   out_row  = gather(inp_flat, flat_idx) → [1, I2]
+        // ================================================================
+        if (rank == 3 && norm_dim == 0) {
+          int64_t S0   = get_const(input_shape[0], "input.shape[0]");
+          int64_t I0   = get_const(index_shape[0], "index.shape[0]");
+          int64_t I1   = get_const(index_shape[1], "index.shape[1]");
+          int64_t I2   = get_const(index_shape[2], "index.shape[2]");
+          int64_t I0I1 = I0 * I1;
+          int64_t S0I2 = S0 * I2;
+
+          // Precompute constant range tile [0, 1, ..., I2-1] (shared across all loop iterations).
+          std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", DataType(DataType::INT32)}};
+          auto range_1d = emit("tile.ci", {make_i32(0), MakeShapeTuple({one, make_idx(I2)}, span)},
+                               ci_kw, "gather_range");
+
+          // Outer loop: r=0..I0*I1-1, accumulating [I0*I1, I2].
+          auto result = make_loop(
+              prologue, "gather_main", make_idx(I0I1), I0I1, I2, input_dtype,
+              [&](VarPtr lv, IterArgPtr /*ia*/, std::vector<StmtPtr>& bs) -> VarPtr {
+                auto i0_expr = MakeFloorDiv(lv, make_idx(I1), span);
+                auto i1_expr = MakeFloorMod(lv, make_idx(I1), span);
+
+                // Load inp[:, i1, :] → [S0, 1, I2] → [S0, I2] → [1, S0*I2].
+                auto inp_ofs = std::make_shared<MakeTuple>(std::vector<ExprPtr>{zero, i1_expr, zero}, span);
+                auto inp_sh  = MakeShapeTuple({input_shape[0], one, input_shape[2]}, span);
+                auto inp_raw = emit_to(bs, "tile.load", {input, inp_ofs, inp_sh, inp_sh},
+                                       load_kwargs, "gather_inp_raw");
+                auto inp_2d   = reshape_to(bs, inp_raw, {input_shape[0], input_shape[2]}, "gather_inp_2d");
+                auto inp_flat = reshape_to(bs, inp_2d, {one, make_idx(S0I2)}, "gather_inp_flat");
+
+                // Load idx[i0, i1, :] → [1, 1, I2] → [1, I2].
+                auto idx_ofs = std::make_shared<MakeTuple>(
+                    std::vector<ExprPtr>{i0_expr, i1_expr, zero}, span);
+                auto idx_sh  = MakeShapeTuple({one, one, index_shape[2]}, span);
+                auto idx_raw = emit_to(bs, "tile.load", {index, idx_ofs, idx_sh, idx_sh},
+                                       load_kwargs, "gather_idx_raw");
+                auto idx_row = reshape_to(bs, idx_raw, {one, index_shape[2]}, "gather_idx_row");
+
+                // flat_idx[k] = idx_row[k] * I2 + k  →  selects inp_flat[flat_idx[k]].
+                auto idx_sc   = emit_to(bs, "tile.muls", {idx_row, make_i32(I2)}, {}, "gather_idx_s");
+                auto flat_idx = emit_to(bs, "tile.add", {idx_sc, range_1d}, {}, "gather_fidx");
+
+                return single_row_gather(bs, inp_flat, flat_idx, I2, "gather_row");
+              });
+          return ConversionResult{std::move(prologue), result};
+        }
+
+        // ================================================================
+        // Case 4  rank==3, dim==1 (middle dim)
+        // out[i0, i1, k] = inp[i0, idx[i0, i1, k], k]
+        // Result tile: [I0*I1, I2] where tile[i0*I1+i1, k] = output[i0, i1, k].
+        //
+        // Uses flat-index gather to avoid intermediate tiles with I1 (potentially
+        // non-8-aligned) columns, which would violate hardware 32-byte row alignment.
+        // For each output row r = i0*I1+i1:
+        //   inp_flat = inp[i0, :, :].flatten()  → [1, S1*I2]
+        //   idx_row  = idx[i0, i1, :]           → [1, I2]
+        //   flat_idx = idx_row * I2 + [0..I2-1] → [1, I2]
+        //   out_row  = gather(inp_flat, flat_idx) → [1, I2]
+        // ================================================================
+        CHECK(rank == 3 && norm_dim == 1)
+            << "tensor.gather: only rank==3 with dim in {0,1,2} is supported, "
+            << "got rank=" << rank << " norm_dim=" << norm_dim;
+
+        {
+          int64_t I0   = get_const(index_shape[0], "index.shape[0]");
+          int64_t I1   = get_const(index_shape[1], "index.shape[1]");
+          int64_t I2   = get_const(index_shape[2], "index.shape[2]");
+          int64_t S1   = get_const(input_shape[1], "input.shape[1]");
+          int64_t I0I1 = I0 * I1;
+          int64_t S1I2 = S1 * I2;
+
+          // Precompute constant range tile [0, 1, ..., I2-1] (shared across all loop iterations).
+          std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", DataType(DataType::INT32)}};
+          auto range_1d = emit("tile.ci", {make_i32(0), MakeShapeTuple({one, make_idx(I2)}, span)},
+                               ci_kw, "gather_range");
+
+          // Outer loop: r=0..I0*I1-1, accumulating [I0*I1, I2].
+          auto result = make_loop(
+              prologue, "gather_main", make_idx(I0I1), I0I1, I2, input_dtype,
+              [&](VarPtr lv, IterArgPtr /*ia*/, std::vector<StmtPtr>& bs) -> VarPtr {
+                auto i0_expr = MakeFloorDiv(lv, make_idx(I1), span);
+                auto i1_expr = MakeFloorMod(lv, make_idx(I1), span);
+
+                // Load inp[i0, :, :] → [1, S1, I2] → [S1, I2] → [1, S1*I2].
+                auto inp_ofs = std::make_shared<MakeTuple>(
+                    std::vector<ExprPtr>{i0_expr, zero, zero}, span);
+                auto inp_sh  = MakeShapeTuple({one, input_shape[1], input_shape[2]}, span);
+                auto inp_raw = emit_to(bs, "tile.load", {input, inp_ofs, inp_sh, inp_sh},
+                                       load_kwargs, "gather_inp_raw");
+                auto inp_2d   = reshape_to(bs, inp_raw, {input_shape[1], input_shape[2]}, "gather_inp_2d");
+                auto inp_flat = reshape_to(bs, inp_2d, {one, make_idx(S1I2)}, "gather_inp_flat");
+
+                // Load idx[i0, i1, :] → [1, 1, I2] → [1, I2].
+                auto idx_ofs = std::make_shared<MakeTuple>(
+                    std::vector<ExprPtr>{i0_expr, i1_expr, zero}, span);
+                auto idx_sh  = MakeShapeTuple({one, one, index_shape[2]}, span);
+                auto idx_raw = emit_to(bs, "tile.load", {index, idx_ofs, idx_sh, idx_sh},
+                                       load_kwargs, "gather_idx_raw");
+                auto idx_row = reshape_to(bs, idx_raw, {one, index_shape[2]}, "gather_idx_row");
+
+                // flat_idx[k] = idx_row[k] * I2 + k  →  selects inp_flat[flat_idx[k]].
+                auto idx_sc   = emit_to(bs, "tile.muls", {idx_row, make_i32(I2)}, {}, "gather_idx_s");
+                auto flat_idx = emit_to(bs, "tile.add", {idx_sc, range_1d}, {}, "gather_fidx");
+
+                return single_row_gather(bs, inp_flat, flat_idx, I2, "gather_row");
+              });
+
+          // Reshape [I0*I1, I2] is already the correct 2D layout; prevents Phase 3 optimization.
+          auto out_2d = reshape_to(prologue, result, {make_idx(I0I1), make_idx(I2)}, "gather_out");
+          return ConversionResult{std::move(prologue), out_2d};
+        }
       });
 }
 
