@@ -234,6 +234,28 @@ void PTOCodegen::VisitExpr_(const ir::CastPtr& op) {
     return;
   } else if (src_is_index || dst_is_index) {
     CHECK(!src_is_float && !dst_is_float) << "Cast between float and index types is not supported";
+    // arith.index_cast requires signless integer types. For unsigned source/destination,
+    // bridge via builtin.unrealized_conversion_cast (mirrors GetOrEmitConstant in pto_codegen.cpp).
+    if (dst_is_uint) {
+      // index -> uiN : arith.index_cast index -> iN, then bridge iN -> uiN
+      std::string signless_dst = dst_type.substr(1);  // "ui32" -> "i32"
+      std::string signless_tmp = NewTemp();
+      Emit(signless_tmp + " = arith.index_cast " + src + " : " + src_type + " to " + signless_dst);
+      Emit(result + " = builtin.unrealized_conversion_cast " + signless_tmp + " : " + signless_dst + " to " +
+           dst_type);
+      fs_.current_expr_value = result;
+      return;
+    }
+    if (src_is_uint) {
+      // uiN -> index : bridge uiN -> iN, then arith.index_cast iN -> index
+      std::string signless_src = src_type.substr(1);  // "ui32" -> "i32"
+      std::string signless_tmp = NewTemp();
+      Emit(signless_tmp + " = builtin.unrealized_conversion_cast " + src + " : " + src_type + " to " +
+           signless_src);
+      Emit(result + " = arith.index_cast " + signless_tmp + " : " + signless_src + " to " + dst_type);
+      fs_.current_expr_value = result;
+      return;
+    }
     mlir_op = "arith.index_cast";
   } else if (src_is_float && dst_is_float) {
     mlir_op = (dst_dtype.GetBit() > src_dtype.GetBit()) ? "arith.extf" : "arith.truncf";

@@ -219,6 +219,33 @@ class TopLevelArangeProgram:
 
 
 @pl.program
+class ArangeRepro:
+    """Repro for ptoas 'expected \':\'' bug with dynamic arange start + sort32."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def repro_kernel(
+        self,
+        scores: pl.Tensor[[1, 32768], pl.FP32],
+        out: pl.Out[pl.Tensor[[4, 16384], pl.FP32]],
+    ) -> pl.Tensor[[4, 16384], pl.FP32]:
+        for part in pl.parallel(4):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                offset = part * 8192
+                score_slice = pl.slice(scores, [1, 8192], [0, offset])
+
+                idx_init = pl.tensor.arange(
+                    pl.cast(offset, pl.UINT32),
+                    [1, 8192],
+                    dtype=pl.UINT32,
+                )
+
+                sorted_t = pl.tensor.sort32(score_slice, idx_init)
+                out = pl.assemble(out, sorted_t, [part, 0])
+
+        return out
+
+
+@pl.program
 class CiUint32AscendProgram:
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
@@ -411,6 +438,40 @@ class TopLevelArangeTestCase(_CiBaseTestCase):
         tensors["output"][:] = torch.arange(0, N, dtype=torch.int32).reshape(ROWS, COLS)
 
 
+class ArangeReproTestCase(_CiBaseTestCase):
+    """Dynamic arange start (via parallel loop var) + sort32 repro."""
+
+    def get_name(self) -> str:
+        return "arange_repro"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("scores", [1, 32768], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [4, 16384], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return ArangeRepro
+
+    def compute_expected(self, tensors, params=None):
+        scores = tensors["scores"]
+        out = torch.zeros(4, 16384, dtype=torch.float32)
+        for part in range(4):
+            offset = part * 8192
+            slice_vals = scores[:, offset : offset + 8192]
+            idx = torch.arange(offset, offset + 8192, dtype=torch.int32).unsqueeze(0)
+            for block in range(256):
+                start = block * 32
+                end = start + 32
+                block_vals = slice_vals[:, start:end].flatten()
+                block_idx = idx[:, start:end].flatten()
+                sorted_vals, order = torch.sort(block_vals, descending=True)
+                sorted_idx = block_idx[order]
+                out[part : part + 1, start * 2 : end * 2 : 2] = sorted_vals
+                out[part : part + 1, start * 2 + 1 : end * 2 + 1 : 2] = sorted_idx.view(torch.float32)
+        tensors["out"][:] = out
+
+
 class CiUint32AscendTestCase(_CiBaseTestCase):
     def get_name(self) -> str:
         return "ci_uint32_ascend"
@@ -483,6 +544,10 @@ class TestCi:
 
     def test_top_level_arange(self, test_runner):
         result = test_runner.run(TopLevelArangeTestCase())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_arange_repro(self, test_runner):
+        result = test_runner.run(ArangeReproTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
     def test_ci_uint32_ascend(self, test_runner):

@@ -1191,6 +1191,11 @@ std::string PTOCodegen::GetExprTypeAnnotation(const ir::ExprPtr& expr) {
     // annotation matches the declared dtype directly.
     return GetTypeString(const_int->dtype());
   }
+  // Fallback: derive annotation from any ScalarType expression (e.g. Cast results,
+  // arith expression results). Their SSA value carries the declared dtype.
+  if (auto scalar_type = As<ScalarType>(expr->GetType())) {
+    return GetTypeString(scalar_type->dtype_);
+  }
   return "";
 }
 

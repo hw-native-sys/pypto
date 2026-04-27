@@ -123,6 +123,8 @@ std::string CodegenBase::GetRuntimeDataTypeString(const DataType& dtype) const {
   if (dtype == DataType::INT16) return "DataType::INT16";
   if (dtype == DataType::INT8) return "DataType::INT8";
   if (dtype == DataType::UINT8) return "DataType::UINT8";
+  if (dtype == DataType::UINT16) return "DataType::UINT16";
+  if (dtype == DataType::UINT32) return "DataType::UINT32";
   if (dtype == DataType::BF16) return "DataType::BFLOAT16";
   // INDEX is a semantic type in the IR; the runtime represents it as INT64
   if (dtype == DataType::INDEX) return "DataType::INT64";
