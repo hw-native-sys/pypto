@@ -599,6 +599,7 @@ def execute_compiled(
     device_id: int,
     pto_isa_commit: str | None = None,
     runtime_profiling: bool = False,
+    level: int = 2,
 ) -> None:
     """Execute a pre-compiled program with user-provided tensors and scalars.
 
@@ -617,6 +618,8 @@ def execute_compiled(
         pto_isa_commit: Optional git commit to pin pto-isa clone.
         runtime_profiling: If ``True``, enable runtime profiling and
             generate swimlane JSON after execution.
+        level: Hierarchy level. Forwarded to :func:`execute_on_device`,
+            which currently only supports ``2``.
     """
     work_dir = Path(work_dir)
 
@@ -665,6 +668,7 @@ def execute_compiled(
         platform,
         runtime_name,
         device_id,
+        level=level,
         enable_profiling=runtime_profiling,
     )
 

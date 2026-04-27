@@ -466,6 +466,7 @@ def execute_on_device(
     runtime_name: str,
     device_id: int,
     *,
+    level: int = 2,
     block_dim: int = 24,
     aicpu_thread_num: int = 4,
     enable_profiling: bool = False,
@@ -473,19 +474,35 @@ def execute_on_device(
 ) -> None:
     """Execute *chip_callable* on device via Simpler's unified ``Worker``.
 
+    If a :class:`pypto.runtime.Worker` is currently active (the call site is
+    inside a ``with Worker(...):`` block) and matches the
+    ``(level, platform, device_id, runtime_name)`` binding, that Worker is
+    reused — its already-initialized device context dispatches the run
+    without re-running ``init`` / ``close``. Otherwise a fresh one-shot
+    Worker is constructed exactly as before.
+
     Args:
         chip_callable: Assembled callable (orchestration + kernels).
         orch_args: Tensor/scalar arguments.
         platform: Target execution platform (e.g. ``"a2a3sim"``).
         runtime_name: Runtime implementation name (e.g. ``"tensormap_and_ringbuffer"``).
         device_id: NPU device index.
+        level: Hierarchy level. Only ``2`` (single-chip) is currently
+            supported; passing any other value raises ``ValueError``. The
+            parameter exists so callers can plumb level through ahead of L3
+            user-API support.
         block_dim: Block dimension for execution.
         aicpu_thread_num: Number of AICPU threads.
         enable_profiling: Enable runtime profiling.
         runtime_env: Optional per-example environment variable overrides.
     """
-    worker = Worker(level=2, device_id=device_id, platform=platform, runtime=runtime_name)
-    worker.init()
+    if level != 2:
+        raise ValueError(
+            f"execute_on_device currently only supports level=2; got level={level}. "
+            f"L3 execution is not yet exposed at the pypto user-API layer."
+        )
+
+    from .worker import Worker as _PyptoWorker  # noqa: PLC0415
 
     cfg = ChipCallConfig()
     cfg.block_dim = block_dim
@@ -493,10 +510,15 @@ def execute_on_device(
     cfg.enable_l2_swimlane = enable_profiling
 
     env = runtime_env or {}
+    active = _PyptoWorker.current(level=level, platform=platform, device_id=device_id, runtime=runtime_name)
     with _temporary_env(env):
+        if active is not None:
+            active._run_chip(chip_callable, orch_args, cfg)
+            return
+        worker = Worker(level=level, device_id=device_id, platform=platform, runtime=runtime_name)
+        worker.init()
         worker.run(chip_callable, orch_args, cfg)
-
-    worker.close()
+        worker.close()
 
 
 # ---------------------------------------------------------------------------
