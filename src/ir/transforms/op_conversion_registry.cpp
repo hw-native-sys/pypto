@@ -1135,7 +1135,9 @@ void OpConversionRegistry::RegisterGatherOps() {
 
                 return single_row_gather(bs, inp_flat, flat_idx, I2, "gather_row");
               });
-          return ConversionResult{std::move(prologue), result};
+          // Reshape [I0*I1, I2] is already the correct 2D layout; prevents Phase 3 optimization.
+          auto out_2d = reshape_to(prologue, result, {make_idx(I0I1), make_idx(I2)}, "gather_out");
+          return ConversionResult{std::move(prologue), out_2d};
         }
 
         // ================================================================

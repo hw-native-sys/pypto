@@ -122,6 +122,8 @@ jobs:
       - name: Install project and dependencies
         run: |
           python -m pip install --upgrade pip
+          rm -rf ./build ./_skbuild
+          test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
           pip install --no-build-isolation .[dev]
 
       - name: Install ptoas (local cache)
@@ -151,6 +153,7 @@ jobs:
       - name: Install simpler
         run: |
           rm -rf ./runtime/build
+          ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
           pip install --no-build-isolation ./runtime
 
       - name: Show ccache stats (after)
