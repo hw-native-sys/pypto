@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -221,21 +222,23 @@ bool DistributedCodegen::TryEmitHierarchyCall(const ir::ExprPtr& expr) {
   INTERNAL_CHECK(callee->level_.has_value() && callee->role_.has_value() &&
                  current_func_->level_.has_value() && current_func_->role_.has_value());
 
-  const bool same_level_worker =
-      *callee->role_ == ir::Role::Worker && *callee->level_ == *current_func_->level_;
-  const bool next_level_orch =
-      *callee->role_ == ir::Role::Orchestrator &&
-      static_cast<int>(*callee->level_) == static_cast<int>(*current_func_->level_) - 1;
+  const ir::Level callee_level = callee->level_.value();
+  const ir::Role callee_role = callee->role_.value();
+  const ir::Level current_level = current_func_->level_.value();
+
+  const bool same_level_worker = callee_role == ir::Role::Worker && callee_level == current_level;
+  const bool next_level_orch = callee_role == ir::Role::Orchestrator &&
+                               static_cast<int>(callee_level) == static_cast<int>(current_level) - 1;
 
   if (same_level_worker || next_level_orch) {
     EmitCallToWorker(call, callee);
     return true;
   }
 
-  UNREACHABLE << ir::LevelToString(*current_func_->level_) << "Level Orch func '" << current_func_->name_
+  UNREACHABLE << ir::LevelToString(current_level) << "Level Orch func '" << current_func_->name_
               << "' can only call same level worker or next level Orch, but call to func '" << gv->name_
-              << "' has level = '" << ir::LevelToString(*callee->level_) << "', role = '"
-              << ir::RoleToString(*callee->role_) << "'.";
+              << "' has level = '" << ir::LevelToString(callee_level) << "', role = '"
+              << ir::RoleToString(callee_role) << "'.";
   return false;  // unreachable
 }
 
@@ -447,7 +450,10 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
 
   // If this call has an assignment target (return value) but the callee already
   // has Out/InOut parameters, the output is already covered by those params.
-  // Only add the target as OUTPUT_EXISTING if the callee has no explicit Out params.
+  // Only add the target as OUTPUT_EXISTING if the callee has no explicit Out
+  // params. In the no-Out-param branch ``tensors[target]`` may not yet exist
+  // (it's only seeded from input parameter names in the runtime), so allocate
+  // a fresh shared-memory tensor for it before emitting ``add_tensor``.
   std::string target = current_target_var_;
   if (!target.empty() && !callee->return_types_.empty()) {
     bool has_out_param = false;
@@ -458,6 +464,28 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
       }
     }
     if (!has_out_param) {
+      // Allocate a shared-memory tensor for the return value if absent.
+      // share_memory_() is required for fork-based distributed visibility.
+      auto ret_type = std::dynamic_pointer_cast<const ir::TensorType>(callee->return_types_.front());
+      INTERNAL_CHECK(ret_type) << "Distributed callee return must be TensorType";
+      std::string shape = "(";
+      for (size_t i = 0; i < ret_type->shape_.size(); ++i) {
+        if (i > 0) shape += ", ";
+        const auto& dim = ret_type->shape_[i];
+        if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(dim)) {
+          shape += std::to_string(const_int->value_);
+        } else if (auto var = std::dynamic_pointer_cast<const ir::Var>(dim)) {
+          shape += SanitizeName(var->name_hint_);
+        } else {
+          CHECK(false) << "Distributed callee return shape dim " << i << " must be ConstInt or Var";
+        }
+      }
+      if (ret_type->shape_.size() == 1) shape += ",";
+      shape += ")";
+      const std::string torch_dtype = DataTypeToPythonDType(ret_type->dtype_);
+      emitter_.EmitLine("if \"" + target + "\" not in tensors:");
+      emitter_.EmitLine("    tensors[\"" + target + "\"] = torch.zeros(" + shape + ", dtype=torch." +
+                        torch_dtype + ").share_memory_()");
       emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(tensors[\"" + target +
                         "\"]), TensorArgType.OUTPUT_EXISTING)");
     }
@@ -528,7 +556,17 @@ void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
   std::string shape = "(";
   for (size_t i = 0; i < result_type->shape_.size(); ++i) {
     if (i > 0) shape += ", ";
-    shape += std::to_string(GetConstIntValue(result_type->shape_[i]));
+    const auto& dim = result_type->shape_[i];
+    if (auto const_int = std::dynamic_pointer_cast<const ir::ConstInt>(dim)) {
+      shape += std::to_string(const_int->value_);
+    } else if (auto var = std::dynamic_pointer_cast<const ir::Var>(dim)) {
+      // Dynamic shape: reference the parameter name in the generated Python.
+      shape += SanitizeName(var->name_hint_);
+    } else {
+      CHECK(false) << "tensor.create shape dim " << i
+                   << " must be a ConstInt or Var (dynamic shape variable), "
+                   << "got expression of unsupported kind";
+    }
   }
   if (result_type->shape_.size() == 1) shape += ",";  // trailing comma for 1-tuple
   shape += ")";

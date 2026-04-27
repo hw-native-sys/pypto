@@ -181,10 +181,12 @@ def compile(  # noqa: PLR0913
 
     from .compiled_program import CompiledProgram  # noqa: PLC0415
 
-    # Detect distributed programs: any function with level >= HOST (Linqu level 3)
+    # Detect distributed programs: any function with level >= HOST (Linqu level 3).
+    # Use the post-pass program so functions promoted to HOST by outlining
+    # (e.g. via ``with pl.at(level=pl.Level.HOST, ...)``) are still detected.
     is_distributed = any(
         f.level is not None and _ir_core.level_to_linqu_level(f.level) >= 3
-        for f in program.functions.values()
+        for f in transformed_program.functions.values()
     )
 
     if is_distributed:

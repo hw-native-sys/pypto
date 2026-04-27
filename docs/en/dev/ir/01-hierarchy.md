@@ -429,9 +429,9 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | `param_directions_` | list[ParamDirection] | Parameter directions, same length as params_ |
 | `return_types_` | list[TypePtr] | Return types |
 | `body_` | StmtPtr | Function body |
-| `level_` | optional[Level] | Hierarchy level (auto-derived from `func_type_` for InCore/Group/Orchestration; see below) |
-| `role_` | optional[Role] | Hierarchy role (auto-derived from `func_type_` for InCore/Group/Orchestration; see below) |
-| `attrs_` | map[str, Any] | Free-form metadata (IgnoreField) |
+| `level_` | optional[Level] | Hierarchy level (auto-derived from `func_type_` for InCore/AIC/AIV/Group/Orchestration; see below) |
+| `role_` | optional[Role] | Hierarchy role (auto-derived from `func_type_` for InCore/AIC/AIV/Group/Orchestration; see below) |
+| `attrs_` | list[(str, Any)] | Ordered free-form metadata, exposed as `UsualField` (participates in structural traversal) |
 
 ### Auto-derivation of `level_` / `role_`
 

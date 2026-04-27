@@ -34,11 +34,19 @@ from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, 
 # Both @pl.function(level>=HOST, role=Worker) and
 # with pl.at(level>=HOST, role=Worker) store source here.
 
-_sub_worker_registry: dict[str, dict[str, str]] = {}
+# Keyed by ``id(prog)`` (program identity) rather than ``prog.name`` so that
+# two programs with the same class name — or recompilations that drop all
+# SubWorkers — never share or leak stale registry entries.
+_sub_worker_registry: dict[int, dict[str, str]] = {}
 
 
 def _register_sub_worker_callables(prog: ir.Program, callables: dict[str, str]) -> None:
-    _sub_worker_registry[prog.name] = callables
+    if callables:
+        _sub_worker_registry[id(prog)] = callables
+    else:
+        # Clear any prior entry so a recompilation that removed all SubWorkers
+        # is reflected (instead of returning stale source).
+        _sub_worker_registry.pop(id(prog), None)
 
 
 def get_sub_worker_callables(prog: ir.Program) -> dict[str, str]:
@@ -47,7 +55,7 @@ def get_sub_worker_callables(prog: ir.Program) -> dict[str, str]:
     Returns:
         Dict mapping function name to source text.
     """
-    return _sub_worker_registry.get(prog.name, {})
+    return _sub_worker_registry.get(id(prog), {})
 
 
 @dataclasses.dataclass
@@ -1031,7 +1039,10 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
 
             # Extract HOST Worker source for SubWorker registration.
             # Sources come from two paths:
-            # 1. @pl.function(level>=HOST, role=Worker) — extract via inspect.getsource
+            # 1. @pl.function(level>=HOST, role=Worker) — extract via _get_source_info
+            #    (re-uses linecache / `python -c` fallbacks). Raise on failure
+            #    instead of registering an empty body — empty source becomes a
+            #    much harder-to-diagnose codegen failure later.
             # 2. with pl.at(level>=HOST, role=Worker) — captured by parser
             sub_workers: dict[str, str] = {}
             for func_def in func_defs:
@@ -1043,18 +1054,21 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                 ):
                     original_method = getattr(c, func_def.name, None)
                     if original_method is not None:
-                        try:
-                            import inspect  # noqa: PLC0415
-
-                            sub_workers[func_def.name] = inspect.getsource(original_method)
-                        except OSError:
-                            sub_workers[func_def.name] = ""
+                        _src_file, src_lines, _start_line = _get_source_info(original_method, "function")
+                        source = "".join(src_lines)
+                        if not source.strip():
+                            raise ParserError(
+                                f"Cannot retrieve source for HOST Worker function "
+                                f"'{func_def.name}'. SubWorker codegen requires the "
+                                f"original Python source text."
+                            )
+                        sub_workers[func_def.name] = source
 
             # Merge sub_worker bodies from with pl.at() scopes
             sub_workers.update(all_sub_worker_bodies)
 
-            if sub_workers:
-                _register_sub_worker_callables(prog, sub_workers)
+            # Always call register so empty SubWorker recompilations clear stale entries.
+            _register_sub_worker_callables(prog, sub_workers)
 
             return prog
 

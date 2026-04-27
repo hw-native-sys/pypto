@@ -967,6 +967,66 @@ def _strip_auto_name_suffix(name: str) -> str:
     return name[:idx] if idx > 0 else name
 
 
+def _strip_inline_comment(line: str) -> str:
+    """Strip a Python inline ``#`` comment, ignoring ``#`` inside string literals."""
+    in_str: str | None = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_str is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+        elif ch in ("'", '"'):
+            in_str = ch
+        elif ch == "#":
+            return line[:i]
+        i += 1
+    return line
+
+
+def _find_def_body_start(lines: list[str]) -> int:
+    """Return the index of the first body line in a Python ``def`` block.
+
+    Skips decorators, then advances past the full function signature
+    (which may span multiple lines). The signature ends at the first
+    top-level ``:`` (parens depth == 0). Strings and inline ``#`` comments
+    are handled so they do not falsely match the colon.
+    """
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("@"):
+            continue
+        if not stripped.startswith("def "):
+            return i
+        paren = 0
+        for j in range(i, len(lines)):
+            sig_line = _strip_inline_comment(lines[j])
+            in_str: str | None = None
+            k = 0
+            while k < len(sig_line):
+                ch = sig_line[k]
+                if in_str is not None:
+                    if ch == "\\":
+                        k += 2
+                        continue
+                    if ch == in_str:
+                        in_str = None
+                elif ch in ("'", '"'):
+                    in_str = ch
+                elif ch in "([{":
+                    paren += 1
+                elif ch in ")]}":
+                    paren -= 1
+                elif ch == ":" and paren == 0:
+                    return j + 1
+                k += 1
+        return len(lines)
+    return len(lines)
+
+
 def _generate_sub_worker_source(
     func_name: str,
     body_source: str,
@@ -985,27 +1045,23 @@ def _generate_sub_worker_source(
     if body_source:
         dedented = textwrap.dedent(body_source)
         lines = dedented.splitlines()
-        body_start = 0
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.startswith("@"):
-                body_start = i + 1
-                continue
-            if stripped.startswith("def "):
-                # Advance past the full function signature (may span multiple lines).
-                # The signature ends at the first line whose stripped form ends with ':'.
-                for j in range(i, len(lines)):
-                    if lines[j].rstrip().endswith(":"):
-                        body_start = j + 1
-                        break
-                break
+        body_start = _find_def_body_start(lines)
         body_lines = lines[body_start:]
         if body_lines:
             user_func_lines = textwrap.dedent("\n".join(body_lines))
 
     # The body source uses original (pre-SSA) names; IR params carry SSA suffixes.
     # Use original names for _user_* params so the body references resolve correctly.
-    orig_names = [_strip_auto_name_suffix(n) for n in param_names]
+    # If two SSA-renamed params share the same base (e.g. x__ssa_v0 + x__ssa_v1
+    # when an outer var is captured across redefinitions), de-dup with a numeric
+    # suffix to keep the emitted ``def _user_*`` syntactically valid.
+    seen: dict[str, int] = {}
+    orig_names: list[str] = []
+    for n in param_names:
+        base = _strip_auto_name_suffix(n)
+        idx = seen.get(base, 0)
+        seen[base] = idx + 1
+        orig_names.append(base if idx == 0 else f"{base}_{idx}")
     orig_params_str = ", ".join(orig_names)
     ssa_params_str = ", ".join(param_names)
 
@@ -1037,21 +1093,47 @@ def _collect_chip_task_functions(
     orch_func: _ir_core.Function,
     program: _ir_core.Program,
 ) -> list[_ir_core.Function]:
-    """Collect an Orchestration function and all its InCore/kernel children."""
-    result = [orch_func]
-    # Find all functions called by this orchestration that are InCore-type
-    for func in program.functions.values():
-        if func is orch_func:
-            continue
-        ft = func.func_type
-        if ft in (
-            _ir_core.FunctionType.InCore,
-            _ir_core.FunctionType.AIC,
-            _ir_core.FunctionType.AIV,
-            _ir_core.FunctionType.Group,
-            _ir_core.FunctionType.Spmd,
-        ):
-            result.append(func)
+    """Collect ``orch_func`` and all chip-level callees reachable from its body.
+
+    Walks the call graph starting from ``orch_func`` and returns any
+    InCore/AIC/AIV/Group/Spmd function transitively called. This filters out
+    chip kernels belonging to *other* orchestrations in multi-orchestration
+    programs (e.g., L3 programs with multiple ``with pl.at(level=CHIP)``
+    scopes), preventing redundant compilation and cross-orchestration name
+    collisions in ``next_levels/{orch}/`` artifacts.
+    """
+    chip_func_types = (
+        _ir_core.FunctionType.InCore,
+        _ir_core.FunctionType.AIC,
+        _ir_core.FunctionType.AIV,
+        _ir_core.FunctionType.Group,
+        _ir_core.FunctionType.Spmd,
+    )
+
+    result: list[_ir_core.Function] = [orch_func]
+    visited: set[str] = {orch_func.name}
+    work: list[_ir_core.Function] = [orch_func]
+
+    while work:
+        func = work.pop()
+        for stmt in _ir_core.flatten_to_stmts(func.body):
+            call = None
+            if isinstance(stmt, _ir_core.EvalStmt):
+                call = stmt.expr
+            elif isinstance(stmt, _ir_core.AssignStmt):
+                call = stmt.value
+            if not (isinstance(call, _ir_core.Call) and isinstance(call.op, _ir_core.GlobalVar)):
+                continue
+            callee_name = call.op.name
+            if callee_name in visited:
+                continue
+            callee = program.get_function(callee_name)
+            if callee is None or callee.func_type not in chip_func_types:
+                continue
+            visited.add(callee_name)
+            result.append(callee)
+            work.append(callee)
+
     return result
 
 

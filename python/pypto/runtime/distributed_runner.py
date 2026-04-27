@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 _DTYPE_MAP: dict[str, tuple[type, torch.dtype]] = {
     "FLOAT32": (ctypes.c_float, torch.float32),
-    "FLOAT16": (ctypes.c_char, torch.float16),
-    "BFLOAT16": (ctypes.c_char, torch.bfloat16),
+    "FLOAT16": (ctypes.c_uint8, torch.float16),
+    "BFLOAT16": (ctypes.c_uint8, torch.bfloat16),
     "INT8": (ctypes.c_int8, torch.int8),
     "INT16": (ctypes.c_int16, torch.int16),
     "INT32": (ctypes.c_int32, torch.int32),
@@ -45,6 +45,11 @@ def _tensor_from_continuous(ct) -> torch.Tensor:
 
     The returned tensor shares the same memory as the ContinuousTensor
     (via shared memory), so modifications are visible across processes.
+
+    For dtypes that ``torch.from_numpy`` cannot accept directly (FP16/BF16),
+    we view the buffer as raw bytes (uint8) and reinterpret with
+    ``torch.Tensor.view(dtype)`` — a zero-copy bit-cast that preserves the
+    shared-memory aliasing required for ``Out``/``InOut`` parameters.
     """
     dtype_key = str(ct.dtype)
     c_type, torch_dtype = _DTYPE_MAP.get(dtype_key, (ctypes.c_float, torch.float32))
@@ -53,13 +58,20 @@ def _tensor_from_continuous(ct) -> torch.Tensor:
     for s in ct.shapes:
         n_elements *= s
 
+    # Compute the buffer length in units of c_type, then in elements of torch_dtype.
+    element_bytes = ctypes.sizeof(c_type)
+    torch_bytes = torch.tensor([], dtype=torch_dtype).element_size()
+    n_c_elements = n_elements * torch_bytes // element_bytes
+
     arr = np.ctypeslib.as_array(
         ctypes.cast(ct.data, ctypes.POINTER(c_type)),
-        shape=(n_elements,),
+        shape=(n_c_elements,),
     )
-    t = torch.from_numpy(arr).reshape(ct.shapes)
-    # Avoid unnecessary copy when numpy dtype already matches torch dtype
-    return t if t.dtype == torch_dtype else t.to(torch_dtype)
+    t = torch.from_numpy(arr)
+    if t.dtype != torch_dtype:
+        # view(dtype) reinterprets the bytes without copying — preserves shared memory.
+        t = t.view(torch_dtype)
+    return t.reshape(ct.shapes)
 
 
 def _load_generated_module(path: Path) -> Any:

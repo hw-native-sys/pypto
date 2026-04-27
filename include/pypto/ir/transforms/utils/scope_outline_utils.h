@@ -808,6 +808,9 @@ class ScopeOutliner : public IRMutator {
   static std::string GenerateHierarchySuffix(Level level, const std::optional<Role>& role) {
     std::string name = "_";
     switch (level) {
+      case Level::UNDEFINED:
+        name += "undefined";
+        break;
       case Level::AIV:
         name += "aiv";
         break;

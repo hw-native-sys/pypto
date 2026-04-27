@@ -393,9 +393,9 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 | `param_directions_` | list[ParamDirection] | 参数方向，与 params_ 长度相同 |
 | `return_types_` | list[TypePtr] | 返回类型 |
 | `body_` | StmtPtr | 函数体 |
-| `level_` | optional[Level] | 层次级别（对 InCore/Group/Orchestration 自动派生，详见下文） |
-| `role_` | optional[Role] | 层次角色（对 InCore/Group/Orchestration 自动派生，详见下文） |
-| `attrs_` | map[str, Any] | 自由形式元数据（IgnoreField） |
+| `level_` | optional[Level] | 层次级别（对 InCore/AIC/AIV/Group/Orchestration 自动派生，详见下文） |
+| `role_` | optional[Role] | 层次角色（对 InCore/AIC/AIV/Group/Orchestration 自动派生，详见下文） |
+| `attrs_` | list[(str, Any)] | 有序的自由形式元数据，以 `UsualField` 暴露（参与结构遍历） |
 
 ### `level_` / `role_` 自动派生
 
