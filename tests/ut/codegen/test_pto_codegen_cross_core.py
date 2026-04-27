@@ -740,10 +740,10 @@ class TestExpandMixedKernelCodegen:
 
         assert "main_incore_0_aic" in codes, "AIC function should be generated"
         aic_body = _extract_func_section(codes["main_incore_0_aic"], "main_incore_0_aic")
-        assert "pto.textract" in aic_body, "AIC should keep the tile.slice producer before C2V push"
+        assert "pto.subview" in aic_body, "AIC should keep the tile.slice producer before C2V push"
         assert "pto.tpush_to_aiv" in aic_body, "AIC should push the sliced row to AIV"
-        assert aic_body.index("pto.textract") < aic_body.index("pto.tpush_to_aiv"), (
-            "AIC should extract the row tile before pushing it across cores"
+        assert aic_body.index("pto.subview") < aic_body.index("pto.tpush_to_aiv"), (
+            "AIC should subview the row tile before pushing it across cores"
         )
 
         assert "main_incore_0_aiv" in codes, "AIV function should be generated"

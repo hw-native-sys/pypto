@@ -182,13 +182,31 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     }
   }
 
-  // Slice preserves dtype but uses static shape for allocation and valid_shape for logical extent.
+  // Slice produces a window over the source tile.  PTO's pto.subview semantics
+  // require the result tile_buf to share dtype, memory space, and the four
+  // tile-config fields (blayout, slayout, fractal, pad) with the source.
+  // Inherit only those fields from the source TileView; recompute the
+  // window-specific fields (valid_shape and physical stride/start_offset are
+  // inherent to the slice itself, not the parent buffer).  Tiles without an
+  // explicit TileView fall back to inferring layout from shape (covers
+  // intermediate IR built before backend-level allocation).
   TileView tile_view;
+  if (tile_type->tile_view_.has_value()) {
+    const auto& src_v = *tile_type->tile_view_;
+    tile_view.blayout = src_v.blayout;
+    tile_view.slayout = src_v.slayout;
+    tile_view.fractal = src_v.fractal;
+    tile_view.pad = src_v.pad;
+  } else {
+    tile_view.blayout = InferTileLayoutFromShape(new_shape);
+  }
   tile_view.valid_shape = valid_shape;
 
-  tile_view.blayout = InferTileLayoutFromShape(new_shape);
-
-  // Read optional pad_value kwarg (default PadValue::null = no padding).
+  // Optional pad_value kwarg overrides the inherited pad mode.  When the user
+  // explicitly requests padding on a slice, codegen will reject it via
+  // CheckSubviewTileCompat (pto.subview is a pure view and cannot pad) and
+  // direct callers to use tile.fillpad on the slice result.
+  bool pad_value_specified = false;
   PadValue pad_value = PadValue::null;
   for (const auto& [k, v] : kwargs) {
     if (k != "pad_value") continue;
@@ -198,9 +216,12 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
     CHECK(pad_value == PadValue::null || pad_value == PadValue::zero || pad_value == PadValue::max ||
           pad_value == PadValue::min)
         << "tile.slice pad_value has invalid enum value: " << static_cast<int>(pad_value);
+    pad_value_specified = true;
     break;
   }
-  tile_view.pad = pad_value;
+  if (pad_value_specified) {
+    tile_view.pad = pad_value;
+  }
 
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }

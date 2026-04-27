@@ -789,7 +789,13 @@ class TestBroadcastOpsCodegen:
 
 
 class TestTileSliceCodegen:
-    """Tests for tile.slice PTO code generation (pto.textract)."""
+    """Tests for tile.slice PTO code generation (pto.subview).
+
+    tile.slice lowers to pto.subview — a pure view alias of the source tile —
+    rather than the historical pto.textract data-movement op.  The result tile
+    inherits the source's tile_buf configuration (loc/dtype/blayout/slayout/
+    fractal/pad) and only the shape/valid_shape change.
+    """
 
     def _generate_mlir(self, program_cls) -> str:
         """Run PassManager and PTOCodegen on the given program, return MLIR string."""
@@ -805,7 +811,7 @@ class TestTileSliceCodegen:
         return codegen_instance.generate(single)
 
     def test_tile_slice_codegen(self):
-        """tile.slice(tile[32,32], [16,16], [0,0]) should generate pto.textract."""
+        """tile.slice(tile[32,32], [16,16], [0,0]) should generate pto.subview."""
 
         @pl.program
         class Prog:
@@ -820,10 +826,18 @@ class TestTileSliceCodegen:
                 return pl.store(sliced, [0, 0], dst)
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.textract" in mlir, f"tile.slice should generate pto.textract, got:\n{mlir}"
+        assert "pto.subview" in mlir, f"tile.slice should generate pto.subview, got:\n{mlir}"
+        assert "pto.textract" not in mlir, f"tile.slice no longer emits pto.textract, got:\n{mlir}"
+        # Subview line must carry both source and result tile_buf types and a
+        # static `sizes [R, C]` attribute matching the slice shape.
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines, "no pto.subview line emitted"
+        line = subview_lines[0]
+        assert "sizes [16, 16]" in line, f"sizes attribute must be [16, 16], got:\n{line}"
+        assert "rows=16, cols=16" in line, f"result tile_buf must carry rows=16, cols=16, got:\n{line}"
 
     def test_tile_slice_codegen_with_valid_shape(self):
-        """tile.slice(..., valid_shape=...) should still generate pto.textract."""
+        """tile.slice(..., valid_shape=...) emits pto.subview with `valid` operands."""
 
         @pl.program
         class Prog:
@@ -841,8 +855,12 @@ class TestTileSliceCodegen:
                 return pl.store(sliced, [0, 0], dst)
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.textract" in mlir, (
-            f"tile.slice with valid_shape should generate pto.textract, got:\n{mlir}"
+        assert "pto.subview" in mlir, f"tile.slice with valid_shape should generate pto.subview, got:\n{mlir}"
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines, "no pto.subview line emitted"
+        # The `valid [...]` clause must be present when valid_shape is given.
+        assert any("valid [" in line for line in subview_lines), (
+            "pto.subview should carry `valid [...]` operands, got:\n" + "\n".join(subview_lines)
         )
 
     def test_tile_slice_multiple_slices_have_correct_types(self):
@@ -851,8 +869,8 @@ class TestTileSliceCodegen:
         Reproduces the Qwen3 decode pattern:
             load [1,512] → reshape [4,128] → slice [4,64]@[0,0] + slice [4,64]@[0,64]
         Both slices share the same MemRef and PTO buffer (sequential execution),
-        but their ins()/outs() type annotations must reflect the [4,64] slice
-        shape, not the [1,512] root alloc shape.
+        but their pto.subview result tile_buf types must reflect the [4,64]
+        slice shape, not the [1,512] root alloc shape.
         """
 
         @pl.program
@@ -872,15 +890,73 @@ class TestTileSliceCodegen:
 
         mlir = self._generate_mlir(Prog)
 
-        textract_lines = [line.strip() for line in mlir.splitlines() if "pto.textract" in line]
-        assert len(textract_lines) == 2, (
-            f"Expected 2 pto.textract (lo+hi slices), got {len(textract_lines)}:\n"
-            + "\n".join(textract_lines)
+        subview_lines = [line.strip() for line in mlir.splitlines() if "pto.subview" in line]
+        assert len(subview_lines) == 2, (
+            f"Expected 2 pto.subview (lo+hi slices), got {len(subview_lines)}:\n" + "\n".join(subview_lines)
         )
-        for line in textract_lines:
-            assert "rows=4" in line and "cols=64" in line, (
-                f"textract outs() type should be rows=4,cols=64 (slice shape), got:\n{line}"
+        # Both subviews must declare the [4, 64] sub-shape on their result type.
+        for line in subview_lines:
+            result_type = line.split("->", 1)[-1]
+            assert "rows=4" in result_type and "cols=64" in result_type, (
+                f"subview result type should be rows=4,cols=64 (slice shape), got:\n{line}"
             )
+
+
+class TestTileAssembleCodegen:
+    """Tests for tile.assemble PTO code generation (pto.subview + pto.tmov).
+
+    tile.assemble lowers to:
+      1. (optional) pto.tmov target → dst when buffer reuse did not merge them.
+      2. %dst_view = pto.subview %dst[row, col] sizes [...] : ... -> ...
+      3. pto.tmov ins(%src) outs(%dst_view)
+    The historical pto.tinsert copy op is no longer emitted.
+    """
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_assemble_codegen(self):
+        """tile.assemble lowers to pto.subview + pto.tmov, never pto.tinsert."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                target_in: pl.Tensor[[16, 128], pl.FP32],
+                source_in: pl.Tensor[[16, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                target: pl.Tile[[16, 128], pl.FP32] = pl.load(target_in, [0, 0], [16, 128])
+                source: pl.Tile[[16, 64], pl.FP32] = pl.load(source_in, [0, 0], [16, 64])
+                result: pl.Tile[[16, 128], pl.FP32] = pl.tile.assemble(target, source, [0, 64])
+                return pl.store(result, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tinsert" not in mlir, f"tile.assemble no longer emits pto.tinsert, got:\n{mlir}"
+        # Exactly one pto.subview should carve out the destination window.
+        subview_lines = [line.strip() for line in mlir.splitlines() if "pto.subview" in line]
+        assert len(subview_lines) == 1, (
+            f"Expected one pto.subview for tile.assemble, got {len(subview_lines)}:\n"
+            + "\n".join(subview_lines)
+        )
+        sv = subview_lines[0]
+        assert "sizes [16, 64]" in sv, f"subview sizes must equal source shape: {sv}"
+        # The actual data write is a pto.tmov from src into the subview SSA.
+        view_ssa = sv.split(" = ", 1)[0].strip()
+        assert any("pto.tmov" in line and f"outs({view_ssa}" in line for line in mlir.splitlines()), (
+            f"tile.assemble should pto.tmov into the subview SSA {view_ssa!r}, got:\n{mlir}"
+        )
 
 
 class TestSetValidShapeCodegen:
