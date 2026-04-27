@@ -303,6 +303,9 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
   } else {
     // 3-arg form fallback: allocate tmp via extra_alloc_tiles (no hardware addr; only safe if
     // this code path is not reached at --pto-level=level3).
+    CHECK(!src_type.empty()) << "tile.transpose 3-arg form requires src to have a tile-buf type annotation; "
+                             << "use the 4-arg form (with pre-allocated tmp) when src is a ForStmt result or "
+                             << "tile.reshape view";
     tmp_ssa = codegen.AllocNewTileBuf(src_type, "ttrans_tmp");
   }
 

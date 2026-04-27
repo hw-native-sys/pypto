@@ -29,7 +29,6 @@ from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-
 # --- Shared init helpers ---
 
 

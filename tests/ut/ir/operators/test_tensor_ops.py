@@ -2133,8 +2133,9 @@ def test_tensor_gather_dim_last_axis_positive():
 
 def test_tensor_gather_rejects_bad_dim():
     inp, idx = _make_gather_inputs()
-    with pytest.raises(Exception, match=r"dim=-1 or dim=rank-1"):
-        ir.op.tensor.gather(inp, dim=0, index=idx)
+    # rank=2, valid dims are -2..1. dim=2 is out of range.
+    with pytest.raises(Exception, match=r"dim"):
+        ir.op.tensor.gather(inp, dim=2, index=idx)
 
 
 def test_tensor_gather_rejects_non_int32_index():
@@ -2168,7 +2169,7 @@ def test_tensor_gather_rejects_non_matching_outer_dim():
     K = ir.ConstInt(3, DataType.INT32, span)
     inp = ir.Var("inp", ir.TensorType([B, N], DataType.FP32), span)
     idx = ir.Var("idx", ir.TensorType([B2, K], DataType.INT32), span)
-    with pytest.raises(Exception, match=r"non-gather axis"):
+    with pytest.raises(Exception, match=r"non-gather axes"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
