@@ -30,9 +30,26 @@ import contextvars
 from typing import Any
 
 from .runner import RunConfig
-from .task_interface import (
-    Worker as _SimplerWorker,  # pyright: ignore[reportAttributeAccessIssue]
-)
+
+# ``simpler`` is loaded lazily on first ``Worker(...)`` instantiation, matching
+# the pattern used by ``device_runner.py`` (imported via lazy ``from .device_runner
+# import ...`` inside function bodies). Eager loading would make ``simpler`` a
+# hard import-time dependency of ``pypto.runtime`` and break unit-test
+# environments that do not install simpler.
+_SimplerWorker: type | None = None
+
+
+def _get_simpler_worker_cls() -> type:
+    global _SimplerWorker  # noqa: PLW0603 - module-level cache that tests patch directly
+    if _SimplerWorker is None:
+        from .task_interface import (  # noqa: PLC0415
+            Worker as _W,  # pyright: ignore[reportAttributeAccessIssue]
+        )
+
+        _SimplerWorker = _W
+    assert _SimplerWorker is not None
+    return _SimplerWorker
+
 
 # Stack of active workers (most-recent last). ContextVar gives correct
 # scoping under nested ``with`` blocks and ``asyncio`` tasks.
@@ -92,7 +109,7 @@ class Worker:
         self._runtime = runtime
         self._token: contextvars.Token | None = None
 
-        self._impl = _SimplerWorker(
+        self._impl = _get_simpler_worker_cls()(
             level=level,
             device_id=self._config.device_id,
             platform=self._config.platform,

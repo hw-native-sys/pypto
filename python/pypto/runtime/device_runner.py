@@ -495,6 +495,11 @@ def execute_on_device(
         aicpu_thread_num: Number of AICPU threads.
         enable_profiling: Enable runtime profiling.
         runtime_env: Optional per-example environment variable overrides.
+            Applied around the device ``run`` call. When an active
+            :class:`pypto.runtime.Worker` is reused, ``init()`` has already
+            executed before this call, so env vars that influence device
+            initialization will not take effect on the reuse path — pass
+            those at ``Worker(...)`` construction instead.
     """
     if level != 2:
         raise ValueError(
