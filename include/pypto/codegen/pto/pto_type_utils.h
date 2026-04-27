@@ -54,12 +54,17 @@ struct TileTypeComponents {
 };
 
 /// Extract dtype, shape, and layout from a TileType into a TileTypeComponents struct.
-/// @param dtype_to_mlir  A callable (DataType -> string) for dtype conversion.
-///                       Typically PTOCodegen::GetTypeString or DataTypeToMLIR.
-/// @param force_all_dynamic  When true AND any dim is dynamic, force both v_row/v_col to dynamic.
+///
+/// `v_row_dynamic` / `v_col_dynamic` are always set when the corresponding rank is
+/// present, so the resulting `!pto.tile_buf<...>` type string always reads
+/// `v_row=?, v_col=?`. The actual extents are conveyed via the `valid_row` /
+/// `valid_col` operands on `pto.alloc_tile` (see ComputeAllocTileFields).
+///
+/// @param dtype_str_override Optional override for the dtype string (e.g.,
+///                           PTOCodegen::GetTypeString); empty falls back to
+///                           DataTypeToMLIR(tile_type.dtype_).
 TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type,
-                                       const std::string& dtype_str_override = "",
-                                       bool force_all_dynamic = false);
+                                       const std::string& dtype_str_override = "");
 
 }  // namespace codegen
 }  // namespace pypto

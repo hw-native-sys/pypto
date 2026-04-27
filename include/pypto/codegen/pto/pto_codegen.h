@@ -147,9 +147,6 @@ class PTOCodegen : public CodegenBase {
    */
   std::string EmitCastToI32(const ir::ExprPtr& expr, const std::string& mlir_name);
 
-  /// Check if a tile variable is consumed by a tile.fillpad operation.
-  bool HasFillpadConsumer(const ir::Var* var) const;
-
   /**
    * @brief Register a variable to an MLIR SSA name
    *
@@ -223,8 +220,7 @@ class PTOCodegen : public CodegenBase {
    * Needed when multiple variables with different shapes share the same MemRef
    * (e.g., reshape input/output).
    */
-  std::string GetTileBufTypeStringFromTileType(const std::shared_ptr<const ir::TileType>& tile_type,
-                                               bool force_all_dynamic = false) const;
+  std::string GetTileBufTypeStringFromTileType(const std::shared_ptr<const ir::TileType>& tile_type) const;
 
   /**
    * @brief Allocate a new tile buffer for codegen (emitted at function scope)
@@ -377,11 +373,10 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Bundle of fields needed to emit a `pto.alloc_tile` op.
    *
-   * Centralises the rules that decide:
-   *   - whether the type string carries `v_row=?` / `v_col=?` (dynamic),
-   *   - whether the `valid_row`/`valid_col` operands must be present
-   *     (only when the type is dynamic, no pad, no fillpad consumer, ...),
-   *   - whether physical or runtime SSA values feed those operands.
+   * `pto.alloc_tile` is always emitted in dynamic form: the type string carries
+   * `v_row=?, v_col=?`, and `valid_row` / `valid_col` operands carry the
+   * actual extent (constant SSA when the IR-level extent is a constant,
+   * runtime SSA otherwise).
    *
    * Returned by ComputeAllocTileFields and consumed by EmitAllocTileForVar
    * (single-statement allocs) and the IfStmt return-tile path
@@ -390,20 +385,21 @@ class PTOCodegen : public CodegenBase {
   struct AllocTileFields {
     std::string type_str;       ///< pto.tile_buf<...> type string
     std::string addr_ssa;       ///< Optional addr operand SSA value
-    std::string valid_row_ssa;  ///< Optional valid_row operand SSA value
-    std::string valid_col_ssa;  ///< Optional valid_col operand SSA value
+    std::string valid_row_ssa;  ///< valid_row operand SSA value (always emitted)
+    std::string valid_col_ssa;  ///< valid_col operand SSA value (always emitted)
   };
 
   /**
    * @brief Compute the type string and (addr, valid_row, valid_col) operands
-   *        for a pto.alloc_tile op in a way that mirrors PTOAS verifier rules.
+   *        for a `pto.alloc_tile` op.
    *
-   * @param owning_var Var that owns the tile (used to detect fillpad consumers).
-   *                   May be nullptr for deferred allocs that have no owning Var.
-   * @param tile_type  Tile type carrying shape/tile_view/memref metadata.
+   * The result is always dynamic (`v_row=?, v_col=?`) and carries explicit
+   * `valid_row` / `valid_col` operands lowered from `tile_type->tile_view_.valid_shape`
+   * when present, falling back to `tile_type->shape_` otherwise.
+   *
+   * @param tile_type Tile type carrying shape/tile_view/memref metadata.
    */
-  AllocTileFields ComputeAllocTileFields(const ir::Var* owning_var,
-                                         const std::shared_ptr<const ir::TileType>& tile_type);
+  AllocTileFields ComputeAllocTileFields(const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
    * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
@@ -452,7 +448,6 @@ class PTOCodegen : public CodegenBase {
     std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
     std::set<const ir::Var*> emitted_tile_alloc_vars;
     std::map<const ir::Var*, TpopResultInfo> tpop_result_vars;
-    std::set<const ir::Var*> fillpad_input_vars;
 
     ir::FunctionPtr current_function;
     ir::VarPtr current_result_var;
@@ -489,7 +484,6 @@ class PTOCodegen : public CodegenBase {
       tile_var_allocs.clear();
       emitted_tile_alloc_vars.clear();
       tpop_result_vars.clear();
-      fillpad_input_vars.clear();
 
       current_function.reset();
       current_result_var.reset();

@@ -110,8 +110,7 @@ std::string FormatTileBufTypeString(const std::string& loc, const std::string& d
   return oss.str();
 }
 
-TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std::string& dtype_str_override,
-                                       bool force_all_dynamic) {
+TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std::string& dtype_str_override) {
   TileTypeComponents c;
   c.dtype_str = dtype_str_override.empty() ? DataTypeToMLIR(tile_type.dtype_) : dtype_str_override;
 
@@ -124,8 +123,14 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
       c.cols = c0->value_;
     }
   }
+  // Valid extent is always conveyed dynamically via `valid_row` / `valid_col`
+  // operands on `pto.alloc_tile`; the type string therefore always reads
+  // `v_row=?, v_col=?`. The numeric `v_row` / `v_col` fields below are kept
+  // for symmetry but are ignored by the formatter when *_dynamic is true.
   c.v_row = c.rows;
   c.v_col = c.cols;
+  c.v_row_dynamic = true;
+  c.v_col_dynamic = true;
 
   if (tile_type.tile_view_.has_value()) {
     const auto& tv = *tile_type.tile_view_;
@@ -133,30 +138,6 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
     c.slayout = tv.slayout;
     c.fractal = tv.fractal;
     c.pad = tv.pad;
-    bool has_pad = (c.pad != ir::PadValue::null);
-    bool has_any_dynamic = false;
-    if (!has_pad && tv.valid_shape.size() >= 1) {
-      if (auto c0 = As<ir::ConstInt>(tv.valid_shape[0])) {
-        c.v_row = c0->value_;
-      } else if (tv.valid_shape[0]) {
-        // Any non-ConstInt expression (Var, Call, BinaryOp, ...) → dynamic.
-        c.v_row_dynamic = true;
-        has_any_dynamic = true;
-      }
-    }
-    if (!has_pad && tv.valid_shape.size() >= 2) {
-      if (auto c1 = As<ir::ConstInt>(tv.valid_shape[1])) {
-        c.v_col = c1->value_;
-      } else if (tv.valid_shape[1]) {
-        // Any non-ConstInt expression (Var, Call, BinaryOp, ...) → dynamic.
-        c.v_col_dynamic = true;
-        has_any_dynamic = true;
-      }
-    }
-    if (force_all_dynamic && has_any_dynamic) {
-      c.v_row_dynamic = true;
-      c.v_col_dynamic = true;
-    }
   } else if (c.cols == 1 && c.rows > 1) {
     c.blayout = ir::TileLayout::col_major;
   }

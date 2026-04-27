@@ -330,13 +330,22 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     # Both share the same addr (same MemRef)
     assert "addr = %c0_i64" in alloc_lines[0]
     assert "addr = %c0_i64" in alloc_lines[1]
-    # Dynamic valid_shape tile: type has v_row=?, v_col=? (both dynamic per PTOAS requirement)
+    # All alloc_tile types are emitted with v_row=?, v_col=? in the unified
+    # always-dynamic codegen. The actual extents are conveyed via
+    # valid_row / valid_col operands.
     assert "v_row=?" in alloc_lines[0], f"Expected dynamic v_row=? in alloc: {alloc_lines[0]}"
     assert "v_col=?" in alloc_lines[0], f"Expected dynamic v_col=? in alloc: {alloc_lines[0]}"
-    # Padded tile has static v_row/v_col (physical dims) since fillpad makes it fully valid
+    # Padded tile carries the same dynamic v_row=?/v_col=? type, retains pad=2,
+    # and sources its valid_row/valid_col operands from the physical dims.
     assert "pad=2>" in alloc_lines[1], f"Expected fillpad pad metadata to be preserved: {alloc_lines[1]}"
-    assert "v_row=128" in alloc_lines[1], f"Expected static v_row in padded tile: {alloc_lines[1]}"
-    assert "v_col=128" in alloc_lines[1], f"Expected static v_col in padded tile: {alloc_lines[1]}"
+    assert "v_row=?" in alloc_lines[1], f"Expected dynamic v_row=? in padded tile: {alloc_lines[1]}"
+    assert "v_col=?" in alloc_lines[1], f"Expected dynamic v_col=? in padded tile: {alloc_lines[1]}"
+    assert "valid_row = %c128_index" in alloc_lines[1], (
+        f"Expected valid_row = %c128_index operand in padded tile: {alloc_lines[1]}"
+    )
+    assert "valid_col = %c128_index" in alloc_lines[1], (
+        f"Expected valid_col = %c128_index operand in padded tile: {alloc_lines[1]}"
+    )
 
 
 def test_pto_codegen_fillpad_inplace():
@@ -448,12 +457,18 @@ def test_pto_codegen_dynamic_valid_shape_scalar_defined_in_body():
 
     assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
     alloc_line = alloc_lines[0]
-    # Only the actually dynamic dim (v_col) is ?, v_row stays static
-    assert "v_row=1" in alloc_line, f"Expected static v_row=1 in tile_buf type, got: {alloc_line}"
+    # Unified always-dynamic alloc_tile: type carries v_row=?/v_col=? with
+    # explicit valid_row/valid_col operands. valid_row comes from a constant
+    # (1) and valid_col from the user-defined dynamic scalar.
+    assert "v_row=?" in alloc_line, f"Expected dynamic v_row=? in tile_buf type, got: {alloc_line}"
     assert "v_col=?" in alloc_line, f"Expected dynamic v_col=? in tile_buf type, got: {alloc_line}"
-    # No fillpad → dynamic variable used as operand, no set_validshape
+    assert "valid_row = %c1_index" in alloc_line, (
+        f"Expected valid_row = %c1_index operand in alloc: {alloc_line}"
+    )
     assert "valid_col" in alloc_line, f"Expected valid_col operand in alloc: {alloc_line}"
     assert "%c-1" not in mlir_code
+    # alloc_tile already carries the runtime valid_col, so no separate
+    # pto.set_validshape is emitted.
     assert "pto.set_validshape" not in mlir_code
 
 
@@ -486,11 +501,17 @@ def test_pto_codegen_dynamic_valid_shape_row_defined_in_body():
 
     assert len(alloc_lines) == 1, f"Expected one alloc_tile, got: {alloc_lines}"
     alloc_line = alloc_lines[0]
-    # Only the actually dynamic dim (v_row) is ?, v_col stays static
+    # Unified always-dynamic alloc_tile: type carries v_row=?/v_col=? with
+    # explicit valid_row/valid_col operands. valid_row comes from the user-
+    # defined dynamic scalar; valid_col is a constant (16).
     assert "v_row=?" in alloc_line, f"Expected dynamic v_row=? in tile_buf type, got: {alloc_line}"
-    assert "v_col=16" in alloc_line, f"Expected static v_col=16 in tile_buf type, got: {alloc_line}"
-    # No fillpad → dynamic variable used as valid_row operand, no set_validshape
+    assert "v_col=?" in alloc_line, f"Expected dynamic v_col=? in tile_buf type, got: {alloc_line}"
     assert "valid_row" in alloc_line, f"Expected valid_row operand in alloc: {alloc_line}"
+    assert "valid_col = %c16_index" in alloc_line, (
+        f"Expected valid_col = %c16_index operand in alloc: {alloc_line}"
+    )
+    # alloc_tile already carries the runtime valid_row, so no separate
+    # pto.set_validshape is emitted.
     assert "pto.set_validshape" not in mlir_code
 
 
@@ -1556,7 +1577,7 @@ def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
         f"textract should not reference slice_buf: {textract_lines[0]}"
     )
 
-    # The tfillpad input type should have v_row=? and v_col=? (force_all_dynamic)
+    # All tile_buf types use the always-dynamic `v_row=?, v_col=?` form.
     fillpad_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tfillpad" in line]
     assert len(fillpad_lines) == 1, f"Expected one tfillpad, got: {fillpad_lines}"
     assert "v_row=?" in fillpad_lines[0], f"fillpad input should have v_row=?: {fillpad_lines[0]}"

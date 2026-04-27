@@ -144,8 +144,9 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
         // Reuse the same alloc_tile rules as EmitAllocTileForVar so this
-        // deferred alloc honours pad / fillpad / dynamic gating identically.
-        AllocTileFields fields = ComputeAllocTileFields(return_var.get(), tile_type);
+        // deferred alloc emits a dynamic-validShape `pto.alloc_tile` with
+        // explicit valid_row / valid_col operands.
+        AllocTileFields fields = ComputeAllocTileFields(tile_type);
         std::string ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
                                                fields.valid_row_ssa, fields.valid_col_ssa);
         BindVarToMlir(return_var, ret_name);

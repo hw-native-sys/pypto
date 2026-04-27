@@ -710,44 +710,10 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   tload_line << tile_buf << " : " << tile_buf_type << ")";
   codegen.Emit(tload_line.str());
 
-  // Emit pto.set_validshape after tload only when a fillpad consumer exists.
-  // Physical dims were used for alloc_tile (correct DMA stride); set_validshape
-  // sets the actual valid region before fillpad pads the rest.
-  auto result_var = codegen.GetCurrentResultVar();
-  if (result_var) {
-    auto tile_type = ir::As<ir::TileType>(result_var->GetType());
-    if (tile_type && tile_type->tile_view_.has_value() && codegen.HasFillpadConsumer(result_var.get())) {
-      const auto& tv = tile_type->tile_view_.value();
-      bool has_dynamic = false;
-      std::string vr, vc;
-
-      // Extract valid_row SSA
-      if (tv.valid_shape.size() >= 1) {
-        if (auto var = ir::As<ir::Var>(tv.valid_shape[0])) {
-          std::string mlir_name = codegen.GetVarName(var);
-          vr = codegen.EmitCastToIndex(var, mlir_name);
-          has_dynamic = true;
-        } else if (auto c = ir::As<ir::ConstInt>(tv.valid_shape[0])) {
-          vr = codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
-        }
-      }
-
-      // Extract valid_col SSA
-      if (tv.valid_shape.size() >= 2) {
-        if (auto var = ir::As<ir::Var>(tv.valid_shape[1])) {
-          std::string mlir_name = codegen.GetVarName(var);
-          vc = codegen.EmitCastToIndex(var, mlir_name);
-          has_dynamic = true;
-        } else if (auto c = ir::As<ir::ConstInt>(tv.valid_shape[1])) {
-          vc = codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
-        }
-      }
-
-      if (has_dynamic && !vr.empty() && !vc.empty()) {
-        codegen.Emit("pto.set_validshape " + tile_buf + ", " + vr + ", " + vc + " : " + tile_buf_type);
-      }
-    }
-  }
+  // No follow-up `pto.set_validshape` is emitted: every `pto.alloc_tile`
+  // already carries the desired `valid_row` / `valid_col` operands. Downstream
+  // consumers (fillpad / set_validshape / ...) read them directly from the
+  // alloc.
 
   return "";
 }

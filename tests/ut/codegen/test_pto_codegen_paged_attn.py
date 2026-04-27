@@ -219,7 +219,8 @@ class UnalignedPagedAttention:
 
 
 def test_unaligned_tile_ops_codegen():
-    """Test that unaligned paged attention emits pto.set_validshape."""
+    """Test that unaligned paged attention emits dynamic-validShape alloc_tiles
+    with explicit valid_row/valid_col operands."""
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.Ascend910B)
 
@@ -239,24 +240,39 @@ def test_unaligned_tile_ops_codegen():
     mlir_code = codegen_instance.generate(single_func_program)
     assert mlir_code, "Generated MLIR code should not be empty"
 
-    # pto.set_validshape must be present
-    assert "pto.set_validshape" in mlir_code, f"Expected pto.set_validshape in MLIR output, got:\n{mlir_code}"
+    # alloc_tile already carries the runtime valid_col, so PTO codegen no longer
+    # emits a separate pto.set_validshape op.
+    assert "pto.set_validshape" not in mlir_code, (
+        f"Did not expect pto.set_validshape (alloc_tile carries valid_row/valid_col), got:\n{mlir_code}"
+    )
 
-    # sij_tile alloc: dynamic type (v_row=?, v_col=?)
     alloc_lines = [line.strip() for line in mlir_code.split("\n") if "pto.alloc_tile" in line]
+
+    # sij_tile alloc: dynamic type (v_row=?, v_col=?) with valid_col coming
+    # from the runtime context-length scalar (passed as %argN).
     sij_alloc = [line for line in alloc_lines if "sij_tile" in line or "s_tile" in line]
     assert len(sij_alloc) >= 1, f"Expected sij/s_tile alloc, got alloc_lines: {alloc_lines}"
     assert "v_col=?" in sij_alloc[0], f"Expected dynamic v_col=? in sij_tile alloc: {sij_alloc[0]}"
     assert "v_row=?" in sij_alloc[0], f"Expected dynamic v_row=? in sij_tile alloc: {sij_alloc[0]}"
+    assert "valid_col = %arg" in sij_alloc[0], (
+        f"Expected runtime valid_col operand in sij_tile alloc: {sij_alloc[0]}"
+    )
 
-    # sij_padded alloc: static v_col=128 and pad=3 (PadValue.min)
+    # sij_padded alloc: still pad=3 (PadValue.min); the type is now dynamic
+    # v_row=?/v_col=? but valid_col operand carries the physical 128 dim.
     sij_padded_alloc = [line for line in alloc_lines if "sij_padded" in line or "s_padded" in line]
     assert len(sij_padded_alloc) >= 1, f"Expected sij_padded/s_padded alloc, got: {alloc_lines}"
     assert "pad=3>" in sij_padded_alloc[0], (
         f"Expected pad=3 (PadValue.min) in sij_padded alloc: {sij_padded_alloc[0]}"
     )
-    assert "v_col=128" in sij_padded_alloc[0], (
-        f"Expected static v_col=128 in padded alloc: {sij_padded_alloc[0]}"
+    assert "v_col=?" in sij_padded_alloc[0], (
+        f"Expected dynamic v_col=? in padded alloc: {sij_padded_alloc[0]}"
+    )
+    assert "v_row=?" in sij_padded_alloc[0], (
+        f"Expected dynamic v_row=? in padded alloc: {sij_padded_alloc[0]}"
+    )
+    assert "valid_col = %c128_index" in sij_padded_alloc[0], (
+        f"Expected valid_col = %c128_index operand in padded alloc: {sij_padded_alloc[0]}"
     )
 
 

@@ -167,10 +167,24 @@ def test_if_else_dyn_valid_shape_has_dynamic_alloc(if_else_mlir: str):
     assert "v_col=?" in s_tile_allocs[0], f"Expected dynamic v_col=? in s_tile alloc: {s_tile_allocs[0]}"
 
 
-def test_if_else_dyn_valid_shape_has_set_validshape(if_else_mlir: str):
-    """Verify the generated code emits pto.set_validshape for fillpad-consumed tiles."""
-    assert "pto.set_validshape" in if_else_mlir, (
-        f"Expected pto.set_validshape in MLIR output:\n{if_else_mlir}"
+def test_if_else_dyn_valid_shape_alloc_carries_runtime_valid_col(if_else_mlir: str):
+    """Verify the s_tile alloc carries the runtime valid_col directly.
+
+    With unified always-dynamic alloc_tile, the runtime valid_col flows through
+    the alloc_tile valid_col operand instead of a separate pto.set_validshape op
+    after the tload.
+    """
+    assert "pto.set_validshape" not in if_else_mlir, (
+        "alloc_tile already carries valid_row/valid_col; "
+        f"did not expect a separate pto.set_validshape:\n{if_else_mlir}"
+    )
+    alloc_lines = [line.strip() for line in if_else_mlir.split("\n") if "pto.alloc_tile" in line]
+    s_tile_allocs = [line for line in alloc_lines if "s_tile" in line]
+    assert len(s_tile_allocs) >= 1, f"Expected s_tile alloc, got alloc_lines: {alloc_lines}"
+    # The runtime valid_col is materialised as %vlen* (the scf.if-yielded scalar)
+    # and threaded through the alloc_tile.
+    assert "valid_col = %vlen" in s_tile_allocs[0], (
+        f"Expected valid_col operand sourced from %vlen in s_tile alloc: {s_tile_allocs[0]}"
     )
 
 

@@ -291,10 +291,6 @@ std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string
   return mlir_name;
 }
 
-bool PTOCodegen::HasFillpadConsumer(const ir::Var* var) const {
-  return fs_.fillpad_input_vars.count(var) > 0;
-}
-
 // ========================================================================
 // Expression visitors - Logical & Bitwise
 // ========================================================================
