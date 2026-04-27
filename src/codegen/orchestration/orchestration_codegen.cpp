@@ -1011,7 +1011,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   // --- Alias generation helpers ---
 
   std::vector<ParamDirection> GetEffectiveDirections(const FunctionPtr& callee) {
-    if (callee->func_type_ == FunctionType::Group) {
+    if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
       return ComputeGroupEffectiveDirections(callee, program_);
     }
     return callee->param_directions_;
@@ -1052,11 +1052,22 @@ class OrchestrationStmtCodegen : public CodegenBase {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     if (!callee) return;
 
-    auto effective_dirs = GetEffectiveDirections(callee);
+    auto call_arg_directions = call->GetArgDirections();
+    bool has_call_dirs = (call_arg_directions.size() == call->args_.size());
     std::vector<size_t> out_indices;
-    for (size_t i = 0; i < effective_dirs.size(); ++i) {
-      if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
-        out_indices.push_back(i);
+    if (has_call_dirs) {
+      for (size_t i = 0; i < call_arg_directions.size(); ++i) {
+        ArgDirection d = call_arg_directions[i];
+        if (d == ArgDirection::Output || d == ArgDirection::InOut || d == ArgDirection::OutputExisting) {
+          out_indices.push_back(i);
+        }
+      }
+    } else {
+      auto effective_dirs = GetEffectiveDirections(callee);
+      for (size_t i = 0; i < effective_dirs.size(); ++i) {
+        if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
+          out_indices.push_back(i);
+        }
       }
     }
 
@@ -1066,12 +1077,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
           << " (has " << out_indices.size() << " Out/InOut params)";
       size_t param_idx = out_indices[static_cast<size_t>(elem.index)];
-      INTERNAL_CHECK_SPAN(param_idx < effective_dirs.size(), call->span_)
+      INTERNAL_CHECK_SPAN(param_idx < call->args_.size(), call->span_)
           << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
-          << " (has " << effective_dirs.size() << " params)";
-      if (effective_dirs[param_idx] == ParamDirection::InOut) {
-        continue;
-      }
+          << " (has " << call->args_.size() << " args)";
+
       if (!effective_uses_.count(elem.var)) {
         continue;
       }

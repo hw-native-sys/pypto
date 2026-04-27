@@ -2230,6 +2230,56 @@ class TestTensorReadWriteOffsetCodegen:
         assert "params_t0.launch_spec.set_block_num(4);" in code
         assert "params_t0.launch_spec.set_require_sync_start(true);" in code
 
+    def test_spmd_multi_assemble(self):
+        """SPMD multi-output call with assemble should preserve both OutputExisting tuple aliases."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdMultiAssembleProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b0: pl.Tensor[[16, 16], pl.FP32],
+                b1: pl.Tensor[[16, 16], pl.FP32],
+                out0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+                tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                tile_b0: pl.Tile[[16, 16], pl.FP32] = pl.load(b0, [0, 0], [16, 16])
+                tile_b1: pl.Tile[[16, 16], pl.FP32] = pl.load(b1, [0, 0], [16, 16])
+                acc0: pl.Tile[[16, 16], pl.FP32] = pl.matmul(tile_a, tile_b0)
+                res0: pl.Tensor[[16, 16], pl.FP32] = pl.store(acc0, [0, 0], out0)
+                acc1: pl.Tile[[16, 16], pl.FP32] = pl.matmul(tile_a, tile_b1)
+                res1: pl.Tensor[[16, 16], pl.FP32] = pl.store(acc1, [0, 0], out1)
+                return res0, res1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b0: pl.Tensor[[16, 16], pl.FP32],
+                b1: pl.Tensor[[16, 16], pl.FP32],
+                out0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+                with pl.spmd(4):
+                    out0, out1 = self.kernel(a, b0, b1, out0, out1)
+                return out0, out1
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = passes.expand_mixed_kernel()(
+                passes.infer_tile_memory_space()(
+                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiAssembleProgram))
+                )
+            )
+        code = _generate_orch_code(transformed)
+
+        assert "add_output(ext_out0)" in code and "add_output(ext_out1)" in code, (
+            f"SPMD tuple outputs must remain OutputExisting at call site. Generated code:\n{code}"
+        )
+
 
 class TestUnregisteredOpError:
     """Test that unregistered/misplaced ops in Orchestration functions raise errors."""
