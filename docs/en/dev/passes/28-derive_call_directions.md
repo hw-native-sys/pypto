@@ -9,11 +9,11 @@ PyPTO uses a **two-layer direction model** (introduced in commit `c53dac0d`):
 - `ParamDirection` (`In` / `Out` / `InOut`) lives on the callee `Function` and describes the function-signature contract — *"I read/write this parameter."*
 - `ArgDirection` (`Input` / `Output` / `InOut` / `OutputExisting` / `NoDep` / `Scalar`) lives on each `Call` site and describes the runtime task-submission semantics — *"this submission establishes these dependencies and uses this memory ownership model."*
 
-The two layers must agree but are not identical: a callee `Out` parameter may legitimately become either `Output`, `OutputExisting`, or `InOut` at the call site depending on whether the destination was allocated locally and whether other writers have already touched the same buffer.
+The two layers must agree but are not identical: under `DeriveCallDirections`, a callee `Out` parameter may become either `OutputExisting` or `InOut` at the call site depending on whether other writers have already touched the same buffer. `ArgDirection::Output` is reserved for explicitly populated call sites where the runtime should allocate a fresh output buffer; this pass never infers it.
 
 `DeriveCallDirections` is the pass that bridges the two layers. It walks every non-builtin `Call` in every `Function` body and writes the resolved per-argument vector to `Call.attrs["arg_directions"]` (the reserved key `kAttrArgDirections`, value type `std::vector<ArgDirection>`). Downstream consumers — orchestration codegen and the runtime task-submission layer — read this vector instead of recomputing it from raw param directions.
 
-**When to use**: Run after the tile pipeline has stabilized (`SplitIncoreOrch` is required) and before any consumer that observes `Call.attrs["arg_directions"]`. In the `Default` strategy it sits between `FuseCreateAssembleToSlice` and the final `Simplify` (entry 28 in `python/pypto/ir/pass_manager.py`).
+**When to use**: Run after the tile pipeline has stabilized (`SplitIncoreOrch` is required) and before any consumer that observes `Call.attrs["arg_directions"]`. In the `Default` strategy it sits between `FuseCreateAssembleToSlice` and the final `Simplify` (doc slot 28 — the 28th pipeline pass excluding utility passes; see `.claude/rules/pass-doc-ordering.md` for the numbering scheme).
 
 ## Properties
 
@@ -21,7 +21,7 @@ The two layers must agree but are not identical: a callee `Out` parameter may le
 | -------- | -------- | ----------- |
 | `SplitIncoreOrch` | `CallDirectionsResolved` | — |
 
-The `CallDirectionsResolved` property is verified by the registered `CallDirectionsResolvedPropertyVerifier` (`src/ir/verifier/verify_call_directions.cpp`), so the pipeline auto-checks the integrity of the produced `arg_directions` after this pass runs — no separate verify pass exists. See [Verifier](99-verifier.md).
+The `CallDirectionsResolved` property is verified by the registered `CallDirectionsResolved` property verifier (factory `CreateCallDirectionsResolvedPropertyVerifier()` in `src/ir/verifier/verify_call_directions.cpp`), so the pipeline auto-checks the integrity of the produced `arg_directions` after this pass runs — no separate verify pass exists. See [Verifier](99-verifier.md).
 
 ## API
 
@@ -77,9 +77,9 @@ For each positional argument the mutator picks a direction by this table:
 
 **R-seq** keeps cross-iteration write-after-write chains correct inside sequential loops: the same buffer slot is written once per iteration, so the runtime must serialize iterations on it. **R-prior** preserves the cross-sibling WAW dependency when an earlier writer-unit in the same scope already touched the same root.
 
-A pre-populated `Call.attrs["arg_directions"]` is treated as authoritative and left untouched (the `Call` constructor's `ValidateArgDirectionsAttr` enforces length compatibility, and some directions like `NoDep` are not derivable structurally).
+A pre-populated `Call.attrs["arg_directions"]` is treated as authoritative and left untouched (some directions like `NoDep` are not derivable structurally). The `Call` constructor's `ValidateArgDirectionsAttr` only enforces arity when the vector is non-empty; an empty vector can still be attached and will later be rejected by the `CallDirectionsResolved` verifier.
 
-**Idempotency**: when the freshly computed direction vector equals the call's existing one, the mutator skips the rewrite. Running the pass twice therefore produces structurally identical IR (regression-tested by `TestDeriveIdempotent::test_idempotent`).
+**Idempotency**: the mutator skips any call that already has `attrs["arg_directions"]` (`HasArgDirections()`), so a second run leaves resolved calls untouched. Running the pass twice therefore produces structurally identical IR (regression-tested by `TestDeriveIdempotent::test_idempotent`).
 
 ## Example
 

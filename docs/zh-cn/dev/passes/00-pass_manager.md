@@ -368,15 +368,18 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 4. [`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md)
 5. `NormalizeStmtStructure`
 6. `ExpandMixedKernel`
-7. `SplitVectorKernel`
-8. `NormalizeReturnOrder`
-9. `InitMemRef`
-10. `MemoryReuse`
-11. `LegalizePTOBufferReuse`
-12. `AllocateMemoryAddr`
-13. `FuseCreateAssembleToSlice`
-14. [`DeriveCallDirections`](28-derive_call_directions.md)
-15. `Simplify`
+7. [`InjectGMPipeBuffer`](18-inject_gm_pipe_buffer.md)
+8. `SplitVectorKernel`
+9. `NormalizeReturnOrder`
+10. [`LowerPipelineLoops`](21-lower_pipeline_loops.md)
+11. [`CanonicalizeIOOrder`](22-canonicalize_io_order.md)
+12. `InitMemRef`
+13. `MemoryReuse`
+14. `LegalizePTOBufferReuse`
+15. `AllocateMemoryAddr`
+16. `FuseCreateAssembleToSlice`
+17. [`DeriveCallDirections`](28-derive_call_directions.md)
+18. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

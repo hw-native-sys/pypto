@@ -9,11 +9,11 @@ PyPTO 采用**两层方向模型**（在提交 `c53dac0d` 中引入）：
 - `ParamDirection`（`In` / `Out` / `InOut`）位于被调用方 `Function` 上，描述函数签名约定——*"我读取/写入这个参数"*。
 - `ArgDirection`（`Input` / `Output` / `InOut` / `OutputExisting` / `NoDep` / `Scalar`）位于每个 `Call` 调用点上，描述运行时任务提交语义——*"本次提交建立这些依赖关系并采用这种内存所有权模型"*。
 
-两层必须保持一致，但并不完全相同：被调用方的 `Out` 参数在调用点上可能合理地变为 `Output`、`OutputExisting` 或 `InOut`，取决于目的地是否在本地分配以及是否已有其他写入者触及同一缓冲区。
+两层必须保持一致，但并不完全相同：就当前 `DeriveCallDirections` 的推导规则而言，被调用方的 `Out` 参数在调用点上会变为 `OutputExisting` 或 `InOut`，取决于该缓冲区是否已被其他写入者触及。`ArgDirection::Output` 仅用于显式填写方向时表达"运行时分配输出缓冲区"的语义，本 pass 不会自动推导出该方向。
 
 `DeriveCallDirections` 就是连接两层的 pass。它遍历每个 `Function` body 中的所有非 builtin `Call`，并将解析后的每参数向量写入 `Call.attrs["arg_directions"]`（保留键 `kAttrArgDirections`，值类型为 `std::vector<ArgDirection>`）。下游消费者——orchestration 代码生成和运行时任务提交层——直接读取该向量，而不是从原始参数方向重新计算。
 
-**何时使用**：在 tile 流水线稳定后（要求满足 `SplitIncoreOrch`）、并在任何观察 `Call.attrs["arg_directions"]` 的消费者之前运行。在 `Default` 策略中，它位于 `FuseCreateAssembleToSlice` 与最终 `Simplify` 之间（`python/pypto/ir/pass_manager.py` 的第 28 项）。
+**何时使用**：在 tile 流水线稳定后（要求满足 `SplitIncoreOrch`）、并在任何观察 `Call.attrs["arg_directions"]` 的消费者之前运行。在 `Default` 策略中，它位于 `FuseCreateAssembleToSlice` 与最终 `Simplify` 之间（文档编号 28，即排除 utility pass 后的第 28 个 pipeline pass；编号规则见 `.claude/rules/pass-doc-ordering.md`）。
 
 ## 属性
 
@@ -21,7 +21,7 @@ PyPTO 采用**两层方向模型**（在提交 `c53dac0d` 中引入）：
 | -------- | -------- | ----------- |
 | `SplitIncoreOrch` | `CallDirectionsResolved` | — |
 
-`CallDirectionsResolved` 属性由已注册的 `CallDirectionsResolvedPropertyVerifier`（`src/ir/verifier/verify_call_directions.cpp`）验证，因此 pass 运行后流水线会自动检查所产生的 `arg_directions` 完整性——不存在独立的 verify pass。参见[验证器](99-verifier.md)。
+`CallDirectionsResolved` 属性由 `src/ir/verifier/verify_call_directions.cpp` 中通过 `CreateCallDirectionsResolvedPropertyVerifier()` 注册/创建的 `CallDirectionsResolved` 属性验证器进行验证，因此 pass 运行后流水线会自动检查所产生的 `arg_directions` 完整性——不存在独立的 verify pass。参见[验证器](99-verifier.md)。
 
 ## API
 
@@ -77,9 +77,9 @@ program_with_dirs = derive_pass(program)
 
 **R-seq** 在顺序循环内保持跨迭代的 write-after-write 链：同一缓冲区槽每次迭代都会被写入一次，因此运行时必须在该槽上序列化迭代。**R-prior** 当同一作用域中较早的写入单元已经触及同一 root 时，保留跨兄弟的 WAW 依赖关系。
 
-预先填充的 `Call.attrs["arg_directions"]` 被视为权威信息并保持不变（`Call` 构造函数中的 `ValidateArgDirectionsAttr` 强制长度匹配，且像 `NoDep` 这类方向无法从结构上推导得出）。
+预先填充的 `Call.attrs["arg_directions"]` 被视为权威信息并保持不变（像 `NoDep` 这类方向也无法仅从结构上推导得出）。需要注意的是，`Call` 构造函数中的 `ValidateArgDirectionsAttr` 只会在向量非空时检查其长度是否与参数个数匹配；空向量仍可被构造，但随后不会通过 `CallDirectionsResolved` 的属性验证。
 
-**幂等性**：当新计算的方向向量与调用现有方向向量相等时，mutator 会跳过重写。因此连续运行该 pass 两次会产生结构上完全相同的 IR（由 `TestDeriveIdempotent::test_idempotent` 回归测试验证）。
+**幂等性**：mutator 一旦发现 `attrs["arg_directions"]` 已存在（`HasArgDirections()`）即直接保留原 `Call`，所以第二次运行时已解析的调用不会被改写。因此连续运行该 pass 两次会产生结构上完全相同的 IR（由 `TestDeriveIdempotent::test_idempotent` 回归测试验证）。
 
 ## 示例
 
