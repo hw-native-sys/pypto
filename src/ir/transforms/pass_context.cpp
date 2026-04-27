@@ -13,7 +13,9 @@
 
 #include <algorithm>
 #include <fstream>
+#include <ios>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -212,7 +214,7 @@ void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& ph
   // pipelines whose distinct ReportInstruments happen to share an output
   // directory. Serialise file appends so per-line writes don't interleave.
   static std::mutex perf_hints_log_mu;
-  std::lock_guard<std::mutex> lock(perf_hints_log_mu);
+  std::scoped_lock lock(perf_hints_log_mu);
 
   const std::string path = dir + "/perf_hints.log";
   std::ofstream f(path, std::ios::app);

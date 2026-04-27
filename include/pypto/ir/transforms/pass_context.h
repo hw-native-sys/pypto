@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/reporter/report.h"
 #include "pypto/ir/transforms/ir_property.h"
