@@ -261,15 +261,9 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tile.transpose supports two forms:
-  //   3-arg: (src, axis1, axis2)         -- legacy form used by FlattenTileNdTo2D
-  //   4-arg: (src, tmp, axis1, axis2)    -- form used by gather lowering; tmp is a pre-allocated
-  //                                         scratch TileType with same shape/dtype as src, so
-  //                                         pto.ttrans can receive a hardware-addressed tmp buffer.
-  CHECK(args.size() == 3 || args.size() == 4)
-      << "tile.transpose requires 3 arguments (src, axis1, axis2) or "
-         "4 arguments (src, tmp, axis1, axis2), but got "
-      << args.size();
+  // tile.transpose requires exactly 3 arguments: input tile, axis1, axis2
+  CHECK(args.size() == 3) << "tile.transpose requires exactly 3 arguments (input, axis1, axis2), but got "
+                          << args.size();
 
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -281,15 +275,13 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 
   CHECK(ndim >= 2) << "tile.transpose requires at least 2 dimensions, but got " << ndim;
 
-  // Axis args: positions 1,2 in 3-arg form; positions 2,3 in 4-arg form.
-  size_t axis1_idx = (args.size() == 4) ? 2 : 1;
-  size_t axis2_idx = (args.size() == 4) ? 3 : 2;
+  // Second argument is axis1 (ConstInt)
+  auto axis1_const = As<ConstInt>(args[1]);
+  CHECK(axis1_const) << "tile.transpose requires second argument (axis1) to be a ConstInt";
 
-  auto axis1_const = As<ConstInt>(args[axis1_idx]);
-  CHECK(axis1_const) << "tile.transpose requires axis1 to be a ConstInt";
-
-  auto axis2_const = As<ConstInt>(args[axis2_idx]);
-  CHECK(axis2_const) << "tile.transpose requires axis2 to be a ConstInt";
+  // Third argument is axis2 (ConstInt)
+  auto axis2_const = As<ConstInt>(args[2]);
+  CHECK(axis2_const) << "tile.transpose requires third argument (axis2) to be a ConstInt";
 
   int axis1 = NormalizeAxis(static_cast<int>(axis1_const->value_), ndim);
   int axis2 = NormalizeAxis(static_cast<int>(axis2_const->value_), ndim);

@@ -879,21 +879,20 @@ void OpConversionRegistry::RegisterSortOps() {
 //   Final reshape [I0,I1*K]→[I0*I1,K]; tile.store at [0,0,0].
 //
 // Case 3  rank==3, dim==0 (first):
-//   Phase A – loop a over S0: load [1,I1,I2]→reshape[1,I1*I2] → src_tile[S0,I1*I2].
-//   Transpose src_tile → src_t[I1*I2,S0].
-//   Load idx [I0,I1,I2] (type at construction [I0,I1,I2]; after flatten [I0*I1,I2])
-//     → reshape[I0,I1*I2] → transpose idx_t[I1*I2,I0].
-//   Phase B – loop r over I1*I2: slice src_t[r]→[1,S0], idx_t[r]→[1,I0],
-//     gather → [1,I0]; inner_acc[I1*I2,I0].
-//   Transpose inner_acc→[I0,I1*I2]; reshape→[I0*I1,I2]; tile.store at [0,0,0].
+//   Flat-index gather: for each output row r = i0*I1+i1:
+//     inp_flat = inp[:, i1, :].flatten()  → [1, S0*I2]
+//     idx_row  = idx[i0, i1, :]           → [1, I2]
+//     flat_idx = idx_row * I2 + [0..I2-1] → [1, I2]
+//     out_row  = gather(inp_flat, flat_idx) → [1, I2]
+//   Accumulator [I0*I1, I2]; reshape→[I0*I1,I2]; tile.store at [0,0,0].
 //
 // Case 4  rank==3, dim==1 (middle):
-//   Outer loop over I0: load [1,S1,I2]→reshape[S1,I2]→transpose[I2,S1];
-//     load [1,I1,I2]→reshape[I1,I2]→transpose[I2,I1].
-//   Inner loop over I2: slice inp_at[c]→[1,S1], idx_at[c]→[1,I1];
-//     gather→[1,I1]; inner_acc[I2,I1].
-//   Transpose[I1,I2]; reshape→[1,I1*I2]; outer acc [I0,I1*I2].
-//   Final reshape [I0,I1*I2]→[I0*I1,I2]; tile.store at [0,0,0].
+//   Flat-index gather: for each output row r = i0*I1+i1:
+//     inp_flat = inp[i0, :, :].flatten()  → [1, S1*I2]
+//     idx_row  = idx[i0, i1, :]           → [1, I2]
+//     flat_idx = idx_row * I2 + [0..I2-1] → [1, I2]
+//     out_row  = gather(inp_flat, flat_idx) → [1, I2]
+//   Accumulator [I0*I1, I2]; reshape→[I0*I1,I2]; tile.store at [0,0,0].
 // ============================================================================
 
 void OpConversionRegistry::RegisterGatherOps() {
