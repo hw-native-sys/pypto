@@ -121,10 +121,11 @@ class TileInnermostDimVerifier : public PropertyVerifier {
     // `pass-context-config` rule. With no context (e.g. a verifier run in
     // isolation), there is no backend to consult — silently skip rather
     // than emit advice that may be wrong for the real target.
+    // GetBackendHandler() is documented as non-null (throws ValueError if
+    // the backend type has not been configured), so no null-check is needed.
     const auto* ctx = PassContext::Current();
     if (ctx == nullptr) return;
     const auto* handler = ctx->GetBackendHandler();
-    if (handler == nullptr) return;
 
     TileInnermostDimVisitor visitor(diagnostics, handler->GetRecommendedInnermostDimBytes(),
                                     handler->GetL2CacheLineBytes(), handler->GetPtoTargetArch());

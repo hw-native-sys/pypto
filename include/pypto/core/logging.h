@@ -350,8 +350,9 @@ class LoggerManager {
    * @brief Resolve the default log level for this process.
    *
    * Reads `PYPTO_LOG_LEVEL` once. Accepted values: "debug", "info", "warn",
-   * "error", "fatal", "event", "none" (case-sensitive). When the env var is
-   * unset, falls back to INFO in release and DEBUG in non-release builds.
+   * "error", "fatal", "event", "none" (case-insensitive — values are
+   * lowercased before lookup). When the env var is unset, falls back to INFO
+   * in release and DEBUG in non-release builds.
    *
    * INFO is the release default so performance hints (issue #1180) and other
    * advisory pass output reach the console without users having to opt in.
