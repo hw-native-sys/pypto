@@ -35,6 +35,7 @@
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/pto/pto_codegen.h"
+#include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -446,14 +447,55 @@ static std::string MakeCmpsCodegenPTO(const std::string& pto_op_name, const Call
   return "";
 }
 
-// Helper function for tile.assemble → pto.tinsert
-// Inserts source tile into target tile at a given row/col offset (DPS pattern).
-// pto.tinsert semantics: dst[i+row, j+col] = src[i, j]
+// Verify that two TileTypes share the strict "same tile config" required by
+// pto.subview: identical dtype, identical TileView (blayout, slayout, fractal,
+// pad), and pad must be null since pto.subview is a pure view and does not
+// pad.  Memory-space equality is enforced separately (via memory_inherit
+// rules on the op definition); this helper checks the tile_view fields that
+// must be byte-for-byte compatible for a subview to be legal.
+static void CheckSubviewTileCompat(const ir::TileType& source, const ir::TileType& result,
+                                   const std::string& op_name) {
+  CHECK(source.tile_view_.has_value())
+      << op_name << ": source tile must carry an explicit TileView to be sliced via pto.subview";
+  CHECK(result.tile_view_.has_value())
+      << op_name << ": result tile must carry an explicit TileView to be emitted as pto.subview";
+  CHECK(source.dtype_ == result.dtype_) << op_name << ": source and result must share dtype, got "
+                                        << source.dtype_.ToString() << " vs " << result.dtype_.ToString();
+
+  const auto& src_v = *source.tile_view_;
+  const auto& res_v = *result.tile_view_;
+  CHECK(src_v.blayout == res_v.blayout)
+      << op_name
+      << ": blayout mismatch between source and result; pto.subview requires identical block layout";
+  CHECK(src_v.slayout == res_v.slayout)
+      << op_name
+      << ": slayout mismatch between source and result; pto.subview requires identical scatter layout";
+  CHECK(src_v.fractal == res_v.fractal) << op_name << ": fractal mismatch (" << src_v.fractal << " vs "
+                                        << res_v.fractal << "); pto.subview requires identical fractal";
+  CHECK(src_v.pad == res_v.pad)
+      << op_name << ": pad mismatch between source and result; pto.subview requires identical pad mode";
+  CHECK(src_v.pad == ir::PadValue::null)
+      << op_name << ": pto.subview does not support pad_value (" << static_cast<int>(src_v.pad)
+      << "); apply tile.fillpad on the result tile instead of carrying a pad on the slice/assemble window";
+}
+
+// Helper function for tile.assemble → pto.subview + pto.tmov
+// Writes source tile into target tile at a given row/col offset.  Lowering:
+//   1. (optional) pto.tmov target → dst when buffer reuse did not merge them
+//      (preserves any data outside the insertion window).
+//   2. %dst_view = pto.subview %dst[row, col] sizes [src.rows, src.cols] : ... -> ...
+//   3. pto.tmov ins(%src) outs(%dst_view)
 // Arguments: args[0] = target (destination base), args[1] = source, args[2] = offset MakeTuple
 static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 3) << "tile.assemble requires 3 arguments (target, source, offset), got "
                                << op->args_.size();
+
+  auto target_tile_type = ir::As<ir::TileType>(op->args_[0]->GetType());
+  auto source_tile_type = ir::As<ir::TileType>(op->args_[1]->GetType());
+  INTERNAL_CHECK_SPAN(target_tile_type && source_tile_type, op->span_)
+      << "tile.assemble target and source must both be TileType";
+  CheckSubviewTileCompat(*target_tile_type, *source_tile_type, "tile.assemble");
 
   std::string target = codegen.GetExprAsCode(op->args_[0]);
   std::string src = codegen.GetExprAsCode(op->args_[1]);
@@ -469,9 +511,10 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
   std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
 
-  // pto.tinsert writes src into dst at (row, col) in place — dst must already
-  // contain target's data.  When target and dst are different buffers (i.e.
-  // memory reuse did not merge them), copy target → dst first.
+  // pto.subview is a view, so writing into the dst_view only affects the
+  // [row, col]+sizes window.  Data outside that window must already be present
+  // in dst — when target and dst are different buffers (memory reuse did not
+  // merge them), copy target → dst first to preserve target's outer data.
   if (target != dst) {
     std::string target_type = codegen.GetExprTypeAnnotation(op->args_[0]);
     std::ostringstream mov;
@@ -483,16 +526,77 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
     codegen.Emit(mov.str());
   }
 
-  // Emit pto.tinsert ins(src, row, col) outs(dst)
-  std::ostringstream oss;
-  oss << "pto.tinsert ins(" << src << ", " << row_off << ", " << col_off;
-  if (!src_type.empty()) {
-    oss << " : " << src_type << ", index, index";
+  // Build %dst_view = pto.subview %dst[%row, %col] sizes [R, C] valid [Vr, Vc] : <dst_type> -> <view_type>
+  // The subview "sizes" attribute is the source tile's physical shape, while
+  // the explicit `valid [...]` operands must match the source tile's logical
+  // valid_shape. PTOAS v0.32 validates that the result tile_buf type's
+  // v_row/v_col agree with those explicit valid operands, so the result type
+  // must be static when source valid_shape is static, and dynamic only when the
+  // source valid_shape itself is dynamic.
+  const auto& src_shape = source_tile_type->shape_;
+  INTERNAL_CHECK_SPAN(src_shape.size() >= 2, op->span_)
+      << "tile.assemble source must have at least 2 dimensions for pto.subview";
+  auto rows_const = ir::As<ir::ConstInt>(src_shape[0]);
+  auto cols_const = ir::As<ir::ConstInt>(src_shape[1]);
+  INTERNAL_CHECK_SPAN(rows_const && cols_const, op->span_)
+      << "tile.assemble source shape must be compile-time constant for pto.subview sizes attribute";
+
+  ir::ExprPtr valid_row_expr = src_shape[0];
+  ir::ExprPtr valid_col_expr = src_shape[1];
+  if (source_tile_type->tile_view_.has_value()) {
+    const auto& src_valid = source_tile_type->tile_view_->valid_shape;
+    if (src_valid.size() >= 1 && src_valid[0]) valid_row_expr = src_valid[0];
+    if (src_valid.size() >= 2 && src_valid[1]) valid_col_expr = src_valid[1];
   }
-  oss << ") outs(" << dst;
-  if (!dst_type.empty()) oss << " : " << dst_type;
-  oss << ")";
-  codegen.Emit(oss.str());
+
+  auto valid_row_const = ir::As<ir::ConstInt>(valid_row_expr);
+  auto valid_col_const = ir::As<ir::ConstInt>(valid_col_expr);
+  std::string valid_rows = valid_row_const
+                               ? codegen.GetOrEmitConstant(valid_row_const->value_, DataType::INDEX)
+                               : codegen.GetExprAsCode(valid_row_expr);
+  std::string valid_cols = valid_col_const
+                               ? codegen.GetOrEmitConstant(valid_col_const->value_, DataType::INDEX)
+                               : codegen.GetExprAsCode(valid_col_expr);
+
+  INTERNAL_CHECK_SPAN(source_tile_type->memory_space_.has_value(), op->span_)
+      << "tile.assemble source must carry a memory space for pto.subview result typing";
+  auto view_type_info =
+      codegen::ExtractTileTypeInfo(*source_tile_type, codegen.GetTypeString(source_tile_type->dtype_));
+  if (valid_row_const) {
+    view_type_info.v_row = valid_row_const->value_;
+    view_type_info.v_row_dynamic = false;
+  }
+  if (valid_col_const) {
+    view_type_info.v_col = valid_col_const->value_;
+    view_type_info.v_col_dynamic = false;
+  }
+  std::string view_type = codegen::FormatTileBufTypeString(
+      codegen::MemorySpaceToMLIR(*source_tile_type->memory_space_), view_type_info.dtype_str,
+      view_type_info.rows, view_type_info.cols, view_type_info.blayout, view_type_info.slayout,
+      view_type_info.fractal, view_type_info.pad, view_type_info.v_row, view_type_info.v_col,
+      view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
+
+  std::string dst_view = codegen.NewNamedTemp("assemble_view");
+  std::ostringstream sv;
+  sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes ["
+     << rows_const->value_ << ", " << cols_const->value_ << "]";
+  sv << " valid [" << valid_rows << ", " << valid_cols << "]";
+  if (!dst_type.empty() && !view_type.empty()) {
+    sv << " : " << dst_type << " -> " << view_type;
+  }
+  codegen.Emit(sv.str());
+  if (!view_type.empty()) {
+    codegen.RegisterTileBufType(dst_view, view_type);
+  }
+
+  // Emit pto.tmov ins(%src) outs(%dst_view) — the actual data transfer.
+  std::ostringstream tmov;
+  tmov << "pto.tmov ins(" << src;
+  if (!src_type.empty()) tmov << " : " << src_type;
+  tmov << ") outs(" << dst_view;
+  if (!view_type.empty()) tmov << " : " << view_type;
+  tmov << ")";
+  codegen.Emit(tmov.str());
   return "";
 }
 
@@ -1839,6 +1943,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         << "Operation:[tile.slice] requires 3 or 4 arguments (tile, shape, offset[, valid_shape]), but got "
         << op->args_.size();
 
+    auto source_tile_type = ir::As<ir::TileType>(op->args_[0]->GetType());
+    INTERNAL_CHECK_SPAN(source_tile_type, op->span_) << "tile.slice source must be TileType";
+
     std::string src = codegen.GetExprAsCode(op->args_[0]);
     std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
 
@@ -1850,29 +1957,60 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     std::string row_off = codegen.GetExprAsCode(offset_tuple->elements_[0]);
     std::string col_off = codegen.GetExprAsCode(offset_tuple->elements_[1]);
 
-    std::string result_target = codegen.GetCurrentResultTarget();
+    auto shape_tuple = ir::As<ir::MakeTuple>(op->args_[1]);
+    INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << "tile.slice shape must be a literal tuple";
+    INTERNAL_CHECK_SPAN(shape_tuple->elements_.size() >= 2, op->span_)
+        << "tile.slice shape must have at least 2 elements (rows, cols)";
+    auto rows_const = ir::As<ir::ConstInt>(shape_tuple->elements_[0]);
+    auto cols_const = ir::As<ir::ConstInt>(shape_tuple->elements_[1]);
+    INTERNAL_CHECK_SPAN(rows_const && cols_const, op->span_)
+        << "tile.slice shape must be compile-time constant for pto.subview sizes attribute";
+
+    // Optional valid_shape (4th arg) materialises into pto.subview's
+    // `valid [%vr, %vc]` operands.  Omit them when valid_shape == shape so
+    // the result tile_buf type carries static v_row / v_col.
+    std::string valid_row;
+    std::string valid_col;
+    if (op->args_.size() == 4) {
+      auto valid_tuple = ir::As<ir::MakeTuple>(op->args_[3]);
+      INTERNAL_CHECK_SPAN(valid_tuple, op->span_) << "tile.slice valid_shape must be a literal tuple";
+      INTERNAL_CHECK_SPAN(valid_tuple->elements_.size() >= 2, op->span_)
+          << "tile.slice valid_shape must have at least 2 elements";
+      valid_row = codegen.GetExprAsCode(valid_tuple->elements_[0]);
+      valid_col = codegen.GetExprAsCode(valid_tuple->elements_[1]);
+    }
+
     std::string result_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
 
-    // With per-var alloc model, prefer the pre-declared alloc SSA if its type
-    // matches the slice result type
-    auto existing_type = codegen.GetSSATileBufType(result_target);
-    if (!result_type.empty() && existing_type != result_type) {
-      result_target = codegen.AllocNewTileBuf(result_type, "slice_buf");
-      codegen.SetCurrentResultBuf(result_target);
-    } else if (!result_type.empty()) {
-      codegen.RegisterTileBufType(result_target, result_type);
+    // Verify pto.subview's strict tile-config constraints.  After
+    // DeduceTileSliceType propagates the source TileView, the result type
+    // shares blayout/slayout/fractal/pad with the source by construction;
+    // this guards against future passes that might rewrite the result type.
+    if (auto result_var = codegen.GetCurrentResultVar()) {
+      if (auto result_tile_type = ir::As<ir::TileType>(result_var->GetType())) {
+        CheckSubviewTileCompat(*source_tile_type, *result_tile_type, "tile.slice");
+      }
+    }
+
+    // Allocate a fresh SSA for the subview result and rebind the current
+    // result variable to it; the (now dead) pre-emitted alloc_tile for the
+    // slice variable is harmless and will be eliminated by downstream PTOAS
+    // passes.  Doing it this way avoids redefining the alloc_tile SSA.
+    std::string view_ssa = codegen.NewNamedTemp("slice_view");
+    codegen.SetCurrentResultBuf(view_ssa);
+    if (!result_type.empty()) {
+      codegen.RegisterTileBufType(view_ssa, result_type);
     }
 
     std::ostringstream oss;
-    oss << "pto.textract ins(" << src << ", " << row_off << ", " << col_off;
-    if (!src_type.empty()) {
-      oss << " : " << src_type << ", index, index";
+    oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
+        << rows_const->value_ << ", " << cols_const->value_ << "]";
+    if (!valid_row.empty()) {
+      oss << " valid [" << valid_row << ", " << valid_col << "]";
     }
-    oss << ") outs(" << result_target;
-    if (!result_type.empty()) {
-      oss << " : " << result_type;
+    if (!src_type.empty() && !result_type.empty()) {
+      oss << " : " << src_type << " -> " << result_type;
     }
-    oss << ")";
     codegen.Emit(oss.str());
     return std::string("");
   });

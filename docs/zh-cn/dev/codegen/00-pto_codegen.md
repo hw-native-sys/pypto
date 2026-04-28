@@ -132,9 +132,29 @@ print(pto_code)
 | ---------- | -------------- |
 | `tile.load(tensor, [row, col], [h, w])` | `pto.partition_view` + `pto.tload` |
 | `tile.store(tile, [row, col], tensor)` | `pto.partition_view` + `pto.tstore` |
+| `tile.slice(tile, [h, w], [row, col][, valid_shape=...])` | `pto.subview`（零拷贝视图；仅在传入 `valid_shape` 时输出 `valid [...]` 子句） |
+| `tile.assemble(target, source, [row, col])` | （可选）`pto.tmov target -> dst` + `pto.subview dst[row, col] sizes [src.rows, src.cols]` + `pto.tmov src -> dst_view` |
 | `tile.mul(lhs, rhs)` | `pto.tmul` |
 | `tile.add(a, b, c)` | `pto.taddc` (三操作数加法) |
 | `tile.adds(tile, scalar)` | `pto.tadds` (Tile + 标量) |
+
+**`tile.slice` / `tile.assemble` 下沉细节。** 两个 op 都通过 `pto.subview`
+下沉，它是源 tile 的纯视图别名（不搬数据，也不会额外发 `pto.alloc_tile`）。
+`pto.subview` 要求结果 `tile_buf` 与源 `tile_buf` 在 `dtype`、`memory_space`、
+`blayout`、`slayout`、`fractal` 和 `pad` 上完全一致，因此
+`DeduceTileSliceType` 会将源 `TileView` 的这四个字段透传到结果，使新生成的
+`TileType` 天然满足约束。后端 codegen 还会在下沉时执行 `CheckSubviewTileCompat`
+做兜底校验：
+
+- 源和结果都必须显式携带 `TileView`。
+- `dtype`、`blayout`、`slayout`、`fractal` 与 `pad` 必须严格相等。
+- `pad` 必须为 `PadValue::null`——`pto.subview` 是视图而不是 fillpad；如果
+  需要 zero/min/max 填充，请在切出来的子 tile 上再调用 `tile.fillpad`。
+
+对 `tile.assemble`，前置的 `pto.tmov target → dst` 仅在缓冲复用未把
+`target` 与目标缓冲合并时才会发出，用于保留写入窗口外的数据；末尾的
+`pto.tmov src → dst_view` 才是真正写入由 `pto.subview` 切出的子窗口的数据
+搬运。
 
 ### 跨核操作到 PTO 指令
 

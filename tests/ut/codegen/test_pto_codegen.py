@@ -1550,7 +1550,9 @@ def test_pto_codegen_mixed_scalar_and_tile_iter_args():
 
 
 def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
-    """Slice with partially dynamic valid_shape followed by fillpad must not create spurious slice_buf."""
+    """Slice with partially dynamic valid_shape followed by fillpad must lower
+    to a single pto.subview (no spurious extra alloc) and feed a dynamic
+    valid_shape tile into pto.tfillpad."""
 
     @pl.program
     class SliceFillpadProgram:
@@ -1570,16 +1572,19 @@ def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
 
     mlir_code = _generate_default_mlir(SliceFillpadProgram)
 
-    # No spurious slice_buf should be allocated — slice reuses its pre-allocated buffer
-    assert "slice_buf" not in mlir_code, (
-        f"Unexpected slice_buf allocation — tile.slice should reuse the pre-allocated buffer.\n{mlir_code}"
-    )
+    # tile.slice now lowers to a pto.subview view rather than a textract
+    # data-movement op; no slice_buf scratch allocation should appear.
+    assert "= pto.alloc_tile" not in "\n".join(
+        line for line in mlir_code.splitlines() if "slice_buf" in line
+    ), f"Unexpected slice_buf alloc_tile — pto.subview is a view, no extra buffer needed.\n{mlir_code}"
+    assert "pto.textract" not in mlir_code, f"tile.slice no longer emits pto.textract, got:\n{mlir_code}"
 
-    # The textract should reference the sliced tile's SSA (not a separate slice_buf)
-    textract_lines = [line.strip() for line in mlir_code.splitlines() if "pto.textract" in line]
-    assert len(textract_lines) == 1, f"Expected one textract, got: {textract_lines}"
-    assert "slice_buf" not in textract_lines[0], (
-        f"textract should not reference slice_buf: {textract_lines[0]}"
+    # Exactly one pto.subview should carry the dynamic `valid [...]` operand
+    # corresponding to the partially-dynamic valid_shape on tile.slice.
+    subview_lines = [line.strip() for line in mlir_code.splitlines() if "pto.subview" in line]
+    assert len(subview_lines) == 1, f"Expected one pto.subview, got: {subview_lines}"
+    assert "valid [" in subview_lines[0], (
+        f"pto.subview should carry a `valid [...]` clause for dynamic valid_shape: {subview_lines[0]}"
     )
 
     # All tile_buf types use the always-dynamic `v_row=?, v_col=?` form.

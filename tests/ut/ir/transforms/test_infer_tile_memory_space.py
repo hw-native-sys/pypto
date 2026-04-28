@@ -923,15 +923,21 @@ class TestInferTileMemorySpaceInheritOps:
                 x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
                     x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
-                sliced: pl.Tile[
+                # tile.slice now propagates the source TileView (Mat-implicit
+                # col_major / row_major) into the result so pto.subview is legal,
+                # which means the printer elides the implicit annotation here.
+                sliced: pl.Tile[[16, 64], pl.BF16, pl.MemorySpace.Mat] = pl.tile.slice(
+                    x_tile, [16, 64], [0, 0]
+                )
+                # The move into Vec preserves the slice's Mat-style layout
+                # (col_major / row_major) on the destination buffer; the printer
+                # surfaces this because it differs from the Vec-implicit defaults.
+                sliced_V: pl.Tile[
                     [16, 64],
                     pl.BF16,
-                    pl.MemorySpace.Mat,
-                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-                ] = pl.tile.slice(x_tile, [16, 64], [0, 0])
-                sliced_V: pl.Tile[[16, 64], pl.BF16, pl.MemorySpace.Vec] = pl.move(
-                    sliced, target_memory=pl.MemorySpace.Vec
-                )
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.move(sliced, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(sliced_V, [0, 0], out_0)
                 return out_0
 
@@ -980,12 +986,14 @@ class TestInferTileMemorySpaceInheritOps:
                 x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
                     x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
-                sliced: pl.Tile[
-                    [16, 64],
-                    pl.BF16,
-                    pl.MemorySpace.Mat,
-                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-                ] = pl.tile.slice(x_tile, [16, 64], [0, 0])
+                # tile.slice now inherits the Mat-implicit TileView from x_tile,
+                # so the printer elides the redundant annotation.
+                sliced: pl.Tile[[16, 64], pl.BF16, pl.MemorySpace.Mat] = pl.tile.slice(
+                    x_tile, [16, 64], [0, 0]
+                )
+                # tile.reshape recomputes layout from the new shape, producing
+                # row_major / none_box which differs from Mat-implicit
+                # col_major / row_major and is therefore surfaced by the printer.
                 reshaped: pl.Tile[
                     [1024],
                     pl.BF16,
