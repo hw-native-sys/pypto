@@ -11,10 +11,11 @@
 
 The pass walks Mat-resident ``tile.matmul`` calls, queries
 ``utils::ChooseL0Tile`` against the active backend's L0 capacities, and rewrites
-each call into a peeled first matmul plus a K-loop of ``tile.matmul_acc`` over
-Mat-resident slices.  The K-loop is marked ``ForKind.Pipeline`` with
-``pipeline_stages=2`` whenever the tiled K dimension produces at least three
-sub-iterations (so the loop body has at least two iterations for ping-pong).
+each call into a K-loop that branches on the loop index: the first iteration
+uses ``tile.matmul`` (fresh accumulator) and subsequent iterations use
+``tile.matmul_acc`` (accumulating into the iter-arg).  The loop is marked
+``ForKind.Pipeline`` with ``pipeline_stages=2`` whenever it has at least two
+iterations.
 
 The conftest configures the Ascend950 backend, which advertises L0a/L0b = 64KB
 and L0c = 256KB.  Tests rely on those capacities to predict the chooser's
@@ -29,11 +30,32 @@ Each test is structured as Before / After / Expected:
 The comparison uses ``ir.assert_structural_equal`` with auto-mapping, so
 intermediate Var names may differ between After and Expected — only types and
 structural positions need to match.
+
+The pass emits IR that is intentionally not yet type-correct: the iter-arg
+init is a ``tile.create`` with ``Vec`` target while the yields are
+``Acc``-typed matmul results.  ``InferTileMemorySpace`` (the next pass in
+the pipeline) inserts the Acc↔Vec bridges that make the IR type-correct.
+For unit testing this pass in isolation, ``_run_pass`` disables the
+auto-fixture's BeforeAndAfter type-check verification, mirroring the pattern
+used by ``test_lower_pipeline_loops``.
 """
 
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+
+
+def _run_pass(program: ir.Program) -> ir.Program:
+    """Run AutoTileMatmulL0 with verification suppressed.
+
+    The pass emits intermediate IR with iter-arg/yield TileView mismatches
+    that ``InferTileMemorySpace`` (next pass) will resolve.  Wrapping in a
+    ``VerificationLevel.NONE`` PassContext bypasses the autouse fixture's
+    BeforeAndAfter check and the print/parse roundtrip check, which together
+    expect type-correct IR after every pass.
+    """
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        return passes.auto_tile_matmul_l0()(program)
 
 
 class TestAutoTileMatmulL0KOnly:
@@ -42,8 +64,10 @@ class TestAutoTileMatmulL0KOnly:
     def test_skinny_gemm_pipelined(self):
         """16×64 @ 2048 BF16 → ChooseL0Tile picks (m=16, n=64, k=256).
 
-        K=2048 → 8 K-iterations after peeling → 7 loop iters → Pipeline
-        marker with pipeline_stages=2."""
+        K=2048 → 8 K-iterations → loop runs 8 times with an if-else branching
+        on ``ko == 0`` between ``tile.matmul`` (first iter) and
+        ``tile.matmul_acc`` (later iters).  Loop is Pipeline-marked with
+        ``pipeline_stages=2``."""
 
         @pl.program
         class Before:
@@ -79,20 +103,25 @@ class TestAutoTileMatmulL0KOnly:
                 rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
                     rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
                 )
-                # Peeled first iteration.
-                a0: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat] = pl.tile.slice(lhs_mat, [16, 256], [0, 0])
-                b0: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.slice(rhs_mat, [256, 64], [0, 0])
-                c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a0, b0)
-                # K-loop with iter_arg threading the accumulator and Pipeline marker.
-                for ko, (c_iter,) in pl.pipeline(256, 2048, 256, init_values=(c_init,), stage=2):
+                # Vec-resident placeholder for the iter-arg init.
+                c_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.create(
+                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Vec
+                )
+                # Full K-loop with ko branching on the first iteration.
+                for ko, (c_iter,) in pl.pipeline(0, 2048, 256, init_values=(c_init,), stage=2):
                     sa: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat] = pl.tile.slice(lhs_mat, [16, 256], [0, ko])
                     sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.slice(rhs_mat, [256, 64], [ko, 0])
-                    c_new: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
-                    (c,) = pl.yield_(c_new)
+                    if ko == 0:
+                        c_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa, sb)
+                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_first)
+                    else:
+                        c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
+                        c_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.yield_(c_phi)
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        After = passes.auto_tile_matmul_l0()(Before)
+        After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_already_l0_sized_skipped(self):
@@ -119,7 +148,7 @@ class TestAutoTileMatmulL0KOnly:
                 return out
 
         # No tiling needed → expected = before.
-        After = passes.auto_tile_matmul_l0()(Before)
+        After = _run_pass(Before)
         ir.assert_structural_equal(After, Before)
 
     def test_pass_idempotent(self):
@@ -152,8 +181,8 @@ class TestAutoTileMatmulL0KOnly:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        once = passes.auto_tile_matmul_l0()(Before)
-        twice = passes.auto_tile_matmul_l0()(once)
+        once = _run_pass(Before)
+        twice = _run_pass(once)
         ir.assert_structural_equal(twice, once)
 
 
@@ -184,7 +213,7 @@ class TestAutoTileMatmulL0Skips:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        After = passes.auto_tile_matmul_l0()(Before)
+        After = _run_pass(Before)
         ir.assert_structural_equal(After, Before)
 
     def test_non_mat_operands_left_untouched(self):
@@ -208,7 +237,7 @@ class TestAutoTileMatmulL0Skips:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        After = passes.auto_tile_matmul_l0()(Before)
+        After = _run_pass(Before)
         ir.assert_structural_equal(After, Before)
 
 

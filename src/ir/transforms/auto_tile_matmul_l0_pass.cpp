@@ -14,29 +14,47 @@
 /// For each ``tile.matmul`` whose operands live in ``MemorySpace::Mat`` with
 /// static 2D shape, picks an L0 tile shape ``(m, n, k)`` from the active
 /// ``BackendHandler``'s L0 capacities (via ``utils::ChooseL0Tile``) and rewrites
-/// the call into a peeled first matmul plus a K-loop of ``tile.matmul_acc``
-/// over Mat-resident slices.  When the K loop has at least two iterations the
-/// loop is marked ``ForKind::Pipeline`` with ``pipeline_stages=2`` so the
-/// downstream ``LowerPipelineLoops`` pass produces a 2-deep ping-pong on the
-/// auto-inserted Mat→Left/Right moves.
+/// the call into a K-loop that branches on the loop index: the first iteration
+/// uses ``tile.matmul`` (fresh accumulator) and subsequent iterations use
+/// ``tile.matmul_acc`` (accumulating into the iter-arg).  The loop is marked
+/// ``ForKind::Pipeline`` with ``pipeline_stages=2`` whenever it has at least
+/// two iterations so the downstream ``LowerPipelineLoops`` pass produces a
+/// 2-deep ping-pong on the auto-inserted Mat→Left/Right moves.
+///
+/// Layout (for K = ceil(K/k) * k):
+///   c_init = tile.create([m, n], dtype=FP32, target_memory=Vec)  // placeholder
+///   for ko in <Pipeline?>(0, K, k) iter_args=[c_iter=c_init] return_vars=[out]:
+///     sa = tile.slice(x_mat, [m, k], [0, ko])
+///     sb = tile.slice(y_mat, [k, n], [ko, 0])
+///     if ko == 0:
+///       c1 = tile.matmul(sa, sb)             // fresh Acc
+///       c_phi = pl.yield_(c1)                // if's return_var
+///     else:
+///       c2 = tile.matmul_acc(c_iter, sa, sb) // accumulate
+///       c_phi = pl.yield_(c2)
+///     yield c_phi                            // for-loop's iter-arg next
+///
+/// The ``out`` variable in the original ``out = tile.matmul(...)`` is reused
+/// as the for-loop's return_var so downstream uses keep referencing the same
+/// SSA value.  ``InferTileMemorySpace`` (the next pass) inserts moves for
+/// Mat→Left/Right on the slices and a Vec/Acc bridge for the iter-arg.
 ///
 /// V1 scope:
-///   * Only ``tile.matmul`` (no ``tile.matmul_acc``).  ``matmul_acc`` is
-///     handled in a follow-up.
-///   * Only K tiling (``m == M`` and ``n == N``).  Cases where the chooser
-///     picks ``m < M`` or ``n < N`` would require an additional Mat-resident
-///     output buffer + per-iter assemble, also handled in a follow-up.
-///   * Requires ``K % k == 0``.  Boundary handling is deferred.
+///   * Only ``tile.matmul`` (no ``tile.matmul_acc`` / ``tile.matmul_bias``).
+///   * Only K tiling (``m == M`` and ``n == N``).  M/N tiling is handled in a
+///     follow-up.
+///   * Requires ``K % k == 0``.  K-boundary handling is deferred.
 ///
-/// Cases outside this scope (``matmul_acc``, M/N tiling, K-not-divisible) emit
-/// a ``DiagnosticSeverity::PerfHint`` describing why no rewrite happened and
-/// leave the matmul untouched so the rest of the pipeline still runs.
+/// Cases outside this scope emit a ``DiagnosticSeverity::PerfHint`` describing
+/// why no rewrite happened and leave the matmul untouched.
 
 #include <any>
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -49,6 +67,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
@@ -58,6 +77,7 @@
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/l0_tile_chooser.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -92,132 +112,118 @@ bool IsMatResidentStatic2D(const TileTypePtr& tile, int64_t& out_d0, int64_t& ou
 }
 
 /// Element width in bytes for a tile dtype.  Returns 0 for sub-byte types
-/// (INT4, FP4 et al.) which the cube path does not support; the caller should
-/// emit a PerfHint and skip in that case.
+/// (INT4, FP4 et al.) which the cube path does not support.
 uint32_t DTypeBytes(const DataType& dt) {
   size_t bits = dt.GetBit();
   if (bits == 0 || bits % 8 != 0) return 0;
   return static_cast<uint32_t>(bits / 8);
 }
 
-/// Build a ``tile.slice(source, [shape], [offset])`` AssignStmt with a fresh
-/// result Var.  Inherits the source's memory_space (Mat).
-AssignStmtPtr BuildSliceStmt(const VarPtr& source_var, const std::vector<int64_t>& shape,
-                             const std::vector<int64_t>& offset, const std::string& name_hint,
-                             const Span& span) {
+/// Build a ``tile.slice(source, [shape], [offset])`` AssignStmt.  ``offset``
+/// may include a runtime ``ko`` Var; the call accepts any 2-element tuple of
+/// index-typed exprs.
+AssignStmtPtr BuildSlice(const VarPtr& source, const std::vector<int64_t>& shape,
+                         const std::vector<ExprPtr>& offset, const std::string& name_hint, const Span& span) {
   auto& reg = OpRegistry::GetInstance();
-  std::vector<ExprPtr> args = {source_var, MakeIndexTuple(shape, span), MakeIndexTuple(offset, span)};
+  auto offset_tuple = std::make_shared<MakeTuple>(offset, span);
+  std::vector<ExprPtr> args = {source, MakeIndexTuple(shape, span), offset_tuple};
   auto call = reg.Create("tile.slice", args, span);
   auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
   return std::make_shared<AssignStmt>(var, call, span);
 }
 
-/// Build ``tile.matmul(lhs, rhs)`` AssignStmt with a fresh result Var.
-AssignStmtPtr BuildMatmulStmt(const VarPtr& lhs, const VarPtr& rhs, const std::string& name_hint,
-                              const Span& span) {
+/// Build the ``tile.create([m, n], dtype, target_memory=Vec)`` placeholder
+/// that initializes the iter-arg.  Vec is used because:
+///   * The actual accumulator buffer is materialized inside the loop (the
+///     first matmul produces a fresh Acc tile and subsequent matmul_accs
+///     accumulate into it).  The Vec init is a typed dummy whose payload is
+///     never read.
+///   * Vec is the natural ``tile.create`` default and survives print → parse
+///     roundtrip without TileView annotation drift.
+///   * ``InferTileMemorySpace`` (the next pass) inserts the Vec→Acc bridge
+///     for the iter-arg's use sites, making the runtime IR type-correct.
+AssignStmtPtr BuildAccInit(int64_t m, int64_t n, const DataType& dtype, const std::string& name_hint,
+                           const Span& span) {
   auto& reg = OpRegistry::GetInstance();
-  auto call = reg.Create("tile.matmul", {lhs, rhs}, span);
+  std::vector<std::pair<std::string, std::any>> kwargs = {{"dtype", dtype},
+                                                          {"target_memory", MemorySpace::Vec}};
+  auto call = reg.Create("tile.create", {MakeIndexTuple({m, n}, span)}, kwargs, span);
   auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
   return std::make_shared<AssignStmt>(var, call, span);
 }
 
-/// Build ``tile.matmul_acc(acc, lhs, rhs)`` AssignStmt with a fresh result Var.
-AssignStmtPtr BuildMatmulAccStmt(const ExprPtr& acc, const VarPtr& lhs, const VarPtr& rhs,
-                                 const std::string& name_hint, const Span& span) {
-  auto& reg = OpRegistry::GetInstance();
-  auto call = reg.Create("tile.matmul_acc", {acc, lhs, rhs}, span);
-  auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
-  return std::make_shared<AssignStmt>(var, call, span);
-}
-
-/// Shape of an ``L0TileResult``-backed K-loop rewrite for a static 2D
-/// ``M x K @ K x N`` matmul whose operands live in Mat.  Built up incrementally
-/// by ``MaybeRewriteMatmul`` so the actual statement emission is a single
-/// straight-line block.
 struct KLoopRewrite {
-  // Original AssignStmt and operand Vars.
   AssignStmtPtr original;
   VarPtr lhs_mat;  // x_mat: TileType([M, K], FP*, Mat)
   VarPtr rhs_mat;  // y_mat: TileType([K, N], FP*, Mat)
-  // Problem dimensions.
   int64_t M = 0;
   int64_t N = 0;
   int64_t K = 0;
-  // Chosen L0 tile shape.
   int64_t m = 0;
   int64_t n = 0;
   int64_t k = 0;
 };
 
-/// True when the loop has at least two iterations after peeling, i.e. when the
-/// K-tiled matmul should be marked as a pipeline loop so LowerPipelineLoops can
-/// body-clone it for ping-pong execution.
-bool ShouldMarkPipeline(int64_t K, int64_t k) {
-  // After peeling, the loop runs (K/k - 1) iterations.  Pipeline marking only
-  // helps when there are at least two iterations to overlap.
-  return (K / k) >= 3;
-}
+/// Pipeline marker only helps when the loop has at least two iterations to
+/// overlap (one prefetch buffer in flight, one consumed) — i.e. ``K/k >= 2``.
+bool ShouldMarkPipeline(int64_t K, int64_t k) { return (K / k) >= 2; }
 
-/// Build the replacement statements for a single Mat-resident matmul.
-///
-/// Layout (for K = 4*k, peeled-first form):
-///   slice_a_0 = tile.slice(x_mat, [M, k], [0, 0])
-///   slice_b_0 = tile.slice(y_mat, [k, N], [0, 0])
-///   c_init = tile.matmul(slice_a_0, slice_b_0)
-///   for ko in <Pipeline?>(k, K, k) iter_args=[c=c_init] return_vars=[out_acc]:
-///     slice_a = tile.slice(x_mat, [M, k], [0, ko])
-///     slice_b = tile.slice(y_mat, [k, N], [ko, 0])
-///     c_new = tile.matmul_acc(c, slice_a, slice_b)
-///     yield c_new
-///
-/// Reuses the original AssignStmt's Var (``out_acc``) as the loop's
-/// ``return_var`` so downstream uses remain valid without substitution.
+/// Build the replacement statements for one Mat-resident matmul.  See the
+/// file-level comment for the emitted shape.
 std::vector<StmtPtr> BuildKLoopRewrite(const KLoopRewrite& r) {
   const Span sp = r.original->span_;
   const std::string base = r.original->var_->name_hint_;
+  auto& reg = OpRegistry::GetInstance();
 
   std::vector<StmtPtr> out;
-  out.reserve(4);
+  out.reserve(2);
 
-  // Peeled first iteration: slice + tile.matmul producing a fresh Acc tile.
-  auto slice_a_0 = BuildSliceStmt(r.lhs_mat, {r.M, r.k}, {0, 0}, base + "_l0_a0", sp);
-  auto slice_b_0 = BuildSliceStmt(r.rhs_mat, {r.k, r.N}, {0, 0}, base + "_l0_b0", sp);
-  auto c_init = BuildMatmulStmt(slice_a_0->var_, slice_b_0->var_, base + "_l0_c_init", sp);
-  out.push_back(slice_a_0);
-  out.push_back(slice_b_0);
+  // Accumulator init: a Vec-resident placeholder of shape [m, n].  The real
+  // accumulator buffer is materialized by the first matmul each iteration;
+  // this is just a typed dummy for the for-loop's iter-arg slot.
+  auto acc_dtype = As<TileType>(r.original->var_->GetType())->dtype_;
+  auto c_init = BuildAccInit(r.m, r.n, acc_dtype, base + "_l0_init", sp);
   out.push_back(c_init);
 
-  // K loop runs (K/k - 1) iterations: ko from k to K (step k).  When K == k
-  // the caller has already filtered this case out (no rewrite needed), so we
-  // expect at least one loop iteration here.
-  INTERNAL_CHECK(r.K > r.k) << "Internal error: BuildKLoopRewrite expected K > k";
-
+  // Loop variable.
   auto ko_var = std::make_shared<Var>(base + "_l0_ko", std::make_shared<ScalarType>(DataType::INDEX), sp);
 
-  // Loop body: slice + matmul_acc + yield.
-  auto c_iter_arg = std::make_shared<IterArg>(base + "_l0_c", c_init->var_->GetType(), c_init->var_, sp);
-  auto slice_a_body = BuildSliceStmt(r.lhs_mat, {r.M, r.k}, /*offset=*/{0, 0}, base + "_l0_a", sp);
-  auto slice_b_body = BuildSliceStmt(r.rhs_mat, {r.k, r.N}, /*offset=*/{0, 0}, base + "_l0_b", sp);
-  // Patch slice offsets to use the loop var.  We rebuild with the var-based
-  // offset since BuildSliceStmt only accepts static offsets.
-  {
-    auto& reg = OpRegistry::GetInstance();
-    auto a_off = std::make_shared<MakeTuple>(std::vector<ExprPtr>{MakeIndex(0, sp), ko_var}, sp);
-    auto a_call = reg.Create("tile.slice", {r.lhs_mat, MakeIndexTuple({r.M, r.k}, sp), a_off}, sp);
-    auto a_var = std::make_shared<Var>(base + "_l0_a", a_call->GetType(), sp);
-    slice_a_body = std::make_shared<AssignStmt>(a_var, a_call, sp);
+  // Iter-arg is typed from the Vec init.  The yields inside the if-else are
+  // Acc-typed (matmul / matmul_acc results); ``InferTileMemorySpace`` (the
+  // next pass) inserts the Acc↔Vec bridges so the runtime IR is type-correct.
+  auto c_iter = std::make_shared<IterArg>(base + "_l0_c", c_init->var_->GetType(), c_init->var_, sp);
 
-    auto b_off = std::make_shared<MakeTuple>(std::vector<ExprPtr>{ko_var, MakeIndex(0, sp)}, sp);
-    auto b_call = reg.Create("tile.slice", {r.rhs_mat, MakeIndexTuple({r.k, r.N}, sp), b_off}, sp);
-    auto b_var = std::make_shared<Var>(base + "_l0_b", b_call->GetType(), sp);
-    slice_b_body = std::make_shared<AssignStmt>(b_var, b_call, sp);
-  }
-  auto c_new = BuildMatmulAccStmt(c_iter_arg, slice_a_body->var_, slice_b_body->var_, base + "_l0_c_new", sp);
-  auto yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_new->var_}, sp);
-  std::vector<StmtPtr> body_stmts = {slice_a_body, slice_b_body, c_new, yield};
+  // Slices use the loop var as the K-axis offset.
+  auto sa = BuildSlice(r.lhs_mat, {r.M, r.k}, {MakeIndex(0, sp), ko_var}, base + "_l0_a", sp);
+  auto sb = BuildSlice(r.rhs_mat, {r.k, r.N}, {ko_var, MakeIndex(0, sp)}, base + "_l0_b", sp);
+
+  // Then-branch: tile.matmul (no acc input — produces a fresh Acc tile).
+  auto c_then_call = reg.Create("tile.matmul", {sa->var_, sb->var_}, sp);
+  auto c_then_var = std::make_shared<Var>(base + "_l0_c_first", c_then_call->GetType(), sp);
+  auto c_then_assign = std::make_shared<AssignStmt>(c_then_var, c_then_call, sp);
+  auto then_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_then_var}, sp);
+  StmtPtr then_body = SeqStmts::Flatten(std::vector<StmtPtr>{c_then_assign, then_yield}, sp);
+
+  // Else-branch: tile.matmul_acc (accumulates into the iter-arg).
+  auto c_else_call = reg.Create("tile.matmul_acc", {ExprPtr(c_iter), sa->var_, sb->var_}, sp);
+  auto c_else_var = std::make_shared<Var>(base + "_l0_c_acc", c_else_call->GetType(), sp);
+  auto c_else_assign = std::make_shared<AssignStmt>(c_else_var, c_else_call, sp);
+  auto else_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_else_var}, sp);
+  StmtPtr else_body = SeqStmts::Flatten(std::vector<StmtPtr>{c_else_assign, else_yield}, sp);
+
+  // IfStmt return_var captures the chosen branch's yield (Acc-typed).
+  auto c_phi = std::make_shared<Var>(base + "_l0_c_phi", c_then_call->GetType(), sp);
+  auto cond = MakeEq(ko_var, MakeIndex(0, sp), sp);
+  auto if_stmt = std::make_shared<IfStmt>(cond, then_body, std::optional<StmtPtr>(else_body),
+                                          std::vector<VarPtr>{c_phi}, sp);
+
+  // Outer yield carries c_phi back to the iter-arg for the next iteration.
+  auto outer_yield = std::make_shared<YieldStmt>(std::vector<ExprPtr>{c_phi}, sp);
+
+  std::vector<StmtPtr> body_stmts = {sa, sb, if_stmt, outer_yield};
   auto body = SeqStmts::Flatten(std::move(body_stmts), sp);
 
-  // Loop kind / attrs.
+  // ForKind / attrs.
   ForKind kind = ForKind::Sequential;
   std::vector<std::pair<std::string, std::any>> attrs;
   if (ShouldMarkPipeline(r.K, r.k)) {
@@ -225,34 +231,51 @@ std::vector<StmtPtr> BuildKLoopRewrite(const KLoopRewrite& r) {
     attrs.emplace_back(kPipelineStagesAttr, /*pipeline_stages=*/2);
   }
 
-  // Return-var reuses the original matmul's output Var so downstream uses
-  // remain unchanged.  Iter-arg init is c_init (the peeled matmul result).
-  auto for_stmt = std::make_shared<ForStmt>(ko_var, MakeIndex(r.k, sp), MakeIndex(r.K, sp),
-                                            MakeIndex(r.k, sp), std::vector<IterArgPtr>{c_iter_arg}, body,
-                                            std::vector<VarPtr>{r.original->var_}, sp, kind,
-                                            /*chunk_config=*/std::nullopt, std::move(attrs));
+  // Build a fresh return_var typed identically to the iter-arg.  Reusing the
+  // original matmul's Var (Acc-typed) here would create an iter_arg/return_var
+  // type mismatch that the post-pass TypeCheck flags.  The caller substitutes
+  // uses of the original Var with this new one in subsequent statements of
+  // the enclosing SeqStmts.
+  auto rv = std::make_shared<Var>(base, c_iter->GetType(), r.original->var_->span_);
+
+  auto for_stmt =
+      std::make_shared<ForStmt>(ko_var, MakeIndex(0, sp), MakeIndex(r.K, sp), MakeIndex(r.k, sp),
+                                std::vector<IterArgPtr>{c_iter}, body, std::vector<VarPtr>{rv}, sp, kind,
+                                /*chunk_config=*/std::nullopt, std::move(attrs));
   out.push_back(for_stmt);
   return out;
 }
 
+/// Get the new return-var Var from a freshly-built rewrite.  The rewrite is
+/// always a ``tile.create`` (init) followed by a ``ForStmt``; the ForStmt's
+/// single return_var is what downstream uses of the original matmul Var
+/// should be redirected to.
+VarPtr GetReturnVar(const std::vector<StmtPtr>& rewrite_stmts) {
+  INTERNAL_CHECK(rewrite_stmts.size() >= 2)
+      << "Internal error: rewrite must contain at least an init and a ForStmt";
+  auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(rewrite_stmts.back());
+  INTERNAL_CHECK(for_stmt) << "Internal error: last rewrite stmt is not a ForStmt";
+  INTERNAL_CHECK(for_stmt->return_vars_.size() == 1)
+      << "Internal error: rewrite ForStmt must have exactly one return_var";
+  return for_stmt->return_vars_[0];
+}
+
 /// Decide whether `assign` is a Mat-resident matmul that we know how to tile.
-/// On success, returns the rewritten statements.  Otherwise returns nullopt and
-/// (when relevant) appends a PerfHint diagnostic.
+/// Returns the rewrite statements on success; otherwise nullopt and (when
+/// useful) appends a PerfHint diagnostic.
 std::optional<std::vector<StmtPtr>> MaybeRewriteMatmul(const AssignStmtPtr& assign,
                                                        std::vector<Diagnostic>& hints) {
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return std::nullopt;
 
   const std::string& op_name = call->op_->name_;
-  // V1 scope: only plain ``tile.matmul``.  ``tile.matmul_acc`` (an extension
-  // that threads a caller-provided accumulator) and ``tile.matmul_bias``
-  // (with bias add) are out of scope and should be left untouched.  Skipping
-  // them here also keeps this pass idempotent — the pass itself emits
-  // ``tile.matmul_acc`` bodies inside the K-loop, and we don't want a
-  // re-run to flag those.
+  // V1 scope: only plain ``tile.matmul``.  ``tile.matmul_acc`` (caller-
+  // provided accumulator) and ``tile.matmul_bias`` are out of scope and left
+  // untouched.  Skipping silently keeps the pass idempotent — the rewritten
+  // K-loop body itself contains a ``tile.matmul_acc`` which we don't want to
+  // flag on a second run.
   if (op_name != "tile.matmul") return std::nullopt;
 
-  // Operands must be Var with TileType.
   if (call->args_.size() != 2) return std::nullopt;
   auto lhs = As<Var>(call->args_[0]);
   auto rhs = As<Var>(call->args_[1]);
@@ -261,10 +284,8 @@ std::optional<std::vector<StmtPtr>> MaybeRewriteMatmul(const AssignStmtPtr& assi
   auto rhs_tile = As<TileType>(rhs->GetType());
   if (!lhs_tile || !rhs_tile) return std::nullopt;
 
-  // Both operands must be Mat-resident with static 2D shape [M,K] / [K,N].
-  // If either constraint fails, the matmul is out of scope for this pass
-  // (Vec/Acc operands, dynamic shapes) — return silently without a perf hint
-  // since it isn't a missed optimization opportunity.
+  // Both operands must be Mat-resident with static 2D shape.  Other cases
+  // (Vec/Acc operands, dynamic shapes) are out of scope; return silently.
   int64_t M = 0, K_lhs = 0, K_rhs = 0, N = 0;
   if (!IsMatResidentStatic2D(lhs_tile, M, K_lhs) || !IsMatResidentStatic2D(rhs_tile, K_rhs, N)) {
     return std::nullopt;
@@ -278,11 +299,9 @@ std::optional<std::vector<StmtPtr>> MaybeRewriteMatmul(const AssignStmtPtr& assi
   }
   const int64_t K = K_lhs;
 
-  // Read element widths from operand dtypes.
   uint32_t bytes_a = DTypeBytes(lhs_tile->dtype_);
   uint32_t bytes_b = DTypeBytes(rhs_tile->dtype_);
-  // Result is FP32 / INT32 per matmul deduction; bytes_c=4 in both cases.
-  constexpr uint32_t kBytesC = 4;
+  constexpr uint32_t kBytesC = 4;  // matmul output is FP32 / INT32
   if (bytes_a == 0 || bytes_b == 0) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-003",
                        "tile.matmul: unsupported operand dtype (zero element width) — left untouched",
@@ -290,7 +309,6 @@ std::optional<std::vector<StmtPtr>> MaybeRewriteMatmul(const AssignStmtPtr& assi
     return std::nullopt;
   }
 
-  // Read L0 capacities from the active backend handler.
   auto* ctx = PassContext::Current();
   if (!ctx) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-004",
@@ -317,8 +335,6 @@ std::optional<std::vector<StmtPtr>> MaybeRewriteMatmul(const AssignStmtPtr& assi
   cfg.min_m = handler->GetMinL0TileDim();
   cfg.min_n = handler->GetMinL0TileDim();
   cfg.min_k = handler->GetMinL0TileDim();
-  // Schedule: lean on LowerPipelineLoops body cloning for L0a/L0b ping-pong;
-  // the chooser must reserve half of each so two splits' tiles fit.
   cfg.double_buffer_a = true;
   cfg.double_buffer_b = true;
   cfg.double_buffer_c = false;
@@ -339,7 +355,7 @@ std::optional<std::vector<StmtPtr>> MaybeRewriteMatmul(const AssignStmtPtr& assi
   // Already L0-sized — nothing to do.
   if (res.m == M && res.n == N && res.k == K) return std::nullopt;
 
-  // V1 scope: K-tiling only.  Defer M/N tiling to a follow-up.
+  // V1 scope: K-tiling only.  M/N tiling is deferred.
   if (res.m != M || res.n != N) {
     hints.emplace_back(DiagnosticSeverity::PerfHint, kPassName, 0, "PH-AT-006",
                        "tile.matmul: chooser picked m=" + std::to_string(res.m) + ", n=" +
@@ -358,9 +374,6 @@ std::optional<std::vector<StmtPtr>> MaybeRewriteMatmul(const AssignStmtPtr& assi
     return std::nullopt;
   }
 
-  // K must be split into at least two iterations (K/k >= 2) for any rewrite
-  // to be useful.  K == k means already L0-sized; handled above.  K/k == 1
-  // (with K != k) is impossible since k divides K and K > k iff K/k >= 2.
   INTERNAL_CHECK(K / res.k >= 2) << "Internal error: K=" << K << " not properly tiled by k=" << res.k;
 
   if (!res.perf_hint.empty()) {
@@ -381,45 +394,43 @@ std::optional<std::vector<StmtPtr>> MaybeRewriteMatmul(const AssignStmtPtr& assi
   return BuildKLoopRewrite(r);
 }
 
-/// Mutator that flattens any tile.matmul rewrite into the enclosing SeqStmts.
 class AutoTileMutator : public IRMutator {
  public:
   std::vector<Diagnostic> hints;
 
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    // Per-SeqStmts substitution map: when we rewrite ``c = tile.matmul(...)``
+    // into a ForStmt with a fresh return_var, subsequent statements in the
+    // same SeqStmts that referenced ``c`` need to be redirected to that
+    // return_var.  Scoped to this SeqStmts so substitutions don't leak into
+    // sibling regions.
+    std::unordered_map<const Var*, VarPtr> remap;
     std::vector<StmtPtr> out;
     out.reserve(op->stmts_.size());
     bool changed = false;
     for (const auto& child : op->stmts_) {
-      auto visited = VisitStmt(child);
+      // Apply the running remap to redirect prior rewrites' downstream uses.
+      StmtPtr current = remap.empty() ? child : transform_utils::Substitute(child, remap);
+
+      // Check if this is a matmul we rewrite *at this SeqStmts level*.  We
+      // try this before recursive visitation so the rewrite — which produces
+      // a sequence of stmts — lands in this enclosing SeqStmts.  Recursive
+      // visitation happens after rewrite-rejection so nested matmuls inside
+      // ForStmt bodies still get rewritten by the recursive visit.
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(current)) {
+        if (auto rewrite = MaybeRewriteMatmul(assign, hints)) {
+          remap[assign->var_.get()] = GetReturnVar(*rewrite);
+          for (auto& s : *rewrite) out.push_back(std::move(s));
+          changed = true;
+          continue;
+        }
+      }
+      auto visited = VisitStmt(current);
       if (visited.get() != child.get()) changed = true;
-      auto assign = std::dynamic_pointer_cast<const AssignStmt>(visited);
-      if (!assign) {
-        out.push_back(visited);
-        continue;
-      }
-      auto rewrite = MaybeRewriteMatmul(assign, hints);
-      if (!rewrite) {
-        out.push_back(visited);
-        continue;
-      }
-      changed = true;
-      for (auto& s : *rewrite) out.push_back(std::move(s));
+      out.push_back(visited);
     }
     if (!changed) return op;
     return SeqStmts::Flatten(std::move(out), op->span_);
-  }
-
-  /// AssignStmt outside any SeqStmts (e.g. as a function body's single
-  /// statement) — wrap the rewrite in a SeqStmts when emission produces more
-  /// than one statement.
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    auto rewritten = IRMutator::VisitStmt_(op);
-    auto assign = std::dynamic_pointer_cast<const AssignStmt>(rewritten);
-    if (!assign) return rewritten;
-    auto rewrite = MaybeRewriteMatmul(assign, hints);
-    if (!rewrite) return rewritten;
-    return SeqStmts::Flatten(std::move(*rewrite), op->span_);
   }
 };
 
