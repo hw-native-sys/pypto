@@ -51,12 +51,15 @@ def _tensor_from_continuous(ct) -> torch.Tensor:
     ``torch.Tensor.view(dtype)`` — a zero-copy bit-cast that preserves the
     shared-memory aliasing required for ``Out``/``InOut`` parameters.
     """
-    dtype_key = str(ct.dtype)
+    # ``str(ct.dtype)`` yields ``"DataType.FLOAT32"``; strip the enum prefix
+    # to match the bare type names used as keys in ``_DTYPE_MAP``.
+    dtype_str = str(ct.dtype)
+    dtype_key = dtype_str.rsplit(".", 1)[-1]
     try:
         c_type, torch_dtype = _DTYPE_MAP[dtype_key]
     except KeyError as exc:
         raise TypeError(
-            f"Unsupported ContinuousTensor dtype: {dtype_key!r}. "
+            f"Unsupported ContinuousTensor dtype: {dtype_str!r}. "
             f"Add an explicit mapping in _DTYPE_MAP. "
             f"Known dtypes: {sorted(_DTYPE_MAP)}"
         ) from exc
