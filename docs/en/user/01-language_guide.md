@@ -156,6 +156,14 @@ elem = A[i, j]         # equivalent to pl.tensor.read(A, [i, j]) / pl.tile.read(
 block = A[0:16, 0:32]  # equivalent to pl.slice(A, [16, 32], [0, 0])
 ```
 
+The symmetric write form `dst[<slices...>] = src` is sugar for `pl.assemble`:
+
+```python
+out[i:i+16, j:j+32] = src   # equivalent to out = pl.assemble(out, src, [i, j])
+```
+
+This sugar is only available before SSA conversion — it rebinds `dst`, which is incompatible with strict SSA. Under `@pl.function(strict_ssa=True)` (or any post-SSA context), use the explicit `pl.assemble(...)` call instead.
+
 Use `pl.tile.*` for tile-specific operations (memory transfers, broadcast, bitwise, etc.).
 
 ## Variable Assignment and SSA

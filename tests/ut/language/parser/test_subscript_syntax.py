@@ -352,5 +352,238 @@ class TestTupleSubscript:
         assert isinstance(tuple_access, ir.Function)
 
 
+class TestTensorSubscriptWrite:
+    """Tests for tensor subscript-write syntax: A[i:i+H, j:j+W] = src."""
+
+    def test_tensor_assemble_via_subscript_write(self):
+        """A[i:i+16, j:j+32] = src on Tensor -> tensor.assemble (rebinds A)."""
+
+        @pl.function
+        def write_slice(
+            out: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tensor[[16, 32], pl.FP32],
+            i: pl.Scalar[pl.INDEX],
+            j: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            out[i : i + 16, j : j + 32] = src
+            return out
+
+        assert isinstance(write_slice, ir.Function)
+        printed = write_slice.as_python()
+        assert "tensor.assemble" in printed
+
+    def test_tensor_subscript_write_constant_offsets(self):
+        """A[0:16, 0:32] = src lowers to tensor.assemble with literal offsets [0, 0]."""
+
+        @pl.function
+        def write_const(
+            out: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tensor[[16, 32], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            out[0:16, 0:32] = src
+            return out
+
+        assert isinstance(write_const, ir.Function)
+        assert isinstance(write_const.body, ir.SeqStmts)
+
+        assemble_stmt = write_const.body.stmts[0]
+        assert isinstance(assemble_stmt, ir.AssignStmt)
+        assert isinstance(assemble_stmt.value, ir.Call)
+        assert assemble_stmt.value.op.name == "tensor.assemble"
+
+        offset_tuple = assemble_stmt.value.args[2]
+        assert isinstance(offset_tuple, ir.MakeTuple)
+        assert [cast(ir.ConstInt, e).value for e in offset_tuple.elements] == [0, 0]
+
+    def test_tensor_subscript_write_open_lower(self):
+        """A[:16, :32] = src treats omitted lower bound as 0."""
+
+        @pl.function
+        def write_open(
+            out: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tensor[[16, 32], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            out[:16, :32] = src
+            return out
+
+        assert isinstance(write_open.body, ir.SeqStmts)
+        assemble_stmt = write_open.body.stmts[0]
+        assert isinstance(assemble_stmt, ir.AssignStmt)
+        assert isinstance(assemble_stmt.value, ir.Call)
+        offset_tuple = assemble_stmt.value.args[2]
+        assert isinstance(offset_tuple, ir.MakeTuple)
+        assert [cast(ir.ConstInt, e).value for e in offset_tuple.elements] == [0, 0]
+
+    def test_tensor_subscript_write_step_error(self):
+        """A[0:16:2, :] = src must reject slice steps."""
+
+        with pytest.raises(UnsupportedFeatureError, match="step"):
+
+            @pl.function
+            def bad_step(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                src: pl.Tensor[[8, 128], pl.FP32],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                out[0:16:2, :] = src
+                return out
+
+    def test_tensor_subscript_write_wrong_rank(self):
+        """A[0:16] = src on a 2D tensor must reject (rank mismatch)."""
+
+        with pytest.raises(ParserTypeError, match="2 indices"):
+
+            @pl.function
+            def bad_rank(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                src: pl.Tensor[[16, 128], pl.FP32],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                out[0:16] = src
+                return out
+
+    def test_tensor_subscript_write_element_form_unsupported(self):
+        """A[i, j] = scalar must be rejected for now (no element-write op wiring)."""
+
+        with pytest.raises(UnsupportedFeatureError, match="Element-write"):
+
+            @pl.function
+            def bad_elem(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                v: pl.Scalar[pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+                j: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                out[i, j] = v
+                return out
+
+    def test_tensor_subscript_write_strict_ssa_rejected(self):
+        """Subscript-write must be rejected under strict_ssa=True."""
+
+        with pytest.raises(UnsupportedFeatureError, match="before SSA conversion"):
+
+            @pl.function(strict_ssa=True)
+            def bad_ssa(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                src: pl.Tensor[[16, 32], pl.FP32],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                out[0:16, 0:32] = src
+                return out
+
+    def test_tensor_subscript_write_shape_mismatch_static(self):
+        """Static shape mismatch on a slice axis must be reported with axis + extents."""
+
+        with pytest.raises(ParserTypeError, match="shape mismatch on axis 0"):
+
+            @pl.function
+            def bad_shape(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                src: pl.Tensor[[8, 32], pl.FP32],  # axis 0 should be 16
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                out[0:16, 0:32] = src
+                return out
+
+    def test_tensor_subscript_write_full_axis_shape_mismatch(self):
+        """`out[:, :] = src` requires src to fill the target shape exactly."""
+
+        with pytest.raises(ParserTypeError, match="shape mismatch on axis 1"):
+
+            @pl.function
+            def bad_full(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                src: pl.Tensor[[64, 32], pl.FP32],  # axis 1 should be 128
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                out[:, :] = src
+                return out
+
+    def test_tensor_subscript_write_rank_mismatch(self):
+        """A 1D source on a 2D target must be rejected with a rank-mismatch error."""
+
+        with pytest.raises(ParserTypeError, match="must be 2D"):
+
+            @pl.function
+            def bad_rank_src(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                src: pl.Tensor[[32], pl.FP32],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                out[0:1, 0:32] = src
+                return out
+
+    def test_tensor_subscript_write_symbolic_extent_simplifies_match(self):
+        """``out[i:i+16, j:j+32] = src`` simplifies (i+16)-i=16 etc. and matches src."""
+
+        @pl.function
+        def symbolic_match(
+            out: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tensor[[16, 32], pl.FP32],
+            i: pl.Scalar[pl.INDEX],
+            j: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            out[i : i + 16, j : j + 32] = src
+            return out
+
+        assert isinstance(symbolic_match, ir.Function)
+        assert "tensor.assemble" in symbolic_match.as_python()
+
+    def test_tensor_subscript_write_symbolic_extent_simplifies_mismatch(self):
+        """``out[i:i+8, ...] = src`` simplifies to 8 — must reject when src has 16."""
+
+        with pytest.raises(ParserTypeError, match="shape mismatch on axis 0"):
+
+            @pl.function
+            def bad_symbolic(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                src: pl.Tensor[[16, 32], pl.FP32],  # axis 0 should be 8
+                i: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                out[i : i + 8, 0:32] = src
+                return out
+
+    def test_tensor_subscript_write_unfoldable_extent_skipped(self):
+        """Genuinely-symbolic extents (``out[:, :k] = src`` with runtime k) are trusted."""
+
+        @pl.function
+        def truly_symbolic(
+            out: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tensor[[64, 128], pl.FP32],
+            k: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            # Upper bound `k` cannot be statically reduced — the parser cannot
+            # prove a mismatch, so it accepts the write.
+            out[:, :k] = src
+            return out
+
+        assert isinstance(truly_symbolic, ir.Function)
+        assert "tensor.assemble" in truly_symbolic.as_python()
+
+
+class TestTileSubscriptWrite:
+    """Tests for tile subscript-write syntax on Tile types."""
+
+    def test_tile_assemble_via_subscript_write(self):
+        """t[0:16, 0:32] = src on Tile -> tile.assemble."""
+
+        @pl.function
+        def write_tile(
+            x: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tile[[16, 32], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+            t[0:16, 0:32] = src
+            return pl.store(t, [0, 0], x)
+
+        assert isinstance(write_tile, ir.Function)
+        printed = write_tile.as_python()
+        assert "tile.assemble" in printed
+
+        assert isinstance(write_tile.body, ir.SeqStmts)
+        assemble_stmt = write_tile.body.stmts[1]
+        assert isinstance(assemble_stmt, ir.AssignStmt)
+        assert isinstance(assemble_stmt.value, ir.Call)
+        assert assemble_stmt.value.op.name == "tile.assemble"
+
+        offset_tuple = assemble_stmt.value.args[2]
+        assert isinstance(offset_tuple, ir.MakeTuple)
+        assert [cast(ir.ConstInt, e).value for e in offset_tuple.elements] == [0, 0]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

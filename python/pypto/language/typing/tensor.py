@@ -235,6 +235,10 @@ class Tensor(metaclass=TensorMeta):
         """Subscript syntax for tensor slicing/reading (only valid inside @pl.function)."""
         raise NotImplementedError("Tensor subscript syntax is only available inside @pl.function")
 
+    def __setitem__(self, indices: Any, value: Any) -> None:
+        """Subscript-write sugar for tensor.assemble (only valid inside @pl.function, pre-SSA)."""
+        raise NotImplementedError("Tensor subscript-write syntax is only available inside @pl.function")
+
     def __repr__(self) -> str:
         """String representation."""
         if self._expr is not None:

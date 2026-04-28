@@ -156,6 +156,14 @@ elem = A[i, j]         # 等价于 pl.tensor.read(A, [i, j]) / pl.tile.read(A, [
 block = A[0:16, 0:32]  # 等价于 pl.slice(A, [16, 32], [0, 0])
 ```
 
+对称的写入形式 `dst[<slices...>] = src` 是 `pl.assemble` 的语法糖：
+
+```python
+out[i:i+16, j:j+32] = src   # 等价于 out = pl.assemble(out, src, [i, j])
+```
+
+该语法糖仅在 SSA 转换前可用——它会重新绑定 `dst`，与严格 SSA 不兼容。在 `@pl.function(strict_ssa=True)` 或任何 SSA 后的上下文中，请显式调用 `pl.assemble(...)`。
+
 需要 tile 特定操作（内存搬运、广播、位运算等）时使用 `pl.tile.*`。
 
 ## 变量赋值与 SSA

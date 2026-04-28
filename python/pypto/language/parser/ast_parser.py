@@ -1039,11 +1039,146 @@ class ASTParser:
 
                 return
 
+            # Handle subscript-write: dst[i:i+64, j:j+64] = src
+            if isinstance(target, ast.Subscript):
+                self._parse_subscript_assignment(target, stmt.value)
+                return
+
         raise ParserSyntaxError(
             f"Unsupported assignment: {ast.unparse(stmt)}",
             span=self.span_tracker.get_span(stmt),
             hint="Use simple variable assignments or tuple unpacking with pl.yield_()",
         )
+
+    def _parse_subscript_assignment(self, target: ast.Subscript, value_node: ast.expr) -> None:
+        """Desugar ``dst[<slices...>] = src`` to ``dst = pl.assemble(dst, src, offsets)``.
+
+        This sugar is parser-time only and therefore only meaningful before
+        ConvertToSSA: the rewrite rebinds ``dst``, which strict-SSA forbids.
+        """
+        span = self.span_tracker.get_span(target)
+
+        if self.scope_manager.strict_ssa:
+            raise UnsupportedFeatureError(
+                "Subscript-write syntax 'dst[...] = src' is only supported before SSA conversion",
+                span=span,
+                hint="Rewrite as an explicit pl.assemble(...) call, or remove strict_ssa=True",
+            )
+
+        if not isinstance(target.value, ast.Name):
+            raise ParserSyntaxError(
+                f"Subscript-write target must be a variable name, got {ast.unparse(target.value)}",
+                span=span,
+                hint="Assign through a named Tensor/Tile, e.g. 'dst[...] = src'",
+            )
+
+        var_name = target.value.id
+        base_expr = self.parse_expression(target.value)
+        base_type = base_expr.type
+
+        if isinstance(base_type, ir.TensorType):
+            kind_name = "tensor"
+            assemble_op = ir_op.tensor.assemble
+        elif isinstance(base_type, ir.TileType):
+            kind_name = "tile"
+            assemble_op = ir_op.tile.assemble
+        else:
+            raise ParserTypeError(
+                f"Subscript-write requires a Tensor or Tile target, got {type(base_type).__name__}",
+                span=span,
+                hint="Subscript-write 'dst[...] = src' is only supported for Tensor and Tile",
+            )
+
+        indices = self._normalize_subscript_indices(target, span)
+        offsets, extents = self._build_assemble_offsets_and_extents(indices, base_type.shape, span, kind_name)
+
+        source_expr = self.parse_expression(value_node)
+        source_type = source_expr.type
+        if not isinstance(source_type, type(base_type)):
+            raise ParserTypeError(
+                f"Subscript-write source must also be a {kind_name}, got {type(source_type).__name__}",
+                span=span,
+                hint=f"The rhs of 'dst[...] = src' must be a {kind_name} of matching shape",
+            )
+
+        if len(source_type.shape) != len(base_type.shape):
+            raise ParserTypeError(
+                f"Subscript-write source must be {len(base_type.shape)}D to match "
+                f"the {kind_name} target, got {len(source_type.shape)}D",
+                span=span,
+                hint="The lhs and rhs of 'dst[...] = src' must have the same rank",
+            )
+
+        for dim_idx, (requested, src_extent) in enumerate(zip(extents, source_type.shape)):
+            requested_const = _fold_const_slice_extent(requested, 0)
+            source_const = _fold_const_slice_extent(src_extent, 0)
+            if requested_const is not None and source_const is not None and requested_const != source_const:
+                raise ParserTypeError(
+                    f"Subscript-write shape mismatch on axis {dim_idx}: "
+                    f"slice expects {requested_const} elements, source has {source_const}",
+                    span=span,
+                    hint=f"Make the source's axis-{dim_idx} extent match the slice extent, "
+                    f"or adjust the slice bounds",
+                )
+
+        assemble_call = assemble_op(base_expr, source_expr, offsets, span=span)
+        var = self._assign_or_let(var_name, assemble_call, span)
+        self.scope_manager.define_var(var_name, var, span=span)
+
+    def _build_assemble_offsets_and_extents(
+        self,
+        indices: list[ast.expr],
+        target_shape: Sequence[ir.Expr],
+        span: ir.Span,
+        kind_name: str,
+    ) -> tuple[list[int | ir.Expr], list[int | ir.Expr]]:
+        """Parse a subscript-write index list once into per-axis offsets and extents.
+
+        For ``a[lower:upper]`` the offset is ``lower`` (defaulting to 0) and the
+        extent is ``upper - lower`` (defaulting to the full target axis when
+        ``upper`` is omitted). For ``a[i]`` the offset is ``i`` and the extent
+        is 1. Extents are folded through the arithmetic simplifier so symbolic
+        bounds like ``i:i+16`` collapse to a constant when possible — this is
+        the same path used by the slice-read sugar.
+
+        All-integer indexing is rejected (no element-write op wiring today),
+        as is ``step``.
+        """
+        if len(indices) != len(target_shape):
+            raise ParserTypeError(
+                f"{kind_name.capitalize()} subscript-write requires {len(target_shape)} indices, "
+                f"got {len(indices)}",
+                span=span,
+                hint=f"Provide exactly {len(target_shape)} indices for a {len(target_shape)}D {kind_name}",
+            )
+
+        if not any(isinstance(idx, ast.Slice) for idx in indices):
+            raise UnsupportedFeatureError(
+                f"Element-write 'dst[i, j] = scalar' is not supported for {kind_name} targets",
+                span=span,
+                hint="Use slice indices, e.g. 'dst[i:i+1, j:j+1] = tile_1x1'",
+            )
+
+        offsets: list[int | ir.Expr] = []
+        extents: list[int | ir.Expr] = []
+        for dim_idx, idx in enumerate(indices):
+            if not isinstance(idx, ast.Slice):
+                offsets.append(self.parse_expression(idx))
+                extents.append(1)
+                continue
+            if idx.step is not None:
+                raise UnsupportedFeatureError(
+                    f"Slice step is not supported in {kind_name} subscript-write",
+                    span=span,
+                    hint="Use 'dst[start:stop] = src' without step",
+                )
+            lower: int | ir.Expr = 0 if idx.lower is None else self.parse_expression(idx.lower)
+            upper: int | ir.Expr = (
+                target_shape[dim_idx] if idx.upper is None else self.parse_expression(idx.upper)
+            )
+            offsets.append(lower)
+            extents.append(self._build_slice_shape_expr(upper, lower))
+        return offsets, extents
 
     def parse_yield_assignment(self, target: ast.Tuple, value: ast.Call) -> None:
         """Parse yield assignment: (a, b) = pl.yield_(x, y).

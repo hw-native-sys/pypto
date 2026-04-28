@@ -205,6 +205,10 @@ class Tile(metaclass=TileMeta):
         """Subscript syntax for tile slicing (only valid inside @pl.function)."""
         raise NotImplementedError("Tile subscript syntax is only available inside @pl.function")
 
+    def __setitem__(self, indices: Any, value: Any) -> None:
+        """Subscript-write sugar for tile.assemble (only valid inside @pl.function, pre-SSA)."""
+        raise NotImplementedError("Tile subscript-write syntax is only available inside @pl.function")
+
     def __repr__(self) -> str:
         """String representation."""
         if self._expr is not None:
