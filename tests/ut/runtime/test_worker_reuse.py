@@ -161,7 +161,7 @@ class TestExecuteOnDeviceReuse:
             fake_simpler_worker.close.reset_mock()
             fake_simpler_worker.run.reset_mock()
 
-            with patch("pypto.runtime.device_runner.ChipCallConfig", MagicMock):
+            with patch("pypto.runtime.device_runner.CallConfig", MagicMock):
                 execute_on_device(
                     chip_callable,
                     orch_args,
@@ -187,7 +187,7 @@ class TestExecuteOnDeviceReuse:
         # so patch that name in addition to the wrapper's _SimplerWorker.
         one_shot = MagicMock()
         with (
-            patch("pypto.runtime.device_runner.ChipCallConfig", MagicMock),
+            patch("pypto.runtime.device_runner.CallConfig", MagicMock),
             patch("pypto.runtime.device_runner.Worker", return_value=one_shot),
         ):
             execute_on_device(

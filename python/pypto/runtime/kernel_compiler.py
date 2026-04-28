@@ -378,6 +378,12 @@ class KernelCompiler:
 
         cmd = [toolchain.cxx_path] + toolchain.get_compile_flags()
 
+        # Force a deterministic ELF GNU Build-ID so simpler's DeviceRunner orch-SO
+        # upload cache (keyed on .note.gnu.build-id) stays stable across GCC/ld
+        # versions. macOS clang ld ignores --build-id, so guard on platform.
+        if sys.platform != "darwin":
+            cmd.append("-Wl,--build-id=sha1")
+
         if extra_sources:
             for src in extra_sources:
                 src = os.path.abspath(src)

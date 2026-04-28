@@ -15,8 +15,8 @@ torch-aware helpers (make_tensor_arg, scalar_to_uint64) come from the
 """
 
 from simpler.task_interface import (  # pyright: ignore[reportMissingImports]
+    CallConfig,
     ChipCallable,
-    ChipCallConfig,
     ChipStorageTaskArgs,
     CoreCallable,
     scalar_to_uint64,
@@ -25,8 +25,8 @@ from simpler.worker import Worker  # pyright: ignore[reportMissingImports]
 from simpler_setup.torch_interop import make_tensor_arg  # pyright: ignore[reportMissingImports]
 
 __all__ = [
+    "CallConfig",
     "ChipCallable",
-    "ChipCallConfig",
     "ChipStorageTaskArgs",
     "CoreCallable",
     "Worker",

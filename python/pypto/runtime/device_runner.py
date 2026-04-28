@@ -46,8 +46,8 @@ import torch
 from .elf_parser import extract_text_section
 from .kernel_compiler import KernelCompiler
 from .task_interface import (
+    CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
     ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
-    ChipCallConfig,  # pyright: ignore[reportAttributeAccessIssue]
     ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
     CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
     Worker,  # pyright: ignore[reportAttributeAccessIssue]
@@ -509,7 +509,7 @@ def execute_on_device(
 
     from .worker import Worker as _PyptoWorker  # noqa: PLC0415
 
-    cfg = ChipCallConfig()
+    cfg = CallConfig()
     cfg.block_dim = block_dim
     cfg.aicpu_thread_num = aicpu_thread_num
     cfg.enable_l2_swimlane = enable_profiling
