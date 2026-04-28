@@ -941,6 +941,9 @@ def _generate_with_distributed(
                 result_files[f"next_levels/{func.name}/{path}"] = content
 
     # 3. SubWorker functions → sub_workers/{name}.py
+    # The registry is keyed by program name; ``transformed_program.name`` is
+    # preserved by the pass pipeline so the lookup matches the entry recorded
+    # at decoration time.
     from pypto.language.parser.decorator import (  # noqa: PLC0415
         get_sub_worker_callables,  # pyright: ignore[reportAttributeAccessIssue]
     )

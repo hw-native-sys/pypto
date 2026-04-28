@@ -222,9 +222,12 @@ bool DistributedCodegen::TryEmitHierarchyCall(const ir::ExprPtr& expr) {
   INTERNAL_CHECK(callee->level_.has_value() && callee->role_.has_value() &&
                  current_func_->level_.has_value() && current_func_->role_.has_value());
 
-  const ir::Level callee_level = callee->level_.value();
-  const ir::Role callee_role = callee->role_.value();
-  const ir::Level current_level = current_func_->level_.value();
+  // INTERNAL_CHECK above guarantees the optionals hold values; clang-tidy
+  // cannot see through the macro, so suppress its false positives here.
+  const ir::Level callee_level = callee->level_.value();  // NOLINT(bugprone-unchecked-optional-access)
+  const ir::Role callee_role = callee->role_.value();     // NOLINT(bugprone-unchecked-optional-access)
+  const ir::Level current_level =
+      current_func_->level_.value();  // NOLINT(bugprone-unchecked-optional-access)
 
   const bool same_level_worker = callee_role == ir::Role::Worker && callee_level == current_level;
   const bool next_level_orch = callee_role == ir::Role::Orchestrator &&
@@ -599,12 +602,14 @@ std::string DistributedCodegen::DataTypeToPythonDType(const DataType& dtype) {
 // ========================================================================
 
 bool DistributedCodegen::IsSubWorker(const ir::FunctionPtr& func) const {
-  // A SubWorker is a HOST-level Worker (runs as Python callable in fork).
-  // A CHIP-level function (Orchestration/InCore/Worker) runs via ChipCallable → submit_next_level.
-  // A function with no level (chip-level by default) is also submit_next_level.
-  if (!func->level_.has_value()) return false;  // chip-level function
-  int linqu_level = ir::LevelToLinquLevel(*func->level_);
-  return linqu_level >= 3;  // HOST (3) and above → SubWorker
+  // A SubWorker is specifically a HOST-or-above Worker (runs as Python
+  // callable in fork). HOST-or-above Orchestrators are dispatched via
+  // ``callables[...]`` not ``sub_ids[...]``, so they must NOT be classified
+  // as SubWorker. CHIP-level functions and functions without level metadata
+  // run via ChipCallable → submit_next_level.
+  if (!func->level_.has_value() || !func->role_.has_value()) return false;
+  if (*func->role_ != ir::Role::Worker) return false;
+  return ir::LevelToLinquLevel(*func->level_) >= 3;
 }
 
 std::string DistributedCodegen::ParamDirectionToTensorArgType(ir::ParamDirection dir) const {

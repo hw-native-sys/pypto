@@ -34,19 +34,19 @@ from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, 
 # Both @pl.function(level>=HOST, role=Worker) and
 # with pl.at(level>=HOST, role=Worker) store source here.
 
-# Keyed by ``id(prog)`` (program identity) rather than ``prog.name`` so that
-# two programs with the same class name — or recompilations that drop all
-# SubWorkers — never share or leak stale registry entries.
-_sub_worker_registry: dict[int, dict[str, str]] = {}
+# Keyed by program name. Same-name collisions across different programs are a
+# known limitation (tracked for follow-up); not worth the complexity of
+# identity-keyed lookups + pass-pipeline propagation in this PR.
+_sub_worker_registry: dict[str, dict[str, str]] = {}
 
 
 def _register_sub_worker_callables(prog: ir.Program, callables: dict[str, str]) -> None:
     if callables:
-        _sub_worker_registry[id(prog)] = callables
+        _sub_worker_registry[prog.name] = callables
     else:
         # Clear any prior entry so a recompilation that removed all SubWorkers
         # is reflected (instead of returning stale source).
-        _sub_worker_registry.pop(id(prog), None)
+        _sub_worker_registry.pop(prog.name, None)
 
 
 def get_sub_worker_callables(prog: ir.Program) -> dict[str, str]:
@@ -55,7 +55,7 @@ def get_sub_worker_callables(prog: ir.Program) -> dict[str, str]:
     Returns:
         Dict mapping function name to source text.
     """
-    return _sub_worker_registry.get(id(prog), {})
+    return _sub_worker_registry.get(prog.name, {})
 
 
 @dataclasses.dataclass

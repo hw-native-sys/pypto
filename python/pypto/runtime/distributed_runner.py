@@ -52,7 +52,14 @@ def _tensor_from_continuous(ct) -> torch.Tensor:
     shared-memory aliasing required for ``Out``/``InOut`` parameters.
     """
     dtype_key = str(ct.dtype)
-    c_type, torch_dtype = _DTYPE_MAP.get(dtype_key, (ctypes.c_float, torch.float32))
+    try:
+        c_type, torch_dtype = _DTYPE_MAP[dtype_key]
+    except KeyError as exc:
+        raise TypeError(
+            f"Unsupported ContinuousTensor dtype: {dtype_key!r}. "
+            f"Add an explicit mapping in _DTYPE_MAP. "
+            f"Known dtypes: {sorted(_DTYPE_MAP)}"
+        ) from exc
 
     n_elements = 1
     for s in ct.shapes:
