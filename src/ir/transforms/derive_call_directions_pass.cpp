@@ -56,25 +56,24 @@ std::vector<ParamDirection> ResolveCalleeDirections(const ProgramPtr& program, c
   return callee->param_directions_;
 }
 
-/// Resolve the buffer root for an argument expression and decide whether that root
-/// is locally allocated (i.e. not rooted at a function parameter).
-/// Returns the root Var* if local, nullptr otherwise (non-var arg, unknown root,
-/// or root that maps to an external function parameter).
-const Var* ResolveLocalRoot(const ExprPtr& arg,
-                            const std::unordered_map<const Var*, const Var*>& buffer_roots,
-                            const std::unordered_set<const Var*>& param_vars) {
+/// Resolve the buffer root for an argument expression, regardless of whether
+/// the root is locally allocated or rooted at an enclosing function parameter.
+/// Returns nullptr only when the arg is not a var or has no known buffer root.
+const Var* ResolveAnyRoot(const ExprPtr& arg,
+                          const std::unordered_map<const Var*, const Var*>& buffer_roots) {
   auto var = AsVarLike(arg);
   if (!var) return nullptr;
   auto it = buffer_roots.find(var.get());
   if (it == buffer_roots.end()) return nullptr;
-  const Var* root = it->second;
-  if (param_vars.count(root) > 0) return nullptr;
-  return root;
+  return it->second;
 }
 
-/// Pre-pass that decides, per (Call, local root), whether the call is the "first
+/// Pre-pass that decides, per (Call, root), whether the call is the "first
 /// writer" of that root within its enclosing scope, treating ForStmt/WhileStmt/
 /// IfStmt as opaque writer-units. ScopeStmt and SeqStmts are transparent.
+/// Tracks both locally-allocated roots and roots that trace back to enclosing
+/// function parameters; either kind needs WAW chaining when a prior sibling
+/// already wrote to the same root.
 ///
 /// Two phases:
 ///   1. PrecomputeWrittenRoots: bottom-up cache of the union of local roots
@@ -84,9 +83,8 @@ const Var* ResolveLocalRoot(const ExprPtr& arg,
 ///      whose root is *not* in `seen_roots` is recorded as "first writer".
 class PriorWriterCollector {
  public:
-  PriorWriterCollector(ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
-                       const std::unordered_set<const Var*>& param_vars)
-      : program_(std::move(program)), buffer_roots_(buffer_roots), param_vars_(param_vars) {}
+  PriorWriterCollector(ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots)
+      : program_(std::move(program)), buffer_roots_(buffer_roots) {}
 
   void Run(const StmtPtr& body) {
     if (!body) return;
@@ -98,6 +96,7 @@ class PriorWriterCollector {
   /// Per-Call set of roots for which the call is the first writer in its scope.
   /// Roots not in the set (or Calls absent from the map) are by definition
   /// preceded by another writer-unit and therefore subject to R-prior promotion.
+  /// Includes both locally-allocated roots and enclosing-param-rooted ones.
   std::unordered_map<const Call*, std::unordered_set<const Var*>> first_writer_roots;
 
  private:
@@ -140,8 +139,8 @@ class PriorWriterCollector {
     return result;
   }
 
-  /// If `expr` is a non-builtin Call, add every Out/InOut local root it writes
-  /// into `out`.
+  /// If `expr` is a non-builtin Call, add every Out/InOut root it writes
+  /// (local or enclosing-param-rooted) into `out`.
   void CollectCallWrittenRoots(const ExprPtr& expr, std::unordered_set<const Var*>& out) {
     auto call = As<Call>(expr);
     if (!call) return;
@@ -152,7 +151,7 @@ class PriorWriterCollector {
     auto dirs = ResolveCalleeDirections(program_, call, callee);
     for (size_t i = 0; i < dirs.size() && i < call->args_.size(); ++i) {
       if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
-      if (const Var* root = ResolveLocalRoot(call->args_[i], buffer_roots_, param_vars_)) {
+      if (const Var* root = ResolveAnyRoot(call->args_[i], buffer_roots_)) {
         out.insert(root);
       }
     }
@@ -218,7 +217,7 @@ class PriorWriterCollector {
       // We still register InOut roots into `roots_this_call` so subsequent
       // siblings see them as prior writers.
       if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
-      const Var* root = ResolveLocalRoot(call->args_[i], buffer_roots_, param_vars_);
+      const Var* root = ResolveAnyRoot(call->args_[i], buffer_roots_);
       if (!root) continue;
       if (dirs[i] == ParamDirection::Out && seen.count(root) == 0) {
         first_writer_roots[call.get()].insert(root);
@@ -230,7 +229,6 @@ class PriorWriterCollector {
 
   ProgramPtr program_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
-  const std::unordered_set<const Var*>& param_vars_;
   std::unordered_map<const Stmt*, std::unordered_set<const Var*>> written_roots_;
 };
 
@@ -238,21 +236,24 @@ class PriorWriterCollector {
 /// the per-argument ArgDirection vector based on callee param directions, the
 /// pre-computed buffer-root map, and prior-writer / sequential-context analysis.
 ///
-/// Promotion rules for callee Out + locally-allocated buffer:
-///   - R-seq:   any sequential ancestor (For{Sequential,Unroll,Pipeline} or While)  → InOut
-///   - R-prior: a prior writer-unit in the same scope wrote to the same root        → InOut
-///   - default: OutputExisting (write into a pre-allocated buffer that the runtime
-///              treats as an output slot, no extra dependency edge introduced).
+/// Promotion rules for callee Out (apply uniformly to local and enclosing-param roots):
+///   - R-seq:        any sequential ancestor (For{Sequential,Unroll,Pipeline} or While) → InOut
+///   - R-prior:      a prior writer-unit in the same scope wrote to the same root      → InOut
+///   - R-enclosing:  the root is the enclosing function's param and that param is
+///                   declared InOut by the user                                         → InOut
+///   - default:      OutputExisting (write into a pre-allocated buffer that the
+///                   runtime treats as an output slot, no extra dependency edge
+///                   introduced).
 class CallDirectionMutator : public IRMutator {
  public:
   CallDirectionMutator(
       ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
-      const std::unordered_set<const Var*>& param_vars,
-      const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots)
+      const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots,
+      const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root)
       : program_(std::move(program)),
         buffer_roots_(buffer_roots),
-        param_vars_(param_vars),
-        first_writer_roots_(first_writer_roots) {}
+        first_writer_roots_(first_writer_roots),
+        enclosing_param_dir_by_root_(enclosing_param_dir_by_root) {}
 
  protected:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
@@ -325,25 +326,35 @@ class CallDirectionMutator : public IRMutator {
       } else if (cd == ParamDirection::InOut) {
         dirs.push_back(ArgDirection::InOut);
       } else {
-        // ParamDirection::Out — apply the promotion rules.
-        const Var* local_root = ResolveLocalRoot(arg, buffer_roots_, param_vars_);
-        if (!local_root) {
-          // External/param-rooted destination: write into an existing tensor.
-          dirs.push_back(ArgDirection::OutputExisting);
-          continue;
-        }
+        // ParamDirection::Out — apply the promotion rules uniformly to both
+        // locally-allocated roots and roots that trace back to an enclosing
+        // function parameter.
+        const Var* root = ResolveAnyRoot(arg, buffer_roots_);
+
         // R-seq: any sequential ancestor forces InOut to keep iteration WAW chains correct.
         if (sequential_depth_ > 0) {
           dirs.push_back(ArgDirection::InOut);
           continue;
         }
         // R-prior: a prior writer-unit in this scope already wrote to this root → InOut.
-        bool is_first_writer = first_writer_set != nullptr && first_writer_set->count(local_root) > 0;
-        if (!is_first_writer) {
-          dirs.push_back(ArgDirection::InOut);
-          continue;
+        if (root) {
+          bool is_first_writer = first_writer_set != nullptr && first_writer_set->count(root) > 0;
+          if (!is_first_writer) {
+            dirs.push_back(ArgDirection::InOut);
+            continue;
+          }
         }
-        // Default: locally-allocated, first writer, no sequential ancestor → OutputExisting.
+        // R-enclosing: if the root is an enclosing function param that the user
+        // declared InOut, honor that declaration — the function effectively reads
+        // the prior-call value and writes a new one back into the same buffer.
+        if (root) {
+          auto it = enclosing_param_dir_by_root_.find(root);
+          if (it != enclosing_param_dir_by_root_.end() && it->second == ParamDirection::InOut) {
+            dirs.push_back(ArgDirection::InOut);
+            continue;
+          }
+        }
+        // Default: first writer, no sequential ancestor, no InOut declaration → OutputExisting.
         dirs.push_back(ArgDirection::OutputExisting);
       }
     }
@@ -361,8 +372,8 @@ class CallDirectionMutator : public IRMutator {
  private:
   ProgramPtr program_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
-  const std::unordered_set<const Var*>& param_vars_;
   const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots_;
+  const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root_;
   int sequential_depth_ = 0;
 };
 
@@ -384,17 +395,20 @@ Pass DeriveCallDirections() {
       br_collector.Initialize(func->params_);
       br_collector.VisitStmt(func->body_);
 
-      std::unordered_set<const Var*> param_vars;
-      param_vars.reserve(func->params_.size());
-      for (const auto& p : func->params_) {
-        param_vars.insert(p.get());
+      // Build a Var* → ParamDirection map for the enclosing function's params,
+      // so call sites can honor an explicit ``pl.InOut`` declaration when the
+      // arg traces back to such a param via the buffer-root map.
+      std::unordered_map<const Var*, ParamDirection> enclosing_param_dir_by_root;
+      enclosing_param_dir_by_root.reserve(func->params_.size());
+      for (size_t i = 0; i < func->params_.size() && i < func->param_directions_.size(); ++i) {
+        enclosing_param_dir_by_root.emplace(func->params_[i].get(), func->param_directions_[i]);
       }
 
-      PriorWriterCollector pw_collector(program, br_collector.buffer_roots, param_vars);
+      PriorWriterCollector pw_collector(program, br_collector.buffer_roots);
       pw_collector.Run(func->body_);
 
-      CallDirectionMutator mutator(program, br_collector.buffer_roots, param_vars,
-                                   pw_collector.first_writer_roots);
+      CallDirectionMutator mutator(program, br_collector.buffer_roots, pw_collector.first_writer_roots,
+                                   enclosing_param_dir_by_root);
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
 

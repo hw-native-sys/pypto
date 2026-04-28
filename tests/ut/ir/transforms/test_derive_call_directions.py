@@ -508,6 +508,153 @@ class TestDeriveDirectionMatrix:
         assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
         assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
 
+    def test_out_param_external_buffer_in_seq_loop_promoted(self):
+        """R-seq on external root: writes inside ``pl.range`` promote to ``InOut``.
+
+        ``dst`` is rooted at the enclosing ``main`` parameter (not locally
+        allocated), but the sequential ancestor still requires WAW chaining
+        across iterations — same as for local roots.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for _i in pl.range(4):
+                    dst = self.kernel(x, dst)
+                return dst
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_out_param_external_buffer_two_writes_second_promoted(self):
+        """R-prior on external root: a prior writer-unit promotes the second to ``InOut``.
+
+        Two consecutive top-level calls writing into the same enclosing-param
+        destination. The first stays ``OutputExisting`` (no prior writer); the
+        second sees the first as a prior writer and is promoted, mirroring the
+        ``test_two_calls_top_level_second_promoted`` semantics for local roots.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                dst = self.kernel(x, dst)
+                dst = self.kernel(x, dst)
+                return dst
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 2
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_out_param_enclosing_inout_declaration_promoted(self):
+        """R-enclosing: explicit ``pl.InOut`` on the enclosing param promotes to ``InOut``.
+
+        Even when neither R-seq nor R-prior fire (single call, no sequential
+        ancestor, first writer in scope), an explicit ``pl.InOut`` declaration
+        on the enclosing function's parameter must be honored — the function
+        effectively reads the prior caller-supplied value and writes back.
+
+        Regression test for the KV-cache scenario where ``pl.InOut`` declared
+        at top level was being collapsed to ``add_output`` in cpp codegen.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.InOut[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst)
+                return r
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
+    def test_out_param_enclosing_inout_in_parallel_loop_promoted(self):
+        """R-enclosing wins even when wrapped in ``pl.parallel``.
+
+        Mirrors the qwen3 KV-cache call site: the kernel is invoked once
+        inside an outer ``pl.parallel`` loop, the buffer root traces back
+        through the loop's iter binding to a ``pl.InOut`` parameter on the
+        enclosing function. Neither R-seq nor R-prior fire here, so this
+        case is the canonical motivator for R-enclosing.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[64], pl.FP32] = pl.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.InOut[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for _i in pl.parallel(4):
+                    dst = self.kernel(x, dst)
+                return dst
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+
     def test_builtin_calls_left_untouched(self):
         """tensor.create / tile.* are builtin and keep arg_directions empty."""
 
