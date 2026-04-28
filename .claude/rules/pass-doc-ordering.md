@@ -39,7 +39,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 24 | `24-memory_reuse.md` | 24th pass |
 | 25 | *(no doc yet)* | 25th pass (`LegalizePTOBufferReuse`) |
 | 26 | `26-allocate_memory_addr.md` | 26th pass |
-| 27 | *(no doc yet)* | 27th pass (`FuseCreateAssembleToSlice`) |
+| 27 | `27-fuse_create_assemble_to_slice.md` | 27th pass |
 | 28 | `28-derive_call_directions.md` | 28th pass |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
