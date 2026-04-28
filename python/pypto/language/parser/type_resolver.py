@@ -1119,7 +1119,7 @@ class TypeResolver:
             else:
                 raise ParserTypeError(
                     f"Unknown TensorView keyword argument: {kw.arg!r}",
-                    span=self._get_span(kw.value),
+                    span=self._get_span(kw),
                     hint="Supported: valid_shape, stride, layout",
                 )
         return tv
@@ -1202,7 +1202,7 @@ class TypeResolver:
             else:
                 raise ParserTypeError(
                     f"Unknown TileView keyword argument: {kw.arg!r}",
-                    span=self._get_span(kw.value),
+                    span=self._get_span(kw),
                     hint="Supported: valid_shape, stride, start_offset, blayout, slayout, fractal, pad",
                 )
         # If valid_shape was not explicitly given, inherit from tile_shape so roundtrip is stable
