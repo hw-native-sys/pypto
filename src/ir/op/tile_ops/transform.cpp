@@ -190,19 +190,47 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
 
   // Read optional pad_value kwarg (default PadValue::null = no padding).
   PadValue pad_value = PadValue::null;
+  std::optional<MemorySpace> target_memory;
   for (const auto& [k, v] : kwargs) {
-    if (k != "pad_value") continue;
-    CHECK(v.type() == typeid(PadValue))
-        << "tile.slice pad_value must be a PadValue enum, got " << v.type().name();
-    pad_value = std::any_cast<PadValue>(v);
-    CHECK(pad_value == PadValue::null || pad_value == PadValue::zero || pad_value == PadValue::max ||
-          pad_value == PadValue::min)
-        << "tile.slice pad_value has invalid enum value: " << static_cast<int>(pad_value);
-    break;
+    if (k == "pad_value") {
+      CHECK(v.type() == typeid(PadValue))
+          << "tile.slice pad_value must be a PadValue enum, got " << v.type().name();
+      pad_value = std::any_cast<PadValue>(v);
+      CHECK(pad_value == PadValue::null || pad_value == PadValue::zero || pad_value == PadValue::max ||
+            pad_value == PadValue::min)
+          << "tile.slice pad_value has invalid enum value: " << static_cast<int>(pad_value);
+    } else if (k == "target_memory") {
+      CHECK(v.type() == typeid(MemorySpace))
+          << "tile.slice target_memory must be a MemorySpace enum, got " << v.type().name();
+      target_memory = std::any_cast<MemorySpace>(v);
+    }
   }
   tile_view.pad = pad_value;
 
-  return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
+  // When target_memory retargets the slice into Left/Right/Vec, the lowered
+  // pto.textract dst tile must satisfy PTOAS A2/A3 layout constraints:
+  //   Left  -> blayout=row_major, slayout=row_major
+  //   Right -> blayout=row_major, slayout=col_major
+  //   Vec   -> blayout=row_major, slayout=row_major
+  // Without target_memory the slice is a zero-copy view that inherits the
+  // input layout.
+  if (target_memory.has_value()) {
+    switch (*target_memory) {
+      case MemorySpace::Left:
+      case MemorySpace::Vec:
+        tile_view.blayout = TileLayout::row_major;
+        tile_view.slayout = TileLayout::row_major;
+        break;
+      case MemorySpace::Right:
+        tile_view.blayout = TileLayout::row_major;
+        tile_view.slayout = TileLayout::col_major;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view, target_memory);
 }
 
 TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
