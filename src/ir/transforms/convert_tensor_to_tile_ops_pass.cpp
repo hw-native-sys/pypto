@@ -268,7 +268,7 @@ class ConsumerSpaceCollector : public IRVisitor {
                  call && !std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
         auto& op_reg = OpRegistry::GetInstance();
         if (op_reg.IsRegistered(call->op_->name_) &&
-            op_reg.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) {
+            op_reg.GetEntry(call->op_->name_).CallActsAsViewOp(call->kwargs_)) {
           for (const auto& arg : call->args_) {
             if (auto arg_var = As<Var>(arg); arg_var && is_shaped(arg_var->GetType())) {
               propagation_edges_.emplace_back(op->var_.get(), arg_var.get());

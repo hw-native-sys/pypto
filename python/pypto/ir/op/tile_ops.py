@@ -1969,6 +1969,7 @@ def slice(
     offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     pad_value: PadValue | int | float | None = None,
+    target_memory: MemorySpace | None = None,
     span: Span | None = None,
 ) -> Call:
     """Create a slice of a tile with static shape and optional valid shape.
@@ -1986,6 +1987,13 @@ def slice(
             through unchanged and means "no padding". When omitted (``None``),
             the kwarg is not forwarded — the deducer defaults to
             ``PadValue.null``.
+        target_memory: Optional destination memory space for the slice result.
+            When set (e.g. ``MemorySpace.Left``), the slice lands directly in
+            that memory and codegen emits a single textract with the matching
+            dst loc, avoiding a follow-up :func:`tile.move`. When omitted
+            (default), the slice is a zero-copy view inheriting the input's
+            memory space. Required on Ascend A2/A3 when slicing a Mat tile,
+            since hardware textract dst must be loc=left/right/vec.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
@@ -2010,11 +2018,9 @@ def slice(
 
     kwargs: dict[str, Any] = {}
     if pad_value is not None:
-        # PadValue.null is a legal "no padding" signal for slice (unlike
-        # fillpad, which requires a real padding mode). Pass it through;
-        # normalize the rest via the shared helper so numeric sugar and
-        # validation match tile.fillpad exactly.
         kwargs["pad_value"] = pad_value if pad_value is PadValue.null else normalize_pad_value(pad_value)
+    if target_memory is not None:
+        kwargs["target_memory"] = target_memory
 
     return _ir_core.create_op_call("tile.slice", args, kwargs, actual_span)
 

@@ -1250,6 +1250,7 @@ def slice(
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
     pad_value: PadValue | int | float | None = None,
+    target_memory: MemorySpace | None = None,
 ) -> Tile:
     """Create a slice of a tile with static shape and optional valid shape.
 
@@ -1265,6 +1266,13 @@ def slice(
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (same
             spelling as :func:`tile.fillpad`). Only meaningful when
             ``valid_shape`` is smaller than ``shape``.
+        target_memory: Optional destination memory space. When set (e.g.
+            ``MemorySpace.Left``), the slice lands directly in that memory and
+            codegen emits a single textract with the matching dst loc, avoiding
+            a follow-up :func:`tile.move`. When omitted (default), the slice is
+            a zero-copy view inheriting the input's memory space. Required on
+            Ascend A2/A3 when slicing a Mat tile, since hardware textract dst
+            must be loc=left/right/vec.
 
     Returns:
         Tile wrapping the slice operation
@@ -1287,6 +1295,7 @@ def slice(
         _normalize_intlike(offset),
         normalized_valid_shape,
         pad_value=pad_value,
+        target_memory=target_memory,
     )
     return Tile(expr=call_expr)
 

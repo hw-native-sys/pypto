@@ -305,13 +305,18 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("tile.slice")
     .set_op_category("TileOp")
-    .set_description("Create a slice of a tile with static shape and optional dynamic valid_shape")
+    .set_description(
+        "Create a slice of a tile with static shape and optional dynamic valid_shape. "
+        "When target_memory is set, the slice lands directly in that memory space "
+        "(e.g. Mat→Left), avoiding a follow-up tile.move; otherwise the slice is a "
+        "zero-copy view that inherits the input's memory space.")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "Static shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .add_argument("valid_shape", "Optional logical valid shape (TupleType of ScalarType(INT64/UINT64/INDEX))")
-    .set_output_memory_inherit_input()
+    .set_output_memory_from_kwarg_or_inherit_input("target_memory")
     .set_attr<PadValue>("pad_value")
+    .set_attr<MemorySpace>("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileSliceType(args, kwargs);

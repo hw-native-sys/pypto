@@ -1075,6 +1075,25 @@ class TestTileSliceReshapeOps:
         assert result_type.tile_view is not None
         assert result_type.tile_view.pad == ir.PadValue.null
 
+    def test_tile_slice_target_memory_kwarg_forwarded(self):
+        """tile.slice forwards target_memory kwarg to the Call so codegen can pick the dst loc."""
+        tile_var = self._make_slice_tile_var()
+        call = tile.slice(tile_var, [8, 16], [0, 0], target_memory=ir.MemorySpace.Left)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.slice"
+        kwargs = dict(call.kwargs)
+        assert "target_memory" in kwargs
+        assert kwargs["target_memory"] == ir.MemorySpace.Left
+
+    def test_tile_slice_target_memory_omitted_keeps_view_semantics(self):
+        """Without target_memory the slice acts as a zero-copy view (no kwarg forwarded)."""
+        tile_var = self._make_slice_tile_var()
+        call = tile.slice(tile_var, [8, 16], [0, 0])
+
+        kwargs = dict(call.kwargs)
+        assert "target_memory" not in kwargs
+
     def test_tile_slice_rejects_bad_pad_value(self):
         """tile.slice rejects a non-PadValue pad_value kwarg via registry validation."""
         tile_var = self._make_slice_tile_var()

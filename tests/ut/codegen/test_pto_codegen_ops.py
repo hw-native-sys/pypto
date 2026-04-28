@@ -882,6 +882,45 @@ class TestTileSliceCodegen:
                 f"textract outs() type should be rows=4,cols=64 (slice shape), got:\n{line}"
             )
 
+    def test_tile_slice_target_memory_left_emits_textract_loc_left(self):
+        """tile.slice(target_memory=Left) on a Mat tile should emit a single textract
+        whose dst type encodes loc=left, avoiding the need for a follow-up tile.move.
+
+        This is the Qwen3-32B path: a 512B-aligned Mat load is split on-chip into
+        two Left tiles for matmul. On A2/A3 the textract dst loc must be
+        left/right/vec — Mat is rejected by PTOAS.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 256], pl.BF16],
+                dst: pl.Tensor[[16, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.BF16]:
+                src_tile: pl.Tile[[16, 256], pl.BF16] = pl.load(
+                    src, [0, 0], [16, 256], target_memory=pl.MemorySpace.Mat
+                )
+                left_half: pl.Tile[[16, 128], pl.BF16] = pl.tile.slice(
+                    src_tile, [16, 128], [0, 0], target_memory=pl.MemorySpace.Left
+                )
+                return pl.store(left_half, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        textract_lines = [line.strip() for line in mlir.splitlines() if "pto.textract" in line]
+        assert len(textract_lines) == 1, f"Expected 1 pto.textract, got {len(textract_lines)}:\n" + "\n".join(
+            textract_lines
+        )
+        line = textract_lines[0]
+        assert "loc=left" in line, (
+            f"slice(target_memory=Left) should emit textract whose outs type carries loc=left, got:\n{line}"
+        )
+        # And no redundant pto.tmov should remain — the slice is the move.
+        assert "pto.tmov" not in mlir, (
+            f"slice(target_memory=Left) should not need a follow-up pto.tmov, got:\n{mlir}"
+        )
+
 
 class TestSetValidShapeCodegen:
     """Tests for tile.set_validshape PTO code generation."""

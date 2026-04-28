@@ -50,12 +50,17 @@ namespace {
 
 // Check if operation is a view operation (zero-copy metadata transform).
 // A view op is one registered with set_output_memory_inherit_input() — its
-// output reuses the input's MemRef view. Delegates to the shared registry
-// predicate so InferTileMemorySpace and InitMemRef agree on the set.
-bool IsViewOperation(const std::string& op_name) {
+// output reuses the input's MemRef view. For hybrid ops registered with
+// set_output_memory_from_kwarg_or_inherit_input (e.g. tile.slice), the call
+// is a view only when the target_memory kwarg is absent; with kwarg present
+// the slice materializes a fresh MemRef in the requested memory space.
+// Delegates to the shared registry predicate so InferTileMemorySpace and
+// InitMemRef agree on the set.
+bool IsViewOperation(const ir::CallPtr& call) {
   auto& registry = OpRegistry::GetInstance();
-  if (!registry.IsRegistered(op_name)) return false;
-  return registry.GetEntry(op_name).OutputMemoryInheritsInput();
+  const auto& name = call->op_->name_;
+  if (!registry.IsRegistered(name)) return false;
+  return registry.GetEntry(name).CallActsAsViewOp(call->kwargs_);
 }
 
 // Check if an operation's output should reuse the MemRef of a specific input argument.
@@ -281,7 +286,7 @@ class InitMemRefMutator : public IRMutator {
                 << call->op_->name_;
 
       // Handle view operations: output should share MemRef with input tile
-      if (IsViewOperation(call->op_->name_) && call->args_.size() > 0) {
+      if (IsViewOperation(call) && call->args_.size() > 0) {
         LOG_DEBUG << "Detected view operation: " << call->op_->name_;
         // Get the input tile (first argument) after mutation
         auto new_call = std::dynamic_pointer_cast<const Call>(new_value);

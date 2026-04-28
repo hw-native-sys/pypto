@@ -356,6 +356,27 @@ class OpRegistryEntry {
     return *this;
   }
 
+  /// Hybrid resolver: output memory = kwarg if present, else inherit first tile-typed input.
+  /// Used by ops like `tile.slice` that are zero-copy views by default but can be
+  /// retargeted to a different memory space (e.g. Mat→Left/Right/Vec) on demand,
+  /// emitting a single textract with the requested dst loc instead of a slice+move chain.
+  /// Per-call view-op detection lives in `CallActsAsViewOp`.
+  inline OpRegistryEntry& set_output_memory_from_kwarg_or_inherit_input(
+      const std::string& kwarg_key = "target_memory") {
+    EnsureMemorySpec();
+    auto& spec = *memory_spec_;         // NOLINT(bugprone-unchecked-optional-access)
+    spec.output_inherits_input = true;  // fallback when kwarg absent
+    spec.deduce_output_memory =
+        [kwarg_key](
+            const std::vector<std::pair<std::string, std::any>>& kwargs) -> std::optional<MemorySpace> {
+      for (const auto& [k, v] : kwargs) {
+        if (k == kwarg_key) return AnyCast<MemorySpace>(v, kwarg_key);
+      }
+      return std::nullopt;  // inherit-input branch handles fallback
+    };
+    return *this;
+  }
+
   /// Set input memory constraint (single allowed space)
   inline OpRegistryEntry& set_input_memory(size_t arg_index, MemorySpace required) {
     return set_input_memory(arg_index, std::vector<MemorySpace>{required});
@@ -391,6 +412,24 @@ class OpRegistryEntry {
   /// the memory-space-inheritance relation still holds.
   [[nodiscard]] bool OutputMemoryInheritsInput() const {
     return memory_spec_.has_value() && memory_spec_->output_inherits_input;
+  }
+
+  /// Per-call view-op predicate. Returns true when the specific call behaves as
+  /// a zero-copy view (output reuses input MemRef). For pure inherit-input ops
+  /// this matches `OutputMemoryInheritsInput()`. For hybrid ops registered with
+  /// `set_output_memory_from_kwarg_or_inherit_input` (e.g. `tile.slice`), the
+  /// call is a view only when the `target_memory` kwarg is absent — when the
+  /// caller specifies a target memory, the op materializes a fresh MemRef in
+  /// that memory and is not a view. Passes that share MemRef across view ops
+  /// (InitMemRef, MemoryReuse, InferTileMemorySpace edge collection) must use
+  /// this per-call check rather than the static `OutputMemoryInheritsInput()`.
+  [[nodiscard]] bool CallActsAsViewOp(const std::vector<std::pair<std::string, std::any>>& kwargs) const {
+    if (!OutputMemoryInheritsInput()) return false;
+    if (!op_ || !op_->HasAttr("target_memory")) return true;
+    for (const auto& [k, _] : kwargs) {
+      if (k == "target_memory") return false;
+    }
+    return true;
   }
 
   /// True when this op's output memory space can be chosen by the compiler

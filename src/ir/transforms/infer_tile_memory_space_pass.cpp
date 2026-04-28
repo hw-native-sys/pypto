@@ -146,7 +146,7 @@ class DemandCollector : public IRVisitor {
     if (!dst) return;
     auto& reg = OpRegistry::GetInstance();
     if (!reg.IsRegistered(call->op_->name_)) return;
-    if (!reg.GetEntry(call->op_->name_).OutputMemoryInheritsInput()) return;
+    if (!reg.GetEntry(call->op_->name_).CallActsAsViewOp(call->kwargs_)) return;
     for (const auto& arg : call->args_) {
       auto var = As<Var>(arg);
       if (!var) continue;

@@ -346,12 +346,19 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
+    target_memory: MemorySpace | None = None,
 ) -> T:
-    """Slice operation, dispatched by input type."""
+    """Slice operation, dispatched by input type.
+
+    ``target_memory`` is only meaningful for ``Tile`` inputs: it routes the
+    sliced result directly to the requested on-chip memory (e.g.
+    ``MemorySpace.Left``) so a follow-up ``pl.move`` is not needed. It is
+    silently ignored for ``Tensor`` inputs.
+    """
     if isinstance(input, Tensor):
         return _tensor.slice(input, shape, offset, valid_shape)
     if isinstance(input, Tile):
-        return _tile.slice(input, shape, offset, valid_shape)
+        return _tile.slice(input, shape, offset, valid_shape, target_memory=target_memory)
     raise TypeError(f"slice: expected Tensor or Tile, got {type(input).__name__}")
 
 
