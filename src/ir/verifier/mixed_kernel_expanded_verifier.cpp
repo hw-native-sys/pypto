@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
+#include <list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,7 +31,7 @@
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
-#include "pypto/ir/transforms/utils/tpop_chain_normalizer.h"
+#include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -44,9 +46,8 @@ using core_affinity::kDirMaskV2C;
 using cross_core_pipe::CollectCrossCorePipeMetadata;
 using cross_core_pipe::CollectDominatingPipeSetupMetadata;
 using cross_core_pipe::CrossCorePipeMetadata;
-using tpop_chain::IsExpectedTpopAssignStmt;
-using tpop_chain::IsTfreeStmt;
-using tpop_chain::StmtReferencesVar;
+using tpop_tfree::IsExpectedTpopAssignStmt;
+using tpop_tfree::IsTfreeStmt;
 
 namespace {
 
@@ -138,8 +139,8 @@ void WalkStmtsVerifyInitializePipe(const std::vector<StmtPtr>& stmts, const std:
       WalkStmtsVerifyInitializePipe(FlattenBody(for_stmt->body_), func_name, diagnostics);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       WalkStmtsVerifyInitializePipe(FlattenBody(if_stmt->then_body_), func_name, diagnostics);
-      if (if_stmt->else_body_.has_value()) {
-        WalkStmtsVerifyInitializePipe(FlattenBody(if_stmt->else_body_.value()), func_name, diagnostics);
+      if (const auto& else_body = if_stmt->else_body_) {
+        WalkStmtsVerifyInitializePipe(FlattenBody(*else_body), func_name, diagnostics);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       WalkStmtsVerifyInitializePipe(FlattenBody(while_stmt->body_), func_name, diagnostics);
@@ -191,9 +192,9 @@ void WalkStmtsCountReserveImport(const std::vector<StmtPtr>& stmts, int& reserve
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       WalkStmtsCountReserveImport(FlattenBody(if_stmt->then_body_), reserve_count, import_count, func_name,
                                   diagnostics);
-      if (if_stmt->else_body_.has_value()) {
-        WalkStmtsCountReserveImport(FlattenBody(if_stmt->else_body_.value()), reserve_count, import_count,
-                                    func_name, diagnostics);
+      if (const auto& else_body = if_stmt->else_body_) {
+        WalkStmtsCountReserveImport(FlattenBody(*else_body), reserve_count, import_count, func_name,
+                                    diagnostics);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       WalkStmtsCountReserveImport(FlattenBody(while_stmt->body_), reserve_count, import_count, func_name,
@@ -274,19 +275,21 @@ class TpopMemoryVerifier : public IRVisitor {
 
     if (expected_memory.has_value()) {
       auto tile_type = std::dynamic_pointer_cast<const TileType>(op->var_->GetType());
-      bool valid = tile_type && tile_type->memory_space_.has_value() &&
-                   tile_type->memory_space_.value() == expected_memory.value();
+      bool valid =
+          tile_type && tile_type->memory_space_.has_value() && tile_type->memory_space_ == expected_memory;
       if (!valid) {
         std::string func_kind = (func_type_ == FunctionType::AIC) ? "AIC" : "AIV";
-        std::string actual_memory = (tile_type && tile_type->memory_space_.has_value())
-                                        ? MemorySpaceToString(tile_type->memory_space_.value())
-                                        : "unset";
-        diagnostics_.emplace_back(
-            DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
-            func_kind + " function '" + func_name_ + "' requires " + ir_op->name_ +
-                " result in MemorySpace::" + MemorySpaceToString(expected_memory.value()) +
-                ", got MemorySpace::" + actual_memory,
-            op->span_);
+        std::string actual_memory = "unset";
+        if (tile_type) {
+          if (const auto& memory_space = tile_type->memory_space_) {
+            actual_memory = MemorySpaceToString(*memory_space);
+          }
+        }
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                                  func_kind + " function '" + func_name_ + "' requires " + ir_op->name_ +
+                                      " result in MemorySpace::" + MemorySpaceToString(*expected_memory) +
+                                      ", got MemorySpace::" + actual_memory,
+                                  op->span_);
       }
     }
 
@@ -355,89 +358,89 @@ void VerifyCrossCorePipeSetup(const FunctionPtr& func, std::vector<Diagnostic>& 
   }
 }
 
-void VerifyTpopTfreeOrderInBlock(const std::vector<StmtPtr>& stmts, const FunctionPtr& func,
-                                 std::vector<Diagnostic>& diagnostics);
+struct OutstandingTpop {
+  VarPtr var;
+  std::string op_name;
+  Span span;
+};
 
-void VerifyNestedTpopTfreeOrder(const StmtPtr& stmt, const FunctionPtr& func,
-                                std::vector<Diagnostic>& diagnostics) {
+void VerifyTpopTfreeMatchingInBlock(const std::vector<StmtPtr>& stmts, const FunctionPtr& func,
+                                    std::vector<Diagnostic>& diagnostics);
+
+void VerifyNestedTpopTfreeMatching(const StmtPtr& stmt, const FunctionPtr& func,
+                                   std::vector<Diagnostic>& diagnostics) {
   if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-    VerifyTpopTfreeOrderInBlock(FlattenBody(for_stmt->body_), func, diagnostics);
+    VerifyTpopTfreeMatchingInBlock(FlattenBody(for_stmt->body_), func, diagnostics);
   } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-    VerifyTpopTfreeOrderInBlock(FlattenBody(if_stmt->then_body_), func, diagnostics);
-    if (if_stmt->else_body_.has_value()) {
-      VerifyTpopTfreeOrderInBlock(FlattenBody(if_stmt->else_body_.value()), func, diagnostics);
+    VerifyTpopTfreeMatchingInBlock(FlattenBody(if_stmt->then_body_), func, diagnostics);
+    if (const auto& else_body = if_stmt->else_body_) {
+      VerifyTpopTfreeMatchingInBlock(FlattenBody(*else_body), func, diagnostics);
     }
   } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-    VerifyTpopTfreeOrderInBlock(FlattenBody(while_stmt->body_), func, diagnostics);
+    VerifyTpopTfreeMatchingInBlock(FlattenBody(while_stmt->body_), func, diagnostics);
   }
 }
 
-void VerifyTpopTfreeOrderInBlock(const std::vector<StmtPtr>& stmts, const FunctionPtr& func,
-                                 std::vector<Diagnostic>& diagnostics) {
+void VerifyTpopTfreeMatchingInBlock(const std::vector<StmtPtr>& stmts, const FunctionPtr& func,
+                                    std::vector<Diagnostic>& diagnostics) {
   const std::string expected_tfree =
       (func->func_type_ == FunctionType::AIC) ? "system.tfree_to_aiv" : "system.tfree_to_aic";
-  VarPtr open_tpop_var;
-  std::string open_tpop_op_name;
-  const Span* open_tpop_span = &func->span_;
+  std::list<OutstandingTpop> outstanding_tpops;
 
   for (const auto& stmt : stmts) {
-    VerifyNestedTpopTfreeOrder(stmt, func, diagnostics);
+    VerifyNestedTpopTfreeMatching(stmt, func, diagnostics);
 
     VarPtr tpop_var;
     if (IsExpectedTpopAssignStmt(stmt, func->func_type_, &tpop_var)) {
-      if (open_tpop_var) {
-        diagnostics.emplace_back(
-            DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
-            "Function '" + func->name_ +
-                "' must order cross-core tpop chains as 'tpop -> use -> tfree -> next tpop'",
-            stmt->span_);
-      }
-      open_tpop_var = tpop_var;
-      open_tpop_span = &stmt->span_;
-      open_tpop_op_name = dce::GetStmtOpName(stmt);
+      outstanding_tpops.push_back({tpop_var, dce::GetStmtOpName(stmt), stmt->span_});
       continue;
     }
 
     VarPtr tfree_var;
     std::string tfree_op_name;
     if (IsTfreeStmt(stmt, &tfree_var, &tfree_op_name)) {
-      if (!open_tpop_var) {
+      if (!tfree_var) {
+        diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                                 ((func->func_type_ == FunctionType::AIC) ? "AIC" : "AIV") +
+                                     std::string(" function '") + func->name_ + "' has '" + tfree_op_name +
+                                     "' without a tile value operand",
+                                 stmt->span_);
         continue;
       }
-      if (tfree_op_name != expected_tfree || !tfree_var || tfree_var.get() != open_tpop_var.get()) {
+      auto it = std::find_if(
+          outstanding_tpops.begin(), outstanding_tpops.end(),
+          [&](const OutstandingTpop& outstanding) { return outstanding.var.get() == tfree_var.get(); });
+      if (it == outstanding_tpops.end()) {
+        diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                                 ((func->func_type_ == FunctionType::AIC) ? "AIC" : "AIV") +
+                                     std::string(" function '") + func->name_ + "' has '" + tfree_op_name +
+                                     "' without a matching outstanding tpop on the same tile value",
+                                 stmt->span_);
+        continue;
+      }
+      if (tfree_op_name != expected_tfree) {
         diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
                                  ((func->func_type_ == FunctionType::AIC) ? "AIC" : "AIV") +
                                      std::string(" function '") + func->name_ + "' must match " +
-                                     open_tpop_op_name + " with '" + expected_tfree +
-                                     "' on the same tile value",
+                                     it->op_name + " with '" + expected_tfree + "' on the same tile value",
                                  stmt->span_);
       } else {
-        open_tpop_var.reset();
+        outstanding_tpops.erase(it);
       }
-      continue;
-    }
-
-    if (open_tpop_var && !StmtReferencesVar(stmt, open_tpop_var.get())) {
-      diagnostics.emplace_back(
-          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
-          "Function '" + func->name_ +
-              "' must order cross-core tpop chains as 'tpop -> use -> tfree -> next tpop'",
-          stmt->span_);
-      open_tpop_var.reset();
     }
   }
 
-  if (open_tpop_var) {
+  for (const auto& outstanding : outstanding_tpops) {
     diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
                              ((func->func_type_ == FunctionType::AIC) ? "AIC" : "AIV") +
-                                 std::string(" function '") + func->name_ + "' uses " + open_tpop_op_name +
+                                 std::string(" function '") + func->name_ + "' uses " + outstanding.op_name +
                                  " but has no matching '" + expected_tfree + "' call",
-                             *open_tpop_span);
+                             outstanding.span);
   }
 }
 
-void VerifyTpopTfreeOrder(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) {
-  VerifyTpopTfreeOrderInBlock(FlattenBody(func->body_), func, diagnostics);
+void VerifyTpopTfreeMatching(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) {
+  VerifyTpopTfreeMatchingInBlock(FlattenBody(func->body_), func, diagnostics);
 }
 
 }  // namespace
@@ -462,7 +465,7 @@ class MixedKernelExpandedPropertyVerifierImpl : public PropertyVerifier {
         VerifyAtMostOneReserveAndImportPeerBuffer(func, diagnostics);
         VerifyCrossCorePipeSetup(func, diagnostics);
         VerifyInitializePipeOperands(func, diagnostics);
-        VerifyTpopTfreeOrder(func, diagnostics);
+        VerifyTpopTfreeMatching(func, diagnostics);
       }
     }
   }

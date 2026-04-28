@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORMS_UTILS_TPOP_CHAIN_NORMALIZER_H_
-#define PYPTO_IR_TRANSFORMS_UTILS_TPOP_CHAIN_NORMALIZER_H_
+#ifndef PYPTO_IR_TRANSFORMS_UTILS_TPOP_TFREE_FINALIZER_H_
+#define PYPTO_IR_TRANSFORMS_UTILS_TPOP_TFREE_FINALIZER_H_
 
 #include <cstddef>
 #include <limits>
@@ -27,7 +27,7 @@
 
 namespace pypto {
 namespace ir {
-namespace tpop_chain {
+namespace tpop_tfree {
 
 bool IsTpopAssignStmt(const StmtPtr& stmt, VarPtr* result_var = nullptr);
 bool IsExpectedTpopOp(const std::string& op_name, FunctionType func_type);
@@ -40,11 +40,8 @@ CallPtr CreateTfree(core_affinity::CoreSide side, const ExprPtr& tile, const Spa
 std::unordered_set<const Var*> CollectStmtVarRefs(const StmtPtr& stmt);
 std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt);
 
-bool StmtReferencesVar(const StmtPtr& stmt, const Var* var);
-
-struct TpopChain {
+struct TpopLifetime {
   size_t tpop_idx;
-  std::vector<size_t> user_idxs;
   size_t tfree_idx = std::numeric_limits<size_t>::max();
   VarPtr tpop_var;
   size_t last_use_idx;
@@ -52,11 +49,16 @@ struct TpopChain {
 
 const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);
 
-std::vector<StmtPtr> NormalizeTpopChains(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
-                                         const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);
+/// Repair tpop/tfree lifetime bookkeeping after mixed-kernel expansion.
+///
+/// Ensures every generated tpop chain frees the canonical tile value and that
+/// each tfree stays at or after the tile's last use, including nested control
+/// flow bodies.
+std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_affinity::CoreSide side,
+                                        const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);
 
-}  // namespace tpop_chain
+}  // namespace tpop_tfree
 }  // namespace ir
 }  // namespace pypto
 
-#endif  // PYPTO_IR_TRANSFORMS_UTILS_TPOP_CHAIN_NORMALIZER_H_
+#endif  // PYPTO_IR_TRANSFORMS_UTILS_TPOP_TFREE_FINALIZER_H_

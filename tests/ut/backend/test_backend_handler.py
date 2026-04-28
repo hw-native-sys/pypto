@@ -28,7 +28,7 @@ class TestBackendHandlerValues:
         assert handler.get_pto_target_arch() == "a2a3"
         assert handler.get_launch_spec_core_count_method() == "set_block_num"
         assert handler.get_default_sim_platform() == "a2a3sim"
-        assert handler.get_extra_ptoas_flags() == []
+        assert handler.get_extra_ptoas_flags() == ["--pto-arch", "a3"]
 
         assert handler.requires_gm_pipe_buffer() is True
         assert handler.requires_split_load_tpop_workaround() is True

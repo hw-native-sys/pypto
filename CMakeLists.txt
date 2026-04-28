@@ -175,7 +175,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/deep_clone_utils.cpp
     src/ir/transforms/utils/dead_code_elimination.cpp
     src/ir/transforms/utils/loop_state_repair.cpp
-    src/ir/transforms/utils/tpop_chain_normalizer.cpp
+    src/ir/transforms/utils/tpop_tfree_finalizer.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/op_predicates.cpp
     src/ir/transforms/utils/parent_stmt_analysis.cpp
@@ -221,7 +221,6 @@ set(PYPTO_SOURCES
     src/codegen/pto/pto_control_flow_codegen.cpp
     src/codegen/pto/pto_scalar_expr_codegen.cpp
     src/codegen/pto/pto_type_utils.cpp
-    src/codegen/pto/tpop_chain_reorder.cpp
     src/codegen/distributed/distributed_codegen.cpp
     src/codegen/tensor_op_codegen.cpp
 

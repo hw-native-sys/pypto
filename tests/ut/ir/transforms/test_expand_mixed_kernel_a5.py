@@ -1802,11 +1802,11 @@ class TestPropertyVerification:
         ):
             passes.verify_properties(prop_set, BadProgram, "test")
 
-    def test_verifier_rejects_next_tpop_before_tfree(self):
-        """A second tpop cannot appear before the previous chain is freed."""
+    def test_verifier_allows_grouped_tpop_use_tfree(self):
+        """Multiple live tpops are allowed as long as each one is eventually freed."""
 
         @pl.program
-        class BadProgram:
+        class GroupedTpopProgram:
             @pl.function(type=pl.FunctionType.AIC)
             def bad_aic(self):
                 pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
@@ -1832,8 +1832,31 @@ class TestPropertyVerification:
         prop_set = passes.IRPropertySet()
         prop_set.insert(passes.IRProperty.MixedKernelExpanded)
 
+        passes.verify_properties(prop_set, GroupedTpopProgram, "test")
+
+    def test_verifier_rejects_unmatched_tfree(self):
+        """A stray or duplicate tfree must be rejected explicitly."""
+
+        @pl.program
+        class BadProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def bad_aiv(self):
+                pipe_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=pipe_buf)
+                popped: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    split=0
+                )
+                pl.tfree_to_aic(popped)
+                pl.tfree_to_aic(popped)
+
+        prop_set = passes.IRPropertySet()
+        prop_set.insert(passes.IRProperty.MixedKernelExpanded)
+
         with pytest.raises(
-            Exception, match="must order cross-core tpop chains as 'tpop -> use -> tfree -> next tpop'"
+            Exception,
+            match=re.escape(
+                "has 'system.tfree_to_aic' without a matching outstanding tpop on the same tile value"
+            ),
         ):
             passes.verify_properties(prop_set, BadProgram, "test")
 
@@ -2106,6 +2129,48 @@ class TestAutoPipeSetup:
         # before structural_equal runs.
         assert aiv_str.index("tpop_from_aic") < aiv_str.index("if flag__ssa_v0 == 0:")
         assert aiv_str.index("if flag__ssa_v0 == 0:") < aiv_str.index("add(")
+
+    def test_auto_tfree_stays_after_if_return_var_alias(self):
+        """A returned if-carried alias must keep tfree after its downstream use."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                flag: pl.Scalar[pl.INDEX],
+                x: pl.Tensor[[4, 32], pl.BF16],
+                y: pl.Tensor[[32, 32], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
+            ) -> pl.Tensor[[4, 32], pl.FP32]:
+                x_mat = pl.load(x, [0, 0], [4, 32], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                if flag == 0:
+                    _then_probe = pl.exp(z_vec)
+                    carried = z_vec
+                else:
+                    _else_probe = pl.exp(z_vec)
+                    carried = z_vec
+                mixed = pl.add(carried, carried)
+                out_0: pl.Tensor[[4, 32], pl.FP32] = pl.store(mixed, [0, 0], out_0)
+                return out_0
+
+        After = _expand_raw(Before)
+        aiv_func = After.get_function("main_incore_0_aiv")
+        assert aiv_func is not None
+        aiv_str = aiv_func.as_python()
+
+        assert aiv_str.index("if flag__ssa_v0 == 0:") < aiv_str.index("pl.tile.add(")
+        assert aiv_str.index("pl.tile.add(") < aiv_str.index("tfree_to_aic")
 
 
 # ---------------------------------------------------------------------------
