@@ -37,7 +37,7 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] std::string GetPtoTargetArch() const override { return "a2a3"; }
   [[nodiscard]] std::string GetLaunchSpecCoreCountMethod() const override { return "set_block_num"; }
   [[nodiscard]] std::string GetDefaultSimPlatform() const override { return "a2a3sim"; }
-  [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {}; }
+  [[nodiscard]] std::vector<std::string> GetExtraPtoasFlags() const override { return {"--pto-arch", "a3"}; }
 
   [[nodiscard]] bool RequiresGMPipeBuffer() const override { return true; }
   [[nodiscard]] bool RequiresSplitLoadTpopWorkaround() const override { return true; }

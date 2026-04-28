@@ -70,8 +70,10 @@ class BackendHandler {
   /**
    * @brief Extra flags appended to the ptoas compiler invocation.
    *
-   * Most backends only need the common flags; some require additional
-   * arch selectors (e.g. Ascend950 needs ["--pto-arch", "a5"]).
+   * Some PTOAS releases require an explicit ISA selector even when the MLIR
+   * module already carries a backend-specific target_arch attribute (e.g.
+   * Ascend910B needs ["--pto-arch", "a3"], Ascend950 needs
+   * ["--pto-arch", "a5"]).
    */
   [[nodiscard]] virtual std::vector<std::string> GetExtraPtoasFlags() const = 0;
 

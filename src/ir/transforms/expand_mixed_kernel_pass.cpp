@@ -46,7 +46,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
-#include "pypto/ir/transforms/utils/tpop_chain_normalizer.h"
+#include "pypto/ir/transforms/utils/tpop_tfree_finalizer.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -70,7 +70,7 @@ using cross_core_pipe::PrependPipeSetup;
 using loop_repair::BuildDefMap;
 using loop_repair::FinalizeSplitCoreBody;
 using loop_repair::MakeBody;
-using tpop_chain::NormalizeTpopChains;
+using tpop_tfree::FinalizeTpopTfrees;
 
 // ============================================================================
 // Flatten body helper
@@ -511,15 +511,15 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       aic_stmts_no_return.push_back(s);
     }
   }
-  auto aic_final = NormalizeTpopChains(FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map),
-                                       CoreSide::AIC, aic_tpop_remap);
+  auto aic_final = FinalizeTpopTfrees(FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map),
+                                      CoreSide::AIC, aic_tpop_remap);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts =
       BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap, superseded_tpop_vars);
   auto aiv_final =
-      NormalizeTpopChains(FinalizeSplitCoreBody(aiv_stmts, original_def_map), CoreSide::AIV, aiv_tpop_remap);
+      FinalizeTpopTfrees(FinalizeSplitCoreBody(aiv_stmts, original_def_map), CoreSide::AIV, aiv_tpop_remap);
 
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";

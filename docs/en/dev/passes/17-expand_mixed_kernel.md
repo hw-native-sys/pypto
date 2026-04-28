@@ -68,10 +68,11 @@ Setup is derived from the split bodies:
 
 When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved.
 
-For consumer-side cross-core tiles, the pass also normalizes statement order to satisfy the PTO requirement
-`tpop -> direct users -> tfree -> next tpop`. When AIC must post-process a `tile.tpop_from_aiv` result with a same-side
-`tile.move` (for example Mat -> Left/Right/Bias), that move is treated as the last direct user and the auto-generated
-`system.tfree_to_aiv(...)` is emitted after it.
+For consumer-side cross-core tiles, the pass also ensures each `tile.tpop_*` has a matching
+`system.tfree_*`. When an existing free is obviously too early, the pass delays it to a later statement in the same
+block without reordering independent `tpop` chains. When AIC must post-process a `tile.tpop_from_aiv` result with a
+same-side `tile.move` (for example Mat -> Left/Right/Bias), the generated `system.tfree_to_aiv(...)` is rewritten to
+free the canonical popped tile value and can be delayed past that carrier chain.
 
 For Ascend910B (a2a3), mixed kernels with **no function split mode** (`split` unset or `SplitMode.None`) are also
 supported. In that case the pass keeps a single AIV kernel body, marks it for **dual AIV dispatch**, and later lowering
@@ -141,8 +142,8 @@ Phase 2 — Expand each InCore function F:
      post-loop use that temporarily kept an iter_arg alive
   9. Run dead code elimination again to clean up init-value chains exposed
      by the second strip
- 10. Normalize consumer-side `tpop` chains to `tpop -> direct users -> tfree`
-     and insert missing `system.tfree_to_aic` / `system.tfree_to_aiv`
+ 10. Ensure each consumer-side `tpop` chain has a matching
+     `system.tfree_to_aic` / `system.tfree_to_aiv`, delaying obviously early frees within the same block when needed
  11. If the split bodies use cross-core tile ops and do not already contain setup,
       derive reserve/import/initialize_pipe prologues and prepend them
  12. Create AIC function (no return) and AIV function (original return)
@@ -316,10 +317,12 @@ class After:
 - `tile.tpop_from_aic` in AIV lands in `MemorySpace::Vec`
 - AIC/AIV functions with cross-core `tpush`/`tpop` also contain the required pipe setup
 - every AIC/AIV `tile.tpop_*` has a matching `system.tfree_*`
-- top-level cross-core consumer chains follow `tpop -> direct users -> tfree -> next tpop`
 - cross-core tile ops have statically known tile shapes (required for auto pipe setup)
 
-This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` / `import_peer_buffer`, missing `tfree`, non-static tile sizes, invalid `tpop` ordering) from PTO codegen / `ptoas` time to immediately after `ExpandMixedKernel`.
+This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` / `import_peer_buffer`, missing `tfree`,
+non-static tile sizes, mismatched cross-core `tpop`/`tfree` pairs) from PTO codegen / `ptoas` time to immediately after
+`ExpandMixedKernel`. The verifier checks pairing by tile value/op; it does not prove that a `tfree` is placed after the
+true last use of that tile.
 
 ## Design Decisions
 
@@ -338,5 +341,5 @@ This moves common failures (missing `initialize_pipe`, missing `reserve_buffer` 
 | Recursive compound-stmt handling | Correctly splits mixed ops inside `ForStmt`, `IfStmt`, `WhileStmt` |
 | Two-stage post-split loop-state repair | First makes loop-carried state valid, then re-strips iter_args after DCE removes dead shared aliases, with a final DCE to clean up exposed init-value chains |
 | Auto-generated pipe setup | Tensor-level mixed kernels do not need handwritten `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`; the pass derives them from cross-core tile ops |
-| Auto-generated tfree chains | Consumer-side split kernels release each popped slot in IR, so PTO codegen sees the required `tpop -> use -> tfree -> next tpop` order directly |
+| Auto-generated tfree chains | Consumer-side split kernels insert missing `tfree` calls, rewrite them to free the canonical popped tile value, and delay obviously early frees within the same block without reordering independent `tpop` chains |
 | Max-slot-size policy | Uses `max(all tile byte sizes)` as the single `initialize_pipe.slot_size`, matching the backend assumption of one reserve/import buffer per function while supporting mixed tile sizes across directions |

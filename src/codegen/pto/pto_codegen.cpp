@@ -31,7 +31,6 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
-#include "pypto/codegen/pto/tpop_chain_reorder.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -364,19 +363,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   stream_ = std::move(fs_.body_section);
 
   if (func->body_) {
-    if (!fs_.tpop_result_vars.empty()) {
-      auto seq = As<ir::SeqStmts>(func->body_);
-      if (seq) {
-        auto reordered = ReorderTpopChains(seq->stmts_);
-        for (const auto& stmt : reordered) {
-          VisitStmt(stmt);
-        }
-      } else {
-        VisitStmt(func->body_);
-      }
-    } else {
-      VisitStmt(func->body_);
-    }
+    VisitStmt(func->body_);
   }
 
   std::string body_content = stream_.str();
@@ -390,10 +377,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   indent_level_--;
   stream_ << "  }\n";
-}
-
-std::vector<ir::StmtPtr> PTOCodegen::ReorderTpopChains(const std::vector<ir::StmtPtr>& stmts) const {
-  return codegen::ReorderTpopChains(stmts, fs_.tpop_result_vars);
 }
 
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {

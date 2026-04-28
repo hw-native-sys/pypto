@@ -380,31 +380,6 @@ class TestCrossCoreTpushTpopCodegen:
         with pytest.raises(Exception, match="tpop valid_shape operand must be integer or index type, got i1"):
             codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_bool_row_program", span))
 
-    def test_tpop_chain_ordering(self):
-        """Test that tpop chains follow pop-use-free ordering per hardware requirement."""
-        codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
-        cube_code = codes["cube_consumer"]
-        lines = cube_code.split("\n")
-
-        tpop_lines = [i for i, line in enumerate(lines) if "pto.tpop_from_aiv" in line]
-        tfree_lines = [i for i, line in enumerate(lines) if "pto.tfree_from_aiv" in line]
-        tmov_lines = [i for i, line in enumerate(lines) if "pto.tmov" in line]
-
-        assert len(tpop_lines) == 2, f"Expected 2 tpop lines, got {len(tpop_lines)}"
-        assert len(tfree_lines) == 2, f"Expected 2 tfree lines, got {len(tfree_lines)}"
-        assert len(tmov_lines) >= 2, f"Expected at least 2 tmov lines, got {len(tmov_lines)}"
-
-        # pop1 < use1 < free1 < pop2 < use2 < free2
-        assert tpop_lines[0] < tmov_lines[0] < tfree_lines[0], (
-            f"First chain out of order: tpop={tpop_lines[0]}, tmov={tmov_lines[0]}, tfree={tfree_lines[0]}"
-        )
-        assert tfree_lines[0] < tpop_lines[1], (
-            f"Second tpop should come after first tfree: tfree1={tfree_lines[0]}, tpop2={tpop_lines[1]}"
-        )
-        assert tpop_lines[1] < tmov_lines[1] < tfree_lines[1], (
-            f"Second chain out of order: tpop={tpop_lines[1]}, tmov={tmov_lines[1]}, tfree={tfree_lines[1]}"
-        )
-
     def test_tfree_stays_after_nested_control_flow_use(self):
         """Nested control-flow users of a tpop result must stay before tfree."""
 
