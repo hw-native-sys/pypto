@@ -12,8 +12,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.30
-      PTOAS_SHA256: 83cd91f1bbe3c1b5bc7b01462adeb73603fb22b1b56d8b39bd90644b373ba2a1
+      PTOAS_VERSION: v0.32
+      PTOAS_SHA256: 325198dff677d7d163e16ce0aed27aa08c119764a4f50a60092b0edcd2e0784b
     container:
       image: localhost:5000/ci-device-py310:latest
       options: >-
@@ -48,7 +48,7 @@ jobs:
         if: steps.cache-ptoas.outputs.cache-hit != 'true'
         run: |
           curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/zhangstevenunity/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
+            https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
              -o /tmp/ptoas-bin-aarch64.tar.gz
           echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
           mkdir -p $GITHUB_WORKSPACE/ptoas-bin
@@ -109,8 +109,8 @@ jobs:
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.30
-      PTOAS_SHA256: 83cd91f1bbe3c1b5bc7b01462adeb73603fb22b1b56d8b39bd90644b373ba2a1
+      PTOAS_VERSION: v0.32
+      PTOAS_SHA256: 325198dff677d7d163e16ce0aed27aa08c119764a4f50a60092b0edcd2e0784b
     steps:
       - uses: actions/checkout@v4
         with:
@@ -131,7 +131,7 @@ jobs:
         if: steps.cache-ptoas.outputs.cache-hit != 'true'
         run: |
           curl --fail --location --retry 3 --retry-all-errors \
-            https://github.com/zhangstevenunity/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
+            https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-aarch64.tar.gz \
              -o /tmp/ptoas-bin-aarch64.tar.gz
           echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-aarch64.tar.gz" | sha256sum -c -
           mkdir -p $GITHUB_WORKSPACE/ptoas-bin
