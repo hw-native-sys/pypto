@@ -282,8 +282,11 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     result_var = ir.Var("result", ir.TensorType([128, 128], DataType.FP32), span)
     offsets = ir.MakeTuple([zero, zero], span)
     shapes = ir.MakeTuple([size, size], span)
+    valid_shapes = ir.MakeTuple([m_var, n_var], span)
 
-    load_call = ir.Call(ir.Op("tile.load"), [input_tensor, offsets, shapes], {}, load_tile_type, span)
+    load_call = ir.Call(
+        ir.Op("tile.load"), [input_tensor, offsets, shapes, valid_shapes], {}, load_tile_type, span
+    )
     fillpad_call = ir.Call(
         ir.Op("tile.fillpad"),
         [load_tile],
@@ -375,6 +378,8 @@ def test_pto_codegen_fillpad_inplace():
     offsets = ir.MakeTuple([zero, zero], span)
     shapes = ir.MakeTuple([size, size], span)
 
+    # Intentionally use the 3-arg form to exercise the backend fallback when
+    # valid_shapes is omitted (equivalent to `pl.load(..., valid_shapes=None)`).
     load_call = ir.Call(ir.Op("tile.load"), [input_tensor, offsets, shapes], {}, load_tile_type, span)
     fillpad_inplace_call = ir.Call(
         ir.Op("tile.fillpad_inplace"),

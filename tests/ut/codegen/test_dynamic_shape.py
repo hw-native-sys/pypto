@@ -152,17 +152,22 @@ def test_add_kernel_valid_shape_pto_codegen():
     assert "shape = [%c128_index, %c128_index]" in mlir_code
     assert "strides = [%c128_index, %c1_index]" in mlir_code
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
-    # Tile allocation uses shapes (128x128), not dynamic valid_shapes
-    assert "partition_tensor_view<128x128xf32>" in mlir_code
+    # partition_view follows valid_shapes (dynamic %arg3, %arg4) so the DMA
+    # only fetches the valid region from GM. The partition_view type therefore
+    # uses dynamic dims and its sizes use the valid_shape SSA values directly.
+    assert "partition_tensor_view<?x?xf32>" in mlir_code
+    assert "sizes = [%arg3, %arg4]" in mlir_code
     # tload is generated for each load
     assert "pto.tload" in mlir_code
     # alloc_tile has dynamic type (v_row=?, v_col=?) with dynamic operands
     assert "v_row=?" in mlir_code
     assert "v_col=?" in mlir_code
-    # No fillpad consumer → valid_row/valid_col use dynamic variable operands (%arg3, %arg4)
+    # alloc_tile valid_row/valid_col use the dynamic valid_shape operands
+    # (%arg3, %arg4), matching the partition_view sizes above.
     assert "valid_row = %arg3" in mlir_code
     assert "valid_col = %arg4" in mlir_code
-    # No set_validshape without fillpad (TLOAD respects valid_shape directly)
+    # No set_validshape: alloc_tile carries the valid_row/valid_col operands
+    # and partition_view already reflects the same valid region.
     assert "pto.set_validshape" not in mlir_code
 
 
