@@ -124,6 +124,61 @@ class TestAutoTileMatmulL0KOnly:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_matmul_acc_pipelined(self):
+        """``tile.matmul_acc`` with the same 16×64 @ 2048 BF16 shape rewrites
+        into a uniform K-loop: every iteration is ``tile.matmul_acc``, with
+        the iter-arg init = caller's ``acc_init`` (no Vec placeholder, no
+        if-else branch since the accumulator chain is uniform from the
+        first iteration)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                acc_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(acc_init, lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                acc_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                # No Vec placeholder: the iter-arg init is the caller's acc_init.
+                for ko, (c_iter,) in pl.pipeline(0, 2048, 256, init_values=(acc_init,), stage=2):
+                    sa: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat] = pl.tile.slice(lhs_mat, [16, 256], [0, ko])
+                    sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.slice(rhs_mat, [256, 64], [ko, 0])
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_already_l0_sized_skipped(self):
         """64×64×64 BF16 → fits in L0 capacity after double-buffering →
         ChooseL0Tile returns (M, N, K) → pass leaves the matmul untouched."""
@@ -221,11 +276,9 @@ class TestAutoTileMatmulL0KOnly:
 class TestAutoTileMatmulL0Skips:
     """Cases where the pass intentionally leaves the matmul untouched."""
 
-    def test_matmul_acc_left_untouched(self):
-        """``tile.matmul_acc`` is not yet rewritten by this pass; it should
-        leave the input identical (no K-loop emitted).  Threading the
-        caller-provided accumulator through a tiled K-loop requires
-        additional rewriting that's out of scope for now."""
+    def test_non_mat_operands_left_untouched_for_matmul_acc(self):
+        """``tile.matmul_acc`` whose lhs/rhs aren't Mat-resident is out of
+        scope for tiling; the pass should leave it identical."""
 
         @pl.program
         class Before:
@@ -237,13 +290,10 @@ class TestAutoTileMatmulL0Skips:
                 acc_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc],
                 out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ) -> pl.Tensor[[16, 64], pl.FP32]:
-                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
-                )
-                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
-                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
-                )
-                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(acc_init, lhs_mat, rhs_mat)
+                # Default tile.load lands in Vec, not Mat — pass should skip.
+                lhs_vec: pl.Tile[[16, 2048], pl.BF16] = pl.tile.load(lhs, [0, 0], [16, 2048])
+                rhs_vec: pl.Tile[[2048, 64], pl.BF16] = pl.tile.load(rhs, [0, 0], [2048, 64])
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(acc_init, lhs_vec, rhs_vec)
                 out = pl.store(c, [0, 0], out)
                 return out
 

@@ -347,27 +347,34 @@ Pass OptimizeOrchTensors();
 Pass FlattenTileNdTo2D();
 
 /**
- * @brief Auto-tile Mat-resident matmul into a C-stationary K-loop
+ * @brief Auto-tile Mat-resident matmul / matmul_acc into a C-stationary K-loop
  *
- * For each ``tile.matmul`` whose operands live in ``MemorySpace::Mat`` with
+ * For each ``tile.matmul`` or ``tile.matmul_acc`` whose Mat operands have
  * static 2D shape, queries ``utils::ChooseL0Tile`` against the active
  * ``BackendHandler``'s L0 capacities and rewrites the call into a single
- * ``range(0, K, k)`` loop whose body branches on ``ko == 0`` between
- * ``tile.matmul`` (fresh accumulator) and ``tile.matmul_acc`` (accumulating
- * into the iter-arg).  The iter-arg init is a Vec-resident ``tile.create``
- * placeholder; ``InferTileMemorySpace`` (the next pass) inserts the Acc/Vec
- * bridges that make the IR type-correct.
+ * ``range(0, K, k)`` loop:
  *
- * The K-loop is marked with ``ForKind::Pipeline`` + ``pipeline_stages=2`` so
- * the downstream ``LowerPipelineLoops`` pass clones the body for a 2-deep
+ *   - For ``tile.matmul``: the loop body branches on ``ko == 0`` between
+ *     ``tile.matmul`` (fresh accumulator) and ``tile.matmul_acc``
+ *     (accumulating into the iter-arg).  The iter-arg init is a Vec-resident
+ *     ``tile.create`` placeholder; ``InferTileMemorySpace`` (the next pass)
+ *     inserts the Acc↔Vec bridges that make the IR type-correct.
+ *   - For ``tile.matmul_acc``: every iteration is ``tile.matmul_acc``; the
+ *     iter-arg init is the caller-provided accumulator directly, so the
+ *     accumulator chain is uniform from the first iteration and no if-else
+ *     is needed.
+ *
+ * The K-loop is marked ``ForKind::Pipeline`` + ``pipeline_stages=2`` so the
+ * downstream ``LowerPipelineLoops`` pass clones the body for a 2-deep
  * ping-pong on the auto-inserted Mat→Left/Right moves.
  *
- * V1 scope (extensions to follow):
- *   - Only plain ``tile.matmul``.  ``tile.matmul_acc`` (caller-provided
- *     accumulator) and ``tile.matmul_bias`` are left untouched.
- *   - Only K tiling (``m == M`` and ``n == N``).  Cases where the chooser
+ * Supported today (extensions to follow):
+ *   - ``tile.matmul`` and ``tile.matmul_acc``.  ``tile.matmul_bias`` is
+ *     deferred (bias add only after the final iteration needs extra
+ *     rewriting).
+ *   - K tiling only (``m == M`` and ``n == N``).  Cases where the chooser
  *     selects ``m < M`` or ``n < N`` emit a ``PerfHint`` and skip.
- *   - Requires ``K % k == 0``.  K-boundary handling is deferred.
+ *   - ``K % k == 0``.  K-boundary handling is deferred.
  *
  * Already-L0-sized matmuls (chooser returns ``(M, N, K)``) are left
  * untouched.  Runs between ``FlattenTileNdTo2D`` and

@@ -392,14 +392,16 @@ void BindPass(nb::module_& m) {
              "Merges all dimensions except the last into a single dimension.\n"
              "E.g., tile [A, B, C] becomes [A*B, C]. Only converts 3D+ tiles.");
   passes.def("auto_tile_matmul_l0", &pass::AutoTileMatmulL0,
-             "Create a pass that auto-tiles Mat-resident tile.matmul into a C-stationary K-loop\n\n"
-             "Rewrites each tile.matmul whose operands live in MemorySpace::Mat with static 2D\n"
-             "shape into a range(0, K, k) loop whose body branches on `ko == 0` between\n"
-             "tile.matmul (fresh accumulator) and tile.matmul_acc (accumulating). The K-loop is\n"
-             "marked ForKind::Pipeline + pipeline_stages=2 so LowerPipelineLoops produces a\n"
-             "2-deep ping-pong. Already-L0-sized matmuls are left untouched. V1 scope: only plain\n"
-             "tile.matmul; tile.matmul_acc / tile.matmul_bias are deferred. Only K tiling; M/N\n"
-             "tiling and K%k!=0 cases emit a PerfHint and skip.");
+             "Create a pass that auto-tiles Mat-resident tile.matmul / tile.matmul_acc into a\n"
+             "C-stationary K-loop\n\n"
+             "Rewrites each tile.matmul or tile.matmul_acc whose Mat operands have static 2D\n"
+             "shape into a range(0, K, k) loop. For tile.matmul the body branches on `ko == 0`\n"
+             "between tile.matmul (fresh accumulator) and tile.matmul_acc (accumulating). For\n"
+             "tile.matmul_acc the body is uniform — every iteration is tile.matmul_acc with the\n"
+             "iter-arg init = caller's accumulator. The K-loop is marked ForKind::Pipeline +\n"
+             "pipeline_stages=2 so LowerPipelineLoops produces a 2-deep ping-pong. Already-L0-\n"
+             "sized matmuls are left untouched. tile.matmul_bias is not yet supported. Only K\n"
+             "tiling; M/N tiling and K%k!=0 cases emit a PerfHint and skip.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
   passes.def("resolve_transpose_layout", &pass::ResolveTransposeLayout,
