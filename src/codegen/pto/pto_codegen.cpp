@@ -203,9 +203,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     BindVarToMlir(tile_var, ssa_name);
 
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
-    // can query it before per-variable alloc_tile emission runs. Tile types
-    // are always emitted with `v_row=?, v_col=?`; the actual extents flow
-    // through the alloc_tile valid_row/valid_col operands.
+    // can query it before per-variable alloc_tile emission runs.
     std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
     fs_.ssa_to_tile_buf_type[ssa_name] = type_str;
 
@@ -461,10 +459,11 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
 
       // Materialize one shape dimension as an MLIR SSA value.
       auto get_shape_dim_mlir = [&](size_t dim_idx) -> std::string {
-        if (auto var = As<ir::Var>(tensor_type->shape_[dim_idx])) {
-          return GetVarName(var);
+        const auto& dim_expr = tensor_type->shape_[dim_idx];
+        if (auto const_int = As<ir::ConstInt>(dim_expr)) {
+          return GetOrEmitConstant(const_int->value_, DataType::INDEX);
         }
-        return GetOrEmitConstant(GetConstIntValue(tensor_type->shape_[dim_idx]), DataType::INDEX);
+        return EmitCastToIndex(dim_expr, GetExprAsCode(dim_expr));
       };
 
       // DN tensor views keep the original logical shape in IR typing, but the
@@ -485,6 +484,11 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
                 << " : index\n";
         return mul_name;
       };
+
+      std::vector<std::string> shape_dim_names(rank);
+      for (size_t j = 0; j < rank; ++j) {
+        shape_dim_names[j] = get_shape_dim_mlir(get_shape_source_idx(j));
+      }
 
       // For N-D (N > 2): pre-compute strides as SSA values using arith.muli.
       // ND uses standard row-major strides. DN keeps the same outer batch/page
@@ -515,6 +519,19 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         }
       }
 
+      std::vector<std::string> explicit_stride_names;
+      if (has_explicit_stride) {
+        const auto& strides = tensor_type->tensor_view_->stride;
+        explicit_stride_names.reserve(strides.size());
+        for (const auto& stride_expr : strides) {
+          if (auto const_int = As<ir::ConstInt>(stride_expr)) {
+            explicit_stride_names.push_back(GetOrEmitConstant(const_int->value_, DataType::INDEX));
+          } else {
+            explicit_stride_names.push_back(EmitCastToIndex(stride_expr, GetExprAsCode(stride_expr)));
+          }
+        }
+      }
+
       stream_ << GetIndent() << tensor_view << " = pto.make_tensor_view ";
       stream_ << GetVarName(param);
 
@@ -522,27 +539,23 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       // DN swaps the last two visible shape dimensions; ND keeps the original order.
       for (size_t j = 0; j < rank; j++) {
         if (j > 0) stream_ << ", ";
-        stream_ << get_shape_dim_mlir(get_shape_source_idx(j));
+        stream_ << shape_dim_names[j];
       }
       stream_ << "],";
 
       stream_ << " strides = [";
       if (has_explicit_stride) {
         // Use explicit strides from tensor_view_ (e.g. physical memory strides for view tensors)
-        const auto& strides = tensor_type->tensor_view_->stride;
-        for (size_t j = 0; j < strides.size(); j++) {
+        for (size_t j = 0; j < explicit_stride_names.size(); j++) {
           if (j > 0) stream_ << ", ";
-          if (auto var = As<ir::Var>(strides[j])) {
-            stream_ << GetVarName(var);
-          } else {
-            stream_ << GetOrEmitConstant(GetConstIntValue(strides[j]), DataType::INDEX);
-          }
+          stream_ << explicit_stride_names[j];
         }
       } else if (tensor_type->shape_.size() == 2) {
         // For column vector [M, 1]: stride dim is shape[0] (= M) → strides [1, M].
         // For other 2D: stride dim is shape[1] (= C) → DN [1, C] or ND [C, 1].
         int stride_idx = is_column_vector ? 0 : 1;
-        std::string row_stride = get_shape_dim_mlir(stride_idx);
+        const std::string& row_stride =
+            shape_dim_names[get_shape_source_idx(static_cast<size_t>(stride_idx))];
         if (layout_DN) {
           stream_ << GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX) << ", " << row_stride;
         } else {
@@ -590,8 +603,8 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
     const std::shared_ptr<const ir::TileType>& tile_type) {
   AllocTileFields fields;
 
-  // Type string is always dynamic (`v_row=?, v_col=?`); the actual extent is
-  // conveyed via the `valid_row` / `valid_col` operands below.
+  // Type string always uses dynamic valid dims (v_row=?, v_col=?); the actual
+  // extent is conveyed via valid_row / valid_col operands below.
   fields.type_str = GetTileBufTypeStringFromTileType(tile_type);
 
   // Cast a non-index integer SSA to `index` (PTOAS expects index typed
@@ -781,6 +794,23 @@ std::string PTOCodegen::GetSSATileBufType(const std::string& ssa_name) const {
   return it != fs_.ssa_to_tile_buf_type.end() ? it->second : std::string{};
 }
 
+void PTOCodegen::RegisterSubviewMaterialization(const std::string& subview_ssa,
+                                                const SubviewMaterializationInfo& info) {
+  fs_.subview_materializations[subview_ssa] = info;
+}
+
+PTOCodegen::SubviewMaterializationInfo* PTOCodegen::GetSubviewMaterialization(
+    const std::string& subview_ssa) {
+  auto it = fs_.subview_materializations.find(subview_ssa);
+  return it != fs_.subview_materializations.end() ? &it->second : nullptr;
+}
+
+const PTOCodegen::SubviewMaterializationInfo* PTOCodegen::GetSubviewMaterialization(
+    const std::string& subview_ssa) const {
+  auto it = fs_.subview_materializations.find(subview_ssa);
+  return it != fs_.subview_materializations.end() ? &it->second : nullptr;
+}
+
 void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa) { fs_.gm_slot_buffer_ssa = ssa; }
 
 std::string PTOCodegen::GetGMSlotBufferSSA() const { return fs_.gm_slot_buffer_ssa; }
@@ -870,7 +900,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       // Register per-variable tile_buf type from the variable's own TileType.
       // This ensures that even when multiple variables share a MemRef, each
       // variable's SSA value carries its correct typed annotation.
-      if (result_tile_type && !fs_.current_result_buf.empty()) {
+      if (result_tile_type && !fs_.current_result_buf.empty() && fs_.current_result_buf == result_buf) {
         std::string var_type_str = GetTileBufTypeStringFromTileType(result_tile_type);
         if (!var_type_str.empty()) {
           fs_.ssa_to_tile_buf_type[fs_.current_result_buf] = var_type_str;

@@ -333,12 +333,11 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     # Both share the same addr (same MemRef)
     assert "addr = %c0_i64" in alloc_lines[0]
     assert "addr = %c0_i64" in alloc_lines[1]
-    # All alloc_tile types are emitted with v_row=?, v_col=? in the unified
-    # always-dynamic codegen. The actual extents are conveyed via
-    # valid_row / valid_col operands.
+    # All alloc_tile types use dynamic v_row=?, v_col=?; the actual extents
+    # are conveyed via the valid_row / valid_col operands.
     assert "v_row=?" in alloc_lines[0], f"Expected dynamic v_row=? in alloc: {alloc_lines[0]}"
     assert "v_col=?" in alloc_lines[0], f"Expected dynamic v_col=? in alloc: {alloc_lines[0]}"
-    # Padded tile carries the same dynamic v_row=?/v_col=? type, retains pad=2,
+    # Padded tile carries dynamic v_row=?/v_col=? type, retains pad=2,
     # and sources its valid_row/valid_col operands from the physical dims.
     assert "pad=2>" in alloc_lines[1], f"Expected fillpad pad metadata to be preserved: {alloc_lines[1]}"
     assert "v_row=?" in alloc_lines[1], f"Expected dynamic v_row=? in padded tile: {alloc_lines[1]}"
@@ -1551,8 +1550,8 @@ def test_pto_codegen_mixed_scalar_and_tile_iter_args():
 
 def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
     """Slice with partially dynamic valid_shape followed by fillpad must lower
-    to a single pto.subview (no spurious extra alloc) and feed a dynamic
-    valid_shape tile into pto.tfillpad."""
+    without a scratch slice alloc, and feed a dynamic valid_shape tile into
+    pto.tfillpad."""
 
     @pl.program
     class SliceFillpadProgram:
@@ -1579,19 +1578,76 @@ def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
     ), f"Unexpected slice_buf alloc_tile — pto.subview is a view, no extra buffer needed.\n{mlir_code}"
     assert "pto.textract" not in mlir_code, f"tile.slice no longer emits pto.textract, got:\n{mlir_code}"
 
-    # Exactly one pto.subview should carry the dynamic `valid [...]` operand
-    # corresponding to the partially-dynamic valid_shape on tile.slice.
+    # Full-window slice with explicit valid_shape lowers via data-preserving
+    # pto.tmov plus a follow-up pto.set_validshape.
     subview_lines = [line.strip() for line in mlir_code.splitlines() if "pto.subview" in line]
-    assert len(subview_lines) == 1, f"Expected one pto.subview, got: {subview_lines}"
-    assert "valid [" in subview_lines[0], (
-        f"pto.subview should carry a `valid [...]` clause for dynamic valid_shape: {subview_lines[0]}"
-    )
+    assert len(subview_lines) == 0, f"Full-window slice should not emit pto.subview, got: {subview_lines}"
+    tmov_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tmov" in line]
+    assert len(tmov_lines) == 1, f"Expected one pto.tmov for full-window slice, got: {tmov_lines}"
+    set_validshape_lines = [line.strip() for line in mlir_code.splitlines() if "pto.set_validshape" in line]
+    assert len(set_validshape_lines) == 1, f"Expected one pto.set_validshape, got: {set_validshape_lines}"
 
     # All tile_buf types use the always-dynamic `v_row=?, v_col=?` form.
     fillpad_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tfillpad" in line]
     assert len(fillpad_lines) == 1, f"Expected one tfillpad, got: {fillpad_lines}"
     assert "v_row=?" in fillpad_lines[0], f"fillpad input should have v_row=?: {fillpad_lines[0]}"
     assert "v_col=?" in fillpad_lines[0], f"fillpad input should have v_col=?: {fillpad_lines[0]}"
+
+
+def test_pto_codegen_slice_full_window_dynamic_valid_shape_uses_set_validshape():
+    """Full-window slice with runtime valid rows should lower via tmov +
+    set_validshape rather than a subview `valid [...]` clause."""
+
+    @pl.program
+    class FullWindowSliceProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            scores_in: pl.Tensor[[16, 256], pl.BF16],
+            valid_rows: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[16, 256], pl.BF16]],
+        ) -> pl.Tensor[[16, 256], pl.BF16]:
+            scores: pl.Tile[[16, 256], pl.BF16] = pl.load(scores_in, [0, 0], [16, 256])
+            trimmed: pl.Tile[[16, 256], pl.BF16] = pl.tile.slice(
+                scores, [16, 256], [0, 0], valid_shape=[valid_rows, 256]
+            )
+            return pl.store(trimmed, [0, 0], out)
+
+    mlir_code = _generate_default_mlir(FullWindowSliceProgram)
+    subview_lines = [line.strip() for line in mlir_code.splitlines() if "pto.subview" in line]
+    assert len(subview_lines) == 0, f"Full-window slice should not emit pto.subview, got: {subview_lines}"
+    tmov_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tmov" in line]
+    assert len(tmov_lines) == 1, f"Expected one pto.tmov for full-window slice, got: {tmov_lines}"
+
+    set_validshape_lines = [line.strip() for line in mlir_code.splitlines() if "pto.set_validshape" in line]
+    assert len(set_validshape_lines) == 1, f"Expected one pto.set_validshape, got: {set_validshape_lines}"
+    assert "valid_rows" in set_validshape_lines[0] or "%arg2" in set_validshape_lines[0], (
+        f"Runtime valid_rows should feed pto.set_validshape: {set_validshape_lines[0]}"
+    )
+
+
+def test_pto_codegen_slice_static_subwindow_binds_subview_result():
+    """Static subwindow slice without explicit valid_shape should remain a
+    true pto.subview SSA result and avoid a materializing pto.tmov."""
+
+    @pl.program
+    class StaticSubviewProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            scores_in: pl.Tensor[[5, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[5, 64], pl.FP32]],
+        ) -> pl.Tensor[[5, 64], pl.FP32]:
+            scores: pl.Tile[[5, 128], pl.FP32] = pl.load(scores_in, [0, 0], [5, 128])
+            sliced: pl.Tile[[5, 64], pl.FP32] = pl.tile.slice(scores, [5, 64], [0, 0])
+            return pl.store(sliced, [0, 0], out)
+
+    mlir_code = _generate_default_mlir(StaticSubviewProgram)
+    subview_lines = [line.strip() for line in mlir_code.splitlines() if "pto.subview" in line]
+    assert len(subview_lines) == 1, f"Expected one pto.subview, got: {subview_lines}"
+    assert "rows=5, cols=64" in subview_lines[0], f"Subview result type should be 5x64: {subview_lines[0]}"
+    tmov_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tmov" in line]
+    assert len(tmov_lines) == 0, f"Static subwindow view should not materialize a pto.tmov, got: {tmov_lines}"
 
 
 class TestColumnVectorCodegen:
@@ -1811,6 +1867,53 @@ def test_pto_codegen_view_output_uses_physical_stride():
     a_view_lines = _find_lines(lines, "pto.make_tensor_view %arg0")
     assert len(a_view_lines) == 1
     assert "strides = [%c128_index, %c1_index]" in a_view_lines[0]
+
+
+def test_pto_codegen_make_tensor_view_accepts_dynamic_shape_expressions():
+    """make_tensor_view should lower non-Var dynamic shape/stride expressions via index casts."""
+    span = ir.Span.unknown()
+    th = ir.Var("TH", ir.ScalarType(DataType.INT64), span)
+    tw = ir.Var("TW", ir.ScalarType(DataType.INT64), span)
+    one = ir.ConstInt(1, DataType.INT64, span)
+    th_plus_one = ir.add(th, one, span)
+    tw_plus_one = ir.add(tw, one, span)
+
+    tv = ir.TensorView(stride=[tw_plus_one, one], layout=ir.TensorLayout.ND)
+    dyn_tensor_type = ir.TensorType([th_plus_one, tw], DataType.FP32, memref=None, tensor_view=tv)
+
+    inp = ir.Var("inp", dyn_tensor_type, span)
+    out = ir.Var("out", dyn_tensor_type, span)
+    tile_type = ir.op.tile.load(inp, [0, 0], [8, 8]).type
+    tile_var = ir.Var("t", tile_type, span)
+    result_var = ir.Var("result", dyn_tensor_type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(tile_var, ir.op.tile.load(inp, [0, 0], [8, 8]), span),
+            ir.AssignStmt(result_var, ir.op.tile.store(tile_var, [0, 0], out), span),
+            ir.ReturnStmt([result_var], span),
+        ],
+        span,
+    )
+
+    func = ir.Function(
+        "kernel",
+        [inp, out, th, tw],
+        [dyn_tensor_type],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+    program = ir.Program([func], "DynamicViewExprTest", span)
+    mlir_code = _generate_mlir(program)
+    lines = _get_mlir_lines(mlir_code)
+
+    assert "Expected ConstInt expression" not in mlir_code
+    view_line = _single_line(lines, "pto.make_tensor_view %arg0")
+    assert "shape = [" in view_line and "strides = [" in view_line
+    index_cast_lines = _find_lines(lines, "arith.index_cast")
+    assert index_cast_lines, (
+        f"Expected dynamic shape/stride expressions to be cast to index. Got:\n{mlir_code}"
+    )
 
 
 if __name__ == "__main__":

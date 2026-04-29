@@ -125,8 +125,8 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
   }
   // Valid extent is always conveyed dynamically via `valid_row` / `valid_col`
   // operands on `pto.alloc_tile`; the type string therefore always reads
-  // `v_row=?, v_col=?`. The numeric `v_row` / `v_col` fields below are kept
-  // for symmetry but are ignored by the formatter when *_dynamic is true.
+  // `v_row=?, v_col=?`.  Subview result types infer static valid dims via
+  // InferSubviewTileTypeComponents (in pto_ops_common.cpp) separately.
   c.v_row = c.rows;
   c.v_col = c.cols;
   c.v_row_dynamic = true;

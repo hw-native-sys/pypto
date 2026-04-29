@@ -290,6 +290,23 @@ std::string PTOCodegen::EmitCastToIndex(const ir::VarPtr& var, const std::string
   return mlir_name;
 }
 
+std::string PTOCodegen::EmitCastToIndex(const ir::ExprPtr& expr, const std::string& mlir_name) {
+  if (auto var = As<ir::Var>(expr)) {
+    return EmitCastToIndex(var, mlir_name);
+  }
+  if (auto scalar_type = As<ScalarType>(expr->GetType())) {
+    CHECK(!scalar_type->dtype_.IsFloat()) << "EmitCastToIndex does not support floating-point types (got "
+                                          << GetTypeString(scalar_type->dtype_) << ")";
+    if (scalar_type->dtype_ != DataType::INDEX) {
+      std::string idx_name = NewTemp();
+      std::string src_type = GetTypeString(scalar_type->dtype_);
+      Emit(idx_name + " = arith.index_cast " + mlir_name + " : " + src_type + " to index");
+      return idx_name;
+    }
+  }
+  return mlir_name;
+}
+
 std::string PTOCodegen::EmitCastToI32(const ir::ExprPtr& expr, const std::string& mlir_name) {
   if (auto scalar_type = As<ScalarType>(expr->GetType())) {
     CHECK(!scalar_type->dtype_.IsFloat()) << "EmitCastToI32 does not support floating-point types (got "

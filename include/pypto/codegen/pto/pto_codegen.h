@@ -139,6 +139,19 @@ class PTOCodegen : public CodegenBase {
   std::string EmitCastToIndex(const ir::VarPtr& var, const std::string& mlir_name);
 
   /**
+   * @brief Emit arith.index_cast if expression is not already index type
+   *
+   * Shape/stride expressions in PTO codegen may be constants, variables, or
+   * general scalar expressions. PTO ops that consume dimensions require index
+   * operands, so dynamic integer expressions must be cast on demand.
+   *
+   * @param expr IR expression whose type determines the cast
+   * @param mlir_name Current MLIR SSA name for the expression value
+   * @return SSA name of the index-typed value (original if already index)
+   */
+  std::string EmitCastToIndex(const ir::ExprPtr& expr, const std::string& mlir_name);
+
+  /**
    * @brief Emit arith.index_cast if expression is not already i32 type
    *
    * PTO ISA instructions like pto.tmrgsort require i32 operands. When the
@@ -254,6 +267,18 @@ class PTOCodegen : public CodegenBase {
   void SetCurrentResultBuf(const std::string& buf);
   void RegisterTileBufType(const std::string& ssa_name, const std::string& type_string);
   std::string GetSSATileBufType(const std::string& ssa_name) const;
+  struct SubviewMaterializationInfo {
+    std::string source_ssa;
+    std::string source_type;
+    std::string row_off_ssa;
+    std::string col_off_ssa;
+    std::string materialize_target_ssa;
+    std::string materialize_target_type;
+    bool emitted = false;
+  };
+  void RegisterSubviewMaterialization(const std::string& subview_ssa, const SubviewMaterializationInfo& info);
+  SubviewMaterializationInfo* GetSubviewMaterialization(const std::string& subview_ssa);
+  const SubviewMaterializationInfo* GetSubviewMaterialization(const std::string& subview_ssa) const;
 
   /**
    * @brief Record the SSA name of the __gm_pipe_buffer function parameter
@@ -436,6 +461,7 @@ class PTOCodegen : public CodegenBase {
     };
     std::vector<ExtraAllocTile> extra_alloc_tiles;
     std::map<std::string, std::string> ssa_to_tile_buf_type;
+    std::map<std::string, SubviewMaterializationInfo> subview_materializations;
 
     int temp_counter = 0;
     std::set<std::string> used_ssa_names;
@@ -472,6 +498,7 @@ class PTOCodegen : public CodegenBase {
 
       extra_alloc_tiles.clear();
       ssa_to_tile_buf_type.clear();
+      subview_materializations.clear();
 
       temp_counter = 0;
       used_ssa_names.clear();

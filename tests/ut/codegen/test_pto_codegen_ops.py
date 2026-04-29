@@ -837,7 +837,7 @@ class TestTileSliceCodegen:
         assert "rows=16, cols=16" in line, f"result tile_buf must carry rows=16, cols=16, got:\n{line}"
 
     def test_tile_slice_codegen_with_valid_shape(self):
-        """tile.slice(..., valid_shape=...) emits pto.subview with `valid` operands."""
+        """tile.slice(..., valid_shape=...) emits pto.subview + pto.tmov + pto.set_validshape."""
 
         @pl.program
         class Prog:
@@ -856,12 +856,12 @@ class TestTileSliceCodegen:
 
         mlir = self._generate_mlir(Prog)
         assert "pto.subview" in mlir, f"tile.slice with valid_shape should generate pto.subview, got:\n{mlir}"
-        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
-        assert subview_lines, "no pto.subview line emitted"
-        # The `valid [...]` clause must be present when valid_shape is given.
-        assert any("valid [" in line for line in subview_lines), (
-            "pto.subview should carry `valid [...]` operands, got:\n" + "\n".join(subview_lines)
-        )
+        # With explicit valid_shape, tile.slice emits subview + tmov + set_validshape
+        # instead of a subview with `valid [...]` clause.
+        tmov_lines = [line for line in mlir.splitlines() if "pto.tmov" in line]
+        assert tmov_lines, f"Expected pto.tmov after subview for valid_shape slice, got:\n{mlir}"
+        set_vs_lines = [line for line in mlir.splitlines() if "pto.set_validshape" in line]
+        assert set_vs_lines, f"Expected pto.set_validshape for valid_shape slice, got:\n{mlir}"
 
     def test_tile_slice_multiple_slices_have_correct_types(self):
         """Multiple tile.slice from one reshape must produce correct type annotations.
