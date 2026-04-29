@@ -80,6 +80,7 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.sqrt",
       "tile.rsqrt",
       "tile.recip",
+      "tile.neg",
       "tile.not",
       "tile.relu",
       // Tile x Scalar ops
