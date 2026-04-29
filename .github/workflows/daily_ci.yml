@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  qwen3-decode:
+  qwen3-pypto-lib:
     runs-on: [self-hosted, linux, arm64, npu]
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
@@ -78,7 +78,7 @@ jobs:
           pip install nanobind
           pip install torch
 
-      - name: Run qwen3 decode examples
+      - name: Run qwen3 pypto-lib examples (14B prefill + 32B decode)
         working-directory: ${{ github.workspace }}/pypto-lib
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
@@ -86,23 +86,21 @@ jobs:
         run: |
           failed=()
           for f in \
-            examples/models/qwen3/32b/qwen3_32b_decode_scope1.py \
-            examples/models/qwen3/32b/qwen3_32b_decode_scope2.py \
-            examples/models/qwen3/32b/qwen3_32b_decode_scope3.py \
+            examples/models/qwen3/14b/qwen3_14b_prefill.py \
             examples/models/qwen3/32b/qwen3_32b_decode.py; do
             echo "::group::$f"
             if ! python "$f" -p a2a3 -d $DEVICE_ID; then
               failed+=("$f")
-              echo "::error file=$f::qwen3 decode case failed: $f"
+              echo "::error file=$f::qwen3 pypto-lib example failed: $f"
             fi
             echo "::endgroup::"
           done
           if [ ${#failed[@]} -ne 0 ]; then
-            echo "Failed qwen3 decode cases (${#failed[@]}):"
+            echo "Failed qwen3 pypto-lib cases (${#failed[@]}):"
             printf '  - %s\n' "${failed[@]}"
             exit 1
           fi
-          echo "All qwen3 decode cases passed."
+          echo "All qwen3 pypto-lib cases passed."
 
   a5-system-tests:
     runs-on: [self-hosted, a5]
@@ -158,11 +156,11 @@ jobs:
 
   notify-on-failure:
     name: Open issue on failure
-    needs: [qwen3-decode, a5-system-tests]
+    needs: [qwen3-pypto-lib, a5-system-tests]
     if: |
       always() &&
       github.event_name == 'schedule' &&
-      (needs.qwen3-decode.result == 'failure' || needs.a5-system-tests.result == 'failure')
+      (needs.qwen3-pypto-lib.result == 'failure' || needs.a5-system-tests.result == 'failure')
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -170,7 +168,7 @@ jobs:
       - name: Create or update Daily CI failure issue
         uses: actions/github-script@v7
         env:
-          QWEN3_RESULT: ${{ needs.qwen3-decode.result }}
+          QWEN3_RESULT: ${{ needs.qwen3-pypto-lib.result }}
           A5_RESULT: ${{ needs.a5-system-tests.result }}
         with:
           script: |
@@ -182,7 +180,7 @@ jobs:
             const commitUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/commit/${context.sha}`;
 
             const failedJobs = [];
-            if (process.env.QWEN3_RESULT === 'failure') failedJobs.push('qwen3-decode');
+            if (process.env.QWEN3_RESULT === 'failure') failedJobs.push('qwen3-pypto-lib');
             if (process.env.A5_RESULT === 'failure') failedJobs.push('a5-system-tests');
 
             const body = [

@@ -168,6 +168,99 @@ jobs:
           pytest tests/st/runtime/test_perf_swimlane.py \
             -v --device="$DEVICE_ID" --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=2c607938
 
+  pypto-lib-model:
+    runs-on: [self-hosted, linux, arm64, npu]
+    env:
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
+      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      PTOAS_VERSION: v0.33
+      PTOAS_SHA256: 3207eafb4db5363c74c20d694c34d5e33622e2f3f225bf6b609727263832fdc5
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: /root/.cache/ccache
+      CCACHE_MAXSIZE: 5G
+      PIP_CACHE_DIR: /root/.cache/pip
+    container:
+      image: localhost:5000/ci-device-py310:latest
+      options: >-
+        --privileged
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+        -v /usr/local/Ascend:/usr/local/Ascend:ro
+        -v /dev:/dev
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
+        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
+        -e DEVICE_ID
+        -e DEVICE_RANGE
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check NPU
+        run: npu-smi info
+
+      - name: Install project and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          rm -rf ./build ./_skbuild
+          test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
+          pip install --no-build-isolation .[dev]
+
+      - name: Install ptoas (local cache)
+        env:
+          PTOAS_CACHE_DIR: /opt/ptoas-cache
+        run: |
+          CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
+          if [ ! -f "$CACHE_ARCHIVE" ]; then
+            echo "Cache miss — downloading ptoas ${PTOAS_VERSION}"
+            mkdir -p "$PTOAS_CACHE_DIR"
+            curl --fail --location --retry 3 --retry-all-errors \
+              https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+              -o "$CACHE_ARCHIVE.tmp"
+            echo "${PTOAS_SHA256}  $CACHE_ARCHIVE.tmp" | sha256sum -c -
+            mv "$CACHE_ARCHIVE.tmp" "$CACHE_ARCHIVE"
+          else
+            echo "Cache hit — using $CACHE_ARCHIVE"
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
+          tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
+          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
+          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
+
+      - name: Add Ascend tools to PATH
+        run: echo "/usr/local/Ascend/cann-8.5.0/bin" >> $GITHUB_PATH
+
+      - name: Install simpler
+        run: |
+          rm -rf ./runtime/build
+          ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
+          pip install --no-build-isolation ./runtime
+
+      - name: Clone pto-isa (pypto-lib Qwen3-14B decode)
+        run: |
+          git clone https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+          cd $GITHUB_WORKSPACE/pto-isa
+          git checkout 2c607938
+
+      - name: Clone pypto-lib (Qwen3-14B decode)
+        run: git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git $GITHUB_WORKSPACE/pypto-lib
+
+      - name: Install pypto-lib runner dependencies
+        run: |
+          pip install nanobind
+          pip install torch
+
+      - name: Run pypto-lib Qwen3-14B decode example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+          PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python examples/models/qwen3/14b/qwen3_14b_decode.py -p a2a3 -d "$DEVICE_ID"
+
   system-tests-a5sim:
     runs-on: ubuntu-latest
     env:
