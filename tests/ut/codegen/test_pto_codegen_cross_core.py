@@ -380,6 +380,253 @@ class TestCrossCoreTpushTpopCodegen:
         with pytest.raises(Exception, match="tpop valid_shape operand must be integer or index type, got i1"):
             codegen.PTOCodegen().generate(ir.Program([func], "dynamic_tpop_bool_row_program", span))
 
+    @pytest.mark.parametrize(
+        ("tpush_op_name", "func_type", "memory_space"),
+        [
+            ("tile.tpush_to_aiv", ir.FunctionType.AIC, ir.MemorySpace.Acc),
+            ("tile.tpush_to_aic", ir.FunctionType.AIV, ir.MemorySpace.Vec),
+        ],
+    )
+    def test_tpush_uses_validshape_aliased_tile(self, tpush_op_name, func_type, memory_space):
+        """set_validshape + cross-core tpush should push the in-place validShape tile handle."""
+        span = ir.Span.unknown()
+
+        src = ir.Var("src", ir.TensorType([32, 32], pl.FP32), span)
+        valid_row = ir.Var("valid_row", ir.ScalarType(pl.INDEX), span)
+        valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
+
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        shape_32 = ir.ConstInt(32, pl.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shapes = ir.MakeTuple([shape_32, shape_32], span)
+
+        load_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 32 * 32 * 4, 0)
+        load_view = ir.TileView()
+        load_view.valid_shape = [shape_32, shape_32]
+        load_view.blayout = ir.TileLayout.col_major
+        load_view.slayout = ir.TileLayout.row_major
+        load_view.fractal = 1024
+        load_type = ir.TileType([32, 32], pl.FP32, load_memref, load_view, memory_space)
+        src_tile = ir.Var("src_tile", load_type, span)
+
+        narrowed_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 32 * 32 * 4, 0)
+        narrowed_view = ir.TileView()
+        narrowed_view.valid_shape = [valid_row, valid_col]
+        narrowed_view.blayout = ir.TileLayout.col_major
+        narrowed_view.slayout = ir.TileLayout.row_major
+        narrowed_view.fractal = 1024
+        narrowed_type = ir.TileType([32, 32], pl.FP32, narrowed_memref, narrowed_view, memory_space)
+        narrowed_tile = ir.Var("narrowed_tile", narrowed_type, span)
+
+        load_call = ir.Call(
+            ir.Op("tile.load"),
+            [src, offsets, shapes, shapes],
+            {"target_memory": memory_space},
+            load_type,
+            span,
+        )
+        set_validshape_call = ir.Call(
+            ir.Op("tile.set_validshape"),
+            [src_tile, valid_row, valid_col],
+            {},
+            narrowed_type,
+            span,
+        )
+        tpush_call = ir.Call(ir.Op(tpush_op_name), [narrowed_tile], {"split": 0}, ir.UnknownType(), span)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(src_tile, load_call, span),
+                ir.AssignStmt(narrowed_tile, set_validshape_call, span),
+                ir.EvalStmt(tpush_call, span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "narrow_then_push",
+            [
+                (src, ir.ParamDirection.In),
+                (valid_row, ir.ParamDirection.In),
+                (valid_col, ir.ParamDirection.In),
+            ],
+            [],
+            body,
+            span,
+            func_type,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "narrow_then_push_program", span))
+
+        narrowed_alloc_lines = [
+            line.strip()
+            for line in mlir_code.splitlines()
+            if "%narrowed_tile" in line and "pto.alloc_tile" in line
+        ]
+        set_validshape_line = next(
+            line.strip() for line in mlir_code.splitlines() if "pto.set_validshape" in line
+        )
+        pto_tpush_op_name = tpush_op_name.replace("tile.", "pto.")
+        tpush_line = next(line.strip() for line in mlir_code.splitlines() if pto_tpush_op_name in line)
+
+        assert not narrowed_alloc_lines, (
+            "Expected set_validshape result to alias the payload tile without a second alloc_tile, got:\n"
+            + "\n".join(narrowed_alloc_lines)
+        )
+        assert "%src_tile" in set_validshape_line, (
+            f"Expected set_validshape to target source payload tile SSA, got:\n{set_validshape_line}"
+        )
+        assert "v_row=?" in set_validshape_line and "v_col=?" in set_validshape_line, (
+            f"Expected dynamic tile type on set_validshape, got:\n{set_validshape_line}"
+        )
+        assert "%src_tile" in tpush_line, (
+            f"Expected tpush to push the source tile after in-place set_validshape, got:\n{tpush_line}"
+        )
+        assert "%narrowed_tile" not in tpush_line, (
+            f"Expected tpush not to use a payload-less set_validshape alias alloc, got:\n{tpush_line}"
+        )
+        assert "v_row=?" in tpush_line and "v_col=?" in tpush_line, (
+            f"Expected tpush to follow main's always-dynamic alloc_tile type annotation, got:\n{tpush_line}"
+        )
+
+    @pytest.mark.parametrize(
+        (
+            "tpush_op_name",
+            "func_type",
+            "memory_space",
+            "split",
+            "transport_valid_shape",
+        ),
+        [
+            (
+                "tile.tpush_to_aiv",
+                ir.FunctionType.AIC,
+                ir.MemorySpace.Acc,
+                1,
+                ", %arg1, %c16_index :",
+            ),
+            (
+                "tile.tpush_to_aic",
+                ir.FunctionType.AIV,
+                ir.MemorySpace.Vec,
+                2,
+                ", %c16_index, %arg2 :",
+            ),
+        ],
+    )
+    def test_split_tpush_uses_full_non_split_transport_dim(
+        self, tpush_op_name, func_type, memory_space, split, transport_valid_shape
+    ):
+        """Split tpush keeps logical validShape but transports a full non-split dimension."""
+        span = ir.Span.unknown()
+
+        src = ir.Var("src", ir.TensorType([16, 16], pl.FP32), span)
+        valid_row = ir.Var("valid_row", ir.ScalarType(pl.INDEX), span)
+        valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
+
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        shape_16 = ir.ConstInt(16, pl.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shapes = ir.MakeTuple([shape_16, shape_16], span)
+
+        src_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 16 * 16 * 4, 0)
+        src_view = ir.TileView()
+        src_view.valid_shape = [shape_16, shape_16]
+        src_view.blayout = ir.TileLayout.col_major
+        src_view.slayout = ir.TileLayout.row_major
+        src_view.fractal = 1024
+        src_type = ir.TileType([16, 16], pl.FP32, src_memref, src_view, memory_space)
+        src_tile = ir.Var("src_tile", src_type, span)
+
+        narrowed_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 16 * 16 * 4, 0)
+        narrowed_view = ir.TileView()
+        narrowed_view.valid_shape = [valid_row, valid_col]
+        narrowed_view.blayout = ir.TileLayout.col_major
+        narrowed_view.slayout = ir.TileLayout.row_major
+        narrowed_view.fractal = 1024
+        narrowed_type = ir.TileType([16, 16], pl.FP32, narrowed_memref, narrowed_view, memory_space)
+        narrowed_tile = ir.Var("narrowed_tile", narrowed_type, span)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    src_tile,
+                    ir.Call(
+                        ir.Op("tile.load"),
+                        [src, offsets, shapes, shapes],
+                        {"target_memory": memory_space},
+                        src_type,
+                        span,
+                    ),
+                    span,
+                ),
+                ir.AssignStmt(
+                    narrowed_tile,
+                    ir.Call(
+                        ir.Op("tile.set_validshape"),
+                        [src_tile, valid_row, valid_col],
+                        {},
+                        narrowed_type,
+                        span,
+                    ),
+                    span,
+                ),
+                ir.EvalStmt(
+                    ir.Call(
+                        ir.Op(tpush_op_name),
+                        [narrowed_tile],
+                        {"split": split},
+                        ir.UnknownType(),
+                        span,
+                    ),
+                    span,
+                ),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "split_narrow_then_push",
+            [
+                (src, ir.ParamDirection.In),
+                (valid_row, ir.ParamDirection.In),
+                (valid_col, ir.ParamDirection.In),
+            ],
+            [],
+            body,
+            span,
+            func_type,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "split_narrow_then_push_program", span))
+
+        set_validshape_lines = [
+            line.strip() for line in mlir_code.splitlines() if "pto.set_validshape" in line
+        ]
+        tpush_line = next(
+            line.strip() for line in mlir_code.splitlines() if tpush_op_name.replace("tile.", "pto.") in line
+        )
+
+        assert len(set_validshape_lines) == 3, (
+            "Expected logical set_validshape, transport normalization, and logical restore, got:\n"
+            + "\n".join(set_validshape_lines)
+        )
+        assert ", %arg1, %arg2 :" in set_validshape_lines[0], (
+            f"Expected the initial logical validShape update, got:\n{set_validshape_lines[0]}"
+        )
+        assert transport_valid_shape in set_validshape_lines[1], (
+            "Expected split tpush to normalize the non-split transport dimension, got:\n"
+            f"{set_validshape_lines[1]}"
+        )
+        assert ", %arg1, %arg2 :" in set_validshape_lines[2], (
+            f"Expected the logical validShape restore after tpush, got:\n{set_validshape_lines[2]}"
+        )
+        assert "%src_tile" in tpush_line and "%narrowed_tile" not in tpush_line, (
+            f"Expected tpush to use the aliased source tile, got:\n{tpush_line}"
+        )
+
     def test_tfree_stays_after_nested_control_flow_use(self):
         """Nested control-flow users of a tpop result must stay before tfree."""
 

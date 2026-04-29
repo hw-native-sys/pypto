@@ -174,7 +174,15 @@ print(pto_code)
 **说明：**
 
 - Push 操作使用带类型 tile buffer 的 `ins()` 子句；前端 Pop 操作生成 SSA 结果，并带 `-> !pto.tile_buf<...>` 结果类型
+- 如果被 push 的 tile 通过动态 `valid_row` / `valid_col` operand 分配，或经
+  `tile.set_validshape` 更新，`tpush` 会发射已经更新运行时 valid shape 的同一个
+  tile handle。对于 split `tpush`，codegen 会临时使用完整的非切分传输维度（上下
+  切分使用完整 `cols`，左右切分使用完整 `rows`），随后恢复 producer tile 的逻辑
+  valid shape；消费侧动态 tpop operand 仍携带后续计算和 store 使用的逻辑范围。
 - 当 tpop 结果的 `TileView.valid_shape` 包含动态表达式时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。tile 类型中动态 valid shape 仍保留为 `?`，运行时范围由操作数传递。
+- 对于 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
+  tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
+  `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。
 - `system.tfree_*` 的 `split` 来自其 tile 参数，因此前端必须释放由 `tile.tpop_*` 产生的那个确切 SSA 值，即使 PTO 指令本身并不显式接收该 tile 作为操作数
 - `ExpandMixedKernel` 现在会在 split 生成的消费侧 `tile.tpop_*` 之后自动补 `system.tfree_*`，保持 `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` 和 `import_reserved_buffer` 返回 `i32` SSA 值；`initialize_pipe` 以操作数引用这些值

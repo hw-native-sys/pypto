@@ -1029,9 +1029,6 @@ class TestSetValidShapeCodegen:
 
         mlir = self._generate_mlir(Prog)
 
-        # Locate the alloc_tile that produces the gather output (variable name
-        # 'gathered'). PTOCodegen names SSA values after the IR var's name_hint,
-        # so we can match by the SSA name prefix.
         gathered_alloc_lines = [
             line for line in mlir.splitlines() if "pto.alloc_tile" in line and "%gathered" in line
         ]
@@ -1053,8 +1050,6 @@ class TestSetValidShapeCodegen:
             f"got line:\n{gathered_line}\n\nfull MLIR:\n{mlir}"
         )
 
-        # The pto.set_validshape line's source tile_buf type annotation must be
-        # dynamic too; otherwise PTOAS rejects it.
         set_vs_lines = [line for line in mlir.splitlines() if "pto.set_validshape" in line]
         assert set_vs_lines, f"Expected pto.set_validshape in codegen output:\n{mlir}"
         for line in set_vs_lines:
@@ -1062,6 +1057,48 @@ class TestSetValidShapeCodegen:
                 f"pto.set_validshape source tile_buf type must be dynamic "
                 f"(v_row=?, v_col=?); got line:\n{line}\n\nfull MLIR:\n{mlir}"
             )
+
+    def test_set_validshape_updates_source_tile_and_aliases_result(self):
+        """tile.set_validshape should mutate the source tile handle and alias the result to it."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 32], pl.FP32],
+                valid_rows: pl.Scalar[pl.INDEX],
+                valid_cols: pl.Scalar[pl.INDEX],
+                dst: pl.Tensor[[32, 32], pl.FP32],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                src_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(src, [0, 0], [32, 32])
+                narrowed: pl.Tile[[32, 32], pl.FP32] = pl.tile.set_validshape(
+                    src_tile, valid_rows, valid_cols
+                )
+                return pl.store(narrowed, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        set_validshape_line = next(line.strip() for line in mlir.splitlines() if "pto.set_validshape" in line)
+        narrowed_alloc_lines = [
+            line.strip() for line in mlir.splitlines() if "%narrowed" in line and "pto.alloc_tile" in line
+        ]
+        store_line = next(
+            line.strip() for line in mlir.splitlines() if "pto.tstore" in line and "%src_tile" in line
+        )
+
+        assert "%src_tile" in set_validshape_line, (
+            f"Expected pto.set_validshape to target the source tile SSA, got:\n{set_validshape_line}"
+        )
+        assert "v_row=?" in set_validshape_line and "v_col=?" in set_validshape_line, (
+            f"Expected dynamic source tile type on pto.set_validshape, got:\n{set_validshape_line}"
+        )
+        assert not narrowed_alloc_lines, (
+            "Expected set_validshape result to alias the source tile without a second alloc_tile, got:\n"
+            + "\n".join(narrowed_alloc_lines)
+        )
+        assert "%src_tile" in store_line, (
+            f"Expected subsequent narrowed uses to resolve to the source tile SSA, got:\n{store_line}"
+        )
 
 
 class TestMrgSortCodegen:
