@@ -205,12 +205,6 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
 // ============================================================================
 
 void OpConversionRegistry::RegisterMemoryOps() {
-  std::unordered_map<size_t, InputSpaceReq> scatter_update_input_reqs = {
-      {0, {MemorySpace::Vec, std::nullopt}},
-      {1, {MemorySpace::Vec, std::nullopt}},
-      {2, {MemorySpace::Vec, std::nullopt}},
-  };
-
   // tensor.slice → tile.load (gm_tensor) or tile.slice (local_tensor)
   RegisterCustom(
       "tensor.slice",
@@ -313,6 +307,11 @@ void OpConversionRegistry::RegisterMemoryOps() {
   // tensor.scatter_update → tile.create + tile.scatter_update(input, index, src, scratch).
   // Mirrors the rsqrt high-precision pattern: prologue allocates a [1, d] scratch row tile
   // via tile.create, which is then passed as the 4th arg to tile.scatter_update.
+  std::unordered_map<size_t, InputSpaceReq> scatter_update_input_reqs = {
+      {0, {MemorySpace::Vec, std::nullopt}},
+      {1, {MemorySpace::Vec, std::nullopt}},
+      {2, {MemorySpace::Vec, std::nullopt}},
+  };
   RegisterCustom(
       "tensor.scatter_update",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
