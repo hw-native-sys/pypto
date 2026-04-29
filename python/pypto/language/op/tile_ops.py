@@ -384,6 +384,7 @@ def scatter_update(
     dim: int,
     index: Tile,
     src: Tile,
+    scratch: Tile,
 ) -> Tile:
     """Update tile rows at positions specified by 2D index tile with values from src.
 
@@ -392,11 +393,12 @@ def scatter_update(
         dim: Dimension to scatter along (currently only -2 is supported)
         index: 2D index tile [b, s] of integer dtype
         src: Source tile (same rank as input)
+        scratch: [1, d] scratch row tile (Vec memory) used as the per-row staging buffer
 
     Returns:
         Tile wrapping the scatter_update operation
     """
-    call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap())
+    call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap(), scratch.unwrap())
     return Tile(expr=call_expr)
 
 

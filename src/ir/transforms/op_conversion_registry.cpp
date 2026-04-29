@@ -205,6 +205,12 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
 // ============================================================================
 
 void OpConversionRegistry::RegisterMemoryOps() {
+  std::unordered_map<size_t, InputSpaceReq> scatter_update_input_reqs = {
+      {0, {MemorySpace::Vec, std::nullopt}},
+      {1, {MemorySpace::Vec, std::nullopt}},
+      {2, {MemorySpace::Vec, std::nullopt}},
+  };
+
   // tensor.slice → tile.load (gm_tensor) or tile.slice (local_tensor)
   RegisterCustom(
       "tensor.slice",
@@ -304,7 +310,9 @@ void OpConversionRegistry::RegisterMemoryOps() {
         return ConversionResult{op_reg.Create("tensor.assemble", args, kwargs, span)};
       });
 
-  // tensor.scatter_update → tile.scatter_update (local) or passthrough (global)
+  // tensor.scatter_update → tile.create + tile.scatter_update(input, index, src, scratch).
+  // Mirrors the rsqrt high-precision pattern: prologue allocates a [1, d] scratch row tile
+  // via tile.create, which is then passed as the 4th arg to tile.scatter_update.
   RegisterCustom(
       "tensor.scatter_update",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
@@ -316,47 +324,38 @@ void OpConversionRegistry::RegisterMemoryOps() {
         const auto& index = args[1];
         const auto& src = args[2];
 
-        auto input_tensor_type = As<TensorType>(input->GetType());
+        auto input_tile_type = As<TileType>(input->GetType());
+        CHECK(input_tile_type) << "tensor.scatter_update: unexpected input type: "
+                               << input->GetType()->TypeName();
+        CHECK(As<TileType>(index->GetType()))
+            << "tensor.scatter_update conversion: index must become TileType, got "
+            << index->GetType()->TypeName();
+        auto src_tile_type = As<TileType>(src->GetType());
+        CHECK(src_tile_type) << "tensor.scatter_update conversion: src must become TileType, got "
+                             << src->GetType()->TypeName();
+        CHECK(src_tile_type->shape_.size() == 2)
+            << "tensor.scatter_update conversion currently supports 2D src tiles, got rank "
+            << src_tile_type->shape_.size();
 
-        if (input_tensor_type) {
-          if (kwargs.empty()) {
-            return ConversionResult{op_reg.Create("tensor.scatter_update", args, span)};
-          }
-          return ConversionResult{op_reg.Create("tensor.scatter_update", args, kwargs, span)};
-        }
+        // Allocate the [1, d] scratch row tile that tile.scatter_update needs as its
+        // per-row staging buffer. Same dtype + Vec memory as the input.
+        auto row_shape = std::make_shared<MakeTuple>(
+            std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span),
+                                 input_tile_type->shape_.back()},
+            span);
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", input_tile_type->dtype_},
+                                                                       {"target_memory", MemorySpace::Vec}};
+        auto create_call = op_reg.Create("tile.create", {row_shape}, create_kwargs, span);
 
-        CHECK(As<TileType>(input->GetType()))
-            << "tensor.scatter_update: unexpected input type: " << input->GetType()->TypeName();
-
+        auto scratch_var = std::make_shared<Var>("scatter_row", create_call->GetType(), span);
         std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(scratch_var, create_call, span));
 
-        ExprPtr index_tile = index;
-        if (auto index_tensor_type = As<TensorType>(index->GetType())) {
-          auto offsets = MakeZeroOffsets(index_tensor_type->shape_.size(), span);
-          auto shapes = MakeShapeTuple(index_tensor_type->shape_, span);
-          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
-                                                                   {"transpose", false}};
-          auto load = op_reg.Create("tile.load", {index, offsets, shapes, shapes}, load_kw, span);
-          auto idx_var = std::make_shared<Var>("scatter_idx", load->GetType(), span);
-          prologue.push_back(std::make_shared<AssignStmt>(idx_var, load, span));
-          index_tile = idx_var;
-        }
-
-        ExprPtr src_tile = src;
-        if (auto src_tensor_type = As<TensorType>(src->GetType())) {
-          auto offsets = MakeZeroOffsets(src_tensor_type->shape_.size(), span);
-          auto shapes = MakeShapeTuple(src_tensor_type->shape_, span);
-          std::vector<std::pair<std::string, std::any>> load_kw = {{"target_memory", MemorySpace::Vec},
-                                                                   {"transpose", false}};
-          auto load = op_reg.Create("tile.load", {src, offsets, shapes, shapes}, load_kw, span);
-          auto src_var = std::make_shared<Var>("scatter_src", load->GetType(), span);
-          prologue.push_back(std::make_shared<AssignStmt>(src_var, load, span));
-          src_tile = src_var;
-        }
-
-        auto scatter_call = op_reg.Create("tile.scatter_update", {input, index_tile, src_tile}, kwargs, span);
+        auto scatter_call =
+            op_reg.Create("tile.scatter_update", {input, index, src, scratch_var}, kwargs, span);
         return ConversionResult{std::move(prologue), scatter_call};
-      });
+      },
+      std::move(scatter_update_input_reqs));
 
   // tensor.create → tile.create with static buffer size validation
   RegisterCustom(

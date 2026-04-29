@@ -1481,12 +1481,13 @@ class WrapperForwardMutator : public TypePropagatingMutator {
                                     : std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->span_);
 
     auto new_assign_var = std::make_shared<Var>(op->var_->name_hint_, new_return_type, op->var_->span_);
-    auto new_assign = MutableCopy(op);
+    std::shared_ptr<AssignStmt> new_assign = MutableCopy(op);
     new_assign->var_ = new_assign_var;
     new_assign->value_ = new_call;
     var_remap_[op->var_.get()] = new_assign_var;
     applied_ = true;
-    return new_assign;
+    StmtPtr result = new_assign;
+    return result;
   }
 
  private:

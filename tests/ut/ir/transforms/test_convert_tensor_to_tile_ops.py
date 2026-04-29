@@ -1783,7 +1783,11 @@ class TestScatterUpdateConversion:
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         after_str = str(After)
+        # ConvertTensorToTileOps emits a tile.create([1, d]) scratch row plus a
+        # 4-arg tile.scatter_update(input, index, src, scratch) — no separate
+        # legalization pass.
         assert "tile.scatter_update" in after_str
+        assert "scatter_row" in after_str
         assert "tensor.scatter_update" not in after_str
 
     def test_scatter_update_global_tensor_stays(self):
@@ -1814,8 +1818,10 @@ class TestScatterUpdateConversion:
 
         After = passes.convert_tensor_to_tile_ops()(Before)
         after_str = str(After)
-        # The pass loads all tensor parameters to tiles, so scatter_update becomes tile.scatter_update
+        # ConvertTensorToTileOps loads tensor parameters into tiles and emits a
+        # tile.create([1, d]) scratch row + 4-arg tile.scatter_update directly.
         assert "tile.scatter_update" in after_str
+        assert "scatter_row" in after_str
 
 
 class TestTensorFullConversion:

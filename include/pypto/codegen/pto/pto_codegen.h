@@ -294,6 +294,10 @@ class PTOCodegen : public CodegenBase {
    */
   [[nodiscard]] std::string GetGMSlotBufferSSA() const;
 
+  /// Increase/decrease the current indentation level (used by op codegen helpers that emit scf.for blocks)
+  void IncreaseIndent() { indent_level_++; }
+  void DecreaseIndent() { indent_level_--; }
+
   /**
    * @brief Get the split value for a tile var produced by a matching tpop operation
    * @param var Raw pointer to the tile variable
