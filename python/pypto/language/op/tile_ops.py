@@ -350,7 +350,7 @@ def extract(
     src: Tile,
     index_row: IntLike,
     index_col: IntLike,
-    shape: Sequence[int],
+    shape: Sequence[IntLike],
     *,
     target_memory: MemorySpace,
 ) -> Tile:
@@ -361,8 +361,8 @@ def extract(
         index_row: Starting row offset
         index_col: Starting col offset
         shape: Static 2D shape of the extracted sub-tile
-        target_memory: Destination memory space
-            (``Left`` / ``Right`` / ``Scale`` / ``ScaleLeft`` / ``ScaleRight`` / ``Mat``)
+        target_memory: Destination memory space —
+            ``Left`` / ``Right`` for Mat sources, ``Mat`` for Acc sources
 
     Returns:
         Tile of the requested shape in ``target_memory``

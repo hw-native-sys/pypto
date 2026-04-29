@@ -2038,7 +2038,7 @@ def extract(
         index_row: Starting row offset (int or Expr)
         index_col: Starting col offset (int or Expr)
         shape: Static destination shape (2-element sequence or MakeTuple of ConstInt)
-        target_memory: Destination memory space (Left/Right/Scale/ScaleLeft/ScaleRight/Mat)
+        target_memory: Destination memory space (Left/Right for Mat sources, Mat for Acc sources)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

@@ -2130,6 +2130,12 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
     std::string row_off = codegen.GetExprAsCode(op->args_[1]);
     std::string col_off = codegen.GetExprAsCode(op->args_[2]);
+    // Use the actual offset SSA dtype (`index` / `i64` / `i32` ...) — the IR
+    // type-check accepts any IndexLike scalar, so don't hardcode `index`.
+    std::string row_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+    std::string col_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+    if (row_type.empty()) row_type = "index";
+    if (col_type.empty()) col_type = "index";
     // args_[3] is the shape tuple: type-deduction only, no PTO operand.
 
     std::string result_target = codegen.GetCurrentResultTarget();
@@ -2146,7 +2152,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     std::ostringstream oss;
     oss << "pto.textract ins(" << src << ", " << row_off << ", " << col_off;
     if (!src_type.empty()) {
-      oss << " : " << src_type << ", index, index";
+      oss << " : " << src_type << ", " << row_type << ", " << col_type;
     }
     oss << ") outs(" << result_target;
     if (!result_type.empty()) {

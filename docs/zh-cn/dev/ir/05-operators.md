@@ -252,7 +252,7 @@ with ib.function("tensor_example") as f:
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar 操作 |
 | **一元** | `tile.sqrt` | 逐元素平方根 |
 | **变换** | `tile.slice` | 提取子 tile，静态 shape，可选动态 valid_shape |
-| - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right/Scale，Acc→Mat） |
+| - | `tile.extract` | 从 `src` 在 `(index_row, index_col)` 处提取子 tile —— ISA TEXTRACT Variant 1（Mat→Left/Right，Acc→Mat） |
 | - | `tile.reshape` | 重塑 tile 维度（元素总数须一致） |
 | - | `tile.transpose` | 交换 tile 的两个轴 |
 | - | `tile.set_validshape` | 更新 valid_shape 元数据，不搬移数据 |

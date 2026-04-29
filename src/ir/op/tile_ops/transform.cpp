@@ -452,19 +452,23 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
     dst_shape.push_back(shape_tuple->elements_[i]);
   }
 
-  // Static-bounds check when both src dim and dst dim are constants.
-  auto src_r = As<ConstInt>(src_type->shape_[0]);
-  auto dst_r = As<ConstInt>(dst_shape[0]);
-  if (src_r && dst_r) {
-    CHECK(dst_r->value_ <= src_r->value_)
-        << "tile.extract shape[0]=" << dst_r->value_ << " exceeds src rows " << src_r->value_;
-  }
-  auto src_c = As<ConstInt>(src_type->shape_[1]);
-  auto dst_c = As<ConstInt>(dst_shape[1]);
-  if (src_c && dst_c) {
-    CHECK(dst_c->value_ <= src_c->value_)
-        << "tile.extract shape[1]=" << dst_c->value_ << " exceeds src cols " << src_c->value_;
-  }
+  // Static-bounds check: when src dim, dst dim, and offset are all constants,
+  // verify offset + dst_shape <= src_shape per ISA TEXTRACT bounds rule.
+  auto check_axis = [&](size_t axis, const char* axis_name, const ExprPtr& offset_arg) {
+    auto src_dim = As<ConstInt>(src_type->shape_[axis]);
+    auto dst_dim = As<ConstInt>(dst_shape[axis]);
+    if (!src_dim || !dst_dim) return;
+    CHECK(dst_dim->value_ <= src_dim->value_) << "tile.extract shape[" << axis << "]=" << dst_dim->value_
+                                              << " exceeds src " << axis_name << " " << src_dim->value_;
+    auto off = As<ConstInt>(offset_arg);
+    if (!off) return;
+    CHECK(off->value_ >= 0) << "tile.extract index_" << axis_name << " must be >= 0, got " << off->value_;
+    CHECK(off->value_ + dst_dim->value_ <= src_dim->value_)
+        << "tile.extract index_" << axis_name << "=" << off->value_ << " + shape[" << axis
+        << "]=" << dst_dim->value_ << " exceeds src " << axis_name << " " << src_dim->value_;
+  };
+  check_axis(0, "row", args[1]);
+  check_axis(1, "col", args[2]);
 
   TileView tile_view;
   tile_view.valid_shape = dst_shape;

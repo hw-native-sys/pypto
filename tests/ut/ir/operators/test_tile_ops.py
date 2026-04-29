@@ -2182,11 +2182,17 @@ class TestTileExtractOp:
     """Tests for tile.extract operator (ISA TEXTRACT Variant 1)."""
 
     @staticmethod
-    def _make_src_var(rows: int = 64, cols: int = 256, dtype: DataType = DataType.FP16) -> ir.Var:
+    def _make_src_var(
+        rows: int = 64,
+        cols: int = 256,
+        dtype: DataType = DataType.FP16,
+        memory_space: ir.MemorySpace | None = None,
+    ) -> ir.Var:
         span = ir.Span.unknown()
         r = ir.ConstInt(rows, DataType.INT32, span)
         c = ir.ConstInt(cols, DataType.INT32, span)
-        return ir.Var("src", ir.TileType([r, c], dtype), span)
+        tile_type = ir.TileType([r, c], dtype, memory_space=memory_space)
+        return ir.Var("src", tile_type, span)
 
     def test_tile_extract_basic(self):
         """tile.extract returns a TileType with the requested shape and src dtype."""
@@ -2205,8 +2211,11 @@ class TestTileExtractOp:
         assert isinstance(cols, ir.ConstInt) and cols.value == 64
 
     def test_tile_extract_acc_to_mat(self):
-        """Acc-source → Mat-target dtype is preserved."""
-        src_var = self._make_src_var(64, 64, DataType.FP32)
+        """Acc source → Mat target: src lives in Acc, dtype preserved."""
+        src_var = self._make_src_var(64, 64, DataType.FP32, memory_space=ir.MemorySpace.Acc)
+        src_tile_type = src_var.type
+        assert isinstance(src_tile_type, ir.TileType)
+        assert src_tile_type.memory_space == ir.MemorySpace.Acc
 
         call = tile.extract(src_var, 0, 0, shape=[32, 32], target_memory=ir.MemorySpace.Mat)
 
@@ -2240,6 +2249,21 @@ class TestTileExtractOp:
 
         with pytest.raises(ValueError, match="exceeds src"):
             tile.extract(src_var, 0, 0, shape=[128, 128], target_memory=ir.MemorySpace.Left)
+
+    def test_tile_extract_offset_plus_shape_exceeds_src_static(self):
+        """Constant offset + shape that walks past src is rejected at deduction."""
+        src_var = self._make_src_var(64, 64)
+
+        # offset 60 + shape 16 = 76 > 64 rows
+        with pytest.raises(ValueError, match="exceeds src row"):
+            tile.extract(src_var, 60, 0, shape=[16, 16], target_memory=ir.MemorySpace.Left)
+
+    def test_tile_extract_negative_offset_static(self):
+        """Constant negative offset is rejected at deduction."""
+        src_var = self._make_src_var(64, 64)
+
+        with pytest.raises(ValueError, match="must be >= 0"):
+            tile.extract(src_var, -1, 0, shape=[16, 16], target_memory=ir.MemorySpace.Left)
 
     def test_tile_extract_rejects_non_index_offset(self):
         """index_row/col must be INT64/UINT64/INDEX."""
