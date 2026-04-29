@@ -151,3 +151,9 @@ The pass preserves all input properties: it only rewrites tensor parameter type 
 | Rank < 2 candidate | `CHECK` failure |
 
 The pass is a no-op when no InCore function contains a `tile.load(..., transpose=True)` whose source is a parameter (verified by the `TestResolveTransposeLayoutNoOp` test class).
+
+## Interaction with `tensor.transpose` at Orchestration
+
+`tensor.transpose` at the Orchestration layer (issue #1209) deduces a result type that toggles `layout` between `ND` and `DN` for trailing-two-dim swaps (in `DeduceTensorTransposeType`). When the transposed tensor flows into an InCore parameter, that parameter inherits the `DN` tag and matches the same kernel-side codegen path this pass produces — so a downstream `tile.load(..., target_memory=Mat, transpose=True)` (the matmul B^T pattern) consumes the orchestration-side transpose for free, no explicit `pl.DN` annotation required.
+
+**Vec target is a known limitation.** Cross-layout `TLOAD(VecTile, GlobalTensor)` is rejected by PTO ISA (only `ND→ND` / `DN→DN` / `NZ→NZ` are supported), and `tile.load` further restricts `transpose=True` to `target_memory=Mat`. Consequently, `pl.transpose` at orchestration followed by a Vec-target consumer (e.g. `pl.slice` inside a non-matmul `pl.at(level=CORE_GROUP)` block) can compile its IR correctly but will fail PTO ISA compilation on Ascend 910B. Workarounds: route the load through a Mat tile (matmul-style), perform an explicit incore `tile.transpose` after the load, or materialize a contiguous transposed copy at orchestration.

@@ -151,3 +151,9 @@ class After:
 | 候选参数 rank < 2 | `CHECK` 失败 |
 
 如果没有任何 InCore 函数包含以参数为源的 `tile.load(..., transpose=True)`，整个 Pass 是 no-op（由 `TestResolveTransposeLayoutNoOp` 测试类验证）。
+
+## 与 Orchestration 层 `tensor.transpose` 的衔接
+
+Orchestration 层的 `tensor.transpose`（见 issue #1209）在 `DeduceTensorTransposeType` 中根据是否为最后两维互换，把结果类型的 `layout` 在 `ND` 与 `DN` 之间切换。被转置的 Tensor 进入 InCore 参数后，参数自动继承 `DN` 标签，与本 Pass 输出的形式一致 —— 因此 `tile.load(..., target_memory=Mat, transpose=True)`（即 matmul B^T 场景）可以直接消费 Orchestration 层的 transpose，无需用户显式标注 `pl.DN`。
+
+**Vec 目标是已知限制。** 跨布局 `TLOAD(VecTile, GlobalTensor)` 会被 PTO ISA 拒绝（仅支持 `ND→ND` / `DN→DN` / `NZ→NZ`），并且 `tile.load` 进一步限制 `transpose=True` 仅在 `target_memory=Mat` 时合法。因此，`pl.transpose` 在 Orchestration 层之后接 Vec 目标的消费者（例如非 matmul 的 `pl.at(level=CORE_GROUP)` 块内的 `pl.slice`），IR 可正确编译但会在 Ascend 910B 的 PTO ISA 阶段编译失败。变通方法：通过 Mat tile 走 matmul 风格的 load；或在 InCore 中显式插入 `tile.transpose`；或在 Orchestration 层物化一份连续的转置拷贝。
