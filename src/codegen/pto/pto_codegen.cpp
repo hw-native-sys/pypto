@@ -25,6 +25,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -32,6 +33,7 @@
 #include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
+#include "pypto/codegen/pto/tile_buf_signature.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -144,6 +146,42 @@ bool ShouldAliasScatterUpdateResultToInput(const AssignStmtPtr& stmt) {
 }
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
+
+bool IsInPlaceAccumulatorCall(const CallPtr& call) {
+  if (!call || !call->op_) return false;
+  return call->op_->name_ == "tile.matmul_acc" || call->op_->name_ == "tile.gemv_acc";
+}
+
+bool HasStaticAllocTileShape(const std::shared_ptr<const TileType>& tile_type) {
+  if (!tile_type) return false;
+  if (tile_type->shape_.size() == 1) {
+    return As<ir::ConstInt>(tile_type->shape_[0]) != nullptr;
+  }
+  if (tile_type->shape_.size() >= 2) {
+    return As<ir::ConstInt>(tile_type->shape_[0]) != nullptr &&
+           As<ir::ConstInt>(tile_type->shape_[1]) != nullptr;
+  }
+  return false;
+}
+
+bool IsMatmulOperandBuffer(const std::shared_ptr<const TileType>& tile_type) {
+  if (!tile_type) return false;
+  return tile_type->memory_space_ == ir::MemorySpace::Left ||
+         tile_type->memory_space_ == ir::MemorySpace::Right;
+}
+
+std::optional<std::string> GetStaticMatmulOperandReuseKey(const std::shared_ptr<const TileType>& tile_type,
+                                                          const std::string& type_str) {
+  if (!IsMatmulOperandBuffer(tile_type)) return std::nullopt;
+  if (!HasStaticAllocTileShape(tile_type)) return std::nullopt;
+
+  const auto sig = TileBufSignature::FromTileType(*tile_type);
+  if (sig.v_row_dynamic || sig.v_col_dynamic) return std::nullopt;
+
+  std::ostringstream key;
+  key << type_str << "|v_row=" << sig.v_row << "|v_col=" << sig.v_col;
+  return key.str();
+}
 
 }  // namespace
 
@@ -333,20 +371,42 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // Still collect fs_.memref_to_tile_type for GetTileBufTypeString fallback paths
   fs_.memref_to_tile_type = collector.GetMemRefTileTypes();
 
-  // Per-var SSA binding: each tile variable gets its own SSA name
+  // Tile-buffer SSA binding. A PTO tile_buf SSA denotes a mutable tile handle,
+  // not an immutable value. Reuse handles only for static Left/Right matmul
+  // operand buffers that MemoryReuse placed in the same physical L0A/L0B
+  // MemRef; PTOAS otherwise cannot see the WAR/WAW dependency between a tmov
+  // writing the reused buffer and the following tmatmul consuming it. Keep the
+  // per-variable model for Vec/Mat/Acc, dynamic byte offsets, and
+  // shape/view-distinct signatures so unrelated ST kernels preserve their
+  // existing scheduling surface.
+  std::map<std::tuple<const ir::Var*, int64_t, std::string>, std::string> matmul_operand_reuse;
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
-    std::string ssa_name = NewNamedTemp(tile_var->name_hint_);
-    BindVarToMlir(tile_var, ssa_name);
-
     // Pre-populate type so body visitors (e.g., tile.reshape no-op check)
     // can query it before per-variable alloc_tile emission runs.
     std::string type_str = GetTileBufTypeStringFromTileType(tile_type);
+    auto memref = ir::GetDefinedMemRef(tile_type);
+    const ir::Var* base_ptr = memref->base_.get();
+
+    std::string ssa_name;
+    auto reuse_key = GetStaticMatmulOperandReuseKey(tile_type, type_str);
+    auto const_offset = As<ir::ConstInt>(memref->byte_offset_);
+    if (reuse_key.has_value() && const_offset && fs_.tpop_result_vars.count(tile_var.get()) == 0) {
+      auto key = std::make_tuple(base_ptr, const_offset->value_, *reuse_key);
+      auto reuse_it = matmul_operand_reuse.find(key);
+      if (reuse_it != matmul_operand_reuse.end()) {
+        ssa_name = reuse_it->second;
+      } else {
+        ssa_name = NewNamedTemp(tile_var->name_hint_);
+        matmul_operand_reuse.emplace(std::move(key), ssa_name);
+      }
+    } else {
+      ssa_name = NewNamedTemp(tile_var->name_hint_);
+    }
+
+    BindVarToMlir(tile_var, ssa_name);
     fs_.ssa_to_tile_buf_type[ssa_name] = type_str;
 
-    auto memref = ir::GetDefinedMemRef(tile_type);
-
     // Also maintain fs_.memref_to_mlir for compatibility (first var per allocation)
-    const ir::Var* base_ptr = memref->base_.get();
     if (fs_.memref_to_mlir.find(base_ptr) == fs_.memref_to_mlir.end()) {
       fs_.memref_to_mlir[base_ptr] = ssa_name;
     }
@@ -822,6 +882,9 @@ void PTOCodegen::EmitAllocTileForVar(const ir::VarPtr& tile_var,
   INTERNAL_CHECK_SPAN(mlir_it != fs_.var_to_mlir.end(), tile_var->span_)
       << "Tile var " << tile_var->name_hint_ << " not found in fs_.var_to_mlir";
   std::string tile_buf = mlir_it->second;
+  if (!fs_.emitted_tile_alloc_ssas.insert(tile_buf).second) {
+    return;
+  }
 
   AllocTileFields fields = ComputeAllocTileFields(tile_type);
 
@@ -1059,7 +1122,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
     if (!is_set_validshape && fs_.tpop_result_vars.count(op->var_.get()) == 0 &&
-        !alias_scatter_result_to_input) {
+        !alias_scatter_result_to_input && !IsInPlaceAccumulatorCall(call)) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }

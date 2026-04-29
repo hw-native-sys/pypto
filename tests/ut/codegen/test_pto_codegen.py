@@ -102,6 +102,19 @@ def _generate_default_mlir(program_cls) -> str:
     return _generate_mlir(_run_default_passes(program_cls))
 
 
+def _generate_default_mlir_for_func_type(program_cls, func_type: ir.FunctionType) -> str:
+    """Run default passes and generate MLIR for the single function of func_type."""
+    transformed = _run_default_passes(program_cls)
+    funcs = [func for func in transformed.functions.values() if func.func_type == func_type]
+    assert len(funcs) == 1, (
+        f"Expected exactly one {func_type} function, got "
+        f"{[(func.name, func.func_type) for func in transformed.functions.values()]}"
+    )
+    func = funcs[0]
+    program_name = getattr(program_cls, "__name__", "program")
+    return _generate_mlir(ir.Program([func], f"{program_name}_{func_type.name}", func.span))
+
+
 def _get_mlir_lines(mlir_code: str) -> list[str]:
     """Return stripped MLIR lines for line-oriented assertions."""
     return [line.strip() for line in mlir_code.splitlines()]
@@ -375,6 +388,150 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     assert "valid_col = %c128_index" in alloc_lines[1], (
         f"Expected valid_col = %c128_index operand in padded tile: {alloc_lines[1]}"
     )
+
+
+def test_pto_codegen_vec_shared_static_memref_keeps_per_var_ssa_handles():
+    """Static Vec tiles sharing storage must keep distinct handles for ST scheduling."""
+    span = ir.Span.unknown()
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    offset = ir.ConstInt(4096, DataType.INT64, span)
+    size = ir.ConstInt(32, DataType.INDEX, span)
+
+    lhs_tensor = ir.Var("lhs", ir.TensorType([32, 32], DataType.FP32), span)
+    rhs_tensor = ir.Var("rhs", ir.TensorType([32, 32], DataType.FP32), span)
+    output_tensor = ir.Var("out", ir.TensorType([32, 32], DataType.FP32), span)
+    shared_memref = ir.MemRef(ir.MemorySpace.Vec, zero, 32 * 32 * 4, 0)
+    result_memref = ir.MemRef(ir.MemorySpace.Vec, offset, 32 * 32 * 4, 1)
+
+    static_view = ir.TileView(valid_shape=[size, size])
+    lhs_tile_type = ir.TileType([32, 32], DataType.FP32, shared_memref, static_view, ir.MemorySpace.Vec)
+    rhs_tile_type = ir.TileType([32, 32], DataType.FP32, shared_memref, static_view, ir.MemorySpace.Vec)
+    result_tile_type = ir.TileType([32, 32], DataType.FP32, result_memref, static_view, ir.MemorySpace.Vec)
+    lhs_tile = ir.Var("lhs_tile", lhs_tile_type, span)
+    rhs_tile = ir.Var("rhs_tile", rhs_tile_type, span)
+    result_tile = ir.Var("result_tile", result_tile_type, span)
+    result_tensor = ir.Var("result", ir.TensorType([32, 32], DataType.FP32), span)
+
+    offsets = ir.MakeTuple([zero, zero], span)
+    shapes = ir.MakeTuple([size, size], span)
+    load_lhs = ir.Call(ir.Op("tile.load"), [lhs_tensor, offsets, shapes], {}, lhs_tile_type, span)
+    load_rhs = ir.Call(ir.Op("tile.load"), [rhs_tensor, offsets, shapes], {}, rhs_tile_type, span)
+    add = ir.Call(ir.Op("tile.add"), [lhs_tile, rhs_tile], {}, result_tile_type, span)
+    store = ir.Call(ir.Op("tile.store"), [result_tile, offsets, output_tensor], result_tensor.type, span)
+
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(lhs_tile, load_lhs, span),
+            ir.AssignStmt(rhs_tile, load_rhs, span),
+            ir.AssignStmt(result_tile, add, span),
+            ir.AssignStmt(result_tensor, store, span),
+            ir.ReturnStmt([result_tensor], span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "vec_shared_static",
+        [
+            (lhs_tensor, ir.ParamDirection.In),
+            (rhs_tensor, ir.ParamDirection.In),
+            (output_tensor, ir.ParamDirection.Out),
+        ],
+        [ir.TensorType([32, 32], DataType.FP32)],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+
+    alloc_lines = _get_alloc_tile_lines(_generate_mlir(ir.Program([func], "vec_shared_static", span)))
+    shared_allocs = [line for line in alloc_lines if "addr = %c0_i64" in line]
+    assert len(shared_allocs) == 2, f"Expected distinct Vec handles for shared storage: {alloc_lines}"
+    assert shared_allocs[0].split(" = ", 1)[0] != shared_allocs[1].split(" = ", 1)[0]
+
+
+def test_pto_codegen_matmul_operand_reuse_respects_byte_offset():
+    """Left/Right tiles with one base but different offsets need distinct handles."""
+    span = ir.Span.unknown()
+    zero = ir.ConstInt(0, DataType.INT64, span)
+    second_tile_offset = ir.ConstInt(16 * 512 * 4, DataType.INT64, span)
+    index_zero = ir.ConstInt(0, DataType.INDEX, span)
+    rows = ir.ConstInt(16, DataType.INDEX, span)
+    cols = ir.ConstInt(512, DataType.INDEX, span)
+
+    lhs_tensor = ir.Var("lhs", ir.TensorType([32, 512], DataType.FP32), span)
+    rhs_tensor = ir.Var("rhs", ir.TensorType([32, 512], DataType.FP32), span)
+    out_tensor = ir.Var("out", ir.TensorType([16, 16], DataType.FP32), span)
+
+    lhs_first_memref = ir.MemRef(ir.MemorySpace.Left, zero, 16 * 512 * 4, 0)
+    lhs_second_memref = ir.MemRef(lhs_first_memref.base_, second_tile_offset, 16 * 512 * 4)
+    rhs_first_memref = ir.MemRef(ir.MemorySpace.Right, zero, 16 * 512 * 4, 1)
+    rhs_second_memref = ir.MemRef(rhs_first_memref.base_, second_tile_offset, 16 * 512 * 4)
+    acc_memref = ir.MemRef(ir.MemorySpace.Acc, zero, 16 * 16 * 4, 2)
+
+    lhs_first_type = ir.TileType([16, 512], DataType.FP32, lhs_first_memref, None, ir.MemorySpace.Left)
+    lhs_second_type = ir.TileType([16, 512], DataType.FP32, lhs_second_memref, None, ir.MemorySpace.Left)
+    rhs_first_type = ir.TileType([16, 512], DataType.FP32, rhs_first_memref, None, ir.MemorySpace.Right)
+    rhs_second_type = ir.TileType([16, 512], DataType.FP32, rhs_second_memref, None, ir.MemorySpace.Right)
+    acc_type = ir.TileType(
+        [16, 16],
+        DataType.FP32,
+        acc_memref,
+        ir.TileView(valid_shape=[rows, rows]),
+        ir.MemorySpace.Acc,
+    )
+
+    lhs_first = ir.Var("lhs_first", lhs_first_type, span)
+    lhs_second = ir.Var("lhs_second", lhs_second_type, span)
+    rhs_first = ir.Var("rhs_first", rhs_first_type, span)
+    rhs_second = ir.Var("rhs_second", rhs_second_type, span)
+    acc = ir.Var("acc", acc_type, span)
+    result_tensor = ir.Var("result", ir.TensorType([16, 16], DataType.FP32), span)
+
+    offsets = ir.MakeTuple([index_zero, index_zero], span)
+    shapes = ir.MakeTuple([rows, cols], span)
+    acc_offsets = ir.MakeTuple([index_zero, index_zero], span)
+    load_lhs_first = ir.Call(ir.Op("tile.load"), [lhs_tensor, offsets, shapes], {}, lhs_first_type, span)
+    load_lhs_second = ir.Call(ir.Op("tile.load"), [lhs_tensor, offsets, shapes], {}, lhs_second_type, span)
+    load_rhs_first = ir.Call(ir.Op("tile.load"), [rhs_tensor, offsets, shapes], {}, rhs_first_type, span)
+    load_rhs_second = ir.Call(ir.Op("tile.load"), [rhs_tensor, offsets, shapes], {}, rhs_second_type, span)
+    matmul = ir.Call(ir.Op("tile.matmul"), [lhs_first, rhs_first], {}, acc_type, span)
+    store = ir.Call(ir.Op("tile.store"), [acc, acc_offsets, out_tensor], result_tensor.type, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(lhs_first, load_lhs_first, span),
+            ir.AssignStmt(lhs_second, load_lhs_second, span),
+            ir.AssignStmt(rhs_first, load_rhs_first, span),
+            ir.AssignStmt(rhs_second, load_rhs_second, span),
+            ir.AssignStmt(acc, matmul, span),
+            ir.AssignStmt(result_tensor, store, span),
+            ir.ReturnStmt([result_tensor], span),
+        ],
+        span,
+    )
+    func = ir.Function(
+        "matmul_operand_offsets",
+        [
+            (lhs_tensor, ir.ParamDirection.In),
+            (rhs_tensor, ir.ParamDirection.In),
+            (out_tensor, ir.ParamDirection.Out),
+        ],
+        [ir.TensorType([16, 16], DataType.FP32)],
+        body,
+        span,
+        ir.FunctionType.InCore,
+    )
+
+    alloc_lines = _get_alloc_tile_lines(_generate_mlir(ir.Program([func], "matmul_operand_offsets", span)))
+    lhs_allocs = [line for line in alloc_lines if "loc=left" in line]
+    rhs_allocs = [line for line in alloc_lines if "loc=right" in line]
+
+    assert len(lhs_allocs) == 2, f"Expected separate L0A handles for distinct offsets: {alloc_lines}"
+    assert len(rhs_allocs) == 2, f"Expected separate L0B handles for distinct offsets: {alloc_lines}"
+    assert lhs_allocs[0].split(" = ", 1)[0] != lhs_allocs[1].split(" = ", 1)[0]
+    assert rhs_allocs[0].split(" = ", 1)[0] != rhs_allocs[1].split(" = ", 1)[0]
+    assert any("addr = %c0_i64" in line for line in lhs_allocs)
+    assert any("addr = %c32768_i64" in line for line in lhs_allocs)
+    assert any("addr = %c0_i64" in line for line in rhs_allocs)
+    assert any("addr = %c32768_i64" in line for line in rhs_allocs)
 
 
 def test_pto_codegen_fillpad_inplace():
@@ -1575,6 +1732,57 @@ def test_pto_codegen_mixed_scalar_and_tile_iter_args():
     yield_line = _single_line(lines, "scf.yield")
     assert "tile_buf" not in yield_line, f"tile_buf should not appear in scf.yield: {yield_line}"
     assert "index" in yield_line, f"Expected index type in scf.yield: {yield_line}"
+
+
+def test_pto_codegen_matmul_acc_uses_loop_carried_accumulator_buffer():
+    """matmul_acc in a tile-carried loop must preserve shared tile-buffer SSA dependencies."""
+
+    @pl.program
+    class MatmulAccLoopProgram:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            x: pl.Tensor[[16, 1024], pl.FP32],
+            w: pl.Tensor[[32, 1024], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer, name_hint="linear"):
+                x0 = pl.slice(x, [16, 512], [0, 0])
+                w0 = pl.slice(w, [32, 512], [0, 0])
+                acc = pl.matmul(x0, w0, b_trans=True, out_dtype=pl.FP32)
+                for kb in pl.range(1, 2):
+                    k0 = kb * 512
+                    x_chunk = pl.slice(x, [16, 512], [0, k0])
+                    w_chunk = pl.slice(w, [32, 512], [0, k0])
+                    acc = pl.matmul_acc(acc, x_chunk, w_chunk, b_trans=True)
+                out = pl.assemble(out, acc, [0, 0])
+
+    mlir_code = _generate_default_mlir_for_func_type(MatmulAccLoopProgram, ir.FunctionType.AIC)
+    lines = _get_mlir_lines(mlir_code)
+
+    acc_line = _single_line(lines, "pto.tmatmul.acc", startswith=True)
+    matmul_line = _single_line(lines, "pto.tmatmul ins", startswith=True)
+    store_line = _single_line(lines, "pto.tstore", startswith=True)
+
+    acc_ins = re.search(r"ins\((%[\w\d_]+),", acc_line)
+    acc_outs = re.search(r"outs\((%[\w\d_]+) :", acc_line)
+    store_ins = re.search(r"ins\((%[\w\d_]+) :", store_line)
+    assert acc_ins and acc_outs and store_ins, (
+        f"Expected tile buffer operands in matmul_acc/store:\n{acc_line}\n{store_line}"
+    )
+
+    assert acc_ins.group(1) == acc_outs.group(1), f"matmul_acc ins/outs must share accumulator: {acc_line}"
+    assert acc_outs.group(1) == store_ins.group(1), (
+        f"the final store must read the loop-carried accumulator buffer, got:\n{acc_line}\n{store_line}"
+    )
+
+    matmul_inputs = re.search(r"ins\((%[\w\d_]+), (%[\w\d_]+)", matmul_line)
+    acc_inputs = re.search(r"ins\(%[\w\d_]+, (%[\w\d_]+), (%[\w\d_]+)", acc_line)
+    assert matmul_inputs and acc_inputs, f"Expected L0 input operands:\n{matmul_line}\n{acc_line}"
+    assert matmul_inputs.groups() == acc_inputs.groups(), (
+        "matmul_acc must reuse the same L0A/L0B tile-buffer SSA handles when MemoryReuse "
+        f"reuses those MemRefs:\n{matmul_line}\n{acc_line}"
+    )
 
 
 def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
