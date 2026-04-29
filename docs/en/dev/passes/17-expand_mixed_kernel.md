@@ -163,7 +163,7 @@ Phase 3 — Rewrite Group callers:
 
 | Affinity | Ops | Classification Rule |
 | -------- | --- | ------------------- |
-| CUBE | `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`, `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias`, `tile.batch_matmul` | Always CUBE (op name) |
+| CUBE | `tile.matmul`, `tile.matmul_acc`, `tile.matmul_bias`, `tile.gemv`, `tile.gemv_acc`, `tile.gemv_bias`, `tile.batch_matmul`, `tile.batch_matmul_acc` | Always CUBE (op name) |
 | CUBE or VECTOR | `tile.load` | By `target_memory` kwarg: cube memory (Mat, Left, Right, Acc, Bias) → CUBE; Vec → VECTOR |
 | CUBE or VECTOR | `tile.store`, `tile.reshape` | By source tile's `memory_space`: cube memory → CUBE; Vec → VECTOR |
 | MIXED | `tile.move` crossing cube↔vector memory | Leaf cross-side move — also recorded in the `boundary_moves` map (see below) |

@@ -7,8 +7,9 @@
 PTO-ISA 仅支持 2D Tile。`ConvertTensorToTileOps` 之后，Tile 可能具有超过 2 个维度（匹配张量形状）。该 Pass 通过将高维轴合并为一个维度并保持最后一个轴不变，将所有 >2D 的 Tile 操作展平为 2D。例如，Tile `[2, 3, 4]` 变为 `[6, 4]`。
 
 对于 batch 矩阵乘法，`ConvertTensorToTileOps` 会先保留为
-`tile.batch_matmul`。随后由 `FlattenTileNdTo2D` 统一负责把它展开成带
-broadcast 语义的逐 batch 2D `tile.matmul`。
+`tile.batch_matmul`（带累加器时为 `tile.batch_matmul_acc`）。随后由
+`FlattenTileNdTo2D` 统一负责把它展开成带 broadcast 语义的逐 batch
+2D `tile.matmul` / `tile.matmul_acc`。
 
 **前置条件**：
 
@@ -51,7 +52,8 @@ program_2d = flatten_pass(program)
 | `tile.store`（2D 张量） | 直接透传 |
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
 | `tile.sum`/`tile.max`/`tile.min`（>2D） | 将 axis 映射为 1（2D 的最后轴） |
-| `tile.batch_matmul` | 展开为逐 batch 的 2D `tile.matmul`，并处理 batch broadcast 与显式 operand `tile.transpose` |
+| `tile.batch_matmul` | 展开为逐 batch 的 2D `tile.matmul`，处理 batch broadcast；operand 的 transpose 通过生产侧 `tile.load(target_memory=Mat, transpose=True)` 携带 |
+| `tile.batch_matmul_acc` | 展开为逐 batch 的 2D `tile.matmul_acc`，按 batch 索引切分（已展平的）累加器；累加器若不在 Acc 内存空间会插入显式 `tile.move(target_memory=Acc)` |
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |
 | 1D/2D Tile 操作 | 不变 |
 

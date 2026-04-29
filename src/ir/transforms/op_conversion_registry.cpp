@@ -679,22 +679,43 @@ void OpConversionRegistry::RegisterMemoryOps() {
 // ============================================================================
 
 void OpConversionRegistry::RegisterMatmulOps() {
+  // Helper: report rank of a Tensor or Tile typed argument. By the time the
+  // conversion lambda runs, BridgeInputSpaces has already loaded TensorType args
+  // into TileType operands per input_reqs, so the args we see here may be either
+  // tile- or tensor-typed.
+  auto rank_of = [](const ExprPtr& e) -> size_t {
+    if (auto t = As<TileType>(e->GetType())) return t->shape_.size();
+    if (auto t = As<TensorType>(e->GetType())) return t->shape_.size();
+    INTERNAL_UNREACHABLE << "matmul conversion: argument has unexpected type " << e->GetType()->TypeName();
+  };
+
+  // tensor.matmul: 2D × 2D → tile.matmul; any operand ≥3D → tile.batch_matmul.
+  // a_trans/b_trans are honored via InputSpaceReq below — the producer load is
+  // emitted with target_memory=Mat and transpose=True, so the transposed tile
+  // arrives at matmul/batch_matmul already in the correct orientation.
   RegisterCustom(
       "tensor.matmul",
-      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
+      [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+                const Span& span) -> ConversionResult {
+        (void)kwargs;
         CHECK(args.size() == 2) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
-        return ConversionResult{OpRegistry::GetInstance().Create("tile.matmul", {args[0], args[1]}, span)};
+        const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2;
+        const std::string out_op = nd ? "tile.batch_matmul" : "tile.matmul";
+        return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, span)};
       },
       {{0, {MemorySpace::Mat, "a_trans"}}, {1, {MemorySpace::Mat, "b_trans"}}});
 
+  // tensor.matmul_acc: 2D × 2D × 2D → tile.matmul_acc; any operand ≥3D →
+  // tile.batch_matmul_acc. Same a_trans/b_trans handling as tensor.matmul.
   RegisterCustom(
       "tensor.matmul_acc",
-      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
+      [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+                const Span& span) -> ConversionResult {
+        (void)kwargs;
         CHECK(args.size() == 3) << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs)";
-        return ConversionResult{
-            OpRegistry::GetInstance().Create("tile.matmul_acc", {args[0], args[1], args[2]}, span)};
+        const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2 || rank_of(args[2]) > 2;
+        const std::string out_op = nd ? "tile.batch_matmul_acc" : "tile.matmul_acc";
+        return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1], args[2]}, span)};
       },
       {{1, {MemorySpace::Mat, "a_trans"}}, {2, {MemorySpace::Mat, "b_trans"}}});
 }

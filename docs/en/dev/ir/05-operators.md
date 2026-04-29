@@ -119,6 +119,17 @@ by `tile.load(..., transpose=True)`. During later lowering to 2D
 `tile.matmul`, both forms are normalized to the same operand-transpose
 semantics.
 
+`tile.batch_matmul_acc(acc, lhs, rhs)` is the accumulating counterpart for
+the batched path: `acc = acc + lhs @ rhs` with the same rank>=2 + batch
+broadcasting rules as `tile.batch_matmul`. The acc batch shape must match the
+broadcast batch shape of `lhs`/`rhs` exactly; the matmul (M, N) dims must
+match the trailing dims of acc; and the K dimension must match between lhs
+and rhs. The inner accumulator type defaults to FP32 for floating inputs and
+INT32 for integer inputs (mirroring `tile.matmul_acc`). At conversion time
+`ConvertTensorToTileOps` dispatches `tensor.matmul` / `tensor.matmul_acc` to
+this batched path whenever any operand has rank > 2; `FlattenTileNdTo2D`
+later unrolls the batched form into per-batch 2D ops.
+
 ## Python Usage
 
 ```python

@@ -399,6 +399,12 @@ def matmul(
 
     Tensor path accepts extra kwargs (out_dtype, a_trans, b_trans, c_matrix_nz).
     Tile path ignores them.
+
+    For Tensor inputs with rank > 2 on either operand, the call is lowered to
+    ``tile.batch_matmul`` (with batch broadcasting) by ``ConvertTensorToTileOps``
+    and then unrolled to per-batch ``tile.matmul`` by ``FlattenTileNdTo2D``.
+    Use this entry point (rather than ``pl.batch_matmul``) for tensor-level ND
+    matmul.
     """
     if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.matmul(lhs, rhs, out_dtype, a_trans, b_trans, c_matrix_nz)
@@ -410,7 +416,10 @@ def matmul(
 def batch_matmul(lhs: Tile, rhs: Tile) -> Tile:
     """Tile-only batched matrix multiplication.
 
-    Tensor batched matmul continues to use ``pl.matmul`` / ``pl.tensor.matmul``.
+    Tensor batched matmul is handled by ``pl.matmul`` / ``pl.tensor.matmul``:
+    when any operand has rank > 2, ``ConvertTensorToTileOps`` automatically
+    dispatches to ``tile.batch_matmul`` (and ``FlattenTileNdTo2D`` later
+    unrolls it). Use this op only when you are working at the tile level.
     """
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.batch_matmul(lhs, rhs)
@@ -445,6 +454,11 @@ def matmul_acc(
 
     Tensor path accepts extra kwargs (a_trans, b_trans).
     Tile path ignores them.
+
+    For Tensor inputs with rank > 2 on any of acc/lhs/rhs, the call is lowered
+    to ``tile.batch_matmul_acc`` (with batch broadcasting on lhs/rhs vs the
+    fixed acc batch) by ``ConvertTensorToTileOps`` and then unrolled to
+    per-batch ``tile.matmul_acc`` by ``FlattenTileNdTo2D``.
     """
     if isinstance(acc, Tensor) and isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
         return _tensor.matmul_acc(acc, lhs, rhs, a_trans, b_trans)

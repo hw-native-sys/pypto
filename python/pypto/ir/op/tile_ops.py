@@ -1414,6 +1414,31 @@ def batch_matmul(
     return _ir_core.create_op_call("tile.batch_matmul", [lhs, rhs], {}, actual_span)
 
 
+def batch_matmul_acc(
+    acc: Expr,
+    lhs: Expr,
+    rhs: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Batch matrix multiplication with accumulation.
+
+    Performs ``acc = acc + lhs @ rhs`` with batch-dim broadcasting between lhs and
+    rhs. The broadcast batch shape must equal acc's batch shape (acc is the in-place
+    accumulation target and is not broadcast).
+
+    Args:
+        acc: Accumulator tile (TileType, at least 2D)
+        lhs: Left-hand side tile (TileType, at least 2D)
+        rhs: Right-hand side tile (TileType, at least 2D)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for batch matrix multiplication with accumulation
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.batch_matmul_acc", [acc, lhs, rhs], {}, actual_span)
+
+
 def gemv(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     """General Matrix-Vector multiplication: C[1,N] = A[1,K] @ B[K,N].
 

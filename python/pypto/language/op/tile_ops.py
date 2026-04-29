@@ -60,6 +60,7 @@ __all__ = [
     "matmul",
     "batch_matmul",
     "matmul_acc",
+    "batch_matmul_acc",
     "matmul_bias",
     "gemv",
     "gemv_acc",
@@ -809,6 +810,25 @@ def matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
         Tile wrapping the matmul_acc operation
     """
     call_expr = _ir_ops.matmul_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap())
+    return Tile(expr=call_expr)
+
+
+def batch_matmul_acc(acc: Tile, lhs: Tile, rhs: Tile) -> Tile:
+    """Batch matrix multiplication with accumulation: acc += lhs @ rhs.
+
+    Performs the in-place ``acc += lhs @ rhs`` with batch-dim broadcasting between
+    ``lhs`` and ``rhs``. The broadcast batch shape must equal the batch shape of
+    ``acc`` (acc is the in-place accumulation target and is not broadcast).
+
+    Args:
+        acc: Accumulator tile (at least 2D)
+        lhs: Left-hand side tile (at least 2D)
+        rhs: Right-hand side tile (at least 2D)
+
+    Returns:
+        Tile wrapping the batch_matmul_acc operation
+    """
+    call_expr = _ir_ops.batch_matmul_acc(acc.unwrap(), lhs.unwrap(), rhs.unwrap())
     return Tile(expr=call_expr)
 
 

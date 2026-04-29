@@ -166,6 +166,51 @@ def test_tensor_matmul_acc_with_transpose():
     assert len(result_type.shape) == 2
 
 
+def test_tensor_matmul_acc_nd_batch_broadcast():
+    """tensor.matmul_acc accepts ND inputs and broadcasts lhs/rhs batch dims to acc batch."""
+    span = ir.Span.unknown()
+
+    def cd(v: int) -> ir.ConstInt:
+        return ir.ConstInt(v, DataType.INT32, span)
+
+    # acc[1, 16, 64] FP32 += lhs[16, 32] BF16 @ rhs[1, 64, 32]^T BF16   (b_trans=True)
+    # lhs is 2D (batch=[]), rhs is 3D (batch=[1]), broadcast batch=[1] == acc batch.
+    acc_type = ir.TensorType([cd(1), cd(16), cd(64)], DataType.FP32)
+    lhs_type = ir.TensorType([cd(16), cd(32)], DataType.BF16)
+    rhs_type = ir.TensorType([cd(1), cd(64), cd(32)], DataType.BF16)
+    acc = ir.Var("acc", acc_type, span)
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    call = ir.op.tensor.matmul_acc(acc, lhs, rhs, b_trans=True)
+
+    assert isinstance(call, ir.Call)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    const_dims = [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)]
+    assert const_dims == [1, 16, 64]
+
+
+def test_tensor_matmul_acc_nd_acc_batch_mismatch_fails():
+    """tensor.matmul_acc rejects acc batch dims that disagree with broadcast(lhs, rhs)."""
+    span = ir.Span.unknown()
+
+    def cd(v: int) -> ir.ConstInt:
+        return ir.ConstInt(v, DataType.INT32, span)
+
+    # acc batch [3] but broadcast(lhs[2], rhs[1]) batch is [2] — should fail.
+    acc_type = ir.TensorType([cd(3), cd(16), cd(64)], DataType.FP32)
+    lhs_type = ir.TensorType([cd(2), cd(16), cd(32)], DataType.BF16)
+    rhs_type = ir.TensorType([cd(1), cd(32), cd(64)], DataType.BF16)
+    acc = ir.Var("acc", acc_type, span)
+    lhs = ir.Var("lhs", lhs_type, span)
+    rhs = ir.Var("rhs", rhs_type, span)
+
+    with pytest.raises(ValueError, match="acc batch dim"):
+        ir.op.tensor.matmul_acc(acc, lhs, rhs)
+
+
 def test_tensor_row_max():
     """Test tensor.row_max reduction."""
     span = ir.Span.unknown()

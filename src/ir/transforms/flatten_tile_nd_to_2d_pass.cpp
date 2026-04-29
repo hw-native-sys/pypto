@@ -766,12 +766,59 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
   // Detect direct-store fusion opportunity.
   auto direct_store = DetectDirectStore(stmts, stmt_index, assign->var_);
 
+  // Fast path: batch_count == 1, non-fused, and no dtype cast required. The
+  // result tile is exactly what a single tile.matmul produces (2D, Acc). Skip
+  // the create + per-batch move-to-Vec + tile.assemble dance and let the Acc
+  // tile flow directly to the consumer. This is essential when the consumer is
+  // tile.matmul_acc / tile.batch_matmul_acc — those need an Acc accumulator,
+  // and a Vec-staged tile would force an illegal cross-core Vec→Acc move at
+  // codegen time. Any downstream Vec consumer can still insert its own Acc→Vec
+  // move.
+  //
+  // Skip the fast path when the deduced tile.matmul accumulator dtype differs
+  // from the requested orig_result_type dtype: returning the raw Acc tile
+  // would leak the wider accumulator dtype (e.g. fp32/int32) instead of the
+  // expected output dtype, and the cast must be inserted in Vec memory by the
+  // general path below.
+  if (batch_count == 1 && !direct_store.detected) {
+    auto output_batch_indices = BuildBatchIndices(0, output_batch_dims);
+    int64_t lhs_batch_idx =
+        BuildOperandFlatBatchIndex(lhs_batch_dims, output_batch_dims, output_batch_indices);
+    int64_t rhs_batch_idx =
+        BuildOperandFlatBatchIndex(rhs_batch_dims, output_batch_dims, output_batch_indices);
+
+    auto lhs_page = ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", def_map, ctx,
+                                     op_registry, span);
+    auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", def_map, ctx,
+                                     op_registry, span);
+    auto matmul = op_registry.Create("tile.matmul", {lhs_page.var, rhs_page.var}, span);
+    auto matmul_type = As<TileType>(matmul->GetType());
+    bool needs_cast = matmul_type && matmul_type->dtype_ != orig_result_type->dtype_;
+    if (!needs_cast) {
+      out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
+      out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
+      auto matmul_var = std::make_shared<Var>(assign->var_->name_hint_, matmul->GetType(), span);
+      out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul, span));
+      out.output_var = matmul_var;
+      return out;
+    }
+    // Discard the speculative pages and matmul (no out.stmts modification yet);
+    // fall through to the general path which inserts the required tile.cast.
+  }
+
   // Allocate output tile (non-fused path only).
   VarPtr out_var;
   if (!direct_store.detected) {
     auto out_shape =
         std::make_shared<MakeTuple>(Make2DShapeExprs(batch_count * lhs_rows, rhs_cols, span), span);
-    std::vector<std::pair<std::string, std::any>> create_kw = {{"dtype", orig_result_type->dtype_}};
+    // Per-batch matmul results are moved to Vec via tile.move(target_memory=Vec)
+    // before being assembled into this tile, so allocate the staging tile in Vec
+    // up-front. This keeps the printed/parsed IR consistent (parser otherwise
+    // backfills target_memory=Vec from the assemble consumer chain).
+    std::vector<std::pair<std::string, std::any>> create_kw = {
+        {"dtype", orig_result_type->dtype_},
+        {"target_memory", MemorySpace::Vec},
+    };
     auto create_out = op_registry.Create("tile.create", {out_shape}, create_kw, span);
     out_var = std::make_shared<Var>(assign->var_->name_hint_, create_out->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, span));
@@ -891,6 +938,203 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
   return out;
 }
 
+// ============================================================================
+// Batch matmul_acc lowering
+// ============================================================================
+//
+// tile.batch_matmul_acc semantics:
+//   acc[..., M, N] += lhs[..., M, K] @ rhs[..., K, N]   (with batch broadcast)
+//
+// The 2D backend only supports tile.matmul_acc on rank-2 tiles. After earlier
+// flattening (which has already turned the original ND acc into its flat 2D form
+// [batch_count*M, N]), this lowering unrolls the batch dim into a sequence of
+// per-batch tile.matmul_acc calls writing into the corresponding row-band of acc.
+//
+// Direct-store fusion is intentionally not applied here — the canonical use is
+// "y_acc = matmul; for k: y_acc = matmul_acc(y_acc, ...); store(y_acc)" where
+// the store consumes the loop-carried accumulator after the loop, not the
+// individual matmul_acc results. The acc operand itself is the in-place target.
+//
+
+/// Result of lowering a tile.batch_matmul_acc operation.
+struct BatchMatmulAccResult {
+  std::vector<StmtPtr> stmts;  ///< Emitted statements
+  VarPtr output_var;           ///< Updated acc tile (always 2D after flatten)
+};
+
+/// Lower tile.batch_matmul_acc into unrolled 2D tile.matmul_acc calls.
+BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const CallPtr& call,
+                                         const std::vector<StmtPtr>& stmts, const FlattenContext& ctx,
+                                         const OpRegistry& op_registry, const Span& span) {
+  (void)assign;
+  BatchMatmulAccResult out;
+  auto def_map = BuildAssignDefMap(stmts);
+
+  // The acc operand has already been flattened (or is naturally 2D) by earlier
+  // statement processing; substitute via var_map to pick up any rewrites.
+  // Accept both Var and IterArg (loop-carried accumulator) — both are Var-like
+  // in the IR and downstream code only needs name_hint_ + a stable Expr.
+  auto acc_operand = Substitute(call->args_[0], ctx.var_map);
+  auto acc_var = AsVarLike(acc_operand);
+  CHECK(acc_var) << "FlattenTileNdTo2D: tile.batch_matmul_acc acc must be a Var/IterArg after "
+                    "substitution, got "
+                 << acc_operand->TypeName();
+  auto acc_type = As<TileType>(acc_operand->GetType());
+  CHECK(acc_type) << "FlattenTileNdTo2D: tile.batch_matmul_acc acc must be TileType";
+  CHECK(acc_type->shape_.size() == 2)
+      << "FlattenTileNdTo2D: tile.batch_matmul_acc expects acc to be 2D after flatten, got rank "
+      << acc_type->shape_.size();
+
+  // Normalize lhs/rhs operands (peel transpose, recognize tile.load(transpose=True)).
+  auto lhs_info = NormalizeBatchMatmulOperand(call->args_[1], "lhs", def_map, ctx);
+  auto rhs_info = NormalizeBatchMatmulOperand(call->args_[2], "rhs", def_map, ctx);
+
+  // Extract original (pre-flatten) static dimensions for batch + matrix axes.
+  auto lhs_dims = ToStaticDims(lhs_info.original_type->shape_, "tile.batch_matmul_acc lhs");
+  auto rhs_dims = ToStaticDims(rhs_info.original_type->shape_, "tile.batch_matmul_acc rhs");
+  CHECK(lhs_dims.size() >= 2) << "FlattenTileNdTo2D: tile.batch_matmul_acc lhs must be at least 2D";
+  CHECK(rhs_dims.size() >= 2) << "FlattenTileNdTo2D: tile.batch_matmul_acc rhs must be at least 2D";
+
+  // Compute broadcast batch dims (must equal acc's batch by op contract).
+  std::vector<ExprPtr> lhs_batch_exprs(lhs_info.original_type->shape_.begin(),
+                                       lhs_info.original_type->shape_.end() - 2);
+  std::vector<ExprPtr> rhs_batch_exprs(rhs_info.original_type->shape_.begin(),
+                                       rhs_info.original_type->shape_.end() - 2);
+  auto broadcast_result = BroadcastShapes(lhs_batch_exprs, rhs_batch_exprs);
+  CHECK(broadcast_result.success)
+      << "FlattenTileNdTo2D: tile.batch_matmul_acc batch dimensions must broadcast";
+
+  auto output_batch_dims = ToStaticDims(broadcast_result.shape, "tile.batch_matmul_acc output batch");
+  int64_t batch_count = MultiplyStaticDims(output_batch_dims, "tile.batch_matmul_acc output batch size");
+
+  std::vector<int64_t> lhs_batch_dims(lhs_dims.begin(), lhs_dims.end() - 2);
+  std::vector<int64_t> rhs_batch_dims(rhs_dims.begin(), rhs_dims.end() - 2);
+
+  int64_t lhs_source_rows = lhs_dims[lhs_dims.size() - 2];
+  int64_t lhs_source_cols = lhs_dims.back();
+  int64_t rhs_source_rows = rhs_dims[rhs_dims.size() - 2];
+  int64_t rhs_source_cols = rhs_dims.back();
+
+  int64_t lhs_rows = lhs_info.transpose ? lhs_source_cols : lhs_source_rows;
+  int64_t lhs_cols = lhs_info.transpose ? lhs_source_rows : lhs_source_cols;
+  int64_t rhs_rows = rhs_info.transpose ? rhs_source_cols : rhs_source_rows;
+  int64_t rhs_cols = rhs_info.transpose ? rhs_source_rows : rhs_source_cols;
+
+  CHECK(lhs_cols == rhs_rows)
+      << "FlattenTileNdTo2D: tile.batch_matmul_acc requires matching K after transpose, got " << lhs_cols
+      << " and " << rhs_rows;
+
+  // Sanity check on flat acc shape: should be [batch_count*M, N].
+  auto acc_rows_const = As<ConstInt>(acc_type->shape_[0]);
+  auto acc_cols_const = As<ConstInt>(acc_type->shape_[1]);
+  CHECK(acc_rows_const && acc_cols_const)
+      << "FlattenTileNdTo2D: tile.batch_matmul_acc expects static acc dims after flatten";
+  CHECK(acc_rows_const->value_ == batch_count * lhs_rows)
+      << "FlattenTileNdTo2D: tile.batch_matmul_acc acc rows " << acc_rows_const->value_ << " != batch_count("
+      << batch_count << ") * M(" << lhs_rows << ")";
+  CHECK(acc_cols_const->value_ == rhs_cols) << "FlattenTileNdTo2D: tile.batch_matmul_acc acc cols "
+                                            << acc_cols_const->value_ << " != N(" << rhs_cols << ")";
+
+  // tile.matmul_acc requires its acc input to be in MemorySpace::Acc. The
+  // upstream tile.batch_matmul lowering moves its result to Vec for the
+  // tile.assemble path, so the acc operand here may arrive as Vec. Insert an
+  // explicit tile.move(acc, target_memory=Acc) when the memory space is
+  // resolved and not already Acc; remember the original space so we can move
+  // the matmul_acc result back to it at the end (preserves the iter_arg /
+  // consumer memory-space contract — e.g. when the accumulator is a loop
+  // iter_arg initialised from a Vec tile, the next iteration must see Vec
+  // again).
+  VarPtr current_acc = acc_var;
+  std::optional<MemorySpace> original_acc_memory;
+  if (acc_type->memory_space_.has_value() && *acc_type->memory_space_ != MemorySpace::Acc) {
+    original_acc_memory = acc_type->memory_space_;
+    std::vector<std::pair<std::string, std::any>> move_kw = {{"target_memory", MemorySpace::Acc}};
+    auto move = op_registry.Create("tile.move", {current_acc}, move_kw, span);
+    auto moved = std::make_shared<Var>(current_acc->name_hint_ + "_acc", move->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(moved, move, span));
+    current_acc = moved;
+  }
+
+  // Move the final accumulator back to its original memory space (typically
+  // Vec when the acc came from a tile.assemble produced by LowerBatchMatmul).
+  // No-op when original_acc_memory is unset (acc was already in Acc) or when
+  // the value already lives in the right space.
+  auto move_back_if_needed = [&](VarPtr value) -> VarPtr {
+    if (!original_acc_memory.has_value()) return value;
+    auto value_type = As<TileType>(value->GetType());
+    if (value_type && value_type->memory_space_.has_value() &&
+        *value_type->memory_space_ == *original_acc_memory) {
+      return value;
+    }
+    std::vector<std::pair<std::string, std::any>> move_kw = {
+        {"target_memory", *original_acc_memory},
+    };
+    auto move = op_registry.Create("tile.move", {value}, move_kw, span);
+    auto restored = std::make_shared<Var>(value->name_hint_ + "_back", move->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(restored, move, span));
+    return restored;
+  };
+
+  // Fast path: batch_count == 1. The acc is already [M, N] and per-batch slicing
+  // would be identity. Emit a single tile.matmul_acc directly. This also avoids
+  // tile.slice/tile.assemble in Acc memory which is the standard codegen path
+  // covered by the existing 2D tile.matmul_acc handling.
+  if (batch_count == 1) {
+    auto output_batch_indices = BuildBatchIndices(0, output_batch_dims);
+    int64_t lhs_batch_idx =
+        BuildOperandFlatBatchIndex(lhs_batch_dims, output_batch_dims, output_batch_indices);
+    int64_t rhs_batch_idx =
+        BuildOperandFlatBatchIndex(rhs_batch_dims, output_batch_dims, output_batch_indices);
+
+    auto lhs_page = ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", def_map, ctx,
+                                     op_registry, span);
+    auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", def_map, ctx,
+                                     op_registry, span);
+    out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
+    out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
+
+    auto matmul_acc = op_registry.Create("tile.matmul_acc", {current_acc, lhs_page.var, rhs_page.var}, span);
+    auto new_acc = std::make_shared<Var>(current_acc->name_hint_, matmul_acc->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(new_acc, matmul_acc, span));
+    out.output_var = move_back_if_needed(new_acc);
+    return out;
+  }
+
+  // General path: unroll batch dims using slice + tile.matmul_acc + assemble on acc.
+  for (int64_t i = 0; i < batch_count; ++i) {
+    auto output_batch_indices = BuildBatchIndices(i, output_batch_dims);
+    int64_t lhs_batch_idx =
+        BuildOperandFlatBatchIndex(lhs_batch_dims, output_batch_dims, output_batch_indices);
+    int64_t rhs_batch_idx =
+        BuildOperandFlatBatchIndex(rhs_batch_dims, output_batch_dims, output_batch_indices);
+
+    auto lhs_page = ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", def_map, ctx,
+                                     op_registry, span);
+    auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", def_map, ctx,
+                                     op_registry, span);
+    out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
+    out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
+
+    auto suffix = std::to_string(i);
+    auto acc_offset = MakeShapeTupleFromInts({i * lhs_rows, 0}, span);
+    auto acc_shape = MakeShapeTupleFromInts({lhs_rows, rhs_cols}, span);
+    auto acc_slice = op_registry.Create("tile.slice", {current_acc, acc_shape, acc_offset}, span);
+    auto acc_page_var = std::make_shared<Var>("acc_page_" + suffix, acc_slice->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(acc_page_var, acc_slice, span));
+
+    auto matmul_acc = op_registry.Create("tile.matmul_acc", {acc_page_var, lhs_page.var, rhs_page.var}, span);
+    auto matmul_var = std::make_shared<Var>("matmul_acc_" + suffix, matmul_acc->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul_acc, span));
+
+    auto assemble = op_registry.Create("tile.assemble", {current_acc, matmul_var, acc_offset}, span);
+    current_acc = std::make_shared<Var>(current_acc->name_hint_, assemble->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(current_acc, assemble, span));
+  }
+
+  out.output_var = move_back_if_needed(current_acc);
+  return out;
+}
+
 /**
  * @brief Recursively transform statements, flattening >2D tile ops to 2D.
  */
@@ -929,14 +1173,23 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     };
 
     for (const auto& s : stmts) {
-      // AssignStmt: count call args; mark batch_matmul operands separately.
+      // AssignStmt: count call args; mark batch_matmul[_acc] operands separately.
+      // For tile.batch_matmul_acc, only lhs (arg 1) and rhs (arg 2) are eligible
+      // for Strategy 1 skip-load — the acc operand (arg 0) is in Acc memory and
+      // never goes through tile.load(target_memory=Mat).
       if (auto a = As<AssignStmt>(s)) {
         if (auto c = As<Call>(a->value_)) {
-          bool is_batch_mm = (c->op_->name_ == "tile.batch_matmul");
-          for (const auto& arg : c->args_) {
+          const std::string& cname = c->op_->name_;
+          bool is_batch_mm = (cname == "tile.batch_matmul");
+          bool is_batch_mm_acc = (cname == "tile.batch_matmul_acc");
+          for (size_t arg_i = 0; arg_i < c->args_.size(); ++arg_i) {
+            const auto& arg = c->args_[arg_i];
             if (auto v = As<Var>(arg)) {
               use_count[v.get()]++;
-              if (is_batch_mm) batch_matmul_operands.push_back(v.get());
+              const bool eligible = is_batch_mm || (is_batch_mm_acc && (arg_i == 1 || arg_i == 2));
+              if (eligible) {
+                batch_matmul_operands.push_back(v.get());
+              }
             }
           }
         } else {
@@ -1403,7 +1656,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       continue;
     }
 
-    // ---- tile.transpose feeding only tile.batch_matmul: skip and let LowerBatchMatmul peel it ----
+    // ---- tile.batch_matmul_acc: delegate to LowerBatchMatmulAcc ----
+    if (op_name == "tile.batch_matmul_acc") {
+      auto lowering = LowerBatchMatmulAcc(assign, call, stmts, ctx, op_registry, span);
+      result.insert(result.end(), lowering.stmts.begin(), lowering.stmts.end());
+      ctx.Insert(assign->var_, lowering.output_var);
+      continue;
+    }
+
+    // ---- tile.transpose feeding only tile.batch_matmul[_acc]: skip and let lowering peel it ----
     if (op_name == "tile.transpose" && batch_matmul_only_vars.count(assign->var_.get()) != 0) {
       ctx.Insert(assign->var_, assign->var_);  // identity mapping for safety
       continue;

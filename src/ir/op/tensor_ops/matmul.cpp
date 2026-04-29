@@ -227,12 +227,12 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
   const auto& lhs_shape = lhs_type->shape_;
   const auto& rhs_shape = rhs_type->shape_;
 
-  CHECK(acc_shape.size() == 2) << "tensor.matmul_acc requires acc to be 2D, but got " << acc_shape.size()
-                               << "D";
-  CHECK(lhs_shape.size() == 2) << "tensor.matmul_acc requires lhs to be 2D, but got " << lhs_shape.size()
-                               << "D";
-  CHECK(rhs_shape.size() == 2) << "tensor.matmul_acc requires rhs to be 2D, but got " << rhs_shape.size()
-                               << "D";
+  CHECK(acc_shape.size() >= 2) << "tensor.matmul_acc requires acc to be at least 2D, but got "
+                               << acc_shape.size() << "D";
+  CHECK(lhs_shape.size() >= 2) << "tensor.matmul_acc requires lhs to be at least 2D, but got "
+                               << lhs_shape.size() << "D";
+  CHECK(rhs_shape.size() >= 2) << "tensor.matmul_acc requires rhs to be at least 2D, but got "
+                               << rhs_shape.size() << "D";
 
   CHECK(lhs_type->dtype_ == rhs_type->dtype_)
       << "tensor.matmul_acc requires identical lhs and rhs dtypes, but got " << lhs_type->dtype_.ToString()
@@ -247,13 +247,15 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
   bool a_trans = GetKwarg<bool>(kwargs, "a_trans", false);
   bool b_trans = GetKwarg<bool>(kwargs, "b_trans", false);
 
-  // acc[M, N] += lhs[M, K] @ rhs[K, N] (with optional transpose)
-  ExprPtr m_dim = a_trans ? lhs_shape[1] : lhs_shape[0];
-  ExprPtr k_lhs = a_trans ? lhs_shape[0] : lhs_shape[1];
-  ExprPtr k_rhs = b_trans ? rhs_shape[1] : rhs_shape[0];
-  ExprPtr n_dim = b_trans ? rhs_shape[0] : rhs_shape[1];
+  // Trailing matrix dims (after applying transpose).
+  size_t lhs_ndim = lhs_shape.size();
+  size_t rhs_ndim = rhs_shape.size();
+  ExprPtr m_dim = a_trans ? lhs_shape[lhs_ndim - 1] : lhs_shape[lhs_ndim - 2];
+  ExprPtr k_lhs = a_trans ? lhs_shape[lhs_ndim - 2] : lhs_shape[lhs_ndim - 1];
+  ExprPtr k_rhs = b_trans ? rhs_shape[rhs_ndim - 1] : rhs_shape[rhs_ndim - 2];
+  ExprPtr n_dim = b_trans ? rhs_shape[rhs_ndim - 2] : rhs_shape[rhs_ndim - 1];
 
-  // Verify K dimensions match
+  // Verify K dimensions match.
   auto k_lhs_const = As<ConstInt>(k_lhs);
   auto k_rhs_const = As<ConstInt>(k_rhs);
   if (k_lhs_const && k_rhs_const) {
@@ -261,18 +263,40 @@ TypePtr DeduceTensorMatMulAccType(const std::vector<ExprPtr>& args,
         << "tensor.matmul_acc: lhs K=" << k_lhs_const->value_ << " != rhs K=" << k_rhs_const->value_;
   }
 
-  // Verify acc shape matches [M, N]
-  auto m_acc = As<ConstInt>(acc_shape[0]);
-  auto m_lhs = As<ConstInt>(m_dim);
-  if (m_acc && m_lhs) {
-    CHECK(m_acc->value_ == m_lhs->value_)
-        << "tensor.matmul_acc: acc M=" << m_acc->value_ << " != matmul M=" << m_lhs->value_;
+  // Verify trailing M, N match acc.
+  size_t acc_ndim = acc_shape.size();
+  auto m_acc = As<ConstInt>(acc_shape[acc_ndim - 2]);
+  auto n_acc = As<ConstInt>(acc_shape[acc_ndim - 1]);
+  auto m_lhs_const = As<ConstInt>(m_dim);
+  auto n_rhs_const = As<ConstInt>(n_dim);
+  if (m_acc && m_lhs_const) {
+    CHECK(m_acc->value_ == m_lhs_const->value_)
+        << "tensor.matmul_acc: acc M=" << m_acc->value_ << " != matmul M=" << m_lhs_const->value_;
   }
-  auto n_acc = As<ConstInt>(acc_shape[1]);
-  auto n_rhs = As<ConstInt>(n_dim);
-  if (n_acc && n_rhs) {
-    CHECK(n_acc->value_ == n_rhs->value_)
-        << "tensor.matmul_acc: acc N=" << n_acc->value_ << " != matmul N=" << n_rhs->value_;
+  if (n_acc && n_rhs_const) {
+    CHECK(n_acc->value_ == n_rhs_const->value_)
+        << "tensor.matmul_acc: acc N=" << n_acc->value_ << " != matmul N=" << n_rhs_const->value_;
+  }
+
+  // Batch dim handling: lhs and rhs batch dims broadcast against each other; the
+  // result must equal the acc batch dims (acc is the in-place accumulation target
+  // and is not broadcast).
+  std::vector<ExprPtr> acc_batch(acc_shape.begin(), acc_shape.end() - 2);
+  std::vector<ExprPtr> lhs_batch(lhs_shape.begin(), lhs_shape.end() - 2);
+  std::vector<ExprPtr> rhs_batch(rhs_shape.begin(), rhs_shape.end() - 2);
+  auto broadcast_result = BroadcastShapes(lhs_batch, rhs_batch);
+  CHECK(broadcast_result.success) << "Cannot broadcast batch dimensions for tensor.matmul_acc";
+  CHECK(broadcast_result.shape.size() == acc_batch.size())
+      << "tensor.matmul_acc: acc batch rank (" << acc_batch.size()
+      << ") must equal broadcast(lhs, rhs) batch rank (" << broadcast_result.shape.size() << ")";
+  for (size_t i = 0; i < acc_batch.size(); ++i) {
+    auto acc_const = As<ConstInt>(acc_batch[i]);
+    auto bcast_const = As<ConstInt>(broadcast_result.shape[i]);
+    if (acc_const && bcast_const) {
+      CHECK(acc_const->value_ == bcast_const->value_)
+          << "tensor.matmul_acc: acc batch dim " << i << " (" << acc_const->value_
+          << ") must equal broadcast(lhs, rhs) batch dim " << i << " (" << bcast_const->value_ << ")";
+    }
   }
 
   return std::make_shared<TensorType>(acc_shape, result_dtype);

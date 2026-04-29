@@ -1508,5 +1508,212 @@ class TestFlattenTileNdTo2DBatchMatmul:
         ]
 
 
+# ----------------------------------------------------------------------------
+# tile.batch_matmul_acc lowering
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DBatchMatmulAcc:
+    """Tests for ``tile.batch_matmul_acc`` lowering inside ``FlattenTileNdTo2D``.
+
+    The single-batch fast path is covered end-to-end in
+    ``TestNdTensorMatmulConversion`` (convert + flatten); the test below
+    targets the general ``batch_count > 1`` path, which is structurally
+    different (per-batch ``tile.slice`` + ``tile.matmul_acc`` +
+    ``tile.assemble``, plus the Vec→Acc round-trip on the loop-carried
+    accumulator).
+    """
+
+    def test_batch_two_acc_unrolls_with_slice_assemble_and_memory_round_trip(self):
+        """batch=2 ``tile.batch_matmul_acc`` unrolls into 2 tile.matmul_acc + slice/assemble.
+
+        The accumulator is produced by an upstream batch=2 ``tensor.matmul``
+        (which itself takes the general ``LowerBatchMatmul`` path), so the
+        post-flatten acc lives in Vec memory. ``LowerBatchMatmulAcc`` must
+        therefore (a) move the acc to Acc before each per-batch
+        ``tile.matmul_acc``, (b) slice/assemble in Acc, and (c) move the final
+        acc back to Vec to preserve the iter-arg / consumer memory contract.
+        """
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            prog.declare_function("main_incore_0")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                h0 = f.param("h0", ir.TensorType([2, 16, 256], DataType.BF16))
+                w0 = f.param("w0", ir.TensorType([2, 64, 256], DataType.BF16))
+                h1 = f.param("h1", ir.TensorType([2, 16, 256], DataType.BF16))
+                w1 = f.param("w1", ir.TensorType([2, 64, 256], DataType.BF16))
+                out_p = f.param(
+                    "out_0",
+                    ir.TensorType([2, 16, 64], DataType.FP32),
+                    direction=ir.ParamDirection.Out,
+                )
+                f.return_type(ir.TensorType([2, 16, 64], DataType.FP32))
+
+                acc_init = ib.let(
+                    "acc_init",
+                    tensor_ops.matmul(h0, w0, b_trans=True, out_dtype=DataType.FP32),
+                )
+                acc_final = ib.let(
+                    "acc_final",
+                    tensor_ops.matmul_acc(acc_init, h1, w1, b_trans=True),
+                )
+                out_r = ib.let("out_0", tensor_ops.assemble(out_p, acc_final, [0, 0, 0]))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+        before = prog.get_result()
+
+        after = passes.flatten_tile_nd_to_2d()(passes.convert_tensor_to_tile_ops()(before))
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+        body = cast(ir.SeqStmts, fn.body)
+        calls = [
+            stmt.value
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+        ]
+        names = [c.op.name for c in calls]
+
+        # Both batch ops are fully unrolled.
+        assert "tile.batch_matmul" not in names
+        assert "tile.batch_matmul_acc" not in names
+
+        # Two batches × {matmul, matmul_acc} = 2 + 2.
+        assert names.count("tile.matmul") == 2
+        assert names.count("tile.matmul_acc") == 2
+
+        # The general path uses tile.slice + tile.assemble around the per-batch
+        # matmul_acc to read/write each [M, N] band of the [batch*M, N] acc.
+        # It also emits a tile.move(target_memory=Acc) before the matmul_acc
+        # block (Vec→Acc) and a tile.move(target_memory=Vec) after it
+        # (Acc→Vec) to keep the loop-carried acc in its original Vec space.
+        assert "tile.slice" in names
+        assert "tile.assemble" in names
+        moves = [c for c in calls if c.op.name == "tile.move"]
+        move_targets = [c.kwargs.get("target_memory") for c in moves]
+        assert pl.MemorySpace.Acc in move_targets, (
+            f"expected a tile.move to Acc on the acc operand, got targets={move_targets}"
+        )
+        assert pl.MemorySpace.Vec in move_targets, (
+            "expected a tile.move back to Vec to preserve original acc memory space, "
+            f"got targets={move_targets}"
+        )
+
+
+# ----------------------------------------------------------------------------
+# tensor.matmul / tensor.matmul_acc → tile.batch_matmul[_acc] dispatch
+# ----------------------------------------------------------------------------
+
+
+class TestNdTensorMatmulConversion:
+    """End-to-end test: tensor.matmul[_acc] with ND inputs lowers via batch ops."""
+
+    def test_nd_tensor_matmul_dispatch(self):
+        """tensor.matmul with 2D × 3D operand emits tile.batch_matmul (then unrolls)."""
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            prog.declare_function("main_incore_0")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                h = f.param("h", ir.TensorType([16, 256], DataType.BF16))
+                w = f.param("w", ir.TensorType([1, 64, 256], DataType.BF16))
+                out_p = f.param(
+                    "out_0", ir.TensorType([16, 64], DataType.FP32), direction=ir.ParamDirection.Out
+                )
+                f.return_type(ir.TensorType([16, 64], DataType.FP32))
+
+                y_acc = ib.let(
+                    "y_acc",
+                    tensor_ops.matmul(h, w, b_trans=True, out_dtype=DataType.FP32),
+                )
+                # Squeeze batch=1 result via assemble into 2D out_0.
+                # Use tensor.assemble with [0, 0] offset; flatten lowers to per-batch store.
+                out_r = ib.let("out_0", tensor_ops.assemble(out_p, y_acc, [0, 0, 0]))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+        Before = prog.get_result()
+
+        # Run conversion + flatten passes.
+        after = passes.convert_tensor_to_tile_ops()(Before)
+        names = []
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+        body = cast(ir.SeqStmts, fn.body)
+        for stmt in body.stmts:
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+                names.append(stmt.value.op.name)
+        # ND tensor.matmul should have become tile.batch_matmul (not tile.matmul).
+        assert "tile.batch_matmul" in names
+        assert "tile.matmul" not in names
+
+    def test_nd_tensor_matmul_acc_dispatch_and_flatten(self):
+        """tensor.matmul_acc with 2D × 3D operand emits tile.batch_matmul_acc, then flattens.
+
+        The acc is produced by an earlier ND tensor.matmul (which the conversion
+        pass remaps to a tile.batch_matmul result) so the acc operand is already
+        a TileType when matmul_acc is converted.
+
+        End-to-end: convert + flatten leaves no batch ops and emits exactly one
+        tile.matmul + one tile.matmul_acc (batch=1 fast path).
+        """
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            prog.declare_function("main_incore_0")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                h0 = f.param("h0", ir.TensorType([16, 256], DataType.BF16))
+                w0 = f.param("w0", ir.TensorType([1, 64, 256], DataType.BF16))
+                h1 = f.param("h1", ir.TensorType([16, 256], DataType.BF16))
+                w1 = f.param("w1", ir.TensorType([1, 64, 256], DataType.BF16))
+                out_p = f.param(
+                    "out_0",
+                    ir.TensorType([1, 16, 64], DataType.FP32),
+                    direction=ir.ParamDirection.Out,
+                )
+                f.return_type(ir.TensorType([1, 16, 64], DataType.FP32))
+
+                y_acc = ib.let(
+                    "y_acc",
+                    tensor_ops.matmul(h0, w0, b_trans=True, out_dtype=DataType.FP32),
+                )
+                y_acc_2 = ib.let(
+                    "y_acc_2",
+                    tensor_ops.matmul_acc(y_acc, h1, w1, b_trans=True),
+                )
+                out_r = ib.let("out_0", tensor_ops.assemble(out_p, y_acc_2, [0, 0, 0]))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+        Before = prog.get_result()
+
+        after_convert = passes.convert_tensor_to_tile_ops()(Before)
+
+        def collect_names(prog: ir.Program) -> list[str]:
+            fn = prog.get_function("main_incore_0")
+            assert fn is not None
+            body = cast(ir.SeqStmts, fn.body)
+            return [
+                stmt.value.op.name
+                for stmt in body.stmts
+                if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+            ]
+
+        # After conversion: ND ops dispatch to the batch variants.
+        names_convert = collect_names(after_convert)
+        assert "tile.batch_matmul" in names_convert
+        assert "tile.batch_matmul_acc" in names_convert
+        assert "tile.matmul" not in names_convert
+        assert "tile.matmul_acc" not in names_convert
+
+        # After flatten: batch ops disappear; one per-batch tile.matmul (from
+        # batch_matmul) and one per-batch tile.matmul_acc (from batch_matmul_acc)
+        # remain (batch=1 fast path).
+        after_flatten = passes.flatten_tile_nd_to_2d()(after_convert)
+        names_flatten = collect_names(after_flatten)
+        assert "tile.batch_matmul" not in names_flatten
+        assert "tile.batch_matmul_acc" not in names_flatten
+        assert names_flatten.count("tile.matmul") == 1
+        assert names_flatten.count("tile.matmul_acc") == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

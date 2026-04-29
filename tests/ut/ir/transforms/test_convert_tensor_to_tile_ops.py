@@ -450,6 +450,83 @@ class TestConvertTensorToTileOps:
         assert "tile.matmul_acc" in ir_str
         assert "tile.matmul" in ir_str
 
+    def test_matmul_nd_dispatches_to_batch_matmul(self):
+        """tensor.matmul with any operand of rank > 2 must lower to tile.batch_matmul.
+
+        Verifies the rank-based dispatch in RegisterMatmulOps: a 2D lhs and a 3D
+        rhs (the typical MoE expert weight pattern) produces tile.batch_matmul,
+        not tile.matmul. b_trans=True is propagated to the rhs load via the
+        existing InputSpaceReq mechanism.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.BF16],
+                rhs: pl.Tensor[[1, 64, 128], pl.BF16],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+                y: pl.Tensor[[1, 16, 64], pl.FP32] = pl.matmul(lhs, rhs, b_trans=True, out_dtype=pl.FP32)
+                return y
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.BF16],
+                rhs: pl.Tensor[[1, 64, 128], pl.BF16],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+                result: pl.Tensor[[1, 16, 64], pl.FP32] = self.main_incore_0(lhs, rhs)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir_str = str(After)
+        assert "tile.batch_matmul" in ir_str
+        # Plain (non-batch) tile.matmul must not appear: rank dispatch picked the
+        # batch path for the entire chain.
+        assert "tile.matmul(" not in ir_str
+        # Transpose was pushed into the rhs load via input_reqs (a_trans/b_trans
+        # InputSpaceReq), not emitted as a separate tile.transpose op.
+        assert "tile.transpose" not in ir_str
+        assert "transpose=True" in ir_str
+
+    def test_matmul_acc_nd_dispatches_to_batch_matmul_acc(self):
+        """tensor.matmul_acc with ND operands lowers to tile.batch_matmul_acc.
+
+        Mirrors the matmul ND dispatch: ND acc + ND lhs/rhs combinations should
+        select the batched accumulating tile op so the downstream FlattenTileNdTo2D
+        can unroll consistently.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.BF16],
+                rhs0: pl.Tensor[[1, 64, 128], pl.BF16],
+                rhs1: pl.Tensor[[1, 64, 128], pl.BF16],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+                acc: pl.Tensor[[1, 16, 64], pl.FP32] = pl.matmul(lhs, rhs0, b_trans=True, out_dtype=pl.FP32)
+                result: pl.Tensor[[1, 16, 64], pl.FP32] = pl.matmul_acc(acc, lhs, rhs1, b_trans=True)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 128], pl.BF16],
+                rhs0: pl.Tensor[[1, 64, 128], pl.BF16],
+                rhs1: pl.Tensor[[1, 64, 128], pl.BF16],
+            ) -> pl.Tensor[[1, 16, 64], pl.FP32]:
+                result: pl.Tensor[[1, 16, 64], pl.FP32] = self.main_incore_0(lhs, rhs0, rhs1)
+                return result
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir_str = str(After)
+        assert "tile.batch_matmul_acc" in ir_str
+        assert "tile.batch_matmul(" in ir_str
+        assert "tile.matmul_acc" not in ir_str.replace("tile.batch_matmul_acc", "")
+
     def test_assemble_tile_tile_then_cast_conversion(self):
         """tensor.create + tensor.assemble(tile,tile) + tensor.cast must not crash.
 

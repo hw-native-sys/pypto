@@ -1391,6 +1391,83 @@ class TestTileBatchMatMulOps:
         assert result_type.tile_view.slayout == ir.TileLayout.row_major
         assert result_type.tile_view.fractal == 1024
 
+    @pytest.mark.parametrize(
+        ("acc_shape", "lhs_shape", "rhs_shape", "input_dtype", "acc_dtype"),
+        [
+            # 2D: acc[16,64] += lhs[16,32] @ rhs[32,64]
+            ([16, 64], [16, 32], [32, 64], DataType.FP16, DataType.FP32),
+            # 3D: acc[4,16,64] += lhs[4,16,32] @ rhs[4,32,64]
+            ([4, 16, 64], [4, 16, 32], [4, 32, 64], DataType.FP32, DataType.FP32),
+            # 4D: multiple batch dims
+            ([2, 3, 16, 64], [2, 3, 16, 32], [2, 3, 32, 64], DataType.FP16, DataType.FP32),
+            # Broadcast lhs/rhs against acc batch
+            ([4, 16, 64], [1, 16, 32], [4, 32, 64], DataType.FP32, DataType.FP32),
+            # INT path
+            ([2, 16, 64], [2, 16, 32], [2, 32, 64], DataType.INT8, DataType.INT32),
+        ],
+        ids=["2d", "3d", "4d", "broadcast", "int"],
+    )
+    def test_batch_matmul_acc(self, acc_shape, lhs_shape, rhs_shape, input_dtype, acc_dtype):
+        """tile.batch_matmul_acc handles batch ranks + broadcasting; result shape == acc shape."""
+        span = ir.Span.unknown()
+        acc_type = ir.TileType(_const_dims(span, *acc_shape), acc_dtype)
+        lhs_type = ir.TileType(_const_dims(span, *lhs_shape), input_dtype)
+        rhs_type = ir.TileType(_const_dims(span, *rhs_shape), input_dtype)
+        acc = ir.Var("acc", acc_type, span)
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        call = tile.batch_matmul_acc(acc, lhs, rhs, span)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.batch_matmul_acc"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        const_dims = [dim for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
+        assert len(const_dims) == len(result_type.shape)
+        assert [dim.value for dim in const_dims] == acc_shape
+        assert result_type.dtype == acc_dtype
+
+    def test_batch_matmul_acc_acc_batch_must_match_broadcast(self):
+        """tile.batch_matmul_acc rejects acc batch dims that disagree with broadcast(lhs, rhs)."""
+        span = ir.Span.unknown()
+        acc_type = ir.TileType(_const_dims(span, 2, 16, 64), DataType.FP32)
+        lhs_type = ir.TileType(_const_dims(span, 4, 16, 32), DataType.FP16)
+        rhs_type = ir.TileType(_const_dims(span, 4, 32, 64), DataType.FP16)
+        acc = ir.Var("acc", acc_type, span)
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        with pytest.raises(ValueError, match="acc batch dim"):
+            tile.batch_matmul_acc(acc, lhs, rhs, span)
+
+    def test_batch_matmul_acc_dtype_mismatch(self):
+        """tile.batch_matmul_acc rejects acc dtype that doesn't match the result dtype."""
+        span = ir.Span.unknown()
+        # FP inputs => FP32 acc required, but acc is FP16 here.
+        acc_type = ir.TileType(_const_dims(span, 2, 16, 64), DataType.FP16)
+        lhs_type = ir.TileType(_const_dims(span, 2, 16, 32), DataType.FP16)
+        rhs_type = ir.TileType(_const_dims(span, 2, 32, 64), DataType.FP16)
+        acc = ir.Var("acc", acc_type, span)
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        with pytest.raises(ValueError, match="accumulator dtype"):
+            tile.batch_matmul_acc(acc, lhs, rhs, span)
+
+    def test_batch_matmul_acc_inner_dim_mismatch(self):
+        """tile.batch_matmul_acc rejects mismatched K dims."""
+        span = ir.Span.unknown()
+        acc_type = ir.TileType(_const_dims(span, 2, 16, 64), DataType.FP32)
+        lhs_type = ir.TileType(_const_dims(span, 2, 16, 32), DataType.FP16)
+        rhs_type = ir.TileType(_const_dims(span, 2, 16, 64), DataType.FP16)  # K=16, mismatch
+        acc = ir.Var("acc", acc_type, span)
+        lhs = ir.Var("lhs", lhs_type, span)
+        rhs = ir.Var("rhs", rhs_type, span)
+
+        with pytest.raises(ValueError, match="inner dimensions"):
+            tile.batch_matmul_acc(acc, lhs, rhs, span)
+
     """Tests for multi-dimensional TileType operations."""
 
     def test_transpose_3d(self):

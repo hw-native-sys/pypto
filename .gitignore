@@ -145,6 +145,9 @@ KNOWN_ISSUES.md
 # Local testing environment configuration
 .claude/skills/testing/testing.env
 
+# Per-developer worktrees managed by AI agents
+.claude/worktrees/
+
 # Documentation build
 docs/_build/
 site/

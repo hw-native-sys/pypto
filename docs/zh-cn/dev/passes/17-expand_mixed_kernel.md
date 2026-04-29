@@ -159,7 +159,7 @@ program_expanded = expand_pass(program)
 
 | 亲和性 | 操作 | 分类规则 |
 | ------ | ---- | -------- |
-| CUBE | `tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`、`tile.batch_matmul` | 始终为 CUBE（按操作名） |
+| CUBE | `tile.matmul`、`tile.matmul_acc`、`tile.matmul_bias`、`tile.gemv`、`tile.gemv_acc`、`tile.gemv_bias`、`tile.batch_matmul`、`tile.batch_matmul_acc` | 始终为 CUBE（按操作名） |
 | CUBE 或 VECTOR | `tile.load` | 按 `target_memory` kwarg：cube 侧内存（Mat、Left、Right、Acc、Bias）→ CUBE；Vec → VECTOR |
 | CUBE 或 VECTOR | `tile.store`、`tile.reshape` | 按源 tile 的 `memory_space`：cube 侧内存 → CUBE；Vec → VECTOR |
 | MIXED | 跨越 cube↔vector 内存的 `tile.move` | 跨核心侧的叶子移动 —— 同时记录在 `boundary_moves` 映射中（见下文） |
