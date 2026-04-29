@@ -1003,12 +1003,13 @@ def _const_int_values(exprs) -> list[int]:
     return out
 
 
-def test_tensor_transpose_records_swapped_strides_2d():
-    """tensor.transpose on a 2D static tensor records swapped strides.
+def test_tensor_transpose_2d_sets_dn_layout():
+    """tensor.transpose on a 2D tensor toggles the layout from ND to DN.
 
-    Regression test for #1209: without recorded strides, downstream
-    EmitMakeTensorViews falls back to row-major-from-shape, producing
-    wrong DMA strides for the transposed view.
+    Regression test for #1209: downstream EmitMakeTensorViews +
+    PTOAS need the layout tag to compute correct DMA strides for
+    the transposed view; explicit strides + ND layout produces a
+    layout-mismatch error inside PTOAS.
     """
     span = ir.Span.unknown()
     dim8 = ir.ConstInt(8, DataType.INT32, span)
@@ -1021,13 +1022,19 @@ def test_tensor_transpose_records_swapped_strides_2d():
     assert isinstance(result_type, ir.TensorType)
     assert _const_int_values(result_type.shape) == [16, 8]
     assert result_type.tensor_view is not None
-    # Default input strides [16, 1] swapped at (0, 1) -> [1, 16].
-    assert _const_int_values(result_type.tensor_view.stride) == [1, 16]
-    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+    # Layout flipped ND -> DN; strides intentionally left empty so codegen
+    # derives them from the DN tag (matching ResolveTransposeLayout's
+    # convention for tile.load(transpose=True) sources).
+    assert result_type.tensor_view.layout == ir.TensorLayout.DN
+    assert len(result_type.tensor_view.stride) == 0
 
 
-def test_tensor_transpose_records_swapped_strides_3d():
-    """tensor.transpose 3D at axes (1, 2) swaps the inner two strides."""
+def test_tensor_transpose_3d_trailing_axes_set_dn_layout():
+    """tensor.transpose 3D at the trailing axes (1, 2) toggles to DN.
+
+    The DN tag in PyPTO encodes "trailing two dimensions swapped",
+    which is exactly what a trailing-axes transpose produces.
+    """
     span = ir.Span.unknown()
     dim2 = ir.ConstInt(2, DataType.INT32, span)
     dim3 = ir.ConstInt(3, DataType.INT32, span)
@@ -1040,12 +1047,32 @@ def test_tensor_transpose_records_swapped_strides_3d():
     assert isinstance(result_type, ir.TensorType)
     assert _const_int_values(result_type.shape) == [2, 4, 3]
     assert result_type.tensor_view is not None
-    # Default strides [12, 4, 1] swapped at (1, 2) -> [12, 1, 4].
-    assert _const_int_values(result_type.tensor_view.stride) == [12, 1, 4]
+    assert result_type.tensor_view.layout == ir.TensorLayout.DN
 
 
-def test_tensor_transpose_idempotent_strides():
-    """transpose(transpose(x, 0, 1), 0, 1) restores the original strides."""
+def test_tensor_transpose_non_trailing_axes_no_view():
+    """Non-trailing transpose can't be encoded as ND or DN; leave view empty.
+
+    This is a known limitation: ND/DN only capture trailing-two-dim swaps.
+    Non-trailing transposes fall back to the legacy "no metadata" path
+    until a real workload demands explicit-stride support.
+    """
+    span = ir.Span.unknown()
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim3 = ir.ConstInt(3, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    tensor_var = ir.Var("t", ir.TensorType([dim2, dim3, dim4], DataType.FP32), span)
+
+    call = tensor.transpose(tensor_var, 0, 1)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_int_values(result_type.shape) == [3, 2, 4]
+    assert result_type.tensor_view is None
+
+
+def test_tensor_transpose_idempotent_layout():
+    """transpose(transpose(x, 0, 1), 0, 1) on a 2D tensor toggles ND -> DN -> ND."""
     span = ir.Span.unknown()
     dim8 = ir.ConstInt(8, DataType.INT32, span)
     dim16 = ir.ConstInt(16, DataType.INT32, span)
@@ -1058,13 +1085,17 @@ def test_tensor_transpose_idempotent_strides():
     result_type = twice.type
     assert isinstance(result_type, ir.TensorType)
     assert _const_int_values(result_type.shape) == [8, 16]
-    assert result_type.tensor_view is not None
-    # Default [16, 1] -> swapped [1, 16] -> swapped back [16, 1].
-    assert _const_int_values(result_type.tensor_view.stride) == [16, 1]
+    # Toggled back to ND with no other view metadata -> tensor_view collapses
+    # to None.
+    assert result_type.tensor_view is None
 
 
-def test_tensor_transpose_dynamic_shape_skips_strides():
-    """Dynamic input shapes leave strides empty (no static computation)."""
+def test_tensor_transpose_dynamic_shape_still_toggles_layout():
+    """Dynamic input shapes still get the DN layout tag for trailing swaps.
+
+    The layout tag does not depend on static dim values, so the dynamic
+    full-load path (e.g. test_dyn_orch_transpose_add) keeps working.
+    """
     span = ir.Span.unknown()
     m = ir.Var("M", ir.ScalarType(DataType.INDEX), span)
     n = ir.Var("N", ir.ScalarType(DataType.INDEX), span)
@@ -1075,9 +1106,8 @@ def test_tensor_transpose_dynamic_shape_skips_strides():
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert len(result_type.shape) == 2
-    # No stride or other view metadata to record -> tensor_view stays None,
-    # preserving the legacy behaviour for dynamic full-load patterns.
-    assert result_type.tensor_view is None
+    assert result_type.tensor_view is not None
+    assert result_type.tensor_view.layout == ir.TensorLayout.DN
 
 
 def test_tensor_transpose_explicit_valid_shape_not_swapped():
@@ -1095,8 +1125,19 @@ def test_tensor_transpose_explicit_valid_shape_not_swapped():
     assert isinstance(rt, ir.TensorType)
     assert rt.tensor_view is not None
     assert _const_int_values(rt.tensor_view.valid_shape) == [16, 8]
-    # Strides are still computed and swapped from the input layout.
-    assert _const_int_values(rt.tensor_view.stride) == [1, 16]
+    # Layout is still toggled to DN (trailing-two-dim transpose).
+    assert rt.tensor_view.layout == ir.TensorLayout.DN
+
+
+def test_tensor_transpose_valid_shape_rank_mismatch_rejected():
+    """A 4th-arg valid_shape with the wrong rank raises a clear error."""
+    span = ir.Span.unknown()
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_var = ir.Var("t", ir.TensorType([dim8, dim16], DataType.FP32), span)
+
+    with pytest.raises(Exception, match="valid_shape rank"):
+        tensor.transpose(tensor_var, 0, 1, valid_shape=[16])
 
 
 def test_get_new_ops():
