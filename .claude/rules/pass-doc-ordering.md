@@ -37,7 +37,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 22 | `22-canonicalize_io_order.md` | 22nd pass |
 | 23 | `23-init_memref.md` | 23rd pass |
 | 24 | `24-memory_reuse.md` | 24th pass |
-| 25 | *(no doc yet)* | 25th pass (`LegalizePTOBufferReuse`) |
+| 25 | `25-legalize_pto_buffer_reuse.md` | 25th pass |
 | 26 | `26-allocate_memory_addr.md` | 26th pass |
 | 27 | `27-fuse_create_assemble_to_slice.md` | 27th pass |
 | 28 | `28-derive_call_directions.md` | 28th pass |

@@ -375,7 +375,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 11. [`CanonicalizeIOOrder`](22-canonicalize_io_order.md)
 12. `InitMemRef`
 13. `MemoryReuse`
-14. `LegalizePTOBufferReuse`
+14. [`LegalizePTOBufferReuse`](25-legalize_pto_buffer_reuse.md)
 15. `AllocateMemoryAddr`
 16. `FuseCreateAssembleToSlice`
 17. [`DeriveCallDirections`](28-derive_call_directions.md)
