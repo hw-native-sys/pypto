@@ -165,6 +165,27 @@ std::vector<int> ComputeReturnPermutation(const FunctionPtr& func) {
     if (permutation[i] != i) needs_reorder = true;
   }
 
+  // Guard against non-bijective permutations (duplicate targets or holes).
+  // A malformed permutation can later create ReturnStmt entries with null values.
+  std::vector<bool> seen(permutation.size(), false);
+  for (int i = 0; i < static_cast<int>(permutation.size()); ++i) {
+    int target = permutation[i];
+    if (target < 0 || target >= static_cast<int>(permutation.size())) {
+      return {};
+    }
+    if (seen[target]) {
+      // Collision: two old indices map to the same new index.
+      return {};
+    }
+    seen[target] = true;
+  }
+  for (bool v : seen) {
+    if (!v) {
+      // Hole: at least one new index has no source.
+      return {};
+    }
+  }
+
   if (!needs_reorder) return {};
   return permutation;
 }

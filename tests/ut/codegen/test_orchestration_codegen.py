@@ -2280,6 +2280,53 @@ class TestTensorReadWriteOffsetCodegen:
             f"SPMD tuple outputs must remain OutputExisting at call site. Generated code:\n{code}"
         )
 
+    def test_spmd_gm_pipe_buffer_tensor_create_scales_with_core_num(self):
+        """SPMD gm_pipe_buffer allocation should scale by launch core_num in orchestration codegen."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdGMPipeProgram:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_bias = pl.load(bias, [0, 0], [64, 64])
+                tile_out = pl.add(tile_mm, tile_bias)
+                out = pl.store(tile_out, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.kernel(a, b, bias, out)
+                return out
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SpmdGMPipeProgram)
+
+        code = _generate_orch_code(transformed)
+        assert "params_t0.launch_spec.set_block_num(4);" in code
+        assert re.search(
+            r"gm_pipe_buffer_\d+_ci_shapes\[1\]\s*=\s*\{static_cast<uint32_t>\(\(\d+\) \* \(4\)\)\};",
+            code,
+        ), f"Expected gm_pipe_buffer tensor.create shape to scale by core_num. Generated code:\n{code}"
+
 
 class TestUnregisteredOpError:
     """Test that unregistered/misplaced ops in Orchestration functions raise errors."""
