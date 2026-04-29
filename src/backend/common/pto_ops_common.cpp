@@ -41,6 +41,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -49,6 +50,7 @@ namespace backend {
 using ir::As;
 using ir::AsVarLike;
 using ir::CallPtr;
+using ir::ExprPtr;
 using ir::ScalarType;
 using ir::TensorType;
 using ir::Var;
@@ -544,7 +546,8 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   ir::ExprPtr valid_row_expr = src_shape[0];
   ir::ExprPtr valid_col_expr = src_shape[1];
   if (source_tile_type->tile_view_.has_value()) {
-    const auto& src_valid = source_tile_type->tile_view_->valid_shape;
+    const auto tile_view = source_tile_type->tile_view_.value_or(ir::TileView{});
+    const auto& src_valid = tile_view.valid_shape;
     if (src_valid.size() >= 1 && src_valid[0]) valid_row_expr = src_valid[0];
     if (src_valid.size() >= 2 && src_valid[1]) valid_col_expr = src_valid[1];
   }
@@ -560,6 +563,7 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
 
   INTERNAL_CHECK_SPAN(source_tile_type->memory_space_.has_value(), op->span_)
       << "tile.assemble source must carry a memory space for pto.subview result typing";
+  const auto source_memory_space = source_tile_type->memory_space_.value_or(ir::MemorySpace::DDR);
   auto view_type_info =
       codegen::ExtractTileTypeInfo(*source_tile_type, codegen.GetTypeString(source_tile_type->dtype_));
   if (valid_row_const) {
@@ -571,10 +575,10 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
     view_type_info.v_col_dynamic = false;
   }
   std::string view_type = codegen::FormatTileBufTypeString(
-      codegen::MemorySpaceToMLIR(*source_tile_type->memory_space_), view_type_info.dtype_str,
-      view_type_info.rows, view_type_info.cols, view_type_info.blayout, view_type_info.slayout,
-      view_type_info.fractal, view_type_info.pad, view_type_info.v_row, view_type_info.v_col,
-      view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
+      codegen::MemorySpaceToMLIR(source_memory_space), view_type_info.dtype_str, view_type_info.rows,
+      view_type_info.cols, view_type_info.blayout, view_type_info.slayout, view_type_info.fractal,
+      view_type_info.pad, view_type_info.v_row, view_type_info.v_col, view_type_info.v_row_dynamic,
+      view_type_info.v_col_dynamic);
 
   std::string dst_view = codegen.NewNamedTemp("assemble_view");
   std::ostringstream sv;
@@ -858,8 +862,8 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
 
-  bool is_dn =
-      tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::DN;
+  const auto tensor_view_value = tensor_type->tensor_view_.value_or(ir::TensorView{});
+  bool is_dn = tensor_type->tensor_view_.has_value() && tensor_view_value.layout == ir::TensorLayout::DN;
 
   // Use valid_shapes (op arg 3) for partition_view sizes so the DMA copy size
   // matches the logical valid region. When valid_shapes equals the physical
@@ -909,7 +913,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.store first argument must have TileType";
   INTERNAL_CHECK_SPAN(tile_type->tile_view_.has_value(), op->span_)
       << "tile.store tile must have TileView with valid_shape";
-  auto& valid_shape = tile_type->tile_view_->valid_shape;
+  const auto tile_view = tile_type->tile_view_.value_or(ir::TileView{});
+  const auto& valid_shape = tile_view.valid_shape;
   INTERNAL_CHECK_SPAN(valid_shape.size() == 2, op->span_) << "tile.store tile valid_shape must be 2D";
 
   auto height_code = codegen.GetExprAsCode(valid_shape[0]);
@@ -932,8 +937,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   std::string partition_type;
   const size_t tensor_rank = tensor_type->shape_.size();
 
-  bool is_dn =
-      tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == ir::TensorLayout::DN;
+  const auto tensor_view_value = tensor_type->tensor_view_.value_or(ir::TensorView{});
+  bool is_dn = tensor_type->tensor_view_.has_value() && tensor_view_value.layout == ir::TensorLayout::DN;
 
   // Check if FlattenTileNdTo2D injected an explicit shapes tuple as args[3].
   ir::MakeTuplePtr shapes_tuple;
@@ -1287,6 +1292,94 @@ static std::string MakeTensorDimCodegenPTO(const CallPtr& op, codegen::CodegenBa
 // Cross-Core Communication Operations (TPUSH/TPOP)
 // ============================================================================
 
+static std::string EmitIndexOperand(codegen::PTOCodegen& codegen, const ExprPtr& expr,
+                                    std::string_view context) {
+  INTERNAL_CHECK(expr) << "Internal error: " << context << " requires a non-null index operand";
+  if (auto const_int = As<ir::ConstInt>(expr)) {
+    return codegen.GetOrEmitConstant(const_int->value_, DataType::INDEX);
+  }
+
+  std::string ssa = codegen.GetExprAsCode(expr);
+  if (auto scalar_type = As<ScalarType>(expr->GetType())) {
+    if (scalar_type->dtype_ == DataType::INDEX) {
+      return ssa;
+    }
+    CHECK(scalar_type->dtype_.IsInt()) << context << " operand must be integer or index type, got "
+                                       << codegen.GetTypeString(scalar_type->dtype_);
+    std::string idx = codegen.NewTemp();
+    codegen.Emit(idx + " = arith.index_cast " + ssa + " : " + codegen.GetTypeString(scalar_type->dtype_) +
+                 " to index");
+    return idx;
+  }
+  return ssa;
+}
+
+static bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
+  if (lhs == rhs) {
+    return true;
+  }
+  auto lhs_const = As<ir::ConstInt>(lhs);
+  auto rhs_const = As<ir::ConstInt>(rhs);
+  return lhs_const && rhs_const && lhs_const->value_ == rhs_const->value_;
+}
+
+static std::shared_ptr<const ir::TileType> GetTpushTileType(const ExprPtr& tile_expr) {
+  if (auto tile_type = ir::GetTileTypeWithMemRef(tile_expr->GetType())) {
+    return tile_type;
+  }
+  return As<ir::TileType>(tile_expr->GetType());
+}
+
+static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                              const std::string& tile_buf, const std::string& tile_type,
+                                              int split) {
+  if (split == 0 || tile_buf.empty() || tile_type.empty()) {
+    return false;
+  }
+
+  auto source_tile_type = GetTpushTileType(op->args_[0]);
+  if (!source_tile_type || source_tile_type->shape_.size() < 2 || !source_tile_type->tile_view_.has_value()) {
+    return false;
+  }
+  const auto tile_view = source_tile_type->tile_view_.value_or(ir::TileView{});
+  if (tile_view.valid_shape.size() < 2) {
+    return false;
+  }
+
+  const auto& shape = source_tile_type->shape_;
+  const auto& valid_shape = tile_view.valid_shape;
+  ExprPtr transport_row = valid_shape[0];
+  ExprPtr transport_col = valid_shape[1];
+  if (split == 1) {
+    transport_col = shape[1];
+  } else if (split == 2) {
+    transport_row = shape[0];
+  }
+
+  if (IsSameDimExpr(transport_row, valid_shape[0]) && IsSameDimExpr(transport_col, valid_shape[1])) {
+    return false;
+  }
+
+  std::string row = EmitIndexOperand(codegen, transport_row, "tpush transport valid_row");
+  std::string col = EmitIndexOperand(codegen, transport_col, "tpush transport valid_col");
+  codegen.Emit("pto.set_validshape " + tile_buf + ", " + row + ", " + col + " : " + tile_type);
+  return true;
+}
+
+static void EmitLogicalTpushValidShapeRestore(const CallPtr& op, codegen::PTOCodegen& codegen,
+                                              const std::string& tile_buf, const std::string& tile_type) {
+  auto source_tile_type = GetTpushTileType(op->args_[0]);
+  INTERNAL_CHECK(source_tile_type && source_tile_type->tile_view_.has_value())
+      << "Internal error: tpush validShape restore requires a rank-2 source TileView";
+  const auto tile_view = source_tile_type->tile_view_.value_or(ir::TileView{});
+  INTERNAL_CHECK(tile_view.valid_shape.size() >= 2)
+      << "Internal error: tpush validShape restore requires rank-2 validShape";
+  const auto& valid_shape = tile_view.valid_shape;
+  std::string row = EmitIndexOperand(codegen, valid_shape[0], "tpush logical valid_row");
+  std::string col = EmitIndexOperand(codegen, valid_shape[1], "tpush logical valid_col");
+  codegen.Emit("pto.set_validshape " + tile_buf + ", " + row + ", " + col + " : " + tile_type);
+}
+
 // tile.tpush_to_aiv: Push tile from Cube to Vector
 static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
@@ -1299,8 +1392,9 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   CHECK(split >= 0 && split <= 2)
       << "tpush_to_aiv requires 'split' attribute (0=none, 1=up-down, 2=left-right), got " << split;
 
-  std::string tile_buf = codegen.GetVarName(tile);
+  std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  const bool restore_valid_shape = EmitSplitTpushTransportValidShape(op, codegen, tile_buf, tile_type, split);
 
   std::ostringstream oss;
   oss << "pto.tpush_to_aiv(" << tile_buf;
@@ -1309,6 +1403,9 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   }
   oss << ") {split = " << split << "}";
   codegen.Emit(oss.str());
+  if (restore_valid_shape) {
+    EmitLogicalTpushValidShapeRestore(op, codegen, tile_buf, tile_type);
+  }
 
   return "";
 }
@@ -1325,8 +1422,9 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   CHECK(split >= 0 && split <= 2)
       << "tpush_to_aic requires 'split' attribute (0=none, 1=up-down, 2=left-right), got " << split;
 
-  std::string tile_buf = codegen.GetVarName(tile);
+  std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
   std::string tile_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  const bool restore_valid_shape = EmitSplitTpushTransportValidShape(op, codegen, tile_buf, tile_type, split);
 
   std::ostringstream oss;
   oss << "pto.tpush_to_aic(" << tile_buf;
@@ -1335,6 +1433,9 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   }
   oss << ") {split = " << split << "}";
   codegen.Emit(oss.str());
+  if (restore_valid_shape) {
+    EmitLogicalTpushValidShapeRestore(op, codegen, tile_buf, tile_type);
+  }
 
   return "";
 }
@@ -2064,6 +2165,12 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
 
     std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
     std::string tile_buf_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+    if (tile_buf.empty()) {
+      tile_buf = codegen.GetCurrentResultTarget();
+    }
+    if (tile_buf_type.empty()) {
+      tile_buf_type = codegen.GetCurrentResultTileBufTypeStringFromTileType();
+    }
 
     auto emit_index_arg = [&](const ir::ExprPtr& arg) -> std::string {
       if (auto var = ir::As<ir::Var>(arg)) {
@@ -2088,6 +2195,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     std::string vr = emit_index_arg(op->args_[1]);
     std::string vc = emit_index_arg(op->args_[2]);
 
+    codegen.RegisterTileBufType(tile_buf, tile_buf_type);
+    codegen.SetCurrentResultBuf(tile_buf);
     codegen.Emit("pto.set_validshape " + tile_buf + ", " + vr + ", " + vc + " : " + tile_buf_type);
     return std::string("");
   });

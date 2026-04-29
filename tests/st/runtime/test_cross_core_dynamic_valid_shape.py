@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Runtime test for C2V tpop with dynamic valid_shape operands."""
+"""Runtime tests for cross-core dynamic valid_shape on tpush/tpop paths."""
 
 import sys
 from typing import Any
@@ -154,6 +154,140 @@ class C2VDynamicTpopValidShapeTestCase(PTOTestCase):
         tensors["output"][:valid_rows, :valid_cols] = matmul[:valid_rows, :valid_cols] + 1.0
 
 
+class C2VDynamicTpushValidShapeTestCase(PTOTestCase):
+    """Cube narrows valid_shape before tpush; vector tpop consumes the narrowed tile."""
+
+    __test__ = False
+
+    def __init__(
+        self,
+        *,
+        platform: str | None = None,
+        config: RunConfig | None = None,
+    ):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"cross_core_c2v_dynamic_tpush_valid_shape_{VALID_ROWS}x{VALID_COLS}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [ROWS, COLS], DataType.BF16, init_value=1.0),
+            TensorSpec("b", [ROWS, COLS], DataType.BF16, init_value=2.0),
+            TensorSpec(
+                "valid_shape",
+                [2],
+                DataType.INT64,
+                init_value=torch.tensor([VALID_ROWS, VALID_COLS], dtype=torch.int64),
+            ),
+            TensorSpec("output", [ROWS, COLS], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class C2VDynamicTpushValidShapeProgram:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def cube_producer(
+                self,
+                a: pl.Tensor[[ROWS, COLS], pl.BF16],
+                b: pl.Tensor[[ROWS, COLS], pl.BF16],
+                output: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                valid_rows: pl.Scalar[pl.INDEX],
+                valid_cols: pl.Scalar[pl.INDEX],
+            ):
+                c2v_peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="vector_consumer")
+                pl.aic_initialize_pipe(
+                    dir_mask=1,
+                    slot_size=SLOT_SIZE_BYTES,
+                    c2v_consumer_buf=c2v_peer,
+                )
+
+                a_mat: pl.Tile[[ROWS, COLS], pl.BF16, pl.Mem.Mat] = pl.load(
+                    a, [0, 0], [ROWS, COLS], target_memory=pl.MemorySpace.Mat
+                )
+                b_mat: pl.Tile[[ROWS, COLS], pl.BF16, pl.Mem.Mat] = pl.load(
+                    b, [0, 0], [ROWS, COLS], target_memory=pl.MemorySpace.Mat
+                )
+                a_left: pl.Tile[[ROWS, COLS], pl.BF16, pl.Mem.Left] = pl.move(
+                    a_mat, target_memory=pl.MemorySpace.Left
+                )
+                b_right: pl.Tile[[ROWS, COLS], pl.BF16, pl.Mem.Right] = pl.move(
+                    b_mat, target_memory=pl.MemorySpace.Right
+                )
+                acc: pl.Tile[[ROWS, COLS], pl.FP32] = pl.matmul(a_left, b_right)
+                narrowed: pl.Tile[
+                    [ROWS, COLS],
+                    pl.FP32,
+                    pl.Mem.Acc,
+                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                ] = pl.tile.set_validshape(acc, valid_rows, valid_cols)
+                pl.tpush_to_aiv(narrowed, split=1)
+
+            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            def vector_consumer(
+                self,
+                a: pl.Tensor[[ROWS, COLS], pl.BF16],
+                b: pl.Tensor[[ROWS, COLS], pl.BF16],
+                output: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                valid_rows: pl.Scalar[pl.INDEX],
+                valid_cols: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                c2v_buf = pl.reserve_buffer(
+                    name="c2v_slot_buffer",
+                    size=BUFFER_SIZE_BYTES,
+                    base=0x2000,
+                )
+                pl.aiv_initialize_pipe(
+                    dir_mask=1,
+                    slot_size=SLOT_SIZE_BYTES,
+                    c2v_consumer_buf=c2v_buf,
+                )
+
+                popped: pl.Tile[
+                    [ROWS, COLS],
+                    pl.FP32,
+                    pl.Mem.Vec,
+                    pl.TileView(valid_shape=[valid_rows, valid_cols]),
+                ] = pl.tpop_from_aic(split=1)
+                incremented: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(popped, 1.0)
+                pl.tfree_to_aic(popped)
+                return pl.store(incremented, [0, 0], output)
+
+            @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
+            def group_func(
+                self,
+                a: pl.Tensor[[ROWS, COLS], pl.BF16],
+                b: pl.Tensor[[ROWS, COLS], pl.BF16],
+                output: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                valid_rows: pl.Scalar[pl.INDEX],
+                valid_cols: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                self.cube_producer(a, b, output, valid_rows, valid_cols)
+                result = self.vector_consumer(a, b, output, valid_rows, valid_cols)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[ROWS, COLS], pl.BF16],
+                b: pl.Tensor[[ROWS, COLS], pl.BF16],
+                valid_shape: pl.Tensor[[2], pl.INDEX],
+                output: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                valid_rows: pl.Scalar[pl.INDEX] = pl.tensor.read(valid_shape, [0])
+                valid_cols: pl.Scalar[pl.INDEX] = pl.tensor.read(valid_shape, [1])
+                result = self.group_func(a, b, output, valid_rows, valid_cols)
+                return result
+
+        return C2VDynamicTpushValidShapeProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        valid_rows = int(tensors["valid_shape"][0])
+        valid_cols = int(tensors["valid_shape"][1])
+        matmul = torch.matmul(tensors["a"].float(), tensors["b"].float())
+        tensors["output"][:valid_rows, :valid_cols] = matmul[:valid_rows, :valid_cols] + 1.0
+
+
 class TestCrossCoreDynamicValidShape:
     """Cross-core dynamic valid_shape runtime tests."""
 
@@ -162,6 +296,12 @@ class TestCrossCoreDynamicValidShape:
         """C2V tpop passes runtime valid_shape to vector-core compute and store."""
         result = test_runner.run(C2VDynamicTpopValidShapeTestCase(platform=platform))
         assert result.passed, f"C2V dynamic valid_shape tpop failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_c2v_tpush_dynamic_valid_shape(self, test_runner, platform):
+        """C2V tpush preserves runtime valid_shape from cube producer to vector consumer."""
+        result = test_runner.run(C2VDynamicTpushValidShapeTestCase(platform=platform))
+        assert result.passed, f"C2V dynamic valid_shape tpush failed: {result.error}"
 
 
 if __name__ == "__main__":

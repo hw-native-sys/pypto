@@ -826,13 +826,16 @@ void PTOCodegen::EmitExtraAllocTiles() {
 // ========================================================================
 
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
+  auto call = As<ir::Call>(op->value_);
+  const bool is_set_validshape = call && call->op_->name_ == "tile.set_validshape";
+
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    if (fs_.tpop_result_vars.count(op->var_.get()) == 0) {
+    if (!is_set_validshape && fs_.tpop_result_vars.count(op->var_.get()) == 0) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }
 
-  if (auto call = As<ir::Call>(op->value_)) {
+  if (call) {
     if (backend_ != nullptr && backend_->GetOpInfo(call->op_->name_) != nullptr) {
       std::string result_buf =
           op->var_->name_hint_;  // Seed for readable MLIR names when no tile buffer exists.
@@ -861,7 +864,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       VisitExpr(op->value_);
       // If codegen changed the result buffer (e.g., reshape allocated a new tile),
       // update variable mapping so subsequent references use the new buffer
-      if (!fs_.current_result_buf.empty() && fs_.current_result_buf != result_buf) {
+      if (!fs_.current_result_buf.empty() && (is_set_validshape || fs_.current_result_buf != result_buf)) {
         BindVarToMlir(op->var_, fs_.current_result_buf);
       }
       // Register per-variable tile_buf type from the variable's own TileType.

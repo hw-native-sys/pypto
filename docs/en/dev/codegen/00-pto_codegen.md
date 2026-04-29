@@ -177,7 +177,15 @@ sub-window carved out by `pto.subview`.
 **Notes:**
 
 - Push ops use an `ins()` clause with a typed tile buffer; frontend pop ops produce an SSA result with a `-> !pto.tile_buf<...>` result type
+- If the pushed tile was allocated with dynamic `valid_row` / `valid_col` operands or updated by
+  `tile.set_validshape`, `tpush` emits the same tile handle after its runtime valid shape has been
+  updated. For split `tpush`, codegen temporarily uses a full non-split transport dimension (`cols`
+  for up/down, `rows` for left/right), then restores the producer tile's logical valid shape;
+  consumer-side dynamic tpop operands carry the logical extents used by compute and store.
 - When a tpop result `TileView.valid_shape` contains dynamic expressions, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. The tile type keeps `?` for the dynamic valid shape while the operands carry runtime extents.
+- For split consumers, `SplitVectorKernel` localizes those dynamic tpop
+  valid-shape operands per subblock (for example global `[8, 16]` becomes
+  `[8, 16]` then `[0, 16]` under up/down split of a `[16, 16]` tile).
 - `system.tfree_*` derives `split` from its tile argument, so the frontend must free the exact SSA value produced by `tile.tpop_*`, even though the PTO instruction itself does not take the tile as an explicit operand
 - `ExpandMixedKernel` now auto-generates consumer-side `system.tfree_*` after split-generated `tile.tpop_*`, preserving `tpop -> direct users -> tfree -> next tpop`
 - `reserve_buffer` and `import_reserved_buffer` return `i32` SSA values; `initialize_pipe` references them as operands
