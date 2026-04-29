@@ -16,6 +16,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/codegen/code_emitter.h"
@@ -98,6 +99,15 @@ class DistributedCodegen : public CodegenBase {
   void EmitTreeReduce(const ir::CallPtr& call);
   void EmitTensorCreate(const ir::CallPtr& call);
 
+  // Pre-init allocation hoisting for HOST orchestrator. tensor.create
+  // statements at the top level of the HOST orchestrator body are emitted
+  // into a separate `_alloc_intermediates(tensors)` Python function so the
+  // simpler runtime can populate shared-memory tensors *before* w.init()
+  // forks subworker / chip-worker child processes. Allocations made after
+  // fork are not visible to inherited children.
+  void CollectHostOrchHoistableAllocs(const ir::FunctionPtr& host_orch);
+  void EmitAllocIntermediatesFunction(const ir::FunctionPtr& host_orch);
+
   // Helpers
   [[nodiscard]] std::string ParamDirectionToTensorArgType(ir::ParamDirection dir) const;
   [[nodiscard]] std::vector<ir::FunctionPtr> SortFunctionsByRoleAndLevel() const;
@@ -124,6 +134,13 @@ class DistributedCodegen : public CodegenBase {
   std::set<std::string> declared_vars_;
   bool is_worker_context_{false};
   int task_args_counter_{0};  // Counter for generating unique TaskArgs variable names
+
+  // HOST orchestrator alloc-hoisting state. Populated by
+  // CollectHostOrchHoistableAllocs() before EmitFunction() runs on the HOST
+  // orchestrator; consulted by VisitStmt_(AssignStmt) to skip tensor.create
+  // assignments that have already been emitted in _alloc_intermediates.
+  std::unordered_set<const ir::AssignStmt*> hoisted_allocs_;
+  bool host_orch_body_after_hoist_{false};
 };
 
 }  // namespace codegen

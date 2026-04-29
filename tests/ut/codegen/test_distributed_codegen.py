@@ -9,6 +9,8 @@
 
 """Unit tests for distributed Python code generation."""
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import codegen, ir, passes
@@ -378,6 +380,107 @@ class TestDistributedCodegen:
         # Parameter tensors still use make_tensor_arg(tensors[...])
         assert 'make_tensor_arg(tensors["a' in code
         assert 'make_tensor_arg(tensors["b' in code
+
+    def test_host_orch_create_tensor_hoisted_to_alloc_intermediates(self):
+        """HOST-orch tensor.create lifts to _alloc_intermediates(tensors).
+
+        The simpler L3 runtime forks subworker / chip-worker child processes
+        inside w.init(); POSIX shared memory created after fork is invisible
+        to inherited children. Intermediate tensors created via
+        pl.create_tensor in the HOST orchestrator body must therefore be
+        allocated *before* w.init() — codegen splits them into a separate
+        _alloc_intermediates(tensors) function that the runtime invokes
+        pre-init.
+        """
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
+            def chip_worker(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                buf: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(a, a)
+                return y
+
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def chip_orch(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                buf: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = self.chip_worker(a, buf)
+                return result
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                buf: pl.Tensor[[64], pl.FP32] = pl.create_tensor([64], dtype=pl.FP32)
+                result: pl.Tensor[[64], pl.FP32] = self.chip_orch(a, buf)
+                return result
+
+        program = passes.convert_to_ssa()(Input)
+        cg = codegen.DistributedCodegen()
+        code = cg.generate(program)
+
+        alloc_idx = code.find("def _alloc_intermediates(tensors):")
+        host_idx = code.find("def host_orch(")
+        assert alloc_idx >= 0, f"Missing _alloc_intermediates in:\n{code}"
+        assert host_idx >= 0, f"Missing host_orch in:\n{code}"
+        assert alloc_idx < host_idx, "_alloc_intermediates must precede host_orch"
+
+        alloc_block = code[alloc_idx:host_idx]
+        host_block = code[host_idx:]
+
+        # Allocation lives in _alloc_intermediates only. SSA renames the local
+        # so match by structure rather than the literal source name.
+        assert "torch.zeros((64,), dtype=torch.float32).share_memory_()" in alloc_block
+        match = re.search(r'tensors\["([^"]+)"\] = torch\.zeros\(', alloc_block)
+        assert match is not None, f"No tensors[...] = torch.zeros(...) in:\n{alloc_block}"
+        hoisted_name = match.group(1)
+
+        # host_orch must NOT re-allocate the hoisted tensor — but it must
+        # still pass it via `tensors["<name>"]` to the chip orchestrator.
+        assert "torch.zeros(" not in host_block
+        assert f'tensors["{hoisted_name}"]' in host_block
+
+    def test_alloc_intermediates_emitted_when_no_creates(self):
+        """HOST orchestrator without tensor.create still gets an empty alloc fn.
+
+        Keeping the symbol present simplifies the runtime contract: it can
+        unconditionally call _alloc_intermediates(tensors) before w.init().
+        """
+
+        @pl.program
+        class Input:
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.SubWorker)
+            def chip_worker(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def chip_orch(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.chip_worker(x)
+                return y
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.chip_orch(x)
+                return y
+
+        program = passes.convert_to_ssa()(Input)
+        cg = codegen.DistributedCodegen()
+        code = cg.generate(program)
+
+        assert "def _alloc_intermediates(tensors):" in code
+        # Body is just `pass` since there are no allocations to hoist.
+        alloc_idx = code.find("def _alloc_intermediates(tensors):")
+        host_idx = code.find("def host_orch(")
+        alloc_block = code[alloc_idx:host_idx]
+        assert "    pass" in alloc_block
 
 
 class TestSubWorkerSourceGeneration:

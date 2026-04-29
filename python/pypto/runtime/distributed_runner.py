@@ -167,6 +167,14 @@ def execute_distributed(  # noqa: PLR0912
             arg.share_memory_()
         tensors[info.name] = arg
 
+    # 3b. Pre-fork: allocate HOST-level intermediate tensors so the POSIX
+    # shared-memory mappings exist before w.init() forks subworker /
+    # chip-worker child processes. Mappings created after fork are not
+    # visible to inherited children.
+    alloc_fn = getattr(orch_module, "_alloc_intermediates", None)
+    if alloc_fn is not None:
+        alloc_fn(tensors)
+
     # 4. Load SubWorker callables from sub_workers/*.py files
     sub_worker_fns: dict[str, Any] = {}
     sub_workers_dir = output_dir / "sub_workers"
