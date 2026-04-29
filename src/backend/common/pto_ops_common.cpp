@@ -2041,21 +2041,24 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
 
   // In-place accumulation ops (matmul_acc, gemv_acc): ptoas expects the
-  // accumulator in ins() to be the same SSA value as outs().  InitMemRef
-  // guarantees that the output shares the MemRef of the accumulator input
-  // (via set_output_reuses_input), so we use the result buffer (dst) as the
-  // accumulator operand instead of the IR-level input arg.
+  // accumulator in ins() to be the same SSA value as outs(). Multiple IR tile
+  // vars may share one MemRef but still have distinct per-var alloc_tile SSA
+  // names, so use the accumulator input's SSA value as both src and dst and
+  // bind the assignment result to that same SSA value.
   auto make_acc_codegen = [](const std::string& pto_op) {
     return [pto_op](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
       auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
       CHECK(op->args_.size() == 3) << pto_op << " requires 3 arguments: acc, lhs, rhs";
 
-      std::string dst = codegen.GetCurrentResultTarget();
+      std::string dst = codegen.GetExprAsCode(op->args_[0]);
       std::string lhs = codegen.GetExprAsCode(op->args_[1]);
       std::string rhs = codegen.GetExprAsCode(op->args_[2]);
-      std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+      std::string dst_type = codegen.GetExprTypeAnnotation(op->args_[0]);
       std::string lhs_type = codegen.GetExprTypeAnnotation(op->args_[1]);
       std::string rhs_type = codegen.GetExprTypeAnnotation(op->args_[2]);
+
+      INTERNAL_CHECK_SPAN(!dst.empty(), op->span_) << pto_op << " accumulator operand has no tile buffer";
+      codegen.SetCurrentResultBuf(dst);
 
       std::ostringstream acc_inst;
       acc_inst << pto_op << " ins(" << dst << ", " << lhs << ", " << rhs;

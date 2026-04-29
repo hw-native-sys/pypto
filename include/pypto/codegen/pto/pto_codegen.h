@@ -469,6 +469,7 @@ class PTOCodegen : public CodegenBase {
     std::map<const ir::Var*, std::string> memref_to_var_name;  ///< keyed by base_ Ptr
     std::vector<std::pair<ir::VarPtr, std::shared_ptr<const ir::TileType>>> tile_var_allocs;
     std::set<const ir::Var*> emitted_tile_alloc_vars;
+    std::set<std::string> emitted_tile_alloc_ssas;
     std::map<const ir::Var*, TpopResultInfo> tpop_result_vars;
 
     ir::FunctionPtr current_function;
@@ -506,6 +507,7 @@ class PTOCodegen : public CodegenBase {
       memref_to_var_name.clear();
       tile_var_allocs.clear();
       emitted_tile_alloc_vars.clear();
+      emitted_tile_alloc_ssas.clear();
       tpop_result_vars.clear();
 
       current_function.reset();
