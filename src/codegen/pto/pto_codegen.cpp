@@ -80,8 +80,7 @@ bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
 // Returns nullptr for a dimension when it is missing or is a ConstInt (static).
 // Non-ConstInt expressions (Var, Call, BinaryOp, ...) flow through as dynamic
 // and must be lowered to MLIR via GetExprAsCode at the call site.
-std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(
-    const std::shared_ptr<const ir::TileType>& tile_type) {
+std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(const std::shared_ptr<const ir::TileType>& tile_type) {
   ExprPtr valid_row_expr;
   ExprPtr valid_col_expr;
   if (!tile_type || !tile_type->tile_view_.has_value()) {
