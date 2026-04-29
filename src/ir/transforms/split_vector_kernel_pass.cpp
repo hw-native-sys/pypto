@@ -185,6 +185,41 @@ ExprPtr MakeConstLike(const ExprPtr& ref, int64_t value, const Span& span) {
   return std::make_shared<ConstInt>(value, GetScalarDtype(ref), span);
 }
 
+ExprPtr MakeIndexConst(int64_t value, const Span& span) {
+  return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+}
+
+ExprPtr MakeZeroTuple(size_t rank, const Span& span) {
+  std::vector<ExprPtr> elements;
+  elements.reserve(rank);
+  for (size_t i = 0; i < rank; ++i) {
+    elements.push_back(MakeIndexConst(0, span));
+  }
+  return std::make_shared<MakeTuple>(std::move(elements), span);
+}
+
+ExprPtr MakeZeroTupleLike(const ExprPtr& tuple_expr, const Span& span) {
+  if (auto tuple = std::dynamic_pointer_cast<const MakeTuple>(tuple_expr)) {
+    return MakeZeroTuple(tuple->elements_.size(), span);
+  }
+  return tuple_expr;
+}
+
+TypePtr WithZeroValidShape(const TypePtr& type, const Span& span) {
+  auto tt = std::dynamic_pointer_cast<const TileType>(type);
+  if (!tt) return type;
+
+  TileView tile_view = tt->tile_view_.value_or(TileView{});
+  tile_view.valid_shape.clear();
+  tile_view.valid_shape.reserve(tt->shape_.size());
+  for (size_t i = 0; i < tt->shape_.size(); ++i) {
+    tile_view.valid_shape.push_back(MakeIndexConst(0, span));
+  }
+
+  return std::make_shared<TileType>(tt->shape_, tt->dtype_, tt->memref_, std::move(tile_view),
+                                    tt->memory_space_);
+}
+
 ExprPtr LocalizeValidDimForSplit(const ExprPtr& valid_dim, const ExprPtr& original_dim,
                                  const ExprPtr& half_dim_size, const ExprPtr& subblock_idx) {
   if (!valid_dim) return valid_dim;
@@ -696,6 +731,51 @@ StmtPtr SubstituteStmtIfNeeded(const StmtPtr& stmt, const ExprReplacementMap& re
   return transform_utils::Substitute(stmt, replacements);
 }
 
+CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplacementMap& replacements) {
+  std::vector<ExprPtr> new_args;
+  new_args.reserve(call->args_.size());
+  bool args_changed = false;
+  for (const auto& arg : call->args_) {
+    auto new_arg = SubstituteExprIfNeeded(arg, replacements);
+    args_changed = args_changed || (new_arg != arg);
+    new_args.push_back(new_arg);
+  }
+
+  const std::string& op_name = call->op_->name_;
+  if (op_name == "tile.load" && new_args.size() >= 3) {
+    auto new_type = WithZeroValidShape(call->GetType(), call->span_);
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
+    if (!tile_type) return call;
+
+    std::vector<std::pair<std::string, std::any>> kwargs;
+    kwargs.emplace_back("dtype", tile_type->dtype_);
+    if (const auto& memory_space = tile_type->memory_space_) {
+      kwargs.emplace_back("target_memory", *memory_space);
+    }
+
+    auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
+    return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[2]}, std::move(kwargs), new_type,
+                                  call->span_);
+  } else if (op_name == "tile.slice" && new_args.size() >= 3) {
+    auto zero_valid_shape = MakeZeroTupleLike(new_args[1], call->span_);
+    if (new_args.size() >= 4) {
+      new_args[3] = zero_valid_shape;
+    } else {
+      new_args.push_back(zero_valid_shape);
+    }
+    args_changed = true;
+  } else if (op_name == "tile.set_validshape" && new_args.size() == 3) {
+    new_args[1] = MakeIndexConst(0, call->span_);
+    new_args[2] = MakeIndexConst(0, call->span_);
+    args_changed = true;
+  }
+
+  auto new_type = WithZeroValidShape(call->GetType(), call->span_);
+  bool type_changed = new_type != call->GetType();
+  if (!args_changed && !type_changed) return call;
+  return std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, new_type, call->span_);
+}
+
 bool IsNoSplitSharedPipeSetupCall(const CallPtr& call) {
   if (!call || !call->op_) return false;
   const std::string& op_name = call->op_->name_;
@@ -730,10 +810,11 @@ NoSplitSharedPrefix SplitNoSplitSharedPipeSetupPrefix(const std::vector<StmtPtr>
   return result;
 }
 
-// Lane 1 still needs to replay the producer-side computations that feed cross-core
-// pipe ops. Replacing them with a dummy sync-only payload avoids deadlock but
-// corrupts no-split V2C / bidirectional results on Ascend910B. The only visible
-// side effects we intentionally suppress are tile.store writes and their SSA results.
+// Lane 1 still needs to replay cross-core handshakes so Ascend910B GM-backed
+// pipes stay balanced. Tile-producing replay work is forced to static
+// valid_shape=0, letting PTO ops run as empty tiles while preserving the tpush /
+// tpop / tfree synchronization protocol. The only visible side effects we
+// intentionally suppress are tile.store writes and their SSA results.
 std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& stmts,
                                                   ExprReplacementMap& replacements) {
   std::vector<StmtPtr> result;
@@ -755,9 +836,15 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
         continue;
       }
 
-      auto new_value = std::dynamic_pointer_cast<const Call>(SubstituteExprIfNeeded(call, replacements));
-      result.push_back(
-          std::make_shared<AssignStmt>(assign->var_, new_value ? new_value : call, assign->span_));
+      auto new_value = RebuildLane1CallWithZeroValidShape(call, replacements);
+      if (std::dynamic_pointer_cast<const TileType>(new_value->GetType())) {
+        auto new_var =
+            std::make_shared<Var>(assign->var_->name_hint_, new_value->GetType(), assign->var_->span_);
+        replacements[assign->var_.get()] = new_var;
+        result.push_back(std::make_shared<AssignStmt>(new_var, new_value, assign->span_));
+      } else {
+        result.push_back(std::make_shared<AssignStmt>(assign->var_, new_value, assign->span_));
+      }
       continue;
     }
 
@@ -773,8 +860,8 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
         continue;
       }
 
-      auto new_expr = std::dynamic_pointer_cast<const Call>(SubstituteExprIfNeeded(call, replacements));
-      result.push_back(std::make_shared<EvalStmt>(new_expr ? new_expr : call, eval->span_));
+      auto new_expr = RebuildLane1CallWithZeroValidShape(call, replacements);
+      result.push_back(std::make_shared<EvalStmt>(new_expr, eval->span_));
       continue;
     }
 
@@ -804,10 +891,10 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
       auto new_then_stmts = BuildNoSplitLane1ReplayStmts(transform_utils::FlattenToStmts(if_stmt->then_body_),
                                                          then_replacements);
       std::optional<StmtPtr> new_else;
-      if (if_stmt->else_body_.has_value()) {
+      if (const auto& else_body = if_stmt->else_body_) {
         auto else_replacements = replacements;
-        auto new_else_stmts = BuildNoSplitLane1ReplayStmts(
-            transform_utils::FlattenToStmts(if_stmt->else_body_.value()), else_replacements);
+        auto new_else_stmts =
+            BuildNoSplitLane1ReplayStmts(transform_utils::FlattenToStmts(*else_body), else_replacements);
         new_else = loop_repair::MakeBody(new_else_stmts, if_stmt->span_);
       }
       auto new_if = MutableCopy(if_stmt);

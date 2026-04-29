@@ -179,7 +179,7 @@ print(pto_code)
   tile handle。对于 split `tpush`，codegen 会临时使用完整的非切分传输维度（上下
   切分使用完整 `cols`，左右切分使用完整 `rows`），随后恢复 producer tile 的逻辑
   valid shape；消费侧动态 tpop operand 仍携带后续计算和 store 使用的逻辑范围。
-- 当 tpop 结果的 `TileView.valid_shape` 包含动态表达式时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。tile 类型中动态 valid shape 仍保留为 `?`，运行时范围由操作数传递。
+- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。
 - 对于 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
   `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。

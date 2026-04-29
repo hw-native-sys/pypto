@@ -355,6 +355,27 @@ class TestCrossCoreTpushTpopCodegen:
         assert "v_row=?" in tpop_line
         assert "v_col=?" in tpop_line
 
+    def test_tpop_static_non_full_valid_shape_operands(self):
+        """Static tpop valid_shape smaller than physical shape should emit explicit operands."""
+        span = ir.Span.unknown()
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 16 * 64 * 4, 0)
+        tile_view = ir.TileView()
+        tile_view.valid_shape = [ir.ConstInt(0, pl.INDEX, span), ir.ConstInt(0, pl.INDEX, span)]
+        tile_type = ir.TileType([16, 64], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
+        recv_tile = ir.Var("recv_tile", tile_type, span)
+        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
+        body = ir.SeqStmts([ir.AssignStmt(recv_tile, tpop_call, span)], span)
+        func = ir.Function("empty_tpop", [], [], body, span, ir.FunctionType.AIV)
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(ir.Program([func], "empty_tpop_program", span))
+        tpop_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpop_from_aic" in line)
+
+        assert "pto.tpop_from_aic(%c0_index, %c0_index) {split = 0}" in tpop_line
+        assert "v_row=?" in tpop_line
+        assert "v_col=?" in tpop_line
+
     def test_tpop_dynamic_valid_shape_rejects_bool_operand(self):
         """Dynamic tpop valid_shape operands must be integer or index typed."""
         span = ir.Span.unknown()

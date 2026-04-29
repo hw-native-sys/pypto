@@ -77,9 +77,9 @@ free the canonical popped tile value and can be delayed past that carrier chain.
 For Ascend910B (a2a3), mixed kernels with **no function split mode** (`split` unset or `SplitMode.None`) are also
 supported. In that case the pass keeps a single AIV kernel body, marks it for **dual AIV dispatch**, and later lowering
 emits a runtime `subblock_idx` branch: AIV lane 0 executes the original body, while AIV lane 1 replays the cross-core
-handshakes plus any producer-side computations needed to feed them, with visible `tile.store` writes suppressed. This
-keeps the AIC/AIV handshakes balanced for `pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk])` no-split mixed
-kernels and avoids deadlock without corrupting V2C / bidirectional payloads.
+handshakes with tile-producing replay work forced to `valid_shape=[0, 0]`, and visible `tile.store` writes suppressed.
+This keeps the AIC/AIV handshakes balanced for `pl.at(level=CORE_GROUP, optimizations=[pl.auto_chunk])` no-split mixed
+kernels while the secondary sync lane avoids real DMA/compute work.
 
 **Requirements**:
 
@@ -148,7 +148,8 @@ Phase 2 — Expand each InCore function F:
       derive reserve/import/initialize_pipe prologues and prepend them
  12. Create AIC function (no return) and AIV function (original return)
      - On Ascend910B no-split mixed kernels, tag the generated AIV with dual-dispatch metadata
-       so later lowering launches the same AIV kernel on both vector lanes
+       so later lowering launches the same AIV kernel on both vector lanes and rewrites the secondary lane's tile
+       replay path to `valid_shape=[0, 0]`
  13. If a non-Group caller still needs the original function name
      (for example a standalone Spmd wrapper): also create a Group
      function (calls AIC then AIV)

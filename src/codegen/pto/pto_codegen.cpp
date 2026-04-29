@@ -65,6 +65,19 @@ using ir::VarPtr;
 using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
 
+namespace {
+
+bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
+  if (lhs == rhs) {
+    return true;
+  }
+  auto lhs_const = As<ir::ConstInt>(lhs);
+  auto rhs_const = As<ir::ConstInt>(rhs);
+  return lhs_const && rhs_const && lhs_const->value_ == rhs_const->value_;
+}
+
+}  // namespace
+
 // Visitor to collect all MemRef objects from TileType variables
 class MemRefCollectorVisitor : public ir::IRVisitor {
  public:
@@ -104,13 +117,14 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       // - Take pad from the new tile if it has a non-null pad (e.g., from fillpad)
       // This ensures fillpad's pad_value is used while preserving the original valid_shape
       auto existing = memref_tile_types_[base_ptr];
-      if (tile_type->tile_view_.has_value() && tile_type->tile_view_->pad != ir::PadValue::null) {
+      if (const auto& tile_view = tile_type->tile_view_;
+          tile_view.has_value() && tile_view->pad != ir::PadValue::null) {
         // Merge: keep valid_shape from existing, take pad from new tile
         ir::TileView merged_view;
-        if (existing->tile_view_.has_value()) {
-          merged_view = existing->tile_view_.value();
+        if (const auto& existing_view = existing->tile_view_) {
+          merged_view = *existing_view;
         }
-        merged_view.pad = tile_type->tile_view_->pad;
+        merged_view.pad = tile_view->pad;
         auto merged_tile_type = std::make_shared<TileType>(
             existing->shape_, existing->dtype_, existing->memref_, merged_view, existing->memory_space_);
         memref_tile_types_[base_ptr] = merged_tile_type;
@@ -621,8 +635,9 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   //     such as a smaller load region or a runtime ctx_len);
   //   - tile_type->shape_ otherwise (physical dims).
   const std::vector<ir::ExprPtr>* dims = nullptr;
-  if (tile_type->tile_view_.has_value() && !tile_type->tile_view_->valid_shape.empty()) {
-    dims = &tile_type->tile_view_->valid_shape;
+  if (const auto& tile_view = tile_type->tile_view_;
+      tile_view.has_value() && !tile_view->valid_shape.empty()) {
+    dims = &tile_view->valid_shape;
   } else if (!tile_type->shape_.empty()) {
     dims = &tile_type->shape_;
   }
@@ -1162,8 +1177,10 @@ std::string PTOCodegen::GetCurrentResultTileBufTypeString() const {
       return ssa_it->second;
     }
   }
-  if (fs_.current_result_tile_type && fs_.current_result_tile_type->memref_.has_value()) {
-    return GetTileBufTypeString(fs_.current_result_tile_type->memref_.value().get());
+  if (fs_.current_result_tile_type) {
+    if (const auto& memref = fs_.current_result_tile_type->memref_) {
+      return GetTileBufTypeString((*memref)->base_.get());
+    }
   }
   return "";
 }
@@ -1180,11 +1197,12 @@ std::pair<std::string, std::string> PTOCodegen::GetCurrentResultTpopValidShapeOp
     return {"", ""};
   }
 
-  if (!fs_.current_result_tile_type->tile_view_.has_value()) {
+  const auto& tile_view = fs_.current_result_tile_type->tile_view_;
+  if (!tile_view) {
     return {"", ""};
   }
 
-  const auto& valid_shape = fs_.current_result_tile_type->tile_view_->valid_shape;
+  const auto& valid_shape = tile_view->valid_shape;
   ExprPtr valid_row_expr;
   ExprPtr valid_col_expr;
   bool has_dynamic_valid_shape = false;
@@ -1196,7 +1214,22 @@ std::pair<std::string, std::string> PTOCodegen::GetCurrentResultTpopValidShapeOp
     valid_col_expr = valid_shape[1];
     has_dynamic_valid_shape = has_dynamic_valid_shape || !As<ir::ConstInt>(valid_col_expr);
   }
-  if (!has_dynamic_valid_shape) {
+  bool valid_shape_matches_shape = !valid_row_expr && !valid_col_expr;
+  if (valid_row_expr && valid_col_expr) {
+    const auto& shape = fs_.current_result_tile_type->shape_;
+    ExprPtr shape_row_expr;
+    ExprPtr shape_col_expr;
+    if (shape.size() >= 2) {
+      shape_row_expr = shape[0];
+      shape_col_expr = shape[1];
+    } else if (shape.size() == 1) {
+      shape_row_expr = std::make_shared<ir::ConstInt>(1, DataType::INDEX, ir::Span::unknown());
+      shape_col_expr = shape[0];
+    }
+    valid_shape_matches_shape =
+        IsSameDimExpr(valid_row_expr, shape_row_expr) && IsSameDimExpr(valid_col_expr, shape_col_expr);
+  }
+  if (!has_dynamic_valid_shape && valid_shape_matches_shape) {
     return {"", ""};
   }
 

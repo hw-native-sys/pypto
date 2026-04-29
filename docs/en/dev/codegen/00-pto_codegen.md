@@ -182,7 +182,7 @@ sub-window carved out by `pto.subview`.
   updated. For split `tpush`, codegen temporarily uses a full non-split transport dimension (`cols`
   for up/down, `rows` for left/right), then restores the producer tile's logical valid shape;
   consumer-side dynamic tpop operands carry the logical extents used by compute and store.
-- When a tpop result `TileView.valid_shape` contains dynamic expressions, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. The tile type keeps `?` for the dynamic valid shape while the operands carry runtime extents.
+- When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store.
 - For split consumers, `SplitVectorKernel` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes
   `[8, 16]` then `[0, 16]` under up/down split of a `[16, 16]` tile).
