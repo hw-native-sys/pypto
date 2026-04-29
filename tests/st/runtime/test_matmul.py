@@ -23,6 +23,7 @@ import pytest
 import torch
 from examples.kernels.matmul import MatmulaccProgram
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from pypto.runtime.runner import RunConfig
 
 
 class TestMatmul(PTOTestCase):
@@ -299,12 +300,78 @@ class TestMatmulAcc(PTOTestCase):
         tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
 
 
+class TestMatmulAccBTransposeNopad(PTOTestCase):
+    """Issue #1213: C = X @ W^T with b_trans=True and K split across matmul_acc."""
+
+    __test__ = False
+
+    def __init__(
+        self,
+        dtype: DataType = DataType.FP32,
+        *,
+        platform: str | None = None,
+        config=None,
+    ):
+        super().__init__(config or RunConfig(rtol=4e-3, atol=4e-3), platform=platform)
+        self.M = 16
+        self.K = 1024
+        self.N = 32
+        self.K_CHUNK = 512
+        self.dtype = dtype
+
+    def get_name(self) -> str:
+        return f"matmulacc_btranspose_nopad_{self.dtype.value}_{self.M}x{self.K}x{self.N}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [self.M, self.K], self.dtype, init_value=torch.randn),
+            TensorSpec("w", [self.N, self.K], self.dtype, init_value=torch.randn),
+            TensorSpec("out", [self.M, self.N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        M, K, N, K_CHUNK = self.M, self.K, self.N, self.K_CHUNK
+        K_BLOCKS = K // K_CHUNK
+        elem_dtype = pl.FP32 if self.dtype is DataType.FP32 else pl.BF16
+
+        @pl.program
+        class MatmulAccBTransposeNopadProgram:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                x: pl.Tensor[[M, K], elem_dtype],
+                w: pl.Tensor[[N, K], elem_dtype],
+                out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ):
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimization=pl.chunked_loop_optimizer,
+                    name_hint="linear",
+                ):
+                    x0 = pl.slice(x, [M, K_CHUNK], [0, 0])
+                    w0 = pl.slice(w, [N, K_CHUNK], [0, 0])
+                    acc = pl.matmul(x0, w0, b_trans=True, out_dtype=pl.FP32)
+                    for kb in pl.range(1, K_BLOCKS):
+                        k0 = kb * K_CHUNK
+                        x_chunk = pl.slice(x, [M, K_CHUNK], [0, k0])
+                        w_chunk = pl.slice(w, [N, K_CHUNK], [0, k0])
+                        acc = pl.matmul_acc(acc, x_chunk, w_chunk, b_trans=True)
+                    out = pl.assemble(out, acc, [0, 0])
+
+        return MatmulAccBTransposeNopadProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["x"].float() @ tensors["w"].float().T
+
+
 # =============================================================================
 # pytest test functions
 # =============================================================================
 
 _MATMUL_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64)]
 _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
+_ISSUE1213_DTYPES = [pytest.param(DataType.FP32, id="fp32"), pytest.param(DataType.BF16, id="bf16")]
+_A2A3_ONLY = [pytest.param("a2a3", id="a2a3")]
 
 
 class TestMatmulOperations:
@@ -342,6 +409,13 @@ class TestMatmulOperations:
     def test_matmulacc(self, test_runner, platform):
         """Test matmul with accumulation (K split into two chunks)."""
         result = test_runner.run(TestMatmulAcc(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", _A2A3_ONLY)
+    @pytest.mark.parametrize("dtype", _ISSUE1213_DTYPES)
+    def test_matmulacc_btranspose_nopad_issue1213(self, test_runner, platform, dtype):
+        """Regression for b_trans=True matmul_acc over reused L0A/L0B buffers."""
+        result = test_runner.run(TestMatmulAccBTransposeNopad(dtype=dtype, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
