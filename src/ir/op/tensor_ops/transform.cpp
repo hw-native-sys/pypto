@@ -76,6 +76,35 @@ int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
   return product;
 }
 
+/**
+ * @brief Compute row-major strides for a static shape.
+ *
+ * For shape [D0, D1, ..., Dn-1], returns [D1*...*Dn-1, ..., Dn-1, 1].
+ * Returns an empty vector if any dimension is non-ConstInt (dynamic shape).
+ * Mirrors the helper in optimize_orch_tensors_pass.cpp; kept file-local here
+ * to avoid a layer inversion (op definitions depending on the transforms layer).
+ *
+ * @param shape The shape dimensions
+ * @return Row-major strides as ConstInt expressions, or empty if dynamic
+ */
+std::vector<ExprPtr> ComputeRowMajorStridesIfStatic(const std::vector<ExprPtr>& shape) {
+  std::vector<int64_t> dims;
+  dims.reserve(shape.size());
+  for (const auto& dim : shape) {
+    auto ci = As<ConstInt>(dim);
+    if (!ci) return {};
+    dims.push_back(ci->value_);
+  }
+  size_t ndim = dims.size();
+  std::vector<ExprPtr> strides(ndim);
+  int64_t product = 1;
+  for (size_t i = ndim; i > 0; --i) {
+    strides[i - 1] = std::make_shared<ConstInt>(product, DataType::INDEX, Span::unknown());
+    product *= dims[i - 1];
+  }
+  return strides;
+}
+
 }  // anonymous namespace
 
 // ============================================================================
@@ -182,14 +211,58 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> new_shape = input_shape;
   std::swap(new_shape[axis1], new_shape[axis2]);
 
-  // Return new TensorType with transposed shape and same dtype
-  // If valid_shape is provided as 4th argument, store it in TensorView
+  // Resolve the input strides so we can record swapped strides on the result.
+  //
+  // Why: tensor.transpose at orchestration level lowers to runtime
+  // Tensor::transpose, a metadata-only swap of shapes/raw_shapes/offsets. The
+  // resulting view is non-contiguous, and any downstream tile.load that uses
+  // it as a GM source needs the swapped strides to read the correct bytes.
+  // Without recording strides here, the kernel-side codegen
+  // (EmitMakeTensorViews in pto_codegen.cpp) falls back to row-major-from-shape
+  // and emits wrong DMA strides — see issue #1209.
+  //
+  // For dynamic dims we leave strides empty and fall through to the no-view
+  // path below; the existing dynamic full-load path doesn't depend on strides.
+  std::vector<ExprPtr> in_strides;
+  if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->stride.empty()) {
+    in_strides = tensor_type->tensor_view_->stride;
+  } else {
+    in_strides = ComputeRowMajorStridesIfStatic(input_shape);
+  }
+  std::vector<ExprPtr> out_strides;
+  if (!in_strides.empty()) {
+    out_strides = in_strides;
+    std::swap(out_strides[axis1], out_strides[axis2]);
+  }
+
+  // Carry forward valid_shape. Two cases differ in coordinate system:
+  //   - explicit 4th arg: already in the OUTPUT's coordinate system (user
+  //     supplies it for the transposed tensor), so use as-is.
+  //   - inherited from input's tensor_view_: in the INPUT's coordinate system,
+  //     so swap at (axis1, axis2) to match the output shape.
+  std::vector<ExprPtr> valid_shape;
   if (args.size() == 4) {
     auto valid_shape_tuple = As<MakeTuple>(args[3]);
     CHECK(valid_shape_tuple) << "tensor.transpose valid_shape (4th argument) must be a MakeTuple";
-    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_);
+    valid_shape = valid_shape_tuple->elements_;
+  } else if (tensor_type->tensor_view_.has_value() && !tensor_type->tensor_view_->valid_shape.empty()) {
+    valid_shape = tensor_type->tensor_view_->valid_shape;
+    std::swap(valid_shape[axis1], valid_shape[axis2]);
+  }
+
+  // Preserve layout and pad mode from the input view if any.
+  TensorLayout layout = TensorLayout::ND;
+  PadValue pad = PadValue::null;
+  if (tensor_type->tensor_view_.has_value()) {
+    layout = tensor_type->tensor_view_->layout;
+    pad = tensor_type->tensor_view_->pad;
+  }
+
+  // Only attach a TensorView when there is something non-default to record.
+  if (!out_strides.empty() || !valid_shape.empty() || layout != TensorLayout::ND || pad != PadValue::null) {
+    TensorView view(std::move(out_strides), layout, std::move(valid_shape), pad);
     return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
-                                        std::make_optional(std::move(tensor_view)));
+                                        std::make_optional(std::move(view)));
   }
   return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
 }

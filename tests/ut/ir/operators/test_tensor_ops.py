@@ -994,6 +994,111 @@ def test_tensor_transpose_negative_axis():
     assert isinstance(result_type, ir.TensorType)
 
 
+def _const_int_values(exprs) -> list[int]:
+    """Extract values from a sequence of ConstInt exprs (asserting the type)."""
+    out: list[int] = []
+    for e in exprs:
+        assert isinstance(e, ir.ConstInt)
+        out.append(e.value)
+    return out
+
+
+def test_tensor_transpose_records_swapped_strides_2d():
+    """tensor.transpose on a 2D static tensor records swapped strides.
+
+    Regression test for #1209: without recorded strides, downstream
+    EmitMakeTensorViews falls back to row-major-from-shape, producing
+    wrong DMA strides for the transposed view.
+    """
+    span = ir.Span.unknown()
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_var = ir.Var("t", ir.TensorType([dim8, dim16], DataType.FP32), span)
+
+    call = tensor.transpose(tensor_var, 0, 1)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_int_values(result_type.shape) == [16, 8]
+    assert result_type.tensor_view is not None
+    # Default input strides [16, 1] swapped at (0, 1) -> [1, 16].
+    assert _const_int_values(result_type.tensor_view.stride) == [1, 16]
+    assert result_type.tensor_view.layout == ir.TensorLayout.ND
+
+
+def test_tensor_transpose_records_swapped_strides_3d():
+    """tensor.transpose 3D at axes (1, 2) swaps the inner two strides."""
+    span = ir.Span.unknown()
+    dim2 = ir.ConstInt(2, DataType.INT32, span)
+    dim3 = ir.ConstInt(3, DataType.INT32, span)
+    dim4 = ir.ConstInt(4, DataType.INT32, span)
+    tensor_var = ir.Var("t", ir.TensorType([dim2, dim3, dim4], DataType.FP32), span)
+
+    call = tensor.transpose(tensor_var, 1, 2)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_int_values(result_type.shape) == [2, 4, 3]
+    assert result_type.tensor_view is not None
+    # Default strides [12, 4, 1] swapped at (1, 2) -> [12, 1, 4].
+    assert _const_int_values(result_type.tensor_view.stride) == [12, 1, 4]
+
+
+def test_tensor_transpose_idempotent_strides():
+    """transpose(transpose(x, 0, 1), 0, 1) restores the original strides."""
+    span = ir.Span.unknown()
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_var = ir.Var("t", ir.TensorType([dim8, dim16], DataType.FP32), span)
+
+    once = tensor.transpose(tensor_var, 0, 1)
+    intermediate = ir.Var("xt", once.type, span)
+    twice = tensor.transpose(intermediate, 0, 1)
+
+    result_type = twice.type
+    assert isinstance(result_type, ir.TensorType)
+    assert _const_int_values(result_type.shape) == [8, 16]
+    assert result_type.tensor_view is not None
+    # Default [16, 1] -> swapped [1, 16] -> swapped back [16, 1].
+    assert _const_int_values(result_type.tensor_view.stride) == [16, 1]
+
+
+def test_tensor_transpose_dynamic_shape_skips_strides():
+    """Dynamic input shapes leave strides empty (no static computation)."""
+    span = ir.Span.unknown()
+    m = ir.Var("M", ir.ScalarType(DataType.INDEX), span)
+    n = ir.Var("N", ir.ScalarType(DataType.INDEX), span)
+    tensor_var = ir.Var("t", ir.TensorType([m, n], DataType.FP32), span)
+
+    call = tensor.transpose(tensor_var, 0, 1)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert len(result_type.shape) == 2
+    # No stride or other view metadata to record -> tensor_view stays None,
+    # preserving the legacy behaviour for dynamic full-load patterns.
+    assert result_type.tensor_view is None
+
+
+def test_tensor_transpose_explicit_valid_shape_not_swapped():
+    """User-supplied valid_shape (4th arg) is in the OUTPUT coordinate system."""
+    span = ir.Span.unknown()
+    dim8 = ir.ConstInt(8, DataType.INT32, span)
+    dim16 = ir.ConstInt(16, DataType.INT32, span)
+    tensor_var = ir.Var("t", ir.TensorType([dim8, dim16], DataType.FP32), span)
+
+    # User supplies valid_shape in output's coord order: [16, 8] for the
+    # transposed tensor's [16, 8] shape — must NOT be swapped.
+    call = tensor.transpose(tensor_var, 0, 1, valid_shape=[16, 8])
+
+    rt = call.type
+    assert isinstance(rt, ir.TensorType)
+    assert rt.tensor_view is not None
+    assert _const_int_values(rt.tensor_view.valid_shape) == [16, 8]
+    # Strides are still computed and swapped from the input layout.
+    assert _const_int_values(rt.tensor_view.stride) == [1, 16]
+
+
 def test_get_new_ops():
     """Test getting new operator instances."""
     matmul_op = ir.get_op("tensor.matmul")
