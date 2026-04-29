@@ -255,7 +255,7 @@ def _preprocess_ptoas_output(content: str) -> str:
     return result
 
 
-def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
+def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False) -> tuple[str, list[str]]:
     """Generate C++ code to unpack ``int64_t* args`` into typed locals.
 
     Args[] are dispatched in tensors-first order (all tensors, then scalars),
@@ -291,11 +291,31 @@ def _generate_arg_unpacking(func: _ir_core.Function) -> tuple[str, list[str]]:
         c_type = param.type.dtype.to_c_type_string()
         lines.append(f"    // Unpack tensor: {param_name}")
         lines.append(f"    __gm__ Tensor* {param_name}_tensor = reinterpret_cast<__gm__ Tensor*>(args[{i}]);")
-        lines.append(
-            f"    __gm__ {c_type}* {param_name} = "
-            f"reinterpret_cast<__gm__ {c_type}*>("
-            f"{param_name}_tensor->buffer.addr) + {param_name}_tensor->start_offset;"
-        )
+        if param_name == "__gm_pipe_buffer" and uses_spmd:
+            lines.append("    // SPMD: shard GM pipe workspace by logical block_idx to avoid overlap.")
+            lines.append("    int64_t __pypto_gm_block_num = static_cast<int64_t>(__pypto_spmd_block_num);")
+            lines.append("    if (__pypto_gm_block_num <= 0) __pypto_gm_block_num = 1;")
+            lines.append(
+                f"    int64_t __pypto_gm_total_elems = static_cast<int64_t>({param_name}_tensor->shapes[0]);"
+            )
+            lines.append(
+                "    int64_t __pypto_gm_elems_per_block = __pypto_gm_total_elems / __pypto_gm_block_num;"
+            )
+            lines.append(
+                "    int64_t __pypto_gm_block_offset = static_cast<int64_t>(__pypto_spmd_block_idx) * "
+                "__pypto_gm_elems_per_block;"
+            )
+            lines.append(
+                f"    __gm__ {c_type}* {param_name} = "
+                f"reinterpret_cast<__gm__ {c_type}*>({param_name}_tensor->buffer.addr) + "
+                f"{param_name}_tensor->start_offset + __pypto_gm_block_offset;"
+            )
+        else:
+            lines.append(
+                f"    __gm__ {c_type}* {param_name} = "
+                f"reinterpret_cast<__gm__ {c_type}*>("
+                f"{param_name}_tensor->buffer.addr) + {param_name}_tensor->start_offset;"
+            )
         lines.append("")
         var_names.append(param_name)
 
@@ -501,9 +521,10 @@ def _generate_kernel_wrapper(
     2. Preprocessed ptoas code (static, no duplicate includes)
     3. ``kernel_entry`` wrapper with arg unpacking and forward call
     """
-    header = _generate_kernel_header(func, uses_spmd=group_uses_spmd or _uses_spmd_block_ops(func))
+    uses_spmd = group_uses_spmd or _uses_spmd_block_ops(func)
+    header = _generate_kernel_header(func, uses_spmd=uses_spmd)
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
-    unpacking_code, var_names = _generate_arg_unpacking(func)
+    unpacking_code, var_names = _generate_arg_unpacking(func, uses_spmd=uses_spmd)
     call_args = ", ".join(var_names)
     runtime_subblock_setup = ""
     if _needs_runtime_subblock_bridge(func):
@@ -515,7 +536,7 @@ def _generate_kernel_wrapper(
         )
 
     spmd_args_setup = ""
-    if _uses_spmd_block_ops(func):
+    if uses_spmd:
         # Use undef/redefine dance: temporarily remove our macros so we can call
         # the intrinsic.h functions that take args, then restore the macros.
         # Runs under both NPU and SIM — in SIM, intrinsic.h::get_block_idx(args)

@@ -233,6 +233,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return "(int64_t)" + name + ".shapes[" + std::to_string(axis) + "]";
   }
 
+  [[nodiscard]] std::string GetTensorCreateScaleExpr(const std::string& result_var) const override {
+    auto it = tensor_create_scale_expr_by_emit_name_.find(result_var);
+    if (it == tensor_create_scale_expr_by_emit_name_.end()) {
+      return "";
+    }
+    return it->second;
+  }
+
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
     if (for_stmt->kind_ == ForKind::Unroll) {
       LOG_WARN << "ForKind::Unroll loop was not expanded before codegen; "
@@ -658,8 +666,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
 
       auto it = wrapper_param_to_outer_idx.find(inner_arg_var.get());
-      INTERNAL_CHECK_SPAN(it != wrapper_param_to_outer_idx.end(), inner_call->span_)
-          << "Internal error: inner call arg " << inner_idx << " does not map to any wrapper parameter";
+      if (it == wrapper_param_to_outer_idx.end()) {
+        // Some wrapper-expansion paths can leave inner-call scalar ivs that are
+        // not part of the user-visible wrapper signature. They should not be
+        // forwarded as orchestration args.
+        if (As<ScalarType>(inner_arg->GetType()) != nullptr) {
+          continue;
+        }
+        INTERNAL_CHECK_SPAN(false, inner_call->span_)
+            << "Internal error: inner call arg " << inner_idx << " does not map to any wrapper parameter";
+      }
 
       size_t outer_idx = it->second;
       const auto& outer_arg = outer_call->args_[outer_idx];
@@ -739,6 +755,54 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   static constexpr size_t kMaxAllocTensorsArgs = 16;
 
+  static bool IsInjectedGMPipeCreateVar(const VarPtr& var) {
+    return var && var->name_hint_.rfind("gm_pipe_buffer_", 0) == 0;
+  }
+
+  [[nodiscard]] std::string ResolveLaunchCoreNumForCreate(const std::vector<StmtPtr>& stmts,
+                                                          size_t create_stmt_idx,
+                                                          const VarPtr& create_var) const {
+    if (!create_var) return "";
+
+    for (size_t i = create_stmt_idx + 1; i < stmts.size(); ++i) {
+      auto assign = As<AssignStmt>(stmts[i]);
+      if (assign && assign->var_ && assign->var_.get() == create_var.get()) {
+        break;
+      }
+
+      CallPtr call;
+      if (assign) {
+        call = As<Call>(assign->value_);
+      } else if (auto eval = As<EvalStmt>(stmts[i])) {
+        call = As<Call>(eval->expr_);
+      }
+      if (!call) continue;
+
+      bool uses_create_var = false;
+      for (const auto& arg : call->args_) {
+        auto arg_var = AsVarLike(arg);
+        if (arg_var && arg_var.get() == create_var.get()) {
+          uses_create_var = true;
+          break;
+        }
+      }
+      if (!uses_create_var) continue;
+
+      auto gv = As<GlobalVar>(call->op_);
+      if (!gv) return "";
+      auto callee_func = program_->GetFunction(gv->name_);
+      if (!callee_func) return "";
+      if (callee_func->func_type_ != FunctionType::Spmd && callee_func->func_type_ != FunctionType::Group) {
+        return "";
+      }
+
+      auto core_num_expr = callee_func->GetAttr<ExprPtr>("core_num", nullptr);
+      if (!core_num_expr) return "";
+      return RenderLaunchCoreNum(core_num_expr);
+    }
+    return "";
+  }
+
   static bool ExprRefsAnyOf(const ExprPtr& expr, const std::unordered_set<const Var*>& vars) {
     if (!expr) {
       return false;
@@ -798,7 +862,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     std::unordered_set<const Var*> locally_defined;
 
-    for (const auto& stmt : stmts) {
+    for (size_t stmt_idx = 0; stmt_idx < stmts.size(); ++stmt_idx) {
+      const auto& stmt = stmts[stmt_idx];
       auto assign = As<AssignStmt>(stmt);
       if (!assign) {
         continue;
@@ -818,6 +883,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
       declared_var_ptrs_.insert(assign->var_.get());
       std::string emit_var = ReserveVarEmitName(assign->var_.get());
+      if (IsInjectedGMPipeCreateVar(assign->var_)) {
+        std::string core_num_expr = ResolveLaunchCoreNumForCreate(stmts, stmt_idx, assign->var_);
+        if (!core_num_expr.empty()) {
+          tensor_create_scale_expr_by_emit_name_[emit_var] = core_num_expr;
+        }
+      }
       creates.push_back({emit_var, call});
       batched_create_stmts_.insert(stmt.get());
     }
@@ -1071,12 +1142,39 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
+    int max_tuple_index = -1;
     for (const auto& elem : elements_it->second) {
-      INTERNAL_CHECK_SPAN(elem.index >= 0 && static_cast<size_t>(elem.index) < out_indices.size(),
-                          call->span_)
-          << "Internal error: tuple element index " << elem.index << " out of range for " << call->op_->name_
-          << " (has " << out_indices.size() << " Out/InOut params)";
-      size_t param_idx = out_indices[static_cast<size_t>(elem.index)];
+      max_tuple_index = std::max(max_tuple_index, elem.index);
+    }
+    size_t tuple_arity = max_tuple_index >= 0 ? static_cast<size_t>(max_tuple_index + 1) : 0;
+    size_t tuple_out_base = tuple_arity >= out_indices.size() ? (tuple_arity - out_indices.size()) : 0;
+
+    for (const auto& elem : elements_it->second) {
+      // Some wrappers (notably SPMD helpers) return auxiliary scalars before
+      // Out/InOut tensors, e.g. (idx, out_tensor). Map tuple tail elements to
+      // Out/InOut params and ignore leading non-output tuple elements.
+      if (elem.index < 0) {
+        continue;
+      }
+      size_t elem_pos = static_cast<size_t>(elem.index);
+      if (elem_pos < tuple_out_base) {
+        // Leading tuple elements are auxiliary values (e.g. loop iv from
+        // SPMD wrappers). They are not returned by runtime task submission.
+        // If such scalar is referenced later, materialize a safe default to
+        // keep generated orchestration compilable.
+        if (effective_uses_.count(elem.var)) {
+          std::string elem_name = ReserveVarEmitName(elem.var);
+          if (auto st = As<ScalarType>(elem.var->GetType())) {
+            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
+          }
+        }
+        continue;
+      }
+      size_t out_pos = elem_pos - tuple_out_base;
+      if (out_pos >= out_indices.size()) {
+        continue;
+      }
+      size_t param_idx = out_indices[out_pos];
       INTERNAL_CHECK_SPAN(param_idx < call->args_.size(), call->span_)
           << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
           << " (has " << call->args_.size() << " args)";
@@ -1154,6 +1252,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
   std::unordered_set<const Var*> effective_uses_;
+  std::unordered_map<std::string, std::string> tensor_create_scale_expr_by_emit_name_;
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {

@@ -130,6 +130,20 @@ class CodegenBase : public ir::IRVisitor {
   }
 
   /**
+   * @brief Optional scale expression applied to tensor.create shape
+   *
+   * Used by orchestration codegen to adjust backend allocation size without
+   * mutating IR (e.g. GM pipe workspace expansion for SPMD launch core_num).
+   *
+   * @param result_var Emitted result variable name of tensor.create
+   * @return C++ scalar expression string; empty means no scaling
+   */
+  [[nodiscard]] virtual std::string GetTensorCreateScaleExpr(const std::string& result_var) const {
+    (void)result_var;
+    return "";
+  }
+
+  /**
    * @brief Get the runtime DataType enum string for generated code
    *
    * Returns the fully qualified DataType enum name as used by the runtime
