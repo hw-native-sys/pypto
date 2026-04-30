@@ -71,12 +71,10 @@ program_simplified = simplify_pass(program)
 
 两个折叠在 `SimplifyMutator` 遍历内部运行，因此与周围的表达式级处理共享分析器的约束栈：
 
-- **Fold A —— 常量条件 `IfStmt` 折叠**。条件被化简后，分别用 `CanProve(cond)` 与 `CanProve(Not(cond))` 询问分析器。任一极性被证明，则丢弃死分支并把保留分支提升到父作用域。当 `return_vars_` 非空时，保留分支末尾的 `YieldStmt` 被剥离，每个 `return_vars[i]` 在 `var_remap_` 中绑定到对应的 yielded 值，使后续兄弟语句（以及函数 `ReturnStmt`）直接读取该值。真/假两种极性的处理是对称的；唯一的边界情况是「永远为假，无 else，且 `return_vars_` 为空」，此时折叠为空体。
-- **Fold B —— 纯单次/零次 `ForStmt` 折叠**。仅对*纯*顺序循环触发：`chunk_config_` 为空、`attrs_` 为空、`kind_ == ForKind::Sequential`。对这类循环，用 `CanProveGreaterEqual(step, 1)` 加 `CanProve(stop <= start)`（零次）或 `CanProve(start < stop && stop <= start + step)`（一次）询问分析器以证明循环次数。零次时，为每个 return var 发出 `AssignStmt(return_vars[i], iter_args[i].initValue_)` 并丢弃循环体；一次时，用 `DeepClone` 复制循环体并将 `loop_var → start`、`iter_args[i] → init_values[i]` 直接代入，再次访问克隆体让进一步折叠在同一次 Pass 中发生，最后剥离末尾的 `YieldStmt` 并把 `return_vars[i] → yielded_value[i]` 写入 `var_remap_`（与 Fold A 的提升机制一致）。
+- **Fold A —— 常量条件 `IfStmt` 折叠**。条件被化简后，分别用 `CanProve(cond)` 与 `CanProve(Not(cond))` 询问分析器。任一极性被证明，则丢弃死分支并把保留分支提升到父作用域。当 `return_vars_` 非空时，保留分支末尾的 `YieldStmt` 会被改写为 `AssignStmt(return_vars[i], yield_values[i])` 序列，使 IfStmt 之后的 SSA 引用仍然有定义。真/假两种极性的处理是对称的；唯一的边界情况是「永远为假，无 else，且 `return_vars_` 为空」，此时折叠为空体。
+- **Fold B —— 纯单次/零次 `ForStmt` 折叠**。仅对*纯*顺序循环触发：`chunk_config_` 为空、`attrs_` 为空、`kind_ == ForKind::Sequential`。对这类循环，用 `CanProveGreaterEqual(step, 1)` 加 `CanProve(stop <= start)`（零次）或 `CanProve(start < stop && stop <= start + step)`（一次）询问分析器以证明循环次数。零次时，为每个 return var 发出 `AssignStmt(return_vars[i], iter_args[i].initValue_)` 并丢弃循环体；一次时，用 `DeepClone` 复制循环体并将 `loop_var → start`、`iter_args[i] → init_values[i]` 直接代入，再次访问克隆体让进一步折叠在同一次 Pass 中发生，最后把末尾的 `YieldStmt` 改写为对 `return_vars` 的赋值。
 
-在循环体上使用 `DeepClone`（而非就地的 `var_remap_` 覆盖）是为了让代换能穿透到类型注解中的 `Var` 引用 —— 例如 `MemRef` 字节偏移里出现的循环变量。`clone_def_vars=true` 同样关键：`MultiAssignCollector` 是在折叠之前的 IR 上跑的，可能已经把原循环体内定义的标量 `Var` 标记为多次赋值（保护 pre-SSA 调用方的安全检查）。在每个定义点产生新的 `Var` 克隆能打破这种过期标记，使后续对（例如）`cur_offset = 0` 的使用得以被分析器绑定并向下游传播。
-
-`return_vars` 通过 `var_remap_` 代换而非直接产出 `AssignStmt(rv, yielded)`，这是有意为之：编排（orchestration）代码生成器的角色感知命名消歧（`role == "out"` 等）会把多个 role 标签的 SSA 版本折叠到同一个 C++ 标识符，于是 `out__rv_v2 = out__co_l0_rv_v3` 这样的别名赋值会下沉为不合法的 `auto out = out;`。在使用点代换可以完全绕开消歧。
+使用 `DeepClone`（而非就地的 `var_remap_` 覆盖）是为了让代换能穿透到类型注解中的 `Var` 引用 —— 例如 `MemRef` 字节偏移里出现的循环变量。`clone_def_vars=true` 同样关键：`MultiAssignCollector` 是在折叠之前的 IR 上跑的，可能已经把原循环体内定义的标量 `Var` 标记为多次赋值（保护 pre-SSA 调用方的安全检查）。在每个定义点产生新的 `Var` 克隆能打破这种过期标记，使后续对（例如）`cur_offset = 0` 的使用得以被分析器绑定并向下游传播。
 
 两种折叠在同一次 Pass 中可以叠加：当 Fold B 把 `loop_var → 0` 代入循环体后，类似 `if loop_var == 0` 的谓词会变成 `if 0 == 0` → `ConstBool(true)`，紧接着就被 Fold A 折掉，无需再跑一次 Simplify。
 
