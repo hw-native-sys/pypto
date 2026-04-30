@@ -492,12 +492,13 @@ REGISTER_OP("tile.extract")
 
 TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
                                     const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tile.scatter_update(input, index, src) -> TileType same as input
-  // input: TileType 2D [rows, d] or 4D [blockNum, blockSize, 1, d]
-  // index: TileType 2D [b, s] of integer dtype
-  // src:   TileType 2D [b*s, d] or 4D [b, s, 1, d] (same rank as input)
-  CHECK(args.size() == 3) << "tile.scatter_update requires exactly 3 arguments (input, index, src), got "
-                          << args.size();
+  // tile.scatter_update(input, index, src, scratch) -> TileType same as input
+  // input:   TileType 2D [rows, d] or 4D [blockNum, blockSize, 1, d]
+  // index:   TileType 2D [b, s] of integer dtype
+  // src:     TileType 2D [b*s, d] or 4D [b, s, 1, d] (same rank as input)
+  // scratch: TileType 2D [1, d] with same dtype as input (caller-allocated row buffer)
+  CHECK(args.size() == 4)
+      << "tile.scatter_update requires exactly 4 arguments (input, index, src, scratch), got " << args.size();
 
   auto input_type = As<TileType>(args[0]->GetType());
   CHECK(input_type) << "tile.scatter_update: input must be TileType, got " << args[0]->GetType()->TypeName();
@@ -520,6 +521,19 @@ TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
       << "tile.scatter_update: src dtype (" << src_type->dtype_.ToString() << ") must match input dtype ("
       << input_type->dtype_.ToString() << ")";
 
+  auto scratch_type = As<TileType>(args[3]->GetType());
+  CHECK(scratch_type) << "tile.scatter_update: scratch must be TileType, got "
+                      << args[3]->GetType()->TypeName();
+  CHECK(scratch_type->shape_.size() == 2)
+      << "tile.scatter_update: scratch must be 2D [1, d], got rank " << scratch_type->shape_.size();
+  auto scratch_rows = As<ConstInt>(scratch_type->shape_[0]);
+  CHECK(scratch_rows && scratch_rows->value_ == 1) << "tile.scatter_update: scratch rows must be 1";
+  CHECK(AreExprsEqual(scratch_type->shape_[1], input_type->shape_.back()))
+      << "tile.scatter_update: scratch cols must match input feature dimension";
+  CHECK(scratch_type->dtype_ == input_type->dtype_)
+      << "tile.scatter_update: scratch dtype (" << scratch_type->dtype_.ToString()
+      << ") must match input dtype (" << input_type->dtype_.ToString() << ")";
+
   for (const auto& [key, val] : kwargs) {
     if (key == "dim") {
       int dim_val = AnyCast<int>(val, "kwarg key: dim");
@@ -527,7 +541,17 @@ TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
     }
   }
 
-  return std::make_shared<TileType>(input_type->shape_, input_type->dtype_);
+  // Inherit tile_view (with valid_shape = input shape) and memory_space from input,
+  // same pattern as tile.assemble — ensures tile.store can read valid_shape downstream.
+  TileView tile_view;
+  if (input_type->tile_view_.has_value()) {
+    tile_view = *input_type->tile_view_;
+  }
+  if (tile_view.valid_shape.empty()) {
+    tile_view.valid_shape = input_type->shape_;
+  }
+  return std::make_shared<TileType>(input_type->shape_, input_type->dtype_, std::nullopt, tile_view,
+                                    input_type->memory_space_);
 }
 
 REGISTER_OP("tile.scatter_update")
@@ -535,15 +559,19 @@ REGISTER_OP("tile.scatter_update")
     .set_description(
         "Update input tile rows at positions given by 2D index tile with values from src. "
         "Supports 2D input [rows, d] with 2D src [b*s, d], and 4D input [blockNum, blockSize, 1, d] "
-        "with 4D src [b, s, 1, d]. Index is always 2D [b, s] of integer dtype.")
+        "with 4D src [b, s, 1, d]. Index is always 2D [b, s] of integer dtype. Caller must pass a "
+        "[1, d] scratch tile for the per-row staging buffer.")
     .add_argument("input", "Destination tile (2D [rows, d] or 4D [blockNum, blockSize, 1, d])")
     .add_argument("index", "2D index tile [b, s] of integer dtype")
     .add_argument("src", "Source tile (2D [b*s, d] or 4D [b, s, 1, d])")
+    .add_argument("scratch", "Scratch row tile [1, d] with same dtype as input")
     .set_attr<int>("dim")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
+    .set_input_memory(3, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterUpdateType(args, kwargs);

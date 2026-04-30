@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -285,6 +286,40 @@ static std::string EmitPartitionViewPTO(const std::string& name_hint, const std:
   oss << " : " << tensor_view_type << " -> " << partition_type;
   codegen.Emit(oss.str());
   return partition_view;
+}
+
+// Emit SSA ops that compute a row-major flat offset from lowered SSA index
+// values and the container shape. This mirrors GetFlatOffsetSSA(...) but uses
+// explicit arith.muli/arith.addi so the result is valid MLIR SSA, not a raw
+// textual expression.
+static std::string EmitFlatOffsetSSAFromValues(const std::vector<std::string>& indices,
+                                               const std::vector<ir::ExprPtr>& shape,
+                                               codegen::PTOCodegen& codegen, const std::string& name_hint) {
+  INTERNAL_CHECK(indices.size() == shape.size())
+      << "Index count (" << indices.size() << ") must match shape rank (" << shape.size() << ")";
+
+  INTERNAL_CHECK(!indices.empty()) << "EmitFlatOffsetSSAFromValues requires at least one index";
+  if (indices.size() == 1) {
+    return indices[0];
+  }
+
+  std::string acc = indices[0];
+  for (size_t i = 1; i < indices.size(); ++i) {
+    std::string dim_ssa;
+    if (auto c = As<ir::ConstInt>(shape[i])) {
+      dim_ssa = codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
+    } else {
+      dim_ssa = codegen.GetExprAsCode(shape[i]);
+    }
+
+    std::string mul = codegen.NewNamedTemp(name_hint + "_mul");
+    codegen.Emit(mul + " = arith.muli " + acc + ", " + dim_ssa + " : index");
+
+    std::string add = codegen.NewNamedTemp(name_hint);
+    codegen.Emit(add + " = arith.addi " + mul + ", " + indices[i] + " : index");
+    acc = add;
+  }
+  return acc;
 }
 
 // Helper function for input & output generation (with type annotations)
@@ -942,6 +977,121 @@ static std::string MakeMrgSort1CodegenPTO(const std::string& pto_op_name, const 
   oss << ")";
 
   codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper function for tile.scatter_update:
+// Implements scatter_update as an in-place update on the input tile in Vec memory:
+//   for i in [0, b):
+//     for j in [0, s):
+//       row = index[i, j]
+//       row_tile = pto.textract(src, i*s + j, 0)   // whole [1, d] row
+//       pto.tinsert(row_tile -> input, row, 0)     // write [1, d] row in-place
+//
+// Using pto.textract / pto.tinsert avoids an inner per-element scalar loop over
+// the feature dim (d), which is the performance-sensitive axis.
+static std::string MakeScatterUpdateCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 4) << op->op_->name_ << " requires 4 arguments (input, index, src, scratch), got "
+                               << op->args_.size();
+
+  auto input_type = ir::As<ir::TileType>(op->args_[0]->GetType());
+  auto index_type = ir::As<ir::TileType>(op->args_[1]->GetType());
+  auto src_type = ir::As<ir::TileType>(op->args_[2]->GetType());
+  INTERNAL_CHECK(input_type && index_type && src_type)
+      << "Internal error: tile.scatter_update arguments must be TileType";
+  CHECK(input_type->shape_.size() == 2 && src_type->shape_.size() == 2)
+      << "tile.scatter_update PTO lowering currently supports 2D input/src only, got input rank "
+      << input_type->shape_.size() << ", src rank " << src_type->shape_.size();
+
+  std::string index_ssa = codegen.GetExprAsCode(op->args_[1]);
+  std::string src_ssa = codegen.GetExprAsCode(op->args_[2]);
+
+  std::string index_type_str = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string src_type_str = codegen.GetExprTypeAnnotation(op->args_[2]);
+
+  std::string input_ssa = codegen.GetExprAsCode(op->args_[0]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type_str = codegen.GetCurrentResultTileBufTypeString();
+
+  // Dimensions: index is [b, s], input is [rows, d], src is [b*s, d].
+  int64_t b_val = codegen.GetConstIntValue(index_type->shape_[0]);
+  int64_t s_val = codegen.GetConstIntValue(index_type->shape_[1]);
+
+  // Emit constants
+  std::string c0 = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
+  std::string c1 = codegen.GetOrEmitConstant(int64_t{1}, DataType::INDEX);
+  std::string cb = codegen.GetOrEmitConstant(int64_t{b_val}, DataType::INDEX);
+  std::string cs = codegen.GetOrEmitConstant(int64_t{s_val}, DataType::INDEX);
+
+  // Scalar type for the scalar index read
+  std::string index_scalar_type = codegen.GetTypeString(index_type->dtype_);
+
+  // scatter_update is marked output_reuses_input(0), so dst aliases input in Vec memory.
+  INTERNAL_CHECK(!dst.empty()) << "tile.scatter_update requires a result buffer";
+  INTERNAL_CHECK(dst == input_ssa)
+      << "Internal error: tile.scatter_update result SSA must alias input SSA, got dst=" << dst
+      << ", input=" << input_ssa;
+
+  // Caller-allocated [1, d] scratch tile (4th arg) — gives PTO an addressed alloc_tile
+  // for the per-row staging buffer, avoiding ad-hoc codegen-side allocations.
+  std::string row_tile = codegen.GetExprAsCode(op->args_[3]);
+  std::string row_tile_type_str = codegen.GetExprTypeAnnotation(op->args_[3]);
+
+  // for i in [0, b)
+  std::string i_var = codegen.NewNamedTemp("i");
+  codegen.Emit("scf.for " + i_var + " = " + c0 + " to " + cb + " step " + c1 + " {");
+  codegen.IncreaseIndent();
+
+  // for j in [0, s)
+  std::string j_var = codegen.NewNamedTemp("j");
+  codegen.Emit("scf.for " + j_var + " = " + c0 + " to " + cs + " step " + c1 + " {");
+  codegen.IncreaseIndent();
+
+  // idx = i * s + j  — flat offset into index and also src row index (src is [b*s, d]).
+  std::string idx = EmitFlatOffsetSSAFromValues({i_var, j_var}, index_type->shape_, codegen, "idx");
+
+  // row_i32 = index[i, j]  (scalar read from the index tile)
+  std::string row_i32 = codegen.NewNamedTemp("row_i32");
+  {
+    std::ostringstream tgetval;
+    tgetval << row_i32 << " = pto.tgetval ins(" << index_ssa << ", " << idx;
+    if (!index_type_str.empty()) tgetval << " : " << index_type_str << ", index";
+    tgetval << ") outs : " << index_scalar_type;
+    codegen.Emit(tgetval.str());
+  }
+
+  std::string row_idx = codegen.NewNamedTemp("row_idx");
+  codegen.Emit(row_idx + " = arith.index_cast " + row_i32 + " : " + index_scalar_type + " to index");
+
+  // row_tile = src[idx, 0 : 1, d]
+  {
+    std::ostringstream textract;
+    textract << "pto.textract ins(" << src_ssa << ", " << idx << ", " << c0;
+    if (!src_type_str.empty()) textract << " : " << src_type_str << ", index, index";
+    textract << ") outs(" << row_tile;
+    if (!row_tile_type_str.empty()) textract << " : " << row_tile_type_str;
+    textract << ")";
+    codegen.Emit(textract.str());
+  }
+
+  // dst[row_idx, 0 : 1, d] = row_tile
+  {
+    std::ostringstream tinsert;
+    tinsert << "pto.tinsert ins(" << row_tile << ", " << row_idx << ", " << c0;
+    if (!row_tile_type_str.empty()) tinsert << " : " << row_tile_type_str << ", index, index";
+    tinsert << ") outs(" << dst;
+    if (!dst_type_str.empty()) tinsert << " : " << dst_type_str;
+    tinsert << ")";
+    codegen.Emit(tinsert.str());
+  }
+
+  codegen.DecreaseIndent();
+  codegen.Emit("}");
+
+  codegen.DecreaseIndent();
+  codegen.Emit("}");
+
   return "";
 }
 
@@ -2031,6 +2181,10 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   // tile.gather_mask (TGATHER mask form): only src operand + maskPattern attribute
   reg("tile.gather_mask", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGatherMaskCodegenPTO(op, codegen);
+  });
+  // tile.scatter_update: update input rows at scatter indices with src rows
+  reg("tile.scatter_update", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeScatterUpdateCodegenPTO(op, codegen);
   });
   // tile.mrgsort_format2 (TMRGSORT format2): all inputs and output must be row_major per ISA
   if (exclude_ops.count("tile.mrgsort_format2") == 0) {

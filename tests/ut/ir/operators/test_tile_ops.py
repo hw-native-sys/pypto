@@ -2396,12 +2396,14 @@ class TestTileScatterUpdateOps:
         input_type = ir.TileType(_const_dims(span, *input_shape), dtype)
         index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)
         src_type = ir.TileType(_const_dims(span, *src_shape), dtype)
+        scratch_type = ir.TileType(_const_dims(span, 1, input_shape[-1]), dtype)
 
         call = tile.scatter_update(
             ir.Var("inp", input_type, span),
             -2,
             ir.Var("idx", index_type, span),
             ir.Var("src", src_type, span),
+            ir.Var("scratch", scratch_type, span),
         )
 
         assert isinstance(call, ir.Call)
@@ -2427,6 +2429,7 @@ class TestTileScatterUpdateOps:
         input_type = ir.TileType(_const_dims(span, 16, 64), DataType.FP16)
         index_type = ir.TileType(_const_dims(span, 2, 4), DataType.INT32)
         src_type = ir.TileType(_const_dims(span, 8, 64), src_dtype)
+        scratch_type = ir.TileType(_const_dims(span, 1, 64), DataType.FP16)
 
         with pytest.raises(ValueError, match=match):
             tile.scatter_update(
@@ -2434,6 +2437,7 @@ class TestTileScatterUpdateOps:
                 dim,
                 ir.Var("idx", index_type, span),
                 ir.Var("src", src_type, span),
+                ir.Var("scratch", scratch_type, span),
             )
 
 

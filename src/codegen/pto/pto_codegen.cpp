@@ -76,6 +76,51 @@ bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
   return lhs_const && rhs_const && lhs_const->value_ == rhs_const->value_;
 }
 
+// Extract the (row, col) valid_shape expressions from a TileType's tile_view.
+// Returns nullptr for a dimension when it is missing or is a ConstInt (static).
+// Non-ConstInt expressions (Var, Call, BinaryOp, ...) flow through as dynamic
+// and must be lowered to MLIR via GetExprAsCode at the call site.
+std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(const std::shared_ptr<const ir::TileType>& tile_type) {
+  ExprPtr valid_row_expr;
+  ExprPtr valid_col_expr;
+  if (!tile_type || !tile_type->tile_view_.has_value()) {
+    return {valid_row_expr, valid_col_expr};
+  }
+
+  const auto& tile_view = tile_type->tile_view_.value();
+  if (tile_view.valid_shape.size() >= 1 && tile_view.valid_shape[0] &&
+      !As<ir::ConstInt>(tile_view.valid_shape[0])) {
+    valid_row_expr = tile_view.valid_shape[0];
+  }
+  if (tile_view.valid_shape.size() >= 2 && tile_view.valid_shape[1] &&
+      !As<ir::ConstInt>(tile_view.valid_shape[1])) {
+    valid_col_expr = tile_view.valid_shape[1];
+  }
+  return {valid_row_expr, valid_col_expr};
+}
+
+bool HasDynamicTileValidShape(const std::shared_ptr<const ir::TileType>& tile_type) {
+  auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
+  return valid_row_expr || valid_col_expr;
+}
+
+bool ShouldAliasScatterUpdateResultToInput(const AssignStmtPtr& stmt) {
+  auto call = As<ir::Call>(stmt->value_);
+  if (!call || call->op_->name_ != "tile.scatter_update" || call->args_.empty()) {
+    return false;
+  }
+
+  auto result_tile_type = ir::GetTileTypeWithMemRef(stmt->var_->GetType());
+  auto input_tile_type = ir::GetTileTypeWithMemRef(call->args_[0]->GetType());
+  if (!result_tile_type || !input_tile_type) {
+    return false;
+  }
+
+  auto result_memref = ir::GetDefinedMemRef(result_tile_type);
+  auto input_memref = ir::GetDefinedMemRef(input_tile_type);
+  return result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get();
+}
+
 }  // namespace
 
 // Visitor to collect all MemRef objects from TileType variables
@@ -873,9 +918,11 @@ void PTOCodegen::EmitExtraAllocTiles() {
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
   const bool is_set_validshape = call && call->op_->name_ == "tile.set_validshape";
+  const bool alias_scatter_result_to_input = ShouldAliasScatterUpdateResultToInput(op);
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-    if (!is_set_validshape && fs_.tpop_result_vars.count(op->var_.get()) == 0) {
+    if (!is_set_validshape && fs_.tpop_result_vars.count(op->var_.get()) == 0 &&
+        !alias_scatter_result_to_input) {
       EmitAllocTileForVar(op->var_, tile_type);
     }
   }
@@ -886,12 +933,19 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
           op->var_->name_hint_;  // Seed for readable MLIR names when no tile buffer exists.
       std::shared_ptr<const TileType> result_tile_type;
       if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
-        // Prefer per-var SSA name from fs_.var_to_mlir (set during per-var alloc binding)
-        auto var_it = fs_.var_to_mlir.find(GetVarKey(op->var_));
-        if (var_it != fs_.var_to_mlir.end()) {
-          result_buf = var_it->second;
+        if (alias_scatter_result_to_input) {
+          result_buf = GetExprAsCode(call->args_[0]);
+          INTERNAL_CHECK(!result_buf.empty())
+              << "Internal error: tile.scatter_update result must alias the input tile SSA";
+          BindVarToMlir(op->var_, result_buf);
         } else {
-          result_buf = GetTileBufForMemRef(ir::GetDefinedMemRef(tile_type));
+          // Prefer per-var SSA name from fs_.var_to_mlir (set during per-var alloc binding)
+          auto var_it = fs_.var_to_mlir.find(GetVarKey(op->var_));
+          if (var_it != fs_.var_to_mlir.end()) {
+            result_buf = var_it->second;
+          } else {
+            result_buf = GetTileBufForMemRef(ir::GetDefinedMemRef(tile_type));
+          }
         }
         result_tile_type = tile_type;
       } else if (auto tile_type = As<TileType>(op->var_->GetType())) {
