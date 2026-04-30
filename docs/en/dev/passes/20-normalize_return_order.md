@@ -13,12 +13,12 @@ User code is free to write `tile.store` calls in any order — `out_b`
 before `out_a`, or interleaved with compute. Earlier in the pipeline, the
 body order is preserved verbatim, so the InCore `ReturnStmt::value_` may
 list its outputs in an order that does not match the declared `Out`/`InOut`
-parameter order. Without normalisation, orchestration codegen would have
+parameter order. Without normalization, orchestration codegen would have
 to follow each `return[i]` back through assignments and `tile.store` calls
-to discover which parameter it materialises — analysis that belongs in a
+to discover which parameter it materializes — analysis that belongs in a
 pass, not in codegen (see `docs/en/dev/codegen/00-pto_codegen.md`).
 
-This pass canonicalises the contract so codegen can rely on
+This pass canonicalizes the contract so codegen can rely on
 `return[k] ↔ out_indices[k]` by position alone:
 
 1. **Step A (InCore rewrite)** — for every `InCore` function, compute a
@@ -67,7 +67,7 @@ result = passes.normalize_return_order()(program)
 own functions; `IncoreTileOps` guarantees the body uses tile ops, so the
 `tile.store(_, _, out_param)` signal that drives Step A is present. The
 pass produces no new property and invalidates none — it preserves SSA
-form, normalised statement structure, memory inference, and every other
+form, normalized statement structure, memory inference, and every other
 property already established upstream.
 
 ## Algorithm
@@ -133,7 +133,7 @@ buffer, just under a new index.
 | Only `InCore` functions are rewritten in Step A | Other function kinds (`Orchestration` / `Group` / `Spmd` / opaque) follow the user's declared return shape; their callers are remapped in Step B but their bodies are untouched |
 | Skips functions where `out_indices.size() > ret_to_param.size()` | An incomplete analysis must not produce an out-of-bounds permutation — leave the function as-is so the verifier can flag the inconsistency |
 | Permutation is identity ⇒ no rewrite | Avoids spurious `Function` clones and keeps the pass idempotent |
-| Step B only touches `TupleGetItemExpr` whose tuple operand is the **transformed** node | A new tuple node may have replaced the original operand; identity-based lookup on the original would be stale |
+| Step B only rewrites `TupleGetItemExpr` whose tuple operand resolves to a tracked `Var` after `VisitExpr` | The mutator preserves `Var` node identity, so the operand pointer stays valid as a key in `reordered_tuple_vars_`; if a future change ever returned a fresh node, looking up the post-visit pointer keeps the check correct |
 
 ## Example
 
@@ -163,8 +163,8 @@ class Module:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, out_a, out_b):
         ret = self.kernel(x, out_a, out_b)
-        a = ret[0]                                # ← currently materialises out_b
-        b = ret[1]                                # ← currently materialises out_a
+        a = ret[0]                                # ← currently materializes out_b
+        b = ret[1]                                # ← currently materializes out_a
         return (a, b)
 ```
 
@@ -258,9 +258,9 @@ def normalize_return_order() -> Pass:
 - [`OutlineInCoreScopes`](09-outline_incore_scopes.md) — upstream
   producer of the `InCore` functions this pass rewrites
 - [`LowerPipelineLoops`](21-lower_pipeline_loops.md) — runs immediately
-  after; consumes the normalised returns when expanding pipeline scopes
+  after; consumes the normalized returns when expanding pipeline scopes
 - [`DeriveCallDirections`](28-derive_call_directions.md) — later
-  inspects call signatures whose return shape this pass canonicalises
+  inspects call signatures whose return shape this pass canonicalizes
 - [PTO codegen overview](../codegen/00-pto_codegen.md) and
   [orchestration codegen](../codegen/01-orchestration_codegen.md) —
   consumers of the canonical `return[i] ↔ out_indices[i]` mapping

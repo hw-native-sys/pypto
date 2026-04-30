@@ -116,7 +116,7 @@ result = passes.normalize_return_order()(program)
 | Step A 仅重写 `InCore` 函数 | 其他函数类型（`Orchestration` / `Group` / `Spmd` / opaque）遵循用户声明的返回形态；它们的调用端在 Step B 中被重映射，但函数体本身不动 |
 | `out_indices.size() > ret_to_param.size()` 时跳过 | 不完整分析不能产生越界置换 —— 保留原状，让 verifier 捕获不一致 |
 | 恒等置换 ⇒ 不重写 | 避免不必要的 `Function` 克隆，使 Pass 幂等 |
-| Step B 只处理 tuple 操作数已经是**变换后**节点的 `TupleGetItemExpr` | 新 tuple 节点可能已经替换原操作数；对原节点做基于身份的查找会拿到失效绑定 |
+| Step B 仅改写 `VisitExpr` 后 tuple 操作数仍为已记录 `Var` 的 `TupleGetItemExpr` | Mutator 保留 `Var` 节点身份，因此操作数指针在 `reordered_tuple_vars_` 中仍是有效的查找键；即便未来某次改写返回新节点，查找 post-visit 的指针也能保证正确性 |
 
 ## 示例
 
