@@ -394,7 +394,6 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
   int64_t gm_buffer_bytes = ComputeGMBufferSizeFromPipeOps(functions);
   INTERNAL_CHECK(gm_buffer_bytes > 0) << "Internal error: cross-core pipe functions found but no "
                                          "initialize_pipe ops to determine buffer size";
-  int64_t gm_buffer_elems = (gm_buffer_bytes + 3) / 4;
 
   // Propagate upward, stopping at Orchestration boundaries (they materialize
   // the buffer locally instead of taking it as a parameter).
@@ -416,6 +415,8 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
       }
     }
   }
+
+  int64_t gm_buffer_elems = (gm_buffer_bytes + 3) / 4;
 
   for (auto& func : functions) {
     if (needs_gm_param.count(func->name_) && !HasGMPipeBufferParam(func)) {

@@ -75,12 +75,19 @@ REGISTER_ORCHESTRATION_OP(tensor_create, ("tensor.create")) {
 
   std::string result_var = codegen.GetCurrentResultTarget();
   size_t ndim = result_type->shape_.size();
+  const std::string create_scale_expr = codegen.GetTensorCreateScaleExpr(result_var);
 
   std::ostringstream oss;
   oss << "uint32_t " << result_var << "_ci_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << EmitAsUint32(result_type->shape_[i], codegen);
+    std::string dim_expr = EmitAsUint32(result_type->shape_[i], codegen);
+    // Backend-side allocation expansion for injected GM pipe buffers in SPMD:
+    // keep IR shape unchanged, scale host allocation at codegen.
+    if (!create_scale_expr.empty() && ndim == 1 && i == 0) {
+      dim_expr = "static_cast<uint32_t>((" + dim_expr + ") * (" + create_scale_expr + "))";
+    }
+    oss << dim_expr;
   }
   oss << "};\n";
 
