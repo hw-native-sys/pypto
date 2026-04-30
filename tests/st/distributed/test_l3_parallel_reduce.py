@@ -108,10 +108,6 @@ class L3ParallelReduceProgram:
 class TestL3ParallelReduce:
     """L3 distributed runtime: two independent chip tasks + SubWorker reduce."""
 
-    @pytest.mark.skip(
-        reason="Multiple submit_next_level calls with different chip callables segfaults "
-        "in _chip_process_loop — runtime support pending"
-    )
     def test_execute(self, test_config):
         """End-to-end: compile + execute, verify f = (a+b) + (a-b) = 2a."""
         compiled = ir.compile(

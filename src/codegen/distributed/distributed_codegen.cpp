@@ -47,6 +47,8 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   entry_func_ = nullptr;
   all_funcs_.clear();
   used_levels_.clear();
+  hoisted_allocs_.clear();
+  host_orch_body_after_hoist_ = false;
 
   ClassifyFunctions();
   CHECK(!workers_.empty() || !orchestrators_.empty())
@@ -70,7 +72,22 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
         }
       }
     }
-    EmitFunction(best_orch);
+    // HOST-or-above orchestrator (Linqu level >= 3): split tensor.create
+    // allocations into a pre-init `_alloc_intermediates(tensors)` function so
+    // the simpler runtime can establish POSIX shared memory before fork.
+    const bool is_host_orch =
+        best_orch->level_.has_value() &&
+        ir::LevelToLinquLevel(*best_orch->level_) >= 3;  // NOLINT(bugprone-unchecked-optional-access)
+    if (is_host_orch) {
+      CollectHostOrchHoistableAllocs(best_orch);
+      EmitAllocIntermediatesFunction(best_orch);
+      host_orch_body_after_hoist_ = true;
+      EmitFunction(best_orch);
+      host_orch_body_after_hoist_ = false;
+      hoisted_allocs_.clear();
+    } else {
+      EmitFunction(best_orch);
+    }
   } else if (entry_func_) {
     EmitEntryFunction();
   }
@@ -249,6 +266,14 @@ void DistributedCodegen::VisitStmt_(const ir::AssignStmtPtr& op) {
   INTERNAL_CHECK(op != nullptr) << "Internal error: null AssignStmt";
 
   std::string var_name = SanitizeName(op->var_->name_hint_);
+
+  // If this AssignStmt was hoisted to _alloc_intermediates(tensors), the
+  // value has already been emitted in the alloc function. Register the SSA
+  // name for downstream tensors[...] references but emit nothing here.
+  if (host_orch_body_after_hoist_ && hoisted_allocs_.count(op.get())) {
+    declared_vars_.insert(var_name);
+    return;
+  }
 
   current_target_var_ = var_name;
   current_expr_value_ = "";
@@ -582,6 +607,95 @@ void DistributedCodegen::EmitTensorCreate(const ir::CallPtr& call) {
 
   declared_vars_.insert(target);
   current_expr_value_ = "";
+}
+
+// ========================================================================
+// HOST orchestrator alloc hoisting
+// ========================================================================
+
+namespace {
+
+// Returns true iff @p stmt is an AssignStmt whose value is a Call to op
+// `tensor.create`. Used to detect hoistable allocations.
+bool IsTensorCreateAssign(const ir::StmtPtr& stmt) {
+  auto assign = std::dynamic_pointer_cast<const ir::AssignStmt>(stmt);
+  if (!assign) return false;
+  auto call = std::dynamic_pointer_cast<const ir::Call>(assign->value_);
+  if (!call || !call->op_) return false;
+  return call->op_->name_ == "tensor.create";
+}
+
+// Recursively reject any `tensor.create` reachable through @p stmt — pre-init
+// hoisting requires unconditional, top-level allocations, so a tensor.create
+// nested inside control flow (if/for/scope) is unsupported. @p container
+// labels the enclosing construct for the error message.
+void RejectNestedTensorCreate(const ir::StmtPtr& stmt, const std::string& container) {
+  if (!stmt) return;
+  CHECK(!IsTensorCreateAssign(stmt)) << "pl.create_tensor in HOST orchestrator must be a top-level "
+                                        "statement (not nested inside "
+                                     << container
+                                     << "). Pre-init hoisting requires static, unconditional allocation.";
+  if (auto if_stmt = std::dynamic_pointer_cast<const ir::IfStmt>(stmt)) {
+    RejectNestedTensorCreate(if_stmt->then_body_, "if-then");
+    if (if_stmt->else_body_.has_value()) {
+      RejectNestedTensorCreate(*if_stmt->else_body_,  // NOLINT(bugprone-unchecked-optional-access)
+                               "if-else");
+    }
+  } else if (auto for_stmt = std::dynamic_pointer_cast<const ir::ForStmt>(stmt)) {
+    RejectNestedTensorCreate(for_stmt->body_, "for-loop");
+  } else if (auto seq = std::dynamic_pointer_cast<const ir::SeqStmts>(stmt)) {
+    for (const auto& s : seq->stmts_) RejectNestedTensorCreate(s, container);
+  }
+}
+
+// Returns the immediate top-level statements of a function body. The HOST
+// orchestrator body is a SeqStmts in practice; the single-stmt case is
+// handled for safety.
+std::vector<ir::StmtPtr> TopLevelStmts(const ir::StmtPtr& body) {
+  if (auto seq = std::dynamic_pointer_cast<const ir::SeqStmts>(body)) {
+    return {seq->stmts_.begin(), seq->stmts_.end()};
+  }
+  return {body};
+}
+
+}  // namespace
+
+void DistributedCodegen::CollectHostOrchHoistableAllocs(const ir::FunctionPtr& host_orch) {
+  hoisted_allocs_.clear();
+  if (!host_orch->body_) return;
+
+  for (const auto& stmt : TopLevelStmts(host_orch->body_)) {
+    if (IsTensorCreateAssign(stmt)) {
+      auto assign = std::dynamic_pointer_cast<const ir::AssignStmt>(stmt);
+      hoisted_allocs_.insert(assign.get());
+    } else {
+      // Any tensor.create reached from a non-top-level statement is an error.
+      RejectNestedTensorCreate(stmt, "control flow");
+    }
+  }
+}
+
+void DistributedCodegen::EmitAllocIntermediatesFunction(const ir::FunctionPtr& host_orch) {
+  emitter_.EmitLine("def _alloc_intermediates(tensors):");
+  emitter_.IncreaseIndent();
+  if (hoisted_allocs_.empty()) {
+    emitter_.EmitLine("pass");
+  } else {
+    // Walk top-level statements in original order; emit only hoisted allocs.
+    // Falls through the normal AssignStmt → Call → EmitTensorCreate path.
+    // host_orch_body_after_hoist_ is FALSE here so EmitTensorCreate runs
+    // unchanged. The subsequent EmitFunction(host_orch) call resets visitor
+    // state (declared_vars_, current_func_, ...), so no save/restore needed.
+    current_func_ = host_orch;
+    for (const auto& stmt : TopLevelStmts(host_orch->body_)) {
+      auto assign = std::dynamic_pointer_cast<const ir::AssignStmt>(stmt);
+      if (assign && hoisted_allocs_.count(assign.get())) {
+        VisitStmt(stmt);
+      }
+    }
+  }
+  emitter_.DecreaseIndent();
+  emitter_.EmitLine("");
 }
 
 std::string DistributedCodegen::DataTypeToPythonDType(const DataType& dtype) {
