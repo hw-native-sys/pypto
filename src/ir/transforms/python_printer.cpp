@@ -284,9 +284,12 @@ class IRPythonPrinter : public IRVisitor {
   // Return the printed name for a Var, using rename map if SSA name shadowing occurred.
   std::string GetVarName(const Var* var) const;
 
-  // Build var_rename_map_ for a function by scanning all Var def-sites in DFS pre-order.
+  // Build var_rename_map_ from a body stmt (and optional params).
   // Assigns unique suffixed names (e.g., "i", "i_1") when two distinct Vars share a name.
-  void BuildVarRenameMap(const FunctionPtr& func);
+  // Called from VisitFunction (with params) and from Print() for bare Stmt roots
+  // (no params) so that standalone stmt.as_python() also gets disambiguation.
+  void BuildVarRenameMap(const std::vector<VarPtr>& params, const StmtPtr& body);
+  void BuildVarRenameMap(const FunctionPtr& func) { BuildVarRenameMap(func->params_, func->body_); }
 
   // Print a statement block at current indent level.
   // SeqStmts is a transparent container - recursed into without extra indent.
@@ -350,6 +353,10 @@ std::string IRPythonPrinter::Print(const IRNodePtr& node) {
   } else if (auto func = As<Function>(node)) {
     VisitFunction(func);
   } else if (auto stmt = As<Stmt>(node)) {
+    // Bare-stmt roots (e.g. for_stmt.as_python(), seq.as_python()) need the
+    // same disambiguation a function body gets — without this, two distinct
+    // Var*/IterArg* sharing a name_hint collapse to one printed identifier.
+    BuildVarRenameMap({}, stmt);
     VisitStmt(stmt);
   } else if (auto expr = As<Expr>(node)) {
     VisitExpr(expr);
@@ -1370,25 +1377,26 @@ class IterArgReturnVarPairCollector : public IRVisitor {
 
 }  // namespace
 
-void IRPythonPrinter::BuildVarRenameMap(const FunctionPtr& func) {
+void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const StmtPtr& body) {
   // Collect Var/IterArg pointers in DFS pre-order: params, then body defs,
   // then body uses. Defs precede uses so a pointer appearing as both keeps
   // its def-site canonical name; pointers appearing only as uses (e.g. a
   // dangling reference from a buggy transform, or a sibling-scope iter_arg
   // sharing a name_hint) still get their own suffix. (#1244)
   std::vector<const Var*> ordered_refs;
-  for (auto& p : func->params_) ordered_refs.push_back(p.get());
+  ordered_refs.reserve(params.size());
+  for (const auto& p : params) ordered_refs.push_back(p.get());
   body_defined_vars_.clear();
   IterArgReturnVarPairCollector pair_collector;
-  if (func->body_) {
+  if (body) {
     var_collectors::VarDefUseCollector body_collector;
-    body_collector.VisitStmt(func->body_);
+    body_collector.VisitStmt(body);
     ordered_refs.insert(ordered_refs.end(), body_collector.var_defs_ordered.begin(),
                         body_collector.var_defs_ordered.end());
     ordered_refs.insert(ordered_refs.end(), body_collector.var_uses_ordered.begin(),
                         body_collector.var_uses_ordered.end());
     body_defined_vars_ = std::move(body_collector.var_defs);
-    pair_collector.VisitStmt(func->body_);
+    pair_collector.VisitStmt(body);
   }
   // Drop program-level dynamic dim vars: they are already disambiguated
   // globally in dyn_var_rename_map_, and re-registering them here would

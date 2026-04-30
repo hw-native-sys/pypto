@@ -1146,6 +1146,43 @@ def test_python_print_distinct_iter_args_same_name_hint_disambiguated():
     assert text.count("(acc_1,)") == 1
 
 
+def test_python_print_distinct_iter_args_disambiguated_at_stmt_root():
+    """Bare `seq.as_python()` (no enclosing Function) must still disambiguate
+    distinct IterArg* sharing a name_hint.
+
+    Regression for the gap CodeRabbit flagged on PR #1247: BuildVarRenameMap
+    used to run only from VisitFunction, so standalone stmt printing hit an
+    empty rename map and collapsed colliding pointers back together.
+    """
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    scalar_ty = ir.ScalarType(dtype)
+    one = ir.ConstInt(1, dtype, span)
+    n = ir.ConstInt(8, dtype, span)
+
+    def make_loop(loop_name: str, rv_name: str) -> ir.ForStmt:
+        acc = ir.IterArg("acc", scalar_ty, ir.ConstInt(0, dtype, span), span)
+        loop_var = ir.Var(loop_name, scalar_ty, span)
+        rv = ir.Var(rv_name, scalar_ty, span)
+        body = ir.YieldStmt([ir.Add(acc, one, dtype, span)], span)
+        return ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, dtype, span),
+            n,
+            ir.ConstInt(1, dtype, span),
+            [acc],
+            body,
+            [rv],
+            span,
+        )
+
+    seq = ir.SeqStmts([make_loop("i", "rv_a"), make_loop("j", "rv_b")], span)
+    text = seq.as_python()
+
+    assert "(acc,)" in text
+    assert "(acc_1,)" in text
+
+
 def test_python_print_dangling_iter_arg_use_disambiguated():
     """A body that references an IterArg pointer not present in any enclosing
     iter_args_ field must still print as a unique identifier — never collapsed
