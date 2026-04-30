@@ -178,6 +178,84 @@ class TestResolveBackendOpLayouts:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_rewrites_matrix_exp_through_row_major_move(self):
+        """`tile.exp` on a non-vector col_major tile should be repaired through `tile.move`."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                src: pl.Tile[[16, 256], pl.FP32] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                col_major: pl.Tile[
+                    [16, 256],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tile.move(
+                    src,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                result: pl.Tile[
+                    [16, 256],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tile.exp(col_major)
+                stored: pl.Tensor[[16, 256], pl.FP32] = pl.store(result, [0, 0], out)
+                return stored
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                src: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [16, 256], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                col_major: pl.Tile[
+                    [16, 256],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tile.move(
+                    src,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                col_major_rm: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.move(
+                    col_major,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                result_rm: pl.Tile[[16, 256], pl.FP32, pl.MemorySpace.Vec] = pl.tile.exp(col_major_rm)
+                result: pl.Tile[
+                    [16, 256],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tile.move(
+                    result_rm,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                stored: pl.Tensor[[16, 256], pl.FP32] = pl.store(result, [0, 0], out)
+                return stored
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
