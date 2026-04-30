@@ -107,17 +107,22 @@ FunctionPtr TransformIncoreParams(const FunctionPtr& func) {
     auto old_tensor_type = As<TensorType>(old_param->GetType());
     CHECK(old_tensor_type) << "DN candidate param must be TensorType";
 
-    // Reject the unsupported combination: tile.load(transpose=True) consuming
-    // a value that already carries explicit physical strides (i.e. a
-    // tensor.transpose result). The two encodings would compose as a double
-    // transpose at codegen time and produce wrong addresses; reconciling them
-    // requires a separate design (track follow-up for issue #1209).
+    // Reject ONLY the "tensor.transpose result + tile.load(transpose=True)"
+    // combination. tensor.transpose produces a TensorView with both DN layout
+    // AND explicit physical strides; combining that with another transpose at
+    // load time would double-encode the transpose and emit wrong addresses.
+    //
+    // Slice-derived inputs (explicit strides + ND layout, attached by
+    // OptimizeOrchTensors) still flow through the normal "promote ND → DN,
+    // drop strides" path used by matmul B^T patterns like paged_attention.
     if (old_tensor_type->tensor_view_.has_value()) {
       const auto& view = old_tensor_type->tensor_view_.value();
-      CHECK(view.stride.empty()) << "tile.load(transpose=True) on a tensor.transpose result is not "
-                                    "yet supported (DN tag and explicit physical strides need "
-                                    "reconciliation). Workaround: do the transpose at the tile level "
-                                    "via tile.load(transpose=True) directly on the source tensor.";
+      CHECK(!(view.layout == TensorLayout::DN && !view.stride.empty()))
+          << "tile.load(transpose=True) on a tensor.transpose result is not "
+             "yet supported (the DN tag and explicit physical strides would "
+             "compose as a double transpose). Workaround: do the transpose at "
+             "the tile level via tile.load(transpose=True) directly on the "
+             "source tensor.";
       if (view.layout == TensorLayout::DN) continue;
     }
 

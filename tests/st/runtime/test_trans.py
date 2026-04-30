@@ -14,8 +14,10 @@ first contiguous chunk of ``x`` in memory). The runtime ``Tensor::transpose``
 is a metadata-only swap, so the IR result must record swapped physical
 strides for the codegen to emit a correctly addressed ``make_tensor_view``.
 
-Run via pytest (requires Ascend hardware) or as a script with
-``-p {a2a3,a2a3sim,a5,a5sim}``.
+Run via pytest (requires Ascend a5/a5sim hardware) or as a script with
+``-p {a5,a5sim}``. a2a3 / a2a3sim are intentionally not advertised — that arch
+rejects ``TLOAD(VecTile_RowMajor, GlobalTensor<DN>)`` at the kernel C++ stage
+(only ``ND2ND`` / ``DN2DN`` / ``NZ2NZ`` cross-layout pairs are supported there).
 """
 
 import argparse
@@ -59,16 +61,16 @@ def _run(platform: str, device_id: int = 0) -> None:
     torch.testing.assert_close(out, expected)
 
 
-def test_transpose_slice_assemble_a5sim() -> None:
-    """Compile + run the reproducer on a5sim; assert column-h selection is correct.
+@pytest.mark.parametrize("platform", [pytest.param("a5sim", id="a5sim")])
+def test_transpose_slice_assemble(platform: str) -> None:
+    """Compile + run the reproducer; assert column-h selection is correct.
 
-    a2a3 is intentionally NOT covered: that arch's PTOAS rejects
-    ``TLOAD(VecTile_RowMajor, GlobalTensor<DN>)`` (only ``ND2ND``, ``DN2DN``,
-    and ``NZ2NZ`` cross-layout pairs are supported on a2a3). a5 lifts this
-    restriction, so DN-tagged GlobalTensor with explicit strides flows into
-    a Vec tile correctly.
+    Parametrized on ``a5sim`` only — conftest's ``--platform`` allowlist
+    intersects with this list, so a2a3 / a2a3sim runners deselect the test
+    at collection time. a5 lifts the ``TLOAD(VecTile_RowMajor, GlobalTensor<DN>)``
+    restriction that fails on a2a3 at the kernel C++ stage.
     """
-    _run("a5sim")
+    _run(platform)
 
 
 if __name__ == "__main__":
@@ -87,7 +89,7 @@ if __name__ == "__main__":
         "--platform",
         type=str,
         default="a5sim",
-        choices=["a2a3", "a2a3sim", "a5", "a5sim"],
+        choices=["a5", "a5sim"],
     )
     parser.add_argument("-d", "--device", type=int, default=0)
     args = parser.parse_args()

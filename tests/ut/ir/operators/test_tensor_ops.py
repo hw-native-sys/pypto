@@ -1166,11 +1166,12 @@ def test_tensor_transpose_dynamic_shape_records_symbolic_strides():
     assert result_type.tensor_view is not None
     assert result_type.tensor_view.layout == ir.TensorLayout.DN
     # strides[0] is the (folded) ConstInt(1) from the row-major identity;
-    # strides[1] is the symbolic dim N.
+    # strides[1] is the symbolic dim N — value-compared rather than identity-
+    # compared to stay robust against MakeIndexMul folding-rule changes.
     strides = result_type.tensor_view.stride
     assert len(strides) == 2
     assert isinstance(strides[0], ir.ConstInt) and strides[0].value == 1
-    assert strides[1] is n
+    assert strides[1] == n
 
 
 def test_tensor_transpose_explicit_valid_shape_not_swapped():

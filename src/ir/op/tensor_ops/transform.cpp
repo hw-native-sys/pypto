@@ -294,11 +294,17 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
     if (result_stride.empty() || out_layout != TensorLayout::ND) return false;
     auto canonical = BuildRowMajorStrides(new_shape);
     if (canonical.size() != result_stride.size()) return false;
+    // Equal when both are ConstInt with the same value, OR when the two
+    // ExprPtrs point to the same underlying node (covers symbolic Var dims:
+    // BuildRowMajorStrides reuses the input shape's ExprPtrs so that the
+    // round-trip transpose-of-transpose lands on identical pointers for the
+    // dynamic-shape case).
     return std::equal(canonical.begin(), canonical.end(), result_stride.begin(),
                       [](const ExprPtr& a, const ExprPtr& b) {
                         auto ca = As<ConstInt>(a);
                         auto cb = As<ConstInt>(b);
-                        return ca && cb && ca->value_ == cb->value_;
+                        if (ca && cb) return ca->value_ == cb->value_;
+                        return a == b;
                       });
   };
   bool record_stride = !result_stride.empty() && !strides_match_row_major();
