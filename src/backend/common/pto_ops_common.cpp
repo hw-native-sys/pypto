@@ -403,27 +403,7 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
 static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 4) << "Operation:[pto.tsel] requires 4 arguments, but got " << op->args_.size();
-
-  std::string mask = codegen.GetExprAsCode(op->args_[0]);
-  std::string src0 = codegen.GetExprAsCode(op->args_[1]);
-  std::string src1 = codegen.GetExprAsCode(op->args_[2]);
-  std::string tmp = codegen.GetExprAsCode(op->args_[3]);
-  std::string mask_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-  std::string src0_type = codegen.GetExprTypeAnnotation(op->args_[1]);
-  std::string src1_type = codegen.GetExprTypeAnnotation(op->args_[2]);
-  std::string tmp_type = codegen.GetExprTypeAnnotation(op->args_[3]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
-
-  std::ostringstream oss;
-  oss << "pto.tsel ins(" << mask << ", " << src0 << ", " << src1 << ", " << tmp;
-  if (!mask_type.empty() && !src0_type.empty() && !src1_type.empty() && !tmp_type.empty()) {
-    oss << " : " << mask_type << ", " << src0_type << ", " << src1_type << ", " << tmp_type;
-  }
-  oss << ") outs(" << dst;
-  if (!dst_type.empty()) oss << " : " << dst_type;
-  oss << ")";
-  codegen.Emit(oss.str());
+  codegen.Emit("pto.tsel " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
