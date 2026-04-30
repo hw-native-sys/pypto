@@ -543,6 +543,89 @@ class TestDeriveDirectionMatrix:
         assert len(calls) == 1
         assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
 
+    def test_out_param_variable_offset_store_in_seq_loop_not_promoted(self):
+        """R-seq exception: variable-offset ``tile.store`` keeps ``OutputExisting``.
+
+        When the InCore callee writes to its Out parameter via ``tile.store``
+        with an offset that depends on another function parameter (e.g.
+        ``pl.store(tile, [offset], out)`` where ``offset`` is a param),
+        the writes are position-dependent and disjoint across iterations.
+        R-seq should NOT promote to ``InOut``.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256], pl.FP32]],
+            ) -> pl.Tensor[[256], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[256], pl.FP32] = pl.store(t, [offset], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[256], pl.FP32],
+            ) -> pl.Tensor[[256], pl.FP32]:
+                for _i in pl.range(4):
+                    dst = self.kernel(x, _i * 64, dst)
+                return dst
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [
+            ir.ArgDirection.Input,
+            ir.ArgDirection.Scalar,
+            ir.ArgDirection.OutputExisting,
+        ]
+
+    def test_out_param_invariant_offset_in_seq_loop_promoted(self):
+        """R-seq: loop-invariant argument to offset param forces ``InOut``.
+
+        The callee writes via ``tile.store`` with an offset that depends on its
+        ``offset`` parameter, but the caller passes a constant (loop-invariant)
+        to that parameter.  Writes overlap across iterations, so R-seq must
+        promote to ``InOut``.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256], pl.FP32]],
+            ) -> pl.Tensor[[256], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                ret: pl.Tensor[[256], pl.FP32] = pl.store(t, [offset], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[256], pl.FP32],
+            ) -> pl.Tensor[[256], pl.FP32]:
+                for _i in pl.range(4):
+                    dst = self.kernel(x, 0, dst)
+                return dst
+
+        out = passes.derive_call_directions()(Prog)
+        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [
+            ir.ArgDirection.Input,
+            ir.ArgDirection.Scalar,
+            ir.ArgDirection.InOut,
+        ]
+
     def test_out_param_external_buffer_two_writes_second_promoted(self):
         """R-prior on external root: a prior writer-unit promotes the second to ``InOut``.
 
