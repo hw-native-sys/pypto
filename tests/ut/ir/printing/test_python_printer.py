@@ -1101,5 +1101,91 @@ def test_python_print_default_is_verbose():
     assert "x:" in result or "x :" in result
 
 
+def test_python_print_distinct_iter_args_same_name_hint_disambiguated():
+    """Two sibling ForStmts whose iter_args share name_hint must print as distinct identifiers.
+
+    Regression test for #1244: the printer used to emit `op->name_hint_` directly
+    for IterArgs (and only registered defs in the rename map), so two distinct
+    IterArg pointers with name_hint_="acc" collapsed to a single `acc` token in
+    headers and bodies, hiding pointer-identity bugs in post-pass dumps.
+    """
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    scalar_ty = ir.ScalarType(dtype)
+    one = ir.ConstInt(1, dtype, span)
+    n = ir.ConstInt(8, dtype, span)
+
+    def make_loop(loop_name: str, rv_name: str) -> tuple[ir.IterArg, ir.ForStmt]:
+        acc = ir.IterArg("acc", scalar_ty, ir.ConstInt(0, dtype, span), span)
+        loop_var = ir.Var(loop_name, scalar_ty, span)
+        rv = ir.Var(rv_name, scalar_ty, span)
+        body = ir.YieldStmt([ir.Add(acc, one, dtype, span)], span)
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, dtype, span),
+            n,
+            ir.ConstInt(1, dtype, span),
+            [acc],
+            body,
+            [rv],
+            span,
+        )
+        return acc, for_stmt
+
+    _, for_outer = make_loop("i", "acc_final_i")
+    _, for_inner = make_loop("j", "acc_final_j")
+
+    func_body = ir.SeqStmts([for_outer, for_inner], span)
+    func = ir.Function("f", [], [], func_body, span)
+    text = func.as_python()
+
+    # Both header tuples must appear, and the second one must be suffix-disambiguated.
+    assert "(acc,)" in text
+    assert "(acc_1,)" in text
+    assert text.count("(acc,)") == 1
+    assert text.count("(acc_1,)") == 1
+
+
+def test_python_print_dangling_iter_arg_use_disambiguated():
+    """A body that references an IterArg pointer not present in any enclosing
+    iter_args_ field must still print as a unique identifier — never collapsed
+    onto an unrelated in-scope IterArg sharing the same name_hint.
+
+    Mirrors the malformed-IR symptom from #1243 that motivated #1244: a
+    transform drops pointer identity and the printed dump masks the divergence.
+    """
+    span = ir.Span.unknown()
+    dtype = DataType.INT64
+    scalar_ty = ir.ScalarType(dtype)
+    one = ir.ConstInt(1, dtype, span)
+
+    in_scope_acc = ir.IterArg("acc", scalar_ty, ir.ConstInt(0, dtype, span), span)
+    stale_acc = ir.IterArg("acc", scalar_ty, ir.ConstInt(0, dtype, span), span)
+    assert stale_acc is not in_scope_acc
+
+    # Body uses `stale_acc`, but only `in_scope_acc` is in iter_args_ — a
+    # pointer-identity bug surfaced as a dangling use.
+    loop_var = ir.Var("i", scalar_ty, span)
+    rv = ir.Var("acc_final", scalar_ty, span)
+    body = ir.YieldStmt([ir.Add(stale_acc, one, dtype, span)], span)
+    for_stmt = ir.ForStmt(
+        loop_var,
+        ir.ConstInt(0, dtype, span),
+        ir.ConstInt(8, dtype, span),
+        ir.ConstInt(1, dtype, span),
+        [in_scope_acc],
+        body,
+        [rv],
+        span,
+    )
+    func = ir.Function("f", [], [], for_stmt, span)
+    text = func.as_python()
+
+    # The in-scope iter_arg keeps "acc"; the dangling use must take a suffix
+    # so the two distinct pointers are visibly different in the dump.
+    assert "(acc,)" in text
+    assert "acc_1" in text
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
