@@ -430,8 +430,12 @@ class BlockOperationsTest:
         """Element-wise comparison: output = cmp(lhs, rhs)."""
         lhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(lhs, [0, 0], [16, 16])
         rhs_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(rhs, [0, 0], [16, 16])
-        result_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.cmp(lhs_tile, rhs_tile)
-        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(result_tile, [0, 0], output)
+        result_tile: pl.Tile[[16, 32], pl.UINT8] = pl.tile.cmp(lhs_tile, rhs_tile)
+        one_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.full([16, 16], dtype=pl.FP32, value=1.0)
+        zero_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+        tmp_tile: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+        selected_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.sel(result_tile, one_tile, zero_tile, tmp_tile)
+        updated_output: pl.Tensor[[16, 16], pl.FP32] = pl.store(selected_tile, [0, 0], output)
         return updated_output
 
     @pl.function(type=pl.FunctionType.InCore)

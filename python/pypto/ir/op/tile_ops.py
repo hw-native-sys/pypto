@@ -999,7 +999,7 @@ def lrelu(tile: Expr, slope: int | float | Expr, span: Span | None = None) -> Ca
     return _ir_core.create_op_call("tile.lrelu", [tile, slope_expr], {}, actual_span)
 
 
-def sel(mask: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
+def sel(mask: Expr, lhs: Expr, rhs: Expr, tmp: Expr, span: Span | None = None) -> Call:
     """Per-element selection between two tiles using a predicate mask tile.
 
     For each element (i, j): dst[i,j] = lhs[i,j] if mask[i,j] is true, else rhs[i,j].
@@ -1009,13 +1009,14 @@ def sel(mask: Expr, lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
         mask: Predicate mask tile (TileType); encoding is target-defined
         lhs: Source tile 0, selected where mask is true (TileType)
         rhs: Source tile 1, selected where mask is false (TileType)
+        tmp: Scratch tile required by TSEL (TileType UINT8 [1, 32] on A2/A3)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for per-element tile selection
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tile.sel", [mask, lhs, rhs], {}, actual_span)
+    return _ir_core.create_op_call("tile.sel", [mask, lhs, rhs, tmp], {}, actual_span)
 
 
 def sels(lhs: Expr, rhs: Expr, select_mode: int | float | Expr, span: Span | None = None) -> Call:
@@ -1123,7 +1124,7 @@ def subs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
 
 
 def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Span | None = None) -> Call:
-    """Element-wise comparison of two tiles (returns boolean tile).
+    """Element-wise comparison of two tiles (returns a packed predicate mask tile).
 
     Args:
         lhs: Left-hand side tile (TileType)
@@ -1134,7 +1135,8 @@ def cmp(lhs: Expr, rhs: Expr, cmp_type: int = 0, span: Span | None = None) -> Ca
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for element-wise comparison
+        Call expression for a packed predicate mask tile.
+        Use tile.sel with an explicit tmp tile to materialize values.
 
     """
     actual_span = _get_span_or_capture(span)
@@ -1148,7 +1150,7 @@ def cmps(
     cmp_type: int = 0,
     span: Span | None = None,
 ) -> Call:
-    """Element-wise comparison of tile and scalar (returns boolean tile).
+    """Element-wise comparison of tile and scalar (returns a packed predicate mask tile).
 
     Args:
         lhs: Tile (TileType)
@@ -1159,7 +1161,8 @@ def cmps(
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
-        Call expression for element-wise comparison with scalar
+        Call expression for a packed predicate mask tile.
+        Use tile.sel with an explicit tmp tile to materialize values.
     """
     actual_span = _get_span_or_capture(span)
     rhs_expr = (

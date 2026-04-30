@@ -305,7 +305,7 @@ static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen&
   }
 
   if (!config_attr.empty()) {
-    oss << config_attr;
+    oss << " " << config_attr;
   }
 
   // Add type annotations after colon
@@ -397,6 +397,13 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
     }
   }
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen));
+  return "";
+}
+
+static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 4) << "Operation:[pto.tsel] requires 4 arguments, but got " << op->args_.size();
+  codegen.Emit("pto.tsel " + GenerateInsOutsClause(op, codegen));
   return "";
 }
 
@@ -523,7 +530,7 @@ static std::string MakeTileCmpCodegenPTO(const std::string& pto_op_name, const C
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments, but got "
                                << op->args_.size();
-  int mode = op->GetKwarg<int>("mode");
+  int mode = op->GetKwarg<int>("cmp_type");
   CHECK(mode >= 0 && mode < static_cast<int>(cmp_modes.size())) << "Tile cmp mode out of range: " << mode;
   std::string config_attr = "{cmpMode = #pto<cmp " + cmp_modes.at(mode) + ">}";
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen, config_attr));
@@ -569,7 +576,7 @@ static std::string MakeCmpsCodegenPTO(const std::string& pto_op_name, const Call
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "Operation:[" << pto_op_name << "] requires 2 arguments, but got "
                                << op->args_.size();
-  int mode = op->GetKwarg<int>("mode");
+  int mode = op->GetKwarg<int>("cmp_type");
   CHECK(mode >= 0 && mode < static_cast<int>(cmp_modes.size())) << "Tile cmp mode out of range: " << mode;
   std::string config_attr = "{cmpMode = #pto<cmp " + cmp_modes.at(mode) + ">}";
   codegen.Emit(pto_op_name + " " + GenerateInsOutsClause(op, codegen, config_attr));
@@ -1790,7 +1797,6 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Ternary operations (tile x tile + carry/select)
     {"tile.addc",            "pto.taddc",            3},
     {"tile.subc",            "pto.tsubc",            3},
-    {"tile.sel",             "pto.tsel",             3},
     // Tile x Scalar operations
     {"tile.adds",            "pto.tadds",            2},
     {"tile.subs",            "pto.tsubs",            2},
@@ -1919,6 +1925,17 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.transpose", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileTransposeCodegenPTO(op, codegen);
   });
+  if (exclude_ops.count("tile.sel") == 0) {
+    backend.RegisterOp("tile.sel")
+        .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+          return MakeTileSelCodegenPTO(op, codegen);
+        })
+        .set_input_layout(0, ir::TileLayout::row_major)
+        .set_input_layout(1, ir::TileLayout::row_major)
+        .set_input_layout(2, ir::TileLayout::row_major)
+        .set_input_layout(3, ir::TileLayout::row_major)
+        .set_output_layout(ir::TileLayout::row_major);
+  }
   // tile.mscatter: src and idx must be row_major (MTE3 DMA reads UB linearly)
   if (exclude_ops.count("tile.mscatter") == 0) {
     backend.RegisterOp("tile.mscatter")

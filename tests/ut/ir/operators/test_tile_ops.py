@@ -164,8 +164,12 @@ class TestTileElementwiseOps:
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.cmp(tile_a, tile_b, cmp_type=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
+                tile_c: pl.Tile[[32, 32], pl.UINT8] = pl.cmp(tile_a, tile_b, cmp_type=0)
+                one_tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.full([32, 32], dtype=pl.FP32, value=1.0)
+                zero_tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.full([32, 32], dtype=pl.FP32, value=0.0)
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                selected: pl.Tile[[32, 32], pl.FP32] = pl.sel(tile_c, one_tile, zero_tile, tmp)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(selected, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -183,8 +187,12 @@ class TestTileElementwiseOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
-                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.cmps(tile_a, 0.0, cmp_type=0)
-                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
+                tile_c: pl.Tile[[32, 32], pl.UINT8] = pl.cmps(tile_a, 0.0, cmp_type=0)
+                one_tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.full([32, 32], dtype=pl.FP32, value=1.0)
+                zero_tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.full([32, 32], dtype=pl.FP32, value=0.0)
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                selected: pl.Tile[[32, 32], pl.FP32] = pl.sel(tile_c, one_tile, zero_tile, tmp)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(selected, [0, 0], output)
                 return result
 
         ir_str = str(Program)
@@ -2064,7 +2072,8 @@ class TestTileBitwiseArithmeticOps:
                 tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
                 tile_b: pl.Tile[[32, 32], pl.FP32] = pl.load(b, [0, 0], [32, 32])
                 tile_m: pl.Tile[[32, 32], pl.FP32] = pl.load(m, [0, 0], [32, 32])
-                tile_out: pl.Tile[[32, 32], pl.FP32] = pl.sel(tile_m, tile_a, tile_b)
+                tmp: pl.Tile[[1, 32], pl.UINT8] = pl.tile.create([1, 32], dtype=pl.UINT8)
+                tile_out: pl.Tile[[32, 32], pl.FP32] = pl.sel(tile_m, tile_a, tile_b, tmp)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_out, [0, 0], output)
                 return result
 

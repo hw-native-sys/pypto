@@ -164,13 +164,15 @@
 
 ## 比较/选择（`pl.tile.*`）
 
-比较类型：`EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
+比较类型：`EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`。`cmp` 和 `cmps` 返回目标相关的
+packed predicate mask；A2/A3 上如需得到数值结果，请配合 `sel` 和显式
+`UINT8 [1, 32]` scratch tile 使用。
 
 | 名称 | 签名 | 说明 |
 | ---- | ---- | ---- |
 | `cmp` | `(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile` | 比较两个 tile |
 | `cmps` | `(lhs: Tile, rhs: int \| float \| Scalar, cmp_type: int = 0) -> Tile` | tile 与标量比较 |
-| `sel` | `(mask: Tile, lhs: Tile, rhs: Tile) -> Tile` | 选择：`mask 为真取 lhs，否则取 rhs` |
+| `sel` | `(mask: Tile, lhs: Tile, rhs: Tile, tmp: Tile) -> Tile` | 选择：`mask 为真取 lhs，否则取 rhs`；`tmp` 是 TSEL scratch |
 | `sels` | `(lhs: Tile, rhs: Tile, select_mode: int \| float \| Scalar) -> Tile` | 按标量模式选择 |
 
 ## 位运算（`pl.tile.*`）
