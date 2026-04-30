@@ -5,7 +5,7 @@ Pass 会把 per-lane 的 tile 形状减半，并重写 `tile.load`、`tile.store
 `tile.tpop_from_aic` 以指向各自的那一半。在 Ascend910B 上，本 Pass 还
 负责 **no-split 双 AIV 派发** 路径：当 `ExpandMixedKernel` 判断混合
 kernel 不可拆分时，会给 AIV 函数打上 `dual_aiv_dispatch=True` 标记，本
-Pass 据此把函数体包装为 `if subblock_idx == 0 / else`，让 AIC↔AIV 跨核
+Pass 据此把函数体包装为 `if subblock_idx == 0 ... else`，让 AIC↔AIV 跨核
 握手在两条 lane 上仍然对称（即使只有 lane 0 做真实计算）。
 
 ## 概述
@@ -220,7 +220,7 @@ class Before:
         y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
         y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
         z_tile = pl.matmul(x_left, y_right)
-        pl.tpush_to_aiv(z_tile, split=0)        # split kwarg 未设置
+        pl.tpush_to_aiv(z_tile, split=0)        # split=0 表示 "None" 哨兵值
 
     @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
     def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]):

@@ -6,7 +6,7 @@ work, halving the per-lane tile shapes and rewriting `tile.load`,
 Ascend910B, the same pass also handles the **no-split dual-AIV dispatch**
 path: when `ExpandMixedKernel` decides a mixed kernel cannot be split, it
 tags the AIV function with `dual_aiv_dispatch=True` and this pass wraps
-the body in a per-lane `if subblock_idx == 0 / else` so AIC↔AIV cross-core
+the body in a per-lane `if subblock_idx == 0 ... else` so AIC↔AIV cross-core
 handshakes stay balanced even though only lane 0 does real compute.
 
 ## Overview
@@ -229,7 +229,7 @@ class Before:
         y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
         y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
         z_tile = pl.matmul(x_left, y_right)
-        pl.tpush_to_aiv(z_tile, split=0)        # split kwarg unset
+        pl.tpush_to_aiv(z_tile, split=0)        # split=0 is the "None" sentinel
 
     @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
     def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]):
