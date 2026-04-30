@@ -93,23 +93,33 @@ class MultiAssignCollector : public IRVisitor {
 /// body into the parent scope, where a YieldStmt would no longer have a
 /// containing if/for to receive its values.
 ///
+/// Recurses through trailing SeqStmts to find the yield, mirroring
+/// `transform_utils::GetLastYieldStmt` — a well-formed control-flow body
+/// can place its terminating YieldStmt inside a nested SeqStmts wrapper.
+///
 /// Pre: @p body is a well-formed control-flow body with `return_vars`
-/// non-empty — its tail is a YieldStmt with `value_.size() == return_vars.size()`.
-std::vector<StmtPtr> RewriteTailYieldToAssigns(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
-  auto stmts = transform_utils::FlattenToStmts(body);
-  INTERNAL_CHECK(!stmts.empty()) << "Internal error: control-flow body must end with YieldStmt "
-                                    "when return_vars is non-empty";
-  auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(stmts.back());
+/// non-empty — its (possibly nested) tail is a YieldStmt with
+/// `value_.size() == return_vars.size()`.
+StmtPtr RewriteTailYieldToAssigns(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+  if (auto seq = As<SeqStmts>(body)) {
+    INTERNAL_CHECK(!seq->stmts_.empty()) << "Internal error: control-flow body must end with YieldStmt "
+                                            "when return_vars is non-empty";
+    auto rewritten = seq->stmts_;
+    rewritten.back() = RewriteTailYieldToAssigns(rewritten.back(), return_vars);
+    return loop_repair::MakeBody(rewritten, seq->span_);
+  }
+  auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(body);
   INTERNAL_CHECK(yield_stmt) << "Internal error: control-flow body tail must be YieldStmt when "
                                 "return_vars is non-empty";
   INTERNAL_CHECK(yield_stmt->value_.size() == return_vars.size())
       << "Internal error: yielded value count " << yield_stmt->value_.size()
       << " does not match return_vars count " << return_vars.size();
-  stmts.pop_back();
+  std::vector<StmtPtr> assigns;
+  assigns.reserve(return_vars.size());
   for (size_t i = 0; i < return_vars.size(); ++i) {
-    stmts.push_back(std::make_shared<AssignStmt>(return_vars[i], yield_stmt->value_[i], yield_stmt->span_));
+    assigns.push_back(std::make_shared<AssignStmt>(return_vars[i], yield_stmt->value_[i], yield_stmt->span_));
   }
-  return stmts;
+  return loop_repair::MakeBody(assigns, yield_stmt->span_);
 }
 
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
@@ -550,16 +560,19 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
   /// Lift @p kept_body into the parent scope when a control-flow fold has
   /// chosen it as the surviving branch. Rebuilds the original @p return_vars
-  /// to pick up any type simplifications, rewrites the trailing YieldStmt
-  /// into AssignStmts targeting those rebuilt vars, and wraps the result.
-  /// Shared by Fold A (IfStmt) and the one-trip case of Fold B (ForStmt).
+  /// to pick up any type simplifications and rewrites the trailing YieldStmt
+  /// into AssignStmts targeting those rebuilt vars (recursing through any
+  /// trailing SeqStmts). Shared by Fold A (IfStmt) and the one-trip case of
+  /// Fold B (ForStmt). The @p span argument is unused now that the rewrite
+  /// reuses the kept body's own span structure but is kept for caller-site
+  /// symmetry with the zero-trip path.
   StmtPtr LiftBodyToReturnVars(const StmtPtr& kept_body, const std::vector<VarPtr>& return_vars,
-                               const Span& span) {
+                               const Span& /*span*/) {
     if (return_vars.empty()) return kept_body;
     std::vector<VarPtr> rebuilt;
     rebuilt.reserve(return_vars.size());
     for (const auto& v : return_vars) rebuilt.push_back(MaybeRebuildVar(v));
-    return loop_repair::MakeBody(RewriteTailYieldToAssigns(kept_body, rebuilt), span);
+    return RewriteTailYieldToAssigns(kept_body, rebuilt);
   }
 
   std::unordered_set<const Var*> multi_assigned_;

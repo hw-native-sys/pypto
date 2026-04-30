@@ -892,7 +892,7 @@ class TestGuardedPolicy:
         AfterExplicit = passes.split_chunked_loops()(_prepare_for_split(InputExplicit))
         ir.assert_structural_equal(After, AfterExplicit)
 
-    def test_guarded_divisible_iter_args(self):
+    def test_guarded_with_iter_args(self):
         """Static bound with iter_args: trip_count not aligned to chunk_size.
 
         Trip 11 with chunk 5 → outer=3, inner=5; the guard `i_out*5 + i_in < 11`
