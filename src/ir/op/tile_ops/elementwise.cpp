@@ -21,17 +21,20 @@
  */
 
 #include <any>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -68,20 +71,22 @@ static ExprPtr MakeRoundUpIndex(const ExprPtr& value, int64_t alignment) {
 
 static std::shared_ptr<TileType> MakePackedPredicateTileType(
     const std::vector<ExprPtr>& logical_shape, const std::shared_ptr<const TileType>& source_tile_type) {
-  INTERNAL_CHECK(logical_shape.size() >= 2)
-      << "tile.cmp/tile.cmps currently require a 2D tile shape for packed predicate mask inference";
+  INTERNAL_CHECK(!logical_shape.empty())
+      << "tile.cmp/tile.cmps require a non-empty tile shape for packed predicate mask inference";
 
   constexpr int64_t kA2A3PredicateBitsPerByte = 8;
   constexpr int64_t kA2A3PredicateColAlignment = 32;
 
+  const size_t col_axis = logical_shape.size() - 1;
   std::vector<ExprPtr> mask_shape = logical_shape;
-  mask_shape[1] = MakeRoundUpIndex(MakeCeilDivIndex(logical_shape[1], kA2A3PredicateBitsPerByte),
-                                   kA2A3PredicateColAlignment);
+  mask_shape[col_axis] = MakeRoundUpIndex(
+      MakeCeilDivIndex(logical_shape[col_axis], kA2A3PredicateBitsPerByte), kA2A3PredicateColAlignment);
 
   auto logical_valid_shape = GetValidShape(source_tile_type);
   TileView tile_view;
   tile_view.valid_shape = logical_valid_shape;
-  tile_view.valid_shape[1] = MakeCeilDivIndex(logical_valid_shape[1], kA2A3PredicateBitsPerByte);
+  tile_view.valid_shape[col_axis] =
+      MakeCeilDivIndex(logical_valid_shape[col_axis], kA2A3PredicateBitsPerByte);
   InheritTileViewLayout(tile_view, source_tile_type);
   return std::make_shared<TileType>(mask_shape, DataType::UINT8, std::nullopt, tile_view);
 }
