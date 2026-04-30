@@ -60,12 +60,23 @@ Implemented by `TransformSimplify` in `src/ir/transforms/simplify_pass.cpp` in f
    - `BinaryExpr` / `UnaryExpr`: visit children, then fold the rebuilt node.
    - `CallPtr`: refresh the result `type_` so a Call whose shape arguments folded ends up structurally equal to a freshly parsed Call.
    - `AssignStmt`: bind the LHS `Var` to the simplified RHS when the type is `ScalarType` and the RHS is a `ConstInt`/`ConstFloat`/`ConstBool`, unless the LHS is in `multi_assigned_`.
-   - `ForStmt`: rebuild `iter_args_` before visiting the body so body references pick up the remapped identity; if both `start_` and `stop_` fold to `ConstInt` with `stop > start`, bind the loop var to that range while visiting the body and unbind on exit; rebuild `return_vars_` after the body so folds discovered inside are visible in return types.
-   - `IfStmt`: enter `Analyzer::GetConstraintContext(cond)` for the then branch and `Not(cond)` for the else branch.
+   - `ForStmt`: rebuild `iter_args_` before visiting the body so body references pick up the remapped identity; if both `start_` and `stop_` fold to `ConstInt` with `stop > start`, bind the loop var to that range while visiting the body and unbind on exit; rebuild `return_vars_` after the body so folds discovered inside are visible in return types. Pure single-trip and zero-trip loops are also collapsed in-place — see "Control-flow folding" below.
+   - `IfStmt`: enter `Analyzer::GetConstraintContext(cond)` for the then branch and `Not(cond)` for the else branch. Conditions the analyzer can prove are also folded — see "Control-flow folding" below.
    - `SpmdScopeStmt`: fold `core_num_` (closure arithmetic such as `MAX // TILE` may need one pass of simplification after SSA conversion).
 3. **Type rebuild** — `SimplifyType` recurses through `TensorType`, `TileType`, and `TupleType`, calling `SimplifyExpr` on every embedded expression (shape, stride, valid_shape, start_offset, view fields). Identity is preserved when nothing changes so the round-trip identity check stays cheap.
 4. **Scalar DCE** — after the mutator finishes, `dce::EliminateDeadScalarAssignments` walks the flattened body and drops scalar `AssignStmt`s whose only uses were folded away. The DCE is conservative: it never removes call-backed assignments because the IR has no purity annotations yet and a `Call` may have observable side effects.
 5. **Loop-state repair** — if DCE removed any statements, `loop_repair::MakeBody` reassembles the function body so loop-carried metadata (yield/return mappings) stays consistent.
+
+### Control-flow folding
+
+Two folds run inside the `SimplifyMutator` traversal so they share the analyzer's constraint stack with the surrounding expression-level work:
+
+- **Fold A — constant-condition `IfStmt` collapse.** After the condition is simplified, query the analyzer with `CanProve(cond)` and `CanProve(Not(cond))`. On a proof of either polarity, drop the dead branch and lift the kept branch into the parent scope. When `return_vars_` is non-empty, the kept branch's trailing `YieldStmt` is rewritten into one `AssignStmt` per `return_vars[i] = yield_values[i]` so SSA references after the IfStmt remain well-defined. Symmetric for true / false; the only edge case is "always-false with no else and empty return_vars," which collapses to an empty body.
+- **Fold B — pure single/zero-trip `ForStmt` collapse.** Fires only on *pure* sequential loops: `chunk_config_` empty, `attrs_` empty, `kind_ == ForKind::Sequential`. For these, query the analyzer for the trip count using `CanProveGreaterEqual(step, 1)` plus `CanProve(stop <= start)` (zero trips) or `CanProve(start < stop && stop <= start + step)` (one trip). On zero trips, emit one `AssignStmt(return_vars[i], iter_args[i].initValue_)` per return var and drop the body. On one trip, `DeepClone` the body with `loop_var → start` and `iter_args[i] → init_values[i]` substitutions, re-visit the cloned body so further folds happen in the same pass, and rewrite the trailing `YieldStmt` into `AssignStmt`s on `return_vars`.
+
+`DeepClone` is used (rather than an in-place `var_remap_` override) so that substitution penetrates `Var` references buried inside type annotations — e.g. `MemRef` byte_offsets that mention the loop variable. `clone_def_vars=true` is also load-bearing: `MultiAssignCollector` ran on the pre-fold IR and may have flagged scalar `Var`s defined inside the original loop body as multi-assigned (the safety check that protects pre-SSA callers). Producing fresh `Var` clones at every DefField breaks that staleness so subsequent uses of (e.g.) `cur_offset = 0` can be bound and propagated downstream.
+
+The two folds compose in a single pass: when Fold B substitutes `loop_var → 0` in a body, predicates like `if loop_var == 0` reduce to `if 0 == 0` → `ConstBool(true)`, which Fold A then collapses without a second Simplify run.
 
 ## Examples
 
@@ -130,6 +141,49 @@ return acc
 ```
 
 `CHUNK_K__ssa_v0` is bound to `512` at its `AssignStmt`. Every downstream reference — including the embedded shape inside the `TileType` of `acc` — folds to the literal during the type-rebuild phase. The now-dead binding is dropped by the DCE phase. This is the primary motivation for the post-SSA scheduling point: tile-lowering passes such as `FlattenTileNdTo2D` and `InferTileMemorySpace` see concrete shape literals instead of opaque scalar `Var`s.
+
+### Constant-condition branch (Fold A)
+
+**Before**:
+
+```python
+for i in pl.range(0, 8, 2):
+    if i == -1:
+        body_dead(i)
+    else:
+        body_live(i)
+```
+
+**After**:
+
+```python
+for i in pl.range(0, 8, 2):
+    body_live(i)
+```
+
+The analyzer binds `i ∈ [0, 8)` while visiting the loop body. `CanProve(Not(i == -1))` succeeds — the comparison is statically false — so Fold A drops the then branch and lifts the else branch into the surrounding for-body. The same path runs for always-true conditions (drops else, lifts then). When the IfStmt has `return_vars_`, the kept branch's trailing `YieldStmt` is rewritten into `AssignStmt`s on the return vars.
+
+### Single-trip loop collapse (Fold B)
+
+**Before**:
+
+```python
+for ko in pl.range(0, 128, 128):
+    if ko == 0:
+        first_iter(ko)
+    else:
+        later_iter(ko)
+```
+
+**After**:
+
+```python
+first_iter(0)
+```
+
+The trip count proof `start < stop && stop <= start + step` succeeds for `pl.range(0, 128, 128)`, so Fold B substitutes `ko → 0` (via `DeepClone`) and lifts the body. The substitution turns the inner `if ko == 0` into `if 0 == 0`, which `analyzer_->Simplify` reduces to `ConstBool(true)`. Fold A then drops the dead else branch — both folds compose in the same Simplify pass. The same path handles zero-trip loops by emitting `AssignStmt`s for each `return_vars[i] = iter_args[i].initValue_` and dropping the body entirely.
+
+Loops with `chunk_config_`, `attrs_`, or non-Sequential `kind_` are skipped — those forms participate in execution-model contracts (chunked-loop pairing, Parallel/Unroll/Pipeline scheduling) that downstream passes may depend on observing as a `ForStmt`.
 
 ## Implementation
 

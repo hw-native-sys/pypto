@@ -915,5 +915,179 @@ class TestScalarDCE:
         ir.assert_structural_equal(after, expected)
 
 
+# ============================================================================
+# Fold A: collapse IfStmt when the analyzer can prove the condition.
+# ============================================================================
+
+
+class TestConstantIfCollapse:
+    def test_always_true_keeps_then_drops_else(self):
+        """`if i < 100` with i ∈ [0, 8): analyzer proves true, then-body lifted."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    if i < 100:
+                        y: pl.Scalar[pl.INDEX] = i + 1
+                        pl.tensor.write(out, [i], y)
+                    else:
+                        z: pl.Scalar[pl.INDEX] = 99
+                        pl.tensor.write(out, [i], z)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    y: pl.Scalar[pl.INDEX] = i + 1
+                    pl.tensor.write(out, [i], y)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_always_false_keeps_else(self):
+        """`if i == -1` with i ∈ [0, 8): analyzer proves false, else-body lifted.
+
+        Mirrors the qwen3 paged-attention pattern where a chunked-loop guard
+        becomes statically dead after constant propagation.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(0, 8, 2):
+                    if i == -1:
+                        y: pl.Scalar[pl.INDEX] = 99
+                        pl.tensor.write(out, [i], y)
+                    else:
+                        y2: pl.Scalar[pl.INDEX] = i + 1
+                        pl.tensor.write(out, [i], y2)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(0, 8, 2):
+                    y2: pl.Scalar[pl.INDEX] = i + 1
+                    pl.tensor.write(out, [i], y2)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_keeps_unprovable_condition(self):
+        """`if i == 0` with i ∈ [0, 8): polarity unknown — IfStmt preserved."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(8):
+                    if i == 0:
+                        a: pl.Scalar[pl.INDEX] = i + 1
+                        pl.tensor.write(out, [i], a)
+                    else:
+                        b: pl.Scalar[pl.INDEX] = i + 2
+                        pl.tensor.write(out, [i], b)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+
+# ============================================================================
+# Fold B: collapse a pure ForStmt with provable trip count 0 or 1.
+# ============================================================================
+
+
+class TestSingleTripLoopCollapse:
+    def test_single_iteration_lifts_body(self):
+        """`for _i in pl.range(1)`: trip 1, body lifted to function level.
+
+        Body holds a tensor.create so a Call-backed AssignStmt anchors the
+        lifted body — DCE preserves Call assignments, which keeps the body's
+        only stmt observable for structural equality.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                for _i in pl.range(1):
+                    _t: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                _t: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_keeps_multi_iteration_loop(self):
+        """Trip > 1: ForStmt preserved (control test)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                for _i in pl.range(4):
+                    _t: pl.Tensor[[8], pl.FP32] = pl.tensor.create([8], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+    def test_keeps_parallel_loop_purity_guard(self):
+        """Single-trip Parallel loop: purity guard refuses to collapse Parallel kind."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                for _i in pl.parallel(1):
+                    _t: pl.Tensor[[8], pl.FP32] = pl.tensor.create([8], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
+
+
+# ============================================================================
+# Fold A composes with Fold B in a single Simplify run: Fold B substitutes
+# loop_var with a literal, exposing always-true/always-false predicates that
+# Fold A then collapses, all in one traversal.
+# ============================================================================
+
+
+class TestFoldComposition:
+    def test_single_trip_loop_then_constant_if(self):
+        """`for ko in pl.range(0, 128, 128): if ko == 0:` collapses fully.
+
+        After Fold B substitutes ko → 0, the inner `0 == 0` reduces to
+        ConstBool(true) and Fold A drops the IfStmt, leaving only the
+        then-body's contents.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                for ko in pl.range(0, 128, 128):
+                    if ko == 0:
+                        _t: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+                    else:
+                        _t2: pl.Tensor[[32], pl.FP32] = pl.tensor.create([32], dtype=pl.FP32)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                _t: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -893,14 +893,19 @@ class TestGuardedPolicy:
         ir.assert_structural_equal(After, AfterExplicit)
 
     def test_guarded_divisible_iter_args(self):
-        """Static bound, trip_count divisible by chunk_size, with iter_args."""
+        """Static bound with iter_args: trip_count not aligned to chunk_size.
+
+        Trip 11 with chunk 5 → outer=3, inner=5; the guard `i_out*5 + i_in < 11`
+        is sometimes false (last outer chunk has spillover at i_in=1..4), so
+        Simplify cannot prove it dead and leaves the IfStmt intact.
+        """
 
         @pl.program
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for _i in pl.range(10, chunk=5, chunk_policy="guarded"):
+                    for _i in pl.range(11, chunk=5, chunk_policy="guarded"):
                         x = pl.add(x, 1.0)
                 return x
 
@@ -912,14 +917,14 @@ class TestGuardedPolicy:
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_out, (x_outer,) in pl.range(
-                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                        3, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         for i_in, (x_inner,) in pl.range(
                             5,
                             init_values=(x_outer,),
                             attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
                         ):
-                            if i_out * 5 + i_in < 10:
+                            if i_out * 5 + i_in < 11:
                                 x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
                                 x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                             else:
@@ -1039,14 +1044,18 @@ class TestGuardedPolicy:
         ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_with_step(self):
-        """Non-unit step: guard compares `idx * step < stop`, idx = (out*C + in)."""
+        """Non-unit step: guard compares `idx * step < stop`, idx = (out*C + in).
+
+        range(0, 22, 2) has 11 trips; with chunk=5 → outer=3, inner=5; guard
+        `(i_out*5 + i_in)*2 < 22` is sometimes false in the last outer chunk.
+        """
 
         @pl.program
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for _i in pl.range(0, 20, 2, chunk=5, chunk_policy="guarded"):
+                    for _i in pl.range(0, 22, 2, chunk=5, chunk_policy="guarded"):
                         x = pl.add(x, 1.0)
                 return x
 
@@ -1058,14 +1067,14 @@ class TestGuardedPolicy:
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_out, (x_outer,) in pl.range(
-                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                        3, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         for i_in, (x_inner,) in pl.range(
                             5,
                             init_values=(x_outer,),
                             attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
                         ):
-                            if (i_out * 5 + i_in) * 2 < 20:
+                            if (i_out * 5 + i_in) * 2 < 22:
                                 x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
                                 x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                             else:
@@ -1077,14 +1086,18 @@ class TestGuardedPolicy:
         ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_parallel(self):
-        """pl.parallel: both outer and inner guarded loops are Parallel kind."""
+        """pl.parallel: both outer and inner guarded loops are Parallel kind.
+
+        Trip 9 with chunk 4 → outer=3, inner=4; guard `i_out*4 + i_in < 9` is
+        sometimes false (last outer chunk's i_in=1..3), so Simplify keeps it.
+        """
 
         @pl.program
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for _i in pl.parallel(8, chunk=4, chunk_policy="guarded"):
+                    for _i in pl.parallel(9, chunk=4, chunk_policy="guarded"):
                         x = pl.add(x, 1.0)
                 return x
 
@@ -1096,14 +1109,14 @@ class TestGuardedPolicy:
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_out, (x_outer,) in pl.parallel(
-                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                        3, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         for i_in, (x_inner,) in pl.parallel(
                             4,
                             init_values=(x_outer,),
                             attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
                         ):
-                            if i_out * 4 + i_in < 8:
+                            if i_out * 4 + i_in < 9:
                                 x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
                                 x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
                             else:
@@ -1239,6 +1252,8 @@ class TestGuardedPolicy:
         """Nested guarded loops: inner guarded loop lives inside outer's then-branch.
 
         Verifies iter_args thread correctly through both levels of IfStmt phi.
+        Outer trip=9 / chunk=4 keeps the outer guard non-trivially-true (last
+        chunk has i_in=1..3 spillover); inner trip=3 / chunk=2 likewise.
         """
 
         @pl.program
@@ -1246,7 +1261,7 @@ class TestGuardedPolicy:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-                    for _i in pl.parallel(8, chunk=4, chunk_policy="guarded"):
+                    for _i in pl.parallel(9, chunk=4, chunk_policy="guarded"):
                         for _j in pl.parallel(3, chunk=2, chunk_policy="guarded"):
                             x = pl.add(x, 1.0)
                 return x
@@ -1259,14 +1274,14 @@ class TestGuardedPolicy:
             def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
                     for i_out, (x_outer,) in pl.parallel(
-                        2, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                        3, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
                     ):
                         for i_in, (x_inner,) in pl.parallel(
                             4,
                             init_values=(x_outer,),
                             attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
                         ):
-                            if i_out * 4 + i_in < 8:
+                            if i_out * 4 + i_in < 9:
                                 for j_out, (x_j_outer,) in pl.parallel(
                                     2,
                                     init_values=(x_inner,),
