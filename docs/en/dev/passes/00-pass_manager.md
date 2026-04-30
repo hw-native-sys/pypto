@@ -393,7 +393,7 @@ constrained use site, where row-major is inferred from the target shape.
 It then reshapes the result back to the original vector shape when
 needed.
 
-`NormalizeReturnOrder` reorders `ReturnStmt::value_` in InCore functions so that
+[`NormalizeReturnOrder`](20-normalize_return_order.md) reorders `ReturnStmt::value_` in InCore functions so that
 `return[i]` corresponds to the i-th `Out`/`InOut` parameter in declaration order,
 and updates `TupleGetItemExpr` indices at call sites accordingly. This lets
 orchestration codegen map tuple element indices to output parameters with a

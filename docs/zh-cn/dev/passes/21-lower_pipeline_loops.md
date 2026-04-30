@@ -10,7 +10,7 @@
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
-**流水线位置**: 位于 `NormalizeReturnOrder` 之后、`InitMemRef` 之前（slot 20.5）。此时 tile 结构决策已完成；同时早于 `InitMemRef`/`MemoryReuse`，使其看到每个副本独立的 tile 变量。
+**流水线位置**: 位于 [`NormalizeReturnOrder`](20-normalize_return_order.md) 之后、`InitMemRef` 之前（slot 20.5）。此时 tile 结构决策已完成；同时早于 `InitMemRef`/`MemoryReuse`，使其看到每个副本独立的 tile 变量。
 
 ## API
 
