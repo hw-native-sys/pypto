@@ -369,7 +369,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 5. `NormalizeStmtStructure`
 6. `ExpandMixedKernel`
 7. [`InjectGMPipeBuffer`](18-inject_gm_pipe_buffer.md)
-8. `SplitVectorKernel`
+8. [`SplitVectorKernel`](19-split_vector_kernel.md)
 9. `NormalizeReturnOrder`
 10. [`LowerPipelineLoops`](21-lower_pipeline_loops.md)
 11. [`CanonicalizeIOOrder`](22-canonicalize_io_order.md)

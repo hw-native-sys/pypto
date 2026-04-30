@@ -31,7 +31,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 16 | `16-resolve_backend_op_layouts.md` | 16th pass |
 | 17 | `17-expand_mixed_kernel.md` | 17th pass |
 | 18 | `18-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
-| 19 | *(no doc yet)* | 19th pass (`SplitVectorKernel`) |
+| 19 | `19-split_vector_kernel.md` | 19th pass |
 | 20 | `20-normalize_return_order.md` | 20th pass |
 | 21 | `21-lower_pipeline_loops.md` | 21st pass |
 | 22 | `22-canonicalize_io_order.md` | 22nd pass |
