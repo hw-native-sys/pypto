@@ -87,11 +87,19 @@ class MultiAssignCollector : public IRVisitor {
   int nesting_depth_ = 0;
 };
 
-/// Replace the trailing YieldStmt of @p body with AssignStmts that bind
-/// `return_vars[i] = yield_values[i]`. Used by control-flow folds (Fold A
-/// for IfStmt, Fold B for ForStmt) that lift a kept branch / unrolled
-/// body into the parent scope, where a YieldStmt would no longer have a
-/// containing if/for to receive its values.
+/// Strip the trailing YieldStmt from @p body and return both the stripped
+/// body and the yielded values that the caller should bind into its
+/// var_remap_ as `return_vars[i] → yielded_values[i]`. Used by control-flow
+/// folds (Fold A for IfStmt, Fold B for ForStmt) that lift a kept branch /
+/// unrolled body into the parent scope.
+///
+/// Substituting return_vars via var_remap_ (rather than emitting a literal
+/// `AssignStmt(return_var, yielded)`) avoids creating alias assignments that
+/// the orchestration codegen's role-aware name disambiguation cannot lower
+/// cleanly — e.g. `out__rv_v2 = out__co_l0_rv_v3` printing as
+/// `auto out = out;` because both vars share the role-derived base name
+/// `out`. The substituted form lets subsequent SimplifyMutator visits
+/// (including the function's ReturnStmt) read the yielded value directly.
 ///
 /// Recurses through trailing SeqStmts to find the yield, mirroring
 /// `transform_utils::GetLastYieldStmt` — a well-formed control-flow body
@@ -100,26 +108,31 @@ class MultiAssignCollector : public IRVisitor {
 /// Pre: @p body is a well-formed control-flow body with `return_vars`
 /// non-empty — its (possibly nested) tail is a YieldStmt with
 /// `value_.size() == return_vars.size()`.
-StmtPtr RewriteTailYieldToAssigns(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+struct StrippedYield {
+  StmtPtr body;                         ///< @p body with the trailing YieldStmt removed.
+  std::vector<ExprPtr> yielded_values;  ///< Values from the removed YieldStmt, one per return_var.
+};
+
+StrippedYield StripTrailingYield(const StmtPtr& body, size_t return_var_count) {
   if (auto seq = As<SeqStmts>(body)) {
     INTERNAL_CHECK(!seq->stmts_.empty()) << "Internal error: control-flow body must end with YieldStmt "
                                             "when return_vars is non-empty";
-    auto rewritten = seq->stmts_;
-    rewritten.back() = RewriteTailYieldToAssigns(rewritten.back(), return_vars);
-    return loop_repair::MakeBody(rewritten, seq->span_);
+    auto stripped = seq->stmts_;
+    auto inner = StripTrailingYield(stripped.back(), return_var_count);
+    if (inner.body) {
+      stripped.back() = inner.body;
+    } else {
+      stripped.pop_back();
+    }
+    return {loop_repair::MakeBody(stripped, seq->span_), std::move(inner.yielded_values)};
   }
   auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(body);
   INTERNAL_CHECK(yield_stmt) << "Internal error: control-flow body tail must be YieldStmt when "
                                 "return_vars is non-empty";
-  INTERNAL_CHECK(yield_stmt->value_.size() == return_vars.size())
+  INTERNAL_CHECK(yield_stmt->value_.size() == return_var_count)
       << "Internal error: yielded value count " << yield_stmt->value_.size()
-      << " does not match return_vars count " << return_vars.size();
-  std::vector<StmtPtr> assigns;
-  assigns.reserve(return_vars.size());
-  for (size_t i = 0; i < return_vars.size(); ++i) {
-    assigns.push_back(std::make_shared<AssignStmt>(return_vars[i], yield_stmt->value_[i], yield_stmt->span_));
-  }
-  return loop_repair::MakeBody(assigns, yield_stmt->span_);
+      << " does not match return_vars count " << return_var_count;
+  return {/*body=*/nullptr, yield_stmt->value_};
 }
 
 class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
@@ -277,7 +290,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         // Re-visit so any algebraic patterns exposed by the substitution
         // (e.g. `0 + 64 → 64`) fold in this same Simplify run.
         auto unrolled_body = VisitStmt(cloned.cloned_body);
-        return LiftBodyToReturnVars(unrolled_body, op->return_vars_, sp);
+        return LiftBodyToReturnVars(unrolled_body, op->return_vars_);
       }
     }
 
@@ -371,7 +384,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
             << "Internal error: IfStmt with no else branch must have empty return_vars_";
         return loop_repair::MakeBody({}, op->span_);
       }
-      return LiftBodyToReturnVars(kept, op->return_vars_, op->span_);
+      return LiftBodyToReturnVars(kept, op->return_vars_);
     }
 
     bool changed = (new_condition.get() != op->condition_.get()) ||
@@ -559,20 +572,23 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   /// Lift @p kept_body into the parent scope when a control-flow fold has
-  /// chosen it as the surviving branch. Rebuilds the original @p return_vars
-  /// to pick up any type simplifications and rewrites the trailing YieldStmt
-  /// into AssignStmts targeting those rebuilt vars (recursing through any
-  /// trailing SeqStmts). Shared by Fold A (IfStmt) and the one-trip case of
-  /// Fold B (ForStmt). The @p span argument is unused now that the rewrite
-  /// reuses the kept body's own span structure but is kept for caller-site
-  /// symmetry with the zero-trip path.
-  StmtPtr LiftBodyToReturnVars(const StmtPtr& kept_body, const std::vector<VarPtr>& return_vars,
-                               const Span& /*span*/) {
+  /// chosen it as the surviving branch. Strips the trailing YieldStmt and
+  /// records `return_vars[i] → yielded_value[i]` in `var_remap_` so any
+  /// downstream uses (subsequent siblings, ReturnStmt) read the yielded
+  /// value directly. Shared by Fold A (IfStmt) and the one-trip case of
+  /// Fold B (ForStmt).
+  ///
+  /// Substituting via var_remap_ (rather than emitting `AssignStmt(rv, val)`)
+  /// avoids alias assignments that the orchestration codegen lowers
+  /// incorrectly when both sides derive from a role-tagged parameter name
+  /// (e.g. both vars have base name "out", producing `auto out = out;`).
+  StmtPtr LiftBodyToReturnVars(const StmtPtr& kept_body, const std::vector<VarPtr>& return_vars) {
     if (return_vars.empty()) return kept_body;
-    std::vector<VarPtr> rebuilt;
-    rebuilt.reserve(return_vars.size());
-    for (const auto& v : return_vars) rebuilt.push_back(MaybeRebuildVar(v));
-    return RewriteTailYieldToAssigns(kept_body, rebuilt);
+    auto stripped = StripTrailingYield(kept_body, return_vars.size());
+    for (size_t i = 0; i < return_vars.size(); ++i) {
+      var_remap_[return_vars[i].get()] = stripped.yielded_values[i];
+    }
+    return stripped.body ? stripped.body : loop_repair::MakeBody({}, kept_body->span_);
   }
 
   std::unordered_set<const Var*> multi_assigned_;
