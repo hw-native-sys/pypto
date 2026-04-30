@@ -1189,7 +1189,7 @@ def cmp(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile:
         cmp_type: Comparison type (EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5)
 
     Returns:
-        Tile wrapping the cmp operation
+        Tile wrapping a packed predicate mask. Use tile.sel with an explicit tmp tile to materialize values.
     """
     call_expr = _ir_ops.cmp(lhs.unwrap(), rhs.unwrap(), cmp_type)
     return Tile(expr=call_expr)
@@ -1204,7 +1204,7 @@ def cmps(lhs: Tile, rhs: int | float | Expr | Scalar, cmp_type: int = 0) -> Tile
         cmp_type: Comparison type (EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5)
 
     Returns:
-        Tile wrapping the cmps operation
+        Tile wrapping a packed predicate mask. Use tile.sel with an explicit tmp tile to materialize values.
     """
     rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
     call_expr = _ir_ops.cmps(lhs.unwrap(), rhs_expr, cmp_type)
@@ -1758,7 +1758,7 @@ def lrelu(tile: Tile, slope: int | float | Expr | Scalar) -> Tile:
     return Tile(expr=call_expr)
 
 
-def sel(mask: Tile, lhs: Tile, rhs: Tile) -> Tile:
+def sel(mask: Tile, lhs: Tile, rhs: Tile, tmp: Tile) -> Tile:
     """Per-element selection between two tiles using a predicate mask tile.
 
     For each element (i, j): dst[i,j] = lhs[i,j] if mask[i,j] is true, else rhs[i,j].
@@ -1768,11 +1768,12 @@ def sel(mask: Tile, lhs: Tile, rhs: Tile) -> Tile:
         mask: Predicate mask tile; encoding is target-defined
         lhs: Source tile 0, selected where mask is true
         rhs: Source tile 1, selected where mask is false
+        tmp: Scratch tile required by TSEL (UINT8 [1, 32] on A2/A3)
 
     Returns:
         Tile wrapping the sel operation
     """
-    call_expr = _ir_ops.sel(mask.unwrap(), lhs.unwrap(), rhs.unwrap())
+    call_expr = _ir_ops.sel(mask.unwrap(), lhs.unwrap(), rhs.unwrap(), tmp.unwrap())
     return Tile(expr=call_expr)
 
 

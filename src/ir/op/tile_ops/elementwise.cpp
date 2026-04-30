@@ -31,6 +31,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -43,6 +44,46 @@ static std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>&
     return tile_type->tile_view_->valid_shape;
   }
   return tile_type->shape_;
+}
+
+static ExprPtr MakeIndexConst(int64_t value, const Span& span = Span::unknown()) {
+  return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+}
+
+static ExprPtr MakeCeilDivIndex(const ExprPtr& value, int64_t divisor) {
+  if (auto const_value = As<ConstInt>(value)) {
+    return MakeIndexConst((const_value->value_ + divisor - 1) / divisor, value->span_);
+  }
+  return MakeFloorDiv(MakeAdd(value, MakeIndexConst(divisor - 1, value->span_), value->span_),
+                      MakeIndexConst(divisor, value->span_), value->span_);
+}
+
+static ExprPtr MakeRoundUpIndex(const ExprPtr& value, int64_t alignment) {
+  if (auto const_value = As<ConstInt>(value)) {
+    const int64_t rounded = ((const_value->value_ + alignment - 1) / alignment) * alignment;
+    return MakeIndexConst(rounded, value->span_);
+  }
+  return MakeMul(MakeCeilDivIndex(value, alignment), MakeIndexConst(alignment, value->span_), value->span_);
+}
+
+static std::shared_ptr<TileType> MakePackedPredicateTileType(
+    const std::vector<ExprPtr>& logical_shape, const std::shared_ptr<const TileType>& source_tile_type) {
+  INTERNAL_CHECK(logical_shape.size() >= 2)
+      << "tile.cmp/tile.cmps currently require a 2D tile shape for packed predicate mask inference";
+
+  constexpr int64_t kA2A3PredicateBitsPerByte = 8;
+  constexpr int64_t kA2A3PredicateColAlignment = 32;
+
+  std::vector<ExprPtr> mask_shape = logical_shape;
+  mask_shape[1] = MakeRoundUpIndex(MakeCeilDivIndex(logical_shape[1], kA2A3PredicateBitsPerByte),
+                                   kA2A3PredicateColAlignment);
+
+  auto logical_valid_shape = GetValidShape(source_tile_type);
+  TileView tile_view;
+  tile_view.valid_shape = logical_valid_shape;
+  tile_view.valid_shape[1] = MakeCeilDivIndex(logical_valid_shape[1], kA2A3PredicateBitsPerByte);
+  InheritTileViewLayout(tile_view, source_tile_type);
+  return std::make_shared<TileType>(mask_shape, DataType::UINT8, std::nullopt, tile_view);
 }
 
 TypePtr DeduceTileOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
@@ -712,13 +753,13 @@ REGISTER_OP("tile.lrelu")
       return DeduceTileOpScalarBinaryType(args, kwargs, "tile.lrelu");
     });
 
-// Type deduction for tile.sel (MaskTile x Tile x Tile -> Tile)
+// Type deduction for tile.sel (MaskTile x Tile x Tile x TmpTile -> Tile)
 // The mask tile encodes per-element predicates in a target-defined layout; its dtype/shape
 // do not influence the output type.  Output type is derived from lhs and rhs only.
 TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs,
                           const std::string& op_name) {
-  CHECK(args.size() == 3) << "The operator " << op_name << " requires exactly 3 arguments, but got "
+  CHECK(args.size() == 4) << "The operator " << op_name << " requires exactly 4 arguments, but got "
                           << args.size();
 
   CHECK(As<TileType>(args[0]->GetType()))
@@ -733,6 +774,9 @@ TypePtr DeduceTileSelType(const std::vector<ExprPtr>& args,
   CHECK(tile_type2) << "The operator " << op_name
                     << " requires third argument (rhs) to be a TileType, but got "
                     << args[2]->GetType()->TypeName();
+  CHECK(As<TileType>(args[3]->GetType()))
+      << "The operator " << op_name << " requires fourth argument (tmp) to be a TileType, but got "
+      << args[3]->GetType()->TypeName();
 
   auto result_dtype = PromoteDataTypes(tile_type1->dtype_, tile_type2->dtype_);
   CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
@@ -759,9 +803,11 @@ REGISTER_OP("tile.sel")
     .add_argument("mask", "Predicate mask tile; encoding is target-defined (TileType)")
     .add_argument("lhs", "Source tile 0, selected where mask is true (TileType)")
     .add_argument("rhs", "Source tile 1, selected where mask is false (TileType)")
+    .add_argument("tmp", "Scratch tile required by TSEL (TileType UINT8 [1, 32])")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
+    .set_input_memory(3, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -848,43 +894,25 @@ TypePtr DeduceTileCmpType(const std::vector<ExprPtr>& args,
                        << " requires second argument to be a ScalarType, but got "
                        << args[1]->GetType()->TypeName();
 
-    // Result has same shape as tile, with promoted dtype
-    auto result_dtype = PromoteDataTypes(tile_type1->dtype_, scalar_type->dtype_);
-    CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
-                        << tile_type1->dtype_.ToString() << " and " << scalar_type->dtype_.ToString();
-
-    TileView tile_view;
-    tile_view.valid_shape = GetValidShape(tile_type1);
-    InheritTileViewLayout(tile_view, tile_type1);
-    return std::make_shared<TileType>(tile_type1->shape_, *result_dtype, std::nullopt, tile_view);
+    return MakePackedPredicateTileType(tile_type1->shape_, tile_type1);
   } else {
     // Second argument must be TileType
     auto tile_type2 = As<TileType>(args[1]->GetType());
     CHECK(tile_type2) << "The operator " << op_name << " requires second argument to be a TileType, but got "
                       << args[1]->GetType()->TypeName();
 
-    // Use broadcasting
-    auto result_dtype = PromoteDataTypes(tile_type1->dtype_, tile_type2->dtype_);
-    CHECK(result_dtype) << "The operator " << op_name << " requires compatible data types, but got "
-                        << args[0]->GetType()->TypeName() << " and " << args[1]->GetType()->TypeName();
-
     auto broadcast_result = BroadcastShapes(tile_type1->shape_, tile_type2->shape_);
     CHECK(broadcast_result.success) << "The operator " << op_name << " requires compatible shapes, but got "
                                     << FormatShape(tile_type1->shape_) << " and "
                                     << FormatShape(tile_type2->shape_);
 
-    // TODO(YunjiQin): assumes both src tiles have the same valid_shape; may need refinement
-    // for cases where lhs and rhs have different valid_shapes (e.g. after broadcasting).
-    TileView tile_view;
-    tile_view.valid_shape = GetValidShape(tile_type1);
-    InheritTileViewLayout(tile_view, tile_type1);
-    return std::make_shared<TileType>(broadcast_result.shape, *result_dtype, std::nullopt, tile_view);
+    return MakePackedPredicateTileType(broadcast_result.shape, tile_type1);
   }
 }
 
 REGISTER_OP("tile.cmp")
     .set_op_category("TileOp")
-    .set_description("Element-wise comparison of two tiles (returns boolean tile)")
+    .set_description("Element-wise comparison of two tiles (returns a packed predicate mask tile)")
     .add_argument("lhs", "Left-hand side tile (TileType)")
     .add_argument("rhs", "Right-hand side tile (TileType)")
     .set_attr<int>("cmp_type")
@@ -898,7 +926,7 @@ REGISTER_OP("tile.cmp")
 
 REGISTER_OP("tile.cmps")
     .set_op_category("TileOp")
-    .set_description("Element-wise comparison of tile and scalar (returns boolean tile)")
+    .set_description("Element-wise comparison of tile and scalar (returns a packed predicate mask tile)")
     .add_argument("lhs", "Tile (TileType)")
     .add_argument("rhs", "Scalar (ScalarType)")
     .set_attr<int>("cmp_type")

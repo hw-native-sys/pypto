@@ -169,13 +169,15 @@ Transfer data between memory hierarchy levels.
 
 ## Comparison / Selection (`pl.tile.*`)
 
-Compare types: `EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`
+Compare types: `EQ=0, NE=1, LT=2, LE=3, GT=4, GE=5`. `cmp` and `cmps` return
+a target-packed predicate mask; use `sel` with an explicit `UINT8 [1, 32]`
+scratch tile to materialize numeric results on A2/A3.
 
 | Name | Signature | Description |
 | ---- | --------- | ----------- |
 | `cmp` | `(lhs: Tile, rhs: Tile, cmp_type: int = 0) -> Tile` | Compare two tiles |
 | `cmps` | `(lhs: Tile, rhs: int \| float \| Scalar, cmp_type: int = 0) -> Tile` | Compare tile with scalar |
-| `sel` | `(mask: Tile, lhs: Tile, rhs: Tile) -> Tile` | Select: `lhs if mask else rhs` |
+| `sel` | `(mask: Tile, lhs: Tile, rhs: Tile, tmp: Tile) -> Tile` | Select: `lhs if mask else rhs`; `tmp` is TSEL scratch |
 | `sels` | `(lhs: Tile, rhs: Tile, select_mode: int \| float \| Scalar) -> Tile` | Select by scalar mode |
 
 ## Bitwise (`pl.tile.*`)
