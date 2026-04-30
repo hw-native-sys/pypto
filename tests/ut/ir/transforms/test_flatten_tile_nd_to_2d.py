@@ -1713,6 +1713,7 @@ class TestNdTensorMatmulConversion:
         assert "tile.batch_matmul_acc" not in names_flatten
         assert names_flatten.count("tile.matmul") == 1
         assert names_flatten.count("tile.matmul_acc") == 1
+        assert "tile.slice" not in names_flatten
 
     def test_singleton_batch_acc_init_stays_acc_in_loop(self):
         """A batch=1 dummy accumulator init should flatten directly to Acc.
@@ -1783,8 +1784,10 @@ class TestNdTensorMatmulConversion:
 
         assert "tile.batch_matmul" not in ir_str
         assert "tile.batch_matmul_acc" not in ir_str
+        assert "tile.slice" not in ir_str
         assert "tile.move" not in ir_str
         assert "target_memory=pl.Mem.Acc" in ir_str
+        assert "pl.Mem.Acc, pl.TileView(blayout=pl.TileLayout.row_major" not in ir_str
 
 
 if __name__ == "__main__":

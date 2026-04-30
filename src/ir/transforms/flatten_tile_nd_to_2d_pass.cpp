@@ -689,11 +689,21 @@ BatchPageResult ExtractBatchPage(const BatchOperandInfo& info, const std::vector
 
   } else if (operand_type->shape_.size() == 2) {
     // Strategy 2: Slice from already-flattened 2D tile.
-    auto offset = MakeShapeTupleFromInts({batch_index * source_rows, 0}, span);
-    auto shape = MakeShapeTupleFromInts({source_rows, source_cols}, span);
-    auto slice = op_registry.Create("tile.slice", {operand, shape, offset}, span);
-    current = std::make_shared<Var>(base_name + "_slice_" + suffix, slice->GetType(), span);
-    page.stmts.push_back(std::make_shared<AssignStmt>(current, slice, span));
+    auto flat_rows = As<ConstInt>(operand_type->shape_[0]);
+    auto flat_cols = As<ConstInt>(operand_type->shape_[1]);
+    if (batch_index == 0 && flat_rows && flat_cols && flat_rows->value_ == source_rows &&
+        flat_cols->value_ == source_cols) {
+      // Singleton-batch operands are already the exact 2D page. Avoid a full-tile
+      // slice, which would lower to an unsupported Mat->Mat tmov on a2a3.
+      current = AsVarLike(operand);
+      CHECK(current) << "FlattenTileNdTo2D: expected 2D batch_matmul operand to be Var-like";
+    } else {
+      auto offset = MakeShapeTupleFromInts({batch_index * source_rows, 0}, span);
+      auto shape = MakeShapeTupleFromInts({source_rows, source_cols}, span);
+      auto slice = op_registry.Create("tile.slice", {operand, shape, offset}, span);
+      current = std::make_shared<Var>(base_name + "_slice_" + suffix, slice->GetType(), span);
+      page.stmts.push_back(std::make_shared<AssignStmt>(current, slice, span));
+    }
 
   } else {
     // Strategy 3: rank>2 tile.slice + tile.reshape to 2D.
@@ -1682,12 +1692,25 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         }
 
         auto new_kwargs = call->kwargs_;
-        if (singleton_batch_acc_init_vars.count(assign->var_.get())) {
+        bool force_acc_init = singleton_batch_acc_init_vars.count(assign->var_.get()) != 0;
+        if (force_acc_init) {
           // Batch=1 matmul_acc lowers to tile.matmul_acc; keep its loop init in Acc
           // instead of round-tripping a dummy accumulator through Vec.
           new_kwargs = WithTargetMemory(new_kwargs, MemorySpace::Acc);
         }
         auto new_call = op_registry.Create(op_name, new_args, new_kwargs, span);
+        if (force_acc_init) {
+          auto new_call_tile = As<TileType>(new_call->GetType());
+          CHECK(new_call_tile) << "FlattenTileNdTo2D: expected flattened accumulator init to be TileType";
+          // Refresh the old N-D/default TileView when changing the dummy init
+          // to Acc so memory reuse sees the same layout as matmul outputs.
+          auto acc_view = tile_view_semantics::GetImplicitTileView(new_call_tile->shape_, MemorySpace::Acc);
+          auto acc_type =
+              std::make_shared<TileType>(new_call_tile->shape_, new_call_tile->dtype_, new_call_tile->memref_,
+                                         std::move(acc_view), MemorySpace::Acc);
+          new_call = std::make_shared<Call>(new_call->op_, new_call->args_, new_call->kwargs_,
+                                            std::move(acc_type), new_call->span_);
+        }
         auto flat_var =
             std::make_shared<Var>(assign->var_->name_hint_, new_call->GetType(), assign->var_->span_);
         result.push_back(std::make_shared<AssignStmt>(flat_var, new_call, assign->span_));
