@@ -261,7 +261,7 @@ for i in pl.unroll(12, chunk=4):
 ### While Loop (SSA-style with iter_args)
 
 ```python
-# Natural while: condition is the for-header expression
+# Natural while: condition is the while-header expression
 i: pl.Scalar[pl.INT64] = 0
 while i < n:
     i = i + 1

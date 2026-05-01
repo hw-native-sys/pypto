@@ -405,7 +405,7 @@ class TestYieldLHSRequired:
     post-loop binding name (uniform convention across both loop forms)."""
 
     def test_pl_range_bare_yield_with_init_values_rejected(self):
-        with pytest.raises(ParserSyntaxError, match="requires an assignment-form pl.yield_"):
+        with pytest.raises(ParserSyntaxError, match=r"requires an assignment-form pl\.yield_"):
 
             @pl.function
             def bad_range(x_0: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
@@ -414,7 +414,7 @@ class TestYieldLHSRequired:
                 return x_iter  # noqa: F821
 
     def test_pl_while_bare_yield_with_init_values_rejected(self):
-        with pytest.raises(ParserSyntaxError, match="requires an assignment-form pl.yield_"):
+        with pytest.raises(ParserSyntaxError, match=r"requires an assignment-form pl\.yield_"):
 
             @pl.function
             def bad_while(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:

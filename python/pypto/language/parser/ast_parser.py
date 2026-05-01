@@ -1867,15 +1867,20 @@ class ASTParser:
     def _find_first_bare_yield(cls, stmts: list[ast.stmt]) -> ast.Expr | None:
         """First bare `pl.yield_(...)` expression-statement in `stmts`, or None.
 
-        Recurses into `if/else` branches at the same scope. Does NOT descend
-        into nested For/While bodies — yields inside an inner loop bind to
-        that inner loop's return_vars, not the outer one.
+        Recurses into `if/else` branches and `with` bodies at the same scope
+        (e.g. `with pl.at(...): pl.yield_(...)` inside a loop body). Does NOT
+        descend into nested For/While bodies — yields inside an inner loop
+        bind to that inner loop's return_vars, not the outer one.
         """
         for s in stmts:
             if isinstance(s, ast.Expr) and cls._is_dsl_call(s, "yield_"):
                 return s
             if isinstance(s, ast.If):
                 found = cls._find_first_bare_yield(s.body) or cls._find_first_bare_yield(s.orelse)
+                if found is not None:
+                    return found
+            elif isinstance(s, ast.With):
+                found = cls._find_first_bare_yield(s.body)
                 if found is not None:
                     return found
         return None

@@ -178,11 +178,12 @@ class SSAVerifier : public IRVisitor {
   StmtPtr GetLastStmt(const StmtPtr& stmt);
 
   /**
-   * @brief Record a SCOPE_VIOLATION if any YieldStmt appears in `body` other
-   * than as the trailing statement. Caller is responsible for the trailing
-   * check; this helper covers the "no mid-body yield" half.
+   * @brief Record a MISPLACED_YIELD if any YieldStmt appears in `body` other
+   * than as the trailing statement. The diagnostic span points at the
+   * offending YieldStmt itself. Caller is responsible for the trailing check;
+   * this helper covers the "no mid-body yield" half.
    */
-  void CheckNoMidBodyYield(const std::string& scope_kind, const StmtPtr& body, const Span& span);
+  void CheckNoMidBodyYield(const std::string& scope_kind, const StmtPtr& body);
 
   /**
    * @brief Verify iter_args/return_vars cardinality and yield constraints for a loop statement.
@@ -250,7 +251,7 @@ StmtPtr SSAVerifier::GetLastStmt(const StmtPtr& stmt) {
   return stmt;
 }
 
-void SSAVerifier::CheckNoMidBodyYield(const std::string& scope_kind, const StmtPtr& body, const Span& span) {
+void SSAVerifier::CheckNoMidBodyYield(const std::string& scope_kind, const StmtPtr& body) {
   auto seq = As<SeqStmts>(body);
   if (!seq) return;
   for (size_t i = 0; i + 1 < seq->stmts_.size(); ++i) {
@@ -259,7 +260,7 @@ void SSAVerifier::CheckNoMidBodyYield(const std::string& scope_kind, const StmtP
                   scope_kind +
                       " body has YieldStmt before the terminating position; "
                       "YieldStmt must be the last statement in its scope",
-                  span);
+                  seq->stmts_[i]->span_);
       return;
     }
   }
@@ -294,7 +295,7 @@ void SSAVerifier::VerifyLoopIterArgsAndYield(const std::string& stmt_kind, size_
       } else {
         // Trailing yield is sound; check no earlier yield sits mid-body.
         // Skipping when trailing already failed avoids cascading errors.
-        CheckNoMidBodyYield(stmt_kind, body, span);
+        CheckNoMidBodyYield(stmt_kind, body);
       }
     }
   }
@@ -334,7 +335,7 @@ void SSAVerifier::VerifyIfStmt(const IfStmtPtr& if_stmt) {
     // Trailing yield is sound; check no earlier yield sits mid-body. Skipping
     // when trailing already failed avoids cascading errors with redundant
     // function dumps.
-    CheckNoMidBodyYield("IfStmt then-branch", if_stmt->then_body_, if_stmt->span_);
+    CheckNoMidBodyYield("IfStmt then-branch", if_stmt->then_body_);
   }
 
   if (!else_yield) {
@@ -346,7 +347,7 @@ void SSAVerifier::VerifyIfStmt(const IfStmtPtr& if_stmt) {
         << ") != return_vars count (" << if_stmt->return_vars_.size() << ")";
     RecordError(ssa::ErrorType::YIELD_COUNT_MISMATCH, msg.str(), if_stmt->span_);
   } else {
-    CheckNoMidBodyYield("IfStmt else-branch", if_stmt->else_body_.value(), if_stmt->span_);
+    CheckNoMidBodyYield("IfStmt else-branch", if_stmt->else_body_.value());
   }
 }
 

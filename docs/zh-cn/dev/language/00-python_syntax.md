@@ -260,7 +260,7 @@ for i in pl.unroll(12, chunk=4):
 ### While 循环 (带 iter_args 的 SSA 风格)
 
 ```python
-# 自然 while：条件作为 for 头部表达式
+# 自然 while：条件作为 while 头部表达式
 i: pl.Scalar[pl.INT64] = 0
 while i < n:
     i = i + 1
