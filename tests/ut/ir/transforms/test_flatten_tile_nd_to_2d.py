@@ -1713,6 +1713,81 @@ class TestNdTensorMatmulConversion:
         assert "tile.batch_matmul_acc" not in names_flatten
         assert names_flatten.count("tile.matmul") == 1
         assert names_flatten.count("tile.matmul_acc") == 1
+        assert "tile.slice" not in names_flatten
+
+    def test_singleton_batch_acc_init_stays_acc_in_loop(self):
+        """A batch=1 dummy accumulator init should flatten directly to Acc.
+
+        This covers the common ``acc = create; for k: if first matmul else
+        matmul_acc`` style.  When the 3D RHS selects ``tile.batch_matmul_acc``,
+        flattening the singleton-batch init to Vec forces an unnecessary
+        Vec/Acc round-trip on the loop-carried accumulator.
+        """
+
+        ib = IRBuilder()
+        span = ir.Span.unknown()
+        with ib.program("main") as prog:
+            incore_gvar = prog.declare_function("main_incore_0")
+            prog.declare_function("main")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                h = f.param("h", ir.TensorType([16, 128], DataType.BF16))
+                w = f.param("w", ir.TensorType([1, 64, 128], DataType.BF16))
+                out_p = f.param(
+                    "out_0",
+                    ir.TensorType([1, 16, 64], DataType.FP32),
+                    direction=ir.ParamDirection.Out,
+                )
+                f.return_type(ir.TensorType([1, 16, 64], DataType.FP32))
+
+                acc_init = ib.let("acc_init", tile_ops.create([1, 16, 64], DataType.FP32))
+                kb = ib.var("kb", ir.ScalarType(DataType.INDEX), span)
+                with ib.for_loop(kb, 0, 2, 1) as loop:
+                    acc_iter = loop.iter_arg("acc", acc_init)
+                    loop.return_var("acc_out")
+                    lhs = ib.let(
+                        "lhs",
+                        tile_ops.load(h, [0, 0], [16, 128], target_memory=ir.MemorySpace.Mat),
+                    )
+                    rhs = ib.let(
+                        "rhs",
+                        tile_ops.load(
+                            w,
+                            [0, 0, 0],
+                            [1, 64, 128],
+                            target_memory=ir.MemorySpace.Mat,
+                            transpose=True,
+                        ),
+                    )
+                    acc_next = ib.let("acc_next", tile_ops.batch_matmul_acc(acc_iter, lhs, rhs))
+                    ib.emit(ir.YieldStmt([acc_next], span))
+                acc_final = loop.output()
+                out_r = ib.let("out_0", tile_ops.store(acc_final, [0, 0, 0], out_p))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+
+            with ib.function("main") as f:
+                h = f.param("h", ir.TensorType([16, 128], DataType.BF16))
+                w = f.param("w", ir.TensorType([1, 64, 128], DataType.BF16))
+                f.return_type(ir.TensorType([1, 16, 64], DataType.FP32))
+                out_v = ib.let("out_0", tensor_ops.create([1, 16, 64], DataType.FP32))
+                y = ib.let("y", ir.Call(incore_gvar, [h, w, out_v], span))
+                ib.return_stmt(y)
+            prog.add_function(f.get_result())
+        before = prog.get_result()
+
+        # This fixture intentionally models pre-flatten tile IR; FlattenTileNdTo2D
+        # repairs the loop-carried TileView contract.
+        with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
+            after = passes.flatten_tile_nd_to_2d()(before)
+        ir_str = str(after.get_function("main_incore_0"))
+
+        assert "tile.batch_matmul" not in ir_str
+        assert "tile.batch_matmul_acc" not in ir_str
+        assert "tile.slice" not in ir_str
+        assert "tile.move" not in ir_str
+        assert "target_memory=pl.Mem.Acc" in ir_str
+        assert "pl.Mem.Acc, pl.TileView(blayout=pl.TileLayout.row_major" not in ir_str
 
 
 if __name__ == "__main__":

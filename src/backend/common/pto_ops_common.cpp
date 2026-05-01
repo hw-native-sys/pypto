@@ -43,6 +43,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -1195,9 +1196,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   auto tile_type = As<ir::TileType>(tile->GetType());
   INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.store first argument must have TileType";
-  INTERNAL_CHECK_SPAN(tile_type->tile_view_.has_value(), op->span_)
-      << "tile.store tile must have TileView with valid_shape";
-  const auto tile_view = tile_type->tile_view_.value_or(ir::TileView{});
+  const auto tile_view = ir::tile_view_semantics::NormalizeImplicitTileView(
+      tile_type->tile_view_, tile_type->shape_, tile_type->memory_space_);
   const auto& valid_shape = tile_view.valid_shape;
   INTERNAL_CHECK_SPAN(valid_shape.size() == 2, op->span_) << "tile.store tile valid_shape must be 2D";
 
