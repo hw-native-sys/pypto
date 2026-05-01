@@ -588,7 +588,7 @@ def test_continue_in_for():
     @pl.program
     class Expected:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
-        def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
+        def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(10, init_values=(x_0,)):
                 if i < 5:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
@@ -623,16 +623,16 @@ def test_break_in_for():
             i_idx: pl.Scalar[pl.INDEX] = 0
             brk: pl.Scalar[pl.BOOL] = False
             for (x_iter,) in pl.while_(init_values=(x_0,)):
-                pl.cond(i_idx < 10 and not brk)  # noqa: F841
+                pl.cond(i_idx < 10 and not brk)
                 if i_idx > 5:
                     brk: pl.Scalar[pl.BOOL] = True
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
-                x_iter = pl.yield_(phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
+                x_iter = pl.yield_(phi)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -682,10 +682,10 @@ def _build_break_and_continue_expected() -> ir.Program:
                 phi2 = if_outer.output(0)
 
                 loop.return_var("x_rv")
-                ib.emit(ir.YieldStmt([phi2], _SPAN))
 
                 with ib.if_stmt(ir.Not(brk, _BOOL, _SPAN)):
                     ib.assign(i_idx, ir.Add(i_idx, _ci(1), _IDX, _SPAN))
+                ib.emit(ir.YieldStmt([phi2], _SPAN))
 
             ib.return_stmt(loop.output(0))
         prog.add_function(f.get_result())
@@ -756,8 +756,8 @@ def test_continue_multiple_iter_args():
             self,
             a_0: pl.Tensor[[64], pl.FP32],
             b_0: pl.Tensor[[64], pl.FP32],
-        ) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
-            for i, (a_iter, b_iter) in pl.range(10, init_values=(a_0, b_0)):  # noqa: F841
+        ) -> pl.Tensor[[64], pl.FP32]:
+            for i, (a_iter, b_iter) in pl.range(10, init_values=(a_0, b_0)):
                 if i < 5:
                     a_phi, b_phi = pl.yield_(a_iter, b_iter)
                 else:
@@ -788,8 +788,8 @@ def test_continue_with_pre_continue_assignment():
 
     @pl.program
     class Expected:
-        @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)  # noqa: F841
-        def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
+        @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+        def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(10, init_values=(x_0,)):
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                 if i < 5:
@@ -832,9 +832,9 @@ def test_break_negative_step():
                 else:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
-                x_iter = pl.yield_(phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + -1
+                x_iter = pl.yield_(phi)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -844,7 +844,7 @@ def test_break_negative_step():
 def test_aic_function_type():
     """Pass processes AIC function type."""
 
-    @pl.program  # noqa: F841
+    @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.AIC, strict_ssa=True)
         def aic_kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -873,9 +873,8 @@ def test_aic_function_type():
 
 
 def test_continue_no_iter_args():
-    """Continue in loop with no carried state."""  # noqa: F841
+    """Continue in loop with no carried state."""
 
-    # noqa: F841
     @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
@@ -894,7 +893,7 @@ def test_continue_no_iter_args():
                 if i < 5:
                     pass
                 else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_0, x_0)  # noqa: F841
+                    _y: pl.Tensor[[64], pl.FP32] = pl.add(x_0, x_0)
             return x_0
 
     After = passes.ctrl_flow_transform()(Before)
@@ -905,7 +904,7 @@ def test_break_no_iter_args():
     """Break in loop with no carried state."""
 
     @pl.program
-    class Before:  # noqa: F841
+    class Before:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i in pl.range(0, 10, 1):
@@ -925,7 +924,7 @@ def test_break_no_iter_args():
                     brk: pl.Scalar[pl.BOOL] = True
                     pl.yield_()
                 else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_0, x_0)  # noqa: F841
+                    _y: pl.Tensor[[64], pl.FP32] = pl.add(x_0, x_0)
                     pl.yield_()
                 if not brk:
                     i_idx = i_idx + 1
@@ -1036,10 +1035,10 @@ def _build_back_to_back_breaks_expected() -> ir.Program:
                 phi2 = if_outer.output(0)
 
                 loop.return_var("x_rv")
-                ib.emit(ir.YieldStmt([phi2], _SPAN))
 
                 with ib.if_stmt(ir.Not(brk, _BOOL, _SPAN)):
                     ib.assign(i_idx, ir.Add(i_idx, _ci(1), _IDX, _SPAN))
+                ib.emit(ir.YieldStmt([phi2], _SPAN))
 
             ib.return_stmt(loop.output(0))
         prog.add_function(f.get_result())
@@ -1068,8 +1067,7 @@ def test_back_to_back_breaks():
     ir.assert_structural_equal(After, Expected)
 
 
-# noqa: F841
-def _build_break_then_continue_expected() -> ir.Program:  # noqa: F841
+def _build_break_then_continue_expected() -> ir.Program:
     """Build Expected for test_break_then_continue."""
     ib = IRBuilder()
     tt = _tt()
@@ -1103,16 +1101,16 @@ def _build_break_then_continue_expected() -> ir.Program:  # noqa: F841
                         if_inner.else_()
                         z = ib.let("z", ir.Call(ir.Op("tensor.add"), [y, y], tt, _SPAN))
                         ib.emit(ir.YieldStmt([z], _SPAN))
-                    phi1 = if_inner.output(0)  # noqa: F841
+                    _phi1 = if_inner.output(0)
                     # NOTE: yields x_iter, not phi1
                     ib.emit(ir.YieldStmt([x_iter], _SPAN))
                 phi2 = if_outer.output(0)
 
                 loop.return_var("x_rv")
-                ib.emit(ir.YieldStmt([phi2], _SPAN))
 
                 with ib.if_stmt(ir.Not(brk, _BOOL, _SPAN)):
                     ib.assign(i_idx, ir.Add(i_idx, _ci(1), _IDX, _SPAN))
+                ib.emit(ir.YieldStmt([phi2], _SPAN))
 
             ib.return_stmt(loop.output(0))
         prog.add_function(f.get_result())
@@ -1125,8 +1123,8 @@ def test_break_then_continue():
 
     @pl.program
     class Before:
-        @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)  # noqa: F841
-        def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
+        @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+        def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(0, 10, 1, init_values=(x_0,)):
                 if i > 8:
                     break
@@ -1180,9 +1178,9 @@ def test_multiple_iter_args_with_break():
                     a_new: pl.Tensor[[64], pl.FP32] = pl.add(a_iter, b_iter)
                     b_new: pl.Tensor[[64], pl.FP32] = pl.add(b_iter, a_iter)
                     a_phi, b_phi = pl.yield_(a_new, b_new)
-                a_iter, b_iter = pl.yield_(a_phi, b_phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
+                a_iter, b_iter = pl.yield_(a_phi, b_phi)
             return a_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -1192,7 +1190,6 @@ def test_multiple_iter_args_with_break():
 # ===========================================================================
 # Unconditional break/continue
 # ===========================================================================
-# noqa: F841
 
 
 def test_unconditional_break():
@@ -1216,16 +1213,13 @@ def test_unconditional_break():
             for (x_iter,) in pl.while_(init_values=(x_0,)):
                 pl.cond(i_idx < 10 and not brk)
                 brk: pl.Scalar[pl.BOOL] = True
-                x_iter = pl.yield_(x_iter)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
+                x_iter = pl.yield_(x_iter)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
     ir.assert_structural_equal(After, Expected)
-
-
-# noqa: F841
 
 
 def test_unconditional_continue():
@@ -1260,7 +1254,7 @@ def test_unconditional_continue():
 def test_nested_loops_only_inner():
     """Only inner loop with continue is transformed, outer loop unchanged."""
 
-    @pl.program  # noqa: F841
+    @pl.program
     class Before:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -1271,7 +1265,7 @@ def test_nested_loops_only_inner():
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
                     x_inner = pl.yield_(y)
                 x_outer = pl.yield_(x_inner)
-            return x_outer  # noqa: F841
+            return x_outer
 
     @pl.program
     class Expected:
@@ -1310,7 +1304,6 @@ def test_both_outer_and_inner_loop_have_break():
                 x_outer = pl.yield_(x_inner)
             return x_outer
 
-    # noqa: F841
     After = passes.ctrl_flow_transform()(Before)
 
     @pl.program
@@ -1331,17 +1324,17 @@ def test_both_outer_and_inner_loop_have_break():
                     else:
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
                         x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
-                    x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi)  # noqa: F841
                     if not brk_i:
                         j_idx: pl.Scalar[pl.INDEX] = j_idx + 1
+                    _x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi)
                 if i_idx > 2:
                     brk_o: pl.Scalar[pl.BOOL] = True
                     o_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_outer)
                 else:
                     o_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_outer)
-                o_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(o_phi)
                 if not brk_o:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
+                o_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(o_phi)
             return o_rv
 
     ir.assert_structural_equal(After, Expected)
@@ -1375,16 +1368,16 @@ def test_nested_continue_outer_break_inner():
                 j_idx: pl.Scalar[pl.INDEX] = 0
                 brk_i: pl.Scalar[pl.BOOL] = False
                 for (x_inner,) in pl.while_(init_values=(x_outer,)):
-                    pl.cond(j_idx < 8 and not brk_i)  # noqa: F841
+                    pl.cond(j_idx < 8 and not brk_i)
                     if j_idx > 3:
                         brk_i: pl.Scalar[pl.BOOL] = True
                         x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                     else:
                         y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
                         x_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
-                    x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi)  # noqa: F841
                     if not brk_i:
                         j_idx: pl.Scalar[pl.INDEX] = j_idx + 1
+                    _x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi)
                 if i < 2:
                     o_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_outer)
                 else:
@@ -1423,7 +1416,7 @@ def test_nested_continue_both_loops():
                 if i < 1:
                     x_outer_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_outer)
                 else:
-                    for j, (x_inner,) in pl.range(8, init_values=(x_outer,)):  # noqa: F841
+                    for j, (x_inner,) in pl.range(8, init_values=(x_outer,)):
                         if j < 2:
                             x_inner_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                         else:
@@ -1469,16 +1462,16 @@ def test_nested_break_and_continue_inner():
                     if j_idx < 2:
                         x_phi2: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                     else:
-                        if j_idx > 5:  # noqa: F841
+                        if j_idx > 5:
                             brk_i: pl.Scalar[pl.BOOL] = True
                             x_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                         else:
                             y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
                             x_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                         x_phi2: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi1)
-                    x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi2)
                     if not brk_i:
                         j_idx: pl.Scalar[pl.INDEX] = j_idx + 1
+                    x_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_phi2)
                 x_outer: pl.Tensor[[64], pl.FP32] = pl.yield_(x_rv)
             return x_outer
 
@@ -1525,7 +1518,7 @@ def test_nested_loop_both_have_break_and_continue():
                     for (x_inner,) in pl.while_(init_values=(x_outer,)):
                         pl.cond(j_idx < 8 and not brk_i)
                         if j_idx < 2:
-                            i_phi2: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)  # noqa: F841
+                            i_phi2: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
                         else:
                             if j_idx > 5:
                                 brk_i: pl.Scalar[pl.BOOL] = True
@@ -1534,18 +1527,18 @@ def test_nested_loop_both_have_break_and_continue():
                                 y: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, x_inner)
                                 i_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
                             i_phi2: pl.Tensor[[64], pl.FP32] = pl.yield_(i_phi1)
-                        i_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(i_phi2)  # noqa: F841
                         if not brk_i:
                             j_idx: pl.Scalar[pl.INDEX] = j_idx + 1
+                        _i_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(i_phi2)
                     if i_idx > 2:
                         brk_o: pl.Scalar[pl.BOOL] = True
                         o_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(x_outer)
                     else:
                         o_phi1: pl.Tensor[[64], pl.FP32] = pl.yield_(x_outer)
                     o_phi2: pl.Tensor[[64], pl.FP32] = pl.yield_(o_phi1)
-                o_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(o_phi2)
                 if not brk_o:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
+                o_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(o_phi2)
             return o_rv
 
     ir.assert_structural_equal(After, Expected)
@@ -1590,32 +1583,32 @@ def test_three_level_nesting_break_at_each():
                     k_idx: pl.Scalar[pl.INDEX] = 0
                     brk3: pl.Scalar[pl.BOOL] = False
                     for (x_l3,) in pl.while_(init_values=(x_l2,)):
-                        pl.cond(k_idx < 5 and not brk3)  # noqa: F841
+                        pl.cond(k_idx < 5 and not brk3)
                         if k_idx > 2:
-                            brk3: pl.Scalar[pl.BOOL] = True  # noqa: F841
+                            brk3: pl.Scalar[pl.BOOL] = True
                             l3_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_l3)
                         else:
                             y: pl.Tensor[[64], pl.FP32] = pl.add(x_l3, x_l3)
                             l3_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
-                        l3_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(l3_phi)  # noqa: F841
                         if not brk3:
                             k_idx: pl.Scalar[pl.INDEX] = k_idx + 1
-                    if j_idx > 1:  # noqa: F841
+                        _l3_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(l3_phi)
+                    if j_idx > 1:
                         brk2: pl.Scalar[pl.BOOL] = True
                         l2_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_l2)
                     else:
                         l2_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_l2)
-                    l2_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(l2_phi)  # noqa: F841
                     if not brk2:
                         j_idx: pl.Scalar[pl.INDEX] = j_idx + 1
+                    _l2_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(l2_phi)
                 if i_idx > 0:
                     brk1: pl.Scalar[pl.BOOL] = True
                     l1_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_l1)
                 else:
                     l1_phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_l1)
-                l1_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(l1_phi)
                 if not brk1:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
+                l1_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(l1_phi)
             return l1_rv
 
     ir.assert_structural_equal(After, Expected)
@@ -1642,7 +1635,7 @@ def test_continue_in_else_branch():
             return x_iter
 
     @pl.program
-    class Expected:  # noqa: F841
+    class Expected:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(10, init_values=(x_0,)):
@@ -1677,7 +1670,7 @@ def test_break_in_else_branch():
     class Expected:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
         def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            i_idx: pl.Scalar[pl.INDEX] = 0  # noqa: F841
+            i_idx: pl.Scalar[pl.INDEX] = 0
             brk: pl.Scalar[pl.BOOL] = False
             for (x_iter,) in pl.while_(init_values=(x_0,)):
                 pl.cond(i_idx < 10 and not brk)
@@ -1687,9 +1680,9 @@ def test_break_in_else_branch():
                 else:
                     brk: pl.Scalar[pl.BOOL] = True
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
-                x_iter = pl.yield_(phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
+                x_iter = pl.yield_(phi)
             return x_iter
 
     After = passes.ctrl_flow_transform()(Before)
@@ -1735,10 +1728,10 @@ def _build_if_else_continue_then_break_else_expected() -> ir.Program:
                 phi2 = if_outer.output(0)
 
                 loop.return_var("x_rv")
-                ib.emit(ir.YieldStmt([phi2], _SPAN))
 
                 with ib.if_stmt(ir.Not(brk, _BOOL, _SPAN)):
                     ib.assign(i_idx, ir.Add(i_idx, _ci(1), _IDX, _SPAN))
+                ib.emit(ir.YieldStmt([phi2], _SPAN))
 
             ib.return_stmt(loop.output(0))
         prog.add_function(f.get_result())
@@ -1787,12 +1780,12 @@ def test_normal_if_else_before_continue():
     @pl.program
     class Expected:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
-        def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
+        def kernel(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(10, init_values=(x_0,)):
                 if i < 5:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    _y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                 else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_0)  # noqa: F841
+                    _y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_0)
                 if i < 2:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
@@ -1912,22 +1905,22 @@ def _build_deeply_nested_break_expected() -> ir.Program:
                     ib.emit(ir.YieldStmt([phi3], _SPAN))
                     if_l1.else_()
                     ib.emit(ir.YieldStmt([x_iter], _SPAN))
-                phi4 = if_l1.output(0)  # noqa: F841
+                phi4 = if_l1.output(0)
 
                 # if not brk: y = add(...); yield phi4; else: yield phi4
                 with ib.if_stmt(ir.Not(brk, _BOOL, _SPAN)) as if_guard:
                     if_guard.return_var("phi5", tt)
-                    y = ib.let("y", ir.Call(ir.Op("tensor.add"), [x_iter, x_iter], tt, _SPAN))  # noqa: F841
+                    _y = ib.let("y", ir.Call(ir.Op("tensor.add"), [x_iter, x_iter], tt, _SPAN))
                     ib.emit(ir.YieldStmt([phi4], _SPAN))
                     if_guard.else_()
                     ib.emit(ir.YieldStmt([phi4], _SPAN))
                 phi5 = if_guard.output(0)
 
                 loop.return_var("x_rv")
-                ib.emit(ir.YieldStmt([phi5], _SPAN))
 
                 with ib.if_stmt(ir.Not(brk, _BOOL, _SPAN)):
                     ib.assign(i_idx, ir.Add(i_idx, _ci(1), _IDX, _SPAN))
+                ib.emit(ir.YieldStmt([phi5], _SPAN))
 
             ib.return_stmt(loop.output(0))
         prog.add_function(f.get_result())
@@ -1987,16 +1980,16 @@ def test_multi_function_program():
             i_idx: pl.Scalar[pl.INDEX] = 0
             brk: pl.Scalar[pl.BOOL] = False
             for (x_iter,) in pl.while_(init_values=(x_0,)):
-                pl.cond(i_idx < 10 and not brk)  # noqa: F841
+                pl.cond(i_idx < 10 and not brk)
                 if i_idx > 5:
                     brk: pl.Scalar[pl.BOOL] = True
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)
                 else:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(y)
-                x_iter = pl.yield_(phi)
                 if not brk:
                     i_idx: pl.Scalar[pl.INDEX] = i_idx + 1
+                x_iter = pl.yield_(phi)
             return x_iter
 
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -2029,7 +2022,7 @@ def test_pipeline_integration():
     @pl.program
     class Expected:
         @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
-        def main_incore_0(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:  # noqa: F841
+        def main_incore_0(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
             for i, (x_iter,) in pl.range(10, init_values=(x_0,)):
                 if i < 5:
                     phi: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter)

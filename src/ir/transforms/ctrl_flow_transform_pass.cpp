@@ -723,15 +723,20 @@ class CtrlFlowTransformMutator : public IRMutator {
     auto processed =
         ProcessBodyForBreakAndContinue(decomposed, op->iter_args_, break_var, also_has_continue, span);
 
-    // Build final body with loop advancement guarded by if (!__break)
-    if (!processed.yield_values.empty() || decomposed.had_yield) {
-      processed.stmts.push_back(std::make_shared<YieldStmt>(std::move(processed.yield_values), span));
-    }
-
+    // Counter advancement happens BEFORE the YieldStmt so the yield terminates
+    // its scope — required by the SSA-form invariant that any For/While/If
+    // with non-empty return_vars_ ends with a YieldStmt. ProcessBodyForBreak
+    // resolves yield values to let-bound Vars (phi return_vars and iter_args),
+    // never the loop_var directly, so reordering does not change yielded
+    // values.
     auto iter_adv = std::make_shared<AssignStmt>(loop_var, MakeAdd(loop_var, op->step_, span), span);
     auto guarded_adv = std::make_shared<IfStmt>(MakeNot(break_var, span), iter_adv, std::nullopt,
                                                 std::vector<VarPtr>{}, span);
     processed.stmts.push_back(guarded_adv);
+
+    if (!processed.yield_values.empty() || decomposed.had_yield) {
+      processed.stmts.push_back(std::make_shared<YieldStmt>(std::move(processed.yield_values), span));
+    }
 
     auto final_body = MakeSeq(std::move(processed.stmts), span);
 
