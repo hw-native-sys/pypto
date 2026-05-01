@@ -268,7 +268,7 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 **Properties:** `condition_` evaluated each iteration; supports SSA iter_args/return_vars; DSL uses `pl.cond()` as first statement.
 
 - Natural syntax without iter_args is converted to SSA by ConvertToSSA pass
-- Body must end with YieldStmt when iter_args are present
+- Body must end with YieldStmt when iter_args are present, AND no YieldStmt may appear before the trailing position — the yield is the scope's terminator. The same rule applies to ForStmt/IfStmt with non-empty `return_vars_`. Enforced in SSA form by the `SSAVerify` verifier (see `99-verifier.md`, error code `MISPLACED_YIELD`).
 
 ### ScopeStmt Details
 

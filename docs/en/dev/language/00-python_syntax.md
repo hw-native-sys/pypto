@@ -258,6 +258,35 @@ for i in pl.unroll(12, chunk=4):
 
 **Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `init_values` is supported with chunked loops (iter_args thread through the generated outer/inner/remainder loops). `chunk=` loops are only valid inside a `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` — outside that scope the parser rejects them with an error. See [SplitChunkedLoops Pass](../passes/06-split_chunked_loops.md).
 
+### While Loop (SSA-style with iter_args)
+
+```python
+# Natural while: condition is the for-header expression
+i: pl.Scalar[pl.INT64] = 0
+while i < n:
+    i = i + 1
+
+# SSA form with init_values: header tuple = iter_args, first stmt is pl.cond().
+# yield-LHS supplies the post-loop binding name (mirrors pl.range).
+x_init: pl.Scalar[pl.INT64] = 0
+for (x,) in pl.while_(init_values=(x_init,)):
+    pl.cond(x < n)
+    x_next = pl.yield_(x + 1)
+# `x_next` is bound here (from the yield-LHS); `x` is loop-scoped only.
+
+# Pre-SSA: no pl.yield_ at all; ConvertToSSA synthesizes it later.
+for (x,) in pl.while_(init_values=(x_init,)):
+    pl.cond(x < n)
+    x = x + 1
+
+# ❌ Bare pl.yield_(...) with non-empty init_values is rejected at parse time:
+#    for (x,) in pl.while_(init_values=(x_init,)):
+#        pl.cond(x < n)
+#        pl.yield_(x + 1)             # ParserSyntaxError: requires assignment-form pl.yield_
+```
+
+**Key points:** `pl.while_(init_values=(...,))` reuses the `for ... in` header for SSA-style loops; the first body statement must be `pl.cond(<bool>)`. The post-loop binding name comes from the **yield-LHS** (`x_next` above), not the header tuple — header-tuple names are scoped to the loop body only. This convention is **uniform with `pl.range`**: assignment-form yield is required whenever `init_values` is non-empty AND the body contains a `pl.yield_(...)` call. Pre-SSA loops with no yield at all are still valid (last form above).
+
 ### Scope Context Managers
 
 | Form | Scope Kind | Notes |

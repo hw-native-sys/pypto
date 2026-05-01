@@ -235,7 +235,7 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 **属性：** `condition_` 每次迭代都会求值；支持 SSA iter_args/return_vars；DSL 使用 `pl.cond()` 作为第一条语句。
 
 - 不带 iter_args 的自然语法通过 ConvertToSSA Pass 转换为 SSA
-- 存在 iter_args 时，循环体必须以 YieldStmt 结尾
+- 存在 iter_args 时，循环体必须以 YieldStmt 结尾，并且尾部之前的位置不允许再出现 YieldStmt——yield 是作用域的终结语句。同一规则同样适用于 `return_vars_` 非空的 ForStmt / IfStmt。在 SSA 形式下由 `SSAVerify` 强制（参见 `99-verifier.md`，错误码 `MISPLACED_YIELD`）。
 
 ### ScopeStmt 详细说明
 

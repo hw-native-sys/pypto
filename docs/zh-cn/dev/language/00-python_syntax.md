@@ -257,6 +257,35 @@ for i in pl.unroll(12, chunk=4):
 
 **要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk=` 循环支持与 `init_values` 一起使用（iter_args 会贯穿生成的外层/内层/余数循环）。`chunk=` 循环只能出现在 `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` 内；在该作用域外，parser 会直接报错。参见 [SplitChunkedLoops Pass](../passes/06-split_chunked_loops.md)。
 
+### While 循环 (带 iter_args 的 SSA 风格)
+
+```python
+# 自然 while：条件作为 for 头部表达式
+i: pl.Scalar[pl.INT64] = 0
+while i < n:
+    i = i + 1
+
+# 带 init_values 的 SSA 形式：头部元组 = iter_args，第一条语句是 pl.cond()。
+# yield-LHS 名字成为循环外的绑定名（与 pl.range 一致）。
+x_init: pl.Scalar[pl.INT64] = 0
+for (x,) in pl.while_(init_values=(x_init,)):
+    pl.cond(x < n)
+    x_next = pl.yield_(x + 1)
+# 此处 `x_next` 已由 yield-LHS 绑定；`x` 仅在循环 body 内可见。
+
+# Pre-SSA：body 中完全没有 pl.yield_，由 ConvertToSSA 后续补出。
+for (x,) in pl.while_(init_values=(x_init,)):
+    pl.cond(x < n)
+    x = x + 1
+
+# ❌ init_values 非空时不允许裸 pl.yield_(...)，parser 直接报错：
+#    for (x,) in pl.while_(init_values=(x_init,)):
+#        pl.cond(x < n)
+#        pl.yield_(x + 1)             # ParserSyntaxError: requires assignment-form pl.yield_
+```
+
+**要点:** `pl.while_(init_values=(...,))` 复用 `for ... in` 头部，用于 SSA 风格循环；body 的第一条语句必须是 `pl.cond(<bool>)`。循环外的绑定名来自 **yield-LHS**（上面的 `x_next`），而不是头部元组——头部元组中的名字只在循环 body 内可见。这一约定与 `pl.range` **保持一致**：当 `init_values` 非空且 body 中确实出现 `pl.yield_(...)` 调用时，必须使用 assignment 形式。Pre-SSA 形式的循环（body 中完全没有 yield，如最后一种写法）仍然合法。
+
 ### 作用域上下文管理器 (Scope Context Managers)
 
 | 形式 | Scope 类型 | 说明 |
