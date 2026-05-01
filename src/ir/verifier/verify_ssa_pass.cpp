@@ -49,6 +49,8 @@ std::string ErrorTypeToString(ErrorType type) {
       return "YIELD_COUNT_MISMATCH";
     case ErrorType::SCOPE_VIOLATION:
       return "SCOPE_VIOLATION";
+    case ErrorType::MISPLACED_YIELD:
+      return "MISPLACED_YIELD";
     default:
       return "UNKNOWN";
   }
@@ -176,6 +178,13 @@ class SSAVerifier : public IRVisitor {
   StmtPtr GetLastStmt(const StmtPtr& stmt);
 
   /**
+   * @brief Record a SCOPE_VIOLATION if any YieldStmt appears in `body` other
+   * than as the trailing statement. Caller is responsible for the trailing
+   * check; this helper covers the "no mid-body yield" half.
+   */
+  void CheckNoMidBodyYield(const std::string& scope_kind, const StmtPtr& body, const Span& span);
+
+  /**
    * @brief Verify iter_args/return_vars cardinality and yield constraints for a loop statement.
    *
    * Shared logic for ForStmt and WhileStmt verification.
@@ -241,6 +250,21 @@ StmtPtr SSAVerifier::GetLastStmt(const StmtPtr& stmt) {
   return stmt;
 }
 
+void SSAVerifier::CheckNoMidBodyYield(const std::string& scope_kind, const StmtPtr& body, const Span& span) {
+  auto seq = As<SeqStmts>(body);
+  if (!seq) return;
+  for (size_t i = 0; i + 1 < seq->stmts_.size(); ++i) {
+    if (As<YieldStmt>(seq->stmts_[i])) {
+      RecordError(ssa::ErrorType::MISPLACED_YIELD,
+                  scope_kind +
+                      " body has YieldStmt before the terminating position; "
+                      "YieldStmt must be the last statement in its scope",
+                  span);
+      return;
+    }
+  }
+}
+
 void SSAVerifier::VerifyLoopIterArgsAndYield(const std::string& stmt_kind, size_t iter_args_size,
                                              size_t return_vars_size, const StmtPtr& body, const Span& span) {
   // Cardinality check: iter_args.size() == return_vars.size()
@@ -251,7 +275,10 @@ void SSAVerifier::VerifyLoopIterArgsAndYield(const std::string& stmt_kind, size_
     RecordError(ssa::ErrorType::ITER_ARGS_RETURN_VARS_MISMATCH, msg.str(), span);
   }
 
-  // Check: If iter_args is not empty, body must end with YieldStmt
+  // Check: If iter_args is not empty, body must end with YieldStmt and no
+  // YieldStmt may appear mid-body (the trailing yield is the scope's
+  // terminator). When iter_args is empty the scope produces no values, so
+  // the mid-body check does not apply (matches the pre-SSA bare-yield case).
   if (iter_args_size > 0) {
     StmtPtr last_stmt = GetLastStmt(body);
     if (!last_stmt || !As<YieldStmt>(last_stmt)) {
@@ -264,6 +291,10 @@ void SSAVerifier::VerifyLoopIterArgsAndYield(const std::string& stmt_kind, size_
         msg << stmt_kind << " YieldStmt value count (" << yield->value_.size() << ") != iter_args count ("
             << iter_args_size << ")";
         RecordError(ssa::ErrorType::YIELD_COUNT_MISMATCH, msg.str(), span);
+      } else {
+        // Trailing yield is sound; check no earlier yield sits mid-body.
+        // Skipping when trailing already failed avoids cascading errors.
+        CheckNoMidBodyYield(stmt_kind, body, span);
       }
     }
   }
@@ -299,6 +330,11 @@ void SSAVerifier::VerifyIfStmt(const IfStmtPtr& if_stmt) {
     msg << "IfStmt then-branch YieldStmt value count (" << then_yield->value_.size()
         << ") != return_vars count (" << if_stmt->return_vars_.size() << ")";
     RecordError(ssa::ErrorType::YIELD_COUNT_MISMATCH, msg.str(), if_stmt->span_);
+  } else {
+    // Trailing yield is sound; check no earlier yield sits mid-body. Skipping
+    // when trailing already failed avoids cascading errors with redundant
+    // function dumps.
+    CheckNoMidBodyYield("IfStmt then-branch", if_stmt->then_body_, if_stmt->span_);
   }
 
   if (!else_yield) {
@@ -309,6 +345,8 @@ void SSAVerifier::VerifyIfStmt(const IfStmtPtr& if_stmt) {
     msg << "IfStmt else-branch YieldStmt value count (" << else_yield->value_.size()
         << ") != return_vars count (" << if_stmt->return_vars_.size() << ")";
     RecordError(ssa::ErrorType::YIELD_COUNT_MISMATCH, msg.str(), if_stmt->span_);
+  } else {
+    CheckNoMidBodyYield("IfStmt else-branch", if_stmt->else_body_.value(), if_stmt->span_);
   }
 }
 

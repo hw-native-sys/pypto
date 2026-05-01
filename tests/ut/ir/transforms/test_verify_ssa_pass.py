@@ -493,6 +493,135 @@ class TestCardinalityChecks:
         with pytest.raises(Exception, match=r"(YieldStmt value count.*return_vars count|size mismatch)"):
             verify_pass(program)
 
+    # The next four tests construct IR directly via `ir.ForStmt` / `ir.WhileStmt`
+    # / `ir.IfStmt` rather than via @pl.program. The DSL parser cannot produce
+    # the shape these tests check: it rejects two yield-LHS bindings to the
+    # same names (SSA), and a body with two yields that have matching value
+    # counts on both yields requires either re-binding LHS names (rejected) or
+    # mismatched counts (caught by the structural verifier before SSAVerify
+    # runs). The MISPLACED_YIELD check exists as a backstop for IR producers
+    # (passes, transforms, IRBuilder users), so direct IR construction is the
+    # only way to test it.
+
+    def test_for_mid_body_yield(self):
+        """ForStmt body with a YieldStmt followed by another stmt is rejected,
+        even when a second YieldStmt sits at the trailing position. The yield
+        must be the scope terminator."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+        iter_arg = ir.IterArg("sum", ir.ScalarType(DataType.INT64), a, span)
+        mid_yield = ir.YieldStmt([iter_arg], span)
+        trailing_assign = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), loop_var, span)
+        final_yield = ir.YieldStmt([iter_arg], span)
+        body = ir.SeqStmts([mid_yield, trailing_assign, final_yield], span)
+
+        rv = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(10, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            [iter_arg],
+            body,
+            [rv],
+            span,
+        )
+
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("test_for_mid_yield", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="YieldStmt before the terminating position"):
+            verify_pass(program)
+
+    def test_while_mid_body_yield(self):
+        """WhileStmt body with a YieldStmt followed by another stmt is rejected.
+        Mirrors the ForStmt case (both share VerifyLoopIterArgsAndYield)."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
+        condition = ir.Gt(iter_arg, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+
+        mid_yield = ir.YieldStmt([iter_arg], span)
+        trailing_assign = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), a, span)
+        final_yield = ir.YieldStmt([iter_arg], span)
+        body = ir.SeqStmts([mid_yield, trailing_assign, final_yield], span)
+
+        rv = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+        while_stmt = ir.WhileStmt(condition, [iter_arg], body, [rv], span)
+
+        func_body = ir.SeqStmts([while_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("test_while_mid_yield", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="WhileStmt.*YieldStmt before the terminating position"):
+            verify_pass(program)
+
+    def test_if_then_mid_body_yield(self):
+        """IfStmt then-branch with a YieldStmt followed by another stmt is
+        rejected. Symmetric to the ForStmt case."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        condition = ir.Gt(a, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+        mid_yield = ir.YieldStmt([a], span)
+        trailing_assign = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), a, span)
+        final_yield = ir.YieldStmt([a], span)
+        then_body = ir.SeqStmts([mid_yield, trailing_assign, final_yield], span)
+        else_body = ir.YieldStmt([a], span)
+        rv = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+        if_stmt = ir.IfStmt(condition, then_body, else_body, [rv], span)
+
+        func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("test_if_then_mid_yield", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="IfStmt then-branch.*YieldStmt before the terminating position"):
+            verify_pass(program)
+
+    def test_if_else_mid_body_yield(self):
+        """IfStmt else-branch with a mid-body YieldStmt is rejected. Then-branch
+        is well-formed; only the else side fails."""
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        condition = ir.Gt(a, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+        then_body = ir.YieldStmt([a], span)
+        mid_yield = ir.YieldStmt([a], span)
+        trailing_assign = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), a, span)
+        final_yield = ir.YieldStmt([a], span)
+        else_body = ir.SeqStmts([mid_yield, trailing_assign, final_yield], span)
+        rv = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+
+        if_stmt = ir.IfStmt(condition, then_body, else_body, [rv], span)
+
+        func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("test_if_else_mid_yield", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        verify_pass = passes.run_verifier()
+        with pytest.raises(Exception, match="IfStmt else-branch.*YieldStmt before the terminating position"):
+            verify_pass(program)
+
 
 class TestValidScopePatterns:
     """Test that valid scope patterns pass verification."""

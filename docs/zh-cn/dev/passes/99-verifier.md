@@ -88,6 +88,7 @@
 | 4 | `ITER_ARGS_RETURN_VARS_MISMATCH` | ForStmt/WhileStmt 中 iter_args 数量 != return_vars 数量 |
 | 5 | `YIELD_COUNT_MISMATCH` | YieldStmt 值数量 != iter_args/return_vars 数量 |
 | 6 | `SCOPE_VIOLATION` | 变量在其定义作用域之外被使用 |
+| 7 | `MISPLACED_YIELD` | YieldStmt 出现在作用域中尾部以外的位置 |
 
 ### TypeCheck
 

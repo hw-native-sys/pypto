@@ -88,6 +88,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | 4 | `ITER_ARGS_RETURN_VARS_MISMATCH` | iter_args count != return_vars count in ForStmt/WhileStmt |
 | 5 | `YIELD_COUNT_MISMATCH` | YieldStmt value count != iter_args/return_vars count |
 | 6 | `SCOPE_VIOLATION` | Variable used outside its defining scope |
+| 7 | `MISPLACED_YIELD` | YieldStmt appears before the trailing position in its scope |
 
 ### TypeCheck
 
