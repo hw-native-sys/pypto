@@ -528,9 +528,12 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
       // DN tensor views keep the original logical shape in IR typing, but the
       // emitted make_tensor_view must expose the trailing two visible dimensions
       // in DN order so PTOAS interprets shape/stride/layout consistently.
-      // Column vectors are handled separately.
+      // Column vectors are handled separately. When the IR also carries explicit
+      // strides (e.g. from tensor.transpose), those strides already describe the
+      // physical layout in the IR shape's coordinate system — skip the implicit
+      // last-two-dim swap so the emitted shape matches the strides.
       auto get_shape_source_idx = [&](size_t dim_idx) -> size_t {
-        if (!(layout_DN && rank >= 2 && !is_column_vector)) return dim_idx;
+        if (!layout_DN || rank < 2 || is_column_vector || has_explicit_stride) return dim_idx;
         if (dim_idx == rank - 2) return rank - 1;
         if (dim_idx == rank - 1) return rank - 2;
         return dim_idx;

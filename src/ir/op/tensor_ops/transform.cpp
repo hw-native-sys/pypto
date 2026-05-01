@@ -17,6 +17,7 @@
  * reshape and transpose operations.
  */
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -74,6 +76,36 @@ int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
     product *= const_dim->value_;
   }
   return product;
+}
+
+/// Build an INDEX-typed multiply, folding ConstInt * ConstInt and the
+/// multiplicative identity (×1) so that downstream codegen sees the same
+/// strides whether the source shape is static or dynamic.
+ExprPtr MakeIndexMul(const ExprPtr& lhs, const ExprPtr& rhs) {
+  auto const_lhs = As<ConstInt>(lhs);
+  auto const_rhs = As<ConstInt>(rhs);
+  if (const_lhs && const_rhs) {
+    return std::make_shared<ConstInt>(const_lhs->value_ * const_rhs->value_, DataType::INDEX,
+                                      Span::unknown());
+  }
+  if (const_rhs && const_rhs->value_ == 1) return lhs;
+  if (const_lhs && const_lhs->value_ == 1) return rhs;
+  return std::make_shared<Mul>(lhs, rhs, DataType::INDEX, Span::unknown());
+}
+
+/// Build row-major strides for the given shape:
+///   strides[ndim-1] = 1; strides[i] = strides[i+1] * shape[i+1].
+/// Works for static and dynamic dims; ConstInt chains collapse to a single
+/// ConstInt via MakeIndexMul.
+std::vector<ExprPtr> BuildRowMajorStrides(const std::vector<ExprPtr>& shape) {
+  size_t ndim = shape.size();
+  if (ndim == 0) return {};
+  std::vector<ExprPtr> strides(ndim);
+  strides[ndim - 1] = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
+  for (int i = static_cast<int>(ndim) - 2; i >= 0; --i) {
+    strides[i] = MakeIndexMul(strides[i + 1], shape[i + 1]);
+  }
+  return strides;
 }
 
 }  // anonymous namespace
@@ -182,26 +214,31 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> new_shape = input_shape;
   std::swap(new_shape[axis1], new_shape[axis2]);
 
-  // Encode the post-transpose layout via PyPTO's ND/DN tag rather than via
-  // explicit strides:
+  // Encode the post-transpose layout via two complementary mechanisms:
   //
-  // Why: tensor.transpose at orchestration level lowers to runtime
-  // Tensor::transpose, a metadata-only swap of shapes/raw_shapes/offsets.
-  // The resulting view's underlying GM layout differs from a plain row-major
-  // walk over the swapped shape, so downstream tile.load on the InCore kernel
-  // param must know the layout. The kernel-side codegen
-  // (EmitMakeTensorViews in pto_codegen.cpp, plus PTOAS) interprets the DN
-  // tag as "trailing two dims swapped" — which is exactly the semantics of a
-  // trailing-two-dim transpose. ResolveTransposeLayout already uses this same
-  // representation for tile.load(transpose=True) sources, so PTOAS support is
-  // proven. See issue #1209.
+  //  1. Layout tag (ND/DN). Only the canonical trailing-two-dim swap can be
+  //     described by toggling the tag — non-trailing transposes leave the tag
+  //     unchanged because ND/DN only describes the trailing two dims. PTOAS
+  //     reads this tag and EmitMakeTensorViews / EmitTileLoadPTO use it to
+  //     drive the implicit "swap last two dims" path used by
+  //     tile.load(transpose=True) sources (see ResolveTransposeLayout).
   //
-  // We only flip the layout for the canonical trailing-two-dim case
-  // (axes {ndim-2, ndim-1}). Non-trailing transposes produce a layout that
-  // ND/DN can't express, so we leave the result untagged and let downstream
-  // passes / users decide (an explicit strides path can be added later if a
-  // real workload needs it; today the user-visible bug from #1209 is the
-  // trailing case).
+  //  2. Explicit strides. tensor.transpose at orchestration level lowers to
+  //     runtime Tensor::transpose, a metadata-only swap of shapes / offsets;
+  //     the underlying GM data stays in the source's row-major layout. So the
+  //     physical strides for the post-transpose view are the source's strides
+  //     reordered at (axis1, axis2). Recording those strides on the result
+  //     type lets EmitMakeTensorViews emit a make_tensor_view that matches
+  //     the actual memory layout instead of fabricating column-major strides
+  //     from the swapped shape (which would be wrong for a row-major source).
+  //
+  // Why both: the layout tag is needed for PTOAS contracts (it expects DN on
+  // any trailing-transposed view at the kernel boundary), while the explicit
+  // strides are needed because ND/DN alone cannot distinguish "source data is
+  // column-major in the IR shape" (matmul's tile.load(transpose=True) path)
+  // from "source data is row-major and we want a transposed view of it"
+  // (this op's path). The codegen disambiguates by checking
+  // tensor_view_->stride: if it's non-empty, skip the implicit DN swap.
   bool is_trailing_swap =
       (static_cast<size_t>(axis1) == ndim - 1 && static_cast<size_t>(axis2) == ndim - 2) ||
       (static_cast<size_t>(axis1) == ndim - 2 && static_cast<size_t>(axis2) == ndim - 1);
@@ -209,14 +246,26 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   TensorLayout in_layout = TensorLayout::ND;
   PadValue pad = PadValue::null;
   std::vector<ExprPtr> in_valid_shape;
+  std::vector<ExprPtr> in_stride;
   if (tensor_type->tensor_view_.has_value()) {
     in_layout = tensor_type->tensor_view_->layout;
     pad = tensor_type->tensor_view_->pad;
     in_valid_shape = tensor_type->tensor_view_->valid_shape;
+    in_stride = tensor_type->tensor_view_->stride;
   }
   TensorLayout out_layout = in_layout;
   if (is_trailing_swap) {
     out_layout = (in_layout == TensorLayout::ND) ? TensorLayout::DN : TensorLayout::ND;
+  }
+
+  // Resolve the post-transpose strides: prefer input's explicit strides;
+  // otherwise derive row-major strides from the input shape (works for both
+  // static and dynamic dims — ConstInt chains fold). Then swap at the same
+  // axes as the shape swap to reflect the metadata-only transpose.
+  std::vector<ExprPtr> result_stride =
+      !in_stride.empty() ? std::move(in_stride) : BuildRowMajorStrides(input_shape);
+  if (!result_stride.empty()) {
+    std::swap(result_stride[axis1], result_stride[axis2]);
   }
 
   // Carry forward valid_shape. Two cases differ in coordinate system:
@@ -237,12 +286,31 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
     std::swap(valid_shape[axis1], valid_shape[axis2]);
   }
 
-  // Only attach a TensorView when there is something non-default to record.
-  // Strides are intentionally not recorded — the layout tag is the canonical
-  // representation for transpose semantics in PyPTO; explicit strides
-  // alongside an inconsistent layout tag are rejected by PTOAS.
-  if (out_layout != TensorLayout::ND || !valid_shape.empty() || pad != PadValue::null) {
-    TensorView view(std::vector<ExprPtr>{}, out_layout, std::move(valid_shape), pad);
+  // Attach a TensorView whenever any non-default field needs to travel with
+  // the result type (strides, non-default layout, valid_shape, or pad). The
+  // identity transpose-of-transpose collapses back to a bare TensorType
+  // because the strides round-trip to row-major and layout flips back to ND.
+  auto strides_match_row_major = [&]() {
+    if (result_stride.empty() || out_layout != TensorLayout::ND) return false;
+    auto canonical = BuildRowMajorStrides(new_shape);
+    if (canonical.size() != result_stride.size()) return false;
+    // Equal when both are ConstInt with the same value, OR when the two
+    // ExprPtrs point to the same underlying node (covers symbolic Var dims:
+    // BuildRowMajorStrides reuses the input shape's ExprPtrs so that the
+    // round-trip transpose-of-transpose lands on identical pointers for the
+    // dynamic-shape case).
+    return std::equal(canonical.begin(), canonical.end(), result_stride.begin(),
+                      [](const ExprPtr& a, const ExprPtr& b) {
+                        auto ca = As<ConstInt>(a);
+                        auto cb = As<ConstInt>(b);
+                        if (ca && cb) return ca->value_ == cb->value_;
+                        return a == b;
+                      });
+  };
+  bool record_stride = !result_stride.empty() && !strides_match_row_major();
+  if (record_stride || out_layout != TensorLayout::ND || !valid_shape.empty() || pad != PadValue::null) {
+    TensorView view(record_stride ? std::move(result_stride) : std::vector<ExprPtr>{}, out_layout,
+                    std::move(valid_shape), pad);
     return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
                                         std::make_optional(std::move(view)));
   }

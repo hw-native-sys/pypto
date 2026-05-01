@@ -154,6 +154,18 @@ class After:
 
 ## 与 Orchestration 层 `tensor.transpose` 的衔接
 
-Orchestration 层的 `tensor.transpose`（见 issue #1209）在 `DeduceTensorTransposeType` 中根据是否为最后两维互换，把结果类型的 `layout` 在 `ND` 与 `DN` 之间切换。被转置的 Tensor 进入 InCore 参数后，参数自动继承 `DN` 标签，与本 Pass 输出的形式一致 —— 因此 `tile.load(..., target_memory=Mat, transpose=True)`（即 matmul B^T 场景）可以直接消费 Orchestration 层的 transpose，无需用户显式标注 `pl.DN`。
+Orchestration 层的 `tensor.transpose`（见 issue #1209）在 `DeduceTensorTransposeType` 中，会在结果类型上同时记录两条信息：
 
-**Vec 目标是已知限制。** 跨布局 `TLOAD(VecTile, GlobalTensor)` 会被 PTO ISA 拒绝（仅支持 `ND→ND` / `DN→DN` / `NZ→NZ`），并且 `tile.load` 进一步限制 `transpose=True` 仅在 `target_memory=Mat` 时合法。因此，`pl.transpose` 在 Orchestration 层之后接 Vec 目标的消费者（例如非 matmul 的 `pl.at(level=CORE_GROUP)` 块内的 `pl.slice`），IR 可正确编译但会在 Ascend 910B 的 PTO ISA 阶段编译失败。变通方法：通过 Mat tile 走 matmul 风格的 load；或在 InCore 中显式插入 `tile.transpose`；或在 Orchestration 层物化一份连续的转置拷贝。
+1. **Layout tag。** 对最后两维互换的标准情形，`layout` 在 `ND` 与 `DN` 之间切换。PTOAS 用该 tag 校验 kernel 边界。
+2. **显式物理 strides。** 运行时 `Tensor::transpose` 只交换 `shapes` / `offsets` 等元数据，底层 GM 仍按源 tensor 的行主序排布，所以转置后视图的物理 strides 是输入 strides 在 `(axis1, axis2)` 上 swap 后的结果。`DeduceTensorTransposeType` 用 `MakeIndexMul` 按输入 shape 构造行主序 strides（静态 shape 折叠为 ConstInt；动态 shape 得到符号表达式），再在同样的轴上 swap。非末两维 transpose 也由这条路径覆盖 —— 它们保持 `layout = ND`，完全依赖 strides 描述排布。
+
+Codegen 通过检查 `tensor_view_->stride` 是否为空区分 DN tag 的两类来源：
+
+- **来自本 Pass（`tile.load(transpose=True)`）：** `stride` 为空 —— 沿用旧的"末两维隐式 swap"路径，把 IR shape `[M, N]` 发射为 `[N, M]`，strides `[1, M]`。
+- **来自 `tensor.transpose`：** `stride` 非空 —— 跳过隐式 swap，直接按 IR shape 发射，strides 用 IR 上记录的。
+
+上述 codegen 规则让 *非转置* 的下游消费者（例如 `tile.load(..., transpose=False)`）能够通过显式 strides 路径正确读取 `tensor.transpose` 的 DN 结果，不会再叠加一次"末两维 swap"造成的双重转置。
+
+**`tile.load(transpose=True)` 直接消费 `tensor.transpose` 的产物 —— 目前不支持。** 这种特定组合（InCore 参数同时携带显式物理 strides 且 `layout = DN`，正是 `tensor.transpose` 结果的独有签名）会被本 Pass 用 `CHECK` 拒绝，因为两套编码会在 codegen 中叠加成双重转置并发出错误地址。源自 slice 的输入（显式 strides + `layout = ND`，由 `OptimizeOrchTensors` 附加）不受影响，仍走标准的"提升 ND → DN，丢弃 strides"路径，paged_attention 的 matmul B^T 等模式继续正常工作。把显式物理 strides 与本 Pass 仅输出 DN 的约定调和需要单独设计 —— 跟踪 issue #1209 的 follow-up。被拒绝场景的变通方法：在 tile 层通过 `tile.load(transpose=True)` 直接对源张量做转置，而不是先在 orchestration 用 `tensor.transpose`。
+
+**Vec 目标仅在 a5 系列可用。** 跨布局 `TLOAD(VecTile_RowMajor, GlobalTensor<DN>)` 在 a2a3 上仍被 PTOAS 拒绝（静态断言 `TLOAD(VecTile, GlobalTensor) only support ND2ND/DN2DN/NZ2NZ`），且 `tile.load` 仍限制 `transpose=True` 仅在 `target_memory=Mat` 时合法。a5（及 `a5sim` 模拟器）解除了该约束，所以 `pl.transpose` 后接 Vec 目标消费者（如非 matmul `pl.at(level=CORE_GROUP)` 块内的 `pl.slice`）在 a5 上可以正确编译并运行。回归测试见 `tests/st/runtime/test_trans.py::test_transpose_slice_assemble[a5sim]`。在 a2a3 上同样的 DSL 现在能产出正确的 IR/.pto，但会在 kernel C++ 阶段失败；变通方法保持不变 —— 通过 Mat tile 走 matmul 风格 load、在 InCore 中显式 `tile.transpose`、或在 Orchestration 层物化一份连续的转置拷贝。
