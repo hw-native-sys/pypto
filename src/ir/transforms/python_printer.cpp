@@ -1344,39 +1344,6 @@ std::string IRPythonPrinter::GetVarName(const Var* var) const {
   return var->name_hint_;
 }
 
-namespace {
-
-/// Collects (return_var, iter_arg) pointer pairs from WhileStmts whose
-/// position-i bindings share name_hint_. Scoped to WhileStmt because only
-/// `pl.while_` parser-side auto-binds the header tuple name to the
-/// outer-scope return_var (`ast_parser.py::_register_while_outputs`);
-/// `pl.range` derives the post-loop binding from the yield-LHS and so does
-/// not need this pinning. The default IRVisitor traverses ForStmt/IfStmt/etc.
-/// bodies for us, so nested WhileStmts inside a ForStmt are still reached.
-///
-/// DISCUSSABLE: if the `pl.while_` DSL is unified with `pl.range` to derive
-/// return_var bindings from yield-LHS only (see RFC #1246), this collector
-/// and the harmonization step below can be deleted — lenient-mode
-/// disambiguation alone would suffice.
-class IterArgReturnVarPairCollector : public IRVisitor {
- public:
-  std::vector<std::pair<const Var*, const Var*>> pairs;  // (return_var, iter_arg)
-
- protected:
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    const size_t n = std::min(op->return_vars_.size(), op->iter_args_.size());
-    for (size_t i = 0; i < n; ++i) {
-      if (!op->return_vars_[i] || !op->iter_args_[i]) continue;
-      if (op->return_vars_[i]->name_hint_ == op->iter_args_[i]->name_hint_) {
-        pairs.emplace_back(op->return_vars_[i].get(), op->iter_args_[i].get());
-      }
-    }
-    VisitStmt(op->body_);
-  }
-};
-
-}  // namespace
-
 void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const StmtPtr& body) {
   // Collect Var/IterArg pointers in DFS pre-order: params, then body defs,
   // then body uses. Defs precede uses so a pointer appearing as both keeps
@@ -1387,7 +1354,6 @@ void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const
   ordered_refs.reserve(params.size());
   for (const auto& p : params) ordered_refs.push_back(p.get());
   body_defined_vars_.clear();
-  IterArgReturnVarPairCollector pair_collector;
   if (body) {
     var_collectors::VarDefUseCollector body_collector;
     body_collector.VisitStmt(body);
@@ -1396,7 +1362,6 @@ void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const
     ordered_refs.insert(ordered_refs.end(), body_collector.var_uses_ordered.begin(),
                         body_collector.var_uses_ordered.end());
     body_defined_vars_ = std::move(body_collector.var_defs);
-    pair_collector.VisitStmt(body);
   }
   // Drop program-level dynamic dim vars: they are already disambiguated
   // globally in dyn_var_rename_map_, and re-registering them here would
@@ -1407,16 +1372,6 @@ void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const
                        ordered_refs.end());
   }
   auto_name::BuildRenameMapForDefs(ordered_refs, var_rename_map_);
-
-  // Harmonize iter_arg / return_var names where they share name_hint_. Both
-  // pointers are colliding def-sites, so BuildRenameMapForDefs has registered
-  // each under a distinct suffix; route the iter_arg to the return_var's name.
-  for (const auto& [rv, ia] : pair_collector.pairs) {
-    auto rv_it = var_rename_map_.find(rv);
-    INTERNAL_CHECK(rv_it != var_rename_map_.end())
-        << "Internal error: return_var with colliding name_hint must be in var_rename_map_";
-    var_rename_map_[ia] = rv_it->second;
-  }
 }
 
 void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
