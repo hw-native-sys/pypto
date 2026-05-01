@@ -395,8 +395,34 @@ class TestConditionMustBeBool:
                 x: pl.Scalar[pl.INT64] = 0
                 for (x_iter,) in pl.while_(init_values=(x,)):
                     pl.cond(1)  # type: ignore  # non-bool
-                    y = pl.yield_(x_iter + 1)  # noqa: F841
+                    y = pl.yield_(x_iter + 1)
                 return y  # noqa: F821
+
+
+class TestYieldLHSRequired:
+    """`pl.range(init_values=...)` and `pl.while_(init_values=...)` both
+    require an assignment-form `pl.yield_(...)` so the LHS supplies the
+    post-loop binding name (uniform convention across both loop forms)."""
+
+    def test_pl_range_bare_yield_with_init_values_rejected(self):
+        with pytest.raises(ParserSyntaxError, match="requires an assignment-form pl.yield_"):
+
+            @pl.function
+            def bad_range(x_0: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                for _i, (x_iter,) in pl.range(10, init_values=(x_0,)):
+                    pl.yield_(x_iter + 1)  # bare — no LHS
+                return x_iter  # noqa: F821
+
+    def test_pl_while_bare_yield_with_init_values_rejected(self):
+        with pytest.raises(ParserSyntaxError, match="requires an assignment-form pl.yield_"):
+
+            @pl.function
+            def bad_while(n: pl.Scalar[pl.INT64]) -> pl.Scalar[pl.INT64]:
+                x: pl.Scalar[pl.INT64] = 0
+                for (x_iter,) in pl.while_(init_values=(x,)):
+                    pl.cond(x_iter < n)
+                    pl.yield_(x_iter + 1)  # bare — no LHS
+                return x  # noqa: F821
 
 
 class TestSourceLocationPreservation:

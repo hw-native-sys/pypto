@@ -1343,6 +1343,8 @@ class ASTParser:
                 hint="Use: for i, (var1,) in pl.range(n, init_values=(val1,)) to include iter_args",
             )
 
+        self._require_yield_lhs_for_init_values(stmt, bool(range_args["init_values"]))
+
         # For pl.unroll(), require compile-time constant integer bounds
         # and reject step=0. Fail early with clear parser errors instead of
         # later generic failures in the UnrollLoops C++ pass.
@@ -1470,13 +1472,12 @@ class ASTParser:
                 assert self._current_yield_vars is not None  # Guaranteed by _yield_tracking_scope
                 loop_output_vars = self._current_yield_vars[:]
 
-            # Create return_vars using yield LHS names (or fallback to _out names)
+            # Yield-LHS names if present; else synthetic `_out` names (pre-SSA).
             if not is_simple_for and range_args["init_values"]:
                 if loop_output_vars:
                     for rv_name in loop_output_vars:
                         loop.return_var(rv_name)
                 else:
-                    # Fallback: no yield vars found, use auto-generated names
                     assert iter_args_node is not None
                     assert isinstance(iter_args_node, ast.Tuple)
                     for iter_arg_node in iter_args_node.elts:
@@ -1695,20 +1696,17 @@ class ASTParser:
         return self.parse_expression(call.args[0])
 
     @staticmethod
-    def _is_dsl_call(stmt: ast.Expr, func_name: str) -> bool:
-        """Check if statement is a call to a named DSL function (e.g. pl.func_name() or func_name()).
-
-        Args:
-            stmt: AST Expr node
-            func_name: The function name to match (e.g. "static_print")
-
-        Returns:
-            True if statement is a call to the named function
+    def _is_dsl_call(node: ast.AST, func_name: str) -> bool:
+        """Check if `node` is a call to a named DSL function (`pl.func_name(...)`
+        or bare `func_name(...)`). Accepts either an `ast.Expr` statement (the
+        body-stmt form, e.g. a bare `pl.cond(...)` line) or an expression node
+        directly (e.g. the RHS of an `ast.Assign`).
         """
-        call = stmt.value
-        if not isinstance(call, ast.Call):
+        if isinstance(node, ast.Expr):
+            node = node.value
+        if not isinstance(node, ast.Call):
             return False
-        func = call.func
+        func = node.func
         if isinstance(func, ast.Attribute):
             return func.attr == func_name
         if isinstance(func, ast.Name):
@@ -1865,6 +1863,50 @@ class ASTParser:
 
         return init_values
 
+    @classmethod
+    def _find_first_bare_yield(cls, stmts: list[ast.stmt]) -> ast.Expr | None:
+        """First bare `pl.yield_(...)` expression-statement in `stmts`, or None.
+
+        Recurses into `if/else` branches at the same scope. Does NOT descend
+        into nested For/While bodies — yields inside an inner loop bind to
+        that inner loop's return_vars, not the outer one.
+        """
+        for s in stmts:
+            if isinstance(s, ast.Expr) and cls._is_dsl_call(s, "yield_"):
+                return s
+            if isinstance(s, ast.If):
+                found = cls._find_first_bare_yield(s.body) or cls._find_first_bare_yield(s.orelse)
+                if found is not None:
+                    return found
+        return None
+
+    def _require_yield_lhs_for_init_values(self, stmt: ast.For, init_values_present: bool) -> None:
+        """Reject bare `pl.yield_(...)` when init_values is non-empty.
+
+        Valid body shapes for an init-values loop:
+          1. Assignment-form yield: `x_next = pl.yield_(updated)` — the LHS
+             supplies the return_var name and the post-loop binding.
+          2. No yield at all (pre-SSA): body mutates iter_args via AssignStmt;
+             ConvertToSSA later synthesizes the yield. Synthetic `_out`
+             return_var names are used.
+
+        Bare `pl.yield_(...)` mixed with init_values is rejected: it would
+        leave the post-loop binding nameless, and the user gets a downstream
+        arity mismatch from the IR builder instead of a clear parser error.
+        """
+        if not init_values_present:
+            return
+        first_bare = self._find_first_bare_yield(stmt.body)
+        if first_bare is None:
+            return
+        raise ParserSyntaxError(
+            "Loop with init_values requires an assignment-form pl.yield_(...) "
+            "— the LHS supplies the post-loop binding name. Bare pl.yield_(...) "
+            "is rejected here.",
+            span=self.span_tracker.get_span(first_bare),
+            hint="Use yield-LHS form: `x_next = pl.yield_(updated)`. Then refer to `x_next` after the loop.",
+        )
+
     def _validate_while_body(self, stmt: ast.For) -> None:
         """Validate pl.while_() body structure."""
         if not stmt.body:
@@ -1932,20 +1974,14 @@ class ASTParser:
             assert self._current_yield_vars is not None  # Guaranteed by _yield_tracking_scope
             return self._current_yield_vars[:]
 
-    def _register_while_outputs(
-        self, loop: Any, iter_args_node: ast.Tuple, loop_output_vars: list[str]
-    ) -> None:
-        """Register output variables from pl.while_() loop."""
+    def _register_while_outputs(self, loop: Any, loop_output_vars: list[str]) -> None:
+        """Register output variables from pl.while_() loop.
+
+        Mirrors `parse_for_loop`: the post-loop binding name is the yield-LHS,
+        not the header tuple. Header-tuple names are loop-scoped only.
+        """
         loop_result = loop.get_result()
         if hasattr(loop_result, "return_vars") and loop_result.return_vars and loop_output_vars:
-            for i, iter_arg_node in enumerate(iter_args_node.elts):
-                if i >= len(loop_result.return_vars):
-                    break
-                if isinstance(iter_arg_node, ast.Name):
-                    self.scope_manager.define_var(
-                        iter_arg_node.id, loop_result.return_vars[i], allow_redef=True
-                    )
-
             for i, var_name in enumerate(loop_output_vars):
                 if i < len(loop_result.return_vars):
                     self.scope_manager.define_var(var_name, loop_result.return_vars[i], allow_redef=True)
@@ -1966,6 +2002,9 @@ class ASTParser:
         init_values = self._parse_while_init_values(while_call)
         self._validate_while_body(stmt)
         iter_args_node = self._validate_while_target(stmt, init_values)
+
+        # init_values is always non-empty for pl.while_ (enforced earlier).
+        self._require_yield_lhs_for_init_values(stmt, True)
 
         span = self.span_tracker.get_span(stmt)
         placeholder_condition = ir.ConstBool(True, span)
@@ -1995,15 +2034,14 @@ class ASTParser:
             # Parse body statements first to get actual output variable names
             loop_output_vars = self._parse_while_body_statements(stmt)
 
-            # Add return_vars using actual output variable names from body
-            if not loop_output_vars:
-                raise ParserSyntaxError(
-                    "pl.while_() with init_values requires a pl.yield_(...) in the body",
-                    span=self.span_tracker.get_span(stmt),
-                    hint="Yield the updated loop-carried values before the end of the body",
-                )
-            for var_name in loop_output_vars:
-                loop.return_var(var_name)
+            # Yield-LHS names if present; else synthetic `_out` names (pre-SSA).
+            if loop_output_vars:
+                for var_name in loop_output_vars:
+                    loop.return_var(var_name)
+            else:
+                for iter_arg_node in iter_args_node.elts:
+                    assert isinstance(iter_arg_node, ast.Name)
+                    loop.return_var(f"{iter_arg_node.id}_out")
 
             # Enforce Bool-typed condition after iter_args and return_vars are both
             # set up, so that the while_loop context manager's __exit__ validation
@@ -2017,7 +2055,7 @@ class ASTParser:
             self.current_loop_builder = prev_loop_builder
 
         # Register output variables
-        self._register_while_outputs(loop, iter_args_node, loop_output_vars)
+        self._register_while_outputs(loop, loop_output_vars)
 
     def parse_while_loop(self, stmt: ast.While) -> None:
         """Parse natural while loop syntax.
@@ -3406,25 +3444,10 @@ class ASTParser:
         # Emit yield statement
         self.builder.emit(ir.YieldStmt(yield_exprs, span))
 
-        # Bare top-level loop/while yields carry the loop output vars directly.
-        # Record their names so pl.while_()/init_values and similar printed forms
-        # can be parsed back into return_vars without requiring assignment-form
-        # yields.
-        if (
-            self._current_yield_vars is not None
-            and not self.in_if_stmt
-            and (self.in_for_loop or self.in_while_loop)
-        ):
-            for expr in yield_exprs:
-                if isinstance(expr, ir.Var):
-                    self._track_yield_var(expr.name_hint, [expr])
-
-        # Track yielded variables for if statement processing
-        # This is for single assignment like: var = pl.yield_(expr)
-        # We'll return a placeholder that gets resolved when if statement completes
-
-        # Return first expression as the "value" of the yield
-        # This handles: var = pl.yield_(expr)
+        # Return first expression as the "value" of the yield, so an
+        # assignment-form yield like `var = pl.yield_(expr)` binds `var` to
+        # `expr` for the body's purposes. The IR builder resolves the actual
+        # return_var once the enclosing scope closes.
         if len(yield_exprs) == 0:
             # Bare pl.yield_() with no arguments — return None (used as bare stmt)
             return None  # type: ignore[return-value]
