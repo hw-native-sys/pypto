@@ -1357,10 +1357,6 @@ class TorchCodegen(_ir.IRVisitor):
         for s in op.stmts:
             self.visit_stmt(s)
 
-    def visit_scope_stmt(self, op: _ir.ScopeStmt) -> None:
-        # Scopes are transparent - just emit the body
-        self.visit_stmt(op.body)
-
     def visit_break_stmt(self, _op: _ir.BreakStmt) -> None:
         self._emit("break")
 
