@@ -10,24 +10,51 @@
 """Utility functions for IR construction."""
 
 import inspect
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 
+# Span pinned by the DSL parser while invoking a wrapper. When set, IR
+# builders that fall back via ``_get_span_or_capture`` use this in preference
+# to frame-capture, so nodes constructed inside DSL wrappers carry the
+# call-site span rather than the wrapper file's own line.
+_PARSER_SPAN: ContextVar[_ir.Span | None] = ContextVar("_PARSER_SPAN", default=None)
+
+
+@contextmanager
+def use_parser_span(span: _ir.Span) -> Iterator[None]:
+    """Temporarily pin the parser span seen by ``_get_span_or_capture``."""
+    token = _PARSER_SPAN.set(span)
+    try:
+        yield
+    finally:
+        _PARSER_SPAN.reset(token)
+
 
 def _get_span_or_capture(span: _ir.Span | None = None, frame_offset: int = 1) -> _ir.Span:
-    """Get explicit span or capture from caller.
+    """Get explicit span, parser-pinned span, or captured frame span.
+
+    Resolution order:
+      1. Explicit ``span`` argument when provided.
+      2. ``_PARSER_SPAN`` contextvar (set by the DSL parser).
+      3. Frame capture from ``frame_offset`` levels up the Python stack.
 
     Args:
         span: Explicit span if provided
         frame_offset: Additional frames to skip beyond immediate caller
 
     Returns:
-        Provided span or captured span from call site
+        Provided span, parser-pinned span, or captured span from call site
     """
     if span is not None:
         return span
+
+    parser_span = _PARSER_SPAN.get()
+    if parser_span is not None:
+        return parser_span
 
     frame = inspect.currentframe()
     if frame is not None:
@@ -162,4 +189,5 @@ __all__ = [
     "_normalize_shape",
     "_to_make_tuple",
     "resolve_cast_mode",
+    "use_parser_span",
 ]

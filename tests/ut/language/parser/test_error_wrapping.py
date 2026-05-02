@@ -90,7 +90,7 @@ class TestOpErrorWrapping:
 
     def test_parser_errors_not_double_wrapped(self):
         """ParserErrors from op dispatch are not re-wrapped."""
-        with pytest.raises(InvalidOperationError, match="Unknown tensor operation"):
+        with pytest.raises(InvalidOperationError, match=r"Unknown operation 'pl\.nonexistent_op'"):
 
             @pl.function
             def unknown(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:

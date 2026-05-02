@@ -77,17 +77,23 @@ T = TypeVar("T", Tensor, Tile)
 
 
 def _raise_type_dispatch_error(op_name: str, *args: object) -> NoReturn:
-    """Raise TypeError for mixed Tensor/Tile or unsupported argument types."""
+    """Raise TypeError for mixed Tensor/Tile or unsupported argument types.
+
+    Op-name prefix is auto-normalized to ``pl.<op>`` so the message reads
+    consistently whether the user invoked the wrapper directly or the DSL
+    parser surfaced the error.
+    """
+    qualified = op_name if op_name.startswith("pl.") else f"pl.{op_name}"
     has_tensor = any(isinstance(a, Tensor) for a in args)
     has_tile = any(isinstance(a, Tile) for a in args)
     types = ", ".join(type(a).__name__ for a in args)
     if has_tensor and has_tile:
         raise TypeError(
-            f"{op_name}: cannot mix Tensor and Tile arguments "
+            f"{qualified}: cannot mix Tensor and Tile arguments "
             f"({types}). All operands must be the same type "
             f"level — either all Tensor or all Tile"
         )
-    raise TypeError(f"{op_name}: expected Tensor or Tile operands, got ({types})")
+    raise TypeError(f"{qualified}: expected Tensor or Tile operands, got ({types})")
 
 
 # ---------------------------------------------------------------------------
@@ -105,13 +111,13 @@ def add(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile: ...
 def add(lhs: Scalar, rhs: Scalar | int | float) -> Scalar: ...
 def add(lhs, rhs):
     """Element-wise addition, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
         return _tensor.add(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.add(lhs, rhs)
-    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         return _tile.adds(lhs, rhs)
-    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float)):
+    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float, _ir_core.Expr)):
         return lhs + rhs
     _raise_type_dispatch_error("add", lhs, rhs)
 
@@ -127,13 +133,13 @@ def sub(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile: ...
 def sub(lhs: Scalar, rhs: Scalar | int | float) -> Scalar: ...
 def sub(lhs, rhs):
     """Element-wise subtraction, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
         return _tensor.sub(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.sub(lhs, rhs)
-    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         return _tile.subs(lhs, rhs)
-    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float)):
+    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float, _ir_core.Expr)):
         return lhs - rhs
     _raise_type_dispatch_error("sub", lhs, rhs)
 
@@ -149,13 +155,13 @@ def mul(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile: ...
 def mul(lhs: Scalar, rhs: Scalar | int | float) -> Scalar: ...
 def mul(lhs, rhs):
     """Element-wise multiplication, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
         return _tensor.mul(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.mul(lhs, rhs)
-    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         return _tile.muls(lhs, rhs)
-    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float)):
+    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float, _ir_core.Expr)):
         return lhs * rhs
     _raise_type_dispatch_error("mul", lhs, rhs)
 
@@ -171,13 +177,13 @@ def div(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile: ...
 def div(lhs: Scalar, rhs: Scalar | int | float) -> Scalar: ...
 def div(lhs, rhs):
     """Element-wise division, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar)):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
         return _tensor.div(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.div(lhs, rhs)
-    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar)):
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         return _tile.divs(lhs, rhs)
-    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float)):
+    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float, _ir_core.Expr)):
         return lhs / rhs
     _raise_type_dispatch_error("div", lhs, rhs)
 
@@ -202,7 +208,7 @@ def exp(input: T) -> T:
         return _tensor.exp(input)
     if isinstance(input, Tile):
         return _tile.exp(input)
-    raise TypeError(f"exp: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.exp: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def neg(input: T) -> T:
@@ -211,7 +217,7 @@ def neg(input: T) -> T:
         return _tensor.neg(input)
     if isinstance(input, Tile):
         return _tile.neg(input)
-    raise TypeError(f"neg: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.neg: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def abs(input: T) -> T:
@@ -220,7 +226,7 @@ def abs(input: T) -> T:
         return _tensor.abs(input)
     if isinstance(input, Tile):
         return _tile.abs(input)
-    raise TypeError(f"abs: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.abs: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def recip(input: T) -> T:
@@ -229,7 +235,7 @@ def recip(input: T) -> T:
         return _tensor.recip(input)
     if isinstance(input, Tile):
         return _tile.recip(input)
-    raise TypeError(f"recip: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.recip: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def sqrt(input: T) -> T:
@@ -238,7 +244,7 @@ def sqrt(input: T) -> T:
         return _tensor.sqrt(input)
     if isinstance(input, Tile):
         return _tile.sqrt(input)
-    raise TypeError(f"sqrt: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.sqrt: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def rsqrt(input: T, high_precision: bool = False) -> T:
@@ -253,7 +259,7 @@ def rsqrt(input: T, high_precision: bool = False) -> T:
         return _tensor.rsqrt(input, high_precision=high_precision)
     if isinstance(input, Tile):
         return _tile.rsqrt(input)
-    raise TypeError(f"rsqrt: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.rsqrt: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def row_expand_mul(lhs: T, rhs: T) -> T:
@@ -343,7 +349,7 @@ def expands(target: Tensor | Tile, scalar: int | float | Scalar) -> Tensor | Til
         return _tensor.expands(target, scalar)
     if isinstance(target, Tile):
         return _tile.expands(target, scalar)
-    raise TypeError(f"expands: expected Tensor or Tile, got {type(target).__name__}")
+    raise TypeError(f"pl.expands: expected Tensor or Tile, got {type(target).__name__}")
 
 
 def reshape(input: T, shape: Sequence[IntLike]) -> T:
@@ -352,7 +358,7 @@ def reshape(input: T, shape: Sequence[IntLike]) -> T:
         return _tensor.reshape(input, shape)
     if isinstance(input, Tile):
         return _tile.reshape(input, shape)
-    raise TypeError(f"reshape: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.reshape: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def transpose(input: T, axis1: int, axis2: int) -> T:
@@ -361,7 +367,7 @@ def transpose(input: T, axis1: int, axis2: int) -> T:
         return _tensor.transpose(input, axis1, axis2)
     if isinstance(input, Tile):
         return _tile.transpose(input, axis1, axis2)
-    raise TypeError(f"transpose: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.transpose: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def concat(src0: T, src1: T) -> T:
@@ -384,7 +390,7 @@ def slice(
         return _tensor.slice(input, shape, offset, valid_shape)
     if isinstance(input, Tile):
         return _tile.slice(input, shape, offset, valid_shape)
-    raise TypeError(f"slice: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.slice: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def fillpad(value: T, pad_value: PadValue | int | float = PadValue.zero) -> T:
@@ -398,7 +404,7 @@ def fillpad(value: T, pad_value: PadValue | int | float = PadValue.zero) -> T:
         return _tensor.fillpad(value, pad_value)
     if isinstance(value, Tile):
         return _tile.fillpad(value, pad_value)
-    raise TypeError(f"fillpad: expected Tensor or Tile, got {type(value).__name__}")
+    raise TypeError(f"pl.fillpad: expected Tensor or Tile, got {type(value).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +517,7 @@ def row_max(input: T, tmp_tile: Tile | None = None) -> T:
         if tmp_tile is None:
             raise ValueError("row_max on Tile requires tmp_tile argument")
         return _tile.row_max(input, tmp_tile)
-    raise TypeError(f"row_max: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.row_max: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def row_sum(input: T, tmp_tile: Tile | None = None) -> T:
@@ -526,7 +532,7 @@ def row_sum(input: T, tmp_tile: Tile | None = None) -> T:
         if tmp_tile is None:
             raise ValueError("row_sum on Tile requires tmp_tile argument")
         return _tile.row_sum(input, tmp_tile)
-    raise TypeError(f"row_sum: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.row_sum: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def row_min(input: T, tmp_tile: Tile | None = None) -> T:
@@ -541,7 +547,7 @@ def row_min(input: T, tmp_tile: Tile | None = None) -> T:
         if tmp_tile is None:
             raise ValueError("row_min on Tile requires tmp_tile argument")
         return _tile.row_min(input, tmp_tile)
-    raise TypeError(f"row_min: expected Tensor or Tile, got {type(input).__name__}")
+    raise TypeError(f"pl.row_min: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def col_sum(input: T, tmp_tile: Tile | None = None) -> T:
@@ -608,7 +614,7 @@ def cast(
             raise ValueError(f"cast: Scalar inputs do not support non-default mode, got mode={mode!r}")
         dtype = DataType(target_type) if isinstance(target_type, int) else target_type
         return Scalar(expr=_ir_core.cast(input.unwrap(), dtype))
-    raise TypeError(f"cast: expected Tensor, Tile, or Scalar, got {type(input).__name__}")
+    raise TypeError(f"pl.cast: expected Tensor, Tile, or Scalar, got {type(input).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -641,10 +647,14 @@ def read(src: Tensor | Tile, offset: IntLike | Sequence[IntLike]) -> Scalar:
         return _tensor.read(src, offset)
     if isinstance(src, Tile):
         return _tile.read(src, offset)
-    raise TypeError(f"read: expected Tensor or Tile, got {type(src).__name__}")
+    raise TypeError(f"pl.read: expected Tensor or Tile, got {type(src).__name__}")
 
 
-def write(dst: Tensor | Tile, offset: IntLike | Sequence[IntLike], value: Scalar) -> None:
+def write(
+    dst: Tensor | Tile,
+    offset: IntLike | Sequence[IntLike],
+    value: Scalar,
+) -> _ir_core.Expr:
     """Write a scalar value to a tensor or tile at given indices.
 
     Args:
@@ -652,9 +662,13 @@ def write(dst: Tensor | Tile, offset: IntLike | Sequence[IntLike], value: Scalar
         offset: A single index expression (for 1-D flat access) or index list
             (one per dimension) into the destination
         value: Scalar value to write
+
+    Returns:
+        Underlying ``tensor.write`` / ``tile.write`` call expression. Direct
+        callers ignore it; the DSL parser surfaces it as an ``EvalStmt``.
     """
     if isinstance(dst, Tensor):
         return _tensor.write(dst, offset, value)
     if isinstance(dst, Tile):
         return _tile.write(dst, offset, value)
-    raise TypeError(f"write: expected Tensor or Tile, got {type(dst).__name__}")
+    raise TypeError(f"pl.write: expected Tensor or Tile, got {type(dst).__name__}")

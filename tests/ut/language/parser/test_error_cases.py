@@ -149,7 +149,7 @@ class ChunkedLoopProgram:
     def test_unknown_tensor_operation(self):
         """Test error on unknown tensor operation."""
 
-        with pytest.raises(InvalidOperationError, match="Unknown tensor operation"):
+        with pytest.raises(InvalidOperationError, match=r"Unknown operation 'pl\.nonexistent_op'"):
 
             @pl.function
             def unknown_op(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:

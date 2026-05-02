@@ -15,7 +15,7 @@ that accept and return Tensor types instead of raw Expr/Call objects.
 
 import warnings
 from collections.abc import Sequence
-from typing import overload
+from typing import Any, overload
 
 __all__ = [
     "create_tensor",
@@ -137,19 +137,23 @@ def read(tensor: Tensor, indices: IntLike | Sequence[IntLike]) -> Scalar:
     return Scalar(expr=call_expr)
 
 
-def write(tensor: Tensor, indices: IntLike | Sequence[IntLike], value: Scalar) -> None:
+def write(tensor: Tensor, indices: IntLike | Sequence[IntLike], value: Scalar | Expr) -> Expr:
     """Write a scalar value into a tensor at given indices.
 
     Args:
         tensor: Destination tensor
         indices: A single index expression (for 1-D flat access) or a list of
             index expressions (one per tensor dimension)
-        value: Scalar value to write
+        value: Scalar value to write (DSL Scalar or raw Expr)
+
+    Returns:
+        The underlying ``tensor.write`` call expression. Direct callers
+        typically ignore it; the DSL parser surfaces it as an ``EvalStmt``.
     """
     # Allow a bare IntLike as a flat 1-D index for backwards compatibility
     indices_seq: Sequence[IntLike] = [indices] if not isinstance(indices, Sequence) else indices
-    call_expr = _ir_ops.write(tensor.unwrap(), _normalize_intlike(indices_seq), value.unwrap())
-    _ = call_expr  # result is the tensor itself; discarded here
+    value_expr = value.unwrap() if isinstance(value, Scalar) else value
+    return _ir_ops.write(tensor.unwrap(), _normalize_intlike(indices_seq), value_expr)
 
 
 def dim(tensor: Tensor, axis: int) -> Scalar:
@@ -344,7 +348,7 @@ def matmul_acc(
     return Tensor(expr=call_expr)
 
 
-def mul(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
+def mul(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
     """Element-wise multiplication of tensor and tensor or scalar.
 
     Automatically selects between tensor.mul (tensor x tensor) and
@@ -377,7 +381,7 @@ def muls(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def add(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
+def add(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
     """Element-wise addition of tensor and tensor or scalar.
 
     Automatically selects between tensor.add (tensor + tensor) and
@@ -410,7 +414,7 @@ def adds(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def sub(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
+def sub(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
     """Element-wise subtraction of tensor and tensor or scalar.
 
     Automatically selects between tensor.sub (tensor - tensor) and
@@ -443,7 +447,7 @@ def subs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def div(lhs: Tensor, rhs: int | float | Tensor | Scalar) -> Tensor:
+def div(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
     """Element-wise division of tensor and tensor or scalar.
 
     Automatically selects between tensor.div (tensor / tensor) and
@@ -881,29 +885,26 @@ def transpose(tensor: Tensor, axis1: int, axis2: int) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def scatter_update(
-    input: Tensor,
-    dim: int,
-    index: Tensor,
-    src: Tensor,
-) -> Tensor:
+def scatter_update(input: Tensor, *args: Any, **kwargs: Any) -> Tensor:
     """Update input tensor rows at positions specified by 2D index with values from src.
 
-    Supports two variants based on input/src rank:
-    - 2D: input [rows, d], src [b*s, d], index [b, s]
-    - 4D: input [blockNum, blockSize, 1, d], src [b, s, 1, d], index [b, s]
+    Accepts the same flexible call shapes as the IR builder
+    ``pypto.ir.op.tensor.scatter_update``:
 
-    Args:
-        input: Destination tensor (2D or 4D)
-        dim: Dimension to scatter along (currently only -2 is supported)
-        index: 2D index tensor [b, s] of integer dtype
-        src: Source tensor (2D [b*s, d] or 4D [b, s, 1, d])
+    - ``scatter_update(input, dim, index, src)``
+    - ``scatter_update(input, index, src, dim=-2)``
+    - ``scatter_update(input, dim, index=..., src=...)``
 
-    Returns:
-        Tensor wrapping the scatter_update operation
+    Tensor / Scalar wrappers are unwrapped before forwarding so the IR
+    builder receives raw ``Expr`` operands.
     """
-    call_expr = _ir_ops.scatter_update(input.unwrap(), dim, index.unwrap(), src.unwrap())
-    return Tensor(expr=call_expr)
+
+    def _unwrap(v: Any) -> Any:
+        return v.unwrap() if isinstance(v, (Tensor, Scalar)) else v
+
+    fwd_args = tuple(_unwrap(a) for a in args)
+    fwd_kwargs = {k: _unwrap(v) for k, v in kwargs.items()}
+    return Tensor(expr=_ir_ops.scatter_update(input.unwrap(), *fwd_args, **fwd_kwargs))
 
 
 def sort32(src: Tensor, idx: Tensor) -> Tensor:

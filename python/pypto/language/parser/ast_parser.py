@@ -20,9 +20,13 @@ from typing import TYPE_CHECKING, Any, cast
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
+from pypto.language.op import system_ops as _dsl_system
+from pypto.language.op import tensor_ops as _dsl_tensor
+from pypto.language.op import tile_ops as _dsl_tile
 from pypto.pypto_core import DataType, ir
 from pypto.pypto_core import arith as _arith
 
+from ._dsl_invoker import invoke_dsl
 from .diagnostics import (
     InvalidOperationError,
     ParserError,
@@ -3831,6 +3835,22 @@ class ASTParser:
 
         return return_expr
 
+    def _parse_op_positional_arg(self, arg: ast.expr) -> Any:
+        """Parse a positional op argument.
+
+        For ``ast.Attribute`` nodes (e.g. ``pl.INDEX``, ``pl.FP32``), try
+        dtype resolution first so wrappers receive a ``DataType`` for slots
+        like ``pl.cast(value, dtype)``. Falls through to ``parse_expression``
+        for everything else, which keeps Tensor/Tile/Scalar var lookups,
+        list literals, etc. on the existing path.
+        """
+        if isinstance(arg, ast.Attribute):
+            try:
+                return self.type_resolver.resolve_dtype(arg)
+            except ParserError:
+                pass
+        return self.parse_expression(arg)
+
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
 
@@ -3949,16 +3969,22 @@ class ASTParser:
         return self.parse_list(value)
 
     def _dispatch_op(self, module: Any, module_name: str, op_name: str, call: ast.Call) -> ir.Expr:
-        """Dispatch an operation call to the given ir_op module.
+        """Dispatch an op call to a DSL wrapper module.
+
+        The wrapper owns type-checking and dispatch (e.g. ``tile.add`` already
+        routes scalar rhs to ``tile.adds``); the parser only parses args, wraps
+        them as DSL types via :func:`invoke_dsl`, pins the call-site span
+        through a contextvar, and unwraps the result.
 
         Args:
-            module: The ir_op sub-module (e.g., ir_op.tensor, ir_op.tile, ir_op.system)
-            module_name: Human-readable module name for error messages
-            op_name: Name of the operation to look up on the module
-            call: Call AST node
+            module: A DSL op submodule (``_dsl_tensor`` / ``_dsl_tile`` /
+                ``_dsl_system``) or the unified ``pypto.language.op`` namespace.
+            module_name: Human-readable module name for error messages.
+            op_name: Name of the operation to look up on the module.
+            call: Call AST node.
 
         Returns:
-            IR expression from the operation
+            IR expression from the operation.
         """
         if not hasattr(module, op_name):
             raise InvalidOperationError(
@@ -3966,30 +3992,94 @@ class ASTParser:
                 span=self.span_tracker.get_span(call),
                 hint=f"Check if '{op_name}' is a valid {module_name} operation",
             )
-        args = [self.parse_expression(arg) for arg in call.args]
+        args = [self._parse_op_positional_arg(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
         op_func = getattr(module, op_name)
+        span = self.span_tracker.get_span(call)
         try:
-            return op_func(*args, **kwargs, span=self.span_tracker.get_span(call))
+            return invoke_dsl(op_func, args, kwargs, span)
         except ParserError:
             raise
+        except (TypeError, ValueError) as e:
+            # Wrapper may have prefixed its message (``pl.<op>:`` from
+            # ``_raise_type_dispatch_error`` or ``pl.<module>.<op>:``) or raised
+            # bare text from a deeper helper (e.g. ``ValueError("Invalid
+            # rounding mode ...")``). Make sure the surfaced error always names
+            # the op so users can locate the bad call. When any operand was a
+            # Scalar, append a hint pointing at Python operators.
+            msg = str(e)
+            if not msg.startswith(f"pl.{op_name}") and not msg.startswith(f"{module_name}.{op_name}"):
+                msg = f"{module_name} operation '{op_name}': {msg}"
+            hint = self._scalar_operand_hint(args, kwargs)
+            raise InvalidOperationError(msg, span=span, hint=hint) from e
         except Exception as e:
             raise InvalidOperationError(
                 f"Error in {module_name} operation '{op_name}': {concise_error_message(e)}",
-                span=self.span_tracker.get_span(call),
+                span=span,
             ) from e
+
+    @staticmethod
+    def _scalar_operand_hint(args: list[Any], kwargs: dict[str, Any]) -> str | None:
+        """Return the Python-operators hint when any operand has ScalarType.
+
+        Replaces a fragile ``"Scalar" in msg`` substring check; the parsed
+        operands carry their IR type explicitly, so we can decide based on
+        that rather than the wrapper's error wording.
+        """
+        for v in (*args, *kwargs.values()):
+            if isinstance(v, ir.Expr) and isinstance(v.type, ir.ScalarType):
+                return (
+                    "For scalar arithmetic / comparison, use Python operators directly "
+                    "(e.g. `s1 + s2`, `s1 % s2`, `s1 == s2`)."
+                )
+        return None
 
     def _parse_tensor_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tensor operation."""
         if op_name == "alloc":
             return self._parse_printed_alloc_call(call)
-        return self._dispatch_op(ir_op.tensor, "tensor", op_name, call)
+        # Prefer the DSL wrapper (owns type-checking + dispatch); fall back to
+        # the IR-builder layer for pass-internal ops like ``gather_mask``
+        # that are emitted by the printer but have no DSL wrapper.
+        if hasattr(_dsl_tensor, op_name):
+            return self._dispatch_op(_dsl_tensor, "pl.tensor", op_name, call)
+        return self._dispatch_ir_builder_op(ir_op.tensor, "pl.tensor", op_name, call)
 
     def _parse_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse tile operation."""
         if op_name == "alloc":
             return self._parse_printed_alloc_call(call)
-        return self._dispatch_op(ir_op.tile, "tile", op_name, call)
+        if hasattr(_dsl_tile, op_name):
+            return self._dispatch_op(_dsl_tile, "pl.tile", op_name, call)
+        return self._dispatch_ir_builder_op(ir_op.tile, "pl.tile", op_name, call)
+
+    def _dispatch_ir_builder_op(self, module: Any, module_name: str, op_name: str, call: ast.Call) -> ir.Expr:
+        """Dispatch to a raw IR-builder op (no DSL wrapping).
+
+        Used as a fallback when the DSL layer doesn't expose an op that the
+        printer emitted (e.g. pass-internal lowerings like ``tile.gather_mask``,
+        ``tile.mrgsort_format1``). IR builders take ``span=`` explicitly and
+        accept raw ``ir.Expr`` arguments — no DSL wrap/unwrap round-trip.
+        """
+        if not hasattr(module, op_name):
+            raise InvalidOperationError(
+                f"Unknown {module_name} operation: {op_name}",
+                span=self.span_tracker.get_span(call),
+                hint=f"Check if '{op_name}' is a valid {module_name} operation",
+            )
+        args = [self._parse_op_positional_arg(arg) for arg in call.args]
+        kwargs = self._parse_op_kwargs(call)
+        op_func = getattr(module, op_name)
+        span = self.span_tracker.get_span(call)
+        try:
+            return op_func(*args, **kwargs, span=span)
+        except ParserError:
+            raise
+        except Exception as e:
+            raise InvalidOperationError(
+                f"Error in {module_name} operation '{op_name}': {concise_error_message(e)}",
+                span=span,
+            ) from e
 
     @staticmethod
     def _is_printed_alloc_call(call: ast.Call) -> bool:
@@ -4027,7 +4117,7 @@ class ASTParser:
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""
-        return self._dispatch_op(ir_op.system, "system", op_name, call)
+        return self._dispatch_op(_dsl_system, "pl.system", op_name, call)
 
     # Maps iterator type name to ForKind enum value.
     _ITERATOR_TO_KIND = {
@@ -4037,128 +4127,27 @@ class ASTParser:
         "pipeline": ir.ForKind.Pipeline,
     }
 
-    # Maps unified op names to the scalar variant for tile ops.
-    # Only binary arithmetic ops have scalar auto-dispatch.
-    _TILE_SCALAR_OPS: dict[str, str] = {
-        "add": "adds",
-        "sub": "subs",
-        "mul": "muls",
-        "div": "divs",
-    }
-
-    # Maps unified op names to ir scalar expression functions.
-    # Arithmetic ops (add/sub/mul/div) mirror the `+`/`-`/`*`/`/` operators
-    # so `pl.<op>(scalar, scalar)` behaves like `scalar <op> scalar`. `div`
-    # maps to `truediv`, matching `pl.tile.div` semantics; users who want
-    # integer floor division can use the `//` operator.
-    _SCALAR_BINARY_OPS: dict[str, str] = {
-        "add": "add",
-        "sub": "sub",
-        "mul": "mul",
-        "div": "truediv",
-        "min": "min_",
-        "max": "max_",
-    }
-
-    _SCALAR_UNARY_OPS: dict[str, str] = {}
-
-    # Maps unified op names to ir scalar functions that take (expr, dtype, span).
-    _SCALAR_DTYPE_OPS: dict[str, str] = {
-        "cast": "cast",
-    }
-
-    # Ops that exist only in one module (no dispatch needed).
-    _TENSOR_ONLY_OPS = {
-        "create_tensor",
-        "dim",
-        "assemble",
-        "full",
-        "arange",
-    }
-    _TILE_ONLY_OPS = {
-        "load",
-        "store",
-        "move",
-        "log",
-        "relu",
-        "minimum",
-        "cmp",
-        "cmps",
-        "sum",
-        "matmul_bias",
-        "gemv",
-        "gemv_acc",
-        "gemv_bias",
-        "create_tile",
-        "tpush_to_aiv",
-        "tpush_to_aic",
-        "tpop_from_aic",
-        "tpop_from_aiv",
-    }
-    _SYSTEM_OPS = {
-        "tfree_to_aic",
-        "tfree_to_aiv",
-        "aic_initialize_pipe",
-        "aiv_initialize_pipe",
-        "reserve_buffer",
-        "import_peer_buffer",
-    }
-
     def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse unified operation call (pl.{op_name}).
+        """Parse a ``pl.<op>(...)`` call by delegating to the matching DSL wrapper.
 
-        Dispatches to tensor or tile IR op based on the first argument's type.
-
-        Args:
-            op_name: Name of the operation
-            call: Call AST node
-
-        Returns:
-            IR expression from the dispatched operation
+        Lookup mirrors how ``pl.<op>`` resolves at runtime: the top-level
+        ``pypto.language`` package is the authoritative source for ``pl.<op>``
+        symbols (it re-exports unified, promoted tensor-only, promoted
+        tile-only, and promoted system ops). The wrapper itself owns
+        type-checking and dispatch (e.g. ``unified_ops.add`` routes Tile+Scalar
+        to ``tile.adds``); the parser only forwards arguments and the
+        call-site span.
         """
-        # Short-circuit for ops that only exist in one module
-        if op_name in self._TENSOR_ONLY_OPS:
-            return self._parse_tensor_op(op_name, call)
-        if op_name in self._TILE_ONLY_OPS:
-            return self._parse_tile_op(op_name, call)
-        if op_name in self._SYSTEM_OPS:
-            return self._parse_system_op(op_name, call)
+        import pypto.language as _pl  # noqa: PLC0415 (circular import — `pypto.language` re-exports parser)
 
-        call_span = self.span_tracker.get_span(call)
-
-        if not call.args:
+        op_func = getattr(_pl, op_name, None)
+        if op_func is None or not callable(op_func):
             raise InvalidOperationError(
-                f"Unified operation '{op_name}' requires at least one argument for type dispatch",
-                span=call_span,
-                hint="Provide a Tensor or Tile as the first argument",
+                f"Unknown operation 'pl.{op_name}'",
+                span=self.span_tracker.get_span(call),
+                hint="Check spelling, or use pl.tensor.*/pl.tile.*/pl.system.* for explicit namespacing",
             )
-
-        # Parse only the first arg to determine dispatch target
-        first_arg = self.parse_expression(call.args[0])
-        first_type = first_arg.type
-
-        if isinstance(first_type, ir.TensorType):
-            return self._parse_tensor_op(op_name, call)
-
-        if isinstance(first_type, ir.TileType):
-            # For binary arithmetic ops, check if rhs is scalar → use scalar variant
-            scalar_op = self._TILE_SCALAR_OPS.get(op_name)
-            if scalar_op and len(call.args) >= 2:
-                rhs_arg = self.parse_expression(call.args[1])
-                if isinstance(rhs_arg.type, ir.ScalarType):
-                    return self._parse_tile_op(scalar_op, call)
-
-            return self._parse_tile_op(op_name, call)
-
-        if isinstance(first_type, ir.ScalarType):
-            return self._parse_scalar_op(op_name, call, call_span)
-
-        raise InvalidOperationError(
-            f"Cannot dispatch '{op_name}': first argument has type {type(first_type).__name__}, "
-            f"expected TensorType, TileType, or ScalarType",
-            span=call_span,
-            hint="Use pl.tensor.* or pl.tile.* for explicit dispatch",
-        )
+        return self._dispatch_op(_pl, "pl", op_name, call)
 
     def _parse_typed_constant(self, call: ast.Call) -> ir.Expr:
         """Parse pl.const(value, dtype) → ConstInt or ConstFloat.
@@ -4203,72 +4192,6 @@ class ASTParser:
             return ir.ConstFloat(value, dtype, span)
         else:
             return ir.ConstInt(value, dtype, span)
-
-    def _parse_scalar_op(self, op_name: str, call: ast.Call, call_span: ir.Span) -> ir.Expr:
-        """Parse scalar operation (e.g. pl.min(s1, s2) where s1, s2 are scalars).
-
-        Args:
-            op_name: Name of the operation
-            call: Call AST node
-            call_span: Source span for error reporting
-
-        Returns:
-            IR scalar expression
-        """
-        if call.keywords:
-            raise InvalidOperationError(
-                f"Scalar operation '{op_name}' does not accept keyword arguments",
-                span=call_span,
-            )
-
-        if op_name in self._SCALAR_DTYPE_OPS:
-            if len(call.args) != 2:
-                raise InvalidOperationError(
-                    f"Scalar operation '{op_name}' requires exactly 2 arguments (value, dtype), "
-                    f"got {len(call.args)}",
-                    span=call_span,
-                )
-            operand = self.parse_expression(call.args[0])
-            dtype = self.type_resolver.resolve_dtype(call.args[1])
-            ir_func_name = self._SCALAR_DTYPE_OPS[op_name]
-            ir_func = getattr(ir, ir_func_name)
-            return ir_func(operand, dtype, call_span)
-
-        if op_name in self._SCALAR_BINARY_OPS:
-            if len(call.args) != 2:
-                raise InvalidOperationError(
-                    f"Scalar binary operation '{op_name}' requires exactly 2 arguments, got {len(call.args)}",
-                    span=call_span,
-                )
-            lhs = self.parse_expression(call.args[0])
-            rhs = self.parse_expression(call.args[1])
-            ir_func_name = self._SCALAR_BINARY_OPS[op_name]
-            ir_func = getattr(ir, ir_func_name)
-            return ir_func(lhs, rhs, call_span)
-
-        if op_name in self._SCALAR_UNARY_OPS:
-            if len(call.args) != 1:
-                raise InvalidOperationError(
-                    f"Scalar unary operation '{op_name}' requires exactly 1 argument, got {len(call.args)}",
-                    span=call_span,
-                )
-            arg = self.parse_expression(call.args[0])
-            ir_func_name = self._SCALAR_UNARY_OPS[op_name]
-            ir_func = getattr(ir, ir_func_name)
-            return ir_func(arg, call_span)
-
-        supported = sorted(
-            set(self._SCALAR_BINARY_OPS) | set(self._SCALAR_UNARY_OPS) | set(self._SCALAR_DTYPE_OPS)
-        )
-        raise InvalidOperationError(
-            f"Operation '{op_name}' is not supported for scalar arguments",
-            span=call_span,
-            hint=(
-                f"Supported scalar ops: {', '.join(supported)}. "
-                "For other arithmetic / bitwise / comparison ops, use Python operators "
-                "directly on scalars (e.g. `s1 % s2`, `s1 << 1`, `s1 | s2`, `s1 == s2`)."
-            ),
-        )
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:
         """Parse attribute access.
