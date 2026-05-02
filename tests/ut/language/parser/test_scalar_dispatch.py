@@ -15,6 +15,7 @@ when called with scalar arguments.
 
 import pypto.language as pl
 import pytest
+from pypto.language.parser.diagnostics.exceptions import InvalidOperationError
 from pypto.pypto_core import ir
 
 
@@ -339,7 +340,7 @@ class TestScalarUnsupportedOpHint:
     def test_unsupported_op_hint_mentions_python_operators(self):
         # `pl.exp` is a unified op (tile/tensor) with no scalar dispatch — hits
         # the catch-all path that surfaces the improved hint.
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(InvalidOperationError, match=r"Operation 'exp' is not supported") as exc_info:
 
             @pl.program
             class Bad:

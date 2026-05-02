@@ -4267,7 +4267,7 @@ class ASTParser:
             hint=(
                 f"Supported scalar ops: {', '.join(supported)}. "
                 "For other arithmetic / bitwise / comparison ops, use Python operators "
-                "directly on scalars (e.g. `s1 + s2`, `s1 % s2`, `s1 << 1`, `s1 == s2`)."
+                "directly on scalars (e.g. `s1 % s2`, `s1 << 1`, `s1 | s2`, `s1 == s2`)."
             ),
         )
 
