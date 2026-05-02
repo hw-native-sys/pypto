@@ -234,15 +234,29 @@ PropertyVerifierPtr CreateNoNestedIncorePropertyVerifier();
 PropertyVerifierPtr CreateInOutUseValidPropertyVerifier();
 
 /**
+ * @brief Factory function for creating PipelineLoopValid property verifier
+ *
+ * Verifies the bidirectional structural invariant on every ``ForStmt``:
+ *   - ``kind_ == ForKind::Pipeline``  ⇔  ``HasAttr("pipeline_stages")``
+ *
+ * Either direction failing indicates a malformed pipeline loop. Listed in
+ * ``GetStructuralProperties()``, so ``VerificationInstrument`` checks it
+ * before/after every pass — not just post-``CanonicalizeIOOrder``.
+ *
+ * @return Shared pointer to PipelineLoopValid PropertyVerifier
+ */
+PropertyVerifierPtr CreatePipelineLoopValidPropertyVerifier();
+
+/**
  * @brief Factory function for creating PipelineResolved property verifier
  *
- * Verifies two invariants around ``ForKind::Pipeline``:
- *   1. No ``ForStmt`` may carry ``kind_ == ForKind::Pipeline`` (post-canonicalize
- *      state — Pipeline is a transient marker lowered by ``LowerPipelineLoops``
- *      and demoted by ``CanonicalizeIOOrder``).
- *   2. No ``ForStmt`` may carry the ``pipeline_stages`` attr when its kind is
- *      anything other than Pipeline (the attr ⇒ kind invariant — always checked,
- *      regardless of this property's specific "post-canonicalize" scope).
+ * Verifies the post-canonicalize invariant: no ``ForStmt`` may carry
+ * ``kind_ == ForKind::Pipeline``. ``ForKind::Pipeline`` is a transient marker
+ * lowered by ``LowerPipelineLoops`` and demoted by ``CanonicalizeIOOrder``;
+ * any survivor downstream of CanonicalizeIOOrder indicates a missing demotion.
+ *
+ * The bidirectional kind ⇔ attr invariant is checked separately by
+ * ``PipelineLoopValid`` (a structural property).
  *
  * @return Shared pointer to PipelineResolved PropertyVerifier
  */

@@ -59,6 +59,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::OutParamNotShadowed, CreateOutParamNotShadowedPropertyVerifier);
   Register(IRProperty::NoNestedInCore, CreateNoNestedIncorePropertyVerifier);
   Register(IRProperty::InOutUseValid, CreateInOutUseValidPropertyVerifier);
+  Register(IRProperty::PipelineLoopValid, CreatePipelineLoopValidPropertyVerifier);
   Register(IRProperty::PipelineResolved, CreatePipelineResolvedPropertyVerifier);
   Register(IRProperty::CallDirectionsResolved, CreateCallDirectionsResolvedPropertyVerifier);
 }

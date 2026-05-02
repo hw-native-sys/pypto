@@ -910,12 +910,10 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
     stream_ << ")";
   }
 
-  // `Pipeline` is user-facing only when the `pipeline_stages` attr is still
-  // present (pre-lowering form); after LowerPipelineLoops strips the attr the
-  // loop is a transient marker that prints as `.range(` — callers who need
-  // fidelity for the intermediate state must rely on tree-level assertions,
-  // not text round-trip.
-  const bool pipeline_user_form = (op->kind_ == ForKind::Pipeline && op->HasAttr(kPipelineStagesAttr));
+  // Kind drives syntax unconditionally (see ir-print-form-follows-kind). The
+  // structural invariant `kind == Pipeline ⇔ pipeline_stages attr present`
+  // (PipelineLoopValid, always-on) lets us read `stage=` from the attr below
+  // without a dual-mode branch.
   const char* range_func = ".range(";
   switch (op->kind_) {
     case ForKind::Unroll:
@@ -925,7 +923,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
       range_func = ".parallel(";
       break;
     case ForKind::Pipeline:
-      range_func = pipeline_user_form ? ".pipeline(" : ".range(";
+      range_func = ".pipeline(";
       break;
     case ForKind::Sequential:
       break;
@@ -979,7 +977,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // When rendering as `.pipeline(...)`, surface `pipeline_stages` as the required
   // `stage=` kwarg. The attr itself is stripped from the printed attrs={...} dict
   // below so it never leaks as storage detail.
-  if (pipeline_user_form) {
+  if (op->kind_ == ForKind::Pipeline) {
     stream_ << ", stage=" << op->GetAttr<int>(kPipelineStagesAttr, 0);
   }
   if (!op->iter_args_.empty()) {
@@ -1019,7 +1017,7 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // attr is filtered out.
   bool header_emitted = false;
   for (const auto& [key, value] : op->attrs_) {
-    if (pipeline_user_form && key == kPipelineStagesAttr) continue;
+    if (op->kind_ == ForKind::Pipeline && key == kPipelineStagesAttr) continue;
     stream_ << (header_emitted ? ", " : ", attrs={");
     header_emitted = true;
     stream_ << std::quoted(key) << ": ";

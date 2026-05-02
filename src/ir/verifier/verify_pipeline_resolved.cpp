@@ -17,7 +17,6 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
@@ -29,6 +28,11 @@ namespace {
 /// ``CanonicalizeIOOrder``; any leftover indicates either a new code path that
 /// forgot to route through the Lower→Canonicalize pair, or a pass that produced
 /// a Pipeline loop without being accounted for.
+///
+/// The bidirectional ``kind ⇔ pipeline_stages attr`` invariant is checked
+/// separately by ``PipelineLoopValid`` (a structural property always-on at every
+/// pass boundary), so this verifier only checks the post-canonicalize-specific
+/// invariant: no ``ForKind::Pipeline`` survives.
 class PipelineKindLeftoverChecker : public IRVisitor {
  public:
   PipelineKindLeftoverChecker(std::vector<Diagnostic>& diagnostics, const std::string& func_name)
@@ -42,17 +46,6 @@ class PipelineKindLeftoverChecker : public IRVisitor {
                                     "'. This kind is a transient marker — LowerPipelineLoops keeps it, "
                                     "and CanonicalizeIOOrder must demote it to Sequential.",
                                 op->span_);
-    }
-    // Structural invariant: pipeline_stages attr ⇒ kind == Pipeline.
-    // Report mismatches regardless of this property's scope — a Sequential loop
-    // carrying pipeline_stages is always malformed.
-    if (op->HasAttr(kPipelineStagesAttr) && op->kind_ != ForKind::Pipeline) {
-      diagnostics_.emplace_back(
-          DiagnosticSeverity::Error, "PipelineResolved", 1,
-          "ForStmt in function '" + func_name_ +
-              "' carries `attrs[\"pipeline_stages\"]` but `kind_` is not `ForKind::Pipeline`. "
-              "The attr is only meaningful on Pipeline loops.",
-          op->span_);
     }
     IRVisitor::VisitStmt_(op);
   }

@@ -205,18 +205,22 @@ Pass UnrollLoops();
  * @brief Lower ``pl.pipeline(N, stage=F)`` loops at the tile level
  *
  * Triggers on ``ForStmt`` nodes with ``kind_ == ForKind::Pipeline`` and
- * ``attrs_["pipeline_stages"] == F``. Produces an outer loop of ``N/F``
- * iterations whose body is a ``SeqStmts`` of ``F`` deep-cloned copies of the
- * original body, each with the loop variable substituted as
+ * ``attrs_["pipeline_stages"] == F`` where ``F > 1``. Produces an outer loop
+ * of ``N/F`` iterations whose body is a ``SeqStmts`` of ``F`` deep-cloned
+ * copies of the original body, each with the loop variable substituted as
  * ``new_var + k * step``. A trailing remainder covers ``N % F`` if non-zero —
  * a bare ``SeqStmts`` flattened into the outer scope for static bounds, or a
  * cascaded ``IfStmt`` dispatch on ``rem`` for dynamic bounds.
  *
- * The produced outer loop **keeps ``ForKind::Pipeline``** as a marker for the
+ * The produced outer loop **keeps ``ForKind::Pipeline`` and downgrades
+ * ``pipeline_stages`` to ``1``** as the post-lowering marker for the
  * downstream ``CanonicalizeIOOrder`` pass (which scopes its IO reorder to
- * pipeline bodies and demotes the kind to ``Sequential`` on exit). The
- * ``pipeline_stages`` attr is stripped from the output so re-running this
- * pass is a natural no-op (trigger requires BOTH kind and attr).
+ * pipeline bodies and demotes the kind / strips the attr on exit). Keeping
+ * the (kind, attr) pair together at every observable state preserves the
+ * bidirectional structural invariant ``kind == Pipeline ⇔ pipeline_stages
+ * attr present`` (verified by ``PipelineLoopValid``), so the IR survives
+ * print/parse round-trip throughout. Re-running this pass on its own output
+ * sees ``factor == 1`` and skips (idempotent).
  *
  * Runs at the tile level (after NormalizeReturnOrder, before InitMemRef) so
  * each clone's tile variables become candidates for distinct MemRef allocations

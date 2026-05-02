@@ -23,16 +23,14 @@ from pypto import ir, passes
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
-    """Run ``LowerPipelineLoops`` + ``CanonicalizeIOOrder`` with structural
-    verification disabled — our Before programs are intentionally minimal and
-    skip the tile-lowering chain. Canonicalize runs to demote the transient
-    ``ForKind::Pipeline`` marker back to ``Sequential`` so the Expected
-    programs (written in plain ``pl.range``) can be compared structurally.
-    Canonicalize is a no-op on the scalar-only bodies used in these tests
-    (single tier, stable order)."""
-    with passes.PassContext([], passes.VerificationLevel.NONE):
-        lowered = passes.lower_pipeline_loops()(program)
-        return passes.canonicalize_io_order()(lowered)
+    """Run ``LowerPipelineLoops`` + ``CanonicalizeIOOrder``. Canonicalize runs
+    to demote the transient ``ForKind::Pipeline`` marker back to ``Sequential``
+    so the Expected programs (written in plain ``pl.range``) can be compared
+    structurally. Canonicalize is a no-op on the scalar-only bodies used in
+    these tests (single tier, stable order). Verification stays on so the
+    autouse RoundtripInstrument exercises the post-LowerPipelineLoops state."""
+    lowered = passes.lower_pipeline_loops()(program)
+    return passes.canonicalize_io_order()(lowered)
 
 
 class TestLowerPipelineMechanics:

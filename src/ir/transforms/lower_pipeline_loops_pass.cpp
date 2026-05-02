@@ -129,14 +129,21 @@ std::pair<StmtPtr, std::vector<ExprPtr>> SplitBodyYield(const StmtPtr& body) {
 
 /**
  * @brief Mutator that lowers user-written `pl.pipeline(N, stage=F)` loops
- *        (`ForKind::Pipeline` + `attrs_["pipeline_stages"]`) into a replicated
- *        main loop plus a modulo-dispatch remainder.
+ *        (`ForKind::Pipeline` + `attrs_["pipeline_stages"] == F` with `F > 1`)
+ *        into a replicated main loop plus a modulo-dispatch remainder.
  *
- * The produced outer loop **keeps `ForKind::Pipeline`** as a marker for the
- * downstream `CanonicalizeIOOrder` pass (which scopes its IO reorder to
- * pipeline bodies and demotes the kind to `Sequential` on exit). The
- * `pipeline_stages` attr is stripped from the output, so re-running this pass
- * is a natural no-op (trigger requires BOTH kind and attr).
+ * The produced outer loop **keeps `ForKind::Pipeline` and downgrades
+ * `pipeline_stages` to `1`** as the post-lowering marker for the downstream
+ * `CanonicalizeIOOrder` pass (which scopes its IO reorder to pipeline bodies
+ * and demotes the kind/strips the attr on exit). Keeping the (kind, attr) pair
+ * together at every observable state preserves the bidirectional structural
+ * invariant `kind == Pipeline ⇔ pipeline_stages attr present` (verified by
+ * `PipelineLoopValid`), so the IR survives print/parse round-trip throughout.
+ *
+ * Idempotency: re-running this pass on its own output sees `factor == 1` and
+ * leaves the loop untouched (trigger requires `factor > 1`). User-written
+ * `pl.pipeline(stage=1)` is treated identically — no replication happens, the
+ * loop is left intact for `CanonicalizeIOOrder`.
  *
  * Static bounds → bare `SeqStmts` tail with exactly rem_iters clones flattened
  *   into the outer scope (plus trailing `AssignStmt`s to bind the outer loop's
@@ -162,6 +169,15 @@ class LowerPipelineMutator : public IRMutator {
     int64_t factor = static_cast<int64_t>(op->GetAttr<int>(kPipelineStagesAttr, 0));
     CHECK(factor >= 1) << "LowerPipelineLoops: pipeline_stages must be >= 1, got " << factor;
 
+    // factor == 1 is either a user-written `pl.pipeline(stage=1)` or the
+    // post-lowering marker emitted by a previous run. Either way nothing needs
+    // replicating — leave the (kind, attr) pair intact for CanonicalizeIOOrder
+    // to scope on, and just recurse into the body to lower nested pipelines.
+    // This also makes re-running the pass a natural no-op (idempotency).
+    if (factor == 1) {
+      return IRMutator::VisitStmt_(op);
+    }
+
     // Recurse into the body first so nested pipeline-marked loops are lowered too.
     auto inner_body = VisitStmt(op->body_);
 
@@ -169,13 +185,6 @@ class LowerPipelineMutator : public IRMutator {
     // both depend on `factor * step` being a compile-time integer.
     int64_t step = GetConstIntValue(op->step_, "step");
     CHECK(step != 0) << "LowerPipelineLoops: step cannot be zero";
-
-    // factor == 1: nothing to replicate. Demote kind to Sequential (no scope
-    // marker needed — CanonicalizeIOOrder has nothing to cluster when there is
-    // only one body copy) and strip the attr.
-    if (factor == 1) {
-      return DemoteToSequential(op, inner_body);
-    }
 
     auto start_const = TryGetConstInt(op->start_);
     auto stop_const = TryGetConstInt(op->stop_);
@@ -186,10 +195,10 @@ class LowerPipelineMutator : public IRMutator {
   }
 
  private:
-  /// stage == 1 / empty trip count path — no replication needed.
-  /// Demote kind to Sequential (no scope marker for CanonicalizeIOOrder to
-  /// react to) and strip `pipeline_stages`. The (kind, attr) pair moves
-  /// together so downstream invariants stay clean.
+  /// Empty static trip-count path — no replication needed and nothing for
+  /// CanonicalizeIOOrder to cluster (the loop never executes). Demote kind to
+  /// Sequential and strip `pipeline_stages` together so the bidirectional
+  /// invariant `kind == Pipeline ⇔ pipeline_stages attr present` stays whole.
   StmtPtr DemoteToSequential(const ForStmtPtr& op, const StmtPtr& inner_body) {
     auto cleaned = MutableCopy(op);
     cleaned->body_ = inner_body;
@@ -307,7 +316,14 @@ class LowerPipelineMutator : public IRMutator {
     auto new_body = SeqStmts::Flatten(std::move(body_parts), sp);
 
     ExprPtr new_step = MakeConstIndex(factor * step, sp);
+    // Post-lowering marker: kind stays Pipeline, attr is downgraded to 1 (the
+    // body is already replicated, so no further stage expansion is needed).
+    // Keeping the (kind, attr) pair together preserves PipelineLoopValid and
+    // makes the IR print/parse round-trip safe (renders as
+    // `pl.pipeline(..., stage=1)`). CanonicalizeIOOrder consumes the marker;
+    // re-running LowerPipelineLoops sees factor=1 and skips (idempotent).
     Attrs new_attrs = StripAttr(op->attrs_, kPipelineStagesAttr);
+    new_attrs.emplace_back(kPipelineStagesAttr, 1);
     return std::make_shared<ForStmt>(new_loop_var, main_start, main_stop, new_step, new_iter_args, new_body,
                                      main_return_vars, sp, op->kind_,
                                      /*chunk_config=*/std::nullopt, new_attrs, op->leading_comments_);

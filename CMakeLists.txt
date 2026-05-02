@@ -200,6 +200,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_structured_ctrl_flow_pass.cpp
     src/ir/verifier/verify_out_param_pass.cpp
     src/ir/verifier/verify_inout_use.cpp
+    src/ir/verifier/verify_pipeline_loop_valid.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/diagnostic_check_registry.cpp
