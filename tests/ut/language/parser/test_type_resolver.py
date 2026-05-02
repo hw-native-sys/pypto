@@ -269,8 +269,38 @@ class TestTypeResolver:
         resolver = _make_resolver()  # no parse_expression callback
 
         annotation = "pl.Tile[[16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[i + 1])]"
-        with pytest.raises(ParserTypeError, match="parsable index expression"):
+        with pytest.raises(ParserTypeError, match="integer constant or bare variable"):
             resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+
+    def test_tileview_field_rejects_non_index_typed_callback_result(self):
+        """The delegated parser may return non-Expr or non-index expressions.
+
+        Bare ``pl.yield_()`` returns ``None`` while emitting a YieldStmt to the
+        builder; ``pl.tile.create(...)`` returns a Tile-typed Expr. Both are
+        invalid for a TileView field — the validator must reject them with a
+        clear error rather than letting downstream code consume malformed IR.
+        """
+        # Non-Expr result (e.g. None from bare pl.yield_())
+        ev = ExprEvaluator(closure_vars={})
+        resolver = TypeResolver(expr_evaluator=ev, parse_expression=lambda _node: None)  # type: ignore[arg-type,return-value]
+        annotation = "pl.Tile[[16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[pl.yield_()])]"
+        with pytest.raises(ParserTypeError, match="must be an index expression"):
+            resolver.resolve_type(ast.parse(annotation, mode="eval").body)
+
+        # Non-index Expr result (e.g. a Tile from pl.tile.create(...))
+        tile_typed = ir.Var(
+            "t",
+            ir.TileType(
+                [ir.ConstInt(16, DataType.INDEX, ir.Span.unknown())], DataType.FP32, None, None, None
+            ),
+            ir.Span.unknown(),
+        )
+        resolver_tile = TypeResolver(expr_evaluator=ev, parse_expression=lambda _node: tile_typed)
+        annotation = (
+            "pl.Tile[[16], pl.FP32, pl.Mem.Vec, pl.TileView(valid_shape=[pl.tile.create([16], pl.FP32)])]"
+        )
+        with pytest.raises(ParserTypeError, match="must be an index expression"):
+            resolver_tile.resolve_type(ast.parse(annotation, mode="eval").body)
 
 
 class TestTupleTypeResolver:

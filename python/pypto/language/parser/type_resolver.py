@@ -73,6 +73,18 @@ def _try_get_static_dim(dim: ir.Expr) -> int | None:
     return None
 
 
+def _is_index_expr_type(t: "ir.Type | None") -> bool:
+    """Whether ``t`` is admissible for a TileView/TensorView field expression.
+
+    Mirrors the C++ contract: TileView fields are integer/index scalars
+    (constants, dyn vars, and arithmetic over them). Excludes tile, tensor,
+    tuple, float, and bool types.
+    """
+    if not isinstance(t, ir.ScalarType):
+        return False
+    return t.dtype == DataType.INDEX or t.dtype.is_int()
+
+
 _TYPE_KIND_NAMES: dict[type, str] = {
     ir.TensorType: "Tensor",
     ir.TileType: "Tile",
@@ -1299,11 +1311,26 @@ class TypeResolver:
                 self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), self._get_span(node))
             return self._dyn_var_cache[name]
         if self._parse_expression is not None:
-            return self._parse_expression(node)
+            result = self._parse_expression(node)
+            # Reject non-Expr returns (e.g. bare `pl.yield_()` returns None and emits a
+            # YieldStmt to the builder) and non-index expression types (e.g. `pl.tile.create(...)`
+            # returns a Tile). The C++ TileView contract is index expressions only.
+            if not isinstance(result, ir.Expr) or not _is_index_expr_type(result.type):
+                got = type(result).__name__ if not isinstance(result, ir.Expr) else type(result.type).__name__
+                raise ParserTypeError(
+                    f"TileView field must be an index expression, got {got}: {ast.unparse(node)}",
+                    span=self._get_span(node),
+                    hint=(
+                        "Use integer literals, dynamic variables, or arithmetic over them "
+                        "(pl.max, pl.min, +, -, *, ...)"
+                    ),
+                )
+            return result
         raise ParserTypeError(
-            f"TileView expression must be a parsable index expression, got: {ast.unparse(node)}",
+            f"TileView expression must be an integer constant or bare variable, got: {ast.unparse(node)}",
             span=self._get_span(node),
-            hint="Use an integer literal, a dynamic variable, or any pl.* index expression",
+            hint="Standalone TypeResolver only handles integer literals and bare names; "
+            "richer expressions require the resolver to be wired into an ASTParser.",
         )
 
     def _resolve_tilelayout(self, node: ast.expr) -> "ir.TileLayout":
