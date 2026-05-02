@@ -194,7 +194,8 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore}.
+ * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
+ * InOutUseValid, PipelineLoopValid}.
  */
 const IRPropertySet& GetStructuralProperties();
 

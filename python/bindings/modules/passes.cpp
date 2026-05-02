@@ -73,6 +73,8 @@ void BindPass(nb::module_& m) {
              "No nested InCore scopes (ScopeStmt inside ScopeStmt)")
       .value("InOutUseValid", IRProperty::InOutUseValid,
              "No reads of InOut/Out-passed variables after the call (RFC #1026)")
+      .value("PipelineLoopValid", IRProperty::PipelineLoopValid,
+             "Bidirectional invariant: ForStmt.kind_ == Pipeline ⇔ has pipeline_stages attr")
       .value("PipelineResolved", IRProperty::PipelineResolved,
              "No ForKind::Pipeline survives; produced by CanonicalizeIOOrder")
       .value("CallDirectionsResolved", IRProperty::CallDirectionsResolved,

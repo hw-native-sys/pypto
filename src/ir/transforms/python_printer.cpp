@@ -976,8 +976,13 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
 
   // When rendering as `.pipeline(...)`, surface `pipeline_stages` as the required
   // `stage=` kwarg. The attr itself is stripped from the printed attrs={...} dict
-  // below so it never leaks as storage detail.
+  // below so it never leaks as storage detail. PipelineLoopValid guarantees the
+  // attr is present whenever the kind is Pipeline; assert it here so a malformed
+  // loop reaching the printer (e.g. with verification disabled) fails loudly
+  // instead of emitting `stage=0`, which the parser rejects.
   if (op->kind_ == ForKind::Pipeline) {
+    INTERNAL_CHECK_SPAN(op->HasAttr(kPipelineStagesAttr), op->span_)
+        << "ForKind::Pipeline loop missing attrs[\"" << kPipelineStagesAttr << "\"]";
     stream_ << ", stage=" << op->GetAttr<int>(kPipelineStagesAttr, 0);
   }
   if (!op->iter_args_.empty()) {
