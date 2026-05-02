@@ -30,6 +30,7 @@
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
+#include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
 
@@ -133,12 +134,39 @@ ProgramPtr IRMutator::VisitProgram(const ProgramPtr& program) {
 }
 
 FunctionPtr IRMutator::VisitFunction(const FunctionPtr& func) {
-  auto new_body = VisitStmt(func->body_);
-  if (new_body.get() == func->body_.get()) {
-    return func;
+  // Visit params first so var_remap_ is primed with old→fresh entries before
+  // the body walk dereferences param uses; sibling params whose types embed
+  // earlier params resolve through the cache.
+  std::vector<VarPtr> new_params;
+  new_params.reserve(func->params_.size());
+  bool params_changed = false;
+  for (size_t i = 0; i < func->params_.size(); ++i) {
+    INTERNAL_CHECK_SPAN(func->params_[i], func->span_) << "Function has null param at index " << i;
+    auto new_param_expr = ExprFunctor<ExprPtr>::VisitExpr(func->params_[i]);
+    INTERNAL_CHECK_SPAN(new_param_expr, func->span_) << "Function param at index " << i << " mutated to null";
+    auto new_param = As<Var>(new_param_expr);
+    INTERNAL_CHECK_SPAN(new_param, func->span_)
+        << "Function param at index " << i << " mutated to non-Var (substitution map mapped a "
+        << "function parameter to a non-Var expression — not supported)";
+    if (new_param.get() != func->params_[i].get()) params_changed = true;
+    new_params.push_back(std::move(new_param));
   }
-  return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,
-                                          func->return_types_, std::move(new_body), func->span_,
+
+  std::vector<TypePtr> new_return_types;
+  new_return_types.reserve(func->return_types_.size());
+  bool return_types_changed = false;
+  for (const auto& rt : func->return_types_) {
+    auto new_rt = RemapTypeViaVisitor(rt);
+    if (new_rt.get() != rt.get()) return_types_changed = true;
+    new_return_types.push_back(std::move(new_rt));
+  }
+
+  auto new_body = VisitStmt(func->body_);
+  bool body_changed = (new_body.get() != func->body_.get());
+
+  if (!params_changed && !return_types_changed && !body_changed) return func;
+  return std::make_shared<const Function>(func->name_, std::move(new_params), func->param_directions_,
+                                          std::move(new_return_types), std::move(new_body), func->span_,
                                           func->func_type_, func->level_, func->role_, func->attrs_);
 }
 
@@ -146,30 +174,108 @@ ExprPtr IRMutator::VisitExpr(const ExprPtr& expr) { return ExprFunctor<ExprPtr>:
 
 StmtPtr IRMutator::VisitStmt(const StmtPtr& stmt) { return StmtFunctor<StmtPtr>::VisitStmt(stmt); }
 
+TypePtr IRMutator::RemapTypeViaVisitor(const TypePtr& type) {
+  if (!type) return type;
+  // No early-out on var_remap_.empty(): subclasses (e.g. DeepCloneMutator)
+  // drive substitution through their own state and override VisitExpr_(VarPtr)
+  // accordingly. Copy-on-write inside CloneTypeWithMemRefAndRemapExprs is the
+  // load-bearing no-op short-circuit — it returns the original type when no
+  // embedded expression actually changes.
+  if (auto tuple_type = As<TupleType>(type)) {
+    std::vector<TypePtr> new_types;
+    new_types.reserve(tuple_type->types_.size());
+    bool changed = false;
+    for (const auto& elem : tuple_type->types_) {
+      auto new_elem = RemapTypeViaVisitor(elem);
+      if (new_elem.get() != elem.get()) changed = true;
+      new_types.push_back(std::move(new_elem));
+    }
+    if (!changed) return type;
+    return std::make_shared<TupleType>(std::move(new_types));
+  }
+  auto original_memref_opt = GetTypeMemRef(type);
+  std::optional<MemRefPtr> new_memref_opt = original_memref_opt;
+  if (original_memref_opt.has_value()) {
+    auto remapped = ExprFunctor<ExprPtr>::VisitExpr(*original_memref_opt);
+    if (auto as_memref = As<MemRef>(remapped)) {
+      new_memref_opt = as_memref;
+    }
+  }
+  return CloneTypeWithMemRefAndRemapExprs(
+      type, new_memref_opt, [this](const ExprPtr& e) { return ExprFunctor<ExprPtr>::VisitExpr(e); });
+}
+
+ExprPtr IRMutator::ResolveVarRemapHit(const Expr* key, ExprPtr remapped) {
+  if (!remapped || remapped.get() == key) return remapped;
+  auto resolved = ExprFunctor<ExprPtr>::VisitExpr(remapped);
+  if (resolved.get() != remapped.get()) {
+    var_remap_[key] = resolved;
+  }
+  return resolved;
+}
+
 ExprPtr IRMutator::VisitExpr_(const VarPtr& op) {
   auto it = var_remap_.find(op.get());
   if (it != var_remap_.end()) {
-    return it->second;
+    return ResolveVarRemapHit(op.get(), it->second);
   }
-  return op;
+  // Walk the type because shape dims, TileView/TensorView fields, and any
+  // embedded MemRef may embed Vars in var_remap_. Identity-bearing — must
+  // mint via the proper Var constructor (MutableCopy is forbidden).
+  auto new_type = RemapTypeViaVisitor(op->GetType());
+  if (new_type.get() == op->GetType().get()) {
+    return op;
+  }
+  auto fresh = std::make_shared<const Var>(op->name_hint_, std::move(new_type), op->span_);
+  var_remap_[op.get()] = fresh;
+  return fresh;
 }
 
 ExprPtr IRMutator::VisitExpr_(const IterArgPtr& op) {
   auto it = var_remap_.find(op.get());
   if (it != var_remap_.end()) {
-    return it->second;
+    return ResolveVarRemapHit(op.get(), it->second);
   }
   INTERNAL_CHECK_SPAN(op->initValue_, op->span_) << "IterArg has null initValue";
   auto new_init_value = ExprFunctor<ExprPtr>::VisitExpr(op->initValue_);
   INTERNAL_CHECK_SPAN(new_init_value, op->span_) << "IterArg initValue mutated to null";
-  if (new_init_value.get() != op->initValue_.get()) {
-    return std::make_shared<const IterArg>(op->name_hint_, op->GetType(), std::move(new_init_value),
-                                           op->span_);
+  auto new_type = RemapTypeViaVisitor(op->GetType());
+  if (new_init_value.get() == op->initValue_.get() && new_type.get() == op->GetType().get()) {
+    return op;
   }
-  return op;
+  auto fresh = std::make_shared<const IterArg>(op->name_hint_, std::move(new_type), std::move(new_init_value),
+                                               op->span_);
+  var_remap_[op.get()] = fresh;
+  return fresh;
 }
 
-ExprPtr IRMutator::VisitExpr_(const MemRefPtr& op) { return op; }
+ExprPtr IRMutator::VisitExpr_(const MemRefPtr& op) {
+  auto it = var_remap_.find(op.get());
+  if (it != var_remap_.end()) {
+    return ResolveVarRemapHit(op.get(), it->second);
+  }
+  // MemRef's own type_ is the singleton MemRefType (no embedded exprs); only
+  // base_/byte_offset_ need remapping.
+  VarPtr new_base = op->base_;
+  if (op->base_) {
+    auto remapped_base = ExprFunctor<ExprPtr>::VisitExpr(op->base_);
+    new_base = As<Var>(remapped_base);
+    INTERNAL_CHECK_SPAN(new_base, op->span_)
+        << "MemRef base_ mutated to non-Var (substitution map mapped a MemRef base "
+        << "to a non-Var expression — not supported)";
+  }
+  ExprPtr new_offset = op->byte_offset_;
+  if (op->byte_offset_) {
+    new_offset = ExprFunctor<ExprPtr>::VisitExpr(op->byte_offset_);
+  }
+  if (new_base.get() == op->base_.get() && new_offset.get() == op->byte_offset_.get()) {
+    return op;
+  }
+  auto fresh = std::make_shared<const MemRef>(op->name_hint_, std::move(new_base), std::move(new_offset),
+                                              op->size_, op->span_);
+  var_remap_[op.get()] = fresh;
+  return fresh;
+}
 
 ExprPtr IRMutator::VisitExpr_(const ConstIntPtr& op) { return op; }
 
@@ -179,7 +285,7 @@ ExprPtr IRMutator::VisitExpr_(const ConstBoolPtr& op) { return op; }
 
 ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   std::vector<ExprPtr> new_args;
-  bool changed = false;
+  bool args_changed = false;
   new_args.reserve(op->args_.size());
 
   for (size_t i = 0; i < op->args_.size(); ++i) {
@@ -188,17 +294,21 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
     INTERNAL_CHECK_SPAN(new_arg, op->span_) << "Call argument at index " << i << " mutated to null";
     new_args.push_back(new_arg);
     if (new_arg.get() != op->args_[i].get()) {
-      changed = true;
+      args_changed = true;
     }
   }
 
-  if (changed) {
-    // Preserve attrs_ across mutation: callers of the base mutator should not lose
-    // compiler-internal metadata (e.g., arg_directions) when only argument expressions change.
-    return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, op->attrs_, op->GetType(),
-                                        op->span_);
-  }
-  return op;
+  // Call's type_ is set by the deducer at construction and isn't auto-derived
+  // from args, so the args walk alone won't propagate substitutions into a
+  // returned TileType/TensorType's shape/view fields.
+  auto new_type = RemapTypeViaVisitor(op->GetType());
+  bool type_changed = (new_type.get() != op->GetType().get());
+
+  if (!args_changed && !type_changed) return op;
+  // Preserve attrs_ across mutation: callers of the base mutator should not lose
+  // compiler-internal metadata (e.g., arg_directions) when only argument expressions change.
+  return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, op->attrs_,
+                                      std::move(new_type), op->span_);
 }
 
 ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {

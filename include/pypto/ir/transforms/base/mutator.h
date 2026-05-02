@@ -21,6 +21,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/functor.h"
+#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -115,10 +116,27 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// Default: visits operand, reconstructs if changed (copy-on-write).
   virtual ExprPtr VisitUnaryExpr_(const UnaryExprPtr& op);
 
-  /// Pointer remapping for variables whose definitions changed during mutation.
-  /// Used to keep body references consistent with new definition pointers
-  /// (e.g., when IterArg's initValue_ changes, creating a new IterArg object).
-  /// Checked in both VisitExpr_(VarPtr) and VisitExpr_(IterArgPtr) for extensibility.
+  /// Walk the embedded expressions inside a TypePtr — shape dims,
+  /// TileView/TensorView fields, and any embedded MemRef's base/offset —
+  /// dispatching each through ExprFunctor::VisitExpr so the active substitution
+  /// (var_remap_ or subclass overrides) reaches Var refs that live inside types.
+  /// Copy-on-write inside CloneTypeWithMemRefAndRemapExprs returns the original
+  /// TypePtr when nothing inside changes.
+  TypePtr RemapTypeViaVisitor(const TypePtr& type);
+
+  /// Resolve a var_remap_ hit transitively — the seeded value may itself need
+  /// further substitution (its type embeds a Var that's also in var_remap_).
+  /// Memoizes the resolved value back into var_remap_ so subsequent lookups
+  /// skip the chain. Self-references short-circuit.
+  ExprPtr ResolveVarRemapHit(const Expr* key, ExprPtr remapped);
+
+  /// Pointer remapping for Vars whose definitions changed during mutation.
+  /// Two sources populate this map: (1) subclass-seeded substitutions (e.g.
+  /// SubstituteMutator copies the user's var_map at construction); (2) fresh
+  /// Vars minted by VisitExpr_(VarPtr/IterArgPtr/MemRefPtr) when an old Var's
+  /// type embeds a substituted Var and gets remapped. Both forms preserve
+  /// def-use closure: every visit of the old Var resolves to the same
+  /// replacement.
   std::unordered_map<const Expr*, ExprPtr> var_remap_;
 };
 

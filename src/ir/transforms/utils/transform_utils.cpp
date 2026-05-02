@@ -15,13 +15,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/kind_traits.h"
-#include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 
@@ -29,178 +24,24 @@ namespace pypto::ir::transform_utils {
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// Substitute helpers
-// ---------------------------------------------------------------------------
-
-/// Reconstruct a BinaryExpr with new operands, dispatching on ObjectKind.
-ExprPtr ReconstructBinaryExpr(ObjectKind kind, const ExprPtr& left, const ExprPtr& right, DataType dtype,
-                              const Span& span) {
-  // clang-format off
-  switch (kind) {
-    case ObjectKind::Add:           return std::make_shared<Add>(left, right, dtype, span);
-    case ObjectKind::Sub:           return std::make_shared<Sub>(left, right, dtype, span);
-    case ObjectKind::Mul:           return std::make_shared<Mul>(left, right, dtype, span);
-    case ObjectKind::FloorDiv:      return std::make_shared<FloorDiv>(left, right, dtype, span);
-    case ObjectKind::FloorMod:      return std::make_shared<FloorMod>(left, right, dtype, span);
-    case ObjectKind::FloatDiv:      return std::make_shared<FloatDiv>(left, right, dtype, span);
-    case ObjectKind::Min:           return std::make_shared<Min>(left, right, dtype, span);
-    case ObjectKind::Max:           return std::make_shared<Max>(left, right, dtype, span);
-    case ObjectKind::Pow:           return std::make_shared<Pow>(left, right, dtype, span);
-    case ObjectKind::Eq:            return std::make_shared<Eq>(left, right, dtype, span);
-    case ObjectKind::Ne:            return std::make_shared<Ne>(left, right, dtype, span);
-    case ObjectKind::Lt:            return std::make_shared<Lt>(left, right, dtype, span);
-    case ObjectKind::Le:            return std::make_shared<Le>(left, right, dtype, span);
-    case ObjectKind::Gt:            return std::make_shared<Gt>(left, right, dtype, span);
-    case ObjectKind::Ge:            return std::make_shared<Ge>(left, right, dtype, span);
-    case ObjectKind::And:           return std::make_shared<And>(left, right, dtype, span);
-    case ObjectKind::Or:            return std::make_shared<Or>(left, right, dtype, span);
-    case ObjectKind::Xor:           return std::make_shared<Xor>(left, right, dtype, span);
-    case ObjectKind::BitAnd:        return std::make_shared<BitAnd>(left, right, dtype, span);
-    case ObjectKind::BitOr:         return std::make_shared<BitOr>(left, right, dtype, span);
-    case ObjectKind::BitXor:        return std::make_shared<BitXor>(left, right, dtype, span);
-    case ObjectKind::BitShiftLeft:  return std::make_shared<BitShiftLeft>(left, right, dtype, span);
-    case ObjectKind::BitShiftRight: return std::make_shared<BitShiftRight>(left, right, dtype, span);
-    default:
-      throw pypto::InternalError("ReconstructBinaryExpr: unsupported ObjectKind");
-  }
-  // clang-format on
-}
-
-/// Reconstruct a UnaryExpr with a new operand, dispatching on ObjectKind.
-ExprPtr ReconstructUnaryExpr(ObjectKind kind, const ExprPtr& operand, DataType dtype, const Span& span) {
-  switch (kind) {
-    case ObjectKind::Abs:
-      return std::make_shared<Abs>(operand, dtype, span);
-    case ObjectKind::Neg:
-      return std::make_shared<Neg>(operand, dtype, span);
-    case ObjectKind::Not:
-      return std::make_shared<Not>(operand, dtype, span);
-    case ObjectKind::BitNot:
-      return std::make_shared<BitNot>(operand, dtype, span);
-    case ObjectKind::Cast:
-      return std::make_shared<Cast>(operand, dtype, span);
-    default:
-      throw pypto::InternalError("ReconstructUnaryExpr: unsupported ObjectKind");
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Substitute helper (IRMutator-based, for statement trees)
-// ---------------------------------------------------------------------------
-
+/// Seeds IRMutator::var_remap_ from the user-supplied substitution map; the
+/// base mutator's type-aware visitors do the rest.
 template <typename ValueT>
 class SubstituteMutator : public IRMutator {
  public:
-  explicit SubstituteMutator(const std::unordered_map<const Var*, ValueT>& var_map) : var_map_(var_map) {}
-
- protected:
-  ExprPtr VisitExpr_(const VarPtr& op) override {
-    auto it = var_map_.find(op.get());
-    if (it != var_map_.end()) {
-      return it->second;
+  explicit SubstituteMutator(const std::unordered_map<const Var*, ValueT>& var_map) {
+    for (const auto& [k, v] : var_map) {
+      var_remap_[k] = v;
     }
-    return IRMutator::VisitExpr_(op);
   }
-
-  ExprPtr VisitExpr_(const IterArgPtr& op) override {
-    auto it = var_map_.find(op.get());
-    if (it != var_map_.end()) {
-      return it->second;
-    }
-    return IRMutator::VisitExpr_(op);
-  }
-
- private:
-  const std::unordered_map<const Var*, ValueT>& var_map_;
 };
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Public API — Substitute
-// ---------------------------------------------------------------------------
-
-template <typename ValueT>
-ExprPtr SubstituteImpl(const ExprPtr& expr, const std::unordered_map<const Var*, ValueT>& var_map) {
-  // Check IterArg first (inherits Var but has different ObjectKind)
-  if (auto iter_arg = As<IterArg>(expr)) {
-    auto it = var_map.find(iter_arg.get());
-    if (it != var_map.end()) {
-      return it->second;
-    }
-    return expr;
-  }
-  if (auto var = As<Var>(expr)) {
-    auto it = var_map.find(var.get());
-    if (it != var_map.end()) {
-      return it->second;
-    }
-    return expr;
-  }
-  if (auto call = As<Call>(expr)) {
-    std::vector<ExprPtr> new_args;
-    new_args.reserve(call->args_.size());
-    bool changed = false;
-    for (const auto& arg : call->args_) {
-      auto new_arg = SubstituteImpl(arg, var_map);
-      new_args.push_back(new_arg);
-      if (new_arg != arg) {
-        changed = true;
-      }
-    }
-    if (!changed) {
-      return expr;
-    }
-    return std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->GetType(), call->span_);
-  }
-  if (auto make_tuple = As<MakeTuple>(expr)) {
-    std::vector<ExprPtr> new_elements;
-    new_elements.reserve(make_tuple->elements_.size());
-    bool changed = false;
-    for (const auto& elem : make_tuple->elements_) {
-      auto new_elem = SubstituteImpl(elem, var_map);
-      new_elements.push_back(new_elem);
-      if (new_elem != elem) {
-        changed = true;
-      }
-    }
-    if (!changed) {
-      return expr;
-    }
-    return std::make_shared<MakeTuple>(new_elements, make_tuple->span_);
-  }
-  if (auto tgi = As<TupleGetItemExpr>(expr)) {
-    auto new_tuple = SubstituteImpl(tgi->tuple_, var_map);
-    if (new_tuple == tgi->tuple_) {
-      return expr;
-    }
-    return std::make_shared<TupleGetItemExpr>(new_tuple, tgi->index_, tgi->span_);
-  }
-  if (auto bin = As<BinaryExpr>(expr)) {
-    auto new_left = SubstituteImpl(bin->left_, var_map);
-    auto new_right = SubstituteImpl(bin->right_, var_map);
-    if (new_left == bin->left_ && new_right == bin->right_) {
-      return expr;
-    }
-    auto dtype = GetScalarDtype(expr);
-    return ReconstructBinaryExpr(bin->GetKind(), new_left, new_right, dtype, bin->span_);
-  }
-  if (auto un = As<UnaryExpr>(expr)) {
-    auto new_operand = SubstituteImpl(un->operand_, var_map);
-    if (new_operand == un->operand_) {
-      return expr;
-    }
-    auto dtype = GetScalarDtype(expr);
-    return ReconstructUnaryExpr(un->GetKind(), new_operand, dtype, un->span_);
-  }
-  // For leaf expression types (ConstInt, ConstFloat, etc.), return as-is
-  return expr;
-}
-
 // Var* → VarPtr
 ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, VarPtr>& var_map) {
-  return SubstituteImpl(expr, var_map);
+  SubstituteMutator<VarPtr> mutator(var_map);
+  return mutator.VisitExpr(expr);
 }
 StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, VarPtr>& var_map) {
   SubstituteMutator<VarPtr> mutator(var_map);
@@ -209,7 +50,8 @@ StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, Var
 
 // Var* → ExprPtr
 ExprPtr Substitute(const ExprPtr& expr, const std::unordered_map<const Var*, ExprPtr>& var_map) {
-  return SubstituteImpl(expr, var_map);
+  SubstituteMutator<ExprPtr> mutator(var_map);
+  return mutator.VisitExpr(expr);
 }
 StmtPtr Substitute(const StmtPtr& body, const std::unordered_map<const Var*, ExprPtr>& var_map) {
   SubstituteMutator<ExprPtr> mutator(var_map);

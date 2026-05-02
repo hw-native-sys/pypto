@@ -472,5 +472,107 @@ class TestSubstituteStmt:
         assert isinstance(result, ir.EvalStmt)
 
 
+# ---------------------------------------------------------------------------
+# TestSubstituteTypeEmbeddedRefs
+# ---------------------------------------------------------------------------
+
+
+def _index_var(name: str) -> ir.Var:
+    return ir.Var(name, ir.ScalarType(DataType.INDEX), _span())
+
+
+def _tile_var_with_valid_shape(name: str, valid_dims: list[ir.Expr]) -> ir.Var:
+    """Build a Var of TileType[[16, 128], FP32] whose valid_shape embeds the given dims."""
+    shape = [ir.ConstInt(16, DataType.INDEX, _span()), ir.ConstInt(128, DataType.INDEX, _span())]
+    tv = ir.TileView(valid_shape=valid_dims)
+    tile_type = ir.TileType(shape, DataType.FP32, None, tv, ir.MemorySpace.Vec)
+    return ir.Var(name, tile_type, _span())
+
+
+class TestSubstituteTypeEmbeddedRefs:
+    """Tests that Substitute walks Var refs embedded inside type annotations
+    (shape dims, TileView/TensorView fields, MemRef base/offset, Call return
+    types, function signature). Regression tests for the bug where uses of a
+    Var whose type embedded a substituted Var were left dangling."""
+
+    def test_var_type_embedded_ref_is_remapped(self):
+        """A Var whose TileType.valid_shape embeds a substituted Var must
+        be reissued with the substituted ref inside its type."""
+        valid_rows_old = _index_var("valid_rows")
+        valid_rows_new = _index_var("valid_rows_new")
+        z = _tile_var_with_valid_shape("z", [valid_rows_old])
+
+        stmt = ir.AssignStmt(z, ir.ConstInt(0, DataType.INT64, _span()), _span())
+        result = ir.substitute_stmt(stmt, [(valid_rows_old, valid_rows_new)])
+
+        assert isinstance(result, ir.AssignStmt)
+        new_tile_type = result.var.type
+        assert isinstance(new_tile_type, ir.TileType)
+        assert new_tile_type.tile_view is not None
+        new_valid = new_tile_type.tile_view.valid_shape[0]
+        assert new_valid is valid_rows_new
+        assert new_valid is not valid_rows_old
+
+    def test_def_and_use_share_same_fresh_var(self):
+        """When a Var appears at both a def site and a use site, and its type
+        embeds a substituted Var, both occurrences must resolve to the same
+        fresh Var object (preserves def-use closure for structural-equal)."""
+        valid_rows_old = _index_var("valid_rows")
+        valid_rows_new = _index_var("valid_rows_new")
+        z = _tile_var_with_valid_shape("z", [valid_rows_old])
+
+        op = ir.Op("identity")
+        defn = ir.AssignStmt(z, ir.ConstInt(0, DataType.INT64, _span()), _span())
+        use = ir.EvalStmt(ir.Call(op, [z], z.type, _span()), _span())
+        body = ir.SeqStmts([defn, use], _span())
+
+        result = ir.substitute_stmt(body, [(valid_rows_old, valid_rows_new)])
+        assert isinstance(result, ir.SeqStmts)
+        new_defn, new_use = result.stmts
+        assert isinstance(new_defn, ir.AssignStmt)
+        assert isinstance(new_use, ir.EvalStmt)
+        assert isinstance(new_use.expr, ir.Call)
+        assert new_defn.var is new_use.expr.args[0]
+
+    def test_chained_substitution_resolves_transitively(self):
+        """When the seed map contains both A→B and X→Y, and B's type embeds X,
+        uses of A must resolve to a B-with-Y-in-its-type (not raw B)."""
+        valid_rows_old = _index_var("valid_rows")
+        valid_rows_new = _index_var("valid_rows_new")
+        z_old = _tile_var_with_valid_shape("z", [valid_rows_old])
+        # z_repl is what the user wants z_old to become — but z_repl's type
+        # still references valid_rows_old, which is itself being substituted.
+        z_repl = _tile_var_with_valid_shape("z", [valid_rows_old])
+
+        stmt = ir.AssignStmt(z_old, ir.ConstInt(0, DataType.INT64, _span()), _span())
+        result = ir.substitute_stmt(
+            stmt,
+            [(z_old, z_repl), (valid_rows_old, valid_rows_new)],
+        )
+        assert isinstance(result, ir.AssignStmt)
+        new_type = result.var.type
+        assert isinstance(new_type, ir.TileType)
+        assert new_type.tile_view is not None
+        assert new_type.tile_view.valid_shape[0] is valid_rows_new
+
+    def test_call_return_type_is_remapped(self):
+        """A Call's return type can be a TileType embedding a substituted Var.
+        Substitute must rewrite the return type."""
+        valid_rows_old = _index_var("valid_rows")
+        valid_rows_new = _index_var("valid_rows_new")
+        shape = [ir.ConstInt(16, DataType.INDEX, _span()), ir.ConstInt(128, DataType.INDEX, _span())]
+        tv = ir.TileView(valid_shape=[valid_rows_old])
+        tile_type = ir.TileType(shape, DataType.FP32, None, tv, ir.MemorySpace.Vec)
+        op = ir.Op("test_op")
+        call = ir.Call(op, [], tile_type, _span())
+
+        result = ir.substitute_expr(call, [(valid_rows_old, valid_rows_new)])
+        assert isinstance(result, ir.Call)
+        assert result is not call
+        assert isinstance(result.type, ir.TileType)
+        assert result.type.tile_view is not None
+        assert result.type.tile_view.valid_shape[0] is valid_rows_new
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -30,11 +30,18 @@ def _setup_backend():
 def _run_split_vector_kernel(program):
     """Run convert_to_ssa then split_vector_kernel.
 
-    Verification is disabled because these tests hand-construct minimal IR that
-    targets ``SplitVectorKernel`` in isolation; that IR doesn't satisfy
-    properties produced earlier in the real pipeline (``MixedKernelExpanded``,
-    pipe initialization, etc.). Roundtrip correctness is exercised explicitly
-    in tests that need it (see ``_assert_parses``).
+    Verification is disabled because these tests target SplitVectorKernel in
+    isolation — the input IR uses cross-core ops (``tpush_to_aiv`` /
+    ``tpop_from_aic``) directly, without the pipe-init / peer-buffer-import /
+    reserve / tfree-to-aic scaffolding that ``ExpandMixedKernel`` would have
+    added in the real pipeline. The ``MixedKernelExpanded`` property verifier
+    flags the missing calls as errors. Re-running the full pipeline through
+    ``ExpandMixedKernel`` here would change the test contract (and a lot of
+    hand-built IR wouldn't survive the upstream passes), so we skip
+    verification for this isolated-pass test harness instead. Round-trip
+    correctness — including def-use closure on Var refs embedded inside type
+    annotations — is exercised explicitly by
+    ``_assert_roundtrip_structural_equal``.
     """
     ssa = passes.convert_to_ssa()(program)
     pipeline = passes.PassPipeline()
@@ -44,17 +51,17 @@ def _run_split_vector_kernel(program):
         return pipeline.run(ssa)
 
 
-def _assert_parses(program, printed: str | None = None):
-    """Print (if not already provided) and reparse, asserting the parser accepts the printed text.
+def _assert_roundtrip_structural_equal(program, printed: str | None = None):
+    """Print, reparse, and assert the reparsed program is structurally equal.
 
-    This is the half of roundtrip the parser owns: any IR a producer can
-    construct must be printable and reparseable. (Full structural_equal
-    additionally requires the producer not to clone Vars, which is a
-    separate concern outside parser scope.) Tests that cover passes
-    producing non-trivial IR shapes (e.g. TileView fields with dynamic
-    expressions) call this to gate the parser side.
+    Catches both parser issues (printed text doesn't reparse) and producer
+    issues (def-use closure violations that produce two Vars where one is
+    expected). Used by tests that exercise passes producing non-trivial IR
+    shapes (e.g. TileView fields with dynamic expressions).
     """
-    pl.parse(printed if printed is not None else python_print(program))
+    text = printed if printed is not None else python_print(program)
+    reparsed = pl.parse(text)
+    ir.assert_structural_equal(reparsed, program)
 
 
 def _assert_split_matches_expected(before_program, expected_program):
@@ -186,8 +193,8 @@ class TestSplitVectorKernelUpDown:
         assert "pl.max(pl.min(valid_rows__ssa_v0 - subblock_idx * 8, 8), 0)" in printed
         assert "valid_rows__ssa_v0 // 2" not in printed
         # The TileView's localized valid_shape carries a non-constant expression;
-        # the parser must accept the same shapes the printer emits.
-        _assert_parses(actual, printed=printed)
+        # both the parser must accept it and the producer must not duplicate Vars.
+        _assert_roundtrip_structural_equal(actual, printed=printed)
 
     def test_load_shape_halved_and_offset_adjusted(self):
         """tile.load in AIV: shape halved, offset adjusted in split dim (includes add of halved tiles)."""
