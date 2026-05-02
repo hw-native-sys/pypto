@@ -34,6 +34,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -250,12 +251,9 @@ CallPtr CreateMove(const ExprPtr& tile, MemorySpace target_memory, const TypePtr
 
   std::vector<std::pair<std::string, std::any>> kwargs{{"target_memory", std::any(target_memory)}};
   if (auto tt = std::dynamic_pointer_cast<const TileType>(result_type); tt) {
-    const auto& tile_view = tt->tile_view_;
-    if (tile_view.has_value()) {
-      const auto& view = *tile_view;
-      kwargs.emplace_back("blayout", std::any(view.blayout));
-      kwargs.emplace_back("slayout", std::any(view.slayout));
-    }
+    const TileView eff = tile_view_semantics::GetEffectiveTileView(*tt);
+    kwargs.emplace_back("blayout", std::any(eff.blayout));
+    kwargs.emplace_back("slayout", std::any(eff.slayout));
   }
   return std::make_shared<Call>(op, std::vector<ExprPtr>{tile}, std::move(kwargs), result_type, span);
 }
@@ -342,15 +340,12 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
           // directly use nd
           if (side == CoreSide::AIV && handler->RequiresVtoCFractalAdapt()) {
             auto push_dest_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-            INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value() &&
-                                    push_dest_type->tile_view_.has_value(),
-                                stmt->span_)
-                << "Boundary move destination must have TileType, MemSpace and TileView";
+            INTERNAL_CHECK_SPAN(push_dest_type && push_dest_type->memory_space_.has_value(), stmt->span_)
+                << "Boundary move destination must have TileType and MemSpace";
 
-            // NOLINT: optional checked by INTERNAL_CHECK above
             auto fractal_view = BuildCrossCoreTransferView(
                 push_dest_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
-                push_dest_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
+                tile_view_semantics::GetEffectiveTileView(*push_dest_type));
 
             auto src_type = std::dynamic_pointer_cast<const TileType>(bm.source_tile->GetType());
             INTERNAL_CHECK_SPAN(src_type, stmt->span_) << "V->C tpush source must have TileType";
@@ -370,16 +365,12 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
               std::make_shared<EvalStmt>(CreateTpush(push_op, push_source, stmt->span_), stmt->span_));
         } else {
           auto dest_tile_type = std::dynamic_pointer_cast<const TileType>(bm.dest_var->GetType());
-          INTERNAL_CHECK_SPAN(dest_tile_type && dest_tile_type->memory_space_.has_value() &&
-                                  dest_tile_type->tile_view_.has_value(),
-                              stmt->span_)
-              << "Boundary move destination must have TileType, MemSpace and TileView";
+          INTERNAL_CHECK_SPAN(dest_tile_type && dest_tile_type->memory_space_.has_value(), stmt->span_)
+              << "Boundary move destination must have TileType and MemSpace";
           auto tpop_type = BuildBoundaryTpopType(side, bm.dest_var->GetType());
-          // Build tpop result type: with fractal TileView for boundary
-          // NOLINT: optional checked by INTERNAL_CHECK above
           auto fractal_view = BuildCrossCoreTransferView(
               dest_tile_type->memory_space_.value(),  // NOLINT(bugprone-unchecked-optional-access)
-              dest_tile_type->tile_view_.value());    // NOLINT(bugprone-unchecked-optional-access)
+              tile_view_semantics::GetEffectiveTileView(*dest_tile_type));
           bool needs_post_move = NeedsPostTpopMove(side, *dest_tile_type);
           std::string tpop_name = needs_post_move ? BuildBoundaryTpopName(side, bm.dest_var->name_hint_)
                                                   : bm.dest_var->name_hint_;

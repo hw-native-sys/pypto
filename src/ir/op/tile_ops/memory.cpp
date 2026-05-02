@@ -36,6 +36,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -248,13 +249,11 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
 
   const auto& input_shape = tile_type->shape_;
 
-  TileView tile_view;
+  const TileView source_view = tile_view_semantics::GetEffectiveTileView(*tile_type);
 
-  // Default: retain source tile's layout
-  if (tile_type->tile_view_) {
-    tile_view.blayout = tile_type->tile_view_->blayout;
-    tile_view.slayout = tile_type->tile_view_->slayout;
-  }
+  TileView tile_view;
+  tile_view.blayout = source_view.blayout;
+  tile_view.slayout = source_view.slayout;
 
   // Hardcoded layout for Left/Right (hardware requirements)
   if (space == MemorySpace::Left) {
@@ -273,14 +272,11 @@ TypePtr DeduceTileMoveType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> output_shape = input_shape;
 
   // Preserve input valid_shape (may be narrower than shape_)
-  auto input_valid_shape = (tile_type->tile_view_ && !tile_type->tile_view_->valid_shape.empty())
-                               ? tile_type->tile_view_->valid_shape
-                               : input_shape;
-  tile_view.valid_shape = input_valid_shape;
+  tile_view.valid_shape = source_view.valid_shape.empty() ? input_shape : source_view.valid_shape;
 
   // Preserve pad value from input tile
-  if (tile_type->tile_view_ && tile_type->tile_view_->pad != PadValue::null) {
-    tile_view.pad = tile_type->tile_view_->pad;
+  if (source_view.pad != PadValue::null) {
+    tile_view.pad = source_view.pad;
   }
 
   // Return TileType with computed shape and same dtype (no explicit MemRef)

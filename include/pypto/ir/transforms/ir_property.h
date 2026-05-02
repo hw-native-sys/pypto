@@ -54,6 +54,7 @@ enum class IRProperty : uint64_t {
   PipelineLoopValid,        ///< Bidirectional invariant: ForStmt.kind_ == Pipeline ⇔ has pipeline_stages attr
   PipelineResolved,         ///< No ForKind::Pipeline survives; produced by CanonicalizeIOOrder
   CallDirectionsResolved,   ///< Every non-builtin Call has explicit attrs['arg_directions']
+  TileTypeCoherence,        ///< Every TileType has canonical tile_view (implicit views stored as nullopt)
   kCount                    ///< Sentinel (must be last)
 };
 

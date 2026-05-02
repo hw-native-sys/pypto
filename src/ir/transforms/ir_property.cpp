@@ -71,6 +71,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "PipelineResolved";
     case IRProperty::CallDirectionsResolved:
       return "CallDirectionsResolved";
+    case IRProperty::TileTypeCoherence:
+      return "TileTypeCoherence";
     default:
       return "Unknown";
   }
@@ -152,7 +154,8 @@ const IRPropertySet& GetDefaultVerifyProperties() {
                                    IRProperty::NoRedundantBlocks,
                                    IRProperty::UseAfterDef,
                                    IRProperty::OutParamNotShadowed,
-                                   IRProperty::NoNestedInCore};
+                                   IRProperty::NoNestedInCore,
+                                   IRProperty::TileTypeCoherence};
   return props;
 }
 

@@ -44,11 +44,11 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
-#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
@@ -419,13 +419,9 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       oss << ", " << prefix_ << ".Mem." << mem_str;
     }
 
-    // Add optional tile_view parameter if present and non-trivial.
     if (tile_type->tile_view_.has_value()) {
-      auto tv_str = PrintTileView(tile_type->tile_view_.value(), tile_type->shape_, tile_type->memory_space_);
-      if (!tv_str.empty()) {
-        oss << ", " << tv_str;
-      }
-      // When all TileView fields are at defaults, omit entirely.
+      oss << ", "
+          << PrintTileView(tile_type->tile_view_.value(), tile_type->shape_, tile_type->memory_space_);
     }
 
     oss << "]";
@@ -1830,11 +1826,8 @@ std::string IRPythonPrinter::PrintMemRef(const MemRef& memref) {
 
 std::string IRPythonPrinter::PrintTileView(const TileView& tile_view, const std::vector<ExprPtr>& tile_shape,
                                            const std::optional<MemorySpace>& memory_space) {
-  // If the tile_view matches the implicit semantics for this shape+memory_space, omit entirely.
-  if (tile_view_semantics::IsImplicitPrintedTileView(tile_view, tile_shape, memory_space)) {
-    return "";
-  }
-
+  // Caller already gated on has_value(); a present view is non-implicit by the
+  // TileType canonical-encoding invariant, so always render the explicit form.
   std::ostringstream oss;
   oss << prefix_ << ".TileView(";
 

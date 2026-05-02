@@ -37,24 +37,12 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
-#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 
 namespace {
-
-std::optional<TileView> NormalizePrintedTileView(const TileTypePtr& tile_type) {
-  if (!tile_type || !tile_type->tile_view_.has_value()) {
-    return std::nullopt;
-  }
-  if (tile_view_semantics::IsImplicitPrintedTileView(tile_type->tile_view_.value(), tile_type->shape_,
-                                                     tile_type->memory_space_)) {
-    return std::nullopt;
-  }
-  return tile_type->tile_view_;
-}
 
 DataType CanonicalizeForSyntaxScalarDtype(const DataType& dtype) {
   if (dtype == DataType::INT64 || dtype == DataType::INDEX) {
@@ -462,8 +450,9 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       INTERNAL_CHECK(dim) << "structural_hash encountered null shape dimension in TileType";
       h = hash_combine(h, HashNode(dim));
     }
-    // Hash tile_view if present
-    auto tile_view = NormalizePrintedTileView(tile_type);
+    // tile_view_ is already canonical (TileType ctor canonicalizes implicit
+    // views to nullopt), so direct hashing yields one hash per semantic state.
+    const auto& tile_view = tile_type->tile_view_;
     if (tile_view.has_value()) {
       const auto& tv = tile_view.value();
       h = hash_combine(h, static_cast<result_type>(1));  // indicate presence

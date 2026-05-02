@@ -9,8 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PYPTO_IR_TRANSFORMS_UTILS_TILE_VIEW_SEMANTICS_H_
-#define PYPTO_IR_TRANSFORMS_UTILS_TILE_VIEW_SEMANTICS_H_
+#ifndef PYPTO_IR_TILE_VIEW_SEMANTICS_H_
+#define PYPTO_IR_TILE_VIEW_SEMANTICS_H_
 
 #include <cstddef>
 #include <memory>
@@ -159,6 +159,18 @@ inline std::vector<ExprPtr> GetPrintedValidShape(const std::optional<TileView>& 
   return shape;
 }
 
+/// Return the effective TileView for a TileType: the stored explicit view if
+/// present, else the implicit view for (shape, memory_space). Callers that
+/// need a concrete TileView for layout reasoning should use this — under the
+/// canonical encoding, an implicit view is stored as nullopt, so reading
+/// `tile_view_` directly would lose layout information for implicit-view tiles.
+inline TileView GetEffectiveTileView(const TileType& tile_type) {
+  if (tile_type.tile_view_.has_value()) {
+    return *tile_type.tile_view_;
+  }
+  return GetImplicitTileView(tile_type.shape_, tile_type.memory_space_);
+}
+
 }  // namespace pypto::ir::tile_view_semantics
 
-#endif  // PYPTO_IR_TRANSFORMS_UTILS_TILE_VIEW_SEMANTICS_H_
+#endif  // PYPTO_IR_TILE_VIEW_SEMANTICS_H_

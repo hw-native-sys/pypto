@@ -42,6 +42,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
 
@@ -212,15 +213,11 @@ static codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::Tile
   c.rows = rows_const->value_;
   c.cols = cols_const->value_;
 
-  if (source_tile_type.tile_view_.has_value()) {
-    const auto& tv = *source_tile_type.tile_view_;
-    c.blayout = tv.blayout;
-    c.slayout = tv.slayout;
-    c.fractal = tv.fractal;
-    c.pad = tv.pad;
-  } else if (c.cols == 1 && c.rows > 1) {
-    c.blayout = ir::TileLayout::col_major;
-  }
+  const auto tv = ir::tile_view_semantics::GetEffectiveTileView(source_tile_type);
+  c.blayout = tv.blayout;
+  c.slayout = tv.slayout;
+  c.fractal = tv.fractal;
+  c.pad = tv.pad;
 
   c.v_row = c.rows;
   c.v_col = c.cols;
@@ -626,15 +623,11 @@ static std::string MakeCmpsCodegenPTO(const std::string& pto_op_name, const Call
 // must be byte-for-byte compatible for a subview to be legal.
 static void CheckSubviewTileCompat(const ir::TileType& source, const ir::TileType& result,
                                    const std::string& op_name) {
-  CHECK(source.tile_view_.has_value())
-      << op_name << ": source tile must carry an explicit TileView to be sliced via pto.subview";
-  CHECK(result.tile_view_.has_value())
-      << op_name << ": result tile must carry an explicit TileView to be emitted as pto.subview";
   CHECK(source.dtype_ == result.dtype_) << op_name << ": source and result must share dtype, got "
                                         << source.dtype_.ToString() << " vs " << result.dtype_.ToString();
 
-  const auto& src_v = *source.tile_view_;
-  const auto& res_v = *result.tile_view_;
+  const auto src_v = ir::tile_view_semantics::GetEffectiveTileView(source);
+  const auto res_v = ir::tile_view_semantics::GetEffectiveTileView(result);
   CHECK(src_v.blayout == res_v.blayout)
       << op_name
       << ": blayout mismatch between source and result; pto.subview requires identical block layout";
@@ -714,12 +707,9 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
 
   ir::ExprPtr valid_row_expr = src_shape[0];
   ir::ExprPtr valid_col_expr = src_shape[1];
-  if (source_tile_type->tile_view_.has_value()) {
-    const auto tile_view = source_tile_type->tile_view_.value_or(ir::TileView{});
-    const auto& src_valid = tile_view.valid_shape;
-    if (src_valid.size() >= 1 && src_valid[0]) valid_row_expr = src_valid[0];
-    if (src_valid.size() >= 2 && src_valid[1]) valid_col_expr = src_valid[1];
-  }
+  const auto src_valid = ir::tile_view_semantics::GetEffectiveTileView(*source_tile_type).valid_shape;
+  if (src_valid.size() >= 1 && src_valid[0]) valid_row_expr = src_valid[0];
+  if (src_valid.size() >= 2 && src_valid[1]) valid_col_expr = src_valid[1];
 
   auto valid_row_const = ir::As<ir::ConstInt>(valid_row_expr);
   auto valid_col_const = ir::As<ir::ConstInt>(valid_col_expr);
@@ -1195,9 +1185,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   auto tile_type = As<ir::TileType>(tile->GetType());
   INTERNAL_CHECK_SPAN(tile_type, op->span_) << "tile.store first argument must have TileType";
-  INTERNAL_CHECK_SPAN(tile_type->tile_view_.has_value(), op->span_)
-      << "tile.store tile must have TileView with valid_shape";
-  const auto tile_view = tile_type->tile_view_.value_or(ir::TileView{});
+  const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*tile_type);
   const auto& valid_shape = tile_view.valid_shape;
   INTERNAL_CHECK_SPAN(valid_shape.size() == 2, op->span_) << "tile.store tile valid_shape must be 2D";
 
@@ -1622,10 +1610,10 @@ static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCod
   }
 
   auto source_tile_type = GetTpushTileType(op->args_[0]);
-  if (!source_tile_type || source_tile_type->shape_.size() < 2 || !source_tile_type->tile_view_.has_value()) {
+  if (!source_tile_type || source_tile_type->shape_.size() < 2) {
     return false;
   }
-  const auto tile_view = source_tile_type->tile_view_.value_or(ir::TileView{});
+  const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*source_tile_type);
   if (tile_view.valid_shape.size() < 2) {
     return false;
   }
@@ -1653,9 +1641,8 @@ static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCod
 static void EmitLogicalTpushValidShapeRestore(const CallPtr& op, codegen::PTOCodegen& codegen,
                                               const std::string& tile_buf, const std::string& tile_type) {
   auto source_tile_type = GetTpushTileType(op->args_[0]);
-  INTERNAL_CHECK(source_tile_type && source_tile_type->tile_view_.has_value())
-      << "Internal error: tpush validShape restore requires a rank-2 source TileView";
-  const auto tile_view = source_tile_type->tile_view_.value_or(ir::TileView{});
+  INTERNAL_CHECK(source_tile_type) << "Internal error: tpush validShape restore requires a TileType source";
+  const auto tile_view = ir::tile_view_semantics::GetEffectiveTileView(*source_tile_type);
   INTERNAL_CHECK(tile_view.valid_shape.size() >= 2)
       << "Internal error: tpush validShape restore requires rank-2 validShape";
   const auto& valid_shape = tile_view.valid_shape;

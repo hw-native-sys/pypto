@@ -34,6 +34,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -209,7 +210,7 @@ TypePtr WithZeroValidShape(const TypePtr& type, const Span& span) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
   if (!tt) return type;
 
-  TileView tile_view = tt->tile_view_.value_or(TileView{});
+  TileView tile_view = tile_view_semantics::GetEffectiveTileView(*tt);
   tile_view.valid_shape.clear();
   tile_view.valid_shape.reserve(tt->shape_.size());
   for (size_t i = 0; i < tt->shape_.size(); ++i) {

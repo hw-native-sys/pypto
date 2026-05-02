@@ -39,24 +39,12 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
-#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
 
 namespace {
-
-std::optional<TileView> NormalizePrintedTileView(const TileTypePtr& tile_type) {
-  if (!tile_type || !tile_type->tile_view_.has_value()) {
-    return std::nullopt;
-  }
-  if (tile_view_semantics::IsImplicitPrintedTileView(tile_type->tile_view_.value(), tile_type->shape_,
-                                                     tile_type->memory_space_)) {
-    return std::nullopt;
-  }
-  return tile_type->tile_view_;
-}
 
 bool AreForSyntaxScalarDtypesEquivalent(const DataType& lhs, const DataType& rhs) {
   return (lhs == DataType::INT64 && rhs == DataType::INDEX) ||
@@ -1093,9 +1081,10 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
     for (size_t i = 0; i < lhs_tile->shape_.size(); ++i) {
       if (!Equal(lhs_tile->shape_[i], rhs_tile->shape_[i])) return false;
     }
-    // Compare tile_view
-    auto lhs_tile_view = NormalizePrintedTileView(lhs_tile);
-    auto rhs_tile_view = NormalizePrintedTileView(rhs_tile);
+    // Field comparison is sufficient — TileType ctor canonicalizes implicit
+    // views to nullopt, so equivalent semantic states have identical fields.
+    const auto& lhs_tile_view = lhs_tile->tile_view_;
+    const auto& rhs_tile_view = rhs_tile->tile_view_;
     if (lhs_tile_view.has_value() != rhs_tile_view.has_value()) {
       if constexpr (AssertMode) {
         ThrowMismatch("TileType tile_view presence mismatch", IRNodePtr(), IRNodePtr(), "", "");

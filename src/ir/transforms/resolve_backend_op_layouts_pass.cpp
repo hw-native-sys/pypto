@@ -27,6 +27,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
@@ -50,10 +51,8 @@ StmtPtr MakeSeqOrSingle(std::vector<StmtPtr> stmts, const Span& span) {
 }
 
 TileLayout GetTileLayout(const TileTypePtr& tile_type) {
-  if (!tile_type || !tile_type->tile_view_.has_value()) {
-    return TileLayout::row_major;
-  }
-  return tile_type->tile_view_->blayout;
+  if (!tile_type) return TileLayout::row_major;
+  return tile_view_semantics::GetEffectiveTileView(*tile_type).blayout;
 }
 
 bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, 1); }

@@ -34,12 +34,12 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
@@ -388,34 +388,63 @@ class TileMemorySpaceMutator : public IRMutator {
       : var_memory_(var_memory), needed_moves_(needed_moves) {}
 
  protected:
+  // When promoting to a new memory_space, refresh the tile_view to the target's
+  // implicit view — the source's layout (e.g. Vec defaults from tile.create)
+  // becomes a mismatch once the space changes (Acc expects col_major/row_major).
+  std::optional<TypePtr> ComputeRewrittenType(const VarPtr& op) const {
+    auto tile_type = As<TileType>(op->GetType());
+    auto mem_it = var_memory_.find(op);
+    if (!tile_type || mem_it == var_memory_.end()) return std::nullopt;
+
+    std::optional<TileView> new_view = tile_type->tile_view_;
+    if (tile_type->memory_space_ != mem_it->second) {
+      new_view = tile_view_semantics::GetImplicitTileView(tile_type->shape_, mem_it->second);
+    }
+    return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
+                                      std::move(new_view), mem_it->second);
+  }
+
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = var_cache_.find(op);
     if (it != var_cache_.end()) {
       return it->second;
     }
 
-    auto tile_type = As<TileType>(op->GetType());
-    auto mem_it = var_memory_.find(op);
-
-    if (tile_type && mem_it != var_memory_.end()) {
-      // When promoting to a new memory space, refresh the TileView to the
-      // implicit view for the target — the old view (e.g. Vec-style defaults
-      // from a tile.create) becomes a layout mismatch once the memory space
-      // changes (e.g. Acc expects col_major/row_major/fractal=1024 rather
-      // than the Vec-style row_major/none_box/fractal=512).
-      std::optional<TileView> new_view = tile_type->tile_view_;
-      if (tile_type->memory_space_ != mem_it->second) {
-        new_view = tile_view_semantics::GetImplicitTileView(tile_type->shape_, mem_it->second);
-      }
-      auto new_type = std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
-                                                 std::move(new_view), mem_it->second);
-      auto new_var = std::make_shared<Var>(op->name_hint_, std::move(new_type), op->span_);
+    if (auto new_type = ComputeRewrittenType(op)) {
+      auto new_var = std::make_shared<Var>(op->name_hint_, *new_type, op->span_);
       var_cache_[op] = new_var;
       return new_var;
     }
 
     var_cache_[op] = op;
     return op;
+  }
+
+  // IterArg dispatches through its own visitor (per kind_traits — As<Var> does
+  // not match IterArg). Without this override the base IRMutator preserves the
+  // IterArg's old type, leaving iter_arg.type.memory_space stale while
+  // init_value and yield are promoted — breaking AssignStmt symmetry and
+  // print/parse round-trip.
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    auto it = var_cache_.find(op);
+    if (it != var_cache_.end()) {
+      return it->second;
+    }
+
+    auto new_type_opt = ComputeRewrittenType(op);
+    auto new_init_value = VisitExpr(op->initValue_);
+
+    bool type_changed = new_type_opt.has_value();
+    bool init_changed = new_init_value.get() != op->initValue_.get();
+    if (!type_changed && !init_changed) {
+      var_cache_[op] = op;
+      return op;
+    }
+
+    auto new_iter_arg = std::make_shared<const IterArg>(
+        op->name_hint_, type_changed ? *new_type_opt : op->GetType(), std::move(new_init_value), op->span_);
+    var_cache_[op] = new_iter_arg;
+    return new_iter_arg;
   }
 
   ExprPtr VisitExpr_(const CallPtr& op) override {

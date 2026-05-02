@@ -861,21 +861,16 @@ class TestInferTileMemorySpaceInheritOps:
                 x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
                     x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
-                reshaped: pl.Tile[
-                    [2048],
-                    pl.BF16,
-                    pl.MemorySpace.Mat,
-                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-                ] = pl.tile.reshape(x_tile, [2048])
-                flat: pl.Tile[
+                # Mat-implicit reshape result (col_major / row_major) — printer elides.
+                reshaped: pl.Tile[[2048], pl.BF16, pl.MemorySpace.Mat] = pl.tile.reshape(x_tile, [2048])
+                flat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.tile.reshape(reshaped, [16, 128])
+                # Move preserves Mat layout into Vec — non-Vec-implicit, so surfaced.
+                flat_V: pl.Tile[
                     [16, 128],
                     pl.BF16,
-                    pl.MemorySpace.Mat,
-                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-                ] = pl.tile.reshape(reshaped, [16, 128])
-                flat_V: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Vec] = pl.move(
-                    flat, target_memory=pl.MemorySpace.Vec
-                )
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.move(flat, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 128], pl.BF16] = pl.store(flat_V, [0, 0], out_0)
                 return out_0
 
@@ -986,23 +981,18 @@ class TestInferTileMemorySpaceInheritOps:
                 x_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
                     x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
                 )
-                # tile.slice now inherits the Mat-implicit TileView from x_tile,
-                # so the printer elides the redundant annotation.
+                # Slice and reshape stay Mat-implicit — printer elides.
                 sliced: pl.Tile[[16, 64], pl.BF16, pl.MemorySpace.Mat] = pl.tile.slice(
                     x_tile, [16, 64], [0, 0]
                 )
-                # tile.reshape recomputes layout from the new shape, producing
-                # row_major / none_box which differs from Mat-implicit
-                # col_major / row_major and is therefore surfaced by the printer.
-                reshaped: pl.Tile[
+                reshaped: pl.Tile[[1024], pl.BF16, pl.MemorySpace.Mat] = pl.tile.reshape(sliced, [1024])
+                # Move preserves Mat layout into Vec — non-Vec-implicit, so surfaced.
+                reshaped_V: pl.Tile[
                     [1024],
                     pl.BF16,
-                    pl.MemorySpace.Mat,
-                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.none_box),
-                ] = pl.tile.reshape(sliced, [1024])
-                reshaped_V: pl.Tile[[1024], pl.BF16, pl.MemorySpace.Vec] = pl.move(
-                    reshaped, target_memory=pl.MemorySpace.Vec
-                )
+                    pl.MemorySpace.Vec,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.move(reshaped, target_memory=pl.MemorySpace.Vec)
                 out_0: pl.Tensor[[16, 64], pl.BF16] = pl.store(reshaped_V, [0, 0], out_0)
                 return out_0
 

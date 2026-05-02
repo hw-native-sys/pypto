@@ -44,6 +44,7 @@
 #include "pypto/ir/serialization/deserializer.h"
 #include "pypto/ir/serialization/serializer.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/op_conversion_registry.h"
 #include "pypto/ir/transforms/printer.h"
 #include "pypto/ir/transforms/structural_comparison.h"
@@ -366,6 +367,12 @@ void BindIR(nb::module_& m) {
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tile_view") = nb::none(),
       nb::arg("memory_space") = nb::none(),
       "Create a tile type (supports multi-dimensional tensors; code generation has constraints)");
+  tile_type_class.def(
+      "get_effective_tile_view",
+      [](const TileType& self) { return tile_view_semantics::GetEffectiveTileView(self); },
+      "Return the effective TileView: the stored tile_view if present, else the implicit "
+      "view derived from (shape, memory_space). An implicit view is stored as None under "
+      "canonicalization, so callers that need to inspect layout fields should use this.");
   BindFields<TileType>(tile_type_class);
 
   // TupleType - const shared_ptr
