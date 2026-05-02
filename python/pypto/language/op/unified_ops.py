@@ -654,8 +654,17 @@ def cast(
 # ---------------------------------------------------------------------------
 
 
-def create_tile(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile:
-    """Create a tile at specific memory space."""
+def create_tile(
+    shape: list[int],
+    dtype: DataType,
+    target_memory: MemorySpace = MemorySpace.Vec,
+) -> Tile:
+    """Create a tile at specific memory space.
+
+    ``target_memory`` defaults to ``Vec`` to match the underlying
+    ``tile.create`` wrapper — direct callers like
+    ``pl.create_tile(shape, dtype)`` (omitting target_memory) keep working.
+    """
     return _tile.create(shape, dtype, target_memory)
 
 
