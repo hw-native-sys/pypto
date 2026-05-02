@@ -85,7 +85,7 @@ IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops) {
       if (ops.IsLoadLike(op)) return IOCategory::Load;
       if (ops.IsStoreLike(op)) return IOCategory::Store;
     }
-    INTERNAL_CHECK(assign->var_) << "Internal error: AssignStmt has null var_";
+    INTERNAL_CHECK_SPAN(assign->var_, assign->span_) << "Internal error: AssignStmt has null var_";
     // Scalar-producing compute lifts to the top so it unblocks downstream
     // loads; tile/tensor-producing compute stays in the middle.
     if (std::dynamic_pointer_cast<const ScalarType>(assign->var_->GetType())) {
@@ -250,7 +250,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
         if (--remaining[j] == 0) ready.push(key_for(j));
       }
     }
-    INTERNAL_CHECK(out.size() == sort_count)
+    INTERNAL_CHECK_SPAN(out.size() == sort_count, seq->span_)
         << "CanonicalizeIOOrder: dependency graph appears cyclic — should be impossible "
            "for an SSA region under the InOut-use discipline";
     if (has_terminator) out.push_back(stmts.back());

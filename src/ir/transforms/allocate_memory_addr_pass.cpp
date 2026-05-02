@@ -365,7 +365,7 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     auto new_param_expr = mutator.VisitExpr(param);
     auto new_param = std::dynamic_pointer_cast<const Var>(new_param_expr);
-    INTERNAL_CHECK(new_param) << "Failed to cast mutated param to Var";
+    INTERNAL_CHECK_SPAN(new_param, param->span_) << "Failed to cast mutated param to Var";
     new_params.push_back(new_param);
   }
 

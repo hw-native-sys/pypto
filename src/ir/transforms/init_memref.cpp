@@ -512,7 +512,7 @@ FunctionPtr TransformInitMemRef(const FunctionPtr& func) {
   new_params.reserve(normalized_func->params_.size());
   for (const auto& var : normalized_func->params_) {
     auto new_param = mutator.GetNewVar(var);
-    INTERNAL_CHECK(new_param) << "Failed to get new param";
+    INTERNAL_CHECK_SPAN(new_param, var->span_) << "Failed to get new param";
     new_params.push_back(new_param);
   }
 

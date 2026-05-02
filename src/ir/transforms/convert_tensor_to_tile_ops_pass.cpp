@@ -1124,7 +1124,7 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
         if (is_target_assemble) {
           if (assemble_assign) return std::nullopt;
           auto assemble_call = As<Call>(assign->value_);
-          INTERNAL_CHECK(assemble_call)
+          INTERNAL_CHECK_SPAN(assemble_call, assign->span_)
               << "Internal error: expected tile.assemble call in assemble loop rewrite";
           if (ExprUsesVar(assemble_call->args_[1], old_iter_arg.get()) ||
               ExprUsesVar(assemble_call->args_[2], old_iter_arg.get())) {
@@ -1154,7 +1154,8 @@ std::optional<ReturnedAssembleLoopRewrite> RewriteReturnedAssembleLoopToStore(
     }
 
     auto assemble_call = As<Call>(assemble_assign->value_);
-    INTERNAL_CHECK(assemble_call) << "Internal error: expected tile.assemble call in assemble loop rewrite";
+    INTERNAL_CHECK_SPAN(assemble_call, assemble_assign->span_)
+        << "Internal error: expected tile.assemble call in assemble loop rewrite";
 
     auto new_iter_arg =
         std::make_shared<IterArg>(old_iter_arg->name_hint_, out_tensor_type, out_param, old_iter_arg->span_);

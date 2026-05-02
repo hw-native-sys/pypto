@@ -221,7 +221,7 @@ class LowerPipelineMutator : public IRMutator {
   ReplicatedRegion ReplicateBody(const ForStmtPtr& op, const StmtPtr& body, int64_t n_clones, int64_t step,
                                  const ExprPtr& base, const std::vector<ExprPtr>& initial_iter_substitutes) {
     Span sp = op->span_;
-    INTERNAL_CHECK(initial_iter_substitutes.size() == op->iter_args_.size())
+    INTERNAL_CHECK_SPAN(initial_iter_substitutes.size() == op->iter_args_.size(), sp)
         << "Internal error: iter substitute count mismatch";
 
     std::vector<StmtPtr> clones;
@@ -235,7 +235,7 @@ class LowerPipelineMutator : public IRMutator {
       }
       auto cloned = DeepClone(body, sub_map, /*clone_def_vars=*/true);
       auto [cloned_stmts, cloned_yields] = SplitBodyYield(cloned.cloned_body);
-      INTERNAL_CHECK(cloned_yields.size() == op->iter_args_.size())
+      INTERNAL_CHECK_SPAN(cloned_yields.size() == op->iter_args_.size(), sp)
           << "Internal error: loop body must yield " << op->iter_args_.size() << " values for iter_args, got "
           << cloned_yields.size();
       clones.push_back(cloned_stmts);
@@ -483,7 +483,7 @@ class LowerPipelineMutator : public IRMutator {
         // Innermost: rem == 0 fall-through yields the main-loop state.
         if (has_iter_args) else_body = std::make_shared<YieldStmt>(main_return_exprs, sp);
       } else {
-        INTERNAL_CHECK(inner.has_value())
+        INTERNAL_CHECK_SPAN(inner.has_value(), sp)
             << "Internal error: inner IfStmt must be built by the previous iteration";
         std::vector<StmtPtr> else_parts = {*inner};
         if (has_iter_args) {

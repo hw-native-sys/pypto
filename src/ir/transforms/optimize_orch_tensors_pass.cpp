@@ -1214,7 +1214,8 @@ class AssembleLoopRewriter {
 
       auto out_param_var = func_->params_[out_var_to_param_idx_.at(store_info.out_param)];
       auto out_tensor_type = As<TensorType>(out_param_var->GetType());
-      INTERNAL_CHECK(out_tensor_type) << "Internal error: Out param should be TensorType";
+      INTERNAL_CHECK_SPAN(out_tensor_type, out_param_var->span_)
+          << "Internal error: Out param should be TensorType";
 
       auto new_iter_arg = std::make_shared<IterArg>(op->iter_args_[0]->name_hint_, out_tensor_type,
                                                     out_param_var, op->iter_args_[0]->span_);
@@ -1431,7 +1432,8 @@ class AssembleLoopRewriter {
 
         auto out_param_var = func_->params_[out_var_to_param_idx_.at(store_info.out_param)];
         auto out_tensor_type = As<TensorType>(out_param_var->GetType());
-        INTERNAL_CHECK(out_tensor_type) << "Internal error: Out param should be TensorType";
+        INTERNAL_CHECK_SPAN(out_tensor_type, out_param_var->span_)
+            << "Internal error: Out param should be TensorType";
         auto new_return_var = std::make_shared<Var>(op->return_vars_[0]->name_hint_, out_tensor_type,
                                                     op->return_vars_[0]->span_);
         return_var_remap_[store_info.store_var] = new_return_var;

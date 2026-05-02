@@ -115,8 +115,9 @@ struct StrippedYield {
 
 StrippedYield StripTrailingYield(const StmtPtr& body, size_t return_var_count) {
   if (auto seq = As<SeqStmts>(body)) {
-    INTERNAL_CHECK(!seq->stmts_.empty()) << "Internal error: control-flow body must end with YieldStmt "
-                                            "when return_vars is non-empty";
+    INTERNAL_CHECK_SPAN(!seq->stmts_.empty(), seq->span_)
+        << "Internal error: control-flow body must end with YieldStmt "
+           "when return_vars is non-empty";
     auto stripped = seq->stmts_;
     auto inner = StripTrailingYield(stripped.back(), return_var_count);
     if (inner.body) {
@@ -127,9 +128,10 @@ StrippedYield StripTrailingYield(const StmtPtr& body, size_t return_var_count) {
     return {loop_repair::MakeBody(stripped, seq->span_), std::move(inner.yielded_values)};
   }
   auto yield_stmt = std::dynamic_pointer_cast<const YieldStmt>(body);
-  INTERNAL_CHECK(yield_stmt) << "Internal error: control-flow body tail must be YieldStmt when "
-                                "return_vars is non-empty";
-  INTERNAL_CHECK(yield_stmt->value_.size() == return_var_count)
+  INTERNAL_CHECK_SPAN(yield_stmt, body->span_)
+      << "Internal error: control-flow body tail must be YieldStmt when "
+         "return_vars is non-empty";
+  INTERNAL_CHECK_SPAN(yield_stmt->value_.size() == return_var_count, yield_stmt->span_)
       << "Internal error: yielded value count " << yield_stmt->value_.size()
       << " does not match return_vars count " << return_var_count;
   return {/*body=*/nullptr, yield_stmt->value_};
@@ -380,7 +382,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       } else if (new_else.has_value()) {
         kept = *new_else;
       } else {
-        INTERNAL_CHECK(op->return_vars_.empty())
+        INTERNAL_CHECK_SPAN(op->return_vars_.empty(), op->span_)
             << "Internal error: IfStmt with no else branch must have empty return_vars_";
         return loop_repair::MakeBody({}, op->span_);
       }
