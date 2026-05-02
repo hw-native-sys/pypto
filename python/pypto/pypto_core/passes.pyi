@@ -39,6 +39,7 @@ class IRProperty(Enum):
     OutParamNotShadowed = ...
     NoNestedInCore = ...
     InOutUseValid = ...
+    PipelineLoopValid = ...
     PipelineResolved = ...
     CallDirectionsResolved = ...
 
@@ -343,12 +344,15 @@ def unroll_loops() -> Pass:
 def lower_pipeline_loops() -> Pass:
     """Create a tile-level lowering pass for ``pl.pipeline(N, stage=F)`` loops.
 
-    Replicates each loop body F times per outer iteration. Static bounds emit a
-    bare ``SeqStmts`` tail flattened into the outer scope; dynamic bounds emit a
-    cascaded ``IfStmt`` dispatch on ``rem`` whose branch bodies are bare
-    ``SeqStmts``. The produced outer loop keeps ``ForKind.Pipeline`` as a marker
-    for ``CanonicalizeIOOrder``; the ``pipeline_stages`` attr is stripped so the
-    pass is idempotent.
+    Triggers when ``F > 1``. Replicates each loop body F times per outer
+    iteration. Static bounds emit a bare ``SeqStmts`` tail flattened into the
+    outer scope; dynamic bounds emit a cascaded ``IfStmt`` dispatch on ``rem``
+    whose branch bodies are bare ``SeqStmts``. The produced outer loop keeps
+    ``ForKind.Pipeline`` and downgrades ``pipeline_stages`` to ``1`` as the
+    post-lowering marker for ``CanonicalizeIOOrder``. Keeping the (kind, attr)
+    pair together preserves the bidirectional invariant ``PipelineLoopValid``
+    so the IR survives print/parse round-trip. Re-running the pass sees
+    ``factor == 1`` and skips (idempotent).
     """
 
 def canonicalize_io_order() -> Pass:

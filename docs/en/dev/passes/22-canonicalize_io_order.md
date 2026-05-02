@@ -81,7 +81,7 @@ The reorder is a topological sort over the SSA def-use dependency graph, so it p
 **Before** (input from `LowerPipelineLoops` — note the outer loop still carries the `kind=Pipeline` marker, and the per-clone scalar address-arithmetic assigns):
 
 ```python
-for i in pl.range(0, 8, 4):  # kind=Pipeline (marker); pipeline_stages attr stripped by LowerPipelineLoops
+for i in pl.pipeline(0, 8, 4, stage=1):  # kind=Pipeline (marker); attr=1 post-LowerPipelineLoops
     off_0: pl.Scalar[pl.INDEX] = i * 128
     tile_x_0 = pl.tile.load(input_a, [off_0], [128])
     tile_y_0 = pl.tile.add(tile_x_0, 1.0)

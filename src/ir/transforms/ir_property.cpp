@@ -65,6 +65,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "NoNestedInCore";
     case IRProperty::InOutUseValid:
       return "InOutUseValid";
+    case IRProperty::PipelineLoopValid:
+      return "PipelineLoopValid";
     case IRProperty::PipelineResolved:
       return "PipelineResolved";
     case IRProperty::CallDirectionsResolved:
@@ -138,7 +140,7 @@ const IRPropertySet& GetStructuralProperties() {
   static const IRPropertySet props{IRProperty::TypeChecked,         IRProperty::BreakContinueValid,
                                    IRProperty::NoRedundantBlocks,   IRProperty::UseAfterDef,
                                    IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
-                                   IRProperty::InOutUseValid};
+                                   IRProperty::InOutUseValid,       IRProperty::PipelineLoopValid};
   return props;
 }
 

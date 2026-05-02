@@ -73,6 +73,8 @@ void BindPass(nb::module_& m) {
              "No nested InCore scopes (ScopeStmt inside ScopeStmt)")
       .value("InOutUseValid", IRProperty::InOutUseValid,
              "No reads of InOut/Out-passed variables after the call (RFC #1026)")
+      .value("PipelineLoopValid", IRProperty::PipelineLoopValid,
+             "Bidirectional invariant: ForStmt.kind_ == Pipeline ⇔ has pipeline_stages attr")
       .value("PipelineResolved", IRProperty::PipelineResolved,
              "No ForKind::Pipeline survives; produced by CanonicalizeIOOrder")
       .value("CallDirectionsResolved", IRProperty::CallDirectionsResolved,
@@ -349,11 +351,13 @@ void BindPass(nb::module_& m) {
              "Create a pass that interchanges chunk loops and inserts InCore scopes");
   passes.def("unroll_loops", &pass::UnrollLoops, "Create a loop unrolling pass");
   passes.def("lower_pipeline_loops", &pass::LowerPipelineLoops,
-             "Lower ``pl.pipeline(N, stage=F)`` loops at the tile level: replicate the body F\n"
-             "times per outer iteration with a bare-SeqStmts remainder (or a cascaded IfStmt\n"
-             "dispatch for dynamic bounds) covering N % F when needed. The produced outer loop\n"
-             "keeps ``ForKind::Pipeline`` as a marker for CanonicalizeIOOrder; the\n"
-             "``pipeline_stages`` attr is stripped so the pass is idempotent.");
+             "Lower ``pl.pipeline(N, stage=F)`` loops at the tile level (triggers on F > 1):\n"
+             "replicate the body F times per outer iteration with a bare-SeqStmts remainder\n"
+             "(or a cascaded IfStmt dispatch for dynamic bounds) covering N % F when needed.\n"
+             "The produced outer loop keeps ``ForKind::Pipeline`` and downgrades\n"
+             "``pipeline_stages`` to ``1`` as the post-lowering marker for CanonicalizeIOOrder.\n"
+             "Keeping the (kind, attr) pair together preserves PipelineLoopValid and round-trip;\n"
+             "re-running the pass sees ``factor == 1`` and skips (idempotent).");
   passes.def("canonicalize_io_order", &pass::CanonicalizeIOOrder,
              "Canonicalize statement order inside SeqStmts that live within a\n"
              "``ForKind::Pipeline`` body using a 4-tier schedule: lift scalar-producing\n"

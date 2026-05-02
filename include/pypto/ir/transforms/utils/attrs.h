@@ -22,9 +22,16 @@ namespace pypto {
 namespace ir {
 
 /// Attribute key for ``pl.pipeline(N, stage=F)`` — appears on ``ForStmt.attrs_``
-/// when ``ForStmt.kind_ == ForKind::Pipeline``. Consumed by ``LowerPipelineLoops``;
-/// stripped on that pass's output so re-running is a no-op. Verifier invariant:
-/// the attr may only appear alongside ``kind == Pipeline``.
+/// if and only if ``ForStmt.kind_ == ForKind::Pipeline`` (bidirectional invariant
+/// enforced by the structural verifier ``PipelineLoopValid``).
+///
+/// Lifecycle:
+///   - User-written ``pl.pipeline(stage=F)``           → attr = F (any F ≥ 1)
+///   - After ``LowerPipelineLoops`` (factor > 1 path)  → attr = 1 (post-lowering marker)
+///   - After ``CanonicalizeIOOrder``                   → attr stripped, kind demoted
+///
+/// ``LowerPipelineLoops`` triggers on attr > 1; attr == 1 is a no-op trigger
+/// (loop is left intact for ``CanonicalizeIOOrder`` to reorder and demote).
 inline constexpr const char* kPipelineStagesAttr = "pipeline_stages";
 
 /// Return a copy of `attrs` with any entry matching `key` removed. The order of

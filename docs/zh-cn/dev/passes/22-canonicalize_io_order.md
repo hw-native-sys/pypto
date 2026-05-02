@@ -78,10 +78,10 @@ ready={store_1}                         发射 store_1
 
 ## 示例
 
-**变换前**（来自 `LowerPipelineLoops` 的输入 —— 注意每个克隆都有标量地址运算 assign）:
+**变换前**（来自 `LowerPipelineLoops` 的输入 —— 注意每个克隆都有标量地址运算 assign，外层循环 kind=Pipeline 标记位、属性下调为 stage=1）:
 
 ```python
-for i in pl.range(0, 8, 4):
+for i in pl.pipeline(0, 8, 4, stage=1):  # kind=Pipeline 标记；属性=1
     off_0: pl.Scalar[pl.INDEX] = i * 128
     tile_x_0 = pl.tile.load(input_a, [off_0], [128])
     tile_y_0 = pl.tile.add(tile_x_0, 1.0)

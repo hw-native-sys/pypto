@@ -131,10 +131,13 @@ class CanonicalizeIOOrderMutator : public IRMutator {
   /// Scope the IO reorder to bodies of `ForKind::Pipeline` loops. Non-pipelined
   /// code is visited recursively but its SeqStmts are left as-is.
   ///
-  /// On exit from a pipeline scope, demote `kind_` to `Sequential` — the marker
-  /// has served its purpose (gated this reorder) and must not survive past this
-  /// pass. The verifier checks the post-condition: no ForKind::Pipeline loops
-  /// downstream of CanonicalizeIOOrder.
+  /// On exit from a pipeline scope, demote `kind_` to `Sequential` and strip
+  /// the `pipeline_stages` attr together — the marker has served its purpose
+  /// (gated this reorder) and must not survive past this pass. The bidirectional
+  /// invariant `kind == Pipeline ⇔ pipeline_stages attr present` (PipelineLoopValid)
+  /// guarantees the attr is present on entry, so we strip unconditionally.
+  /// The PipelineResolved verifier checks the post-condition: no
+  /// ForKind::Pipeline loops downstream of CanonicalizeIOOrder.
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     const bool is_pipeline = (op->kind_ == ForKind::Pipeline);
     if (is_pipeline) inside_pipeline_depth_++;
@@ -146,14 +149,7 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     if (!visited_for) return visited;
     auto demoted = MutableCopy(visited_for);
     demoted->kind_ = ForKind::Sequential;
-    // Strip any stale `pipeline_stages` attr when demoting — normally the attr
-    // is already gone after LowerPipelineLoops, but stripping here keeps the
-    // invariant (`pipeline_stages` attr ⇒ kind == Pipeline) whole even when
-    // CanonicalizeIOOrder runs standalone on pre-lowered IR (e.g. in tests).
-    // Skip the rebuild entirely when the attr is already absent (common case).
-    if (demoted->HasAttr(kPipelineStagesAttr)) {
-      demoted->attrs_ = StripAttr(demoted->attrs_, kPipelineStagesAttr);
-    }
+    demoted->attrs_ = StripAttr(demoted->attrs_, kPipelineStagesAttr);
     return demoted;
   }
 

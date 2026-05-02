@@ -8,7 +8,7 @@ Lowers `pl.pipeline(N, stage=F)` at the tile level: replicates the loop body `F`
 
 `pl.pipeline(N, stage=F)` is the user-facing surface for that targeted knob: replicate the body `F` times (typically 2–4) at the tile level, leaving an outer loop of `N/F` iterations. Each clone gets fresh def-vars (SSA preserved) and operates on independent tiles, which downstream `MemoryReuse` cannot merge.
 
-Internally, `pl.pipeline(...)` emits `ForStmt(kind=ForKind::Pipeline, attrs={"pipeline_stages": F})`. `LowerPipelineLoops` triggers on that pair — both signals must be present. The produced outer loop keeps `ForKind::Pipeline` as a **marker** for the downstream `CanonicalizeIOOrder` pass; the `pipeline_stages` attr is stripped so re-running `LowerPipelineLoops` is a natural no-op (trigger condition is falsified).
+Internally, `pl.pipeline(...)` emits `ForStmt(kind=ForKind::Pipeline, attrs={"pipeline_stages": F})`. The bidirectional structural invariant `kind == Pipeline ⇔ pipeline_stages attr present` (verified by `PipelineLoopValid`) holds at every observable IR state — the kind and the attr always travel together. `LowerPipelineLoops` triggers when `F > 1`; it replicates the body and downgrades the attr to `1` as the post-lowering marker, keeping `ForKind::Pipeline` for the downstream `CanonicalizeIOOrder` pass to scope on. Re-running `LowerPipelineLoops` is a no-op (it sees `factor == 1` and skips).
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
@@ -38,12 +38,12 @@ for i in pl.pipeline(64, stage=4):
 
 ## Behavior
 
-For `ForStmt(kind=Pipeline, attrs={"pipeline_stages": F}, start, stop, step, body)`:
+For `ForStmt(kind=Pipeline, attrs={"pipeline_stages": F}, start, stop, step, body)` with `F > 1`:
 
-- **Main loop**: stride `F*step`, body is a `SeqStmts` of `F` clones, kind still `ForKind::Pipeline` (marker), attr removed.
+- **Main loop**: stride `F*step`, body is a `SeqStmts` of `F` clones, kind still `ForKind::Pipeline` (marker), attr downgraded to `1`. The (kind, attr) pair stays together so `PipelineLoopValid` holds and the IR survives print/parse round-trip (renders as `pl.pipeline(..., stage=1)`).
 - **Cloning**: each clone uses `DeepClone(body, {loop_var → new_var + k * step}, clone_def_vars=true)`. Fresh def-vars per clone keep SSA intact and give `MemoryReuse` distinct tile identities to work with.
 
-`stage=1` is a special case: no replication needed. The pass demotes `kind_` to `Sequential` directly and strips the attr — there is no scope marker for `CanonicalizeIOOrder` to react to.
+`stage=1` is a no-op trigger: the pass leaves the loop intact (kind and attr stay) and only recurses into the body to lower nested pipelines. `CanonicalizeIOOrder` then scopes on the kept marker, applies the IO reorder, and demotes/strips on exit. The same path handles user-written `pl.pipeline(stage=1)` and the post-lowering output of a `factor>1` invocation — both ask for IO reorder without further replication, so re-running `LowerPipelineLoops` is naturally idempotent.
 
 Two lowering modes — static vs dynamic — differ only in how the main loop's `stop` and the remainder are computed.
 
@@ -92,9 +92,9 @@ for i in pl.pipeline(0, 10, 1, stage=4):
     tile_x = pl.tile.load(input_a, [i * 128], [128])
     pl.tile.store(tile_x, [i * 128], output)
 
-# After: main loop covers [0, 8) with kind=Pipeline (marker), bare tail clones
-# flattened into the outer scope
-for i in pl.range(0, 8, 4):  # kind=Pipeline internally; printer emits pl.range because attr is gone
+# After: main loop covers [0, 8) with kind=Pipeline (marker), attr downgraded to
+# stage=1; bare tail clones flattened into the outer scope.
+for i in pl.pipeline(0, 8, 4, stage=1):
     tile_x_0 = pl.tile.load(input_a, [i * 128], [128]); pl.tile.store(tile_x_0, [i * 128], output)
     tile_x_1 = pl.tile.load(input_a, [(i + 1) * 128], [128]); pl.tile.store(tile_x_1, [(i + 1) * 128], output)
     tile_x_2 = pl.tile.load(input_a, [(i + 2) * 128], [128]); pl.tile.store(tile_x_2, [(i + 2) * 128], output)
@@ -114,7 +114,7 @@ for i in pl.pipeline(0, n, 1, stage=4):
 
 # After
 unroll_main_end: pl.Scalar[pl.INDEX] = ((n - 0) // 4) * 4 + 0
-for i in pl.range(0, unroll_main_end, 4):  # kind=Pipeline (marker)
+for i in pl.pipeline(0, unroll_main_end, 4, stage=1):  # post-lowering marker
     <4 clones as above>
 
 unroll_rem: pl.Scalar[pl.INDEX] = n - unroll_main_end

@@ -51,6 +51,7 @@ enum class IRProperty : uint64_t {
   OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor-creating ops
   NoNestedInCore,           ///< No nested InCore scopes (ScopeStmt inside ScopeStmt)
   InOutUseValid,            ///< No reads of InOut/Out-passed variables after the call (RFC #1026)
+  PipelineLoopValid,        ///< Bidirectional invariant: ForStmt.kind_ == Pipeline ⇔ has pipeline_stages attr
   PipelineResolved,         ///< No ForKind::Pipeline survives; produced by CanonicalizeIOOrder
   CallDirectionsResolved,   ///< Every non-builtin Call has explicit attrs['arg_directions']
   kCount                    ///< Sentinel (must be last)
@@ -193,7 +194,8 @@ const IRPropertySet& GetVerifiedProperties();
  *
  * These are verified automatically at pipeline start and never declared
  * in per-pass PassProperties. Returns {TypeChecked, BreakContinueValid,
- * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore}.
+ * NoRedundantBlocks, UseAfterDef, OutParamNotShadowed, NoNestedInCore,
+ * InOutUseValid, PipelineLoopValid}.
  */
 const IRPropertySet& GetStructuralProperties();
 
