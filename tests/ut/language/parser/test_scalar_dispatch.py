@@ -216,5 +216,149 @@ class TestScalarNot:
         ir.assert_structural_equal(Before, pl.parse_program(printed))
 
 
+class TestScalarArithmetic:
+    """Tests for pl.add/sub/mul/div dispatching on scalar arguments."""
+
+    def test_scalar_add(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = pl.add(a, b)  # pyright: ignore[reportArgumentType]
+                _ = c + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "a + b" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_scalar_sub(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = pl.sub(a, b)  # pyright: ignore[reportArgumentType]
+                _ = c + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "a - b" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_scalar_mul(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = pl.mul(a, b)  # pyright: ignore[reportArgumentType]
+                _ = c + 1
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "a * b" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_scalar_div(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.FP32],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.FP32] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.FP32] = pl.div(a, b)  # pyright: ignore[reportArgumentType]
+                _ = c
+                return out
+
+        assert isinstance(Before, ir.Program)
+        printed = Before.as_python()
+        assert "a / b" in printed
+        ir.assert_structural_equal(Before, pl.parse_program(printed))
+
+    def test_scalar_add_matches_plus_operator(self):
+        """`pl.add(a, b)` must produce the same IR as `a + b`."""
+
+        @pl.program
+        class WithCall:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = pl.add(a, b)  # pyright: ignore[reportArgumentType]
+                _ = c
+                return out
+
+        @pl.program
+        class WithOperator:
+            @pl.function
+            def main(
+                self,
+                config: pl.Tensor[[2], pl.INT64],
+                out: pl.Tensor[[2, 16, 128], pl.FP32],
+            ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
+                c: pl.Scalar[pl.INT64] = a + b
+                _ = c
+                return out
+
+        ir.assert_structural_equal(WithCall, WithOperator)
+
+
+class TestScalarUnsupportedOpHint:
+    """Verify the catch-all error message points users at Python operators."""
+
+    def test_unsupported_op_hint_mentions_python_operators(self):
+        # `pl.exp` is a unified op (tile/tensor) with no scalar dispatch — hits
+        # the catch-all path that surfaces the improved hint.
+        with pytest.raises(Exception) as exc_info:
+
+            @pl.program
+            class Bad:
+                @pl.function
+                def main(
+                    self,
+                    config: pl.Tensor[[1], pl.FP32],
+                    out: pl.Tensor[[2, 16, 128], pl.FP32],
+                ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
+                    a: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
+                    _ = pl.exp(a)  # pyright: ignore[reportArgumentType]
+                    return out
+
+            assert Bad is not None  # silence "unused" warnings if reached
+
+        err = exc_info.value
+        assert "exp" in err.message  # type: ignore[attr-defined]
+        assert "Python operators" in err.hint  # type: ignore[attr-defined]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

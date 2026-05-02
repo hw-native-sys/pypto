@@ -4048,7 +4048,15 @@ class ASTParser:
     }
 
     # Maps unified op names to ir scalar expression functions.
+    # Arithmetic ops (add/sub/mul/div) mirror the `+`/`-`/`*`/`/` operators
+    # so `pl.<op>(scalar, scalar)` behaves like `scalar <op> scalar`. `div`
+    # maps to `truediv`, matching `pl.tile.div` semantics; users who want
+    # integer floor division can use the `//` operator.
     _SCALAR_BINARY_OPS: dict[str, str] = {
+        "add": "add",
+        "sub": "sub",
+        "mul": "mul",
+        "div": "truediv",
         "min": "min_",
         "max": "max_",
     }
@@ -4256,7 +4264,11 @@ class ASTParser:
         raise InvalidOperationError(
             f"Operation '{op_name}' is not supported for scalar arguments",
             span=call_span,
-            hint=f"Supported scalar ops: {', '.join(supported)}",
+            hint=(
+                f"Supported scalar ops: {', '.join(supported)}. "
+                "For other arithmetic / bitwise / comparison ops, use Python operators "
+                "directly on scalars (e.g. `s1 + s2`, `s1 % s2`, `s1 << 1`, `s1 == s2`)."
+            ),
         )
 
     def parse_attribute(self, attr: ast.Attribute) -> ir.Expr:
