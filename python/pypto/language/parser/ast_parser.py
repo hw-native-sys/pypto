@@ -4130,24 +4130,26 @@ class ASTParser:
     def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse a ``pl.<op>(...)`` call by delegating to the matching DSL wrapper.
 
-        Lookup mirrors how ``pl.<op>`` resolves at runtime: the top-level
-        ``pypto.language`` package is the authoritative source for ``pl.<op>``
-        symbols (it re-exports unified, promoted tensor-only, promoted
-        tile-only, and promoted system ops). The wrapper itself owns
-        type-checking and dispatch (e.g. ``unified_ops.add`` routes Tile+Scalar
-        to ``tile.adds``); the parser only forwards arguments and the
-        call-site span.
+        Lookup is restricted to ``pypto.language.op`` rather than the broader
+        ``pypto.language`` namespace. The op package re-exports only callable
+        ops (unified + promoted tensor/tile/system), so non-op DSL symbols
+        like ``pl.range``, ``pl.dynamic``, or ``pl.const`` cannot be invoked
+        here as ops — they're handled by their own parser entry points
+        upstream of this method. The wrapper itself owns type-checking and
+        dispatch (e.g. ``unified_ops.add`` routes Tile+Scalar to
+        ``tile.adds``); the parser only forwards arguments and the call-site
+        span.
         """
-        import pypto.language as _pl  # noqa: PLC0415 (circular import — `pypto.language` re-exports parser)
+        import pypto.language.op as _pl_op  # noqa: PLC0415 (circular import — `pypto.language` re-exports parser)
 
-        op_func = getattr(_pl, op_name, None)
+        op_func = getattr(_pl_op, op_name, None)
         if op_func is None or not callable(op_func):
             raise InvalidOperationError(
                 f"Unknown operation 'pl.{op_name}'",
                 span=self.span_tracker.get_span(call),
                 hint="Check spelling, or use pl.tensor.*/pl.tile.*/pl.system.* for explicit namespacing",
             )
-        return self._dispatch_op(_pl, "pl", op_name, call)
+        return self._dispatch_op(_pl_op, "pl", op_name, call)
 
     def _parse_typed_constant(self, call: ast.Call) -> ir.Expr:
         """Parse pl.const(value, dtype) → ConstInt or ConstFloat.

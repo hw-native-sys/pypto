@@ -26,13 +26,29 @@ from . import system_ops as system
 from . import tensor_ops as tensor
 from . import tile_ops as tile
 
+# Promoted system ops (accessible as pl.tfree_to_aic, etc.)
+from .system_ops import (
+    aic_initialize_pipe,
+    aiv_initialize_pipe,
+    import_peer_buffer,
+    reserve_buffer,
+    tfree_to_aic,
+    tfree_to_aiv,
+    tpop_from_aic,
+    tpop_from_aiv,
+    tpush_to_aic,
+    tpush_to_aiv,
+)
+
 # Promoted tensor-only ops (accessible as pl.create_tensor, etc.)
-from .tensor_ops import assemble, dim, expand_clone, scatter_update
+from .tensor_ops import assemble, dim, expand_clone, full, scatter_update
+from .tensor_ops import ci as arange
 from .tensor_ops import create as create_tensor
 
-# Promoted tile-only ops (accessible as pl.load, etc.)
+# Promoted tile-only ops (accessible as pl.load, etc.). ``abs`` and
+# ``create_tile`` are re-exported below from ``unified_ops`` instead so
+# the unified Tensor/Tile dispatch wins.
 from .tile_ops import (
-    abs,
     addc,
     addsc,
     and_,
@@ -73,13 +89,15 @@ from .tile_ops import (
     xor,
     xors,
 )
-from .tile_ops import (
-    create as create_tile,
-)
 
-# Unified dispatch (overlapping ops)
+# Unified dispatch (overlapping ops). Imported AFTER tile_ops so the
+# unified versions override any same-named imports above (e.g. ``abs``,
+# ``create_tile``) — direct ``pl.abs(tensor)`` users get the unified
+# dispatch rather than the Tile-only path.
 from .unified_ops import (
+    abs,  # noqa: A004 (intentionally shadows builtin via DSL surface)
     add,
+    batch_matmul,
     cast,
     col_expand,
     col_expand_div,
@@ -88,6 +106,8 @@ from .unified_ops import (
     col_max,
     col_min,
     col_sum,
+    concat,
+    create_tile,
     div,
     exp,
     expands,
@@ -97,6 +117,7 @@ from .unified_ops import (
     maximum,
     mul,
     neg,
+    read,
     recip,
     reshape,
     row_expand,
@@ -112,6 +133,7 @@ from .unified_ops import (
     sqrt,
     sub,
     transpose,
+    write,
 )
 
 __all__ = [
@@ -154,7 +176,11 @@ __all__ = [
     "expand_clone",
     "expands",
     "neg",
+    "read",
     "recip",
+    "write",
+    "concat",
+    "batch_matmul",
     # Promoted tile-only
     "create_tile",
     "fillpad",
@@ -196,8 +222,22 @@ __all__ = [
     "sel",
     "sels",
     # Promoted tensor-only
+    "arange",
     "create_tensor",
     "assemble",
     "dim",
+    "expand_clone",
+    "full",
     "scatter_update",
+    # Promoted system ops
+    "aic_initialize_pipe",
+    "aiv_initialize_pipe",
+    "import_peer_buffer",
+    "reserve_buffer",
+    "tfree_to_aic",
+    "tfree_to_aiv",
+    "tpop_from_aic",
+    "tpop_from_aiv",
+    "tpush_to_aic",
+    "tpush_to_aiv",
 ]

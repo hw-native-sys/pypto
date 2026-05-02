@@ -128,6 +128,7 @@ __all__ = [
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
+from pypto.ir.utils import _get_span_or_capture
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TileLayout
@@ -201,13 +202,39 @@ def _scalar_operand_to_expr(value: int | Scalar | Expr) -> Expr:
 
     Used by the scalar-pair branches of ``tile.min`` / ``tile.max``: ``Scalar``
     is unwrapped to its inner ``Expr``, raw ``Expr`` is forwarded as-is, and a
-    bare ``int`` is materialized as ``ConstInt(.., INT32)``.
+    bare ``int`` is materialized as ``ConstInt(.., INDEX)`` with the span
+    pinned by the parser if any (so error messages and dumps point at the
+    user's source line, not this wrapper). ``INDEX`` matches the dtype the
+    parser uses for plain int literals, so round-tripped programs don't
+    sprout spurious casts on otherwise-equivalent constants.
     """
     if isinstance(value, Scalar):
         return value.unwrap()
     if isinstance(value, Expr):
         return value
-    return _ir_core.ConstInt(value, DataType.INT32, _ir_core.Span.unknown())
+    return _ir_core.ConstInt(value, DataType.INDEX, _get_span_or_capture())
+
+
+def _axis_to_int(axis: int | Scalar | Expr) -> int:
+    """Coerce a compile-time axis argument to a Python ``int``.
+
+    The parser passes integer literals through as raw ``ConstInt`` (to
+    preserve dtype) — accept that shape and unwrap. Direct callers can
+    still pass a bare ``int``.
+    """
+    if isinstance(axis, bool):  # bool is an int subclass; reject explicitly
+        raise TypeError(f"axis must be int, got bool ({axis!r})")
+    if isinstance(axis, int):
+        return axis
+    if isinstance(axis, _ir_core.ConstInt):
+        return int(axis.value)
+    if isinstance(axis, Scalar):
+        inner = axis.unwrap()
+        if isinstance(inner, _ir_core.ConstInt):
+            return int(inner.value)
+    raise TypeError(
+        f"axis must be a compile-time int (or ConstInt/Scalar wrapping one), got {type(axis).__name__}"
+    )
 
 
 def create(
@@ -1241,7 +1268,7 @@ def sum(tile: Tile, axis: int, keepdim: bool = False) -> Tile:
     Returns:
         Tile wrapping the sum operation
     """
-    call_expr = _ir_ops.sum(tile.unwrap(), axis, keepdim)
+    call_expr = _ir_ops.sum(tile.unwrap(), _axis_to_int(axis), keepdim)
     return Tile(expr=call_expr)
 
 
@@ -1266,8 +1293,7 @@ def max(tile: Tile | Scalar, axis: int | Scalar | Expr = 0, keepdim: bool = Fals
     """
     if isinstance(tile, Scalar):
         return Scalar(expr=_ir_core.max_(tile.unwrap(), _scalar_operand_to_expr(axis)))
-    assert isinstance(axis, int)
-    call_expr = _ir_ops.max(tile.unwrap(), axis, keepdim)
+    call_expr = _ir_ops.max(tile.unwrap(), _axis_to_int(axis), keepdim)
     return Tile(expr=call_expr)
 
 
@@ -1302,8 +1328,7 @@ def min(
         lhs = _scalar_operand_to_expr(tile)
         rhs = _scalar_operand_to_expr(axis)
         return Scalar(expr=_ir_core.min_(lhs, rhs))
-    assert isinstance(axis, int)
-    call_expr = _ir_ops.min(tile.unwrap(), axis, keepdim)
+    call_expr = _ir_ops.min(tile.unwrap(), _axis_to_int(axis), keepdim)
     return Tile(expr=call_expr)
 
 

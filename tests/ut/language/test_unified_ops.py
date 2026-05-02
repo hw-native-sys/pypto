@@ -1005,8 +1005,12 @@ class TestUnifiedOpsTypeErrors:
             unified_ops.add("not_a_tensor", 1)  # type: ignore
 
     def test_mul_invalid_lhs(self):
+        # ``pl.mul(42, 2)`` is valid scalar arithmetic — both operands are
+        # ``int``, so it lowers via ``ir.mul(ConstInt(42), ConstInt(2))``
+        # and returns a ``Scalar``. Reject only when a non-scalar-like
+        # type slips in.
         with pytest.raises(TypeError, match="expected Tensor or Tile operands"):
-            unified_ops.mul(42, 2)  # type: ignore
+            unified_ops.mul("not_a_number", 2)  # type: ignore
 
     def test_exp_invalid_input(self):
         with pytest.raises(TypeError, match="expected Tensor or Tile"):

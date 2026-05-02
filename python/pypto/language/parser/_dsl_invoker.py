@@ -43,19 +43,27 @@ def _wrap_arg(arg: Any) -> Any:
     - ``MakeTuple`` (the parser's representation of a Python list literal in
       source) is unwrapped to a Python list of its elements so wrappers that
       expect ``Sequence[IntLike]`` (e.g. shape / offset / indices) accept it.
-    - ``ConstInt`` / ``ConstFloat`` literals are kept raw. Wrapping them as
-      ``Scalar`` would defeat downstream ``isinstance(x, int)`` fast-paths
-      (see e.g. ``tile.max(t, 0, ...)``), and every wrapper that accepts a
-      ``Scalar`` already accepts a raw ``Expr`` too.
+    - ``ConstInt`` / ``ConstFloat`` literals stay as raw ``Expr``. They
+      carry the parser's chosen dtype (``INDEX`` for plain ``int`` literals,
+      ``FP32`` for plain ``float``, or whatever the user specified via
+      ``pl.const``) — extracting them to Python ``int`` / ``float`` would
+      lose that dtype and let downstream IR-builder defaults pick something
+      different (e.g. tensor.muls' rhs defaults to ``FP32``, which would
+      silently change the result dtype). Wrappers that need a Python
+      ``int`` (axis-style arguments) explicitly extract via the IR layer's
+      ``ConstInt.value`` field.
     - ``ir.Expr`` whose ``type`` is ``TensorType`` / ``TileType`` /
-      ``ScalarType`` is wrapped in the matching DSL class so type-dispatch in
-      the wrapper sees the right ``isinstance`` answer.
+      ``ScalarType`` (and which is not a ``Const*`` literal) is wrapped in
+      the matching DSL class so type-dispatch in the wrapper sees the right
+      ``isinstance`` answer.
     - Anything else (non-Expr Python values, or Expr with no matching DSL
       class) is returned unchanged.
     """
     if isinstance(arg, ir.MakeTuple):
         return list(arg.elements)
-    if not isinstance(arg, ir.Expr) or isinstance(arg, (ir.ConstInt, ir.ConstFloat)):
+    if not isinstance(arg, ir.Expr):
+        return arg
+    if isinstance(arg, (ir.ConstInt, ir.ConstFloat)):
         return arg
     t = arg.type
     if isinstance(t, ir.TensorType):

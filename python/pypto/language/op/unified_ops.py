@@ -16,7 +16,7 @@ or ``pl.tile.add``.
 """
 
 from collections.abc import Sequence
-from typing import NoReturn, TypeVar, overload
+from typing import Any, NoReturn, TypeVar, overload
 
 __all__ = [
     "add",
@@ -60,7 +60,7 @@ __all__ = [
     "write",
 ]
 
-from pypto.ir.utils import resolve_cast_mode
+from pypto.ir.utils import _get_span_or_capture, resolve_cast_mode
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import MemorySpace, PadValue
@@ -96,6 +96,38 @@ def _raise_type_dispatch_error(op_name: str, *args: object) -> NoReturn:
     raise TypeError(f"{qualified}: expected Tensor or Tile operands, got ({types})")
 
 
+def _is_scalar_like(v: object) -> bool:
+    """True for Scalar, Python int/float, or raw Expr with ScalarType.
+
+    Used by the unified arithmetic wrappers so parser-shaped operands
+    (raw ``ConstInt`` / ``ConstFloat`` literals, IR scalar Vars, etc.)
+    flow through the scalar branch alongside DSL ``Scalar`` and Python
+    literals.
+    """
+    if isinstance(v, (Scalar, int, float)):
+        return True
+    return isinstance(v, _ir_core.Expr) and isinstance(v.type, _ir_core.ScalarType)
+
+
+def _to_scalar_expr(v: Any) -> _ir_core.Expr:
+    """Coerce a scalar-like value to an ``Expr``.
+
+    Caller must have already passed :func:`_is_scalar_like`. ``Scalar`` is
+    unwrapped, raw ``Expr`` is returned as-is, and Python ``int`` / ``float``
+    are materialized as ``ConstInt`` / ``ConstFloat`` with the parser-pinned
+    span (or frame-captured fallback).
+    """
+    if isinstance(v, Scalar):
+        return v.unwrap()
+    if isinstance(v, _ir_core.Expr):
+        return v
+    if isinstance(v, bool):  # bool is an int subclass; reject explicitly
+        raise TypeError(f"scalar arithmetic does not accept bool, got {v!r}")
+    if isinstance(v, int):
+        return _ir_core.ConstInt(v, DataType.INDEX, _get_span_or_capture())
+    return _ir_core.ConstFloat(float(v), DataType.DEFAULT_CONST_FLOAT, _get_span_or_capture())
+
+
 # ---------------------------------------------------------------------------
 # Binary arithmetic with scalar auto-dispatch
 # ---------------------------------------------------------------------------
@@ -117,8 +149,8 @@ def add(lhs, rhs):
         return _tile.add(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         return _tile.adds(lhs, rhs)
-    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float, _ir_core.Expr)):
-        return lhs + rhs
+    if _is_scalar_like(lhs) and _is_scalar_like(rhs):
+        return Scalar(expr=_to_scalar_expr(lhs) + _to_scalar_expr(rhs))
     _raise_type_dispatch_error("add", lhs, rhs)
 
 
@@ -139,8 +171,8 @@ def sub(lhs, rhs):
         return _tile.sub(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         return _tile.subs(lhs, rhs)
-    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float, _ir_core.Expr)):
-        return lhs - rhs
+    if _is_scalar_like(lhs) and _is_scalar_like(rhs):
+        return Scalar(expr=_to_scalar_expr(lhs) - _to_scalar_expr(rhs))
     _raise_type_dispatch_error("sub", lhs, rhs)
 
 
@@ -161,8 +193,8 @@ def mul(lhs, rhs):
         return _tile.mul(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         return _tile.muls(lhs, rhs)
-    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float, _ir_core.Expr)):
-        return lhs * rhs
+    if _is_scalar_like(lhs) and _is_scalar_like(rhs):
+        return Scalar(expr=_to_scalar_expr(lhs) * _to_scalar_expr(rhs))
     _raise_type_dispatch_error("mul", lhs, rhs)
 
 
@@ -183,8 +215,8 @@ def div(lhs, rhs):
         return _tile.div(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
         return _tile.divs(lhs, rhs)
-    if isinstance(lhs, Scalar) and isinstance(rhs, (Scalar, int, float, _ir_core.Expr)):
-        return lhs / rhs
+    if _is_scalar_like(lhs) and _is_scalar_like(rhs):
+        return Scalar(expr=_to_scalar_expr(lhs) / _to_scalar_expr(rhs))
     _raise_type_dispatch_error("div", lhs, rhs)
 
 
@@ -609,11 +641,11 @@ def cast(
         return _tensor.cast(input, target_type, mode)
     if isinstance(input, Tile):
         return _tile.cast(input, target_type, mode)
-    if isinstance(input, Scalar):
+    if _is_scalar_like(input):
         if resolve_cast_mode(mode) != 2:
             raise ValueError(f"cast: Scalar inputs do not support non-default mode, got mode={mode!r}")
         dtype = DataType(target_type) if isinstance(target_type, int) else target_type
-        return Scalar(expr=_ir_core.cast(input.unwrap(), dtype))
+        return Scalar(expr=_ir_core.cast(_to_scalar_expr(input), dtype))
     raise TypeError(f"pl.cast: expected Tensor, Tile, or Scalar, got {type(input).__name__}")
 
 

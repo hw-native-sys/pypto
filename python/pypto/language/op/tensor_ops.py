@@ -74,6 +74,7 @@ __all__ = [
 
 from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TensorLayout
 
 from ..typing import IntLike, Scalar, Tensor
@@ -156,16 +157,19 @@ def write(tensor: Tensor, indices: IntLike | Sequence[IntLike], value: Scalar | 
     return _ir_ops.write(tensor.unwrap(), _normalize_intlike(indices_seq), value_expr)
 
 
-def dim(tensor: Tensor, axis: int) -> Scalar:
+def dim(tensor: Tensor, axis: int | _ir_core.ConstInt) -> Scalar:
     """Extract a shape dimension from a tensor as a scalar value.
 
     Args:
         tensor: Input tensor
-        axis: Dimension index (supports negative indexing)
+        axis: Dimension index (supports negative indexing). Accepts either
+            a Python ``int`` or a ``ConstInt`` (parser-shape).
 
     Returns:
         Scalar wrapping the dim operation (INT64)
     """
+    if isinstance(axis, _ir_core.ConstInt):
+        axis = int(axis.value)
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.dim(tensor_expr, axis)
     return Scalar(expr=call_expr)
