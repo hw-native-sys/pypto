@@ -230,7 +230,7 @@ class TestScalarArithmetic:
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
                 a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.INT64] = pl.add(a, b)  # pyright: ignore[reportArgumentType]
+                c: pl.Scalar[pl.INT64] = pl.add(a, b)
                 _ = c + 1
                 return out
 
@@ -250,7 +250,7 @@ class TestScalarArithmetic:
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
                 a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.INT64] = pl.sub(a, b)  # pyright: ignore[reportArgumentType]
+                c: pl.Scalar[pl.INT64] = pl.sub(a, b)
                 _ = c + 1
                 return out
 
@@ -270,7 +270,7 @@ class TestScalarArithmetic:
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
                 a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.INT64] = pl.mul(a, b)  # pyright: ignore[reportArgumentType]
+                c: pl.Scalar[pl.INT64] = pl.mul(a, b)
                 _ = c + 1
                 return out
 
@@ -290,7 +290,7 @@ class TestScalarArithmetic:
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
                 a: pl.Scalar[pl.FP32] = pl.tensor.read(config, [0])
                 b: pl.Scalar[pl.FP32] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.FP32] = pl.div(a, b)  # pyright: ignore[reportArgumentType]
+                c: pl.Scalar[pl.FP32] = pl.div(a, b)
                 _ = c
                 return out
 
@@ -312,7 +312,7 @@ class TestScalarArithmetic:
             ) -> pl.Tensor[[2, 16, 128], pl.FP32]:
                 a: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
                 b: pl.Scalar[pl.INT64] = pl.tensor.read(config, [1])
-                c: pl.Scalar[pl.INT64] = pl.add(a, b)  # pyright: ignore[reportArgumentType]
+                c: pl.Scalar[pl.INT64] = pl.add(a, b)
                 _ = c
                 return out
 
