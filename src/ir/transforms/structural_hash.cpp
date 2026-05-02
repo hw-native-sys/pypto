@@ -25,6 +25,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/hash.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
@@ -63,13 +64,6 @@ DataType CanonicalizeForSyntaxScalarDtype(const DataType& dtype) {
 }
 
 }  // namespace
-
-/**
- * @brief Hash combine using Boost-inspired algorithm
- */
-inline uint64_t hash_combine(uint64_t seed, uint64_t value) {
-  return seed ^ (value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
-}
 
 /**
  * @brief Structural hasher for IR nodes

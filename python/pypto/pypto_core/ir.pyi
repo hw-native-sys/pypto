@@ -268,6 +268,12 @@ class Expr(IRNode):
 class Type:
     """Base class for type representations."""
 
+    def __eq__(self, other: object) -> bool:
+        """Structural equality comparison (delegates to structural_equal)."""
+
+    def __hash__(self) -> int:
+        """Structural hash (consistent with __eq__)."""
+
 class UnknownType(Type):
     """Unknown or unspecified type representation.
 
@@ -535,6 +541,9 @@ class TileView:
 
     def __ne__(self, other: object) -> bool:
         """Structural inequality comparison."""
+
+    def __hash__(self) -> int:
+        """Hash consistent with __eq__ (ConstInt fields by value, others by pointer identity)."""
 
 class TileType(ShapedType):
     """Tile type representation (multi-dimensional tensor)."""

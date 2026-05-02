@@ -280,5 +280,36 @@ def test_perf_hint_visible_at_default_log_level(capfd):
     assert re.search(r"\[perf_hint PH001\]", combined), f"perf hint not in output:\n{combined}"
 
 
+# ---------------------------------------------------------------------------
+# DiagnosticCheckSet hash/eq consistency (regression)
+# ---------------------------------------------------------------------------
+
+
+def test_diagnostic_check_set_two_empty_sets_hash_equally():
+    a = passes.DiagnosticCheckSet()
+    b = passes.DiagnosticCheckSet()
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a in {b}
+
+
+def test_diagnostic_check_set_two_populated_sets_hash_equally():
+    a = passes.DiagnosticCheckSet()
+    a.insert(passes.DiagnosticCheck.UnusedVariable)
+    b = passes.DiagnosticCheckSet()
+    b.insert(passes.DiagnosticCheck.UnusedVariable)
+    assert a == b
+    assert hash(a) == hash(b)
+
+
+def test_diagnostic_check_set_distinct_sets_hash_differently():
+    a = passes.DiagnosticCheckSet()
+    a.insert(passes.DiagnosticCheck.UnusedVariable)
+    b = passes.DiagnosticCheckSet()
+    b.insert(passes.DiagnosticCheck.TileInnermostDimGranularity)
+    assert a != b
+    assert hash(a) != hash(b)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

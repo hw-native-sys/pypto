@@ -129,5 +129,45 @@ class TestTileViewEquality:
         assert v1 != v2
 
 
+class TestTileViewHashEqConsistency:
+    """Regression tests for the Python hash/eq contract on TileView."""
+
+    def test_default_views_hash_equally(self):
+        v1 = ir.TileView()
+        v2 = ir.TileView()
+        assert v1 == v2
+        assert hash(v1) == hash(v2)
+
+    def test_constint_value_carve_out_in_hash(self):
+        # AreExprsEqual treats two distinct ConstInt nodes with the same value
+        # as equal. Hash must follow suit.
+        span = _make_span()
+        v1 = _make_view(valid_shape=[_make_const(16, span), _make_const(16, span)])
+        v2 = _make_view(valid_shape=[_make_const(16, span), _make_const(16, span)])
+        assert v1 == v2
+        assert hash(v1) == hash(v2)
+        assert v1 in {v2}
+
+    def test_distinct_var_ptrs_hash_differently(self):
+        # Two distinct Var pointers with the same name compare unequal under
+        # AreExprsEqual; their hashes should also differ.
+        span = _make_span()
+        sym1 = ir.Var("M", ir.ScalarType(DataType.INT64), span)
+        sym2 = ir.Var("M", ir.ScalarType(DataType.INT64), span)
+        v1 = _make_view(valid_shape=[sym1], stride=[_make_const(1, span)])
+        v2 = _make_view(valid_shape=[sym2], stride=[_make_const(1, span)])
+        assert v1 != v2
+        assert hash(v1) != hash(v2)
+
+    def test_shared_var_ptr_hashes_equally(self):
+        # Same Var instance shared across both views — eq AND hash equal.
+        span = _make_span()
+        sym = ir.Var("M", ir.ScalarType(DataType.INT64), span)
+        v1 = _make_view(valid_shape=[sym], stride=[_make_const(1, span)])
+        v2 = _make_view(valid_shape=[sym], stride=[_make_const(1, span)])
+        assert v1 == v2
+        assert hash(v1) == hash(v2)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -291,5 +291,31 @@ class TestStructuralHash:
         assert hash1 != hash2
 
 
+class TestTypePyHashEqConsistency:
+    """Regression tests for the Python hash/eq contract on Type bindings.
+
+    Type's __eq__ is bound to structural_equal; __hash__ must therefore use
+    structural_hash so that structurally-equal types are interchangeable as
+    set/dict keys.
+    """
+
+    def test_two_equal_scalar_types_hash_equally(self):
+        a = ir.ScalarType(DataType.FP32)
+        b = ir.ScalarType(DataType.FP32)
+        assert a == b
+        assert hash(a) == hash(b)
+        assert a in {b}
+
+    def test_distinct_scalar_types_hash_differently(self):
+        a = ir.ScalarType(DataType.FP32)
+        b = ir.ScalarType(DataType.INT32)
+        assert a != b
+        assert hash(a) != hash(b)
+
+    def test_type_works_as_dict_key(self):
+        d = {ir.ScalarType(DataType.FP32): "fp32"}
+        assert d[ir.ScalarType(DataType.FP32)] == "fp32"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

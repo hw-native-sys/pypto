@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TYPE_H_
 #define PYPTO_IR_TYPE_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -325,6 +326,16 @@ struct TileView {
 
 bool operator==(const TileView& lhs, const TileView& rhs);
 bool operator!=(const TileView& lhs, const TileView& rhs);
+
+/**
+ * @brief Hash a TileView consistently with operator==
+ *
+ * For each ExprPtr field, mirrors AreExprsEqual's identity rule: ConstInt nodes
+ * hash by integer value (matching the value carve-out), all other expressions
+ * hash by pointer identity (matching shared_ptr equality). Other fields hash by
+ * value. The contract is: lhs == rhs implies Hash(lhs) == Hash(rhs).
+ */
+size_t Hash(const TileView& tv);
 
 /**
  * @brief Base class for shaped types (tensors and tiles)

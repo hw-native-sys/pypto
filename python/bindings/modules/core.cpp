@@ -12,6 +12,8 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 
+#include <functional>
+
 #include "../module.h"
 #include "pypto/core/dtype.h"
 
@@ -69,6 +71,9 @@ void BindCore(nb::module_& m) {
       // Operators
       .def("__eq__", &DataType::operator==, nb::arg("other"), "Equality comparison operator")
       .def("__ne__", &DataType::operator!=, nb::arg("other"), "Inequality comparison operator")
+      .def(
+          "__hash__", [](const DataType& self) { return std::hash<uint8_t>{}(self.Code()); },
+          "Hash by underlying type code (consistent with __eq__ and structural_hash)")
       .def("__repr__", &DataType::ToString, "String representation for debugging")
       .def("__str__", &DataType::ToString, "String representation for printing");
 }

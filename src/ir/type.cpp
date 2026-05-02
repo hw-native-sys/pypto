@@ -11,7 +11,9 @@
 
 #include "pypto/ir/type.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,8 +22,10 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
+#include "pypto/core/hash.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/scalar_expr.h"
@@ -55,6 +59,39 @@ bool operator==(const TileView& lhs, const TileView& rhs) {
 }
 
 bool operator!=(const TileView& lhs, const TileView& rhs) { return !(lhs == rhs); }
+
+namespace {
+
+// Tags distinguish the two AreExprsEqual cases so a value-equal ConstInt and a
+// pointer-equal Var can never collide on the same hash bucket by coincidence.
+constexpr uint64_t kConstIntHashTag = 1;
+constexpr uint64_t kExprPtrHashTag = 2;
+
+// Mirror AreExprsEqual: ConstInt nodes compare by value, all others by pointer
+// identity. The hash must match this granularity.
+inline uint64_t HashExprForAreExprsEqual(const ExprPtr& e) {
+  if (!e) return 0;
+  if (auto c = As<ConstInt>(e)) {
+    return hash_combine(kConstIntHashTag, std::hash<int64_t>{}(c->value_));
+  }
+  return hash_combine(kExprPtrHashTag, std::hash<const void*>{}(e.get()));
+}
+
+}  // namespace
+
+size_t Hash(const TileView& tv) {
+  uint64_t h = 0;
+  h = hash_combine(h, tv.valid_shape.size());
+  for (const auto& e : tv.valid_shape) h = hash_combine(h, HashExprForAreExprsEqual(e));
+  h = hash_combine(h, tv.stride.size());
+  for (const auto& e : tv.stride) h = hash_combine(h, HashExprForAreExprsEqual(e));
+  h = hash_combine(h, HashExprForAreExprsEqual(tv.start_offset));
+  h = hash_combine(h, std::hash<int>{}(static_cast<int>(tv.blayout)));
+  h = hash_combine(h, std::hash<int>{}(static_cast<int>(tv.slayout)));
+  h = hash_combine(h, std::hash<uint64_t>{}(tv.fractal));
+  h = hash_combine(h, std::hash<int>{}(static_cast<int>(tv.pad)));
+  return static_cast<size_t>(h);
+}
 
 ShapedType::ShapedType(DataType dtype, std::vector<ExprPtr> shape)
     : dtype_(dtype), shape_(std::move(shape)), memref_(std::nullopt) {}

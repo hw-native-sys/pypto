@@ -242,6 +242,9 @@ void BindIR(nb::module_& m) {
   type_class.def(
       "__eq__", [](const TypePtr& self, const TypePtr& other) { return structural_equal(self, other); },
       "Equality comparison");
+  type_class.def(
+      "__hash__", [](const TypePtr& self) { return structural_hash(self); },
+      "Hash by structural identity (consistent with __eq__)");
 
   // UnknownType - const shared_ptr
   auto unknown_type_class =
@@ -447,7 +450,10 @@ void BindIR(nb::module_& m) {
           nb::arg("other"), "Structural equality comparison")
       .def(
           "__ne__", [](const TileView& self, const TileView& other) { return self != other; },
-          nb::arg("other"), "Structural inequality comparison");
+          nb::arg("other"), "Structural inequality comparison")
+      .def(
+          "__hash__", [](const TileView& self) { return Hash(self); },
+          "Hash consistent with __eq__ (ConstInt by value, other ExprPtrs by pointer identity)");
 
   // Dynamic dimension constant
   ir.attr("DYNAMIC_DIM") = kDynamicDim;

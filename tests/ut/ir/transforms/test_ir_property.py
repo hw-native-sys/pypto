@@ -158,6 +158,35 @@ class TestIRPropertySet:
         assert str(ps) == "{}"
 
 
+class TestIRPropertySetHashEqConsistency:
+    """Regression tests for the Python hash/eq contract on IRPropertySet."""
+
+    def test_two_empty_sets_hash_equally(self):
+        a = passes.IRPropertySet()
+        b = passes.IRPropertySet()
+        assert a == b
+        assert hash(a) == hash(b)
+        assert a in {b}
+
+    def test_two_populated_sets_hash_equally(self):
+        a = passes.IRPropertySet()
+        a.insert(passes.IRProperty.SSAForm)
+        a.insert(passes.IRProperty.TypeChecked)
+        b = passes.IRPropertySet()
+        b.insert(passes.IRProperty.SSAForm)
+        b.insert(passes.IRProperty.TypeChecked)
+        assert a == b
+        assert hash(a) == hash(b)
+
+    def test_distinct_sets_hash_differently(self):
+        a = passes.IRPropertySet()
+        a.insert(passes.IRProperty.SSAForm)
+        b = passes.IRPropertySet()
+        b.insert(passes.IRProperty.TypeChecked)
+        assert a != b
+        assert hash(a) != hash(b)
+
+
 class TestPassPropertyAccessors:
     """Test Pass property accessor methods."""
 

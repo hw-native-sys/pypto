@@ -2572,21 +2572,20 @@ class ASTParser:
         the pipeline.
         """
 
-        # Tuple (not set): nanobind DataType values have __eq__ that compares by
-        # value but non-coherent __hash__, so set membership misses. `in` on a
-        # tuple falls back to linear `==` comparison and works as expected.
-        integer_dtypes = (
-            DataType.INT4,
-            DataType.INT8,
-            DataType.INT16,
-            DataType.INT32,
-            DataType.INT64,
-            DataType.UINT4,
-            DataType.UINT8,
-            DataType.UINT16,
-            DataType.UINT32,
-            DataType.UINT64,
-            DataType.INDEX,
+        integer_dtypes = frozenset(
+            {
+                DataType.INT4,
+                DataType.INT8,
+                DataType.INT16,
+                DataType.INT32,
+                DataType.INT64,
+                DataType.UINT4,
+                DataType.UINT8,
+                DataType.UINT16,
+                DataType.UINT32,
+                DataType.UINT64,
+                DataType.INDEX,
+            }
         )
 
         def _parse_core_num_node(value_node: ast.AST, source: ast.AST) -> "ir.Expr":

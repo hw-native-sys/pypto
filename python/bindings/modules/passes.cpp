@@ -94,7 +94,8 @@ void BindPass(nb::module_& m) {
       .def("__str__", &IRPropertySet::ToString)
       .def("__repr__", &IRPropertySet::ToString)
       .def("__eq__", &IRPropertySet::operator==)
-      .def("__ne__", &IRPropertySet::operator!=);
+      .def("__ne__", &IRPropertySet::operator!=)
+      .def("__hash__", &IRPropertySet::Hash);
 
   // Bind VerificationMode enum
   nb::enum_<VerificationMode>(passes, "VerificationMode", "Controls when property verification runs")
@@ -145,7 +146,8 @@ void BindPass(nb::module_& m) {
       .def("__str__", &DiagnosticCheckSet::ToString)
       .def("__repr__", &DiagnosticCheckSet::ToString)
       .def("__eq__", &DiagnosticCheckSet::operator==)
-      .def("__ne__", &DiagnosticCheckSet::operator!=);
+      .def("__ne__", &DiagnosticCheckSet::operator!=)
+      .def("__hash__", &DiagnosticCheckSet::Hash);
 
   // Bind DiagnosticCheckRegistry
   nb::class_<DiagnosticCheckRegistry>(passes, "DiagnosticCheckRegistry",
