@@ -236,5 +236,29 @@ def test_idempotence():
     ir.assert_structural_equal(After2, Expected)
 
 
+def test_no_redundant_blocks_rejects_mid_body_yield():
+    """NoRedundantBlocks rejects a YieldStmt at a non-trailing position of a
+    SeqStmts. Function body has no iter_args context, so SSAVerify's
+    CheckNoMidBodyYield does not apply — only the structural verifier catches it.
+    """
+    span = ir.Span.unknown()
+
+    a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+    params: list[ir.Var] = [a]
+    return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+    dummy_var = ir.Var("dummy", ir.ScalarType(DataType.INT64), span)
+    assign = ir.AssignStmt(dummy_var, a, span)
+    mid_yield = ir.YieldStmt([a], span)
+    ret = ir.ReturnStmt([a], span)
+    func_body = ir.SeqStmts([assign, mid_yield, ret], span)
+    func = ir.Function("main", params, return_types, func_body, span)
+    program = ir.Program([func], "test_program", span)
+
+    verify_pass = passes.run_verifier()
+    with pytest.raises(Exception, match="YieldStmt before the terminating position"):
+        verify_pass(program)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

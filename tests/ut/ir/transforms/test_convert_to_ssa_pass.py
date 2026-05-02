@@ -1553,5 +1553,54 @@ class TestEscapingVariables:
         )
 
 
+class TestMidBodyYieldGuard:
+    """ConvertToSSA rejects a body whose SeqStmts contains a YieldStmt before
+    the trailing position via INTERNAL_CHECK in ExtractYield/ReplaceOrAppendYield.
+
+    Structural pre-verification (NoRedundantBlocks) normally intercepts this
+    shape before ConvertToSSA runs, so the test wraps the call in a
+    VerificationLevel.NONE PassContext to exercise the in-pass assertion.
+    """
+
+    def test_for_body_with_mid_body_yield_rejected(self):
+        """ForStmt body shaped as [YieldStmt, AssignStmt] trips
+        AssertNoMidBodyYield. Constructed directly because the DSL parser
+        cannot produce this shape; iter_args ensure the loop-handler path
+        that calls the helpers is exercised.
+        """
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        loop_var = ir.Var("i", ir.ScalarType(DataType.INDEX), span)
+        iter_arg = ir.IterArg("acc", ir.ScalarType(DataType.INT64), a, span)
+
+        mid_yield = ir.YieldStmt([iter_arg], span)
+        trailing_assign = ir.AssignStmt(ir.Var("dummy", ir.ScalarType(DataType.INT64), span), loop_var, span)
+        body = ir.SeqStmts([mid_yield, trailing_assign], span)
+
+        rv = ir.Var("result", ir.ScalarType(DataType.INT64), span)
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(10, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            [iter_arg],
+            body,
+            [rv],
+            span,
+        )
+
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("main", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        with ctx, pytest.raises(Exception, match="YieldStmt at position"):
+            passes.convert_to_ssa()(program)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

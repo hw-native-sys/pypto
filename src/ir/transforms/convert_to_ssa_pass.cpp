@@ -913,7 +913,24 @@ class SSAConverter {
     return nullptr;
   }
 
+  // Invariant: a YieldStmt may appear only as the trailing statement of its
+  // scope. Both helpers below only inspect / pop the last stmt, so a mid-body
+  // YieldStmt would silently survive ReplaceOrAppendYield and produce a
+  // SeqStmts with two yields. Assert at the source rather than letting the
+  // structural verifier blame the resulting shape.
+  static void AssertNoMidBodyYield(const StmtPtr& s) {
+    auto seq = As<SeqStmts>(s);
+    if (!seq) return;
+    for (size_t i = 0; i + 1 < seq->stmts_.size(); ++i) {
+      INTERNAL_CHECK(!As<YieldStmt>(seq->stmts_[i]))
+          << "ConvertToSSA: body has a YieldStmt at position " << i << " of " << seq->stmts_.size()
+          << "; YieldStmt must be the trailing statement of its scope. "
+          << "A producing pass emitted malformed IR.";
+    }
+  }
+
   static YieldStmtPtr ExtractYield(const StmtPtr& s) {
+    AssertNoMidBodyYield(s);
     if (auto y = As<YieldStmt>(s)) {
       return y;
     }
@@ -926,6 +943,7 @@ class SSAConverter {
   }
 
   static StmtPtr ReplaceOrAppendYield(const StmtPtr& s, const std::vector<ExprPtr>& vals, const Span& span) {
+    AssertNoMidBodyYield(s);
     auto yield = std::make_shared<YieldStmt>(vals, span);
     if (auto seq = As<SeqStmts>(s)) {
       std::vector<StmtPtr> stmts = seq->stmts_;

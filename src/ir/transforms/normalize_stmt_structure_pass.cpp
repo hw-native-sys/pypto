@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <utility>
@@ -34,9 +35,13 @@ namespace ir {
 namespace {
 
 /**
- * @brief Checks that no SeqStmts has a single child (should be
- * unwrapped) and no SeqStmts contains a nested instance of itself
- * (should be flattened).
+ * @brief Checks structural invariants of SeqStmts:
+ *   - no single-child SeqStmts (should be unwrapped),
+ *   - no nested SeqStmts inside another SeqStmts (should be flattened),
+ *   - no YieldStmt anywhere except as the trailing statement (YieldStmt is
+ *     the scope-exit terminator; mid-body yields are unreachable code and
+ *     break passes that assume the yield is at the tail — see
+ *     ConvertToSSA::ExtractYield/ReplaceOrAppendYield).
  */
 class NoRedundantBlocksVerifier : public IRVisitor {
  public:
@@ -50,10 +55,17 @@ class NoRedundantBlocksVerifier : public IRVisitor {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, rule_name_, 0,
                                 "SeqStmts with single child should be unwrapped", op->span_);
     }
-    for (const auto& stmt : op->stmts_) {
+    for (size_t i = 0; i < op->stmts_.size(); ++i) {
+      const auto& stmt = op->stmts_[i];
       if (As<SeqStmts>(stmt)) {
         diagnostics_.emplace_back(DiagnosticSeverity::Error, rule_name_, 0,
                                   "SeqStmts contains nested SeqStmts", stmt->span_);
+      }
+      if (i + 1 < op->stmts_.size() && As<YieldStmt>(stmt)) {
+        diagnostics_.emplace_back(DiagnosticSeverity::Error, rule_name_, 0,
+                                  "YieldStmt before the terminating position; "
+                                  "YieldStmt must be the trailing statement of its scope",
+                                  stmt->span_);
       }
     }
     IRVisitor::VisitStmt_(op);

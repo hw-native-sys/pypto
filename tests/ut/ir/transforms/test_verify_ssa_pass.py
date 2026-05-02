@@ -494,14 +494,11 @@ class TestCardinalityChecks:
             verify_pass(program)
 
     # The next four tests construct IR directly via `ir.ForStmt` / `ir.WhileStmt`
-    # / `ir.IfStmt` rather than via @pl.program. The DSL parser cannot produce
-    # the shape these tests check: it rejects two yield-LHS bindings to the
-    # same names (SSA), and a body with two yields that have matching value
-    # counts on both yields requires either re-binding LHS names (rejected) or
-    # mismatched counts (caught by the structural verifier before SSAVerify
-    # runs). The MISPLACED_YIELD check exists as a backstop for IR producers
-    # (passes, transforms, IRBuilder users), so direct IR construction is the
-    # only way to test it.
+    # / `ir.IfStmt` because the DSL parser cannot produce a body with a
+    # mid-body yield. The structural NoRedundantBlocks verifier intercepts the
+    # shape before SSAVerify, so the diagnostic surfaces as a NoRedundantBlocks
+    # error; SSAVerify's check remains as a backstop for flows that bypass
+    # structural pre-verification.
 
     def test_for_mid_body_yield(self):
         """ForStmt body with a YieldStmt followed by another stmt is rejected,
@@ -565,7 +562,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="WhileStmt.*YieldStmt before the terminating position"):
+        with pytest.raises(Exception, match="YieldStmt before the terminating position"):
             verify_pass(program)
 
     def test_if_then_mid_body_yield(self):
@@ -592,7 +589,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="IfStmt then-branch.*YieldStmt before the terminating position"):
+        with pytest.raises(Exception, match="YieldStmt before the terminating position"):
             verify_pass(program)
 
     def test_if_else_mid_body_yield(self):
@@ -619,7 +616,7 @@ class TestCardinalityChecks:
         program = ir.Program([func], "test_program", span)
 
         verify_pass = passes.run_verifier()
-        with pytest.raises(Exception, match="IfStmt else-branch.*YieldStmt before the terminating position"):
+        with pytest.raises(Exception, match="YieldStmt before the terminating position"):
             verify_pass(program)
 
 
