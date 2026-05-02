@@ -275,28 +275,6 @@ inline std::string ScopeKindToString(ScopeKind kind) {
 }
 
 /**
- * @brief Convert string to ScopeKind
- * @param str String representation
- * @return ScopeKind enum value
- * @throws pypto::TypeError if string is not recognized
- */
-inline ScopeKind StringToScopeKind(const std::string& str) {
-  if (str == "InCore") {
-    return ScopeKind::InCore;
-  } else if (str == "AutoInCore") {
-    return ScopeKind::AutoInCore;
-  } else if (str == "Cluster") {
-    return ScopeKind::Cluster;
-  } else if (str == "Hierarchy") {
-    return ScopeKind::Hierarchy;
-  } else if (str == "Spmd") {
-    return ScopeKind::Spmd;
-  } else {
-    throw pypto::TypeError("Unknown ScopeKind: " + str);
-  }
-}
-
-/**
  * @brief Base class for all statements in the IR
  *
  * Statements represent operations that perform side effects or control flow.

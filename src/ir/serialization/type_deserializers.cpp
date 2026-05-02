@@ -723,30 +723,6 @@ static IRNodePtr DeserializeSpmdScopeStmt(const msgpack::object& fields_obj, msg
                                          DeserializeLeadingComments(fields_obj));
 }
 
-// Backward-compatibility: route legacy "ScopeStmt" type tags (written before the
-// per-kind subclass split, issue #1047) to the matching derived deserializer by
-// reading the legacy "scope_kind" field.
-static IRNodePtr DeserializeLegacyScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
-                                            DeserializerContext& ctx) {
-  auto kind_obj = GET_FIELD_OBJ("scope_kind");
-  CHECK(kind_obj.type == msgpack::type::STR)
-      << "Legacy ScopeStmt scope_kind must be a string, got msgpack type " << static_cast<int>(kind_obj.type);
-  auto kind = StringToScopeKind(kind_obj.as<std::string>());
-  switch (kind) {
-    case ScopeKind::InCore:
-      return DeserializeInCoreScopeStmt(fields_obj, zone, ctx);
-    case ScopeKind::AutoInCore:
-      return DeserializeAutoInCoreScopeStmt(fields_obj, zone, ctx);
-    case ScopeKind::Cluster:
-      return DeserializeClusterScopeStmt(fields_obj, zone, ctx);
-    case ScopeKind::Hierarchy:
-      return DeserializeHierarchyScopeStmt(fields_obj, zone, ctx);
-    case ScopeKind::Spmd:
-      return DeserializeSpmdScopeStmt(fields_obj, zone, ctx);
-  }
-  throw pypto::TypeError("Unknown legacy ScopeKind during deserialization");
-}
-
 // Deserialize SeqStmts
 static IRNodePtr DeserializeSeqStmts(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -997,8 +973,6 @@ static TypeRegistrar _auto_in_core_scope_stmt_registrar("AutoInCoreScopeStmt",
 static TypeRegistrar _cluster_scope_stmt_registrar("ClusterScopeStmt", DeserializeClusterScopeStmt);
 static TypeRegistrar _hierarchy_scope_stmt_registrar("HierarchyScopeStmt", DeserializeHierarchyScopeStmt);
 static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmdScopeStmt);
-// Backward compatibility for IR serialized before issue #1047 split ScopeStmt into per-kind subclasses.
-static TypeRegistrar _legacy_scope_stmt_registrar("ScopeStmt", DeserializeLegacyScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);
