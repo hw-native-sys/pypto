@@ -1601,6 +1601,29 @@ class TestMidBodyYieldGuard:
         with ctx, pytest.raises(Exception, match="YieldStmt at position"):
             passes.convert_to_ssa()(program)
 
+    def test_function_body_with_mid_body_yield_rejected(self):
+        """Function-body SeqStmts with a mid-body YieldStmt trips
+        AssertNoMidBodyYield via ConvertSeq — the path that bypasses the
+        loop/if scope handlers.
+        """
+        span = ir.Span.unknown()
+
+        a = ir.Var("a", ir.ScalarType(DataType.INT64), span)
+        params: list[ir.Var] = [a]
+        return_types: list[ir.Type] = [ir.ScalarType(DataType.INT64)]
+
+        dummy_var = ir.Var("dummy", ir.ScalarType(DataType.INT64), span)
+        assign = ir.AssignStmt(dummy_var, a, span)
+        mid_yield = ir.YieldStmt([a], span)
+        ret = ir.ReturnStmt([a], span)
+        func_body = ir.SeqStmts([assign, mid_yield, ret], span)
+        func = ir.Function("main", params, return_types, func_body, span)
+        program = ir.Program([func], "test_program", span)
+
+        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
+        with ctx, pytest.raises(Exception, match="YieldStmt at position"):
+            passes.convert_to_ssa()(program)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

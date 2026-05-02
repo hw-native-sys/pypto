@@ -398,6 +398,7 @@ class SSAConverter {
   // ── SeqStmts — computes future uses per-statement for escaping detection
 
   StmtPtr ConvertSeq(const SeqStmtsPtr& op) {
+    AssertNoMidBodyYield(op);
     size_t n = op->stmts_.size();
 
     // Precompute suffix_needs[i] = variables needed from the outer scope by stmts[i..N-1].
@@ -914,15 +915,16 @@ class SSAConverter {
   }
 
   // Invariant: a YieldStmt may appear only as the trailing statement of its
-  // scope. Both helpers below only inspect / pop the last stmt, so a mid-body
-  // YieldStmt would silently survive ReplaceOrAppendYield and produce a
-  // SeqStmts with two yields. Assert at the source rather than letting the
-  // structural verifier blame the resulting shape.
+  // scope. ConvertSeq and the loop/if helpers below only inspect / pop the
+  // last stmt, so a mid-body YieldStmt would silently survive
+  // ReplaceOrAppendYield and produce a SeqStmts with two yields. Assert at the
+  // source rather than letting the structural verifier blame the resulting
+  // shape.
   static void AssertNoMidBodyYield(const StmtPtr& s) {
     auto seq = As<SeqStmts>(s);
     if (!seq) return;
     for (size_t i = 0; i + 1 < seq->stmts_.size(); ++i) {
-      INTERNAL_CHECK(!As<YieldStmt>(seq->stmts_[i]))
+      INTERNAL_CHECK_SPAN(!As<YieldStmt>(seq->stmts_[i]), seq->stmts_[i]->span_)
           << "ConvertToSSA: body has a YieldStmt at position " << i << " of " << seq->stmts_.size()
           << "; YieldStmt must be the trailing statement of its scope. "
           << "A producing pass emitted malformed IR.";
