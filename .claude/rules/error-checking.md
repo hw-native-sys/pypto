@@ -2,7 +2,7 @@
 
 ## Overview
 
-PyPTO uses two distinct macros: `CHECK` for user errors, `INTERNAL_CHECK` for internal bugs.
+PyPTO uses two distinct macros: `CHECK` for user errors, `INTERNAL_CHECK` for internal bugs. When operating on IR and a `Span` is in scope, prefer the `_SPAN` variants — they auto-emit IR source location on failure and dramatically improve debuggability.
 
 ## CHECK - User Input Validation
 
@@ -53,7 +53,7 @@ void SetTensorShape(const std::vector<int>& shape) {
 ```cpp
 void InternalTransform(IRNode* node) {
   INTERNAL_CHECK(node != nullptr) << "Internal error: node should not be null";
-  INTERNAL_CHECK(node->GetRefCount() > 0)
+  INTERNAL_CHECK_SPAN(node->GetRefCount() > 0, node->span_)
     << "Internal error: invalid reference count";
   // Transform logic...
 }
@@ -64,6 +64,37 @@ void InternalTransform(IRNode* node) {
 - Be technical (for developers debugging PyPTO)
 - Include context for debugging
 - Mark as "Internal error" to indicate bug
+
+### Prefer `INTERNAL_CHECK_SPAN` when an IR `Span` is in scope
+
+`INTERNAL_CHECK_SPAN(expr, span)` and `INTERNAL_UNREACHABLE_SPAN(span)` attach the IR source location to the failure message. Use them whenever a `Span` is reachable — typically `op->span_`, `node->span_`, `expr->span_`, or `stmt->span_`. See `docs/en/dev/02-error-handling.md` for the full reference.
+
+**Safety rule:** the `span` argument is evaluated only on failure, but it is evaluated unconditionally there. So **the span expression must be safe to evaluate exactly when the check fails.**
+
+```cpp
+// ❌ UNSAFE — if `func` is null, `RequiresX(func)` short-circuits to false,
+// then `func->span_` dereferences null in the failure path.
+INTERNAL_CHECK_SPAN(RequiresX(func), func->span_) << "...";
+
+// ❌ UNSAFE — guarding the very pointer whose span we read.
+INTERNAL_CHECK_SPAN(node, node->span_) << "...";
+
+// ✅ Plain INTERNAL_CHECK when the predicate is the null guard.
+INTERNAL_CHECK(node) << "Internal error: node must not be null";
+
+// ✅ SPAN form when the span source is a *different* IR node guaranteed
+// non-null at the failure point (often a sibling parameter or a parent).
+INTERNAL_CHECK_SPAN(child_value, parent->span_) << "...";
+```
+
+**Quick decision:**
+
+| Situation | Use |
+| --------- | --- |
+| Check guards the same pointer whose `->span_` you'd read | `INTERNAL_CHECK` |
+| Predicate may short-circuit before dereferencing the span source | `INTERNAL_CHECK` |
+| Span source is a separate IR node known non-null at the failure point | `INTERNAL_CHECK_SPAN` |
+| No IR node in scope (utility / arithmetic helper / non-IR code) | `INTERNAL_CHECK` |
 
 ## PyPTO Exception Types
 

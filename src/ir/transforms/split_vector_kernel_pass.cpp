@@ -949,7 +949,9 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
 }
 
 FunctionPtr ProcessNoSplitDualAivFunction(const FunctionPtr& func) {
-  INTERNAL_CHECK_SPAN(RequiresNoSplitDualAivSync(func), func->span_)
+  // Plain INTERNAL_CHECK: RequiresNoSplitDualAivSync short-circuits on null
+  // func, so func->span_ would dereference null in the failure path.
+  INTERNAL_CHECK(RequiresNoSplitDualAivSync(func))
       << "Internal error: ProcessNoSplitDualAivFunction requires dual-dispatch AIV marker";
 
   std::unordered_map<const Var*, ExprPtr> param_replacements;
@@ -962,7 +964,7 @@ FunctionPtr ProcessNoSplitDualAivFunction(const FunctionPtr& func) {
   }
 
   auto injected = InjectSubblockIdx(func, /*is_aiv=*/true);
-  INTERNAL_CHECK_SPAN(!injected.body_stmts.empty(), func->span_)
+  INTERNAL_CHECK(!injected.body_stmts.empty())
       << "Internal error: dual-dispatch no-split AIV body must contain injected subblock_idx";
   std::vector<StmtPtr> guarded_stmts(injected.body_stmts.begin() + 1, injected.body_stmts.end());
   auto hoisted_prefix = SplitNoSplitSharedPipeSetupPrefix(guarded_stmts);

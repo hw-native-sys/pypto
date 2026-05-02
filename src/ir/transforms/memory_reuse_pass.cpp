@@ -343,8 +343,7 @@ class TopDownRetargeter {
   bool RetargetAssign(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
                       std::optional<MemorySpace> target_memory) {
     auto assign = As<AssignStmt>(def.assign_stmt);
-    INTERNAL_CHECK_SPAN(assign, def.assign_stmt->span_)
-        << "Internal error: kAssign VarDef must carry an AssignStmt";
+    INTERNAL_CHECK_SPAN(assign, var->span_) << "Internal error: kAssign VarDef must carry an AssignStmt";
     auto call = As<Call>(assign->value_);
     if (!call) return false;
     const auto& reg = OpRegistry::GetInstance();
