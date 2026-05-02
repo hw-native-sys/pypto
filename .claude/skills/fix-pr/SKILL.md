@@ -65,8 +65,9 @@ grep -o '"isResolved":[[:space:]]*false' /tmp/threads.json | wc -l
 
 # Paginate: if hasNextPage is true, re-run with -F cursor="<endCursor>" until done
 
-# Also fetch CodeRabbit "outside diff range" findings — they live in review BODIES, not threads
-gh api "repos/$OWNER/$NAME/pulls/<NUMBER>/reviews" > /tmp/reviews.json
+# Also fetch CodeRabbit "outside diff range" findings — they live in review BODIES, not threads.
+# Use --paginate so PRs with many reviews don't drop the latest CodeRabbit body.
+gh api --paginate "repos/$OWNER/$NAME/pulls/<NUMBER>/reviews" > /tmp/reviews.json
 # Markers in body: "Outside diff range comments" or "Some comments are outside the diff".
 # After stripping the leading "> " (the [!CAUTION] callout makes everything a blockquote),
 # the structure is nested <details>:
@@ -101,7 +102,7 @@ Present: "**Iteration N** — Found X unresolved comments (A inline + B outside-
 
 Treat bot reviewers (CodeRabbit, Copilot, Gemini) same as human — classify by content.
 
-**Out-of-diff findings** (from `/tmp/reviews.json`) — present alongside inline threads as pseudo-threads (path + line range + body). They have NO thread ID, so Step 6's `resolveReviewThread` mutation cannot apply; address by fixing the code and noting the commit in your push message.
+**Out-of-diff findings** (from `/tmp/reviews.json`) — present alongside inline threads as pseudo-threads (path + line range + body). They have NO thread ID, so Step 6's `resolveReviewThread` mutation cannot apply; address by fixing the code and noting the fix in the next commit message.
 
 **CI failures:**
 
