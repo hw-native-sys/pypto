@@ -555,6 +555,19 @@ class TestSubstituteTypeEmbeddedRefs:
         assert new_type.tile_view is not None
         assert new_type.tile_view.valid_shape[0] is valid_rows_new
 
+    def test_cyclic_substitution_does_not_infinite_recurse(self):
+        """A cyclic substitution map (A→B, B→A) must not stack-overflow.
+        Transitive resolution short-circuits via the cycle guard."""
+        a = _index_var("a")
+        b = _index_var("b")
+        # A→B, B→A — uses of either resolve through ResolveVarRemapHit.
+        # Without the cycle guard this would recurse indefinitely.
+        op = ir.Op("test_op")
+        call = ir.Call(op, [a], ir.ScalarType(DataType.INT64), _span())
+        # Should complete without crashing or hanging.
+        result = ir.substitute_expr(call, [(a, b), (b, a)])
+        assert isinstance(result, ir.Call)
+
     def test_call_return_type_is_remapped(self):
         """A Call's return type can be a TileType embedding a substituted Var.
         Substitute must rewrite the return type."""

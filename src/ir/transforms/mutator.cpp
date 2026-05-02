@@ -197,9 +197,11 @@ TypePtr IRMutator::RemapTypeViaVisitor(const TypePtr& type) {
   std::optional<MemRefPtr> new_memref_opt = original_memref_opt;
   if (original_memref_opt.has_value()) {
     auto remapped = ExprFunctor<ExprPtr>::VisitExpr(*original_memref_opt);
-    if (auto as_memref = As<MemRef>(remapped)) {
-      new_memref_opt = as_memref;
-    }
+    auto as_memref = As<MemRef>(remapped);
+    INTERNAL_CHECK_SPAN(as_memref, (*original_memref_opt)->span_)
+        << "MemRef embedded in a type mutated to non-MemRef (substitution map mapped a "
+        << "MemRef to a non-MemRef expression — not supported)";
+    new_memref_opt = as_memref;
   }
   return CloneTypeWithMemRefAndRemapExprs(
       type, new_memref_opt, [this](const ExprPtr& e) { return ExprFunctor<ExprPtr>::VisitExpr(e); });
@@ -207,7 +209,13 @@ TypePtr IRMutator::RemapTypeViaVisitor(const TypePtr& type) {
 
 ExprPtr IRMutator::ResolveVarRemapHit(const Expr* key, ExprPtr remapped) {
   if (!remapped || remapped.get() == key) return remapped;
+  // Cycle guard: if `key` is already being resolved on the stack, the user's
+  // substitution map has a cycle (e.g. A→B, B→A). Return the unresolved value
+  // rather than recursing forever.
+  auto [_it, inserted] = remap_resolving_.insert(key);
+  if (!inserted) return remapped;
   auto resolved = ExprFunctor<ExprPtr>::VisitExpr(remapped);
+  remap_resolving_.erase(key);
   if (resolved.get() != remapped.get()) {
     var_remap_[key] = resolved;
   }

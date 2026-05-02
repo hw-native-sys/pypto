@@ -13,6 +13,7 @@
 #define PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 
 #include <unordered_map>
+#include <unordered_set>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -127,7 +128,9 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// Resolve a var_remap_ hit transitively — the seeded value may itself need
   /// further substitution (its type embeds a Var that's also in var_remap_).
   /// Memoizes the resolved value back into var_remap_ so subsequent lookups
-  /// skip the chain. Self-references short-circuit.
+  /// skip the chain. Direct self-references and indirect cycles (A→B, B→A) are
+  /// detected via remap_resolving_ and short-circuit by returning the unresolved
+  /// value rather than recursing.
   ExprPtr ResolveVarRemapHit(const Expr* key, ExprPtr remapped);
 
   /// Pointer remapping for Vars whose definitions changed during mutation.
@@ -138,6 +141,11 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// def-use closure: every visit of the old Var resolves to the same
   /// replacement.
   std::unordered_map<const Expr*, ExprPtr> var_remap_;
+
+  /// Keys currently being resolved by ResolveVarRemapHit. Detects cycles in
+  /// caller-supplied substitution maps (e.g. {A→B, B→A}) and stops recursion
+  /// before a stack overflow.
+  std::unordered_set<const Expr*> remap_resolving_;
 };
 
 }  // namespace ir
