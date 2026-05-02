@@ -284,6 +284,7 @@ class ASTParser:
             scope_lookup=self.scope_manager.lookup_var,
             span_tracker=self.span_tracker,
             dyn_var_cache=dyn_var_cache,
+            parse_expression=self.parse_expression,
         )
         self.builder = IRBuilder()
         self.global_vars = global_vars or {}  # Track GlobalVars for cross-function calls

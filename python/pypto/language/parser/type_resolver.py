@@ -150,6 +150,7 @@ class TypeResolver:
         scope_lookup: Callable[[str], Any | None] | None = None,
         span_tracker: "SpanTracker | None" = None,
         dyn_var_cache: dict[str, ir.Var] | None = None,
+        parse_expression: Callable[[ast.expr], "ir.Expr"] | None = None,
     ):
         """Initialize type resolver.
 
@@ -162,11 +163,17 @@ class TypeResolver:
                 objects. When provided, multiple TypeResolvers share the same cache,
                 ensuring the same DynVar produces the same ir.Var across functions
                 in a program.
+            parse_expression: Optional callback to the enclosing parser's full
+                expression parser. When set, TileView/TensorView fields accept any
+                index expression the DSL itself can parse (matching what the C++
+                ``ir.TileView`` constructor accepts), not just integer constants
+                and bare names.
         """
         self.expr_evaluator = expr_evaluator
         self.scope_lookup = scope_lookup
         self.span_tracker = span_tracker
         self._dyn_var_cache: dict[str, ir.Var] = dyn_var_cache if dyn_var_cache is not None else {}
+        self._parse_expression = parse_expression
 
     def resolve_param_type(self, type_node: ast.expr) -> "tuple[ir.Type, ir.ParamDirection]":
         """Resolve AST type annotation to (ir.Type, ParamDirection) for function parameters.
@@ -1247,7 +1254,14 @@ class TypeResolver:
         return [self._parse_tileview_expr(elt) for elt in node.elts]
 
     def _parse_tileview_expr(self, node: ast.expr) -> "ir.Expr":
-        """Parse a single expression for a TileView field."""
+        """Parse a single expression for a TileView field.
+
+        TileView fields admit arbitrary index expressions, matching what the
+        C++ ``ir.TileView`` constructor accepts. Integer constants and bare
+        names use fast paths here; richer expressions (calls, arithmetic,
+        attribute access, etc.) fall through to the same expression parser
+        that the DSL uses everywhere else.
+        """
         val = self._try_resolve_int(node)
         if val is not None:
             return ir.ConstInt(val, DataType.INDEX, self._get_span(node))
@@ -1284,10 +1298,12 @@ class TypeResolver:
             if name not in self._dyn_var_cache:
                 self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), self._get_span(node))
             return self._dyn_var_cache[name]
+        if self._parse_expression is not None:
+            return self._parse_expression(node)
         raise ParserTypeError(
-            f"TileView expression must be an integer constant, got: {ast.unparse(node)}",
+            f"TileView expression must be a parsable index expression, got: {ast.unparse(node)}",
             span=self._get_span(node),
-            hint="Use an integer literal for TileView fields",
+            hint="Use an integer literal, a dynamic variable, or any pl.* index expression",
         )
 
     def _resolve_tilelayout(self, node: ast.expr) -> "ir.TileLayout":

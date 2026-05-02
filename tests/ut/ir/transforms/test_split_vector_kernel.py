@@ -28,13 +28,33 @@ def _setup_backend():
 
 
 def _run_split_vector_kernel(program):
-    """Run convert_to_ssa then split_vector_kernel (without verification)."""
+    """Run convert_to_ssa then split_vector_kernel.
+
+    Verification is disabled because these tests hand-construct minimal IR that
+    targets ``SplitVectorKernel`` in isolation; that IR doesn't satisfy
+    properties produced earlier in the real pipeline (``MixedKernelExpanded``,
+    pipe initialization, etc.). Roundtrip correctness is exercised explicitly
+    in tests that need it (see ``_assert_parses``).
+    """
     ssa = passes.convert_to_ssa()(program)
     pipeline = passes.PassPipeline()
     pipeline.add_pass(passes.split_vector_kernel())
     ctx = passes.PassContext([], passes.VerificationLevel.NONE)
     with ctx:
         return pipeline.run(ssa)
+
+
+def _assert_parses(program, printed: str | None = None):
+    """Print (if not already provided) and reparse, asserting the parser accepts the printed text.
+
+    This is the half of roundtrip the parser owns: any IR a producer can
+    construct must be printable and reparseable. (Full structural_equal
+    additionally requires the producer not to clone Vars, which is a
+    separate concern outside parser scope.) Tests that cover passes
+    producing non-trivial IR shapes (e.g. TileView fields with dynamic
+    expressions) call this to gate the parser side.
+    """
+    pl.parse_program(printed if printed is not None else python_print(program))
 
 
 def _assert_split_matches_expected(before_program, expected_program):
@@ -165,6 +185,9 @@ class TestSplitVectorKernelUpDown:
         assert re.search(r"pl\.tile\.tpop_from_aic\(\s*split=1\s*\)", printed)
         assert "pl.max(pl.min(valid_rows__ssa_v0 - subblock_idx * 8, 8), 0)" in printed
         assert "valid_rows__ssa_v0 // 2" not in printed
+        # The TileView's localized valid_shape carries a non-constant expression;
+        # the parser must accept the same shapes the printer emits.
+        _assert_parses(actual, printed=printed)
 
     def test_load_shape_halved_and_offset_adjusted(self):
         """tile.load in AIV: shape halved, offset adjusted in split dim (includes add of halved tiles)."""
