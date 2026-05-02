@@ -53,19 +53,35 @@ Examples: build failure preventing testing, ambiguous requirements, API behaving
 
 - **Date**: YYYY-MM-DD
 - **Found during**: [brief context of what task you were working on]
-- **Description**: [clear description of the problem]
+- **Description**: [actual behaviour, expected behaviour, why it matters]
+- **Example / Repro**: [smallest artefact that surfaces the issue — see "Entry Quality" below; use `N/A` only for purely descriptive issues]
 - **Location**: [file path(s) and line number(s) if applicable]
 - **Severity**: low | medium | high
 
 ---
 ```
 
+### Entry Quality
+
+Each entry must be **self-contained** — a future reader (you in two months, or the user filing it as a GitHub issue) should understand the problem without re-deriving it from memory.
+
+- **Description**: name the actual vs. expected behaviour and the consequence. ✅ "ConvertSeq doesn't guard mid-body yields, so malformed SeqStmts survive SSA conversion when verification is off" beats ❌ "ConvertSeq has a bug".
+- **Example / Repro**: include the smallest concrete artefact that surfaces the issue. Pick whichever fits:
+  - A failing test name + the bottom of the traceback for runtime bugs
+  - A short code snippet (DSL / IR / C++) showing the wrong output for codegen / printer / pass issues
+  - The exact CLI command + error message for build or tooling issues
+  - A grep query + counts for inventory-style observations (e.g. `grep -rE 'INTERNAL_CHECK\(' src/ir | wc -l   # 91`)
+
+**Note on `N/A`:** Mark as `N/A` only when the issue is purely descriptive (doc gap, naming concern) — that signals "considered, not forgotten" rather than "skipped".
+
+If you cannot produce a concrete example, treat that as a signal the issue may not yet be well-understood — flag it to the user before logging.
+
 ### How to Log
 
 1. Determine the main repo root (`git worktree list` — first entry)
 2. Read `KNOWN_ISSUES.md` (create if it doesn't exist)
 3. Check the issue is not already logged (avoid duplicates)
-4. Append the new issue using the format above
+4. Append the new issue using the format above — verify it meets the "Entry Quality" bar before saving
 5. Continue with the current task (do not fix the logged issue now)
 
 ## On Task Completion

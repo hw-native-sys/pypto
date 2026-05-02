@@ -65,6 +65,16 @@ grep -o '"isResolved":[[:space:]]*false' /tmp/threads.json | wc -l
 
 # Paginate: if hasNextPage is true, re-run with -F cursor="<endCursor>" until done
 
+# Also fetch CodeRabbit "outside diff range" findings — they live in review BODIES, not threads
+gh api "repos/$OWNER/$NAME/pulls/<NUMBER>/reviews" > /tmp/reviews.json
+# Markers in body: "Outside diff range comments" or "Some comments are outside the diff".
+# After stripping the leading "> " (the [!CAUTION] callout makes everything a blockquote),
+# the structure is nested <details>:
+#   <summary>⚠️ Outside diff range comments (N)</summary><blockquote>
+#     <summary>PATH (N)</summary><blockquote>
+#       `LINE-RANGE`: severity-tags **Title** ... body ...
+# Use Python (re + json) to walk the tree; surface (path, line_range, body) as pseudo-threads.
+
 # Check CI status
 gh pr checks <NUMBER>
 ```
@@ -75,7 +85,7 @@ gh pr checks <NUMBER>
 - Do NOT use `gh api graphql --jq` with `$` in filter expressions — `gh`'s jq processor interprets `$` as a jq variable sign, causing `Expected VAR_SIGN` errors even when shell quoting is correct
 - Use `grep -c` for simple counts; save to a temp file first if complex parsing is needed
 
-Present: "**Iteration N** — Found X unresolved comments and Y failed/pending checks."
+Present: "**Iteration N** — Found X unresolved comments (A inline + B outside-diff) and Y failed/pending checks."
 
 **Exit:** All checks green AND no unresolved comments → done. Pending checks do NOT count as clean.
 
@@ -90,6 +100,8 @@ Present: "**Iteration N** — Found X unresolved comments and Y failed/pending c
 | **C: Informational** | Resolve without changes | Acknowledgments, "optional" suggestions |
 
 Treat bot reviewers (CodeRabbit, Copilot, Gemini) same as human — classify by content.
+
+**Out-of-diff findings** (from `/tmp/reviews.json`) — present alongside inline threads as pseudo-threads (path + line range + body). They have NO thread ID, so Step 6's `resolveReviewThread` mutation cannot apply; address by fixing the code and noting the commit in your push message.
 
 **CI failures:**
 
@@ -137,6 +149,8 @@ Ask which to address/skip. Recommend A + CI items. On subsequent iterations, reu
 Reply with `gh api repos/:owner/:repo/pulls/<number>/comments/<comment_id>/replies -f body="..."` then resolve with GraphQL `resolveReviewThread` mutation.
 
 Templates: Fixed → "Fixed in `<commit>` - description" | Skip → "Follows `.claude/rules/<file>`" | Ack → "Acknowledged!"
+
+**Out-of-diff findings** (no thread ID): nothing to resolve via GraphQL — note the fix in the commit message; CodeRabbit re-scans on the next push and won't re-emit fixed findings.
 
 ### Step 7: Wait and Re-check
 
