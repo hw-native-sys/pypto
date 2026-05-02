@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -50,10 +51,10 @@ StmtPtr MakeSeqOrSingle(std::vector<StmtPtr> stmts, const Span& span) {
 }
 
 TileLayout GetTileLayout(const TileTypePtr& tile_type) {
-  if (!tile_type || !tile_type->tile_view_.has_value()) {
+  if (!tile_type) {
     return TileLayout::row_major;
   }
-  return tile_type->tile_view_->blayout;
+  return tile_type->tile_view_.value_or(TileView{}).blayout;
 }
 
 bool IsConstOne(const ExprPtr& expr) { return IsConstValue(expr, 1); }
@@ -67,10 +68,11 @@ bool IsColumnVector(const TileTypePtr& tile_type) {
   return tile_type && tile_type->shape_.size() == 2 && IsConstOne(tile_type->shape_[1]);
 }
 
-bool IsRowVectorRowMajor(const TileTypePtr& tile_type) {
-  return tile_type && tile_type->shape_.size() == 2 && IsConstOne(tile_type->shape_[0]) &&
-         GetTileLayout(tile_type) == TileLayout::row_major;
+bool RequiresRowMajor(const std::optional<TileLayout>& required_layout) {
+  return required_layout.has_value() && required_layout.value() == TileLayout::row_major;
 }
+
+bool IsRowMajor(const TileTypePtr& tile_type) { return GetTileLayout(tile_type) == TileLayout::row_major; }
 
 ExprPtr MakeShapeTuple(const std::vector<ExprPtr>& dims, const Span& span) {
   return std::make_shared<MakeTuple>(dims, span);
@@ -89,27 +91,55 @@ std::vector<ExprPtr> MakeRowVectorShape(const TileTypePtr& tile_type) {
   return {std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()), tile_type->shape_[0]};
 }
 
-bool IsRepairableCall(const CallPtr& call, const backend::BackendTileLayoutSpec& spec) {
-  bool has_repairable_input = false;
+MemorySpace GetRepairTargetMemory(const TileTypePtr& tile_type, MemorySpace fallback = MemorySpace::Vec) {
+  if (!tile_type) {
+    return fallback;
+  }
+  return tile_type->memory_space_.value_or(fallback);
+}
+
+std::vector<std::pair<std::string, std::any>> MakeLayoutMoveKwargs(MemorySpace target_memory,
+                                                                   TileLayout blayout, TileLayout slayout) {
+  return {
+      {"target_memory", std::any(target_memory)},
+      {"blayout", std::any(blayout)},
+      {"slayout", std::any(slayout)},
+  };
+}
+
+CallPtr CreateLayoutMoveCall(const ExprPtr& input, MemorySpace target_memory, TileLayout blayout,
+                             TileLayout slayout, const Span& span) {
+  auto expr = OpRegistry::GetInstance().Create("tile.move", {input},
+                                               MakeLayoutMoveKwargs(target_memory, blayout, slayout), span);
+  auto call = As<Call>(expr);
+  CHECK(call) << "ResolveBackendOpLayouts: tile.move must produce a Call";
+  return call;
+}
+
+bool NeedsInputRepair(const CallPtr& call, const backend::BackendTileLayoutSpec& spec) {
   for (size_t i = 0; i < spec.input_layouts.size() && i < call->args_.size(); ++i) {
     const auto& required_layout = spec.input_layouts[i];
-    if (!required_layout.has_value() || required_layout.value() != TileLayout::row_major) {
+    if (!RequiresRowMajor(required_layout)) {
       continue;
     }
     auto tile_type = As<TileType>(call->args_[i]->GetType());
     if (!tile_type) {
       continue;  // Non-tile inputs (scalars, shapes) are not subject to layout repair
     }
-    if (GetTileLayout(tile_type) == TileLayout::row_major) {
-      continue;
+    if (!IsRowMajor(tile_type)) {
+      return true;
     }
-    if (IsColumnVectorColMajor(tile_type)) {
-      has_repairable_input = true;
-      continue;
-    }
-    return false;
   }
-  return has_repairable_input;
+  return false;
+}
+
+bool NeedsOutputRepair(const TileTypePtr& result_tile_type, const backend::BackendTileLayoutSpec& spec) {
+  return RequiresRowMajor(spec.output_layout) && result_tile_type && !IsRowMajor(result_tile_type);
+}
+
+bool NeedsRepair(const CallPtr& call, const TileTypePtr& result_tile_type,
+                 const backend::BackendTileLayoutSpec& spec) {
+  return NeedsInputRepair(call, spec) || NeedsOutputRepair(result_tile_type, spec);
 }
 
 class BackendLayoutRepairMutator : public IRMutator {
@@ -126,11 +156,11 @@ class BackendLayoutRepairMutator : public IRMutator {
     }
 
     auto* layout_spec = backend::GetBackend()->GetTileLayoutSpec(call->op_->name_);
-    if (!layout_spec || !IsRepairableCall(call, *layout_spec)) {
+    auto result_tile_type = As<TileType>(op->var_->GetType());
+    if (!layout_spec || !NeedsRepair(call, result_tile_type, *layout_spec)) {
       return IRMutator::VisitStmt_(op);
     }
 
-    auto result_tile_type = As<TileType>(op->var_->GetType());
     CHECK(result_tile_type)
         << "ResolveBackendOpLayouts expects constrained op assignment targets to be TileType";
 
@@ -139,21 +169,30 @@ class BackendLayoutRepairMutator : public IRMutator {
 
     for (size_t i = 0; i < layout_spec->input_layouts.size() && i < call->args_.size(); ++i) {
       const auto& required_layout = layout_spec->input_layouts[i];
-      if (!required_layout.has_value() || required_layout.value() != TileLayout::row_major) {
+      if (!RequiresRowMajor(required_layout)) {
         continue;
       }
 
       auto tile_type = As<TileType>(call->args_[i]->GetType());
-      if (!IsColumnVector(tile_type) || IsRowVectorRowMajor(tile_type)) {
+      if (!tile_type || IsRowMajor(tile_type)) {
         continue;
       }
 
-      auto reshape_call = CreateReshapeCall(call->args_[i], MakeRowVectorShape(tile_type), call->span_);
-      auto reshape_var = std::make_shared<Var>(
-          NextTempName(op->var_->name_hint_, {auto_name::RowMajorQualifier(), auto_name::ArgQualifier(i)}),
-          reshape_call->GetType(), call->span_);
-      rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, op->span_));
-      new_args[i] = reshape_var;
+      auto repair_var_name =
+          NextTempName(op->var_->name_hint_, {auto_name::RowMajorQualifier(), auto_name::ArgQualifier(i)});
+      if (IsColumnVectorColMajor(tile_type)) {
+        auto reshape_call = CreateReshapeCall(call->args_[i], MakeRowVectorShape(tile_type), call->span_);
+        auto reshape_var = std::make_shared<Var>(repair_var_name, reshape_call->GetType(), call->span_);
+        rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, op->span_));
+        new_args[i] = reshape_var;
+        continue;
+      }
+
+      auto move_call = CreateLayoutMoveCall(call->args_[i], GetRepairTargetMemory(tile_type),
+                                            TileLayout::row_major, TileLayout::none_box, call->span_);
+      auto move_var = std::make_shared<Var>(repair_var_name, move_call->GetType(), call->span_);
+      rewritten.push_back(std::make_shared<AssignStmt>(move_var, move_call, op->span_));
+      new_args[i] = move_var;
     }
 
     auto repaired_expr =
@@ -161,14 +200,21 @@ class BackendLayoutRepairMutator : public IRMutator {
     auto repaired_call = As<Call>(repaired_expr);
     CHECK(repaired_call) << "ResolveBackendOpLayouts: repaired consumer must remain a Call";
 
-    if (!IsRowVectorRowMajor(result_tile_type)) {
+    if (NeedsOutputRepair(result_tile_type, *layout_spec)) {
       auto row_major_var = std::make_shared<Var>(NextTempName(op->var_->name_hint_, {"row_major"}),
                                                  repaired_call->GetType(), call->span_);
       rewritten.push_back(std::make_shared<AssignStmt>(row_major_var, repaired_call, op->span_));
 
-      auto reshape_back = CreateReshapeCall(row_major_var, result_tile_type->shape_, call->span_);
+      CallPtr restore_call;
+      if (IsColumnVector(result_tile_type)) {
+        restore_call = CreateReshapeCall(row_major_var, result_tile_type->shape_, call->span_);
+      } else {
+        auto target_view = result_tile_type->tile_view_.value_or(TileView{});
+        restore_call = CreateLayoutMoveCall(row_major_var, GetRepairTargetMemory(result_tile_type),
+                                            target_view.blayout, target_view.slayout, call->span_);
+      }
       auto replacement = MutableCopy(op);
-      replacement->value_ = reshape_back;
+      replacement->value_ = restore_call;
       rewritten.push_back(std::move(replacement));
       return MakeSeqOrSingle(std::move(rewritten), op->span_);
     }
@@ -186,7 +232,7 @@ class BackendLayoutRepairMutator : public IRMutator {
     }
 
     auto* layout_spec = backend::GetBackend()->GetTileLayoutSpec(call->op_->name_);
-    if (!layout_spec || !IsRepairableCall(call, *layout_spec)) {
+    if (!layout_spec || !NeedsInputRepair(call, *layout_spec)) {
       return IRMutator::VisitStmt_(op);
     }
 
@@ -195,19 +241,27 @@ class BackendLayoutRepairMutator : public IRMutator {
 
     for (size_t i = 0; i < layout_spec->input_layouts.size() && i < call->args_.size(); ++i) {
       const auto& required_layout = layout_spec->input_layouts[i];
-      if (!required_layout.has_value() || required_layout.value() != TileLayout::row_major) {
+      if (!RequiresRowMajor(required_layout)) {
         continue;
       }
       auto tile_type = As<TileType>(call->args_[i]->GetType());
-      if (!IsColumnVector(tile_type) || IsRowVectorRowMajor(tile_type)) {
+      if (!tile_type || IsRowMajor(tile_type)) {
         continue;
       }
-      auto reshape_call = CreateReshapeCall(call->args_[i], MakeRowVectorShape(tile_type), call->span_);
-      auto reshape_var =
-          std::make_shared<Var>(NextTempName("layout_fix", {"row_major", "arg" + std::to_string(i)}),
-                                reshape_call->GetType(), call->span_);
-      rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, op->span_));
-      new_args[i] = reshape_var;
+      auto repair_var_name = NextTempName("layout_fix", {"row_major", "arg" + std::to_string(i)});
+      if (IsColumnVectorColMajor(tile_type)) {
+        auto reshape_call = CreateReshapeCall(call->args_[i], MakeRowVectorShape(tile_type), call->span_);
+        auto reshape_var = std::make_shared<Var>(repair_var_name, reshape_call->GetType(), call->span_);
+        rewritten.push_back(std::make_shared<AssignStmt>(reshape_var, reshape_call, op->span_));
+        new_args[i] = reshape_var;
+        continue;
+      }
+
+      auto move_call = CreateLayoutMoveCall(call->args_[i], GetRepairTargetMemory(tile_type),
+                                            TileLayout::row_major, TileLayout::none_box, call->span_);
+      auto move_var = std::make_shared<Var>(repair_var_name, move_call->GetType(), call->span_);
+      rewritten.push_back(std::make_shared<AssignStmt>(move_var, move_call, op->span_));
+      new_args[i] = move_var;
     }
 
     auto repaired_expr =
