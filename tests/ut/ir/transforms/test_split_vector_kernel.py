@@ -54,7 +54,7 @@ def _assert_parses(program, printed: str | None = None):
     producing non-trivial IR shapes (e.g. TileView fields with dynamic
     expressions) call this to gate the parser side.
     """
-    pl.parse_program(printed if printed is not None else python_print(program))
+    pl.parse(printed if printed is not None else python_print(program))
 
 
 def _assert_split_matches_expected(before_program, expected_program):

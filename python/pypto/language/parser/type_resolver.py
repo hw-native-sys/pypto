@@ -85,6 +85,21 @@ def _is_index_expr_type(t: "ir.Type | None") -> bool:
     return t.dtype == DataType.INDEX or t.dtype.is_int()
 
 
+def _is_pl_yield_call(node: ast.expr) -> bool:
+    """Detect ``pl.yield_(...)`` / bare ``yield_(...)`` call nodes.
+
+    ``parse_yield_call`` emits an ``ir.YieldStmt`` to the builder as a side
+    effect — incompatible with the pure-expression contract type-annotation
+    parsing assumes.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr == "yield_":
+        return True
+    return isinstance(func, ast.Name) and func.id == "yield_"
+
+
 _TYPE_KIND_NAMES: dict[type, str] = {
     ir.TensorType: "Tensor",
     ir.TileType: "Tile",
@@ -1311,10 +1326,21 @@ class TypeResolver:
                 self._dyn_var_cache[name] = ir.Var(name, ir.ScalarType(DataType.INDEX), self._get_span(node))
             return self._dyn_var_cache[name]
         if self._parse_expression is not None:
+            # Pre-flight: pl.yield_() emits an ir.YieldStmt to the builder as a side
+            # effect during parsing. Type-annotation parsing must stay pure, so reject
+            # the call before delegation rather than after — otherwise the spurious
+            # YieldStmt is already in the builder when we throw.
+            if _is_pl_yield_call(node):
+                raise ParserTypeError(
+                    "TileView field cannot contain pl.yield_() — it would emit a "
+                    "YieldStmt as a side effect of type annotation parsing.",
+                    span=self._get_span(node),
+                    hint="Use a pure index expression (constants, vars, arithmetic, pl.max/pl.min, ...).",
+                )
             result = self._parse_expression(node)
-            # Reject non-Expr returns (e.g. bare `pl.yield_()` returns None and emits a
-            # YieldStmt to the builder) and non-index expression types (e.g. `pl.tile.create(...)`
-            # returns a Tile). The C++ TileView contract is index expressions only.
+            # Backstop: the delegated parser may still return non-Expr (e.g. None)
+            # or non-index expressions (e.g. pl.tile.create(...) returns a Tile).
+            # The C++ TileView contract is index expressions only.
             if not isinstance(result, ir.Expr) or not _is_index_expr_type(result.type):
                 got = type(result).__name__ if not isinstance(result, ir.Expr) else type(result.type).__name__
                 raise ParserTypeError(
