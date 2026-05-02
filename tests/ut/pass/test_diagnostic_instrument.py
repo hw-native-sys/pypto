@@ -281,34 +281,26 @@ def test_perf_hint_visible_at_default_log_level(capfd):
 
 
 # ---------------------------------------------------------------------------
-# DiagnosticCheckSet hash/eq consistency (regression)
+# DiagnosticCheckSet is unhashable (mutable via insert/remove)
 # ---------------------------------------------------------------------------
 
 
-def test_diagnostic_check_set_two_empty_sets_hash_equally():
-    a = passes.DiagnosticCheckSet()
-    b = passes.DiagnosticCheckSet()
-    assert a == b
-    assert hash(a) == hash(b)
-    assert a in {b}
+def test_diagnostic_check_set_hash_raises_typeerror():
+    s = passes.DiagnosticCheckSet()
+    with pytest.raises(TypeError, match="unhashable"):
+        hash(s)
 
 
-def test_diagnostic_check_set_two_populated_sets_hash_equally():
-    a = passes.DiagnosticCheckSet()
-    a.insert(passes.DiagnosticCheck.UnusedVariable)
-    b = passes.DiagnosticCheckSet()
-    b.insert(passes.DiagnosticCheck.UnusedVariable)
-    assert a == b
-    assert hash(a) == hash(b)
+def test_diagnostic_check_set_use_as_set_member_raises():
+    s = passes.DiagnosticCheckSet()
+    with pytest.raises(TypeError, match="unhashable"):
+        _ = {s}
 
 
-def test_diagnostic_check_set_distinct_sets_hash_differently():
-    a = passes.DiagnosticCheckSet()
-    a.insert(passes.DiagnosticCheck.UnusedVariable)
-    b = passes.DiagnosticCheckSet()
-    b.insert(passes.DiagnosticCheck.TileInnermostDimGranularity)
-    assert a != b
-    assert hash(a) != hash(b)
+def test_diagnostic_check_set_use_as_dict_key_raises():
+    s = passes.DiagnosticCheckSet()
+    with pytest.raises(TypeError, match="unhashable"):
+        _ = {s: "value"}
 
 
 if __name__ == "__main__":

@@ -13,7 +13,6 @@
 #define PYPTO_IR_TRANSFORMS_IR_PROPERTY_H_
 
 #include <cstdint>
-#include <functional>
 #include <initializer_list>
 #include <string>
 #include <vector>
@@ -150,11 +149,6 @@ class IRPropertySet {
 
   bool operator==(const IRPropertySet& other) const { return bits_ == other.bits_; }
   bool operator!=(const IRPropertySet& other) const { return bits_ != other.bits_; }
-
-  /**
-   * @brief Hash by the underlying bitset (consistent with operator==)
-   */
-  [[nodiscard]] uint64_t Hash() const { return std::hash<uint64_t>{}(bits_); }
 
  private:
   uint64_t bits_;

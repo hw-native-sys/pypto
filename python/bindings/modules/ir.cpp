@@ -421,30 +421,35 @@ void BindIR(nb::module_& m) {
       .value("col_major", TileLayout::col_major, "Column-major layout")
       .export_values();
 
-  // TileView - struct for tile view information
+  // TileView - immutable struct for tile view information.
+  //
+  // Fields are read-only from Python so that hash and equality remain stable
+  // across an instance's lifetime (Python's hash contract). Construct via the
+  // constructor, not by mutating fields.
   nb::class_<TileView>(
       ir, "TileView",
-      "Tile view representation with valid shape, stride, start offset, layouts, fractal, and pad")
-      .def(nb::init<>(), "Create an empty tile view")
+      "Tile view representation with valid shape, stride, start offset, layouts, fractal, and pad. "
+      "Immutable from Python — set all fields at construction time.")
       .def(nb::init<const std::vector<ExprPtr>&, const std::vector<ExprPtr>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue>(),
-           nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
-           nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
-           nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
-           "Create a tile view with valid_shape, stride, start_offset, blayout, slayout, fractal, and pad")
+           nb::arg("valid_shape") = std::vector<ExprPtr>{}, nb::arg("stride") = std::vector<ExprPtr>{},
+           nb::arg("start_offset") = ExprPtr{}, nb::arg("blayout") = TileLayout::row_major,
+           nb::arg("slayout") = TileLayout::none_box, nb::arg("fractal") = static_cast<uint64_t>(512),
+           nb::arg("pad") = PadValue::null,
+           "Create a tile view; all fields default to empty/null/row_major/none_box/512/null")
       .def(nb::init<const std::vector<int64_t>&, const std::vector<int64_t>&, ExprPtr, TileLayout, TileLayout,
                     uint64_t, PadValue>(),
            nb::arg("valid_shape"), nb::arg("stride"), nb::arg("start_offset"),
            nb::arg("blayout") = TileLayout::row_major, nb::arg("slayout") = TileLayout::none_box,
            nb::arg("fractal") = static_cast<uint64_t>(512), nb::arg("pad") = PadValue::null,
            "Create a tile view with integer valid_shape and stride, auto-converted to ConstInt")
-      .def_rw("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
-      .def_rw("stride", &TileView::stride, "Stride for each dimension")
-      .def_rw("start_offset", &TileView::start_offset, "Starting offset")
-      .def_rw("blayout", &TileView::blayout, "Block layout")
-      .def_rw("slayout", &TileView::slayout, "Scatter layout")
-      .def_rw("fractal", &TileView::fractal, "Fractal size")
-      .def_rw("pad", &TileView::pad, "Pad mode")
+      .def_ro("valid_shape", &TileView::valid_shape, "Valid shape dimensions")
+      .def_ro("stride", &TileView::stride, "Stride for each dimension")
+      .def_ro("start_offset", &TileView::start_offset, "Starting offset")
+      .def_ro("blayout", &TileView::blayout, "Block layout")
+      .def_ro("slayout", &TileView::slayout, "Scatter layout")
+      .def_ro("fractal", &TileView::fractal, "Fractal size")
+      .def_ro("pad", &TileView::pad, "Pad mode")
       .def(
           "__eq__", [](const TileView& self, const TileView& other) { return self == other; },
           nb::arg("other"), "Structural equality comparison")

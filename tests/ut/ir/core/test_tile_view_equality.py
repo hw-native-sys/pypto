@@ -148,16 +148,17 @@ class TestTileViewHashEqConsistency:
         assert hash(v1) == hash(v2)
         assert v1 in {v2}
 
-    def test_distinct_var_ptrs_hash_differently(self):
+    def test_distinct_var_ptrs_remain_distinct(self):
         # Two distinct Var pointers with the same name compare unequal under
-        # AreExprsEqual; their hashes should also differ.
+        # AreExprsEqual. Hash collisions are legal under Python's contract, so
+        # check the membership behavior callers actually depend on.
         span = _make_span()
         sym1 = ir.Var("M", ir.ScalarType(DataType.INT64), span)
         sym2 = ir.Var("M", ir.ScalarType(DataType.INT64), span)
         v1 = _make_view(valid_shape=[sym1], stride=[_make_const(1, span)])
         v2 = _make_view(valid_shape=[sym2], stride=[_make_const(1, span)])
         assert v1 != v2
-        assert hash(v1) != hash(v2)
+        assert v1 not in {v2}
 
     def test_shared_var_ptr_hashes_equally(self):
         # Same Var instance shared across both views — eq AND hash equal.

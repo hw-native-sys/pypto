@@ -174,17 +174,6 @@ class _TileViewMeta(type):
         fractal: int = 512,
         pad: PadValue = PadValue.null,
     ) -> "_TileViewBase":
-        has_args = valid_shape is not None or stride is not None or start_offset is not None
-        has_kwargs = (
-            blayout != TileLayout.row_major
-            or slayout != TileLayout.none_box
-            or fractal != 512
-            or pad != PadValue.null
-        )
-        if not has_args and not has_kwargs:
-            return _TileViewBase()
-        if start_offset is None:
-            raise ValueError("start_offset is required")
         if isinstance(start_offset, int):
             start_offset = _normalize_expr(start_offset)
         return _TileViewBase(

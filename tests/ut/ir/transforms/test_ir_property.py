@@ -158,33 +158,28 @@ class TestIRPropertySet:
         assert str(ps) == "{}"
 
 
-class TestIRPropertySetHashEqConsistency:
-    """Regression tests for the Python hash/eq contract on IRPropertySet."""
+class TestIRPropertySetUnhashable:
+    """IRPropertySet is mutable via insert/remove, so it must not be hashable.
 
-    def test_two_empty_sets_hash_equally(self):
-        a = passes.IRPropertySet()
-        b = passes.IRPropertySet()
-        assert a == b
-        assert hash(a) == hash(b)
-        assert a in {b}
+    Python's hash contract requires hashable objects to have a stable hash for
+    their entire lifetime. Allowing hash on a mutable type would silently break
+    set/dict invariants when the object is mutated after insertion.
+    """
 
-    def test_two_populated_sets_hash_equally(self):
-        a = passes.IRPropertySet()
-        a.insert(passes.IRProperty.SSAForm)
-        a.insert(passes.IRProperty.TypeChecked)
-        b = passes.IRPropertySet()
-        b.insert(passes.IRProperty.SSAForm)
-        b.insert(passes.IRProperty.TypeChecked)
-        assert a == b
-        assert hash(a) == hash(b)
+    def test_hash_raises_typeerror(self):
+        ps = passes.IRPropertySet()
+        with pytest.raises(TypeError, match="unhashable"):
+            hash(ps)
 
-    def test_distinct_sets_hash_differently(self):
-        a = passes.IRPropertySet()
-        a.insert(passes.IRProperty.SSAForm)
-        b = passes.IRPropertySet()
-        b.insert(passes.IRProperty.TypeChecked)
-        assert a != b
-        assert hash(a) != hash(b)
+    def test_use_as_set_member_raises(self):
+        ps = passes.IRPropertySet()
+        with pytest.raises(TypeError, match="unhashable"):
+            _ = {ps}
+
+    def test_use_as_dict_key_raises(self):
+        ps = passes.IRPropertySet()
+        with pytest.raises(TypeError, match="unhashable"):
+            _ = {ps: "value"}
 
 
 class TestPassPropertyAccessors:

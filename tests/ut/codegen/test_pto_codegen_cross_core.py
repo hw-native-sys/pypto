@@ -301,8 +301,7 @@ class TestCrossCoreTpushTpopCodegen:
         valid_row = ir.Var("valid_row", ir.ScalarType(pl.INDEX), span)
         valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 16 * 64 * 4, 0)
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [valid_row, valid_col]
+        tile_view = ir.TileView(valid_shape=[valid_row, valid_col])
         tile_type = ir.TileType([16, 64], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
         recv_tile = ir.Var("recv_tile", tile_type, span)
         tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 2}, tile_type, span)
@@ -331,8 +330,7 @@ class TestCrossCoreTpushTpopCodegen:
         span = ir.Span.unknown()
         valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 16 * 64 * 4, 0)
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [ir.ConstInt(8, pl.INT64, span), valid_col]
+        tile_view = ir.TileView(valid_shape=[ir.ConstInt(8, pl.INT64, span), valid_col])
         tile_type = ir.TileType([16, 64], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
         recv_tile = ir.Var("recv_tile", tile_type, span)
         tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
@@ -359,8 +357,7 @@ class TestCrossCoreTpushTpopCodegen:
         """Static tpop valid_shape smaller than physical shape should emit explicit operands."""
         span = ir.Span.unknown()
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 16 * 64 * 4, 0)
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [ir.ConstInt(0, pl.INDEX, span), ir.ConstInt(0, pl.INDEX, span)]
+        tile_view = ir.TileView(valid_shape=[ir.ConstInt(0, pl.INDEX, span), ir.ConstInt(0, pl.INDEX, span)])
         tile_type = ir.TileType([16, 64], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
         recv_tile = ir.Var("recv_tile", tile_type, span)
         tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
@@ -381,8 +378,7 @@ class TestCrossCoreTpushTpopCodegen:
         span = ir.Span.unknown()
         valid_row = ir.Var("valid_row", ir.ScalarType(pl.BOOL), span)
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 16 * 64 * 4, 0)
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [valid_row, ir.ConstInt(64, pl.INT64, span)]
+        tile_view = ir.TileView(valid_shape=[valid_row, ir.ConstInt(64, pl.INT64, span)])
         tile_type = ir.TileType([16, 64], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
         recv_tile = ir.Var("recv_tile", tile_type, span)
         tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
@@ -422,20 +418,22 @@ class TestCrossCoreTpushTpopCodegen:
         shapes = ir.MakeTuple([shape_32, shape_32], span)
 
         load_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 32 * 32 * 4, 0)
-        load_view = ir.TileView()
-        load_view.valid_shape = [shape_32, shape_32]
-        load_view.blayout = ir.TileLayout.col_major
-        load_view.slayout = ir.TileLayout.row_major
-        load_view.fractal = 1024
+        load_view = ir.TileView(
+            valid_shape=[shape_32, shape_32],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
         load_type = ir.TileType([32, 32], pl.FP32, load_memref, load_view, memory_space)
         src_tile = ir.Var("src_tile", load_type, span)
 
         narrowed_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 32 * 32 * 4, 0)
-        narrowed_view = ir.TileView()
-        narrowed_view.valid_shape = [valid_row, valid_col]
-        narrowed_view.blayout = ir.TileLayout.col_major
-        narrowed_view.slayout = ir.TileLayout.row_major
-        narrowed_view.fractal = 1024
+        narrowed_view = ir.TileView(
+            valid_shape=[valid_row, valid_col],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
         narrowed_type = ir.TileType([32, 32], pl.FP32, narrowed_memref, narrowed_view, memory_space)
         narrowed_tile = ir.Var("narrowed_tile", narrowed_type, span)
 
@@ -552,20 +550,22 @@ class TestCrossCoreTpushTpopCodegen:
         shapes = ir.MakeTuple([shape_16, shape_16], span)
 
         src_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 16 * 16 * 4, 0)
-        src_view = ir.TileView()
-        src_view.valid_shape = [shape_16, shape_16]
-        src_view.blayout = ir.TileLayout.col_major
-        src_view.slayout = ir.TileLayout.row_major
-        src_view.fractal = 1024
+        src_view = ir.TileView(
+            valid_shape=[shape_16, shape_16],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
         src_type = ir.TileType([16, 16], pl.FP32, src_memref, src_view, memory_space)
         src_tile = ir.Var("src_tile", src_type, span)
 
         narrowed_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 16 * 16 * 4, 0)
-        narrowed_view = ir.TileView()
-        narrowed_view.valid_shape = [valid_row, valid_col]
-        narrowed_view.blayout = ir.TileLayout.col_major
-        narrowed_view.slayout = ir.TileLayout.row_major
-        narrowed_view.fractal = 1024
+        narrowed_view = ir.TileView(
+            valid_shape=[valid_row, valid_col],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
         narrowed_type = ir.TileType([16, 16], pl.FP32, narrowed_memref, narrowed_view, memory_space)
         narrowed_tile = ir.Var("narrowed_tile", narrowed_type, span)
 

@@ -127,8 +127,8 @@ class TestTileView:
         tile_view = ir.TileView()
         assert tile_view is not None
 
-    def test_tileview_set_attributes(self):
-        """Test setting TileView attributes."""
+    def test_tileview_constructor_with_attributes(self):
+        """Test constructing a TileView with valid_shape, stride, start_offset."""
         span = ir.Span.unknown()
         valid_shape = [
             ir.ConstInt(16, DataType.INT64, span),
@@ -140,10 +140,7 @@ class TestTileView:
         ]
         start_offset = ir.ConstInt(0, DataType.INT64, span)
 
-        tile_view = ir.TileView()
-        tile_view.valid_shape = valid_shape
-        tile_view.stride = stride
-        tile_view.start_offset = start_offset
+        tile_view = ir.TileView(valid_shape=valid_shape, stride=stride, start_offset=start_offset)
 
         assert len(tile_view.valid_shape) == 2
         assert len(tile_view.stride) == 2
@@ -155,10 +152,11 @@ class TestTileView:
         M = ir.Var("M", ir.ScalarType(DataType.INT64), span)
         N = ir.Var("N", ir.ScalarType(DataType.INT64), span)
 
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [M, N]
-        tile_view.stride = [ir.ConstInt(1, DataType.INT64, span), M]
-        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+        tile_view = ir.TileView(
+            valid_shape=[M, N],
+            stride=[ir.ConstInt(1, DataType.INT64, span), M],
+            start_offset=ir.ConstInt(0, DataType.INT64, span),
+        )
 
         assert isinstance(tile_view.valid_shape[0], ir.Var)
         assert isinstance(tile_view.valid_shape[1], ir.Var)
@@ -167,16 +165,17 @@ class TestTileView:
         """Test TileView with non-contiguous stride."""
         span = ir.Span.unknown()
 
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [
-            ir.ConstInt(8, DataType.INT64, span),
-            ir.ConstInt(8, DataType.INT64, span),
-        ]
-        tile_view.stride = [
-            ir.ConstInt(2, DataType.INT64, span),
-            ir.ConstInt(32, DataType.INT64, span),
-        ]
-        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+        tile_view = ir.TileView(
+            valid_shape=[
+                ir.ConstInt(8, DataType.INT64, span),
+                ir.ConstInt(8, DataType.INT64, span),
+            ],
+            stride=[
+                ir.ConstInt(2, DataType.INT64, span),
+                ir.ConstInt(32, DataType.INT64, span),
+            ],
+            start_offset=ir.ConstInt(0, DataType.INT64, span),
+        )
 
         # Verify non-unit stride in first dimension
         assert isinstance(tile_view.stride[0], ir.ConstInt)
@@ -190,18 +189,18 @@ class TestTileView:
         assert tile_view.fractal == 512
         assert tile_view.pad == ir.PadValue.null
 
-    def test_tileview_set_new_fields(self):
-        """Test setting blayout, slayout, fractal, and pad on TileView."""
+    def test_tileview_constructor_with_new_fields(self):
+        """Test passing blayout, slayout, fractal, and pad through the constructor."""
         span = ir.Span.unknown()
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [ir.ConstInt(16, DataType.INT64, span)]
-        tile_view.stride = [ir.ConstInt(1, DataType.INT64, span)]
-        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
-
-        tile_view.blayout = ir.TileLayout.col_major
-        tile_view.slayout = ir.TileLayout.row_major
-        tile_view.fractal = 1024
-        tile_view.pad = ir.PadValue.zero
+        tile_view = ir.TileView(
+            valid_shape=[ir.ConstInt(16, DataType.INT64, span)],
+            stride=[ir.ConstInt(1, DataType.INT64, span)],
+            start_offset=ir.ConstInt(0, DataType.INT64, span),
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+            pad=ir.PadValue.zero,
+        )
 
         assert tile_view.blayout == ir.TileLayout.col_major
         assert tile_view.slayout == ir.TileLayout.row_major
@@ -385,16 +384,17 @@ class TestTileTypeWithMemRef:
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16 * 16 * 2, 13)
 
         # Create TileView
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [
-            ir.ConstInt(16, DataType.INT64, span),
-            ir.ConstInt(16, DataType.INT64, span),
-        ]
-        tile_view.stride = [
-            ir.ConstInt(1, DataType.INT64, span),
-            ir.ConstInt(16, DataType.INT64, span),
-        ]
-        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+        tile_view = ir.TileView(
+            valid_shape=[
+                ir.ConstInt(16, DataType.INT64, span),
+                ir.ConstInt(16, DataType.INT64, span),
+            ],
+            stride=[
+                ir.ConstInt(1, DataType.INT64, span),
+                ir.ConstInt(16, DataType.INT64, span),
+            ],
+            start_offset=ir.ConstInt(0, DataType.INT64, span),
+        )
 
         tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.MemorySpace.Vec)
         assert tile_type.memref is not None
@@ -523,16 +523,17 @@ class TestMemRefSerialization:
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 512, 17)
 
-        tile_view = ir.TileView()
-        tile_view.valid_shape = [
-            ir.ConstInt(16, DataType.INT64, span),
-            ir.ConstInt(16, DataType.INT64, span),
-        ]
-        tile_view.stride = [
-            ir.ConstInt(1, DataType.INT64, span),
-            ir.ConstInt(16, DataType.INT64, span),
-        ]
-        tile_view.start_offset = ir.ConstInt(0, DataType.INT64, span)
+        tile_view = ir.TileView(
+            valid_shape=[
+                ir.ConstInt(16, DataType.INT64, span),
+                ir.ConstInt(16, DataType.INT64, span),
+            ],
+            stride=[
+                ir.ConstInt(1, DataType.INT64, span),
+                ir.ConstInt(16, DataType.INT64, span),
+            ],
+            start_offset=ir.ConstInt(0, DataType.INT64, span),
+        )
 
         tile_type = ir.TileType(shape, DataType.FP16, memref, tile_view, ir.MemorySpace.Vec)
         tile_var = ir.Var("tile", tile_type, span)
@@ -973,7 +974,7 @@ class TestTileViewConstructor:
 
         assert len(tv.valid_shape) == 2
         assert len(tv.stride) == 2
-        assert tv.start_offset.same_as(start_offset)
+        assert tv.start_offset is not None and tv.start_offset.same_as(start_offset)
 
     def test_tileview_constructor_with_vars(self):
         """Test TileView constructor with symbolic expressions."""
@@ -1301,8 +1302,7 @@ class TestPythonSyntaxPrinting:
         """Test that tile_view= is entirely omitted when all fields are default."""
         span = ir.Span.unknown()
         shape = [ir.ConstInt(64, DataType.INT64, span)]
-        tv = ir.TileView()
-        tv.valid_shape = [ir.ConstInt(64, DataType.INT64, span)]
+        tv = ir.TileView(valid_shape=[ir.ConstInt(64, DataType.INT64, span)])
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
         tile_type = ir.TileType(shape, DataType.FP32, memref, tv, ir.MemorySpace.Vec)
@@ -1320,8 +1320,7 @@ class TestPythonSyntaxPrinting:
         span = ir.Span.unknown()
         n_var = ir.Var("N", ir.ScalarType(DataType.INT64), span)
         shape = [n_var, ir.ConstInt(16, DataType.INT64, span)]
-        tv = ir.TileView()
-        tv.valid_shape = shape  # Same ExprPtr objects
+        tv = ir.TileView(valid_shape=shape)  # Same ExprPtr objects
 
         memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 64, 1)
         tile_type = ir.TileType(shape, DataType.FP16, memref, tv, ir.MemorySpace.Vec)

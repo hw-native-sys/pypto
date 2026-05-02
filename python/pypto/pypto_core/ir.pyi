@@ -486,50 +486,47 @@ class TensorType(ShapedType):
         """
 
 class TileView:
-    """Tile view representation with valid shape, stride, start offset, layouts, fractal, and pad."""
+    """Tile view: read-only representation of valid shape, stride, start offset,
+    layouts, fractal, and pad. Construct with all values; fields cannot be mutated
+    after construction (so hash/equality stay stable for use as set/dict keys)."""
 
-    valid_shape: Sequence[Expr]
+    valid_shape: Final[Sequence[Expr]]
     """Valid shape dimensions."""
 
-    stride: Sequence[Expr]
+    stride: Final[Sequence[Expr]]
     """Stride for each dimension."""
 
-    start_offset: Expr
-    """Starting offset."""
+    start_offset: Final[Expr | None]
+    """Starting offset (None for an empty tile view)."""
 
-    blayout: TileLayout
+    blayout: Final[TileLayout]
     """Block layout."""
 
-    slayout: TileLayout
+    slayout: Final[TileLayout]
     """Scatter layout."""
 
-    fractal: int
+    fractal: Final[int]
     """Fractal size."""
 
-    pad: PadValue
+    pad: Final[PadValue]
     """Pad mode."""
 
-    @overload
-    def __init__(self) -> None:
-        """Create an empty tile view."""
-
-    @overload
     def __init__(
         self,
-        valid_shape: Sequence[Expr | int],
-        stride: Sequence[Expr | int],
-        start_offset: Expr | int,
+        valid_shape: Sequence[Expr | int | Scalar] | None = None,
+        stride: Sequence[Expr | int | Scalar] | None = None,
+        start_offset: Expr | int | Scalar | None = None,
         blayout: TileLayout = ...,
         slayout: TileLayout = ...,
         fractal: int = ...,
         pad: PadValue = ...,
     ) -> None:
-        """Create a tile view with all parameters.
+        """Create a tile view; all fields default to empty/None/row_major/none_box/512/null.
 
         Args:
-            valid_shape: Valid shape dimensions (Expr or int, ints auto-converted to ConstInt)
-            stride: Stride for each dimension (Expr or int, ints auto-converted to ConstInt)
-            start_offset: Starting offset (Expr or int, int auto-converted to ConstInt)
+            valid_shape: Valid shape dimensions (Expr/int/Scalar, ints auto-converted to ConstInt)
+            stride: Stride for each dimension (Expr/int/Scalar, ints auto-converted to ConstInt)
+            start_offset: Starting offset (Expr/int/Scalar, int auto-converted to ConstInt; None allowed)
             blayout: Block layout (default: row_major)
             slayout: Scatter layout (default: none_box)
             fractal: Fractal size (default: 512)

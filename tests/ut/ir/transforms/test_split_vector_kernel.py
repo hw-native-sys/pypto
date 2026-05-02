@@ -722,8 +722,7 @@ class TestSplitVectorKernelNoSplitA2A3:
         data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
         out = ir.Var("out", ir.TensorType([16, 16], pl.FP32), span)
 
-        load_view = ir.TileView()
-        load_view.valid_shape = [dim, dim]
+        load_view = ir.TileView(valid_shape=[dim, dim])
         load_type = ir.TileType([16, 16], pl.FP32, None, load_view, ir.MemorySpace.Vec)
         loaded = ir.Var("loaded", load_type, span)
         load_call = ir.Call(

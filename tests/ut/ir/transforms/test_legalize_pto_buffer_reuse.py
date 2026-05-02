@@ -429,9 +429,7 @@ class TestLegalizeWithCodegen:
         output_t = _tensor_t([128, 128], _FP32)
         load_type = _tile_t([128, 128], _FP32, shared)
 
-        padded_view = ir.TileView()
-        padded_view.valid_shape = [_ci(128), _ci(128)]
-        padded_view.pad = ir.PadValue.max
+        padded_view = ir.TileView(valid_shape=[_ci(128), _ci(128)], pad=ir.PadValue.max)
         padded_type = _tile_t_with_view([128, 128], _FP32, shared, padded_view)
 
         a_var = ir.Var("a", input_t, _SPAN)
@@ -490,13 +488,10 @@ class TestLegalizeWithCodegen:
         output_t = _tensor_t([128, 128], _FP32)
         valid_rows = ir.Var("m", ir.ScalarType(_IDX), _SPAN)
 
-        load_view = ir.TileView()
-        load_view.valid_shape = [valid_rows, _ci(128)]
+        load_view = ir.TileView(valid_shape=[valid_rows, _ci(128)])
         load_type = _tile_t_with_view([128, 128], _FP32, shared, load_view)
 
-        padded_view = ir.TileView()
-        padded_view.valid_shape = [_ci(128), _ci(128)]
-        padded_view.pad = ir.PadValue.max
+        padded_view = ir.TileView(valid_shape=[_ci(128), _ci(128)], pad=ir.PadValue.max)
         padded_type = _tile_t_with_view([128, 128], _FP32, shared, padded_view)
 
         a_var = ir.Var("a", input_t, _SPAN)
@@ -570,10 +565,8 @@ class TestLegalizeWithCodegen:
         input_t = _tensor_t([128, 128], _FP32)
         output_t = _tensor_t([128, 128], _FP32)
 
-        view_128 = ir.TileView()
-        view_128.valid_shape = [_ci(128), _ci(128)]
-        view_64 = ir.TileView()
-        view_64.valid_shape = [_ci(64), _ci(64)]
+        view_128 = ir.TileView(valid_shape=[_ci(128), _ci(128)])
+        view_64 = ir.TileView(valid_shape=[_ci(64), _ci(64)])
 
         tile1_type = _tile_t_with_view([128, 128], _FP32, shared, view_128)
         tile2_type = _tile_t_with_view([64, 64], _FP32, shared, view_64)

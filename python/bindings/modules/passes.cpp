@@ -79,8 +79,8 @@ void BindPass(nb::module_& m) {
              "Every non-builtin Call has explicit attrs['arg_directions'] (see Call::GetArgDirections)");
 
   // Bind IRPropertySet
-  nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties")
-      .def(nb::init<>(), "Create an empty property set")
+  auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
+  ir_property_set.def(nb::init<>(), "Create an empty property set")
       .def("insert", &IRPropertySet::Insert, nb::arg("prop"), "Insert a property")
       .def("remove", &IRPropertySet::Remove, nb::arg("prop"), "Remove a property")
       .def("contains", &IRPropertySet::Contains, nb::arg("prop"), "Check if property is in set")
@@ -94,8 +94,11 @@ void BindPass(nb::module_& m) {
       .def("__str__", &IRPropertySet::ToString)
       .def("__repr__", &IRPropertySet::ToString)
       .def("__eq__", &IRPropertySet::operator==)
-      .def("__ne__", &IRPropertySet::operator!=)
-      .def("__hash__", &IRPropertySet::Hash);
+      .def("__ne__", &IRPropertySet::operator!=);
+  // Unhashable: IRPropertySet is mutable via insert()/remove(); a hashable
+  // mutable type would silently corrupt set/dict invariants if mutated after
+  // insertion. Setting __hash__ = None is the Python convention.
+  ir_property_set.attr("__hash__") = nb::none();
 
   // Bind VerificationMode enum
   nb::enum_<VerificationMode>(passes, "VerificationMode", "Controls when property verification runs")
@@ -134,8 +137,9 @@ void BindPass(nb::module_& m) {
              "Tile innermost dim below recommended HW memory-access granularity (PH001)");
 
   // Bind DiagnosticCheckSet
-  nb::class_<DiagnosticCheckSet>(passes, "DiagnosticCheckSet", "A set of diagnostic checks")
-      .def(nb::init<>(), "Create an empty diagnostic check set")
+  auto diagnostic_check_set =
+      nb::class_<DiagnosticCheckSet>(passes, "DiagnosticCheckSet", "A set of diagnostic checks");
+  diagnostic_check_set.def(nb::init<>(), "Create an empty diagnostic check set")
       .def("insert", &DiagnosticCheckSet::Insert, nb::arg("check"), "Insert a diagnostic check")
       .def("remove", &DiagnosticCheckSet::Remove, nb::arg("check"), "Remove a diagnostic check")
       .def("contains", &DiagnosticCheckSet::Contains, nb::arg("check"), "Check if check is in set")
@@ -146,8 +150,9 @@ void BindPass(nb::module_& m) {
       .def("__str__", &DiagnosticCheckSet::ToString)
       .def("__repr__", &DiagnosticCheckSet::ToString)
       .def("__eq__", &DiagnosticCheckSet::operator==)
-      .def("__ne__", &DiagnosticCheckSet::operator!=)
-      .def("__hash__", &DiagnosticCheckSet::Hash);
+      .def("__ne__", &DiagnosticCheckSet::operator!=);
+  // Unhashable for the same reason as IRPropertySet — mutable via insert/remove.
+  diagnostic_check_set.attr("__hash__") = nb::none();
 
   // Bind DiagnosticCheckRegistry
   nb::class_<DiagnosticCheckRegistry>(passes, "DiagnosticCheckRegistry",

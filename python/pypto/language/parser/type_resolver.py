@@ -1169,25 +1169,27 @@ class TypeResolver:
                 span=self._get_span(node),
                 hint="Use keyword arguments: pl.TileView(valid_shape=[...], stride=[...], ...)",
             )
-        tv = ir.TileView()
-        has_explicit_valid_shape = False
-        has_explicit_blayout = False
-        has_explicit_slayout = False
-        has_explicit_fractal = False
+        # TileView is immutable from Python — accumulate fields here, then
+        # construct once at the end. Track which fields were explicitly given
+        # so the implicit-defaults pass below knows what to fill in.
+        valid_shape: list[ir.Expr] | None = None
+        stride: list[ir.Expr] = []
+        start_offset: ir.Expr | None = None
+        blayout: ir.TileLayout | None = None
+        slayout: ir.TileLayout | None = None
+        fractal: int | None = None
+        pad: ir.PadValue = ir.PadValue.null
         for kw in node.keywords:
             if kw.arg == "valid_shape":
-                tv.valid_shape = self._parse_tileview_expr_list(kw.value)
-                has_explicit_valid_shape = True
+                valid_shape = self._parse_tileview_expr_list(kw.value)
             elif kw.arg == "stride":
-                tv.stride = self._parse_tileview_expr_list(kw.value)
+                stride = self._parse_tileview_expr_list(kw.value)
             elif kw.arg == "start_offset":
-                tv.start_offset = self._parse_tileview_expr(kw.value)
+                start_offset = self._parse_tileview_expr(kw.value)
             elif kw.arg == "blayout":
-                tv.blayout = self._resolve_tilelayout(kw.value)
-                has_explicit_blayout = True
+                blayout = self._resolve_tilelayout(kw.value)
             elif kw.arg == "slayout":
-                tv.slayout = self._resolve_tilelayout(kw.value)
-                has_explicit_slayout = True
+                slayout = self._resolve_tilelayout(kw.value)
             elif kw.arg == "fractal":
                 val = self._try_resolve_int(kw.value)
                 if val is None:
@@ -1195,10 +1197,9 @@ class TypeResolver:
                         f"TileView fractal must be an integer, got: {ast.unparse(kw.value)}",
                         span=self._get_span(kw.value),
                     )
-                tv.fractal = val
-                has_explicit_fractal = True
+                fractal = val
             elif kw.arg == "pad":
-                tv.pad = self._resolve_padvalue(kw.value)
+                pad = self._resolve_padvalue(kw.value)
             else:
                 raise ParserTypeError(
                     f"Unknown TileView keyword argument: {kw.arg!r}",
@@ -1206,22 +1207,24 @@ class TypeResolver:
                     hint="Supported: valid_shape, stride, start_offset, blayout, slayout, fractal, pad",
                 )
         # If valid_shape was not explicitly given, inherit from tile_shape so roundtrip is stable
-        if not has_explicit_valid_shape and tile_shape is not None:
-            tv.valid_shape = self._tile_shape_to_expr_list(tile_shape)
+        if valid_shape is None and tile_shape is not None:
+            valid_shape = self._tile_shape_to_expr_list(tile_shape)
         # Apply implicit defaults for any field NOT explicitly set.  The printer omits
         # fields matching the memory-space-aware implicit defaults; the parser must
         # recover them from the same rules — regardless of whether memory_space is
         # present, since shape-derived defaults (e.g. col_major for [N,1]) also apply.
         impl_blayout, impl_slayout, impl_fractal = _implicit_tile_view_defaults(
-            tv.valid_shape if tv.valid_shape else (tile_shape or []), memory_space
+            valid_shape if valid_shape else (tile_shape or []), memory_space
         )
-        if not has_explicit_blayout:
-            tv.blayout = impl_blayout
-        if not has_explicit_slayout:
-            tv.slayout = impl_slayout
-        if not has_explicit_fractal:
-            tv.fractal = impl_fractal
-        return tv
+        return ir.TileView(
+            valid_shape=valid_shape if valid_shape is not None else [],
+            stride=stride,
+            start_offset=start_offset,
+            blayout=blayout if blayout is not None else impl_blayout,
+            slayout=slayout if slayout is not None else impl_slayout,
+            fractal=fractal if fractal is not None else impl_fractal,
+            pad=pad,
+        )
 
     def _tile_shape_to_expr_list(self, shape: "Sequence[int | ir.Expr]") -> "list[ir.Expr]":
         """Convert a tile shape (list of int or Expr) to a list of Expr for TileView.valid_shape."""

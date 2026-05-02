@@ -81,11 +81,6 @@ class DiagnosticCheckSet {
   bool operator==(const DiagnosticCheckSet& other) const { return bits_ == other.bits_; }
   bool operator!=(const DiagnosticCheckSet& other) const { return bits_ != other.bits_; }
 
-  /**
-   * @brief Hash by the underlying bitset (consistent with operator==)
-   */
-  [[nodiscard]] uint64_t Hash() const { return std::hash<uint32_t>{}(bits_); }
-
  private:
   uint32_t bits_;
 

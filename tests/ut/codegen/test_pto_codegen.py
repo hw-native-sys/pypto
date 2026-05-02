@@ -268,14 +268,11 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     n_var = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
     shared_memref = ir.MemRef(ir.MemorySpace.Vec, zero, 128 * 128 * 4, 0)
 
-    load_view = ir.TileView()
-    load_view.valid_shape = [m_var, n_var]
+    load_view = ir.TileView(valid_shape=[m_var, n_var])
     load_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, load_view, ir.MemorySpace.Vec)
     load_tile = ir.Var("tile_a", load_tile_type, span)
 
-    padded_view = ir.TileView()
-    padded_view.valid_shape = [size, size]
-    padded_view.pad = ir.PadValue.max
+    padded_view = ir.TileView(valid_shape=[size, size], pad=ir.PadValue.max)
     padded_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, padded_view, ir.MemorySpace.Vec)
     padded_tile = ir.Var("padded", padded_tile_type, span)
 
@@ -362,14 +359,11 @@ def test_pto_codegen_fillpad_inplace():
     n_var = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
     shared_memref = ir.MemRef(ir.MemorySpace.Vec, zero, 128 * 128 * 4, 0)
 
-    load_view = ir.TileView()
-    load_view.valid_shape = [m_var, n_var]
+    load_view = ir.TileView(valid_shape=[m_var, n_var])
     load_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, load_view, ir.MemorySpace.Vec)
     load_tile = ir.Var("tile_a", load_tile_type, span)
 
-    padded_view = ir.TileView()
-    padded_view.valid_shape = [size, size]
-    padded_view.pad = ir.PadValue.zero
+    padded_view = ir.TileView(valid_shape=[size, size], pad=ir.PadValue.zero)
     padded_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, padded_view, ir.MemorySpace.Vec)
     padded_tile = ir.Var("padded", padded_tile_type, span)
 
