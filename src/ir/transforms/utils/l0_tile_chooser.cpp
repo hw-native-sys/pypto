@@ -59,7 +59,12 @@ struct Candidate {
 int LargestLegalK(int m, int n, const L0TileConfig& cfg, int64_t A0, int64_t B0) {
   const int64_t k_from_a = A0 / m;
   const int64_t k_from_b = B0 / n;
-  const int64_t k_from_problem = cfg.allow_padding ? std::max(cfg.K, cfg.min_k) : cfg.K;
+  // Padded callers want k bounded by the *aligned-up* problem size — without
+  // AlignUp, K=17 with align_k=16 would cap at max(17, 16)=17 then align-down
+  // to 16, so the natural padded k=32 would never be considered.
+  const int64_t k_from_problem =
+      cfg.allow_padding ? std::max<int64_t>(AlignUp(static_cast<int64_t>(cfg.K), cfg.align_k), cfg.min_k)
+                        : cfg.K;
   int64_t k_max = std::min({k_from_a, k_from_b, static_cast<int64_t>(k_from_problem)});
   k_max = AlignDown(k_max, cfg.align_k);
   if (k_max < cfg.min_k) return 0;

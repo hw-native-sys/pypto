@@ -88,6 +88,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/backend/common/backend.h"
+#include "pypto/backend/common/backend_config.h"
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
@@ -381,12 +383,15 @@ std::optional<RewriteResult> MaybeRewriteMatmul(const AssignStmtPtr& assign, std
     return std::nullopt;
   }
 
-  // Pass always runs under a PassContext (asserted by PassPipeline::Run); the
-  // BackendHandler is required to read L0 capacities.
-  auto* ctx = PassContext::Current();
-  INTERNAL_CHECK(ctx) << "Internal error: AutoTileMatmulL0 requires an active PassContext";
-  const auto* handler = ctx->GetBackendHandler();
-  INTERNAL_CHECK(handler) << "Internal error: PassContext returned a null BackendHandler";
+  // Prefer the active PassContext's BackendHandler (the production path runs
+  // under PassPipeline::Run, which establishes a context).  Fall back to the
+  // global default backend so direct callers — e.g. tests that call
+  // PassManager strategies' run_passes() without wrapping in a PassContext —
+  // still work; this mirrors the env-var fallback documented in
+  // .claude/rules/pass-context-config.md.
+  const auto* ctx = PassContext::Current();
+  const auto* handler = ctx ? ctx->GetBackendHandler() : pypto::backend::GetBackend()->GetHandler();
+  INTERNAL_CHECK(handler) << "Internal error: BackendHandler is null";
 
   utils::L0TileConfig cfg;
   cfg.M = static_cast<int>(M);
@@ -407,7 +412,11 @@ std::optional<RewriteResult> MaybeRewriteMatmul(const AssignStmtPtr& assign, std
   cfg.double_buffer_a = true;
   cfg.double_buffer_b = true;
   cfg.double_buffer_c = false;
-  cfg.c_read = false;
+  // tile.matmul_acc threads the caller's accumulator into the K-loop's
+  // iter-arg, so each invocation reads C from L1 at start and writes back at
+  // end (gamma_c = 2 in the chooser's traffic model).  Plain tile.matmul
+  // starts from a fresh Acc placeholder so C is write-only (gamma_c = 1).
+  cfg.c_read = is_matmul_acc;
   cfg.allow_padding = false;
 
   utils::L0TileResult res;
