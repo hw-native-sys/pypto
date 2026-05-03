@@ -49,6 +49,13 @@ struct Candidate {
 
 // Largest legal aligned k for a given (m, n). Returns 0 if no legal k exists.
 // Callers must pass m, n >= min_m, min_n (positive).
+//
+// When `allow_padding` is false, the returned k must additionally divide K:
+// the downstream `AutoTileMatmulL0` pass has no K-boundary handling yet (see
+// `auto_tile_matmul_l0_pass.cpp` PH-AT-007) and will skip the matmul if
+// `K % k != 0`, leaving the caller-supplied Mat tile to overflow L0.  Walking
+// k_max down to the largest aligned divisor of K avoids that silent skip and
+// keeps the chooser-pass contract intact.
 int LargestLegalK(int m, int n, const L0TileConfig& cfg, int64_t A0, int64_t B0) {
   const int64_t k_from_a = A0 / m;
   const int64_t k_from_b = B0 / n;
@@ -56,6 +63,13 @@ int LargestLegalK(int m, int n, const L0TileConfig& cfg, int64_t A0, int64_t B0)
   int64_t k_max = std::min({k_from_a, k_from_b, static_cast<int64_t>(k_from_problem)});
   k_max = AlignDown(k_max, cfg.align_k);
   if (k_max < cfg.min_k) return 0;
+  if (!cfg.allow_padding) {
+    // O(K / align_k) per call; constant in IR size.
+    while (k_max >= cfg.min_k && cfg.K % k_max != 0) {
+      k_max -= cfg.align_k;
+    }
+    if (k_max < cfg.min_k) return 0;
+  }
   return static_cast<int>(k_max);
 }
 

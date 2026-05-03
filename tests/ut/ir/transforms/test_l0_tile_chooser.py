@@ -68,19 +68,22 @@ class TestL0TilingDocExamples:
         assert result.perf_hint == ""
 
     def test_example_2_large_square_gemm(self):
-        """M=N=K=4096 → near-balanced ≈(176, 176, 80) under A/B double-buffering.
+        """M=N=K=4096 → balanced tile under A/B double-buffering.
 
-        The doc cites (176, 176, 80) as "approximate". Several aligned candidates
-        are traffic-tied for square 4096 GEMM (e.g. (176, 176, 80) and
-        (192, 160, 80) both yield 2*M*K*ceil(N/n) + 2*K*N*ceil(M/m) = 1.6e9 B);
-        the tie-break (padded_compute) lex-orders them. We pin the properties
-        that matter: k=80 (tight A0/B0 bound), m and n within one alignment of
-        176, and capacity feasibility.
+        The L0_TILING.md doc cites (176, 176, 80) as "approximate" continuous
+        optimum, but k=80 does not divide K=4096, so the AutoTileMatmulL0
+        consumer would skip it (PH-AT-007).  When `allow_padding=False` the
+        chooser walks k down to the largest aligned divisor of K — for K=4096
+        that is k=64 (next divisor below 80).  We pin the properties that
+        matter under the divisor contract: k divides K, k respects the A0/B0
+        bound, and (m, n) stay within one alignment step of the continuous
+        optimum.
         """
         cfg = _default_config(M=4096, N=4096, K=4096)
         result = passes.l0_tile_chooser.choose_l0_tile(cfg)
         assert _capacities_ok(result.m, result.n, result.k, cfg)
-        assert result.k == 80, f"K should hit the A0/B0 capacity bound; got k={result.k}"
+        assert cfg.K % result.k == 0, f"k must divide K=4096; got k={result.k}"
+        assert result.k == 64, f"Expected largest aligned divisor ≤ 80; got k={result.k}"
         assert result.m in (160, 176, 192), f"m near 176 (one align step); got m={result.m}"
         assert result.n in (160, 176, 192), f"n near 176 (one align step); got n={result.n}"
 
@@ -176,6 +179,22 @@ class TestL0TilingEdgeCases:
         # but traffic estimate must include the extra C read.
         assert result_read.estimated_traffic_bytes > result_no_read.estimated_traffic_bytes
 
+    def test_k_must_divide_K_when_no_padding(self):
+        """Regression: qwen3_decode gate_proj/up_proj inner-K shape.
+
+        With M=16, N=320, K=128 (BF16→FP32, A/B double-buffered, L0a/b=64KB,
+        L0c=128KB), the largest k fitting in B0 with n=320 is 48 (capacity-
+        bound: 16384 / 320 = 51 → align-down to 48).  k=48 does not divide
+        K=128, so the AutoTileMatmulL0 consumer would emit PH-AT-007 and
+        skip — leaving the 128×320 Mat tile to overflow L0b (81920 bytes >
+        65536 byte limit).  The chooser must instead return a k that divides
+        K (32 is the largest aligned divisor ≤ 48).
+        """
+        cfg = _default_config(M=16, N=320, K=128)
+        result = passes.l0_tile_chooser.choose_l0_tile(cfg)
+        assert _capacities_ok(result.m, result.n, result.k, cfg)
+        assert cfg.K % result.k == 0, f"k must divide K=128; got k={result.k}"
+
     def test_already_l0_sized_returns_native(self):
         """A 64x64x64 matmul already fits in L0; chooser returns near-native."""
         cfg = _default_config(M=64, N=64, K=64)
@@ -221,6 +240,9 @@ class TestL0TilingInvariants:
         assert _capacities_ok(result.m, result.n, result.k, cfg), (
             f"Tile (m={result.m}, n={result.n}, k={result.k}) violates capacity for M={M}, N={N}, K={K}"
         )
+        # Without padding, the chooser must honor the AutoTileMatmulL0
+        # consumer's K-divisibility precondition (PH-AT-007).
+        assert K % result.k == 0, f"k={result.k} must divide K={K} when allow_padding=False"
 
     def test_invalid_zero_dim_raises(self):
         cfg = _default_config(M=0, N=128, K=128)
