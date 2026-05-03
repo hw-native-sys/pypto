@@ -39,6 +39,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `IncoreTileOps` | InCore functions use tile ops |
 | `MixedKernelExpanded` | Mixed InCore functions split into AIC + AIV + Group |
 | `AllocatedMemoryAddr` | All MemRefs have valid addresses within buffer limits |
+| `TileTypeCoherence` | Every TileType has canonical tile_view (implicit views stored as nullopt) |
 
 ### IRPropertySet
 

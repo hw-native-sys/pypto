@@ -30,6 +30,7 @@
 
 #include "pypto/core/dtype.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/printer.h"  // NOLINT(misc-include-cleaner) -- needed for operator<< on ExprPtr
 #include "pypto/ir/type.h"
 
@@ -199,11 +200,12 @@ std::string FormatShape(const std::vector<ExprPtr>& shape);
  * @param src Source TileType whose tile_view properties are inherited
  */
 inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const TileType>& src) {
-  if (src->tile_view_.has_value()) {
-    dst.blayout = src->tile_view_->blayout;
-    dst.slayout = src->tile_view_->slayout;
-    dst.pad = src->tile_view_->pad;
-  }
+  // Use the effective view: under canonicalization an implicit view is stored
+  // as nullopt, but the inheritance still needs to see the resolved layout.
+  const TileView eff = tile_view_semantics::GetEffectiveTileView(*src);
+  dst.blayout = eff.blayout;
+  dst.slayout = eff.slayout;
+  dst.pad = eff.pad;
 }
 
 /**

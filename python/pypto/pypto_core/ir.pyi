@@ -627,6 +627,16 @@ class TileType(ShapedType):
             memory_space: Optional memory space
         """
 
+    def get_effective_tile_view(self) -> TileView:
+        """Return the effective TileView for this tile.
+
+        If ``tile_view`` is set explicitly, returns that. Otherwise returns the
+        implicit view derived from ``(shape, memory_space)``. Under canonicalization
+        an implicit view is stored as ``None``, so callers that need to inspect
+        layout fields should use this method rather than reading ``tile_view``
+        directly.
+        """
+
 class TupleType(Type):
     """Tuple type representation (contains multiple types)."""
 

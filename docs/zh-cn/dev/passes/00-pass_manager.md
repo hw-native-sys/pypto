@@ -39,6 +39,7 @@
 | `IncoreTileOps` | InCore 函数使用 tile 操作 |
 | `MixedKernelExpanded` | 混合 InCore 函数已拆分为 AIC + AIV + Group |
 | `AllocatedMemoryAddr` | 所有 MemRef 在缓冲区限制内具有有效地址 |
+| `TileTypeCoherence` | 每个 TileType 都具有规范的 tile_view（隐式视图存储为 nullopt） |
 
 ### IRPropertySet
 

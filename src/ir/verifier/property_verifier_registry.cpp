@@ -62,6 +62,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::PipelineLoopValid, CreatePipelineLoopValidPropertyVerifier);
   Register(IRProperty::PipelineResolved, CreatePipelineResolvedPropertyVerifier);
   Register(IRProperty::CallDirectionsResolved, CreateCallDirectionsResolvedPropertyVerifier);
+  Register(IRProperty::TileTypeCoherence, CreateTileTypeCoherencePropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

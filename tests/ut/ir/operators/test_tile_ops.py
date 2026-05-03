@@ -1080,8 +1080,7 @@ class TestTileSliceReshapeOps:
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
-        assert result_type.tile_view is not None
-        assert result_type.tile_view.pad == ir.PadValue.null
+        assert result_type.get_effective_tile_view().pad == ir.PadValue.null
 
     def test_tile_slice_rejects_bad_pad_value(self):
         """tile.slice rejects a non-PadValue pad_value kwarg via registry validation."""
@@ -1156,20 +1155,18 @@ class TestTileSliceReshapeOps:
         assert result_type.dtype == DataType.FP32
         assert len(result_type.shape) == 2
 
-        # Reshape to [32, 1]
+        # Reshape to [32, 1] — [N,1] infers col_major blayout.
         call2 = tile.reshape(tile_var, [32, 1])
         result_type2 = call2.type
         assert isinstance(result_type2, ir.TileType)
         assert len(result_type2.shape) == 2
-        assert result_type2.tile_view is not None
-        assert result_type2.tile_view.blayout == ir.TileLayout.col_major
+        assert result_type2.get_effective_tile_view().blayout == ir.TileLayout.col_major
 
         # Layout is inferred from target shape for vector repair
         call3 = tile.reshape(tile_var, [1, 32])
         result_type3 = call3.type
         assert isinstance(result_type3, ir.TileType)
-        assert result_type3.tile_view is not None
-        assert result_type3.tile_view.blayout == ir.TileLayout.row_major
+        assert result_type3.get_effective_tile_view().blayout == ir.TileLayout.row_major
         assert call3.kwargs == {}
 
     def test_tile_transpose(self):
@@ -1394,10 +1391,10 @@ class TestTileBatchMatMulOps:
 
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
-        assert result_type.tile_view is not None
-        assert result_type.tile_view.blayout == ir.TileLayout.col_major
-        assert result_type.tile_view.slayout == ir.TileLayout.row_major
-        assert result_type.tile_view.fractal == 1024
+        eff = result_type.get_effective_tile_view()
+        assert eff.blayout == ir.TileLayout.col_major
+        assert eff.slayout == ir.TileLayout.row_major
+        assert eff.fractal == 1024
 
     @pytest.mark.parametrize(
         ("acc_shape", "lhs_shape", "rhs_shape", "input_dtype", "acc_dtype"),
@@ -2096,8 +2093,7 @@ class TestTileLoadOp:
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
-        assert tile_type.tile_view is not None
-        assert len(tile_type.tile_view.valid_shape) == 2
+        assert len(tile_type.get_effective_tile_view().valid_shape) == 2
 
     def test_load_with_static_valid_shapes_sets_tileview(self):
         """When valid_shapes provided as static ints, TileView.valid_shape reflects it."""
@@ -2164,9 +2160,9 @@ class TestTileCreateOp:
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
-        assert tile_type.tile_view is not None
-        assert tile_type.tile_view.blayout == ir.TileLayout.col_major
-        assert len(tile_type.tile_view.valid_shape) == 2
+        eff = tile_type.get_effective_tile_view()
+        assert eff.blayout == ir.TileLayout.col_major
+        assert len(eff.valid_shape) == 2
 
     def test_create_row_vector_keeps_row_major_layout(self):
         """Non-column-vector shapes should keep the default row-major layout."""
@@ -2174,8 +2170,7 @@ class TestTileCreateOp:
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
-        assert tile_type.tile_view is not None
-        assert tile_type.tile_view.blayout == ir.TileLayout.row_major
+        assert tile_type.get_effective_tile_view().blayout == ir.TileLayout.row_major
 
 
 class TestTileScalarOps:

@@ -203,6 +203,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_pipeline_loop_valid.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/verify_call_directions.cpp
+    src/ir/verifier/verify_tile_type_coherence.cpp
     src/ir/verifier/diagnostic_check_registry.cpp
     src/ir/verifier/warning_unused_var.cpp
     src/ir/verifier/perf_hint_tile_innermost_dim.cpp

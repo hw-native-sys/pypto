@@ -256,6 +256,31 @@ def test_pto_codegen_alloc_tile():
         assert "rows=32, cols=32" in alloc_line, f"Expected 32x32 alloc_tile, got: {alloc_line}"
 
 
+def test_pto_codegen_mat_tile_uses_col_major_blayout():
+    """Mat tiles must lower with blayout=col_major even after tile_view canonicalization.
+
+    The ``Mat`` memory space's implicit view is ``blayout=col_major, slayout=row_major``.
+    When the constructor canonicalizes a Mat tile's tile_view to ``None``, codegen must
+    still surface ``col_major`` via the effective view; otherwise ``pto.tmatmul`` rejects
+    the operand on Ascend backends ("expects dst to use the col_major blayout").
+    """
+
+    @pl.program
+    class MatTileProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def f(self, qi: pl.Tensor[[16, 128], pl.BF16]):
+            _q_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(
+                qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+
+    alloc_lines = _get_alloc_tile_lines(_generate_default_mlir(MatTileProgram))
+    mat_allocs = [line for line in alloc_lines if "loc=mat" in line]
+    assert len(mat_allocs) >= 1, f"Expected at least one mat alloc_tile, got: {alloc_lines}"
+    for line in mat_allocs:
+        assert "blayout=col_major" in line, f"Expected col_major blayout for Mat tile, got: {line}"
+        assert "slayout=row_major" in line, f"Expected row_major slayout for Mat tile, got: {line}"
+
+
 def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     """Test that shared MemRef tiles emit one alloc_tile and preserve merged TileView info."""
     span = ir.Span.unknown()

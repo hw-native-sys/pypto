@@ -289,6 +289,19 @@ PropertyVerifierPtr CreatePipelineResolvedPropertyVerifier();
  */
 PropertyVerifierPtr CreateCallDirectionsResolvedPropertyVerifier();
 
+/**
+ * @brief Factory function for creating TileTypeCoherence property verifier
+ *
+ * Asserts the canonical encoding of TileType: a TileView matching the implicit
+ * semantics for the tile's (shape, memory_space) is stored as nullopt. The
+ * TileType constructor enforces this at construction; the verifier catches
+ * passes that mutate the public ``tile_view_`` field directly without going
+ * through the constructor.
+ *
+ * @return Shared pointer to TileTypeCoherence PropertyVerifier
+ */
+PropertyVerifierPtr CreateTileTypeCoherencePropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 
