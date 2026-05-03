@@ -1088,6 +1088,60 @@ class TestFoldComposition:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_two_sibling_single_trip_loops_no_var_alias(self):
+        """Regression: Fold B trips=1 must not leak body-internal var_remap_
+        entries into sibling scope.
+
+        ``MaybeRebuildVar`` and inner Fold A's ``LiftBodyToReturnVars`` write
+        entries keyed by raw ``Var*`` of the cloned-body locals. After the
+        Fold returns, those clones can be released (their AssignStmts were
+        rebuilt or lifted), and ``make_shared<Var>`` in a subsequent sibling
+        Fold B can recycle the same heap address — the stale remap then
+        substitutes the new Var with an unrelated value, producing IR where
+        an AssignStmt's LHS Var has the wrong type for its RHS.
+
+        Mirrors the qwen3_decode q_proj pattern (two peeled K-loops at the
+        same scope, each with two unrolled iterations gated by ``ko == 0`` /
+        ``ko + 64 == 0``) where the second loop's ``tile.extract`` LHS got
+        aliased onto the first loop's matmul Acc accumulator (see e67e1488
+        regression).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                for ko in pl.range(0, 128, 128):
+                    if ko == 0:
+                        _t1: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+                    else:
+                        _t2: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+                    if ko + 64 == 0:
+                        _t3: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+                    else:
+                        _t4: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+                for ko_1 in pl.range(0, 128, 128):
+                    if ko_1 == 0:
+                        _t5: pl.Tensor[[32], pl.FP32] = pl.tensor.create([32], dtype=pl.FP32)
+                    else:
+                        _t6: pl.Tensor[[32], pl.FP32] = pl.tensor.create([32], dtype=pl.FP32)
+                    if ko_1 + 64 == 0:
+                        _t7: pl.Tensor[[32], pl.FP32] = pl.tensor.create([32], dtype=pl.FP32)
+                    else:
+                        _t8: pl.Tensor[[32], pl.FP32] = pl.tensor.create([32], dtype=pl.FP32)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                _t1: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+                _t4: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+                _t5: pl.Tensor[[32], pl.FP32] = pl.tensor.create([32], dtype=pl.FP32)
+                _t8: pl.Tensor[[32], pl.FP32] = pl.tensor.create([32], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -289,9 +289,28 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         // (e.g.) `cur_offset = 0` propagate via analyzer Bind as expected.
         auto cloned = DeepClone(op->body_, sub_map, /*clone_def_vars=*/true);
 
+        // Snapshot var_remap_ around the cloned-body visit. MaybeRebuildVar
+        // inserts entries keyed by the cloned-body's defining-Var raw pointers
+        // (the freshly-allocated clones); after this Fold returns, those clones
+        // become unreachable as soon as the rebuilt AssignStmts replace them,
+        // and the heap addresses can be recycled by a later make_shared<Var>
+        // (e.g. another sibling Fold B that DeepClones a different body). A
+        // recycled address would silently match the stale entry and substitute
+        // the new Var with an unrelated value — producing AssignStmts whose
+        // LHS Var has the wrong type for the RHS (observed on qwen3_decode's
+        // q_proj/up_proj as a `pto.textract` whose dst aliases the matmul Acc
+        // tile of an earlier iteration).
+        //
+        // The lift's own additions (return_vars[i] → yielded_values[i]) are
+        // applied to the restored baseline below, so subsequent siblings that
+        // reference this ForStmt's return_vars still substitute correctly.
+        auto baseline_remap = var_remap_;
+
         // Re-visit so any algebraic patterns exposed by the substitution
         // (e.g. `0 + 64 → 64`) fold in this same Simplify run.
         auto unrolled_body = VisitStmt(cloned.cloned_body);
+
+        var_remap_ = std::move(baseline_remap);
         return LiftBodyToReturnVars(unrolled_body, op->return_vars_);
       }
     }
