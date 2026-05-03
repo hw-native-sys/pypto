@@ -420,8 +420,14 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     }
 
     if (tile_type->tile_view_.has_value()) {
-      oss << ", "
-          << PrintTileView(tile_type->tile_view_.value(), tile_type->shape_, tile_type->memory_space_);
+      // PrintTileView elides every default field and returns "" when the explicit
+      // view happens to match the implicit one — possible only on incoherent IR
+      // (canonical IR stores that as nullopt and never reaches this branch).
+      // Fall back to an empty TileView() literal so the output stays parseable
+      // and TileTypeCoherence can flag the real bug.
+      auto view_str =
+          PrintTileView(tile_type->tile_view_.value(), tile_type->shape_, tile_type->memory_space_);
+      oss << ", " << (view_str.empty() ? prefix_ + ".TileView()" : view_str);
     }
 
     oss << "]";

@@ -388,9 +388,11 @@ class TileMemorySpaceMutator : public IRMutator {
       : var_memory_(var_memory), needed_moves_(needed_moves) {}
 
  protected:
-  // When promoting to a new memory_space, refresh the tile_view to the target's
-  // implicit view — the source's layout (e.g. Vec defaults from tile.create)
-  // becomes a mismatch once the space changes (Acc expects col_major/row_major).
+  // When promoting to a new memory_space, refresh the layout pieces (blayout/
+  // slayout/fractal) to the target's implicit view — the source's layout
+  // (e.g. Vec defaults from tile.create) becomes a mismatch once the space
+  // changes (Acc expects col_major/row_major). Other metadata (valid_shape,
+  // stride, start_offset, pad) reflects the actual data and is preserved.
   std::optional<TypePtr> ComputeRewrittenType(const VarPtr& op) const {
     auto tile_type = As<TileType>(op->GetType());
     auto mem_it = var_memory_.find(op);
@@ -398,7 +400,12 @@ class TileMemorySpaceMutator : public IRMutator {
 
     std::optional<TileView> new_view = tile_type->tile_view_;
     if (tile_type->memory_space_ != mem_it->second) {
-      new_view = tile_view_semantics::GetImplicitTileView(tile_type->shape_, mem_it->second);
+      TileView source = tile_view_semantics::GetEffectiveTileView(*tile_type);
+      TileView target_layout = tile_view_semantics::GetImplicitTileView(tile_type->shape_, mem_it->second);
+      source.blayout = target_layout.blayout;
+      source.slayout = target_layout.slayout;
+      source.fractal = target_layout.fractal;
+      new_view = std::move(source);
     }
     return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
                                       std::move(new_view), mem_it->second);
