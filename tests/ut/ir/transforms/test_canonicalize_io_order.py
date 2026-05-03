@@ -287,6 +287,143 @@ class TestCanonicalizeIOOrder:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_l1_to_l0_extract_clusters_above_matmul(self):
+        """`tile.extract` with Mat source and Left/Right target is the ISA
+        TEXTRACT L1→L0 data-movement op. Reordering it into the Load tier lets
+        all the extracts in an iteration body cluster ahead of their matmul_acc
+        consumers — the precondition for L1→L0 ping-pong on Left/Right buffers
+        (analogous to how tile.load clustering enables DDR→Mat ping-pong).
+
+        Mirrors the qwen3_decode q_proj inner K-loop body: two unrolled
+        ``extract→extract→matmul_acc`` triplets must rewrite to all four
+        extracts followed by both matmul_accs.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[16, 128], pl.BF16], in_b: pl.Tensor[[128, 256], pl.BF16]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    a_mat: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        in_a, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                    )
+                    b_mat: pl.Tile[[128, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        in_b, [0, 0], [128, 256], target_memory=pl.Mem.Mat
+                    )
+                    a0: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left
+                    )
+                    b0: pl.Tile[[64, 256], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 0, 0, [64, 256], target_memory=pl.Mem.Right
+                    )
+                    acc0: pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a0, b0)
+                    a1: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a_mat, 0, 64, [16, 64], target_memory=pl.Mem.Left
+                    )
+                    b1: pl.Tile[[64, 256], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 64, 0, [64, 256], target_memory=pl.Mem.Right
+                    )
+                    _acc1: pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(acc0, a1, b1)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[16, 128], pl.BF16], in_b: pl.Tensor[[128, 256], pl.BF16]):
+                for i in pl.range(0, 2, 1):
+                    a_mat: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        in_a, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                    )
+                    b_mat: pl.Tile[[128, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        in_b, [0, 0], [128, 256], target_memory=pl.Mem.Mat
+                    )
+                    a0: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left
+                    )
+                    b0: pl.Tile[[64, 256], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 0, 0, [64, 256], target_memory=pl.Mem.Right
+                    )
+                    a1: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a_mat, 0, 64, [16, 64], target_memory=pl.Mem.Left
+                    )
+                    b1: pl.Tile[[64, 256], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 64, 0, [64, 256], target_memory=pl.Mem.Right
+                    )
+                    acc0: pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a0, b0)
+                    _acc1: pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(acc0, a1, b1)
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_non_l1_to_l0_extract_stays_in_compute_tier(self):
+        """`tile.extract` whose target is **not** Left/Right (here: Acc) must
+        stay in the TileCompute tier and not promote to Load.
+
+        The L1→L0 promotion is keyed on src=Mat ∧ target∈{Left,Right} —
+        analogous extracts to other memory spaces (Acc spill, Vec view, etc.)
+        don't represent the matmul-input prefetch pattern and shouldn't be
+        lifted above TileCompute consumers.
+
+        Verified by an extract that depends on the matmul's Acc result: if the
+        promotion mis-fired, the topo sort would still land in this order
+        (deps force it), so we use a sibling Acc-target extract that is
+        independent of the matmul. With the correct categorization the extract
+        stays after the matmul (stable order within TileCompute, original
+        position preserved).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[16, 64], pl.BF16], in_b: pl.Tensor[[64, 256], pl.BF16]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    a_mat: pl.Tile[[16, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        in_a, [0, 0], [16, 64], target_memory=pl.Mem.Mat
+                    )
+                    b_mat: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        in_b, [0, 0], [64, 256], target_memory=pl.Mem.Mat
+                    )
+                    a_left: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left
+                    )
+                    b_right: pl.Tile[[64, 256], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 0, 0, [64, 256], target_memory=pl.Mem.Right
+                    )
+                    _acc: pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_left, b_right)
+                    # Mat→Acc extract — independent of the matmul, but NOT
+                    # the L1→L0a/b prefetch pattern, so it must stay in
+                    # TileCompute (after the matmul in the original sequence).
+                    _spare: pl.Tile[[16, 256], pl.BF16, pl.Mem.Acc] = pl.tile.extract(
+                        b_mat, 0, 0, [16, 256], target_memory=pl.Mem.Acc
+                    )
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[16, 64], pl.BF16], in_b: pl.Tensor[[64, 256], pl.BF16]):
+                for i in pl.range(0, 2, 1):
+                    # Loads + L1→L0a/b extracts cluster at the top.
+                    a_mat: pl.Tile[[16, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        in_a, [0, 0], [16, 64], target_memory=pl.Mem.Mat
+                    )
+                    b_mat: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                        in_b, [0, 0], [64, 256], target_memory=pl.Mem.Mat
+                    )
+                    a_left: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left
+                    )
+                    b_right: pl.Tile[[64, 256], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b_mat, 0, 0, [64, 256], target_memory=pl.Mem.Right
+                    )
+                    # The Mat→Acc extract stays in TileCompute and so keeps
+                    # its original (post-matmul) position.
+                    _acc: pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a_left, b_right)
+                    _spare: pl.Tile[[16, 256], pl.BF16, pl.Mem.Acc] = pl.tile.extract(
+                        b_mat, 0, 0, [16, 256], target_memory=pl.Mem.Acc
+                    )
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

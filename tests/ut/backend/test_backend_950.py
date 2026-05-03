@@ -157,6 +157,35 @@ class TestBackend950MemoryPath:
             assert path[-1] == to_mem, f"Path should end with {to_mem}"
 
 
+class TestBackend950L0Tiling:
+    """Tests for the L0-tiling parameters exposed on the 950 BackendHandler.
+
+    These accessors feed ChooseL0Tile / AutoTileMatmulL0; their values must match
+    the 950 SoC AIC core memory layout (Create950SoC), notably the larger
+    256 KiB Acc compared to 910B's 128 KiB.
+    """
+
+    def test_l0_capacities_match_soc(self):
+        backend = Backend950.instance()
+        handler = backend.get_handler()
+
+        assert handler.get_l0a_capacity_bytes() == 64 * 1024
+        assert handler.get_l0b_capacity_bytes() == 64 * 1024
+        assert handler.get_l0c_capacity_bytes() == 256 * 1024
+
+        assert handler.get_l0a_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Left)
+        assert handler.get_l0b_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Right)
+        assert handler.get_l0c_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Acc)
+
+    def test_l0_fractal_alignment_default(self):
+        handler = Backend950.instance().get_handler()
+        assert handler.get_l0_fractal_alignment() == 16
+
+    def test_min_l0_tile_dim_default(self):
+        handler = Backend950.instance().get_handler()
+        assert handler.get_min_l0_tile_dim() == 16
+
+
 class TestBackend950Serialization:
     """Tests for 950 backend serialization."""
 

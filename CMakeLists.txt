@@ -154,6 +154,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/outline_hierarchy_scopes_pass.cpp
     src/ir/transforms/expand_mixed_kernel_pass.cpp
     src/ir/transforms/split_vector_kernel_pass.cpp
+    src/ir/transforms/auto_tile_matmul_l0_pass.cpp
     src/ir/transforms/flatten_tile_nd_to_2d_pass.cpp
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
@@ -174,6 +175,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/cross_core_pipe.cpp
     src/ir/transforms/utils/deep_clone_utils.cpp
     src/ir/transforms/utils/dead_code_elimination.cpp
+    src/ir/transforms/utils/l0_tile_chooser.cpp
     src/ir/transforms/utils/loop_state_repair.cpp
     src/ir/transforms/utils/tpop_tfree_finalizer.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp

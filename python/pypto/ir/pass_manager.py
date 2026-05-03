@@ -138,6 +138,7 @@ class PassManager:
         ]
         tile_pto_passes: list[PassSpec] = [
             ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
+            ("AutoTileMatmulL0", lambda: passes.auto_tile_matmul_l0()),
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
             ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),

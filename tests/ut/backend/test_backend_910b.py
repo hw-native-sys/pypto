@@ -131,6 +131,35 @@ class TestBackend910BMemoryHierarchy:
             assert path[-1] == to_mem, f"Path should end with {to_mem}"
 
 
+class TestBackend910BL0Tiling:
+    """Tests for the L0-tiling parameters exposed on the 910B BackendHandler.
+
+    These accessors feed ChooseL0Tile / AutoTileMatmulL0; their values must match
+    the 910B SoC AIC core memory layout (Create910BSoC).
+    """
+
+    def test_l0_capacities_match_soc(self):
+        backend = Backend910B.instance()
+        handler = backend.get_handler()
+
+        assert handler.get_l0a_capacity_bytes() == 64 * 1024
+        assert handler.get_l0b_capacity_bytes() == 64 * 1024
+        assert handler.get_l0c_capacity_bytes() == 128 * 1024
+
+        # Mirrors Backend.get_mem_size for the corresponding spaces (per-core).
+        assert handler.get_l0a_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Left)
+        assert handler.get_l0b_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Right)
+        assert handler.get_l0c_capacity_bytes() == backend.get_mem_size(ir.MemorySpace.Acc)
+
+    def test_l0_fractal_alignment_default(self):
+        handler = Backend910B.instance().get_handler()
+        assert handler.get_l0_fractal_alignment() == 16
+
+    def test_min_l0_tile_dim_default(self):
+        handler = Backend910B.instance().get_handler()
+        assert handler.get_min_l0_tile_dim() == 16
+
+
 class TestBackend910BSerialization:
     """Tests for 910B backend serialization."""
 

@@ -31,6 +31,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
@@ -473,6 +474,25 @@ TypePtr DeduceTileExtractType(const std::vector<ExprPtr>& args,
   TileView tile_view;
   tile_view.valid_shape = dst_shape;
   tile_view.blayout = InferTileLayoutFromShape(dst_shape);
+
+  // Override blayout/slayout for L0-resident destinations to match the
+  // architectural layouts the A2/A3 `pto.textract` codegen verifier
+  // expects.  Mat/other targets keep the inferred default.  These
+  // hardcoded layouts mirror the L0A/L0B formats the hardware imposes on
+  // TEXTRACT outputs (and differ from `tile.move`'s TMOV-side L0 formats).
+  for (const auto& [k, v] : kwargs) {
+    if (k != "target_memory") continue;
+    auto target = AnyCast<MemorySpace>(v, "kwarg key: target_memory");
+    if (target == MemorySpace::Left) {
+      tile_view.blayout = TileLayout::row_major;
+      tile_view.slayout = TileLayout::row_major;
+    } else if (target == MemorySpace::Right) {
+      tile_view.blayout = TileLayout::row_major;
+      tile_view.slayout = TileLayout::col_major;
+    }
+    break;
+  }
+
   return std::make_shared<TileType>(dst_shape, src_type->dtype_, std::nullopt, tile_view);
 }
 

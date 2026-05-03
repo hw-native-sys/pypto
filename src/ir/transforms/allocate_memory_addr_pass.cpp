@@ -269,6 +269,12 @@ class MemRefUpdateMutator : public IRMutator {
 
 /**
  * @brief Allocate memory addresses using the given allocation policy
+ *
+ * MemRefs sharing the same ``base_`` Ptr are co-located in a single bumped
+ * slot sized by the largest member.size_ in the group.  This handles view
+ * MemRefs (e.g. produced by ``tile.slice``) — every view physically aliases
+ * its parent allocation, so they should share one address slot rather than
+ * each consuming size_ bytes of fresh L1.
  */
 std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
     const std::vector<MemRefWithSpace>& memrefs, const ReservedEndBySpace& reserved_end_by_space,
@@ -289,25 +295,50 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 
     policy.OrderMemRefs(refs);
 
-    // Allocate sequential aligned addresses
+    // Group MemRefs by base_ Ptr identity.  base_order preserves the policy's
+    // sort order via the first MemRef that introduces each base.
+    std::map<const Var*, std::vector<MemRefPtr>> base_groups;
+    std::vector<const Var*> base_order;
+    for (const auto& ref : refs) {
+      const Var* base_key = ref->base_.get();
+      auto inserted = base_groups.try_emplace(base_key);
+      if (inserted.second) base_order.push_back(base_key);
+      inserted.first->second.push_back(ref);
+    }
+
     uint64_t current_addr = 0;
     auto reserved_it = reserved_end_by_space.find(space);
     if (reserved_it != reserved_end_by_space.end()) {
       current_addr = reserved_it->second;
     }
-    for (const auto& old_memref : refs) {
-      CHECK(old_memref->size_ > 0)
-          << "AllocateMemoryAddr encountered zero-sized MemRef '" << old_memref->name_hint_
-          << "'. InitMemRef should reject dynamic or invalid allocation shapes before address assignment.";
-      // Create new MemRef with allocated byte_offset, reusing the same base_ Ptr
-      auto offset_expr =
-          std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INDEX, Span::unknown());
-      auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, offset_expr,
-                                                 old_memref->size_, old_memref->span_);
-      memref_pairs.emplace_back(old_memref.get(), new_memref);
+    for (const Var* base_key : base_order) {
+      const auto& group = base_groups.at(base_key);
 
-      // Next address = align(current + size)
-      current_addr = policy.AlignAddress(current_addr + old_memref->size_, space);
+      // Slot size = max member.size_.  The root MemRef (byte_offset == 0) is
+      // sized to the full alloc; views are sub-regions and never exceed it.
+      uint64_t slot_size = 0;
+      for (const auto& ref : group) {
+        CHECK(ref->size_ > 0)
+            << "AllocateMemoryAddr encountered zero-sized MemRef '" << ref->name_hint_
+            << "'. InitMemRef should reject dynamic or invalid allocation shapes before address assignment.";
+        slot_size = std::max(slot_size, static_cast<uint64_t>(ref->size_));
+      }
+
+      // Every member of the group (root + views) gets the same bumped base
+      // address as its byte_offset.  The codegen recovers each view's actual
+      // location from the corresponding ``tile.slice`` op args, not from the
+      // result MemRef offset, so collapsing all members onto base_addr is safe
+      // (and matches the existing post-pass invariant that byte_offset_ is a
+      // ConstInt the verifier can read).
+      auto base_addr_expr =
+          std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INDEX, Span::unknown());
+      for (const auto& old_memref : group) {
+        auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, base_addr_expr,
+                                                   old_memref->size_, old_memref->span_);
+        memref_pairs.emplace_back(old_memref.get(), new_memref);
+      }
+
+      current_addr = policy.AlignAddress(current_addr + slot_size, space);
     }
   }
 

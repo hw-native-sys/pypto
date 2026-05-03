@@ -52,6 +52,11 @@ class Ascend910BHandler : public BackendHandler {
   [[nodiscard]] uint32_t GetL2CacheLineBytes() const override { return 512; }
   [[nodiscard]] uint32_t GetRecommendedInnermostDimBytes() const override { return 512; }
 
+  // L0 capacity (matches Create910BSoC AIC core memory layout).
+  [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
+  [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
+  [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 128ULL * 1024; }
+
  private:
   Ascend910BHandler() = default;
 };

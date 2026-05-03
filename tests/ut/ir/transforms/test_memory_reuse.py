@@ -2681,5 +2681,85 @@ class TestStructuralShapeEquality:
         assert tile_a_type.shares_memref_with(tile_b_type)
 
 
+class TestParallelPlaceholdersInIfThen:
+    """Regression: two parallel `tile.create` placeholders inside an IfStmt
+    then-branch, each feeding a sibling inner ForStmt, must NOT be aliased
+    to the same buffer when both inner loops' results are simultaneously
+    consumed at the if-then yield. Mirrors the kv_proj pattern that
+    surfaces in qwen3_decode."""
+
+    def test_parallel_placeholders_must_not_alias(self):
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                cond_param: pl.Scalar[pl.INDEX],
+                output_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 64], pl.FP32], pl.Tensor[[64, 64], pl.FP32]]:
+                outer_init_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                outer_init_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                if cond_param < 2:
+                    inner_init_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                        [64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
+                    for _i, (acc_a,) in pl.range(0, 4, init_values=(inner_init_a,)):
+                        next_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_a, acc_a)
+                        loop_a_out = pl.yield_(next_a)
+                    inner_init_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                        [64, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                    )
+                    for _j, (acc_b,) in pl.range(0, 4, init_values=(inner_init_b,)):
+                        next_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_b, acc_b)
+                        loop_b_out = pl.yield_(next_b)
+                    phi_a, phi_b = pl.yield_(loop_a_out, loop_b_out)
+                else:
+                    phi_a, phi_b = pl.yield_(outer_init_a, outer_init_b)
+                result_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(phi_a, [0, 0], output_a)
+                result_b: pl.Tensor[[64, 64], pl.FP32] = pl.store(phi_b, [0, 0], output_b)
+                return result_a, result_b
+
+        After = _run_pipeline(Before)
+
+        # Walk the IR after MemoryReuse and confirm inner_init_a and
+        # inner_init_b are NOT on the same MemRef base.  They are simultaneously
+        # consumed at the if-then yield, so aliasing them is a correctness bug
+        # (the second loop's writes would clobber the first loop's value before
+        # the if-then yield reads both).
+        func = After.get_function("main")
+        assert func is not None
+        # Find the two inner_init AssignStmts inside the if-then body
+        inits: dict[str, ir.MemRef] = {}
+
+        def visit(stmt: ir.Stmt) -> None:
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint in ("inner_init_a", "inner_init_b"):
+                t = stmt.var.type
+                assert isinstance(t, ir.TileType)
+                assert t.memref is not None
+                inits[stmt.var.name_hint] = t.memref
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    visit(s)
+            elif isinstance(stmt, ir.IfStmt):
+                visit(stmt.then_body)
+                if stmt.else_body is not None:
+                    visit(stmt.else_body)
+            elif isinstance(stmt, ir.ForStmt):
+                visit(stmt.body)
+
+        visit(func.body)
+        assert "inner_init_a" in inits, "inner_init_a not found in After IR"
+        assert "inner_init_b" in inits, "inner_init_b not found in After IR"
+        assert inits["inner_init_a"].base_ is not inits["inner_init_b"].base_, (
+            f"inner_init_a and inner_init_b must NOT share MemRef base; both at "
+            f"{inits['inner_init_a'].base_.name_hint}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

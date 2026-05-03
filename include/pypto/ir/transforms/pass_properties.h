@@ -95,6 +95,20 @@ inline const PassProperties kFlattenTileNdTo2DProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
 
+// -- Auto L0 matmul tiling pass -----------------------------------------------
+//
+// Property-preserving rewrite: replaces ``tile.matmul[_acc]`` over Mat-resident
+// operands with a small loop nest of L0-sized matmuls.  Runs between
+// FlattenTileNdTo2D and InferTileMemorySpace, so all tile ops are already 2D
+// and memory spaces have not yet been inferred.  No properties are produced
+// or invalidated beyond what the input IR already guarantees.
+
+inline const PassProperties kAutoTileMatmulL0Properties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
+
 // -- Tile memory space inference pass -----------------------------------------
 
 inline const PassProperties kInferTileMemorySpaceProperties{

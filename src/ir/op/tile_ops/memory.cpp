@@ -327,9 +327,24 @@ TypePtr DeduceTileCreateTileType(const std::vector<ExprPtr>& args,
 
   CHECK(!tile_shape.empty()) << "The operator " << op_name << " requires non-empty shape";
 
-  // Return TileType with the static shape and dtype
+  // When target_memory is Acc, deduce the Nz TileView so the result type
+  // matches what tile.matmul / tile.matmul_acc produce.  This keeps Acc-typed
+  // iter-arg / yield chains structurally consistent in passes such as
+  // AutoTileMatmulL0.
+  std::optional<MemorySpace> target_memory_opt;
+  for (const auto& [k, v] : kwargs) {
+    if (k == "target_memory") {
+      target_memory_opt = AnyCast<MemorySpace>(v, "target_memory");
+      break;
+    }
+  }
+
   TileView tile_view;
-  if (tile_shape.size() == 2) {
+  if (target_memory_opt.has_value() && *target_memory_opt == MemorySpace::Acc) {
+    tile_view.blayout = TileLayout::col_major;
+    tile_view.slayout = TileLayout::row_major;
+    tile_view.fractal = 1024;
+  } else if (tile_shape.size() == 2) {
     auto rows_const = As<ConstInt>(tile_shape[0]);
     auto cols_const = As<ConstInt>(tile_shape[1]);
     if (rows_const && cols_const && rows_const->value_ > 1 && cols_const->value_ == 1) {

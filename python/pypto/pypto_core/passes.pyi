@@ -394,6 +394,31 @@ def optimize_orch_tensors() -> Pass:
 def flatten_tile_nd_to_2d() -> Pass:
     """Create a pass that flattens ND tile ops to 2D in InCore functions."""
 
+def auto_tile_matmul_l0() -> Pass:
+    """Create a pass that auto-tiles Mat-resident matmul / matmul_acc into a C-stationary K-loop.
+
+    Rewrites each ``tile.matmul`` or ``tile.matmul_acc`` whose Mat operands
+    have static 2D shape into a ``range(0, K, k)`` loop:
+
+    * For ``tile.matmul``, the loop body branches on ``ko == 0`` between
+      ``tile.matmul`` (fresh accumulator) and ``tile.matmul_acc``
+      (accumulating into the iter-arg).
+    * For ``tile.matmul_acc``, every iteration is ``tile.matmul_acc`` with
+      the iter-arg init set to the caller's accumulator — the chain is
+      uniform from the first iteration so no if-else is needed.
+
+    The L0 tile shape ``(m, n, k)`` is chosen by ``utils.choose_l0_tile``
+    from the active backend's L0 capacities. The K-loop is marked
+    ``ForKind.Pipeline`` with ``pipeline_stages=2`` so the downstream
+    ``LowerPipelineLoops`` pass produces a 2-deep ping-pong on the
+    auto-inserted Mat→Left/Right moves. Already-L0-sized matmuls are left
+    untouched.
+
+    Supported today: ``tile.matmul`` and ``tile.matmul_acc``;
+    ``tile.matmul_bias`` is deferred. Only K tiling; M/N tiling and
+    ``K % k != 0`` cases emit a perf hint and skip.
+    """
+
 def infer_tile_memory_space() -> Pass:
     """Create a pass that infers memory_space for TileType variables in InCore functions."""
 
@@ -509,6 +534,48 @@ class stmt_dependency_analysis:
         compilation halts rather than proceeding with unsound IR.
         """
 
+class l0_tile_chooser:
+    """Closed-form chooser for L0 matmul tile shape (m, n, k)."""
+
+    class L0TileConfig:
+        """Inputs to choose_l0_tile: problem dims + hardware + schedule knobs."""
+
+        M: int
+        N: int
+        K: int
+        l0a_bytes: int
+        l0b_bytes: int
+        l0c_bytes: int
+        bytes_a: int
+        bytes_b: int
+        bytes_c: int
+        min_m: int
+        min_n: int
+        min_k: int
+        align_m: int
+        align_n: int
+        align_k: int
+        double_buffer_a: bool
+        double_buffer_b: bool
+        double_buffer_c: bool
+        c_read: bool
+        allow_padding: bool
+        def __init__(self) -> None: ...
+
+    class L0TileResult:
+        """Output of choose_l0_tile: the chosen (m, n, k) plus diagnostics."""
+
+        m: int
+        n: int
+        k: int
+        estimated_traffic_bytes: int
+        padded_compute_volume: int
+        perf_hint: str
+
+    @staticmethod
+    def choose_l0_tile(config: L0TileConfig) -> L0TileResult:
+        """Pick an approximately-optimal L0 tile shape (m, n, k)."""
+
 __all__ = [
     "IRProperty",
     "IRPropertySet",
@@ -552,6 +619,7 @@ __all__ = [
     "convert_tensor_to_tile_ops",
     "optimize_orch_tensors",
     "flatten_tile_nd_to_2d",
+    "auto_tile_matmul_l0",
     "infer_tile_memory_space",
     "resolve_transpose_layout",
     "resolve_backend_op_layouts",

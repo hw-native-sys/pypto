@@ -53,6 +53,11 @@ class Ascend950Handler : public BackendHandler {
   [[nodiscard]] uint32_t GetL2CacheLineBytes() const override { return 512; }
   [[nodiscard]] uint32_t GetRecommendedInnermostDimBytes() const override { return 128; }
 
+  // L0 capacity (matches Create950SoC AIC core memory layout).
+  [[nodiscard]] uint32_t GetL0aCapacityBytes() const override { return 64ULL * 1024; }
+  [[nodiscard]] uint32_t GetL0bCapacityBytes() const override { return 64ULL * 1024; }
+  [[nodiscard]] uint32_t GetL0cCapacityBytes() const override { return 256ULL * 1024; }
+
  private:
   Ascend950Handler() = default;
 };

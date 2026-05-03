@@ -148,7 +148,17 @@ void BindBackend(nb::module_& m) {
            "GM access granularity in bytes (issue #1180 perf-hint threshold input)")
       .def("get_l2_cache_line_bytes", &BackendHandler::GetL2CacheLineBytes, "L2 cache line size in bytes")
       .def("get_recommended_innermost_dim_bytes", &BackendHandler::GetRecommendedInnermostDimBytes,
-           "Recommended minimum innermost-dim size, in bytes, for tile ops touching GM");
+           "Recommended minimum innermost-dim size, in bytes, for tile ops touching GM")
+      .def("get_l0a_capacity_bytes", &BackendHandler::GetL0aCapacityBytes,
+           "L0a (Left) on-chip SRAM capacity in bytes")
+      .def("get_l0b_capacity_bytes", &BackendHandler::GetL0bCapacityBytes,
+           "L0b (Right) on-chip SRAM capacity in bytes")
+      .def("get_l0c_capacity_bytes", &BackendHandler::GetL0cCapacityBytes,
+           "L0c (Acc) on-chip SRAM capacity in bytes")
+      .def("get_l0_fractal_alignment", &BackendHandler::GetL0FractalAlignment,
+           "Cube fractal alignment in elements for L0 tile dimensions m, n, k")
+      .def("get_min_l0_tile_dim", &BackendHandler::GetMinL0TileDim,
+           "Minimum legal value for L0 tile dimensions m, n, k");
 
   // ========== Backend abstract base class ==========
   nb::class_<Backend>(backend_mod, "Backend", "Abstract backend base class")

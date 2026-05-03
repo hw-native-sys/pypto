@@ -193,6 +193,48 @@ class BackendHandler {
    * L2 cache line but 128 B taken as the hard threshold for the hint.
    */
   [[nodiscard]] virtual uint32_t GetRecommendedInnermostDimBytes() const = 0;
+
+  // ---------------------------------------------------------------------------
+  // L0-tiling parameters (consumed by AutoTileMatmulL0 / ChooseL0Tile)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * @brief L0a (Left) on-chip SRAM capacity, in bytes.
+   *
+   * Used by ChooseL0Tile to bound `m * k * bytes_a` (per buffer when
+   * double-buffered). Must match the AIC-core `MemorySpace::Left` size in the
+   * SoC config; encoded here so passes do not depend on the SoC walker.
+   */
+  [[nodiscard]] virtual uint32_t GetL0aCapacityBytes() const = 0;
+
+  /**
+   * @brief L0b (Right) on-chip SRAM capacity, in bytes.
+   */
+  [[nodiscard]] virtual uint32_t GetL0bCapacityBytes() const = 0;
+
+  /**
+   * @brief L0c (Acc) on-chip SRAM capacity, in bytes.
+   */
+  [[nodiscard]] virtual uint32_t GetL0cCapacityBytes() const = 0;
+
+  /**
+   * @brief Cube fractal alignment in *elements* for L0 tile dimensions.
+   *
+   * Distinct from memory access alignment (which is a byte-level concept on
+   * the SoC `Mem` record). This is the m/n/k alignment imposed by the cube
+   * hardware's fractal tile shape — typically 16 across Ascend AI Core
+   * generations.
+   */
+  [[nodiscard]] virtual int GetL0FractalAlignment() const { return 16; }
+
+  /**
+   * @brief Minimum legal value for L0 tile dimensions m, n, k.
+   *
+   * The cube unit cannot operate below this dimension; ChooseL0Tile rejects
+   * candidates smaller than this value (and emits a perf-hint when the
+   * outer matmul shape is itself smaller than this threshold).
+   */
+  [[nodiscard]] virtual int GetMinL0TileDim() const { return 16; }
 };
 
 }  // namespace backend

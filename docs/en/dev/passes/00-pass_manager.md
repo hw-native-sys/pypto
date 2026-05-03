@@ -70,6 +70,7 @@ struct PassProperties {
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
+| AutoTileMatmulL0 | SSAForm, IncoreTileOps, TileOps2D | SSAForm, IncoreTileOps, TileOps2D | — |
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
 | NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
@@ -364,23 +365,24 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 
 1. `FlattenTileNdTo2D`
-2. `InferTileMemorySpace`
-3. `ResolveTransposeLayout`
-4. [`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md)
-5. `NormalizeStmtStructure`
-6. `ExpandMixedKernel`
-7. [`InjectGMPipeBuffer`](18-inject_gm_pipe_buffer.md)
-8. [`SplitVectorKernel`](19-split_vector_kernel.md)
-9. `NormalizeReturnOrder`
-10. [`LowerPipelineLoops`](21-lower_pipeline_loops.md)
-11. [`CanonicalizeIOOrder`](22-canonicalize_io_order.md)
-12. `InitMemRef`
-13. `MemoryReuse`
-14. [`LegalizePTOBufferReuse`](25-legalize_pto_buffer_reuse.md)
-15. `AllocateMemoryAddr`
-16. `FuseCreateAssembleToSlice`
-17. [`DeriveCallDirections`](28-derive_call_directions.md)
-18. `Simplify`
+2. `AutoTileMatmulL0`
+3. `InferTileMemorySpace`
+4. `ResolveTransposeLayout`
+5. [`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md)
+6. `NormalizeStmtStructure`
+7. `ExpandMixedKernel`
+8. [`InjectGMPipeBuffer`](18-inject_gm_pipe_buffer.md)
+9. [`SplitVectorKernel`](19-split_vector_kernel.md)
+10. `NormalizeReturnOrder`
+11. [`LowerPipelineLoops`](21-lower_pipeline_loops.md)
+12. [`CanonicalizeIOOrder`](22-canonicalize_io_order.md)
+13. `InitMemRef`
+14. `MemoryReuse`
+15. [`LegalizePTOBufferReuse`](25-legalize_pto_buffer_reuse.md)
+16. `AllocateMemoryAddr`
+17. `FuseCreateAssembleToSlice`
+18. [`DeriveCallDirections`](28-derive_call_directions.md)
+19. `Simplify`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

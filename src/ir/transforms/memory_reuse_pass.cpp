@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -293,12 +294,18 @@ class TopDownRetargeter {
 
     for (size_t i = 0; i < for_stmt->iter_args_.size() && i < yield->value_.size(); ++i) {
       auto ia = for_stmt->iter_args_[i];
-      auto ia_tile = GetTileTypeWithMemRef(ia->GetType());
+      // If a prior PropagateFromForStmt (an enclosing ForStmt) already retyped
+      // this iter_arg, use the planned new TileType so we don't push a stale
+      // target down the chain.
+      auto ia_var_key = std::static_pointer_cast<const Var>(ia);
+      auto rit = rewrites_.find(ia_var_key);
+      TypePtr ia_type = (rit != rewrites_.end()) ? rit->second : ia->GetType();
+      auto ia_tile = GetTileTypeWithMemRef(ia_type);
       if (!ia_tile) continue;
       auto target_memref = GetDefinedMemRef(ia_tile);
       auto target_memory = ia_tile->GetMemorySpace();
 
-      auto yield_var = As<Var>(yield->value_[i]);
+      auto yield_var = AsVarLike(yield->value_[i]);
       if (!yield_var) continue;
 
       TryRetargetVar(yield_var, target_memref, target_memory);
@@ -335,7 +342,12 @@ class TopDownRetargeter {
     if (def.kind == VarDef::kIfReturn) {
       return RetargetIfReturn(var, def, target, target_memory);
     }
-    // kIterArg / kForReturn / kUnknown: can't retarget directly.
+    if (def.kind == VarDef::kForReturn) {
+      return RetargetForReturn(var, def, target, target_memory);
+    }
+    if (def.kind == VarDef::kIterArg) {
+      return RetargetIterArg(var, def, target, target_memory);
+    }
     return false;
   }
 
@@ -354,7 +366,7 @@ class TopDownRetargeter {
     if (reuse_idx.has_value()) {
       // Pinned output: can't change this stmt's LHS MemRef; recurse onto pinned input.
       if (*reuse_idx >= call->args_.size()) return false;
-      auto input_var = As<Var>(call->args_[*reuse_idx]);
+      auto input_var = AsVarLike(call->args_[*reuse_idx]);
       if (!input_var) return false;
       if (!TryRetargetVar(input_var, target, target_memory)) return false;
       // Also record that `var`'s MemRef should follow the pinned input to target.
@@ -368,15 +380,19 @@ class TopDownRetargeter {
     //      inherits the input's view byte_offset_ / size_, which rewriting
     //      with target's full MemRef would silently drop.
     //   2. Ops that encode output memory in a `target_memory` kwarg (e.g.
-    //      tile.move / tile.load) — retyping the LHS without also rewriting
-    //      the kwarg leaves the call self-inconsistent.
+    //      tile.create / tile.move / tile.load) — retyping the LHS to a
+    //      different memory_space would require rewriting the kwarg too.
+    //      Same-memory_space retypes are safe: only the MemRef base changes,
+    //      while the op's declared output memory stays consistent.
     //   3. Ops registered `not_inplace_safe()` (e.g. tile.mrgsort_format1)
     //      whose implementation requires src buffer != dst buffer.  If any
     //      input of the call already lives on `target_base`, retyping the
     //      output onto the same buffer creates an in-place execution that
     //      the op cannot handle and fails at runtime.
     if (IsOutputMemoryInheritInput(entry)) return false;
-    if (HasKwarg(*call, "target_memory")) return false;
+    if (HasKwarg(*call, "target_memory") && !TargetMemoryKwargMatches(*call, target_memory)) {
+      return false;
+    }
     if (!entry.IsInplaceSafe() && CallReadsBase(*call, target->base_.get())) return false;
 
     // Unconstrained: check liveness, then plan retype.
@@ -408,6 +424,22 @@ class TopDownRetargeter {
     return false;
   }
 
+  /// True when the call has a `target_memory` kwarg whose MemorySpace value
+  /// equals `target_memory`. Used to allow retypes that change the MemRef
+  /// base but keep the memory space the same — the kwarg stays consistent
+  /// with the new LHS type without rewriting.  Caller must have verified
+  /// `HasKwarg(call, "target_memory")` first; AnyCast errors propagate as
+  /// pypto exceptions if the kwarg holds an unexpected type (which would be
+  /// an internal IR consistency bug rather than a retype-decline signal).
+  static bool TargetMemoryKwargMatches(const Call& call, std::optional<MemorySpace> target_memory) {
+    if (!target_memory.has_value()) return false;
+    for (const auto& [k, v] : call.kwargs_) {
+      if (k != "target_memory") continue;
+      return AnyCast<MemorySpace>(v, "kwarg key: target_memory") == *target_memory;
+    }
+    return false;
+  }
+
   /// Retype an IfStmt return_var: recurse into both branches' yield values.
   bool RetargetIfReturn(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
                         std::optional<MemorySpace> target_memory) {
@@ -418,7 +450,7 @@ class TopDownRetargeter {
     auto visit_branch = [&](const StmtPtr& body) -> bool {
       auto y = FindYieldStmt(body);
       if (!y || idx >= y->value_.size()) return false;
-      auto yv = As<Var>(y->value_[idx]);
+      auto yv = AsVarLike(y->value_[idx]);
       if (!yv) return false;
       return TryRetargetVar(yv, target, target_memory);
     };
@@ -431,6 +463,63 @@ class TopDownRetargeter {
     return true;
   }
 
+  /// Retype a ForStmt return_var: recurse into the loop's body-yield value.
+  /// Pushing the target onto the body-yield-value also pushes it transitively
+  /// onto the iter_arg (via the matmul_acc-style pinned chain) and onto the
+  /// init.  After all recursive PlanRewrites, the iter_arg's MemRef will
+  /// match the target, and YieldFixupMutator's PatchIterArgsAndReturnVars
+  /// finalises iter_arg/return_var TileType updates.
+  bool RetargetForReturn(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
+                         std::optional<MemorySpace> target_memory) {
+    auto for_stmt = As<ForStmt>(def.control_stmt);
+    if (!for_stmt) return false;
+    size_t idx = def.return_idx;
+
+    auto y = FindYieldStmt(for_stmt->body_);
+    if (!y || idx >= y->value_.size()) return false;
+    auto yv = AsVarLike(y->value_[idx]);
+    if (!yv) return false;
+    if (!TryRetargetVar(yv, target, target_memory)) return false;
+
+    // Also retype the corresponding iter_arg's init so the next iteration's
+    // loop-carried value reads from the same buffer the body just wrote.
+    if (idx < for_stmt->iter_args_.size()) {
+      auto ia = for_stmt->iter_args_[idx];
+      auto init_var = AsVarLike(ia->initValue_);
+      if (init_var && !TryRetargetVar(init_var, target, target_memory)) return false;
+      // Plan rewrite for the IterArg itself (its TileType will be updated).
+      PlanRewrite(std::static_pointer_cast<const Var>(ia), target, target_memory);
+    }
+
+    PlanRewrite(var, target, target_memory);
+    return true;
+  }
+
+  /// Retype an IterArg: push the target onto its initValue. The iter_arg
+  /// itself records a rewrite so RetypeApplier substitutes its TileType in
+  /// body references.
+  bool RetargetIterArg(const VarPtr& var, const VarDef& def, const MemRefPtr& target,
+                       std::optional<MemorySpace> target_memory) {
+    auto iter_arg = def.iter_arg;
+    if (!iter_arg) return false;
+    auto init_var = AsVarLike(iter_arg->initValue_);
+    if (!init_var) return false;
+    if (!TryRetargetVar(init_var, target, target_memory)) return false;
+    PlanRewrite(var, target, target_memory);
+    return true;
+  }
+
+  /// IterArg keys are stored under their `Var` base via static_pointer_cast;
+  /// `rewrites_` keying compares shared_ptr control blocks, not static types,
+  /// so `RetypeApplier`'s ForStmt handler can find the IterArg's planned
+  /// retype using the same VarPtr-keyed lookup as ordinary AssignStmt LHS
+  /// rewrites.  Note: when intermediate recursion partially populates
+  /// `rewrites_` and a later step then declines, those entries remain — same
+  /// tolerance as `RetargetIfReturn`'s branch-failure path.  This is safe
+  /// because `RetypeApplier` only acts on retypes that landed at top-level
+  /// callers (the for-stmt's iter_arg in `PropagateFromForStmt`), and the
+  /// declined upper-level returns false so the partial chain isn't surfaced
+  /// as the canonical retype.
   void PlanRewrite(const VarPtr& var, const MemRefPtr& target, std::optional<MemorySpace> target_memory) {
     auto new_type = CloneTypeWithMemRef(var->GetType(), target, target_memory);
     rewrites_[var] = new_type;
@@ -487,6 +576,46 @@ class RetypeApplier : public IRMutator {
     return op;
   }
 
+  ExprPtr VisitExpr_(const IterArgPtr& op) override {
+    // Check var_remap_ first.  IRMutator::VisitStmt_(ForStmtPtr) registers
+    // OLD → NEW for each iter_arg whose pointer changed when we visited the
+    // For's iter_args_ list, then visits the body.  Without this lookup, every
+    // body reference to OLD would build its own fresh IterArg (each
+    // make_shared returns a distinct pointer), leaving the For's iter_args_
+    // and body referencing two different IterArg objects with the same name —
+    // a malformed-IR pattern that downstream substitution passes (e.g.,
+    // Simplify's Fold B) cannot rewrite consistently.
+    auto remap_it = var_remap_.find(op.get());
+    if (remap_it != var_remap_.end()) {
+      return remap_it->second;
+    }
+
+    INTERNAL_CHECK_SPAN(op->initValue_, op->span_) << "IterArg has null initValue";
+    // Always recurse into initValue_ first so prior substitutions applied to
+    // the AssignStmt that defines initValue (e.g., a tile.create whose LHS
+    // we retyped) propagate into the IterArg's initValue field.
+    auto new_init_value = VisitExpr(op->initValue_);
+    INTERNAL_CHECK_SPAN(new_init_value, op->span_) << "IterArg initValue mutated to null";
+
+    // Look up whether the IterArg itself is being retyped (its TileType
+    // changed by a planned PlanRewrite). If so, return a new IterArg with the
+    // retyped TileType and the (possibly substituted) initValue.
+    auto var_key = std::static_pointer_cast<const Var>(op);
+    auto it = var_substitution_.find(var_key);
+    if (it != var_substitution_.end()) {
+      auto sub_iter_arg = std::dynamic_pointer_cast<const IterArg>(it->second);
+      if (sub_iter_arg) {
+        return std::make_shared<IterArg>(sub_iter_arg->name_hint_, sub_iter_arg->GetType(), new_init_value,
+                                         sub_iter_arg->span_);
+      }
+      return it->second;
+    }
+    if (new_init_value.get() != op->initValue_.get()) {
+      return std::make_shared<IterArg>(op->name_hint_, op->GetType(), new_init_value, op->span_);
+    }
+    return op;
+  }
+
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto rit = rewrites_.find(op->var_);
     if (rit != rewrites_.end()) {
@@ -499,6 +628,27 @@ class RetypeApplier : public IRMutator {
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
     // Pre-register substitutions for any retargeted return_var; the default
     // IRMutator IfStmt handler will then pick them up through VisitExpr_(Var).
+    for (const auto& rv : op->return_vars_) {
+      auto rit = rewrites_.find(rv);
+      if (rit != rewrites_.end()) {
+        var_substitution_[rv] = std::make_shared<Var>(rv->name_hint_, rit->second, rv->span_);
+      }
+    }
+    return IRMutator::VisitStmt_(op);
+  }
+
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    // Pre-register the IterArg's TileType retype so body references to the
+    // IterArg are substituted via VisitExpr_(IterArgPtr). The init value
+    // recursion is handled inside VisitExpr_(IterArgPtr).
+    for (const auto& ia : op->iter_args_) {
+      auto var_key = std::static_pointer_cast<const Var>(ia);
+      auto rit = rewrites_.find(var_key);
+      if (rit != rewrites_.end()) {
+        auto new_iter_arg = std::make_shared<IterArg>(ia->name_hint_, rit->second, ia->initValue_, ia->span_);
+        var_substitution_[var_key] = new_iter_arg;
+      }
+    }
     for (const auto& rv : op->return_vars_) {
       auto rit = rewrites_.find(rv);
       if (rit != rewrites_.end()) {
