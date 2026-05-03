@@ -89,5 +89,38 @@ def test_explicit_non_implicit_view_is_preserved():
     assert t.tile_view.blayout == ir.TileLayout.row_major
 
 
+def test_constructor_canonicalizes_default_tile_view():
+    """A TileView with empty valid_shape is semantically the implicit view; canonicalize to None.
+
+    Empty ``valid_shape`` is treated as equivalent to ``shape`` everywhere else
+    (see NormalizeImplicitTileView). Without this canonicalization there would
+    be two encodings of the same semantic state — None and TileView() — and the
+    verifier could not catch the duplicate.
+    """
+    shape = [16, 128]
+    # Mat-implicit: blayout=col_major, slayout=row_major, fractal=512 (default), pad=null.
+    mat_view_no_valid_shape = ir.TileView(
+        blayout=ir.TileLayout.col_major,
+        slayout=ir.TileLayout.row_major,
+    )
+    t = ir.TileType(shape, ir.DataType.BF16, None, mat_view_no_valid_shape, ir.MemorySpace.Mat)
+    assert t.tile_view is None  # collapsed even with empty valid_shape
+
+
+def test_mat_tile_effective_view_uses_implicit_layout():
+    """Regression: Mat tiles canonicalized to None must surface col_major via the effective view.
+
+    Direct ``tile_view_`` reads in codegen previously produced ``blayout=row_major`` for
+    Mat tiles after canonicalization (see issue #1266 review). The effective view path
+    must inherit Mat's implicit ``col_major`` blayout from ``GetImplicitTileView``.
+    """
+    shape = [16, 128]
+    t = ir.TileType(shape, ir.DataType.BF16, None, None, ir.MemorySpace.Mat)
+    assert t.tile_view is None
+    eff = t.get_effective_tile_view()
+    assert eff.blayout == ir.TileLayout.col_major
+    assert eff.slayout == ir.TileLayout.row_major
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -50,6 +50,17 @@ std::optional<MemorySpace> ValidateTileMemorySpaceConsistency(const std::optiona
   return memory_space;
 }
 
+// Canonical encoding: an explicit TileView matching the implicit semantics for
+// (shape, memory_space) collapses to nullopt. One in-memory form per semantic
+// state — required for lossless print/parse round-trip.
+void CanonicalizeTileViewInPlace(std::optional<TileView>& tile_view, const std::vector<ExprPtr>& shape,
+                                 const std::optional<MemorySpace>& memory_space) {
+  if (tile_view.has_value() &&
+      tile_view_semantics::IsImplicitPrintedTileView(*tile_view, shape, memory_space)) {
+    tile_view.reset();
+  }
+}
+
 }  // namespace
 
 bool operator==(const TileView& lhs, const TileView& rhs) {
@@ -190,13 +201,7 @@ TileType::TileType(const std::vector<int64_t>& shape, DataType dtype, std::optio
     : ShapedType(dtype, shape, std::move(memref)),
       tile_view_(std::move(tile_view)),
       memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {
-  // Canonical encoding: a TileView matching the implicit semantics for
-  // (shape_, memory_space_) is stored as nullopt. One in-memory form per
-  // semantic state — required for lossless print/parse round-trip.
-  if (tile_view_.has_value() &&
-      tile_view_semantics::IsImplicitPrintedTileView(*tile_view_, shape_, memory_space_)) {
-    tile_view_.reset();
-  }
+  CanonicalizeTileViewInPlace(tile_view_, shape_, memory_space_);
 }
 
 TileType::TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
@@ -204,10 +209,7 @@ TileType::TileType(std::vector<ExprPtr> shape, DataType dtype, std::optional<Mem
     : ShapedType(dtype, std::move(shape), std::move(memref)),
       tile_view_(std::move(tile_view)),
       memory_space_(ValidateTileMemorySpaceConsistency(memref_, memory_space)) {
-  if (tile_view_.has_value() &&
-      tile_view_semantics::IsImplicitPrintedTileView(*tile_view_, shape_, memory_space_)) {
-    tile_view_.reset();
-  }
+  CanonicalizeTileViewInPlace(tile_view_, shape_, memory_space_);
 }
 
 std::optional<MemorySpace> TileType::GetMemorySpace() const { return memory_space_; }

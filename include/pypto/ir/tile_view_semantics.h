@@ -108,7 +108,11 @@ inline bool IsDefaultPrintedTileView(const TileView& tile_view, const std::vecto
 /// Return whether TileView matches the semantics of omitted Python syntax.
 inline bool IsImplicitPrintedTileView(const TileView& tile_view, const std::vector<ExprPtr>& shape,
                                       const std::optional<MemorySpace>& memory_space = std::nullopt) {
-  if (!ShapeExprListsEquivalent(tile_view.valid_shape, shape)) {
+  // Empty valid_shape is semantically equivalent to shape (per the convention
+  // in NormalizeImplicitTileView). Treat both forms as the same encoding so a
+  // default-constructed TileView also collapses to nullopt and the canonical
+  // encoding is unique.
+  if (!tile_view.valid_shape.empty() && !ShapeExprListsEquivalent(tile_view.valid_shape, shape)) {
     return false;
   }
   if (!tile_view.stride.empty() || tile_view.start_offset || tile_view.pad != PadValue::null) {

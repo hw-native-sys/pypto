@@ -21,6 +21,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -132,15 +133,14 @@ TileTypeComponents ExtractTileTypeInfo(const ir::TileType& tile_type, const std:
   c.v_row_dynamic = true;
   c.v_col_dynamic = true;
 
-  if (tile_type.tile_view_.has_value()) {
-    const auto& tv = *tile_type.tile_view_;
-    c.blayout = tv.blayout;
-    c.slayout = tv.slayout;
-    c.fractal = tv.fractal;
-    c.pad = tv.pad;
-  } else if (c.cols == 1 && c.rows > 1) {
-    c.blayout = ir::TileLayout::col_major;
-  }
+  // Effective view encodes implicit defaults for the memory space (Mat/Right/Acc),
+  // so reading via GetEffectiveTileView preserves layout after the constructor's
+  // canonicalization elides views that match the implicit semantics.
+  ir::TileView view = ir::tile_view_semantics::GetEffectiveTileView(tile_type);
+  c.blayout = view.blayout;
+  c.slayout = view.slayout;
+  c.fractal = view.fractal;
+  c.pad = view.pad;
   return c;
 }
 
