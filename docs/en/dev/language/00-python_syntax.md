@@ -256,7 +256,7 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `init_values` is supported with chunked loops (iter_args thread through the generated outer/inner/remainder loops). `chunk=` loops are only valid inside a `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` — outside that scope the parser rejects them with an error. See [SplitChunkedLoops Pass](../passes/06-split_chunked_loops.md).
+**Key points:** `chunk=C` splits the loop into an outer sequential loop and an inner loop of `C` iterations. The inner loop preserves the original kind (Sequential/Parallel/Unroll). `init_values` is supported with chunked loops (iter_args thread through the generated outer/inner/remainder loops). `chunk=` loops are only valid inside a `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` — outside that scope the parser rejects them with an error. See [SplitChunkedLoops Pass](../passes/07-split_chunked_loops.md).
 
 ### While Loop (SSA-style with iter_args)
 

@@ -24,6 +24,10 @@ namespace pass {
 /// for one pass.  Using `inline const` (not `constexpr`) because
 /// IRPropertySet's initializer_list constructor is not constexpr in C++17.
 
+// -- Inline-function elimination pass (runs first, before everything) ---------
+
+inline const PassProperties kInlineFunctionsProperties{.produced = {IRProperty::InlineFunctionsEliminated}};
+
 // -- Loop unrolling pass (runs before SSA) ------------------------------------
 
 inline const PassProperties kUnrollLoopsProperties{};

@@ -18,8 +18,8 @@
 # Example: Pass documentation split into topic folders
 docs/en/dev/passes/
 ├── 00-pass_manager.md      (~295 lines) - Pass system overview
-├── 01-unroll_loops.md      (~100 lines) - Loop unrolling
-├── 02-convert_to_ssa.md    (~150 lines) - SSA conversion
+├── 02-unroll_loops.md      (~100 lines) - Loop unrolling
+├── 04-convert_to_ssa.md    (~150 lines) - SSA conversion
 └── ...                     - Individual pass docs
 ```
 

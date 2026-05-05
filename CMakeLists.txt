@@ -143,6 +143,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/ctrl_flow_transform_pass.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
     src/ir/transforms/infer_tile_memory_space_pass.cpp
+    src/ir/transforms/inline_functions_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/legalize_pto_buffer_reuse_pass.cpp
     src/ir/transforms/ir_property.cpp
@@ -197,6 +198,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_ssa_pass.cpp
     src/ir/verifier/verify_no_nested_call_pass.cpp
     src/ir/verifier/verify_break_continue_pass.cpp
+    src/ir/verifier/verify_inline_functions_eliminated.cpp
     src/ir/verifier/verify_use_after_def.cpp
     src/ir/verifier/type_check_pass.cpp
     src/ir/verifier/verify_structured_ctrl_flow_pass.cpp

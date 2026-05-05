@@ -12,7 +12,7 @@ Internally, `pl.pipeline(...)` emits `ForStmt(kind=ForKind::Pipeline, attrs={"pi
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
-**Pipeline position**: After [`NormalizeReturnOrder`](20-normalize_return_order.md), before `CanonicalizeIOOrder` and `InitMemRef` (slot 20.5). Late enough that all tile-structural decisions are made; early enough that `CanonicalizeIOOrder` / `InitMemRef` / `MemoryReuse` see distinct tile vars per clone.
+**Pipeline position**: After [`NormalizeReturnOrder`](21-normalize_return_order.md), before `CanonicalizeIOOrder` and `InitMemRef` (slot 20.5). Late enough that all tile-structural decisions are made; early enough that `CanonicalizeIOOrder` / `InitMemRef` / `MemoryReuse` see distinct tile vars per clone.
 
 ## API
 
@@ -133,5 +133,5 @@ After this pass, `CanonicalizeIOOrder` runs scoped to the pipeline loop's body, 
 
 ## Related
 
-- [`CanonicalizeIOOrder`](22-canonicalize_io_order.md) — the IO-order canonicalization pass that runs next, scoped to pipeline bodies
-- [`UnrollLoops`](01-unroll_loops.md) — full-unroll pass at slot #1, kept as the primary `pl.unroll(N)` lowering
+- [`CanonicalizeIOOrder`](23-canonicalize_io_order.md) — the IO-order canonicalization pass that runs next, scoped to pipeline bodies
+- [`UnrollLoops`](02-unroll_loops.md) — full-unroll pass at slot #1, kept as the primary `pl.unroll(N)` lowering

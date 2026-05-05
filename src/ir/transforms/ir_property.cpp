@@ -73,6 +73,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "CallDirectionsResolved";
     case IRProperty::TileTypeCoherence:
       return "TileTypeCoherence";
+    case IRProperty::InlineFunctionsEliminated:
+      return "InlineFunctionsEliminated";
     default:
       return "Unknown";
   }

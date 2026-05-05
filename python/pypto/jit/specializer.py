@@ -64,14 +64,18 @@ class SpecializeContext:
     Attributes:
         func_name: Python function name.
         source: Dedented source code of the function.
-        func_type: 'orchestration' | 'incore' | None (auto).
+        func_type: 'orchestration' | 'incore' | 'inline' | 'opaque' | None (auto).
         level: pl.Level value or None.
         param_names: Ordered parameter names (excluding 'self').
         tensor_meta: TensorMeta per tensor param name.
         scalar_values: Concrete value per scalar param name.
         scalar_dtypes: DataType annotation per scalar param name.
         dynamic_dims: Set of (param_name, dim_index) pairs marked dynamic.
-        dep_names: Names of @pl.jit.incore functions called from this function.
+        dep_names: Names of dep functions called from this function.
+        py_globals: The originating function's ``__globals__``. The specializer
+            uses this to resolve module-level int/float/bool constants (e.g.
+            ``BATCH``, ``HIDDEN`` imported from a config module) by inlining
+            them at the use site.
     """
 
     func_name: str
@@ -84,6 +88,7 @@ class SpecializeContext:
     scalar_dtypes: dict[str, DataType]
     dynamic_dims: set[tuple[str, int]] = field(default_factory=set)
     dep_names: list[str] = field(default_factory=list)
+    py_globals: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +300,7 @@ class _BodyTransformer(ast.NodeTransformer):
         dynvar_var_names: set[str],
         param_names: list[str] | None = None,
         initial_used_names: set[str] | None = None,
+        py_globals: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._meta = tensor_meta
@@ -304,6 +310,10 @@ class _BodyTransformer(ast.NodeTransformer):
         self._dv_names = dynvar_python_names
         self._dep_names = dep_names
         self._dynvar_var_names = dynvar_var_names
+        # Module-level globals from the originating function. Used by
+        # ``visit_Name`` to inline imported int/float/bool constants
+        # (e.g. ``BATCH = 16`` from a config module) at their use sites.
+        self._py_globals = py_globals or {}
         # Maps local variable names (from `M, N = a.shape`) to their concrete
         # constant values when all dimensions are static.  Used by visit_Name
         # to inline constants and by visit_Assign to suppress the assignment.
@@ -552,7 +562,8 @@ class _BodyTransformer(ast.NodeTransformer):
     # ------------------------------------------------------------------
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
-        """Replace scalar param references, inlined shape constants, and renamed rebindings."""
+        """Replace scalar param references, inlined shape constants, renamed rebindings,
+        and module-level int/float/bool constants imported from globals."""
         if isinstance(node.ctx, ast.Load):
             # Check active renames first — a rebinding supersedes any earlier inlining.
             if node.id in self._var_renames:
@@ -561,6 +572,15 @@ class _BodyTransformer(ast.NodeTransformer):
                 return ast.Constant(value=self._scalars[node.id])
             if node.id in self._shape_inlined:
                 return ast.Constant(value=self._shape_inlined[node.id])
+            # Module-level constant inlining: only when the name is not also a
+            # local (function param or assigned-in-body) — those take priority.
+            if node.id not in self._used_names:
+                value = self._py_globals.get(node.id)
+                # Accept int/float (excluding bool, which would otherwise be picked
+                # up here despite being a separate semantic — but also bool is
+                # commonly used as a literal flag, so include it).
+                if isinstance(value, (int, float, bool)) and not isinstance(value, type):
+                    return ast.Constant(value=value)
         return node
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
@@ -1042,6 +1062,7 @@ class Specializer:
             dynvar_var_names=dynvar_var_names,
             param_names=all_param_names,
             initial_used_names=all_defined,
+            py_globals=ctx.py_globals,
         )
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         # Accumulate alias→original renames for error message rewriting.
@@ -1110,6 +1131,10 @@ class Specializer:
             if func_def is not None and _has_incore_scope(func_def):
                 return "@pl.function(type=pl.FunctionType.Opaque)"
             return "@pl.function(type=pl.FunctionType.Orchestration)"
+        if ctx.func_type == "inline":
+            return "@pl.function(type=pl.FunctionType.Inline)"
+        if ctx.func_type == "opaque":
+            return "@pl.function(type=pl.FunctionType.Opaque)"
         # InCore
         if ctx.level is None:
             return "@pl.function(type=pl.FunctionType.InCore)"
@@ -1238,6 +1263,7 @@ def build_specialize_context(
         scalar_dtypes=scalar_dtypes,
         dynamic_dims=dynamic_dims,
         dep_names=dep_names,
+        py_globals=getattr(func, "__globals__", {}),
     )
 
 

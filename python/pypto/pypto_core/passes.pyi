@@ -43,6 +43,7 @@ class IRProperty(Enum):
     PipelineResolved = ...
     CallDirectionsResolved = ...
     TileTypeCoherence = ...
+    InlineFunctionsEliminated = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -460,6 +461,19 @@ def derive_call_directions() -> Pass:
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
+def inline_functions() -> Pass:
+    """Create a pass that eliminates ``FunctionType.Inline`` functions.
+
+    Splices the body of every ``Inline``-typed function into each call site,
+    alpha-renaming locals and substituting formal params with actual args. The
+    inline functions are then removed from the program. Runs as the first
+    pipeline pass so subsequent passes never observe Inline functions.
+
+    Detects cycles in the Inline → Inline call graph and raises
+    :class:`pypto.ValueError`. Multi-return inline functions emit
+    ``LHS = MakeTuple([rets...])`` at the call site.
+    """
+
 def normalize_stmt_structure() -> Pass:
     """Create a pass that normalizes statement structure."""
 
@@ -629,6 +643,7 @@ __all__ = [
     "split_vector_kernel",
     "simplify",
     "flatten_call_expr",
+    "inline_functions",
     "normalize_stmt_structure",
     "derive_call_directions",
     "NestedCallErrorType",

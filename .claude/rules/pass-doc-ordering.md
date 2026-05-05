@@ -13,34 +13,35 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | Number | File | Pass Manager Position |
 | ------ | ---- | --------------------- |
 | 00 | `00-pass_manager.md` | Overview (not a pass) |
-| 01 | `01-unroll_loops.md` | 1st pass |
-| 02 | `02-ctrl_flow_transform.md` | 2nd pass |
-| 03 | `03-convert_to_ssa.md` | 3rd pass |
-| 04 | `04-simplify.md` | 4th pass (also runs as the last pass of the tile pipeline) |
-| 05 | `05-flatten_call_expr.md` | 5th pass |
-| 06 | `06-split_chunked_loops.md` | 6th pass |
-| 07 | `07-interchange_chunk_loops.md` | 7th pass |
-| 08 | `08-outline_hierarchy_scopes.md` | 8th pass |
-| 09 | `09-outline_incore_scopes.md` | 9th pass |
-| 10 | `10-outline_cluster_scopes.md` | 10th pass |
-| 11 | `11-convert_tensor_to_tile_ops.md` | 11th pass |
-| 12 | `12-optimize_orch_tensors.md` | 12th pass |
-| 13 | `13-flatten_tile_nd_to_2d.md` | 13th pass |
-| 14 | `14-infer_tile_memory_space.md` | 14th pass |
-| 15 | `15-resolve_transpose_layout.md` | 15th pass |
-| 16 | `16-resolve_backend_op_layouts.md` | 16th pass |
-| 17 | `17-expand_mixed_kernel.md` | 17th pass |
-| 18 | `18-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
-| 19 | `19-split_vector_kernel.md` | 19th pass |
-| 20 | `20-normalize_return_order.md` | 20th pass |
-| 21 | `21-lower_pipeline_loops.md` | 21st pass |
-| 22 | `22-canonicalize_io_order.md` | 22nd pass |
-| 23 | `23-init_memref.md` | 23rd pass |
-| 24 | `24-memory_reuse.md` | 24th pass |
-| 25 | `25-legalize_pto_buffer_reuse.md` | 25th pass |
-| 26 | `26-allocate_memory_addr.md` | 26th pass |
-| 27 | `27-fuse_create_assemble_to_slice.md` | 27th pass |
-| 28 | `28-derive_call_directions.md` | 28th pass |
+| 01 | `01-inline_functions.md` | 1st pass |
+| 02 | `02-unroll_loops.md` | 2nd pass |
+| 03 | `03-ctrl_flow_transform.md` | 3rd pass |
+| 04 | `04-convert_to_ssa.md` | 4th pass |
+| 05 | `05-simplify.md` | 5th pass (also runs as the last pass of the tile pipeline) |
+| 06 | `06-flatten_call_expr.md` | 6th pass |
+| 07 | `07-split_chunked_loops.md` | 7th pass |
+| 08 | `08-interchange_chunk_loops.md` | 8th pass |
+| 09 | `09-outline_hierarchy_scopes.md` | 9th pass |
+| 10 | `10-outline_incore_scopes.md` | 10th pass |
+| 11 | `11-outline_cluster_scopes.md` | 11th pass |
+| 12 | `12-convert_tensor_to_tile_ops.md` | 12th pass |
+| 13 | `13-optimize_orch_tensors.md` | 13th pass |
+| 14 | `14-flatten_tile_nd_to_2d.md` | 14th pass |
+| 15 | `15-infer_tile_memory_space.md` | 15th pass |
+| 16 | `16-resolve_transpose_layout.md` | 16th pass |
+| 17 | `17-resolve_backend_op_layouts.md` | 17th pass |
+| 18 | `18-expand_mixed_kernel.md` | 18th pass |
+| 19 | `19-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
+| 20 | `20-split_vector_kernel.md` | 20th pass |
+| 21 | `21-normalize_return_order.md` | 21st pass |
+| 22 | `22-lower_pipeline_loops.md` | 22nd pass |
+| 23 | `23-canonicalize_io_order.md` | 23rd pass |
+| 24 | `24-init_memref.md` | 24th pass |
+| 25 | `25-memory_reuse.md` | 25th pass |
+| 26 | `26-legalize_pto_buffer_reuse.md` | 26th pass |
+| 27 | `27-allocate_memory_addr.md` | 27th pass |
+| 28 | `28-fuse_create_assemble_to_slice.md` | 28th pass |
+| 29 | `29-derive_call_directions.md` | 29th pass |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

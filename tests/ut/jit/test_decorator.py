@@ -437,6 +437,183 @@ class TestMultiFuncIntegration:
         ir.assert_structural_equal(got, expected_post_pass)
 
 
+class TestInlineFuncIntegration:
+    """End-to-end @pl.jit.inline: dep body is spliced into entry by the IR pass."""
+
+    def test_inline_dep_discovered(self):
+        """@pl.jit.inline functions are picked up by dep discovery."""
+
+        @jit.inline
+        def helper(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return c
+
+        @jit
+        def entry(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            c = helper(a, c)
+            return c
+
+        deps = _discover_deps(entry._func)
+        assert len(deps) == 1
+        assert deps[0]._func_type == "inline"
+
+    def test_inline_compiled_program_drops_dep_function(self):
+        """After compilation, the Inline dep is gone (spliced + removed).
+
+        Inline bodies must include their own ``pl.at`` scope: unlike InCore,
+        Inline doesn't provide an implicit scope. The body is spliced into the
+        caller's lexical context as-is, then ``OutlineIncoreScopes`` extracts
+        the spliced ``pl.at`` block normally.
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def add_inline(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+            M, N = a.shape
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile_a = pl.load(a, [0, 0], [M, N])
+                tile_b = pl.load(b, [0, 0], [M, N])
+                tile_c = pl.add(tile_a, tile_b)
+                pl.store(tile_c, [0, 0], c)
+            return c
+
+        @jit
+        def add_entry(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+            c = add_inline(a, b, c)
+            return c
+
+        a = torch.randn(32, 32)
+        b = torch.randn(32, 32)
+        c = torch.empty(32, 32)
+        # compile_for_test() returns the post-pass IR (after PassManager.Default).
+        # CompiledProgram.program is the *pre-pass* IR, so the cache entry would
+        # still contain "add_inline"; we must inspect the post-pass return value.
+        post_pass = add_entry.compile_for_test(a, b, c)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "add_inline" not in func_names, (
+            f"Inline function should have been spliced and removed, got {func_names}"
+        )
+        assert "add_entry" in func_names
+
+    def test_inline_body_spliced_into_entry(self):
+        """The inlined body's tile ops appear inside the (post-outline) entry.
+
+        Detailed structural equality between JIT-with-inline and hand-written
+        @pl.program is intentionally not asserted here: when the call site is
+        `c = inline(a, b, c)`, the parser SSA-renames the LHS to `c_v1`, and
+        the inline pass's substituted return Var does not match `c_v1` at Var
+        identity — so a redundant `c_v1 = c` survives. A side-effect call
+        (`inline(a, b, c)` — no LHS) avoids the rename but trips the
+        InOutUseDiscipline verifier (must read the post-call return). Both
+        equivalents are valid IRs, just structurally distinct from a fully
+        hand-written equivalent.
+
+        The pass-level tests in tests/ut/ir/transforms/test_inline_functions.py
+        cover detailed structural correctness (Phase 0d).
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def add_inline(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+            M, N = a.shape
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile_a = pl.load(a, [0, 0], [M, N])
+                tile_b = pl.load(b, [0, 0], [M, N])
+                tile_c = pl.add(tile_a, tile_b)
+                pl.store(tile_c, [0, 0], c)
+            return c
+
+        @jit
+        def add_entry(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+            c = add_inline(a, b, c)
+            return c
+
+        a = torch.randn(32, 32)
+        b = torch.randn(32, 32)
+        c = torch.empty(32, 32)
+        post_pass = add_entry.compile_for_test(a, b, c)
+        # After OutlineIncoreScopes: entry is Orchestration, inline body became
+        # an InCore-class function (AIV/AIC/InCore) named *_incore_*.
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "add_inline" not in func_names
+        assert "add_entry" in func_names
+        assert any("incore" in n for n in func_names), (
+            f"Expected an *_incore_* outlined function from the spliced pl.at body, got {func_names}"
+        )
+
+
+class TestOpaqueFuncIntegration:
+    """End-to-end @pl.jit.opaque: dep is emitted as a separate Opaque IR function."""
+
+    def test_opaque_dep_discovered(self):
+        """@pl.jit.opaque functions are picked up by dep discovery."""
+
+        @jit.opaque
+        def helper(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return c
+
+        @jit
+        def entry(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            c = helper(a, c)
+            return c
+
+        deps = _discover_deps(entry._func)
+        assert len(deps) == 1
+        assert deps[0]._func_type == "opaque"
+
+    def test_opaque_structural_equal_to_program(self):
+        """JIT(@opaque + @jit) ≡ hand-written @pl.program with Opaque sub-function."""
+        torch = pytest.importorskip("torch")
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def add_op(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                b: pl.Tensor[[32, 32], pl.FP32],
+                c: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    tile_a = pl.load(a, [0, 0], [32, 32])
+                    tile_b = pl.load(b, [0, 0], [32, 32])
+                    tile_c = pl.add(tile_a, tile_b)
+                    pl.store(tile_c, [0, 0], c)
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def add_entry(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                b: pl.Tensor[[32, 32], pl.FP32],
+                c: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                c = self.add_op(a, b, c)
+                return c
+
+        @jit.opaque
+        def add_op(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+            M, N = a.shape
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile_a = pl.load(a, [0, 0], [M, N])
+                tile_b = pl.load(b, [0, 0], [M, N])
+                tile_c = pl.add(tile_a, tile_b)
+                pl.store(tile_c, [0, 0], c)
+            return c
+
+        @jit
+        def add_entry(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+            c = add_op(a, b, c)
+            return c
+
+        a = torch.randn(32, 32)
+        b = torch.randn(32, 32)
+        c = torch.empty(32, 32)
+        got = add_entry.compile_for_test(a, b, c)
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        expected_post_pass = pm.run_passes(Expected)
+        ir.assert_structural_equal(got, expected_post_pass)
+
+
 class TestRoundTrip:
     """Round-trip: @pl.jit output must be structurally equal to a hand-written @pl.program."""
 

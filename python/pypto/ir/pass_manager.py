@@ -117,6 +117,10 @@ class PassManager:
     def _register_passes(cls):
         """Register all strategy Pass configurations."""
         tensor_prefix_passes: list[PassSpec] = [
+            # Eliminate FunctionType.Inline functions by splicing their bodies at
+            # every call site. Runs FIRST so no downstream pass observes Inline
+            # functions or Calls to them.
+            ("InlineFunctions", lambda: passes.inline_functions()),
             ("UnrollLoops", lambda: passes.unroll_loops()),
             ("CtrlFlowTransform", lambda: passes.ctrl_flow_transform()),
             ("ConvertToSSA", lambda: passes.convert_to_ssa()),

@@ -175,6 +175,16 @@ PropertyVerifierPtr CreateTileOps2DPropertyVerifier();
 PropertyVerifierPtr CreateBreakContinuePropertyVerifier();
 
 /**
+ * @brief Factory function for creating InlineFunctionsEliminated property verifier
+ *
+ * Verifies that no FunctionType::Inline function and no Call expression
+ * resolving to one survives in the program. Should hold after the
+ * InlineFunctions pass runs (i.e. for the entire post-pass-01 pipeline).
+ * @return Shared pointer to InlineFunctionsEliminated PropertyVerifier
+ */
+PropertyVerifierPtr CreateInlineFunctionsEliminatedPropertyVerifier();
+
+/**
  * @brief Factory function for creating TileMemoryInferred property verifier
  *
  * Verifies that all TileType variables in InCore functions have

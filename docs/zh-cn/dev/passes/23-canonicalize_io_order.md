@@ -119,6 +119,6 @@ for i in pl.range(0, 8, 4):
 
 ## 相关
 
-- [`LowerPipelineLoops`](21-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
-- [`MemoryReuse`](24-memory_reuse.md) —— 在本 Pass 之后运行；受益于复制区域中同时活跃的 tile
+- [`LowerPipelineLoops`](22-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
+- [`MemoryReuse`](25-memory_reuse.md) —— 在本 Pass 之后运行；受益于复制区域中同时活跃的 tile
 - RFC #1026 / PR #1029 —— InOut-use 规约 + 依赖分析工具

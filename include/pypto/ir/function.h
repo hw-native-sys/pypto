@@ -46,6 +46,8 @@ namespace ir {
  * - AIV: Vector core kernel (specialized InCore)
  * - Group: Co-scheduled group of AIC + AIV kernels
  * - Spmd: SPMD data-parallel dispatch wrapper
+ * - Inline: Whole-body substitution at every call site by the InlineFunctions
+ *   pass. Eliminated from the program before any other pass runs.
  */
 enum class FunctionType : uint8_t {
   Opaque = 0,         ///< Default: unspecified function type
@@ -54,7 +56,8 @@ enum class FunctionType : uint8_t {
   AIC = 3,            ///< Cube core kernel (specialized InCore)
   AIV = 4,            ///< Vector core kernel (specialized InCore)
   Group = 5,          ///< Co-scheduled group of AIC + AIV kernels
-  Spmd = 6            ///< SPMD data-parallel dispatch
+  Spmd = 6,           ///< SPMD data-parallel dispatch
+  Inline = 7          ///< Whole-body substitution at every call site
 };
 
 /**
@@ -253,6 +256,8 @@ inline std::string FunctionTypeToString(FunctionType type) {
       return "Group";
     case FunctionType::Spmd:
       return "Spmd";
+    case FunctionType::Inline:
+      return "Inline";
   }
   throw pypto::TypeError("Unknown FunctionType");
 }
@@ -307,6 +312,8 @@ inline FunctionType StringToFunctionType(const std::string& str) {
     return FunctionType::Group;
   } else if (str == "Spmd") {
     return FunctionType::Spmd;
+  } else if (str == "Inline") {
+    return FunctionType::Inline;
   } else {
     throw pypto::TypeError("Unknown FunctionType: " + str);
   }

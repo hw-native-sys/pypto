@@ -18,23 +18,29 @@ Public API
             M, N = a.shape
             ...
 
-    # Multi-function: @jit entry + one or more @jit.incore sub-functions
+    # Multi-function: @jit entry + one or more sub-function deps. Three flavours:
     @pl.jit.incore
-    def sub_kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+    def sub_kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):     # FunctionType.InCore
         ...
 
-    @pl.jit.incore(level=pl.Level.AIC)
-    def aic_kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
-        ...
+    @pl.jit.inline
+    def util(a: pl.Tensor, c: pl.Out[pl.Tensor]):           # FunctionType.Inline
+        ...                                                 # spliced at call site
+
+    @pl.jit.opaque
+    def opaque_util(a: pl.Tensor, c: pl.Out[pl.Tensor]):    # FunctionType.Opaque
+        for i in pl.parallel(...):                          # may wrap orchestration
+            with pl.at(level=pl.Level.CORE_GROUP):          # loops + pl.at scopes
+                ...
 
     @pl.jit
     def entry(a: pl.Tensor, c: pl.Out[pl.Tensor]):
-        c = sub_kernel(a, c)   # dep discovered automatically
+        c = sub_kernel(a, c)   # dep discovered automatically (any of incore/inline/opaque)
         return c
 
 JITFunction.__call__ flow
 -------------------------
-1. Lazily discover @pl.jit.incore deps from entry function's globals (once).
+1. Lazily discover deps (incore/inline/opaque) from entry's globals (once).
 2. Classify args: tensor vs scalar.
 3. Extract TensorMeta from torch.Tensor arguments.
 4. Scan entry + dep ASTs for bind_dynamic declarations.
@@ -239,12 +245,53 @@ def _get_pl_dtype_map() -> dict[str, Any]:
 def _extract_create_tensor_metas(func: Any) -> dict[str, TensorMeta]:
     """Scan func's AST for ``var = pl.create_tensor([...], dtype=pl.XXX)`` and return TensorMeta per var.
 
-    Only handles literal integer shapes and pl.XXX dtype attributes. Skips any
-    assignment that cannot be statically resolved.
+    Each shape element may be either a literal int (``42``) or a
+    ``Name`` referencing an int in ``func.__globals__`` — covering the common
+    case of model code that imports shape constants from a config module.
+    Each dtype must be a ``pl.<name>`` attribute. Anything that cannot be
+    statically resolved is skipped silently.
     """
     func_def = _get_func_def(func)
     result: dict[str, TensorMeta] = {}
     dtype_map = _get_pl_dtype_map()
+    func_globals = getattr(func, "__globals__", {})
+
+    def _resolve_int(elt: ast.expr) -> int | None:
+        """Resolve ``elt`` to a Python int. Returns None if not statically resolvable.
+
+        Handles literal ints, ``Name`` refs to module-level int globals, and
+        simple integer arithmetic (``+``, ``-``, ``*``, ``//``, ``%``) over
+        any combination of those — covering shape expressions like
+        ``BATCH * TOTAL_Q_GROUPS * Q_HEAD_PAD``.
+        """
+        if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
+            return elt.value
+        if isinstance(elt, ast.Name):
+            value = func_globals.get(elt.id)
+            if isinstance(value, int) and not isinstance(value, bool):
+                return value
+            return None
+        if isinstance(elt, ast.BinOp):
+            lhs = _resolve_int(elt.left)
+            rhs = _resolve_int(elt.right)
+            if lhs is None or rhs is None:
+                return None
+            op = elt.op
+            if isinstance(op, ast.Add):
+                return lhs + rhs
+            if isinstance(op, ast.Sub):
+                return lhs - rhs
+            if isinstance(op, ast.Mult):
+                return lhs * rhs
+            if isinstance(op, ast.FloorDiv) and rhs != 0:
+                return lhs // rhs
+            if isinstance(op, ast.Mod) and rhs != 0:
+                return lhs % rhs
+            return None
+        if isinstance(elt, ast.UnaryOp) and isinstance(elt.op, ast.USub):
+            v = _resolve_int(elt.operand)
+            return -v if v is not None else None
+        return None
 
     for node in ast.walk(func_def):
         # Look for: var = pl.create_tensor([...], dtype=pl.XXX)
@@ -261,15 +308,22 @@ def _extract_create_tensor_metas(func: Any) -> dict[str, TensorMeta]:
             isinstance(fn, ast.Attribute) and fn.attr == "create_tensor" and isinstance(fn.value, ast.Name)
         ):
             continue
-        # Extract shape: first positional arg must be a list of int constants
+        # Extract shape: first positional arg must be a list whose elements are
+        # literal ints or globals-resolved ints.
         if not call.args or not isinstance(call.args[0], ast.List):
             continue
         shape_node = call.args[0]
-        if not all(isinstance(e, ast.Constant) and isinstance(e.value, int) for e in shape_node.elts):
+        resolved_shape: list[int] = []
+        skip = False
+        for elt in shape_node.elts:
+            v = _resolve_int(elt)
+            if v is None:
+                skip = True
+                break
+            resolved_shape.append(v)
+        if skip:
             continue
-        shape = tuple(
-            e.value for e in shape_node.elts if isinstance(e, ast.Constant) and isinstance(e.value, int)
-        )
+        shape = tuple(resolved_shape)
         # Extract dtype from keyword arg dtype=pl.XXX
         dtype_val = None
         for kw in call.keywords:
@@ -488,9 +542,10 @@ class JITFunction:
 
     Attributes:
         _func: Original Python function.
-        _func_type: 'orchestration' | 'incore'.
+        _func_type: 'orchestration' | 'incore' | 'inline' | 'opaque'.
         _level: pl.Level or None.
-        _deps: Lazily-discovered list of @jit.incore sub-function dependencies.
+        _deps: Lazily-discovered list of sub-function dependencies (any of
+            incore / inline / opaque).
         _deps_discovered: Whether dep discovery has been performed.
         _cache: L1 in-memory cache: CacheKey → CompiledProgram (post-pass ir.Program wrapped).
         _source_hash: Lazily-computed hash of func source + all dep sources.
@@ -926,7 +981,11 @@ def _discover_deps(func: Any) -> list[JITFunction]:
     seen: set[str] = set()
     for name in called_names:
         obj = all_vars.get(name)
-        if isinstance(obj, JITFunction) and obj._func_type == "incore" and name not in seen:
+        if (
+            isinstance(obj, JITFunction)
+            and obj._func_type in ("incore", "inline", "opaque")
+            and name not in seen
+        ):
             deps.append(obj)
             seen.add(name)
     return deps
@@ -937,19 +996,30 @@ def _discover_deps(func: Any) -> list[JITFunction]:
 # ---------------------------------------------------------------------------
 
 
-class _IncoreDecorator:
-    """Handles ``@jit.incore`` and ``@jit.incore(level=...)`` sub-decorator."""
+class _SubFunctionDecorator:
+    """Sub-decorator factory for ``@jit.<kind>`` (incore / inline / opaque).
+
+    Every kind supports both ``@jit.kind`` (bare) and ``@jit.kind()`` (parens).
+    Only ``incore`` honors a ``level=`` kwarg; passing it to other kinds raises.
+
+    See `_JITDecorator` for the kind semantics:
+      - ``incore``  → ``FunctionType.InCore`` (separate IR function, ``level`` selectable).
+      - ``inline``  → ``FunctionType.Inline`` (spliced at every call site by the
+        ``InlineFunctions`` IR pass).
+      - ``opaque``  → ``FunctionType.Opaque`` (separate IR function; may wrap
+        orchestration loops and ``pl.at`` scopes).
+    """
+
+    def __init__(self, func_type: str, *, allow_level: bool) -> None:
+        self._func_type = func_type
+        self._allow_level = allow_level
 
     def __call__(self, func: Any = None, *, level: Any = None) -> Any:
-        """Support both ``@jit.incore`` (no args) and ``@jit.incore(level=...)``."""
+        if level is not None and not self._allow_level:
+            raise TypeError(f"@pl.jit.{self._func_type} does not accept a level= argument")
         if func is None:
-            # Called as @jit.incore(level=pl.Level.AIC)
-            def _dec(f: Any) -> JITFunction:
-                return JITFunction(f, func_type="incore", level=level)
-
-            return _dec
-        # Called as @jit.incore (no parentheses)
-        return JITFunction(func, func_type="incore", level=None)
+            return lambda f: JITFunction(f, func_type=self._func_type, level=level)
+        return JITFunction(func, func_type=self._func_type, level=None)
 
 
 class _JITDecorator:
@@ -960,10 +1030,14 @@ class _JITDecorator:
         @pl.jit                               # entry-point (Orchestration)
         @pl.jit.incore                        # InCore sub-function
         @pl.jit.incore(level=pl.Level.AIC)   # InCore with explicit level
+        @pl.jit.inline                        # Inline sub-function (spliced at call site)
+        @pl.jit.opaque                        # Opaque sub-function (separate IR function)
     """
 
     def __init__(self) -> None:
-        self.incore = _IncoreDecorator()
+        self.incore = _SubFunctionDecorator("incore", allow_level=True)
+        self.inline = _SubFunctionDecorator("inline", allow_level=False)
+        self.opaque = _SubFunctionDecorator("opaque", allow_level=False)
 
     def __call__(self, func: Any) -> JITFunction:
         """Decorate an entry-point JIT function (Orchestration)."""

@@ -27,6 +27,7 @@ TENSOR_ONLY_PASSES = [
 ]
 
 TENSOR_OPTIMIZATION_PASSES = [
+    "InlineFunctions",
     "UnrollLoops",
     "CtrlFlowTransform",
     "ConvertToSSA",
@@ -56,6 +57,7 @@ TENSOR_OPTIMIZATION_PASSES = [
 ]
 
 DEBUG_TILE_OPTIMIZATION_PASSES = [
+    "InlineFunctions",
     "UnrollLoops",
     "CtrlFlowTransform",
     "ConvertToSSA",

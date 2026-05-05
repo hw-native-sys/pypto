@@ -255,7 +255,7 @@ for i in pl.unroll(12, chunk=4):
     body_statements
 ```
 
-**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk=` 循环支持与 `init_values` 一起使用（iter_args 会贯穿生成的外层/内层/余数循环）。`chunk=` 循环只能出现在 `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` 内；在该作用域外，parser 会直接报错。参见 [SplitChunkedLoops Pass](../passes/06-split_chunked_loops.md)。
+**要点:** `chunk=C` 将循环拆分为外层顺序循环和 `C` 次迭代的内层循环。内层循环保留原始类型 (Sequential/Parallel/Unroll)。`chunk=` 循环支持与 `init_values` 一起使用（iter_args 会贯穿生成的外层/内层/余数循环）。`chunk=` 循环只能出现在 `with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):` 内；在该作用域外，parser 会直接报错。参见 [SplitChunkedLoops Pass](../passes/07-split_chunked_loops.md)。
 
 ### While 循环 (带 iter_args 的 SSA 风格)
 

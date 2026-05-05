@@ -59,6 +59,7 @@ struct PassProperties {
 
 | Pass | 所需 | 产生 | 失效 |
 | ---- | ---- | ---- | ---- |
+| InlineFunctions | — | InlineFunctionsEliminated | — |
 | UnrollLoops | TypeChecked | TypeChecked | — |
 | CtrlFlowTransform | TypeChecked | TypeChecked, StructuredCtrlFlow | — |
 | ConvertToSSA | TypeChecked | TypeChecked, SSAForm | NormalizedStmtStructure |
@@ -368,33 +369,33 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 2. `AutoTileMatmulL0`
 3. `InferTileMemorySpace`
 4. `ResolveTransposeLayout`
-5. [`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md)
+5. [`ResolveBackendOpLayouts`](17-resolve_backend_op_layouts.md)
 6. `NormalizeStmtStructure`
 7. `ExpandMixedKernel`
-8. [`InjectGMPipeBuffer`](18-inject_gm_pipe_buffer.md)
-9. [`SplitVectorKernel`](19-split_vector_kernel.md)
+8. [`InjectGMPipeBuffer`](19-inject_gm_pipe_buffer.md)
+9. [`SplitVectorKernel`](20-split_vector_kernel.md)
 10. `NormalizeReturnOrder`
-11. [`LowerPipelineLoops`](21-lower_pipeline_loops.md)
-12. [`CanonicalizeIOOrder`](22-canonicalize_io_order.md)
+11. [`LowerPipelineLoops`](22-lower_pipeline_loops.md)
+12. [`CanonicalizeIOOrder`](23-canonicalize_io_order.md)
 13. `InitMemRef`
 14. `MemoryReuse`
-15. [`LegalizePTOBufferReuse`](25-legalize_pto_buffer_reuse.md)
+15. [`LegalizePTOBufferReuse`](26-legalize_pto_buffer_reuse.md)
 16. `AllocateMemoryAddr`
 17. `FuseCreateAssembleToSlice`
-18. [`DeriveCallDirections`](28-derive_call_directions.md)
+18. [`DeriveCallDirections`](29-derive_call_directions.md)
 19. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用
 `Default`，以保证主维护流水线持续被覆盖。
 
-[`ResolveBackendOpLayouts`](16-resolve_backend_op_layouts.md) 会根据
+[`ResolveBackendOpLayouts`](17-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO
 上要求 `row_major` 的逐元素算子，它会在受约束 use-site 把 `[N, 1]`
 向量操作数改写成 `[1, N]` 的 `tile.reshape`，其 layout 由目标 shape
 自动推导为 `row_major`，并在需要时把结果 reshape 回原始向量 shape。
 
-[`NormalizeReturnOrder`](20-normalize_return_order.md) 对 InCore 函数的 `ReturnStmt::value_` 重新排序，使
+[`NormalizeReturnOrder`](21-normalize_return_order.md) 对 InCore 函数的 `ReturnStmt::value_` 重新排序，使
 `return[i]` 对应声明顺序中第 i 个 `Out`/`InOut` 参数，并同步更新调用点的
 `TupleGetItemExpr` 索引。这样编排代码生成可以直接通过
 `out_indices[i]` 查找输出参数，而不需要追踪 `tile.store`/yield 链。该 pass

@@ -678,6 +678,9 @@ class FunctionType(enum.Enum):
     - AIC: Cube core kernel (specialized InCore)
     - AIV: Vector core kernel (specialized InCore)
     - Group: Co-scheduled group of AIC + AIV kernels
+    - Spmd: SPMD data-parallel dispatch
+    - Inline: Whole-body substitution at every call site by the
+      InlineFunctions pass (eliminated before any other pass runs)
     """
 
     Opaque = ...
@@ -700,6 +703,9 @@ class FunctionType(enum.Enum):
 
     Spmd = ...
     """SPMD data-parallel dispatch."""
+
+    Inline = ...
+    """Whole-body substitution at every call site."""
 
 class Level(enum.Enum):
     """Hierarchy level in the Linqu machine model.

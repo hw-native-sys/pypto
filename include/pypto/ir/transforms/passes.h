@@ -193,6 +193,26 @@ Pass SplitChunkedLoops();
 Pass InterchangeChunkLoops();
 
 /**
+ * @brief Eliminate FunctionType::Inline functions by splicing their bodies
+ *        into every call site.
+ *
+ * Runs as the first pipeline pass. After this pass, no Function with
+ * func_type == Inline remains, and no Call expression resolves to one.
+ * Subsequent passes do not need to handle Inline functions.
+ *
+ * Algorithm:
+ *  - Detects cycles in the Inline → Inline call graph (raises pypto::ValueError).
+ *  - Iteratively splices each top-level `LHS = inline_call(args)` (and
+ *    `EvalStmt(inline_call(args))`) until fixpoint, supporting nested
+ *    Inline-calls-Inline expansion.
+ *  - Alpha-renames inlined locals to avoid collisions across multiple call
+ *    sites and substitutes formal params with actual args.
+ *  - Multi-return inline functions emit `LHS = MakeTuple([rets...])` at the
+ *    call site.
+ */
+Pass InlineFunctions();
+
+/**
  * @brief Create a loop unrolling pass
  *
  * Expands ForStmt nodes with ForKind::Unroll into inlined copies of the loop

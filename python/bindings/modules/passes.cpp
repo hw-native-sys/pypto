@@ -81,7 +81,9 @@ void BindPass(nb::module_& m) {
       .value("CallDirectionsResolved", IRProperty::CallDirectionsResolved,
              "Every non-builtin Call has explicit attrs['arg_directions'] (see Call::GetArgDirections)")
       .value("TileTypeCoherence", IRProperty::TileTypeCoherence,
-             "Every TileType has canonical tile_view (implicit views stored as nullopt)");
+             "Every TileType has canonical tile_view (implicit views stored as nullopt)")
+      .value("InlineFunctionsEliminated", IRProperty::InlineFunctionsEliminated,
+             "No FunctionType::Inline functions or Calls to them remain");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -431,6 +433,12 @@ void BindPass(nb::module_& m) {
       "Create a pass that simplifies expressions and statements using algebraic rules and bound analysis");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
+  passes.def("inline_functions", &pass::InlineFunctions,
+             "Create a pass that eliminates FunctionType::Inline functions by splicing\n"
+             "their bodies at every call site. Runs as the first pipeline pass.\n"
+             "Detects cycles in the Inline → Inline call graph and raises ValueError.\n"
+             "Supports multi-return inline (emits MakeTuple at call site) and nested\n"
+             "Inline-calls-Inline (iterates to fixpoint).");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,
