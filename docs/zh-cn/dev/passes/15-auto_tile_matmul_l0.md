@@ -75,7 +75,7 @@ class After:
     def main(self, ...):
         ...
         c_l0_init = pl.tile.create([128, 128], pl.FP32, target_memory=Acc)
-        for ko in pl.pipeline(0, 256, 64, init_values=(c_l0_init,), stage=2):
+        for ko, (c_iter,) in pl.pipeline(0, 256, 64, init_values=(c_l0_init,), stage=2):
             sa = pl.tile.extract(a_mat, 0, ko, [128, 64], target_memory=Left)
             sb = pl.tile.extract(b_mat, ko, 0, [64, 128], target_memory=Right)
             if ko == 0:
@@ -84,8 +84,8 @@ class After:
             else:
                 c_acc = pl.tile.matmul_acc(c_iter, sa, sb)
                 c_phi = pl.yield_(c_acc)
-            yield c_phi
-        c = c_phi  # ForStmt 的 return_var（Acc 类型）
+            c = pl.yield_(c_phi)
+        # c（即 yield-LHS）持有累加得到的 Acc 类型结果。
         ...
 ```
 
@@ -94,11 +94,12 @@ class After:
 调用方的累加器直接穿过 iter-arg，无需 if-else：
 
 ```python
-for ko in pl.pipeline(0, K, k, init_values=(acc_init,), stage=2):
+for ko, (c_iter,) in pl.pipeline(0, K, k, init_values=(acc_init,), stage=2):
     sa = pl.tile.extract(a_mat, 0, ko, [m, k], target_memory=Left)
     sb = pl.tile.extract(b_mat, ko, 0, [k, n], target_memory=Right)
     c_new = pl.tile.matmul_acc(c_iter, sa, sb)
-    yield c_new
+    c = pl.yield_(c_new)
+# c（即 yield-LHS）持有累加得到的 Acc 类型结果。
 ```
 
 ## Backend 约束
