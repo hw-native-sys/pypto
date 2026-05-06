@@ -92,11 +92,12 @@ std::vector<ExprPtr> MakeRowVectorShape(const TileTypePtr& tile_type) {
   return {std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()), tile_type->shape_[0]};
 }
 
-MemorySpace GetRepairTargetMemory(const TileTypePtr& tile_type, MemorySpace fallback = MemorySpace::Vec) {
-  if (!tile_type) {
-    return fallback;
-  }
-  return tile_type->memory_space_.value_or(fallback);
+MemorySpace GetRepairTargetMemory(const TileTypePtr& tile_type) {
+  CHECK(tile_type) << "ResolveBackendOpLayouts expects synthesized tile.move repairs to use tile inputs";
+  const auto& memory_space = tile_type->memory_space_;
+  CHECK(memory_space.has_value())
+      << "ResolveBackendOpLayouts expects synthesized tile.move repairs to preserve memory space";
+  return *memory_space;
 }
 
 std::vector<std::pair<std::string, std::any>> MakeLayoutMoveKwargs(MemorySpace target_memory,
