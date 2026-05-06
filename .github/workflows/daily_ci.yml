@@ -86,8 +86,8 @@ jobs:
         run: |
           failed=()
           for f in \
-            examples/models/qwen3/14b/qwen3_14b_prefill.py \
-            examples/models/qwen3/32b/qwen3_32b_decode.py; do
+            models/qwen3/14b/qwen3_14b_prefill.py \
+            models/qwen3/32b/qwen3_32b_decode.py; do
             echo "::group::$f"
             if ! python "$f" -p a2a3 -d $DEVICE_ID; then
               failed+=("$f")

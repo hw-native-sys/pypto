@@ -259,7 +259,7 @@ jobs:
           PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
           PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
-        run: python examples/models/qwen3/14b/qwen3_14b_decode.py -p a2a3 -d "$DEVICE_ID"
+        run: python models/qwen3/14b/qwen3_14b_decode.py -p a2a3 -d "$DEVICE_ID"
 
   system-tests-a5sim:
     runs-on: ubuntu-latest
