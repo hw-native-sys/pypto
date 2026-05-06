@@ -1089,8 +1089,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     EmitLaunchSpec(ind, task_var, launch_func);
 
-    std::string submit_expr =
-        "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
+    std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
     EmitTaskSubmitAndBind(submit_expr);
   }
 

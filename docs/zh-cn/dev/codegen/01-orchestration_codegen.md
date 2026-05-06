@@ -184,8 +184,8 @@ const Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 
 | MemorySpace | 核心类型 | 提交函数 |
 | ----------- | -------- | -------- |
-| `Left`、`Right`、`Acc` | CUBE (AIC) | `rt_submit_aic_task` |
-| `Vec`、`Mat`（默认） | VECTOR (AIV) | `rt_submit_aiv_task` |
+| `Left`、`Right`、`Acc`、`Mat` | CUBE (AIC) | `rt_submit_aic_task` |
+| `Vec`（默认） | VECTOR (AIV) | `rt_submit_aiv_task` |
 
 ### 元组处理
 

@@ -40,7 +40,8 @@ struct OrchestrationResult {
  * - aicpu_orchestration_config(TaskArg* orch_args) returns PTO2OrchestrationConfig
  * - aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args)
  * - from_task_arg() for ND external tensors, make_tensor for internal tensors
- * - PTOParam + rt_submit_task for task submission
+ * - PTOParam + rt_submit_*_task for task submission (rt_submit_aic_task /
+ *   rt_submit_aiv_task for single-core kernels; rt_submit_task for mixed kernels)
  * - No manual dependency management (runtime handles automatically)
  *
  * @param program The IR Program (used to resolve callee functions and validate references)

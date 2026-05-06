@@ -184,8 +184,8 @@ The codegen determines whether to submit to AIC (CUBE) or AIV (VECTOR) based on 
 
 | MemorySpace | Core Type | Submit Function |
 | ----------- | --------- | --------------- |
-| `Left`, `Right`, `Acc` | CUBE (AIC) | `rt_submit_aic_task` |
-| `Vec`, `Mat` (default) | VECTOR (AIV) | `rt_submit_aiv_task` |
+| `Left`, `Right`, `Acc`, `Mat` | CUBE (AIC) | `rt_submit_aic_task` |
+| `Vec` (default) | VECTOR (AIV) | `rt_submit_aiv_task` |
 
 ### Tuple Handling
 
