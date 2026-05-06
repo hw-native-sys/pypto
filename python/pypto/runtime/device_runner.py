@@ -469,7 +469,7 @@ def execute_on_device(
     level: int = 2,
     block_dim: int = 24,
     aicpu_thread_num: int = 4,
-    enable_profiling: bool = False,
+    output_prefix: str | None = None,
     runtime_env: dict[str, str] | None = None,
 ) -> None:
     """Execute *chip_callable* on device via Simpler's unified ``Worker``.
@@ -493,7 +493,12 @@ def execute_on_device(
             user-API support.
         block_dim: Block dimension for execution.
         aicpu_thread_num: Number of AICPU threads.
-        enable_profiling: Enable runtime profiling.
+        output_prefix: Directory under which the runtime writes diagnostic
+            artifacts (``l2_perf_records.json`` etc.). Passing a non-empty
+            value also enables L2 swimlane profiling; pass ``None`` to run
+            without profiling. Simpler's ``CallConfig::validate()`` rejects
+            an empty prefix whenever any diagnostic flag is enabled, so the
+            two are kept linked at this entry point.
         runtime_env: Optional per-example environment variable overrides.
             Applied around the device ``run`` call. When an active
             :class:`pypto.runtime.Worker` is reused, ``init()`` has already
@@ -507,12 +512,16 @@ def execute_on_device(
             f"L3 execution is not yet exposed at the pypto user-API layer."
         )
 
+    enable_profiling = bool(output_prefix)
+
     from .worker import Worker as _PyptoWorker  # noqa: PLC0415
 
     cfg = CallConfig()
     cfg.block_dim = block_dim
     cfg.aicpu_thread_num = aicpu_thread_num
     cfg.enable_l2_swimlane = enable_profiling
+    if enable_profiling:
+        cfg.output_prefix = output_prefix
 
     env = runtime_env or {}
     active = _PyptoWorker.current(level=level, platform=platform, device_id=device_id, runtime=runtime_name)

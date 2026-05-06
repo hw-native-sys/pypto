@@ -44,9 +44,6 @@ from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase
 
 from .device_tensor import DeviceTensor
 
-_OUTPUTS_DIR = Path("outputs")
-
-
 def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
     """Load pre-computed golden outputs from ``data/out/{name}.pt`` files.
 
@@ -345,8 +342,11 @@ def _execute_on_device(
         golden_module.compute_golden(golden_with_inputs, params)
 
     # Execute
+    swimlane_dir: Path | None = None
     if runtime_profiling:
-        pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(platform, device_id)
+        swimlane_dir = work_dir / "swimlane_data"
+        swimlane_dir.mkdir(parents=True, exist_ok=True)
+        pre_run_logs, device_log_dir = _snapshot_profiling_state(platform, device_id)
 
     execute_on_device(
         chip_callable,
@@ -354,17 +354,17 @@ def _execute_on_device(
         platform,
         runtime_name,
         device_id,
-        enable_profiling=runtime_profiling,
+        output_prefix=str(swimlane_dir) if swimlane_dir is not None else None,
     )
 
     if runtime_profiling:
+        assert swimlane_dir is not None
         _collect_swimlane_data(
-            work_dir,
+            swimlane_dir,
             platform,
             device_id,
             pre_run_logs,
             device_log_dir,
-            pre_run_perf_files,
         )
 
     # Validate
@@ -381,11 +381,15 @@ def _execute_on_device(
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_profiling_state(platform: str, device_id: int) -> tuple[set[Path], Path | None, set[Path]]:
-    """Snapshot device logs and perf files before a profiled execution.
+def _snapshot_profiling_state(platform: str, device_id: int) -> tuple[set[Path], Path | None]:
+    """Snapshot device logs before a profiled execution.
+
+    The runtime now writes ``l2_perf_records.json`` directly under the
+    ``CallConfig.output_prefix`` we provide (Simpler PR #693), so there is no
+    need to diff a shared ``outputs/`` directory anymore.
 
     Returns:
-        ``(pre_run_logs, device_log_dir, pre_run_perf_files)``
+        ``(pre_run_logs, device_log_dir)``
     """
     pre_run_logs: set[Path] = set()
     device_log_dir: Path | None = None
@@ -394,49 +398,34 @@ def _snapshot_profiling_state(platform: str, device_id: int) -> tuple[set[Path],
         if device_log_dir.exists():
             pre_run_logs = set(device_log_dir.glob("*.log"))
 
-    _OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    pre_run_perf_files = set(_OUTPUTS_DIR.glob("l2_perf_records_*.json"))
-
-    return pre_run_logs, device_log_dir, pre_run_perf_files
+    return pre_run_logs, device_log_dir
 
 
 def _collect_swimlane_data(
-    work_dir: Path,
+    swimlane_dir: Path,
     platform: str,
     device_id: int,
     pre_run_logs: set[Path],
     device_log_dir: Path | None,
-    pre_run_perf_files: set[Path],
 ) -> None:
     """Collect swimlane profiling data after a profiled device execution.
 
-    Moves ``l2_perf_records_*.json`` into ``work_dir/swimlane_data/`` and runs
-    Simpler's swimlane converter via ``python -m simpler_setup.tools.swimlane_converter``
-    (if available) to produce merged JSON.
+    The runtime writes ``l2_perf_records.json`` directly into *swimlane_dir*
+    (the ``CallConfig.output_prefix`` we passed at submit). For onboard runs we
+    also pair it with the matching device log and produce merged swimlane JSON
+    via Simpler's swimlane converter.
     """
-    swimlane_dir = work_dir / "swimlane_data"
-    swimlane_dir.mkdir(parents=True, exist_ok=True)
-
-    new_perf_files = set(_OUTPUTS_DIR.glob("l2_perf_records_*.json")) - pre_run_perf_files
-    perf_file: Path | None = None
-    if new_perf_files:
-        perf_file = max(new_perf_files, key=lambda p: p.stat().st_mtime)
-        dest = swimlane_dir / perf_file.name
-        perf_file.rename(dest)
-        perf_file = dest
-        try:
-            _OUTPUTS_DIR.rmdir()
-        except OSError:
-            pass
+    perf_file = swimlane_dir / "l2_perf_records.json"
+    perf_file_arg: Path | None = perf_file if perf_file.exists() else None
 
     if not platform.endswith("sim"):
         _generate_swimlane(
-            work_dir,
+            swimlane_dir.parent,
             device_id,
             device_log_dir,
             pre_run_logs,
             swimlane_dir,
-            perf_file,
+            perf_file_arg,
         )
 
 
