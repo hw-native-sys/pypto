@@ -31,6 +31,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
@@ -150,104 +151,6 @@ class DefVarCollector : public IRVisitor {
 };
 
 // =============================================================================
-// VarSubstituteMutator — substitutes param Vars with actual-arg Exprs and
-// alpha-renames local Vars per the rename map.
-// =============================================================================
-
-class VarSubstituteMutator : public IRMutator {
- public:
-  VarSubstituteMutator(std::unordered_map<const Var*, ExprPtr> param_subst,
-                       std::unordered_map<const Var*, VarPtr> rename_map)
-      : param_subst_(std::move(param_subst)), rename_map_(std::move(rename_map)) {}
-
-  // Use-site Var refs: substitute params, then rename locals.
-  ExprPtr VisitExpr_(const VarPtr& op) override {
-    auto pit = param_subst_.find(op.get());
-    if (pit != param_subst_.end()) return pit->second;
-    auto rit = rename_map_.find(op.get());
-    if (rit != rename_map_.end()) return rit->second;
-    return op;
-  }
-
-  // Defining var in AssignStmt — rename if in map.
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    auto new_value = VisitExpr(op->value_);
-    auto rit = rename_map_.find(op->var_.get());
-    VarPtr new_var = (rit != rename_map_.end()) ? rit->second : op->var_;
-    if (new_var.get() == op->var_.get() && new_value.get() == op->value_.get()) {
-      return op;
-    }
-    return std::make_shared<const AssignStmt>(new_var, new_value, op->span_, op->leading_comments_);
-  }
-
-  // Defining vars in ForStmt — rename loop_var_ + return_vars_ if in map.
-  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-    auto base = IRMutator::VisitStmt_(op);
-    auto fp = std::dynamic_pointer_cast<const ForStmt>(base);
-    INTERNAL_CHECK(fp) << "Internal error: VisitStmt_(ForStmtPtr) must return a ForStmt";
-
-    auto loop_var_renamed = rename_map_.find(fp->loop_var_.get());
-    auto new_return_vars = RenameVarVec(fp->return_vars_);
-    bool any_renamed = (loop_var_renamed != rename_map_.end()) || new_return_vars.has_value();
-    if (!any_renamed) return fp;
-
-    auto result = MutableCopy(fp);
-    if (loop_var_renamed != rename_map_.end()) result->loop_var_ = loop_var_renamed->second;
-    if (new_return_vars.has_value()) result->return_vars_ = std::move(*new_return_vars);
-    return result;
-  }
-
-  // Defining vars in WhileStmt.return_vars_ — rename each if in map.
-  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
-    auto base = IRMutator::VisitStmt_(op);
-    auto wp = std::dynamic_pointer_cast<const WhileStmt>(base);
-    INTERNAL_CHECK(wp) << "Internal error: VisitStmt_(WhileStmtPtr) must return a WhileStmt";
-
-    auto new_return_vars = RenameVarVec(wp->return_vars_);
-    if (!new_return_vars.has_value()) return wp;
-    auto result = MutableCopy(wp);
-    result->return_vars_ = std::move(*new_return_vars);
-    return result;
-  }
-
-  // Defining vars in IfStmt.return_vars_ — rename each if in map.
-  StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-    auto base = IRMutator::VisitStmt_(op);
-    auto ip = std::dynamic_pointer_cast<const IfStmt>(base);
-    INTERNAL_CHECK(ip) << "Internal error: VisitStmt_(IfStmtPtr) must return an IfStmt";
-
-    auto new_return_vars = RenameVarVec(ip->return_vars_);
-    if (!new_return_vars.has_value()) return ip;
-    auto result = MutableCopy(ip);
-    result->return_vars_ = std::move(*new_return_vars);
-    return result;
-  }
-
- private:
-  // Rebuild a vector of VarPtr with renames applied. Returns nullopt if no
-  // entry needed renaming (so the caller can keep the original instance).
-  std::optional<std::vector<VarPtr>> RenameVarVec(const std::vector<VarPtr>& vars) const {
-    bool any_renamed = false;
-    std::vector<VarPtr> result;
-    result.reserve(vars.size());
-    for (const auto& v : vars) {
-      auto rit = rename_map_.find(v.get());
-      if (rit != rename_map_.end()) {
-        result.push_back(rit->second);
-        any_renamed = true;
-      } else {
-        result.push_back(v);
-      }
-    }
-    if (!any_renamed) return std::nullopt;
-    return result;
-  }
-
-  std::unordered_map<const Var*, ExprPtr> param_subst_;
-  std::unordered_map<const Var*, VarPtr> rename_map_;
-};
-
-// =============================================================================
 // Splice an inline call site
 // =============================================================================
 
@@ -281,12 +184,15 @@ class NestedReturnCounter : public IRVisitor {
 // Splice a call site into a SeqStmts. Returns the splice's statements, in order.
 //
 // For `LHS = inline_call(arg1, ...)`:
-//   1. Reject nested ReturnStmts (only a single trailing return is supported).
-//   2. Build param_subst: callee.params_[i] → args[i]
-//   3. Build rename_map: every local def in callee.body → fresh Var
-//   4. Walk callee.body with both maps applied, accumulating statements,
-//      EXCEPT the trailing ReturnStmt
-//   5. For the ReturnStmt:
+//   1. Build the substitution seed: params → actual args, locally-defined
+//      Vars → fresh `_inlineN` Vars.
+//   2. DeepClone the callee body with that seed. The clone uses the same
+//      substitution at use-sites and def-sites, so a rebinding of a param
+//      (`out = pl.assemble(out, ...)`) collapses to `actual = pl.assemble(
+//      actual, ...)` whenever the actual arg is a Var.
+//   3. Split the cloned body into pre-return statements and the trailing
+//      return value(s); reject any non-trailing return.
+//   4. For the return value(s):
 //        - If lhs is set and return has 1 value: emit `LHS = renamed_ret[0]`
 //        - If lhs is set and return has N values: emit `LHS = MakeTuple(...)`
 //        - If lhs is null (EvalStmt): drop the return
@@ -296,28 +202,41 @@ std::vector<StmtPtr> SpliceInlineCall(const FunctionPtr& callee, const std::vect
       << "Inline call to '" << callee->name_ << "' has " << args.size() << " argument(s) but callee expects "
       << callee->params_.size();
 
-  // 1. Param substitution map
-  std::unordered_map<const Var*, ExprPtr> param_subst;
+  // 1. Build the seed substitution map for DeepClone:
+  //    - Each param Var → its actual-arg Expr. The same substitution is
+  //      consulted at both use-sites and def-sites of the param, so a
+  //      rebinding `out = pl.assemble(out, ...)` where `out` is a param
+  //      becomes `q_out = pl.assemble(q_out, ...)` when the actual arg is
+  //      the Var `q_out` (the natural pre-SSA in-place semantics for
+  //      pl.Out parameters). If the actual arg is not a Var and the param
+  //      is rebound, IRMutator::VisitStmt_(AssignStmtPtr)'s Var-cast check
+  //      fires with a clear span-tagged error.
+  //    - Each locally-defined Var → a fresh Var with a `_inlineN` name so
+  //      multi-call-site expansions of the same callee remain
+  //      distinguishable in IR dumps. DeepClone uses the seeded fresh Var
+  //      verbatim; only Vars NOT in the seed receive an auto-cloned copy
+  //      with their original name_hint as a safety fallback.
+  std::unordered_map<const Var*, ExprPtr> seed;
   for (size_t i = 0; i < callee->params_.size(); ++i) {
-    param_subst[callee->params_[i].get()] = args[i];
+    seed[callee->params_[i].get()] = args[i];
   }
-
-  // 2. Rename map for locally-defined Vars
   DefVarCollector def_collector;
   def_collector.VisitStmt(callee->body_);
-  std::unordered_map<const Var*, VarPtr> rename_map;
   for (const Var* v : def_collector.defs) {
-    // Skip any Var that is also a param (params are substituted, not renamed)
-    if (param_subst.count(v) > 0) continue;
+    if (seed.count(v) > 0) continue;  // param — already seeded with actual arg
     auto fresh = std::make_shared<Var>(FreshName(v->name_hint_), v->GetType(), v->span_);
-    rename_map[v] = fresh;
+    seed[v] = fresh;
   }
 
-  // 3. Apply substitution to body
-  VarSubstituteMutator mutator(param_subst, rename_map);
-  StmtPtr renamed_body = mutator.VisitStmt(callee->body_);
+  // 2. Deep-clone the body with substitutions applied. DeepClone visits
+  //    every DefField Var via the same VisitExpr_(VarPtr) pathway as
+  //    use-sites, so the seed map covers both — no separate def-site map
+  //    is needed. clone_def_vars=true is a safety net: if DefVarCollector
+  //    misses a binding kind, DeepClone still produces a fresh Var rather
+  //    than leaving the callee's original Var leaking into the caller.
+  auto [renamed_body, _unused] = DeepClone(callee->body_, seed, /*clone_def_vars=*/true);
 
-  // 4. Walk renamed_body and separate trailing ReturnStmt from the rest.
+  // 3. Walk renamed_body and separate trailing ReturnStmt from the rest.
   std::vector<StmtPtr> spliced;
   std::vector<ExprPtr> return_values;
   bool has_return = false;
@@ -348,7 +267,7 @@ std::vector<StmtPtr> SpliceInlineCall(const FunctionPtr& callee, const std::vect
   };
   extract_from_stmt(renamed_body);
 
-  // 4a. Reject any ReturnStmt that survived extraction (nested inside an
+  // 3a. Reject any ReturnStmt that survived extraction (nested inside an
   //     If/For/While branch, or non-trailing). Such returns would otherwise
   //     splice straight into the caller and trigger the OUTER function to
   //     return prematurely. The pre-splice total-count alone isn't enough:
@@ -361,7 +280,7 @@ std::vector<StmtPtr> SpliceInlineCall(const FunctionPtr& callee, const std::vect
                                  << "' contains a non-trailing ReturnStmt; only a single trailing return is "
                                     "supported (early-return inside an If/For/While branch is rejected)";
 
-  // 5. Wire up the return value(s) at the call site
+  // 4. Wire up the return value(s) at the call site
   if (lhs) {
     CHECK(has_return) << "Inline function '" << callee->name_
                       << "' is called for its value but has no return statement";

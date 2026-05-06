@@ -387,5 +387,110 @@ class TestInlineFunctionsEliminatedVerifier:
         assert errors == [], f"Verifier should be silent post-pass, got {[d.message for d in errors]}"
 
 
+class TestInlineFunctionsParamRebinding:
+    """Regression coverage for issue #1281.
+
+    An ``@pl.jit.inline`` callee that rebinds one of its ``pl.Out`` parameters
+    (the typical ``out = pl.tensor.assemble(out, ...)`` pattern) used to leave
+    the LHS of the rebinding pointing at the callee's original param Var after
+    splicing. The post-call alias was then synthesised from the substituted
+    use-site and ended up as ``lhs = actual_arg`` instead of ``lhs = rebound``,
+    which downstream codegen lowered to a self-referential ``auto X = X;`` in
+    C++. With substitution carried into def-sites, the rebinding lands in the
+    caller scope as ``actual_arg = pl.tensor.assemble(actual_arg, ...)`` and
+    the post-call alias correctly plumbs the rebound value.
+    """
+
+    def test_single_callsite_pl_out_rebinding(self):
+        """Param rebinding survives through to the caller's scope and the
+        post-call alias is no longer a self-reference."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def proj(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                v: pl.Tensor[[4], pl.FP32] = self.proj(a, ext)
+                return v
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                ext = pl.tensor.assemble(ext, a, [0])  # in-place rebinding of the pl.Out
+                v: pl.Tensor[[4], pl.FP32] = ext  # alias to rebound value, NOT pre-call ext
+                return v
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_multi_callsite_distinct_rebindings(self):
+        """Three call sites of an inline callee that rebinds its pl.Out param
+        each emit an independent ``actual = assemble(actual, ...)`` rebinding
+        of their own caller-side actual arg, never aliasing across sites."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def proj(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                qo: pl.Out[pl.Tensor[[4], pl.FP32]],
+                ko: pl.Out[pl.Tensor[[4], pl.FP32]],
+                vo: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ):
+                q: pl.Tensor[[4], pl.FP32] = self.proj(a, qo)
+                k: pl.Tensor[[4], pl.FP32] = self.proj(a, ko)
+                v: pl.Tensor[[4], pl.FP32] = self.proj(a, vo)
+                return q, k, v
+
+        After = passes.inline_functions()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                qo: pl.Out[pl.Tensor[[4], pl.FP32]],
+                ko: pl.Out[pl.Tensor[[4], pl.FP32]],
+                vo: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ):
+                qo = pl.tensor.assemble(qo, a, [0])
+                q: pl.Tensor[[4], pl.FP32] = qo
+                ko = pl.tensor.assemble(ko, a, [0])
+                k: pl.Tensor[[4], pl.FP32] = ko
+                vo = pl.tensor.assemble(vo, a, [0])
+                v: pl.Tensor[[4], pl.FP32] = vo
+                return q, k, v
+
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
