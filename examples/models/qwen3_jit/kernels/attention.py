@@ -102,4 +102,8 @@ def rope_kv_cache_update(
                     target_type=pl.BF16,
                 )
                 all_q_padded = pl.assemble(all_q_padded, q_pad_zero, [q_pad_row0 + Q_HEAD_BATCH, 0])
+    # All three Out params are rebound via pl.assemble. Returning only k_cache
+    # is intentional: pl.Out parameters share memory with the caller, so the
+    # in-place writes to v_cache and all_q_padded persist across the inline
+    # splice — only one of the three is returned as the SSA-name handle.
     return k_cache

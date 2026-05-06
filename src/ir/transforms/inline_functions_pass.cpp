@@ -111,6 +111,12 @@ void DetectInlineCycles(const std::unordered_map<std::string, FunctionPtr>& inli
 // Collect all defining Vars in a function body (excludes the function's params)
 // =============================================================================
 
+// Collects Vars whose binding sites must be alpha-renamed at each splice.
+//
+// We deliberately omit `iter_args_` of For/While loops: the base IRMutator
+// already mints fresh IterArg instances per visit (see mutator.cpp:581 / 664).
+// Including them here would seed `rename_map_` with entries the base mutator
+// later overwrites/erases, leading to inconsistent def-use after the splice.
 class DefVarCollector : public IRVisitor {
  public:
   std::unordered_set<const Var*> defs;
@@ -122,6 +128,16 @@ class DefVarCollector : public IRVisitor {
 
   void VisitStmt_(const ForStmtPtr& op) override {
     if (op->loop_var_) defs.insert(op->loop_var_.get());
+    for (const auto& v : op->return_vars_) {
+      if (v) defs.insert(v.get());
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    for (const auto& v : op->return_vars_) {
+      if (v) defs.insert(v.get());
+    }
     IRVisitor::VisitStmt_(op);
   }
 
@@ -164,16 +180,33 @@ class VarSubstituteMutator : public IRMutator {
     return std::make_shared<const AssignStmt>(new_var, new_value, op->span_, op->leading_comments_);
   }
 
-  // Defining var in ForStmt — rename loop_var_ if in map; recurse for body and bounds.
+  // Defining vars in ForStmt — rename loop_var_ + return_vars_ if in map.
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     auto base = IRMutator::VisitStmt_(op);
     auto fp = std::dynamic_pointer_cast<const ForStmt>(base);
     INTERNAL_CHECK(fp) << "Internal error: VisitStmt_(ForStmtPtr) must return a ForStmt";
 
-    auto rit = rename_map_.find(fp->loop_var_.get());
-    if (rit == rename_map_.end()) return fp;
+    auto loop_var_renamed = rename_map_.find(fp->loop_var_.get());
+    auto new_return_vars = RenameVarVec(fp->return_vars_);
+    bool any_renamed = (loop_var_renamed != rename_map_.end()) || new_return_vars.has_value();
+    if (!any_renamed) return fp;
+
     auto result = MutableCopy(fp);
-    result->loop_var_ = rit->second;
+    if (loop_var_renamed != rename_map_.end()) result->loop_var_ = loop_var_renamed->second;
+    if (new_return_vars.has_value()) result->return_vars_ = std::move(*new_return_vars);
+    return result;
+  }
+
+  // Defining vars in WhileStmt.return_vars_ — rename each if in map.
+  StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
+    auto base = IRMutator::VisitStmt_(op);
+    auto wp = std::dynamic_pointer_cast<const WhileStmt>(base);
+    INTERNAL_CHECK(wp) << "Internal error: VisitStmt_(WhileStmtPtr) must return a WhileStmt";
+
+    auto new_return_vars = RenameVarVec(wp->return_vars_);
+    if (!new_return_vars.has_value()) return wp;
+    auto result = MutableCopy(wp);
+    result->return_vars_ = std::move(*new_return_vars);
     return result;
   }
 
@@ -183,25 +216,33 @@ class VarSubstituteMutator : public IRMutator {
     auto ip = std::dynamic_pointer_cast<const IfStmt>(base);
     INTERNAL_CHECK(ip) << "Internal error: VisitStmt_(IfStmtPtr) must return an IfStmt";
 
-    bool any_renamed = false;
-    std::vector<VarPtr> new_return_vars;
-    new_return_vars.reserve(ip->return_vars_.size());
-    for (const auto& v : ip->return_vars_) {
-      auto rit = rename_map_.find(v.get());
-      if (rit != rename_map_.end()) {
-        new_return_vars.push_back(rit->second);
-        any_renamed = true;
-      } else {
-        new_return_vars.push_back(v);
-      }
-    }
-    if (!any_renamed) return ip;
+    auto new_return_vars = RenameVarVec(ip->return_vars_);
+    if (!new_return_vars.has_value()) return ip;
     auto result = MutableCopy(ip);
-    result->return_vars_ = std::move(new_return_vars);
+    result->return_vars_ = std::move(*new_return_vars);
     return result;
   }
 
  private:
+  // Rebuild a vector of VarPtr with renames applied. Returns nullopt if no
+  // entry needed renaming (so the caller can keep the original instance).
+  std::optional<std::vector<VarPtr>> RenameVarVec(const std::vector<VarPtr>& vars) const {
+    bool any_renamed = false;
+    std::vector<VarPtr> result;
+    result.reserve(vars.size());
+    for (const auto& v : vars) {
+      auto rit = rename_map_.find(v.get());
+      if (rit != rename_map_.end()) {
+        result.push_back(rit->second);
+        any_renamed = true;
+      } else {
+        result.push_back(v);
+      }
+    }
+    if (!any_renamed) return std::nullopt;
+    return result;
+  }
+
   std::unordered_map<const Var*, ExprPtr> param_subst_;
   std::unordered_map<const Var*, VarPtr> rename_map_;
 };
@@ -223,14 +264,29 @@ std::string FreshName(const std::string& orig) {
   return orig + "_inline" + std::to_string(counter++);
 }
 
+// Counts ReturnStmts anywhere inside a body. Splicing only handles a trailing
+// return at top level; an early return nested inside an If/For/While/Scope
+// body would leak into the caller and trigger the OUTER function to return,
+// silently miscompiling. The pl-DSL doesn't expose nested returns, but
+// hand-built IR could; reject it explicitly.
+class NestedReturnCounter : public IRVisitor {
+ public:
+  int count = 0;
+  void VisitStmt_(const ReturnStmtPtr& op) override {
+    ++count;
+    IRVisitor::VisitStmt_(op);
+  }
+};
+
 // Splice a call site into a SeqStmts. Returns the splice's statements, in order.
 //
 // For `LHS = inline_call(arg1, ...)`:
-//   1. Build param_subst: callee.params_[i] → args[i]
-//   2. Build rename_map: every local def in callee.body → fresh Var
-//   3. Walk callee.body with both maps applied, accumulating statements,
+//   1. Reject nested ReturnStmts (only a single trailing return is supported).
+//   2. Build param_subst: callee.params_[i] → args[i]
+//   3. Build rename_map: every local def in callee.body → fresh Var
+//   4. Walk callee.body with both maps applied, accumulating statements,
 //      EXCEPT the trailing ReturnStmt
-//   4. For the ReturnStmt:
+//   5. For the ReturnStmt:
 //        - If lhs is set and return has 1 value: emit `LHS = renamed_ret[0]`
 //        - If lhs is set and return has N values: emit `LHS = MakeTuple(...)`
 //        - If lhs is null (EvalStmt): drop the return
@@ -239,6 +295,14 @@ std::vector<StmtPtr> SpliceInlineCall(const FunctionPtr& callee, const std::vect
   CHECK(callee->params_.size() == args.size())
       << "Inline call to '" << callee->name_ << "' has " << args.size() << " argument(s) but callee expects "
       << callee->params_.size();
+
+  // 0. Reject nested returns up-front. Splicing only consumes the trailing
+  //    top-level return; any nested ReturnStmt would otherwise survive the
+  //    splice and trigger the outer caller to return prematurely.
+  NestedReturnCounter ret_counter;
+  ret_counter.VisitStmt(callee->body_);
+  CHECK(ret_counter.count <= 1) << "Inline function '" << callee->name_ << "' contains " << ret_counter.count
+                                << " ReturnStmt(s); only a single trailing return is supported";
 
   // 1. Param substitution map
   std::unordered_map<const Var*, ExprPtr> param_subst;
@@ -399,8 +463,11 @@ namespace pass {
  *    Simplify can fold `TupleGetItemExpr(MakeTuple(...), i)` if needed.
  *  - Nested Call to inline (e.g. inside a binary expression) is left alone in
  *    v1; the verifier flags any surviving Calls to Inline functions.
- *  - Inline function with no callers is silently dropped in step (5).
- *  - Inline function as program entry: detected before splicing; raises.
+ *  - Inline function with no callers is silently dropped in step (5) — that
+ *    naturally covers the "Inline function as program entry" case too: with
+ *    no Call sites it just disappears in the cleanup phase.
+ *  - Inline body containing a non-trailing ReturnStmt is rejected at splice
+ *    time with a CHECK (only a single trailing return is supported).
  */
 Pass InlineFunctions() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {

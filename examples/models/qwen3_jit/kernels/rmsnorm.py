@@ -71,12 +71,15 @@ def post_rmsnorm(
 
     See ``input_rmsnorm`` for the per-loop-naming workaround rationale.
     """
+    # ``resid`` is the BF16 residual stream — promote each chunk to FP32 before
+    # the squared-sum + normalize passes (mirrors ``input_rmsnorm``) so the
+    # accumulation doesn't lose precision or overflow.
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="post_rmsnorm"):
         sq_sum = pl.full([1, BATCH], dtype=pl.FP32, value=0.0)
 
         for kb_a in pl.pipeline(HIDDEN // K_CHUNK, stage=2):
             k0_a = kb_a * K_CHUNK
-            resid_chunk_a = resid[:, k0_a : k0_a + K_CHUNK]
+            resid_chunk_a = pl.cast(resid[:, k0_a : k0_a + K_CHUNK], target_type=pl.FP32)
             sq_sum = pl.add(
                 sq_sum,
                 pl.reshape(pl.row_sum(pl.mul(resid_chunk_a, resid_chunk_a)), [1, BATCH]),
@@ -87,7 +90,7 @@ def post_rmsnorm(
 
         for kb_b in pl.pipeline(HIDDEN // K_CHUNK, stage=2):
             k0_b = kb_b * K_CHUNK
-            resid_chunk_b = resid[:, k0_b : k0_b + K_CHUNK]
+            resid_chunk_b = pl.cast(resid[:, k0_b : k0_b + K_CHUNK], target_type=pl.FP32)
             gamma = post_rms_weight[:, k0_b : k0_b + K_CHUNK]
             normed = pl.col_expand_mul(pl.row_expand_mul(resid_chunk_b, inv_rms_col), gamma)
             post_norm_tile = pl.assemble(post_norm_tile, pl.cast(normed, target_type=pl.BF16), [0, k0_b])

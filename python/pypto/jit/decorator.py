@@ -260,9 +260,10 @@ def _extract_create_tensor_metas(func: Any) -> dict[str, TensorMeta]:
         """Resolve ``elt`` to a Python int. Returns None if not statically resolvable.
 
         Handles literal ints, ``Name`` refs to module-level int globals, and
-        simple integer arithmetic (``+``, ``-``, ``*``, ``//``, ``%``) over
-        any combination of those — covering shape expressions like
-        ``BATCH * TOTAL_Q_GROUPS * Q_HEAD_PAD``.
+        simple integer arithmetic (``+``, ``-``, ``*``, ``//``, ``%``, ``**``)
+        over any combination of those — covering shape expressions like
+        ``BATCH * TOTAL_Q_GROUPS * Q_HEAD_PAD`` and ``2 ** N``. Also accepts
+        leading unary ``+`` / ``-``.
         """
         if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
             return elt.value
@@ -287,10 +288,19 @@ def _extract_create_tensor_metas(func: Any) -> dict[str, TensorMeta]:
                 return lhs // rhs
             if isinstance(op, ast.Mod) and rhs != 0:
                 return lhs % rhs
+            # Pow: only int exponents to keep the result an int.
+            if isinstance(op, ast.Pow) and rhs >= 0:
+                return lhs**rhs
             return None
-        if isinstance(elt, ast.UnaryOp) and isinstance(elt.op, ast.USub):
+        if isinstance(elt, ast.UnaryOp):
             v = _resolve_int(elt.operand)
-            return -v if v is not None else None
+            if v is None:
+                return None
+            if isinstance(elt.op, ast.USub):
+                return -v
+            if isinstance(elt.op, ast.UAdd):
+                return v
+            return None
         return None
 
     for node in ast.walk(func_def):
