@@ -2664,5 +2664,129 @@ class TestArgDirectionsCodegen:
         )
 
 
+SELF_ALIAS_RE = re.compile(r"\bauto\s+(\w+)\s*=\s*\1\s*;")
+
+
+class TestNoOpAliasSkip:
+    """Regression coverage for issue #1281 sub-problem 2.
+
+    When VarLineageCollector collapses several Vars onto the same param-rooted
+    emit name (because they all alias the same buffer), a chained Var-RHS
+    AssignStmt like ``u = t`` reaches the catch-all emit branch with both LHS
+    and RHS resolving to the same C++ identifier. Pre-fix, the codegen emitted
+    ``auto X = X;`` literally, which gcc rejects with
+    ``use of 'X' before deduction of 'auto'``.
+
+    The trigger is: an Orchestration entry that
+
+      1. Calls a kernel with an Out/InOut param,
+      2. Passes the entry's own pl.Out param as the actual arg, and
+      3. Binds the call result to one local AND aliases it to a second local
+         before returning.
+
+    Forms A and B below are control cases that already worked; form C is the
+    one that used to emit the self-alias.
+    """
+
+    def test_form_a_direct_return_no_alias(self):
+        """Control: `return self.kern(...)` — single return path, never tripped the bug."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class FormA:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def entry(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                q_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                return self.kern(x, q_out)
+
+        code = _generate_orch_code(FormA)
+        assert not SELF_ALIAS_RE.search(code), f"unexpected `auto X = X;` in form A. Code:\n{code}"
+
+    def test_form_b_single_bind_no_alias(self):
+        """Control: `t = self.kern(...); return t` — single AssignStmt, handled by
+        GenerateSingleReturnAlias's existing ``alias_name != out_arg`` guard."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class FormB:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def entry(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                q_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tensor[[16, 16], pl.FP32] = self.kern(x, q_out)
+                return t
+
+        code = _generate_orch_code(FormB)
+        assert not SELF_ALIAS_RE.search(code), f"unexpected `auto X = X;` in form B. Code:\n{code}"
+
+    def test_form_c_chained_alias_drops_no_op(self):
+        """`t = self.kern(...); u = t; return u` — the bug trigger.
+
+        Pre-fix: emits `auto q_out = q_out;` for the `u = t` AssignStmt because
+        VarLineageCollector collapses both `t` and `u` onto the entry's `q_out`
+        param emit name. Post-fix: the catch-all Var-RHS branch detects
+        LHS-name == RHS-name and drops the AssignStmt entirely.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class FormC:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+                ret: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def entry(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                q_out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tensor[[16, 16], pl.FP32] = self.kern(x, q_out)
+                u: pl.Tensor[[16, 16], pl.FP32] = t
+                return u
+
+        code = _generate_orch_code(FormC)
+        assert not SELF_ALIAS_RE.search(code), (
+            f"`auto X = X;` regression — issue #1281 sub-problem 2 is back. Code:\n{code}"
+        )
+        # Sanity: the task submission must still be present; the fix only
+        # drops the no-op alias, not the actual kernel call.
+        assert "pto2_rt_submit_aiv_task" in code, f"task submission missing from form C output. Code:\n{code}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

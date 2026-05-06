@@ -337,6 +337,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // No-op: tuple elements handled via tuple_var_to_elements_
     } else {
       std::string value_expr = GenerateExprString(assign->value_);
+      // Drop a no-op `X = X;` that arises when VarLineageCollector has
+      // collapsed both LHS and RHS onto the same param-rooted emit name
+      // (both Vars alias the same buffer). Without this guard the catch-all
+      // emit path produces `auto X = X;`, which gcc rejects with
+      // "use of 'X' before deduction of 'auto'".
+      //
+      // FIXME(#1281): this is a codegen-layer band-aid. The cleaner home is
+      // an IR-level copy-propagation pass that drops lineage-redundant
+      // Var-RHS AssignStmts so downstream analyses don't have to reason
+      // about no-op aliases at all (today's Simplify only does scalar
+      // constant propagation, not tensor-Var copy prop). Once such a pass
+      // exists, this guard can go.
+      if (AsVarLike(assign->value_) && value_expr == var_name) {
+        return;
+      }
       code_ << Indent() << GetCppType(assign->var_->GetType()) << " " << var_name << " = " << value_expr
             << ";\n";
     }
