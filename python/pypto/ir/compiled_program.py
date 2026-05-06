@@ -37,11 +37,14 @@ from pypto.pypto_core.ir import (
     ScalarType,
     ShapedType,
 )
+from pypto.runtime.device_tensor import DeviceTensor
 
 # Type alias for arguments accepted by CompiledProgram.__call__().
-# Tensor params expect torch.Tensor; scalar params accept Python primitives
-# or ctypes scalars (which are coerced to the correct ctypes type internally).
-CallArg = torch.Tensor | int | float | bool | ctypes._SimpleCData
+# Tensor params accept ``torch.Tensor`` (host) or :class:`DeviceTensor`
+# (worker-resident — skips H2D/D2H, see ``pypto.runtime.DeviceTensor``).
+# Scalar params accept Python primitives or ctypes scalars (which are
+# coerced to the correct ctypes type internally).
+CallArg = torch.Tensor | DeviceTensor | int | float | bool | ctypes._SimpleCData
 
 # IR DataType -> torch.dtype mapping.
 # Keyed by string because nanobind DataType instances are not singletons,
@@ -288,7 +291,7 @@ class CompiledProgram:
 
     # --- Callable API ---------------------------------------------------------
 
-    def __call__(
+    def __call__(  # noqa: PLR0912 — dispatch logic with several arg-shape branches
         self,
         *args: CallArg,
         config: Any = None,
@@ -338,7 +341,7 @@ class CompiledProgram:
             )
 
         # Coerce args: wrap Python scalars into ctypes, validate tensor vs scalar
-        coerced: list[torch.Tensor | ctypes._SimpleCData] = []
+        coerced: list[torch.Tensor | DeviceTensor | ctypes._SimpleCData] = []
         for info, arg in zip(param_infos, all_args, strict=True):
             if info.shape is None:
                 # Scalar parameter
@@ -358,9 +361,20 @@ class CompiledProgram:
                         raise TypeError(f"Unsupported scalar dtype {info.dtype} for parameter {info.name!r}")
                     coerced.append(ctype(arg))
             else:
-                # Tensor parameter
-                if not isinstance(arg, torch.Tensor):
-                    raise TypeError(f"Parameter {info.name!r} is a tensor; got {type(arg).__name__}")
+                # Tensor parameter — accept torch.Tensor (host) or DeviceTensor (worker-resident)
+                if not isinstance(arg, (torch.Tensor, DeviceTensor)):
+                    raise TypeError(
+                        f"Parameter {info.name!r} is a tensor; got {type(arg).__name__}. "
+                        f"Pass a torch.Tensor (host) or DeviceTensor (worker-resident)."
+                    )
+                # Early shape/dtype validation for DeviceTensor.  ``torch.Tensor`` already
+                # carries its shape/dtype natively and downstream codegen has its own
+                # checks; ``DeviceTensor`` is opaque, so a mismatch would only surface
+                # deep inside the runtime with a far less actionable error.  Skip the
+                # check on dynamic dims (any ``-1`` in info.shape) since the IR has not
+                # committed to a concrete shape there.
+                if isinstance(arg, DeviceTensor):
+                    self._validate_device_tensor(arg, info)
                 coerced.append(arg)
 
         from pypto.runtime.runner import RunConfig, execute_compiled  # noqa: PLC0415
@@ -384,6 +398,30 @@ class CompiledProgram:
         outputs = [coerced[i] for i in output_indices]
         assert all(isinstance(o, torch.Tensor) for o in outputs)
         return outputs[0] if len(outputs) == 1 else tuple(outputs)  # type: ignore[return-value]
+
+    @staticmethod
+    def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
+        """Check a ``DeviceTensor`` arg against IR parameter metadata.
+
+        Raises:
+            TypeError: when shape or dtype disagrees with ``info``.
+
+        Static IR shapes are compared exactly; dynamic dims (any ``-1`` in
+        ``info.shape``) are skipped.  Dtypes that the runtime can't map to
+        torch are also skipped.
+        """
+        if info.shape is not None and all(d >= 0 for d in info.shape):
+            expected_shape = tuple(info.shape)
+            if expected_shape != arg.shape:
+                raise TypeError(
+                    f"Parameter {info.name!r} expects shape {expected_shape}; "
+                    f"got DeviceTensor shape {arg.shape}"
+                )
+        expected_dtype = _to_torch_dtype(info.dtype)
+        if expected_dtype is not None and arg.dtype != expected_dtype:
+            raise TypeError(
+                f"Parameter {info.name!r} expects dtype {expected_dtype}; got DeviceTensor dtype {arg.dtype}"
+            )
 
     @staticmethod
     def _build_full_args(

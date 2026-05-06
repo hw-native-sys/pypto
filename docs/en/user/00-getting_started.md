@@ -213,6 +213,39 @@ print(VectorAddProgram.as_python())
 print(vector_add.as_python(concise=True))
 ```
 
+## Reusing weights on the worker (DeviceTensor)
+
+When the same large tensor is consumed by many kernel invocations — e.g. a
+weight matrix used across batches of a forward pass — uploading it on every
+call wastes bandwidth. `Worker.alloc_tensor` allocates persistent device
+memory and returns a `DeviceTensor` handle that `CompiledProgram` accepts in
+place of a `torch.Tensor`. The runtime treats the buffer as already resident
+and skips both H2D and D2H copies for that argument.
+
+```python
+import torch
+from pypto import ir
+from pypto.runtime import Worker, RunConfig
+
+compiled = ir.compile(MyKernel)
+
+with Worker(config=RunConfig(platform="a2a3sim")) as w:
+    weight = w.alloc_tensor((1024, 4096), torch.float16, init=host_weight)
+    for batch in batches:
+        out = torch.empty(batch.shape[0], 4096, dtype=torch.float16)
+        compiled(batch, weight, out)
+    w.free_tensor(weight)
+```
+
+### Caveats
+
+- A `DeviceTensor` is never copied back to the host. If a kernel writes to
+  one, call `Worker.copy_from(host_ptr, t.data_ptr, t.nbytes)` to read the
+  result.
+- Free the handle with `Worker.free_tensor` before the Worker is closed,
+  otherwise the memory leaks for the lifetime of the Worker.
+- Only the Worker that allocated the buffer can use it.
+
 ## What's Next
 
 - **[Language Guide](01-language_guide.md)** — complete reference for types, operations, control flow, memory, and compilation

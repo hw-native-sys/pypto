@@ -24,6 +24,7 @@ Example::
     compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
+from .device_tensor import DeviceTensor
 from .runner import RunConfig, RunResult, compile_program, execute_compiled, run
 from .tensor_spec import ScalarSpec, TensorSpec
 from .worker import Worker
@@ -32,6 +33,7 @@ __all__ = [
     "run",
     "compile_program",
     "execute_compiled",
+    "DeviceTensor",
     "RunConfig",
     "RunResult",
     "ScalarSpec",

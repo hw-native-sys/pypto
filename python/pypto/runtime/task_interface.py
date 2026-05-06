@@ -18,18 +18,26 @@ from simpler.task_interface import (  # pyright: ignore[reportMissingImports]
     CallConfig,
     ChipCallable,
     ChipStorageTaskArgs,
+    ContinuousTensor,
     CoreCallable,
+    DataType,
     scalar_to_uint64,
 )
 from simpler.worker import Worker  # pyright: ignore[reportMissingImports]
-from simpler_setup.torch_interop import make_tensor_arg  # pyright: ignore[reportMissingImports]
+from simpler_setup.torch_interop import (  # pyright: ignore[reportMissingImports]
+    make_tensor_arg,
+    torch_dtype_to_datatype,
+)
 
 __all__ = [
     "CallConfig",
     "ChipCallable",
     "ChipStorageTaskArgs",
+    "ContinuousTensor",
     "CoreCallable",
+    "DataType",
     "Worker",
     "make_tensor_arg",
     "scalar_to_uint64",
+    "torch_dtype_to_datatype",
 ]

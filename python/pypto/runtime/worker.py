@@ -27,8 +27,12 @@ Example::
 from __future__ import annotations
 
 import contextvars
+from collections.abc import Sequence
 from typing import Any
 
+import torch
+
+from .device_tensor import DeviceTensor
 from .runner import RunConfig
 
 # ``simpler`` is loaded lazily on first ``Worker(...)`` instantiation, matching
@@ -139,6 +143,134 @@ class Worker:
             return
         self._impl.close()
         self._initialized = False
+
+    # ------------------------------------------------------------------
+    # Device memory primitives (forwarded to the underlying chip worker)
+    #
+    # All methods require an active init().  ``worker_id`` is kept as a
+    # keyword for forward compatibility with L3, even though pypto's Worker
+    # currently only supports level=2 with worker_id=0.
+    # ------------------------------------------------------------------
+
+    def _require_initialized(self, op: str) -> None:
+        if not self._initialized:
+            raise RuntimeError(
+                f"Worker.{op}() requires an initialized Worker. "
+                f"Use `with worker:` or call `worker.init()` first."
+            )
+
+    def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
+        """Allocate ``nbytes`` of device memory; returns an opaque pointer.
+
+        The returned pointer lives in *worker_id*'s address space.  Pair every
+        ``malloc()`` with a matching :meth:`free` before this Worker is
+        closed, otherwise the device memory is leaked.
+        """
+        self._require_initialized("malloc")
+        if not isinstance(nbytes, int) or nbytes <= 0:
+            raise ValueError(f"nbytes must be a positive int, got {nbytes!r}")
+        return self._impl.malloc(nbytes, worker_id)
+
+    def free(self, ptr: int, *, worker_id: int = 0) -> None:
+        """Release a pointer previously returned by :meth:`malloc`."""
+        self._require_initialized("free")
+        self._impl.free(ptr, worker_id)
+
+    def copy_to(
+        self,
+        dst_dev_ptr: int,
+        src_host_ptr: int,
+        nbytes: int,
+        *,
+        worker_id: int = 0,
+    ) -> None:
+        """H2D copy: ``nbytes`` bytes from host *src_host_ptr* to device *dst_dev_ptr*.
+
+        *src_host_ptr* is typically obtained from ``host_tensor.data_ptr()``;
+        the caller is responsible for keeping the host tensor alive until
+        this call returns.
+        """
+        self._require_initialized("copy_to")
+        self._impl.copy_to(dst_dev_ptr, src_host_ptr, nbytes, worker_id)
+
+    def copy_from(
+        self,
+        dst_host_ptr: int,
+        src_dev_ptr: int,
+        nbytes: int,
+        *,
+        worker_id: int = 0,
+    ) -> None:
+        """D2H copy: ``nbytes`` bytes from device *src_dev_ptr* back to host *dst_host_ptr*."""
+        self._require_initialized("copy_from")
+        self._impl.copy_from(dst_host_ptr, src_dev_ptr, nbytes, worker_id)
+
+    # ------------------------------------------------------------------
+    # DeviceTensor convenience helpers
+    # ------------------------------------------------------------------
+
+    def alloc_tensor(
+        self,
+        shape: Sequence[int],
+        dtype: torch.dtype,
+        *,
+        init: torch.Tensor | None = None,
+        worker_id: int = 0,
+    ) -> DeviceTensor:
+        """Allocate a device buffer and (optionally) upload host data.
+
+        Convenience wrapper around :meth:`malloc` + :meth:`copy_to`.  When
+        *init* is provided, its dtype and shape must match exactly; the
+        tensor is moved to CPU and made contiguous before upload.  If any
+        step after :meth:`malloc` raises (validation, copy, …), the
+        allocation is rolled back via :meth:`free` before the exception
+        propagates so callers never observe a leaked pointer.
+
+        Returns:
+            A :class:`DeviceTensor` referencing the allocated buffer.  Free
+            it via :meth:`free_tensor` (or :meth:`free` with the underlying
+            ``data_ptr``) before this Worker is closed.
+        """
+        # DeviceTensor only carries (data_ptr, shape, dtype) — no worker_id.
+        # Until the handle encodes worker scope, restrict the convenience
+        # helpers to the default worker so ``free_tensor`` cannot silently
+        # free a different worker's pointer.
+        if worker_id != 0:
+            raise ValueError(
+                "Worker.alloc_tensor currently only supports worker_id=0. "
+                "Use malloc/copy_to directly if you need a different worker."
+            )
+        shape_t = tuple(int(d) for d in shape)
+        if any(d < 0 for d in shape_t):
+            raise ValueError(f"shape must contain only non-negative dimensions, got {shape_t}")
+        n_elems = 1
+        for d in shape_t:
+            n_elems *= d
+        elem = torch.tensor([], dtype=dtype).element_size()
+        nbytes = n_elems * elem
+        ptr = self.malloc(nbytes, worker_id=worker_id)
+        try:
+            if init is not None:
+                if init.dtype != dtype or tuple(init.shape) != shape_t:
+                    raise ValueError(
+                        f"init must have shape={shape_t} dtype={dtype}, "
+                        f"got shape={tuple(init.shape)} dtype={init.dtype}"
+                    )
+                host = init.contiguous().cpu()
+                self.copy_to(ptr, host.data_ptr(), nbytes, worker_id=worker_id)
+            return DeviceTensor(ptr, shape_t, dtype)
+        except Exception:
+            self.free(ptr, worker_id=worker_id)
+            raise
+
+    def free_tensor(self, t: DeviceTensor, *, worker_id: int = 0) -> None:
+        """Release a buffer previously returned by :meth:`alloc_tensor`."""
+        if worker_id != 0:
+            raise ValueError(
+                "Worker.free_tensor currently only supports worker_id=0. "
+                "Use free directly if you need a different worker."
+            )
+        self.free(t.data_ptr, worker_id=worker_id)
 
     # ------------------------------------------------------------------
     # Binding accessors

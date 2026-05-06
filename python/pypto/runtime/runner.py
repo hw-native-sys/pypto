@@ -42,6 +42,8 @@ from pypto.ir.pass_manager import OptimizationStrategy
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase
 
+from .device_tensor import DeviceTensor
+
 _OUTPUTS_DIR = Path("outputs")
 
 
@@ -596,7 +598,7 @@ def _add_headers_to_file(cpp_file: Path) -> None:
 
 def execute_compiled(
     work_dir: str | Path,
-    args: list[torch.Tensor | _SimpleCData],
+    args: list[torch.Tensor | DeviceTensor | _SimpleCData],
     *,
     platform: str,
     device_id: int,
@@ -608,14 +610,18 @@ def execute_compiled(
 
     Reuses :func:`device_runner.compile_and_assemble` for binary compilation
     (with caching and parallel kernel compilation) and
-    :func:`device_runner.execute_on_device` for device dispatch.  Output
-    tensors in *args* are modified in-place with device results.
+    :func:`device_runner.execute_on_device` for device dispatch.  Host
+    ``torch.Tensor`` outputs in *args* are modified in-place with device
+    results; :class:`DeviceTensor` arguments are passed through to the
+    runtime as ``child_memory=True`` (no H2D upload, no D2H readback).
 
     Args:
         work_dir: Root output directory from :func:`ir.compile`, containing
             ``kernels/``, ``orchestration/``, and ``kernel_config.py``.
-        args: Ordered list of ``torch.Tensor`` or ``ctypes._SimpleCData``
-            arguments matching the orchestration function's parameter order.
+        args: Ordered list of ``torch.Tensor`` (host),
+            :class:`pypto.runtime.DeviceTensor` (worker-resident), or
+            ``ctypes._SimpleCData`` scalar arguments matching the
+            orchestration function's parameter order.
         platform: Target execution platform.
         device_id: Hardware device index.
         pto_isa_commit: Optional git commit to pin pto-isa clone.
@@ -636,6 +642,10 @@ def execute_compiled(
         make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
         scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
     )
+    from .task_interface import (  # noqa: PLC0415
+        ContinuousTensor,  # pyright: ignore[reportAttributeAccessIssue]
+        torch_dtype_to_datatype,  # pyright: ignore[reportAttributeAccessIssue]
+    )
 
     chip_callable, runtime_name = compile_and_assemble(work_dir, platform, pto_isa_commit)
 
@@ -654,11 +664,25 @@ def execute_compiled(
                     f"Call .cpu() before passing to execute_compiled()."
                 )
             orch_args.add_tensor(make_tensor_arg(arg))
+        elif isinstance(arg, DeviceTensor):
+            try:
+                dt_enum = torch_dtype_to_datatype(arg.dtype)
+            except KeyError as e:
+                raise ValueError(f"Unsupported DeviceTensor dtype at position {i}: {arg.dtype}") from e
+            orch_args.add_tensor(
+                ContinuousTensor.make(
+                    data=arg.data_ptr,
+                    shapes=arg.shape,
+                    dtype=dt_enum,
+                    child_memory=True,
+                )
+            )
         elif isinstance(arg, _SimpleCData):
             orch_args.add_scalar(scalar_to_uint64(arg))
         else:
             raise TypeError(
-                f"Argument at position {i} must be torch.Tensor or ctypes scalar, got {type(arg).__name__}"
+                f"Argument at position {i} must be torch.Tensor, DeviceTensor or "
+                f"ctypes scalar, got {type(arg).__name__}"
             )
 
     # Snapshot profiling state before execution

@@ -17,6 +17,7 @@ import pytest
 import torch
 from pypto import DataType, ir
 from pypto.ir.compiled_program import CompiledProgram, _extract_param_infos
+from pypto.runtime import DeviceTensor
 
 
 def _make_program_with_orchestration(*, has_return: bool = False) -> ir.Program:
@@ -404,6 +405,74 @@ class TestCompiledProgramScalarCall:
         assert coerced_args[1].value == 7
         # Output should be returned
         assert isinstance(result, torch.Tensor)
+
+
+class TestCompiledProgramDeviceTensor:
+    """Verify __call__ accepts DeviceTensor in tensor parameter slots."""
+
+    def test_device_tensor_in_input_slot(self, tmp_path):
+        """A DeviceTensor passed for an In param is forwarded to execute_compiled."""
+        prog = _make_program_with_orchestration()  # a (In), b (In), c (Out)
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = torch.randn(128, 128)
+        b = DeviceTensor(0xB0000, (128, 128), torch.float32)
+        c = torch.zeros(128, 128)
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            cp(a, b, c)
+
+        coerced_args = mock_exec.call_args.args[1]
+        assert isinstance(coerced_args[0], torch.Tensor)
+        assert coerced_args[1] is b  # forwarded as-is
+        assert isinstance(coerced_args[2], torch.Tensor)
+
+    def test_all_device_tensors(self, tmp_path):
+        """Every tensor slot can be a DeviceTensor."""
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = DeviceTensor(0x1000, (128, 128), torch.float32)
+        b = DeviceTensor(0x2000, (128, 128), torch.float32)
+        c = DeviceTensor(0x3000, (128, 128), torch.float32)
+
+        with patch("pypto.runtime.runner.execute_compiled") as mock_exec:
+            cp(a, b, c)
+
+        coerced_args = mock_exec.call_args.args[1]
+        assert coerced_args == [a, b, c]
+
+    def test_unsupported_type_for_tensor_param(self, tmp_path):
+        """Non-tensor / non-DeviceTensor in a tensor slot raises TypeError."""
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        with pytest.raises(TypeError, match="DeviceTensor"):
+            cp("not a tensor", torch.zeros(128, 128), torch.zeros(128, 128))  # type: ignore[arg-type]
+
+    def test_device_tensor_shape_mismatch_rejected_early(self, tmp_path):
+        """DeviceTensor with wrong shape vs IR metadata fails before dispatch."""
+        prog = _make_program_with_orchestration()  # all params are [128, 128]
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = torch.zeros(128, 128)
+        bad_b = DeviceTensor(0xB0000, (64, 128), torch.float32)  # wrong shape
+        c = torch.zeros(128, 128)
+
+        with pytest.raises(TypeError, match=r"expects shape \(128, 128\)"):
+            cp(a, bad_b, c)
+
+    def test_device_tensor_dtype_mismatch_rejected_early(self, tmp_path):
+        """DeviceTensor with wrong dtype vs IR metadata fails before dispatch."""
+        prog = _make_program_with_orchestration()  # all params are FP32
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        a = torch.zeros(128, 128)
+        bad_b = DeviceTensor(0xB0000, (128, 128), torch.float16)  # wrong dtype
+        c = torch.zeros(128, 128)
+
+        with pytest.raises(TypeError, match="expects dtype"):
+            cp(a, bad_b, c)
 
 
 if __name__ == "__main__":

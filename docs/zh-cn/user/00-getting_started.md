@@ -212,6 +212,36 @@ print(VectorAddProgram.as_python())
 print(vector_add.as_python(concise=True))
 ```
 
+## 在 worker 上复用权重（DeviceTensor）
+
+当同一个大张量被多次内核调用复用 —— 例如前向计算每个 batch 都要用到的权重矩阵 ——
+每次都重新上传会浪费带宽。`Worker.alloc_tensor` 在 device 上分配一块常驻内存，并返回
+一个 `DeviceTensor` 句柄；`CompiledProgram` 接受它替代 `torch.Tensor` 入参。runtime
+把这块 buffer 视为已经驻留在 device 上，对该入参跳过 H2D 与 D2H 拷贝。
+
+```python
+import torch
+from pypto import ir
+from pypto.runtime import Worker, RunConfig
+
+compiled = ir.compile(MyKernel)
+
+with Worker(config=RunConfig(platform="a2a3sim")) as w:
+    weight = w.alloc_tensor((1024, 4096), torch.float16, init=host_weight)
+    for batch in batches:
+        out = torch.empty(batch.shape[0], 4096, dtype=torch.float16)
+        compiled(batch, weight, out)
+    w.free_tensor(weight)
+```
+
+### 注意事项
+
+- `DeviceTensor` 永远不会被拷回 host。如果内核写入了它，需要显式调用
+  `Worker.copy_from(host_ptr, t.data_ptr, t.nbytes)` 读回结果。
+- 必须在 Worker 关闭之前用 `Worker.free_tensor` 释放句柄，否则该内存会泄漏到
+  Worker 生命周期结束。
+- 只有分配它的那个 Worker 可以使用该 buffer。
+
 ## 下一步
 
 - **[语言指南](01-language_guide.md)** —— 类型、操作、控制流、内存和编译的完整参考
