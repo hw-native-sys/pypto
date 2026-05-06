@@ -22,8 +22,10 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
+#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
@@ -66,6 +68,168 @@ const Var* ResolveAnyRoot(const ExprPtr& arg,
   auto it = buffer_roots.find(var.get());
   if (it == buffer_roots.end()) return nullptr;
   return it->second;
+}
+
+/// Return true if `expr` transitively references any Var in `vars`.
+/// Recurses into BinaryExpr, UnaryExpr, TupleGetItemExpr, Call args, and MakeTuple.
+bool ExprReferencesAnyOf(const ExprPtr& expr, const std::unordered_set<const Var*>& vars) {
+  if (!expr) return false;
+  if (auto var = AsVarLike(expr)) return vars.count(var.get()) > 0;
+  if (auto bin = As<BinaryExpr>(expr)) {
+    return ExprReferencesAnyOf(bin->left_, vars) || ExprReferencesAnyOf(bin->right_, vars);
+  }
+  if (auto un = As<UnaryExpr>(expr)) {
+    return ExprReferencesAnyOf(un->operand_, vars);
+  }
+  if (auto tgi = As<TupleGetItemExpr>(expr)) {
+    return ExprReferencesAnyOf(tgi->tuple_, vars);
+  }
+  if (auto call = As<Call>(expr)) {
+    for (const auto& arg : call->args_) {
+      if (ExprReferencesAnyOf(arg, vars)) return true;
+    }
+  }
+  if (auto tuple = As<MakeTuple>(expr)) {
+    for (const auto& e : tuple->elements_) {
+      if (ExprReferencesAnyOf(e, vars)) return true;
+    }
+  }
+  return false;
+}
+
+/// Visitor that checks whether every tile.store to a given Out parameter uses
+/// an offset that references another function parameter (indicating
+/// position-dependent, likely disjoint writes across iterations).
+///
+/// Result: `found_store && all_variable` means (a) at least one tile.store
+/// targets the Out param, and (b) every such store's offset depends on a
+/// function parameter.
+///
+/// Additionally tracks which callee parameter indices contribute to the store
+/// offsets (intersection across all stores), so the call site can verify that
+/// the corresponding arguments are loop-variant.
+class DisjointStoreVisitor : public IRVisitor {
+ public:
+  DisjointStoreVisitor(const Var* out_param, std::unordered_map<const Var*, size_t> other_param_indices)
+      : other_param_indices_(std::move(other_param_indices)) {
+    // Build a Var* set for the quick ExprReferencesAnyOf check.
+    for (const auto& [var, idx] : other_param_indices_) {
+      other_params_.insert(var);
+    }
+    aliases_.insert(out_param);
+  }
+
+  bool IsDisjoint() const { return found_store_ && all_variable_; }
+
+  /// Parameter indices whose call-site arguments must be loop-variant.
+  /// Valid only when IsDisjoint() is true.  Returns the intersection of
+  /// offset-contributing param indices across all tile.store operations.
+  const std::unordered_set<size_t>& GetOffsetParamIndices() const { return offset_param_indices_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    auto call = As<Call>(op->value_);
+    if (call && call->op_) {
+      if (call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
+        auto target_var = AsVarLike(call->args_[2]);
+        if (target_var && aliases_.count(target_var.get())) {
+          found_store_ = true;
+          aliases_.insert(op->var_.get());
+          if (!ExprReferencesAnyOf(call->args_[1], other_params_)) {
+            all_variable_ = false;
+          } else {
+            // Collect which param indices this store's offset depends on.
+            std::unordered_set<size_t> this_store_params;
+            CollectReferencedParamIndices(call->args_[1], this_store_params);
+            if (!first_store_seen_) {
+              offset_param_indices_ = std::move(this_store_params);
+              first_store_seen_ = true;
+            } else {
+              // Intersect: keep only indices present in both sets.
+              std::unordered_set<size_t> intersection;
+              for (size_t idx : offset_param_indices_) {
+                if (this_store_params.count(idx)) intersection.insert(idx);
+              }
+              offset_param_indices_ = std::move(intersection);
+            }
+          }
+        }
+      }
+      if (call->op_->name_ == "tensor.assemble" && !call->args_.empty()) {
+        auto target_var = AsVarLike(call->args_[0]);
+        if (target_var && aliases_.count(target_var.get())) {
+          aliases_.insert(op->var_.get());
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  /// Collect callee parameter indices referenced by `expr`.
+  void CollectReferencedParamIndices(const ExprPtr& expr, std::unordered_set<size_t>& out) {
+    if (!expr) return;
+    if (auto var = AsVarLike(expr)) {
+      auto it = other_param_indices_.find(var.get());
+      if (it != other_param_indices_.end()) out.insert(it->second);
+      return;
+    }
+    if (auto bin = As<BinaryExpr>(expr)) {
+      CollectReferencedParamIndices(bin->left_, out);
+      CollectReferencedParamIndices(bin->right_, out);
+      return;
+    }
+    if (auto un = As<UnaryExpr>(expr)) {
+      CollectReferencedParamIndices(un->operand_, out);
+      return;
+    }
+    if (auto tgi = As<TupleGetItemExpr>(expr)) {
+      CollectReferencedParamIndices(tgi->tuple_, out);
+      return;
+    }
+    if (auto call = As<Call>(expr)) {
+      for (const auto& arg : call->args_) {
+        CollectReferencedParamIndices(arg, out);
+      }
+      return;
+    }
+    if (auto tuple = As<MakeTuple>(expr)) {
+      for (const auto& e : tuple->elements_) {
+        CollectReferencedParamIndices(e, out);
+      }
+    }
+  }
+
+  std::unordered_map<const Var*, size_t> other_param_indices_;
+  std::unordered_set<const Var*> other_params_;
+  std::unordered_set<const Var*> aliases_;
+  std::unordered_set<size_t> offset_param_indices_;
+  bool first_store_seen_ = false;
+  bool found_store_ = false;
+  bool all_variable_ = true;
+};
+
+/// Check whether every tile.store to the Out parameter at `param_idx` in
+/// `callee` uses an offset that references another function parameter.
+///
+/// Returns the set of callee parameter indices whose corresponding call-site
+/// arguments must be loop-variant for the writes to be disjoint.  An empty set
+/// means the callee does NOT qualify for the disjoint-store optimization.
+std::unordered_set<size_t> CalleeHasOnlyVariableOffsetStores(const FunctionPtr& callee, size_t param_idx) {
+  if (!callee || !callee->body_ || param_idx >= callee->params_.size()) return {};
+  if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) return {};
+
+  const Var* out_param = callee->params_[param_idx].get();
+
+  std::unordered_map<const Var*, size_t> other_param_indices;
+  for (size_t i = 0; i < callee->params_.size(); ++i) {
+    if (i != param_idx) other_param_indices.emplace(callee->params_[i].get(), i);
+  }
+
+  DisjointStoreVisitor visitor(out_param, std::move(other_param_indices));
+  visitor.VisitStmt(callee->body_);
+  if (!visitor.IsDisjoint()) return {};
+  return visitor.GetOffsetParamIndices();
 }
 
 /// Pre-pass that decides, per (Call, root), whether the call is the "first
@@ -258,9 +422,15 @@ class CallDirectionMutator : public IRMutator {
  protected:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
     bool is_sequential = op->kind_ != ForKind::Parallel;
-    if (is_sequential) ++sequential_depth_;
+    if (is_sequential) {
+      ++sequential_depth_;
+      sequential_loop_vars_.insert(op->loop_var_.get());
+    }
     auto out = IRMutator::VisitStmt_(op);
-    if (is_sequential) --sequential_depth_;
+    if (is_sequential) {
+      --sequential_depth_;
+      sequential_loop_vars_.erase(op->loop_var_.get());
+    }
     return out;
   }
 
@@ -332,9 +502,35 @@ class CallDirectionMutator : public IRMutator {
         const Var* root = ResolveAnyRoot(arg, buffer_roots_);
 
         // R-seq: any sequential ancestor forces InOut to keep iteration WAW chains correct.
+        // Exception: if the callee writes to this Out param only via tile.store with
+        // variable offsets (dependent on other function params), AND the corresponding
+        // call-site arguments are variant w.r.t. the sequential loop (i.e. reference
+        // an enclosing loop induction variable), the writes are position-dependent and
+        // disjoint across iterations — no WAW chaining needed.
         if (sequential_depth_ > 0) {
-          dirs.push_back(ArgDirection::InOut);
-          continue;
+          bool disjoint = false;
+          if (callee) {
+            auto& fn_cache = offset_param_cache_[callee->name_];
+            auto cache_it = fn_cache.find(i);
+            std::unordered_set<size_t> offset_params;
+            if (cache_it != fn_cache.end()) {
+              offset_params = cache_it->second;
+            } else {
+              offset_params = CalleeHasOnlyVariableOffsetStores(callee, i);
+              fn_cache[i] = offset_params;
+            }
+            // Callee check passed; now verify call-site loop-variance.
+            for (size_t pi : offset_params) {
+              if (pi < call->args_.size() && ExprReferencesAnyOf(call->args_[pi], sequential_loop_vars_)) {
+                disjoint = true;
+                break;
+              }
+            }
+          }
+          if (!disjoint) {
+            dirs.push_back(ArgDirection::InOut);
+            continue;
+          }
         }
         // R-prior: a prior writer-unit in this scope already wrote to this root → InOut.
         if (root) {
@@ -375,6 +571,9 @@ class CallDirectionMutator : public IRMutator {
   const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots_;
   const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root_;
   int sequential_depth_ = 0;
+  std::unordered_set<const Var*> sequential_loop_vars_;
+  mutable std::unordered_map<std::string, std::unordered_map<size_t, std::unordered_set<size_t>>>
+      offset_param_cache_;
 };
 
 }  // namespace
