@@ -1228,88 +1228,80 @@ void OpConversionRegistry::RegisterGatherOps() {
 }
 
 // ============================================================================
-// Tensor compare ops: lower to packed mask + tile.full(one/zero) + tile.sel
+// Tensor compare op: lower to packed mask + tile.full(one/zero) + tile.sel.
+// Dispatches to tile.cmp (tensor-vs-tensor) or tile.cmps (tensor-vs-scalar)
+// based on the rhs operand type — there is no tensor.cmps front-end op.
 // ============================================================================
 
 void OpConversionRegistry::RegisterCmpOps() {
-  auto MakeCmpConv = [](const std::string& tile_cmp_op) -> ConversionFunc {
-    return [tile_cmp_op](const std::vector<ExprPtr>& args,
-                         const std::vector<std::pair<std::string, std::any>>& kwargs,
-                         const Span& span) -> ConversionResult {
-      auto& op_reg = OpRegistry::GetInstance();
-      auto lhs_tile = As<TileType>(args[0]->GetType());
-      CHECK(lhs_tile) << tile_cmp_op << " conversion: lhs must be TileType after memory promotion, got "
-                      << args[0]->GetType()->TypeName();
+  auto CmpConv = [](const std::vector<ExprPtr>& args,
+                    const std::vector<std::pair<std::string, std::any>>& kwargs,
+                    const Span& span) -> ConversionResult {
+    auto& op_reg = OpRegistry::GetInstance();
+    auto lhs_tile = As<TileType>(args[0]->GetType());
+    CHECK(lhs_tile) << "tensor.cmp conversion: lhs must be TileType after memory promotion, got "
+                    << args[0]->GetType()->TypeName();
 
-      // Compute the broadcasted shape and promoted dtype shared by the
-      // synthesized one/zero/sel tiles. Aligning with the elementwise binary
-      // deducer keeps the conversion result consistent with the IR's inferred
-      // type for tensor.cmp / tensor.cmps (which promotes dtype and broadcasts
-      // shape across both operands).
-      std::vector<ExprPtr> result_shape;
-      DataType result_dtype = lhs_tile->dtype_;
-      if (auto rhs_tile = As<TileType>(args[1]->GetType())) {
-        auto broadcast_result = BroadcastShapes(lhs_tile->shape_, rhs_tile->shape_);
-        CHECK(broadcast_result.success)
-            << tile_cmp_op << " conversion: incompatible shapes " << FormatShape(lhs_tile->shape_) << " and "
-            << FormatShape(rhs_tile->shape_);
-        result_shape = broadcast_result.shape;
-        auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_tile->dtype_);
-        CHECK(promoted) << tile_cmp_op << " conversion: incompatible dtypes " << lhs_tile->dtype_.ToString()
-                        << " and " << rhs_tile->dtype_.ToString();
-        result_dtype = *promoted;
-      } else if (auto rhs_scalar = As<ScalarType>(args[1]->GetType())) {
-        result_shape = lhs_tile->shape_;
-        auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_scalar->dtype_);
-        CHECK(promoted) << tile_cmp_op << " conversion: incompatible dtypes " << lhs_tile->dtype_.ToString()
-                        << " and " << rhs_scalar->dtype_.ToString();
-        result_dtype = *promoted;
-      } else {
-        CHECK(false) << tile_cmp_op << " conversion: rhs must be TileType or ScalarType, got "
-                     << args[1]->GetType()->TypeName();
-      }
+    std::string tile_cmp_op;
+    std::vector<ExprPtr> result_shape;
+    DataType result_dtype = lhs_tile->dtype_;
+    if (auto rhs_tile = As<TileType>(args[1]->GetType())) {
+      tile_cmp_op = "tile.cmp";
+      auto broadcast_result = BroadcastShapes(lhs_tile->shape_, rhs_tile->shape_);
+      CHECK(broadcast_result.success)
+          << "tensor.cmp conversion: incompatible shapes " << FormatShape(lhs_tile->shape_) << " and "
+          << FormatShape(rhs_tile->shape_);
+      result_shape = broadcast_result.shape;
+      auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_tile->dtype_);
+      CHECK(promoted) << "tensor.cmp conversion: incompatible dtypes " << lhs_tile->dtype_.ToString()
+                      << " and " << rhs_tile->dtype_.ToString();
+      result_dtype = *promoted;
+    } else if (auto rhs_scalar = As<ScalarType>(args[1]->GetType())) {
+      tile_cmp_op = "tile.cmps";
+      result_shape = lhs_tile->shape_;
+      auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_scalar->dtype_);
+      CHECK(promoted) << "tensor.cmp conversion: incompatible dtypes " << lhs_tile->dtype_.ToString()
+                      << " and " << rhs_scalar->dtype_.ToString();
+      result_dtype = *promoted;
+    } else {
+      CHECK(false) << "tensor.cmp conversion: rhs must be TileType or ScalarType, got "
+                   << args[1]->GetType()->TypeName();
+    }
 
-      std::vector<StmtPtr> prologue;
+    std::vector<StmtPtr> prologue;
 
-      // 1) packed mask = tile.cmp / tile.cmps(lhs, rhs, cmp_type=K)
-      auto mask_call = op_reg.Create(tile_cmp_op, args, kwargs, span);
-      auto mask_var = std::make_shared<Var>("cmp_mask", mask_call->GetType(), span);
-      prologue.push_back(std::make_shared<AssignStmt>(mask_var, mask_call, span));
+    auto mask_call = op_reg.Create(tile_cmp_op, args, kwargs, span);
+    auto mask_var = std::make_shared<Var>("cmp_mask", mask_call->GetType(), span);
+    prologue.push_back(std::make_shared<AssignStmt>(mask_var, mask_call, span));
 
-      // 2) one / zero tiles via tile.full, sized to the broadcasted compare
-      //    shape and the promoted dtype so tile.sel sees matching operands.
-      auto shape_tuple = std::make_shared<MakeTuple>(result_shape, span);
-      auto make_full = [&](double v, const std::string& name) {
-        std::vector<std::pair<std::string, std::any>> kw = {{"dtype", result_dtype}};
-        ExprPtr val = result_dtype.IsFloat()
-                          ? ExprPtr(std::make_shared<ConstFloat>(v, result_dtype, span))
-                          : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), result_dtype, span));
-        auto call = op_reg.Create("tile.full", {shape_tuple, val}, kw, span);
-        auto var = std::make_shared<Var>(name, call->GetType(), span);
-        prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
-        return var;
-      };
-      auto one_var = make_full(1.0, "cmp_one");
-      auto zero_var = make_full(0.0, "cmp_zero");
-
-      // 3) tmp scratch tile [1, 32] UINT8 in Vec memory
-      std::vector<ExprPtr> tmp_shape_dims = {std::make_shared<ConstInt>(1, DataType::INDEX, span),
-                                             std::make_shared<ConstInt>(32, DataType::INDEX, span)};
-      auto tmp_shape_tuple = std::make_shared<MakeTuple>(tmp_shape_dims, span);
-      std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType::UINT8},
-                                                              {"target_memory", MemorySpace::Vec}};
-      auto tmp_call = op_reg.Create("tile.create", {tmp_shape_tuple}, tmp_kw, span);
-      auto tmp_var = std::make_shared<Var>("cmp_tmp", tmp_call->GetType(), span);
-      prologue.push_back(std::make_shared<AssignStmt>(tmp_var, tmp_call, span));
-
-      // 4) tile.sel(mask, one, zero, tmp)
-      auto sel_call = op_reg.Create("tile.sel", {mask_var, one_var, zero_var, tmp_var}, span);
-      return ConversionResult{std::move(prologue), sel_call};
+    auto shape_tuple = std::make_shared<MakeTuple>(result_shape, span);
+    auto make_full = [&](double v, const std::string& name) {
+      std::vector<std::pair<std::string, std::any>> kw = {{"dtype", result_dtype}};
+      ExprPtr val = result_dtype.IsFloat()
+                        ? ExprPtr(std::make_shared<ConstFloat>(v, result_dtype, span))
+                        : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), result_dtype, span));
+      auto call = op_reg.Create("tile.full", {shape_tuple, val}, kw, span);
+      auto var = std::make_shared<Var>(name, call->GetType(), span);
+      prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+      return var;
     };
+    auto one_var = make_full(1.0, "cmp_one");
+    auto zero_var = make_full(0.0, "cmp_zero");
+
+    std::vector<ExprPtr> tmp_shape_dims = {std::make_shared<ConstInt>(1, DataType::INDEX, span),
+                                           std::make_shared<ConstInt>(32, DataType::INDEX, span)};
+    auto tmp_shape_tuple = std::make_shared<MakeTuple>(tmp_shape_dims, span);
+    std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType::UINT8},
+                                                            {"target_memory", MemorySpace::Vec}};
+    auto tmp_call = op_reg.Create("tile.create", {tmp_shape_tuple}, tmp_kw, span);
+    auto tmp_var = std::make_shared<Var>("cmp_tmp", tmp_call->GetType(), span);
+    prologue.push_back(std::make_shared<AssignStmt>(tmp_var, tmp_call, span));
+
+    auto sel_call = op_reg.Create("tile.sel", {mask_var, one_var, zero_var, tmp_var}, span);
+    return ConversionResult{std::move(prologue), sel_call};
   };
 
-  RegisterCustom("tensor.cmp", MakeCmpConv("tile.cmp"));
-  RegisterCustom("tensor.cmps", MakeCmpConv("tile.cmps"));
+  RegisterCustom("tensor.cmp", CmpConv);
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,

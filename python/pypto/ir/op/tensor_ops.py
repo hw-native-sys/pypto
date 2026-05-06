@@ -535,11 +535,11 @@ def maximum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
 
 
 def cmp(lhs: Expr, rhs: int | float | Expr, cmp_type: int = 0, span: Span | None = None) -> Call:
-    """Element-wise comparison of tensor and tensor or scalar.
+    """Element-wise comparison of tensor and tensor or scalar (returns 0/1 tensor).
 
-    Automatically selects between tensor.cmp (tensor vs tensor) and
-    tensor.cmps (tensor vs scalar) based on the rhs type. Returns a tensor
-    with the same shape and dtype as ``lhs`` containing 0/1 values.
+    Emits a single ``tensor.cmp`` op; the conversion pass dispatches to
+    ``tile.cmp`` (tensor-vs-tensor) or ``tile.cmps`` (tensor-vs-scalar)
+    based on the rhs operand type.
 
     Args:
         lhs: Left-hand side tensor
@@ -556,35 +556,7 @@ def cmp(lhs: Expr, rhs: int | float | Expr, cmp_type: int = 0, span: Span | None
         if not isinstance(rhs, Expr)
         else rhs
     )
-
-    kwargs: dict[str, Any] = {"cmp_type": cmp_type}
-    rhs_type = rhs_expr.type
-    if isinstance(rhs_type, ScalarType):
-        return _ir_core.create_op_call("tensor.cmps", [lhs, rhs_expr], kwargs, actual_span)
-    else:
-        return _ir_core.create_op_call("tensor.cmp", [lhs, rhs_expr], kwargs, actual_span)
-
-
-def cmps(lhs: Expr, rhs: int | float | Expr, cmp_type: int = 0, span: Span | None = None) -> Call:
-    """Element-wise comparison of tensor and scalar (returns 0/1 tensor).
-
-    Args:
-        lhs: Left-hand side tensor
-        rhs: Right-hand side scalar (int/float/Expr with ScalarType)
-        cmp_type: Comparison type code (0=eq, 1=ne, 2=lt, 3=le, 4=gt, 5=ge)
-        span: Optional source span for debugging (auto-captured if not provided)
-
-    Returns:
-        Call expression for element-wise comparison with scalar (0/1 tensor)
-    """
-    actual_span = _get_span_or_capture(span)
-    rhs_expr = (
-        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
-        if not isinstance(rhs, Expr)
-        else rhs
-    )
-    kwargs: dict[str, Any] = {"cmp_type": cmp_type}
-    return _ir_core.create_op_call("tensor.cmps", [lhs, rhs_expr], kwargs, actual_span)
+    return _ir_core.create_op_call("tensor.cmp", [lhs, rhs_expr], {"cmp_type": cmp_type}, actual_span)
 
 
 def row_max(input: Expr, span: Span | None = None) -> Call:
