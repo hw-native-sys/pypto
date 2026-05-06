@@ -52,7 +52,9 @@ StmtPtr MakeSeqOrSingle(std::vector<StmtPtr> stmts, const Span& span) {
 }
 
 TileLayout GetTileLayout(const TileTypePtr& tile_type) {
-  if (!tile_type) return TileLayout::row_major;
+  if (!tile_type) {
+    return TileLayout::row_major;
+  }
   return tile_view_semantics::GetEffectiveTileView(*tile_type).blayout;
 }
 
