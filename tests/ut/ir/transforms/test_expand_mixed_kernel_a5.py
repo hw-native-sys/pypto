@@ -1834,6 +1834,81 @@ class TestPropertyVerification:
 
         passes.verify_properties(prop_set, GroupedTpopProgram, "test")
 
+    def test_verifier_allows_multiple_explicit_pipe_buffers(self):
+        """Multiple explicit pipe ids may have separate reserve/import buffers."""
+
+        @pl.program
+        class MultiPipeSetupProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube_consumer(self):
+                v2c_0 = pl.reserve_buffer(name="v2c_slot_buffer_0", size=4096, base=0x1000)
+                v2c_1 = pl.reserve_buffer(name="v2c_slot_buffer_1", size=4096, base=0x2000)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_0, dir_mask=2, slot_size=512, id=0)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_1, dir_mask=2, slot_size=512, id=1)
+                first: pl.Tile[
+                    [16, 16],
+                    pl.FP16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tpop_from_aiv(split=0, id=0)
+                second: pl.Tile[
+                    [16, 16],
+                    pl.FP16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tpop_from_aiv(split=0, id=1)
+                pl.tfree_to_aiv(first, id=0)
+                pl.tfree_to_aiv(second, id=1)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector_producer(self):
+                v2c_0 = pl.import_peer_buffer(name="v2c_slot_buffer_0", peer_func="cube_consumer")
+                v2c_1 = pl.import_peer_buffer(name="v2c_slot_buffer_1", peer_func="cube_consumer")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_0, dir_mask=2, slot_size=512, id=0)
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_1, dir_mask=2, slot_size=512, id=1)
+
+        prop_set = passes.IRPropertySet()
+        prop_set.insert(passes.IRProperty.MixedKernelExpanded)
+
+        passes.verify_properties(prop_set, MultiPipeSetupProgram, "test")
+
+    def test_verifier_rejects_underprovisioned_multiple_explicit_pipe_buffers(self):
+        """Every initialized pipe direction must have its own reserve/import buffer."""
+
+        @pl.program
+        class BadProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube_consumer(self):
+                v2c_0 = pl.reserve_buffer(name="v2c_slot_buffer_0", size=4096, base=0x1000)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_0, dir_mask=2, slot_size=512, id=0)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_0, dir_mask=2, slot_size=512, id=1)
+                first: pl.Tile[
+                    [16, 16],
+                    pl.FP16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tpop_from_aiv(split=0, id=0)
+                second: pl.Tile[
+                    [16, 16],
+                    pl.FP16,
+                    pl.MemorySpace.Mat,
+                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
+                ] = pl.tpop_from_aiv(split=0, id=1)
+                pl.tfree_to_aiv(first, id=0)
+                pl.tfree_to_aiv(second, id=1)
+
+        prop_set = passes.IRPropertySet()
+        prop_set.insert(passes.IRProperty.MixedKernelExpanded)
+
+        with pytest.raises(
+            Exception,
+            match=re.escape(
+                "Function 'cube_consumer' has fewer 'system.reserve_buffer' calls than initialized pipe "
+                "directions require"
+            ),
+        ):
+            passes.verify_properties(prop_set, BadProgram, "test")
+
     def test_verifier_rejects_unmatched_tfree(self):
         """A stray or duplicate tfree must be rejected explicitly."""
 
@@ -2156,6 +2231,48 @@ class TestAutoPipeSetup:
                 return out_0_store
 
         _assert_function_equal(After, Expected, "main_incore_0_aiv")
+
+    def test_alias_tfree_preserves_explicit_pipe_id(self):
+        """Canonicalizing a tfree alias must keep its original pipe id kwarg."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self):
+                received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(
+                    split=0,
+                    id=1,
+                )
+                alias: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = received
+                pl.tfree_to_aiv(alias, id=0)
+                vector_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+                pl.tfree_to_aic(vector_tile)
+
+        After = _expand_raw(Before)
+        aic_func = After.get_function("main_incore_0_aic")
+        assert aic_func is not None
+
+        tpop_var = None
+        tfree_call = None
+        for stmt in ir.flatten_to_stmts(aic_func.body):
+            if isinstance(stmt, ir.AssignStmt):
+                call = stmt.value
+            elif isinstance(stmt, ir.EvalStmt):
+                call = stmt.expr
+            else:
+                call = None
+            if not isinstance(call, ir.Call):
+                continue
+            if call.op.name == "tile.tpop_from_aiv":
+                assert isinstance(stmt, ir.AssignStmt)
+                tpop_var = stmt.var
+            elif call.op.name == "system.tfree_to_aiv":
+                tfree_call = call
+
+        assert tpop_var is not None
+        assert tfree_call is not None
+        assert tfree_call.args == [tpop_var]
+        assert tfree_call.kwargs["id"] == 0
 
     def test_auto_tfree_does_not_hoist_user_before_if_defined_tile(self):
         """A later tpop user must stay after an if-defined tile result."""

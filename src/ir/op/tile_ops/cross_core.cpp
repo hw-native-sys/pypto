@@ -43,6 +43,7 @@ REGISTER_OP("tile.tpush_to_aiv")
     .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
     .set_attr<int>("split")
+    .set_attr<int>("id")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 
@@ -54,6 +55,7 @@ REGISTER_OP("tile.tpush_to_aic")
     .set_cross_core_role(core_affinity::CrossCoreRole::TPush)
     .add_argument("tile", "Tile data to transfer")
     .set_attr<int>("split")
+    .set_attr<int>("id")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 
@@ -65,6 +67,7 @@ REGISTER_OP("tile.tpop_from_aic")
     .set_cross_core_role(core_affinity::CrossCoreRole::TPop)
     .no_argument()
     .set_attr<int>("split")
+    .set_attr<int>("id")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 
@@ -76,6 +79,7 @@ REGISTER_OP("tile.tpop_from_aiv")
     .set_cross_core_role(core_affinity::CrossCoreRole::TPop)
     .no_argument()
     .set_attr<int>("split")
+    .set_attr<int>("id")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 

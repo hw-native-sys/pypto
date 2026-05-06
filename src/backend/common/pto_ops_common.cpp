@@ -1660,6 +1660,42 @@ static void EmitLogicalTpushValidShapeRestore(const CallPtr& op, codegen::PTOCod
   codegen.Emit("pto.set_validshape " + tile_buf + ", " + row + ", " + col + " : " + tile_type);
 }
 
+static std::string FormatFrontendPipeAttrs(const CallPtr& op, int split) {
+  std::ostringstream oss;
+  oss << "{";
+  if (op->HasKwarg("id")) {
+    const int id = op->GetKwarg<int>("id", 0);
+    CHECK(id >= 0) << "Frontend pipe 'id' attribute must be non-negative, got " << id;
+    oss << "id = " << id << ", ";
+  }
+  oss << "split = " << split << "}";
+  return oss.str();
+}
+
+static std::string FormatFrontendPipeAttrs(std::optional<int> pipe_id, int split) {
+  std::ostringstream oss;
+  oss << "{";
+  if (pipe_id.has_value()) {
+    CHECK(pipe_id.value() >= 0) << "Frontend pipe 'id' attribute must be non-negative, got "
+                                << pipe_id.value();
+    oss << "id = " << pipe_id.value() << ", ";
+  }
+  oss << "split = " << split << "}";
+  return oss.str();
+}
+
+static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, int slot_size) {
+  std::ostringstream oss;
+  oss << "{";
+  if (op->HasKwarg("id")) {
+    const int id = op->GetKwarg<int>("id", 0);
+    CHECK(id >= 0) << "Frontend initialize_pipe 'id' attribute must be non-negative, got " << id;
+    oss << "id = " << id << ", ";
+  }
+  oss << "dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
+  return oss.str();
+}
+
 // tile.tpush_to_aiv: Push tile from Cube to Vector
 static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
@@ -1681,7 +1717,7 @@ static std::string MakeTpushToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   if (!tile_type.empty()) {
     oss << " : " << tile_type;
   }
-  oss << ") {split = " << split << "}";
+  oss << ") " << FormatFrontendPipeAttrs(op, split);
   codegen.Emit(oss.str());
   if (restore_valid_shape) {
     EmitLogicalTpushValidShapeRestore(op, codegen, tile_buf, tile_type);
@@ -1711,7 +1747,7 @@ static std::string MakeTpushToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
   if (!tile_type.empty()) {
     oss << " : " << tile_type;
   }
-  oss << ") {split = " << split << "}";
+  oss << ") " << FormatFrontendPipeAttrs(op, split);
   codegen.Emit(oss.str());
   if (restore_valid_shape) {
     EmitLogicalTpushValidShapeRestore(op, codegen, tile_buf, tile_type);
@@ -1743,7 +1779,7 @@ static std::string MakeTpopFromAicCodegenPTO(const CallPtr& op, codegen::Codegen
         << "Internal error: tpop_from_aic dynamic valid_shape requires both valid_row and valid_col";
     oss << "(" << valid_row << ", " << valid_col << ")";
   }
-  oss << " {split = " << split << "}";
+  oss << " " << FormatFrontendPipeAttrs(op, split);
   if (!result_type.empty()) {
     oss << " -> " << result_type;
   }
@@ -1775,7 +1811,7 @@ static std::string MakeTpopFromAivCodegenPTO(const CallPtr& op, codegen::Codegen
         << "Internal error: tpop_from_aiv dynamic valid_shape requires both valid_row and valid_col";
     oss << "(" << valid_row << ", " << valid_col << ")";
   }
-  oss << " {split = " << split << "}";
+  oss << " " << FormatFrontendPipeAttrs(op, split);
   if (!result_type.empty()) {
     oss << " -> " << result_type;
   }
@@ -1792,10 +1828,19 @@ static std::string MakeTfreeToAicCodegenPTO(const CallPtr& op, codegen::CodegenB
                                << op->args_.size();
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK_SPAN(tile, op->span_) << "tfree_to_aic first argument must be a Var or IterArg";
-  int split = codegen.GetValidatedTpopSplit(tile.get(), "tile.tpop_from_aic", "system.tfree_to_aic");
+  const auto& tpop_info =
+      codegen.GetValidatedTpopInfo(tile.get(), "tile.tpop_from_aic", "system.tfree_to_aic");
+  if (op->HasKwarg("id")) {
+    const int tfree_id = op->GetKwarg<int>("id", 0);
+    const int tpop_id = tpop_info.pipe_id.value_or(0);
+    CHECK(tpop_id == tfree_id) << "system.tfree_to_aic pipe id " << tfree_id
+                               << " does not match originating tile.tpop_from_aic pipe id " << tpop_id;
+  }
+  const std::optional<int> pipe_id =
+      op->HasKwarg("id") ? std::optional<int>(op->GetKwarg<int>("id", 0)) : tpop_info.pipe_id;
 
   std::ostringstream oss;
-  oss << "pto.tfree_from_aic {split = " << split << "}";
+  oss << "pto.tfree_from_aic " << FormatFrontendPipeAttrs(pipe_id, tpop_info.split);
   codegen.Emit(oss.str());
 
   return "";
@@ -1810,10 +1855,19 @@ static std::string MakeTfreeToAivCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto tile = AsVarLike(op->args_[0]);
   INTERNAL_CHECK_SPAN(tile, op->span_) << "tfree_to_aiv first argument must be a Var or IterArg";
 
-  int split = codegen.GetValidatedTpopSplit(tile.get(), "tile.tpop_from_aiv", "system.tfree_to_aiv");
+  const auto& tpop_info =
+      codegen.GetValidatedTpopInfo(tile.get(), "tile.tpop_from_aiv", "system.tfree_to_aiv");
+  if (op->HasKwarg("id")) {
+    const int tfree_id = op->GetKwarg<int>("id", 0);
+    const int tpop_id = tpop_info.pipe_id.value_or(0);
+    CHECK(tpop_id == tfree_id) << "system.tfree_to_aiv pipe id " << tfree_id
+                               << " does not match originating tile.tpop_from_aiv pipe id " << tpop_id;
+  }
+  const std::optional<int> pipe_id =
+      op->HasKwarg("id") ? std::optional<int>(op->GetKwarg<int>("id", 0)) : tpop_info.pipe_id;
 
   std::ostringstream oss;
-  oss << "pto.tfree_from_aiv {split = " << split << "}";
+  oss << "pto.tfree_from_aiv " << FormatFrontendPipeAttrs(pipe_id, tpop_info.split);
   codegen.Emit(oss.str());
 
   return "";
@@ -1868,8 +1922,9 @@ static std::string MakeAicInitializePipeCodegenPTO(const CallPtr& op, codegen::C
       << "aic_initialize_pipe: failed to lower buffer operands to SSA names";
 
   std::ostringstream oss;
-  oss << "pto.aic_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
-  EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSA(), c2v_ssa, v2c_ssa);
+  oss << "pto.aic_initialize_pipe " << FormatInitializePipeAttrs(op, dir_mask, slot_size);
+  const int pipe_id = op->GetKwarg<int>("id", 0);
+  EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSAForPipe(pipe_id, dir_mask), c2v_ssa, v2c_ssa);
   codegen.Emit(oss.str());
 
   return "";
@@ -1893,8 +1948,9 @@ static std::string MakeAivInitializePipeCodegenPTO(const CallPtr& op, codegen::C
       << "aiv_initialize_pipe: failed to lower buffer operands to SSA names";
 
   std::ostringstream oss;
-  oss << "pto.aiv_initialize_pipe {dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
-  EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSA(), c2v_ssa, v2c_ssa);
+  oss << "pto.aiv_initialize_pipe " << FormatInitializePipeAttrs(op, dir_mask, slot_size);
+  const int pipe_id = op->GetKwarg<int>("id", 0);
+  EmitInitializePipeOperands(oss, codegen.GetGMSlotBufferSSAForPipe(pipe_id, dir_mask), c2v_ssa, v2c_ssa);
   codegen.Emit(oss.str());
 
   return "";

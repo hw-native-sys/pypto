@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -39,6 +40,7 @@ namespace codegen {
 struct TpopResultInfo {
   int split = 0;
   std::string op_name;
+  std::optional<int> pipe_id;
 };
 
 /**
@@ -287,7 +289,7 @@ class PTOCodegen : public CodegenBase {
    * intermediary for cross-core pipe communication. The codegen emits it as
    * a gm_slot_buffer operand in initialize_pipe instructions.
    */
-  void RecordGMSlotBufferSSA(const std::string& ssa);
+  void RecordGMSlotBufferSSA(const std::string& ssa, const DataType& dtype);
 
   /**
    * @brief Get the recorded GM slot buffer SSA name (empty if none)
@@ -299,11 +301,27 @@ class PTOCodegen : public CodegenBase {
   void DecreaseIndent() { indent_level_--; }
 
   /**
-   * @brief Get the split value for a tile var produced by a matching tpop operation
+   * @brief Return the GM slot buffer SSA region for one frontend pipe.
+   *
+   * Ascend910B uses a single function parameter as the backing GM FIFO
+   * workspace. Multiple frontend pipe ids in one function must point at
+   * disjoint byte ranges within that parameter.
+   */
+  [[nodiscard]] std::string GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask);
+
+  /**
+   * @brief Get metadata for a tile var produced by a matching tpop operation
    * @param var Raw pointer to the tile variable
    * @param expected_tpop_op_name Expected originating tpop op name
    * @param tfree_op_name Name of the consuming tfree op for diagnostics
-   * @return Split value from the originating tpop
+   * @return Metadata from the originating tpop
+   */
+  [[nodiscard]] const TpopResultInfo& GetValidatedTpopInfo(const ir::Var* var,
+                                                           const std::string& expected_tpop_op_name,
+                                                           const std::string& tfree_op_name) const;
+
+  /**
+   * @brief Get the split value for a tile var produced by a matching tpop operation
    */
   [[nodiscard]] int GetValidatedTpopSplit(const ir::Var* var, const std::string& expected_tpop_op_name,
                                           const std::string& tfree_op_name) const;
@@ -371,6 +389,11 @@ class PTOCodegen : public CodegenBase {
    * @brief Generate PTO-ISA MLIR for a single function
    */
   void GenerateFunction(const ir::FunctionPtr& func);
+
+  /**
+   * @brief Collect deterministic GM slot buffer byte offsets for frontend pipe ids in a module.
+   */
+  void PrepareGMSlotBufferLayout(const ir::ProgramPtr& program);
 
   /**
    * @brief Build variable identity to MemRef mapping from function body
@@ -481,6 +504,8 @@ class PTOCodegen : public CodegenBase {
     std::shared_ptr<const ir::TileType> current_result_tile_type;
 
     std::string gm_slot_buffer_ssa;
+    DataType gm_slot_buffer_dtype = DataType::FP32;
+    std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
 
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
@@ -518,6 +543,8 @@ class PTOCodegen : public CodegenBase {
       current_result_tile_type = nullptr;
 
       gm_slot_buffer_ssa.clear();
+      gm_slot_buffer_dtype = DataType::FP32;
+      gm_slot_buffer_region_by_pipe.clear();
 
       current_expr_value.clear();
       yield_buffer.clear();
@@ -530,6 +557,7 @@ class PTOCodegen : public CodegenBase {
   // Module-level output stream (persists across functions)
   std::ostringstream stream_;
   int indent_level_ = 0;
+  std::map<std::pair<int, int>, int64_t> gm_slot_buffer_offsets_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 

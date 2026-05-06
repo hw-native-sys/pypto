@@ -2197,28 +2197,36 @@ def _resolve_tpop_type(
     return None
 
 
-def tpush_to_aiv(tile: Expr, *, split: int, span: Span | None = None) -> Call:
+def tpush_to_aiv(tile: Expr, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
     """Push tile data from AIC to AIV via cross-core pipe.
 
     Args:
         tile: Tile data to push
         split: Split mode (0=none, 1=up-down, 2=left-right)
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("tile.tpush_to_aiv", [tile], {"split": split}, actual_span)
+    kwargs = {"split": split}
+    if id is not None:
+        kwargs["id"] = id
+    return _ir_core.create_op_call("tile.tpush_to_aiv", [tile], kwargs, actual_span)
 
 
-def tpush_to_aic(tile: Expr, *, split: int, span: Span | None = None) -> Call:
+def tpush_to_aic(tile: Expr, *, split: int, id: int | None = None, span: Span | None = None) -> Call:
     """Push tile data from AIV to AIC via cross-core pipe.
 
     Args:
         tile: Tile data to push
         split: Split mode (0=none, 1=up-down, 2=left-right)
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("tile.tpush_to_aic", [tile], {"split": split}, actual_span)
+    kwargs = {"split": split}
+    if id is not None:
+        kwargs["id"] = id
+    return _ir_core.create_op_call("tile.tpush_to_aic", [tile], kwargs, actual_span)
 
 
 def tpop_from_aic(
@@ -2227,6 +2235,7 @@ def tpop_from_aic(
     shape: list[int] | None = None,
     dtype: DataType | None = None,
     split: int = 0,
+    id: int | None = None,
     span: Span | None = None,
 ) -> Call:
     """Pop tile data from AIC cross-core pipe into AIV.
@@ -2236,14 +2245,18 @@ def tpop_from_aic(
         shape: Shape of the tile to receive (alternative to result_type).
         dtype: Data type of the tile to receive (alternative to result_type).
         split: Split mode (0=none, 1=up-down, 2=left-right)
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     resolved_type = _resolve_tpop_type(result_type, shape, dtype, MemorySpace.Vec)
+    kwargs = {"split": split}
+    if id is not None:
+        kwargs["id"] = id
     if resolved_type is not None:
         op = _ir_core.get_op("tile.tpop_from_aic")
-        return _ir_core.Call(op, [], {"split": split}, resolved_type, actual_span)
-    return _ir_core.create_op_call("tile.tpop_from_aic", [], {"split": split}, actual_span)
+        return _ir_core.Call(op, [], kwargs, resolved_type, actual_span)
+    return _ir_core.create_op_call("tile.tpop_from_aic", [], kwargs, actual_span)
 
 
 def tpop_from_aiv(
@@ -2252,6 +2265,7 @@ def tpop_from_aiv(
     shape: list[int] | None = None,
     dtype: DataType | None = None,
     split: int = 0,
+    id: int | None = None,
     span: Span | None = None,
 ) -> Call:
     """Pop tile data from AIV cross-core pipe into AIC.
@@ -2261,14 +2275,18 @@ def tpop_from_aiv(
         shape: Shape of the tile to receive (alternative to result_type).
         dtype: Data type of the tile to receive (alternative to result_type).
         split: Split mode (0=none, 1=up-down, 2=left-right)
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     resolved_type = _resolve_tpop_type(result_type, shape, dtype, MemorySpace.Mat)
+    kwargs = {"split": split}
+    if id is not None:
+        kwargs["id"] = id
     if resolved_type is not None:
         op = _ir_core.get_op("tile.tpop_from_aiv")
-        return _ir_core.Call(op, [], {"split": split}, resolved_type, actual_span)
-    return _ir_core.create_op_call("tile.tpop_from_aiv", [], {"split": split}, actual_span)
+        return _ir_core.Call(op, [], kwargs, resolved_type, actual_span)
+    return _ir_core.create_op_call("tile.tpop_from_aiv", [], kwargs, actual_span)
 
 
 # ============================================================================

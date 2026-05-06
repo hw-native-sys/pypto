@@ -160,26 +160,27 @@ print(pto_code)
 
 | PyPTO 操作 | 生成的 PTO-ISA | 描述 |
 | ---------- | -------------- | ---- |
-| `tile.tpush_to_aiv(tile, split=N)` | `pto.tpush_to_aiv ins(%tile : type) {split = N}` | Cube → Vector 推送 |
-| `tile.tpush_to_aic(tile, split=N)` | `pto.tpush_to_aic ins(%tile : type) {split = N}` | Vector → Cube 推送 |
-| `tile.tpop_from_aic(split=N)` | `%buf = pto.tpop_from_aic {split = N} -> type` | 从 Cube 管道弹出 |
-| `tile.tpop_from_aiv(split=N)` | `%buf = pto.tpop_from_aiv {split = N} -> type` | 从 Vector 管道弹出 |
-| `system.tfree_to_aic(tile_from_tpop)` | `pto.tfree_from_aic {split = N}` | 将消费侧槽位释放回 Cube |
-| `system.tfree_to_aiv(tile_from_tpop)` | `pto.tfree_from_aiv {split = N}` | 将消费侧槽位释放回 Vector |
-| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube 管道初始化 |
-| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector 管道初始化 |
+| `tile.tpush_to_aiv(tile, split=N[, id=I])` | `pto.tpush_to_aiv ins(%tile : type) {[id = I, ]split = N}` | Cube → Vector 推送 |
+| `tile.tpush_to_aic(tile, split=N[, id=I])` | `pto.tpush_to_aic ins(%tile : type) {[id = I, ]split = N}` | Vector → Cube 推送 |
+| `tile.tpop_from_aic(split=N[, id=I])` | `%buf = pto.tpop_from_aic {[id = I, ]split = N} -> type` | 从 Cube 管道弹出 |
+| `tile.tpop_from_aiv(split=N[, id=I])` | `%buf = pto.tpop_from_aiv {[id = I, ]split = N} -> type` | 从 Vector 管道弹出 |
+| `system.tfree_to_aic(tile_from_tpop[, id=I])` | `pto.tfree_from_aic {[id = I, ]split = N}` | 将消费侧槽位释放回 Cube |
+| `system.tfree_to_aiv(tile_from_tpop[, id=I])` | `pto.tfree_from_aiv {[id = I, ]split = N}` | 将消费侧槽位释放回 Vector |
+| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube 管道初始化 |
+| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector 管道初始化 |
 | `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | 预留缓冲区 |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | 导入对等缓冲区 |
 
 **说明：**
 
 - Push 操作使用带类型 tile buffer 的 `ins()` 子句；前端 Pop 操作生成 SSA 结果，并带 `-> !pto.tile_buf<...>` 结果类型
+- `id` 是可选属性。省略时 PTOAS 默认使用 frontend pipe id `0`。只有手写多条独立 frontend pipe 时才需要显式 `id`；自动生成的双向 mixed-kernel setup 会保持单条 `dir_mask = 3` pipe。
 - 如果被 push 的 tile 通过动态 `valid_row` / `valid_col` operand 分配，或经
   `tile.set_validshape` 更新，`tpush` 会发射已经更新运行时 valid shape 的同一个
   tile handle。对于 split `tpush`，codegen 会临时使用完整的非切分传输维度（上下
   切分使用完整 `cols`，左右切分使用完整 `rows`），随后恢复 producer tile 的逻辑
   valid shape；消费侧动态 tpop operand 仍携带后续计算和 store 使用的逻辑范围。
-- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。
+- 当 tpop 结果的 `TileView.valid_shape` 与物理 tile shape 不一致时，PTO codegen 会生成 PTOAS 前端操作数：`%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`。这同时覆盖动态表达式和 `[0, 0]` 这类静态非满形状；operand 携带后续计算和 store 使用的逻辑范围。
 - 对于 split consumer，`SplitVectorKernel` 会按 subblock 本地化这些动态
   tpop valid-shape operand（例如 `[16, 16]` tile 做上下切分时，全局
   `[8, 16]` 会变成 `[8, 16]` 和 `[0, 16]`）。

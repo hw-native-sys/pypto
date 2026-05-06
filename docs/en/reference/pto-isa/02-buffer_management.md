@@ -135,9 +135,9 @@ def my_vector_kernel(self, ...):
     )
 
     for ...:
-        tile = pl.tpop_from_aic()              # zero-copy from pipe_buf on A5
+        tile = pl.tpop_from_aic(split=0)       # zero-copy from pipe_buf on A5
         # ... compute on tile ...
-        pl.tfree_to_aic(aiv_idx=0)             # release slot
+        pl.tfree_to_aic(tile)                  # release slot
 ```
 
 ### `pl.import_peer_buffer` — Producer Side

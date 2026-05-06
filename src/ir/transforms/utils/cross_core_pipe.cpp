@@ -221,8 +221,9 @@ void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePi
       CollectCrossCorePipeMetadata(FlattenBody(for_stmt->body_), metadata);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
       CollectCrossCorePipeMetadata(FlattenBody(if_stmt->then_body_), metadata);
-      if (if_stmt->else_body_.has_value()) {
-        CollectCrossCorePipeMetadata(FlattenBody(if_stmt->else_body_.value()), metadata);
+      const auto& else_body = if_stmt->else_body_;
+      if (else_body) {
+        CollectCrossCorePipeMetadata(FlattenBody(*else_body), metadata);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       CollectCrossCorePipeMetadata(FlattenBody(while_stmt->body_), metadata);
@@ -242,6 +243,11 @@ CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtP
       call = std::dynamic_pointer_cast<const Call>(eval->expr_);
     }
     auto op = call ? std::dynamic_pointer_cast<const Op>(call->op_) : nullptr;
+    CrossCorePipeMetadata stmt_metadata;
+    CollectCrossCorePipeMetadata({stmt}, stmt_metadata);
+    if (stmt_metadata.HasCrossCoreOps()) {
+      break;
+    }
     if (op) {
       const std::string& op_name = op->name_;
       if (op_name == "system.reserve_buffer") {
@@ -253,12 +259,6 @@ CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtP
       } else if (op_name == "system.aiv_initialize_pipe") {
         metadata.has_aiv_initialize_pipe = true;
       }
-    }
-
-    CrossCorePipeMetadata stmt_metadata;
-    CollectCrossCorePipeMetadata({stmt}, stmt_metadata);
-    if (stmt_metadata.HasCrossCoreOps()) {
-      break;
     }
   }
   return metadata;

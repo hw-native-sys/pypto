@@ -21,8 +21,10 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -32,6 +34,7 @@
 #include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/core_side_ops.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -53,16 +56,22 @@ namespace tpop_tfree {
 
 std::string GetTfreeOpName(core_affinity::CoreSide side) { return core_side_ops::TFreeOp(side); }
 
-CallPtr CreateTfree(core_affinity::CoreSide side, const ExprPtr& tile, const Span& span) {
-  return OpRegistry::GetInstance().Create(GetTfreeOpName(side), {tile}, {}, span);
+CallPtr CreateTfree(core_affinity::CoreSide side, const ExprPtr& tile, const Span& span,
+                    std::optional<int> pipe_id) {
+  std::vector<std::pair<std::string, std::any>> kwargs;
+  if (pipe_id.has_value()) {
+    kwargs.emplace_back("id", std::any(pipe_id.value()));
+  }
+  return OpRegistry::GetInstance().Create(GetTfreeOpName(side), {tile}, kwargs, span);
 }
 
-bool IsTpopAssignStmt(const StmtPtr& stmt, VarPtr* result_var) {
+bool IsTpopAssignStmt(const StmtPtr& stmt, VarPtr* result_var, CallPtr* tpop_call) {
   auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
   if (!assign) return false;
   auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
   if (!op_predicates::IsTPop(call)) return false;
   if (result_var) *result_var = assign->var_;
+  if (tpop_call) *tpop_call = call;
   return true;
 }
 
@@ -291,20 +300,26 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
 
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
     VarPtr tpop_var;
-    if (IsTpopAssignStmt(normalized_inputs[i], &tpop_var)) {
+    CallPtr tpop_call;
+    if (IsTpopAssignStmt(normalized_inputs[i], &tpop_var, &tpop_call)) {
       const Var* canonical_var = CanonicalizeTpopRef(tpop_var.get(), local_tpop_var_remap);
       VarPtr chain_var = tpop_var;
       if (auto remap_it = local_tpop_var_remap.find(tpop_var.get());
           remap_it != local_tpop_var_remap.end() && remap_it->second) {
         chain_var = remap_it->second;
       }
-      auto [it, inserted] = chains.emplace(canonical_var, TpopLifetime{i, no_tfree, chain_var, i});
+      std::optional<int> pipe_id;
+      if (tpop_call && tpop_call->HasKwarg("id")) {
+        pipe_id = tpop_call->GetKwarg<int>("id", 0);
+      }
+      auto [it, inserted] = chains.emplace(canonical_var, TpopLifetime{i, no_tfree, chain_var, i, pipe_id});
       if (inserted) {
         tpop_order.push_back(canonical_var);
       } else {
         it->second.tpop_idx = i;
         it->second.tpop_var = chain_var;
         it->second.last_use_idx = (it->second.last_use_idx < i) ? i : it->second.last_use_idx;
+        it->second.pipe_id = pipe_id;
       }
       continue;
     }
@@ -318,9 +333,15 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
         continue;
       }
       if (tfree_var && chain_it->second.tpop_var && tfree_var.get() != chain_it->second.tpop_var.get()) {
-        normalized_inputs[i] = std::make_shared<EvalStmt>(
-            CreateTfree(side, chain_it->second.tpop_var, normalized_inputs[i]->span_),
-            normalized_inputs[i]->span_);
+        auto eval = std::dynamic_pointer_cast<const EvalStmt>(normalized_inputs[i]);
+        auto call = eval ? std::dynamic_pointer_cast<const Call>(eval->expr_) : nullptr;
+        INTERNAL_CHECK_SPAN(call && !call->args_.empty(), normalized_inputs[i]->span_)
+            << "Internal error: expected tfree EvalStmt with a tile operand";
+        auto new_call = MutableCopy(call);
+        new_call->args_[0] = chain_it->second.tpop_var;
+        auto new_eval = MutableCopy(eval);
+        new_eval->expr_ = new_call;
+        normalized_inputs[i] = new_eval;
       }
       chain_it->second.tfree_idx = i;
       continue;
@@ -351,7 +372,7 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
         remove_existing_tfree[chain.tfree_idx] = true;
       }
       deferred_tfrees[chain.last_use_idx].push_back(std::make_shared<EvalStmt>(
-          CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_),
+          CreateTfree(side, chain.tpop_var, normalized_inputs[chain.tpop_idx]->span_, chain.pipe_id),
           normalized_inputs[chain.tpop_idx]->span_));
     }
   }

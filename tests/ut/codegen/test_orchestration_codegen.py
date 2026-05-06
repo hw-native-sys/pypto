@@ -2327,6 +2327,64 @@ class TestTensorReadWriteOffsetCodegen:
             code,
         ), f"Expected gm_pipe_buffer tensor.create shape to scale by core_num. Generated code:\n{code}"
 
+    def test_gm_pipe_buffer_tensor_create_uses_callee_workspace(self):
+        """Each injected gm_pipe_buffer tensor.create is sized from its callee pipe layout."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class PerCalleeGMPipeProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def small_cube(self):
+                buf = pl.reserve_buffer(name="small_v2c_slot_buffer", size=4096, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def small_vector(self):
+                peer = pl.import_peer_buffer(name="small_v2c_slot_buffer", peer_func="small_cube")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def small_group(self):
+                self.small_cube()
+                self.small_vector()
+
+            @pl.function(type=pl.FunctionType.AIC)
+            def large_cube(self):
+                buf0 = pl.reserve_buffer(name="large_v2c_slot_buffer_0", size=8192, base=pl.AUTO)
+                buf1 = pl.reserve_buffer(name="large_v2c_slot_buffer_1", size=16384, base=pl.AUTO)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf0, dir_mask=2, slot_size=1024, id=0)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf1, dir_mask=2, slot_size=2048, id=1)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def large_vector(self):
+                peer0 = pl.import_peer_buffer(name="large_v2c_slot_buffer_0", peer_func="large_cube")
+                peer1 = pl.import_peer_buffer(name="large_v2c_slot_buffer_1", peer_func="large_cube")
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer0, dir_mask=2, slot_size=1024, id=0)
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer1, dir_mask=2, slot_size=2048, id=1)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def large_group(self):
+                self.large_cube()
+                self.large_vector()
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                self.small_group()
+                self.large_group()
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+                PerCalleeGMPipeProgram
+            )
+
+        code = _generate_orch_code(transformed)
+        shape_values = re.findall(r"gm_pipe_buffer_\d+_ci_shapes\[1\]\s*=\s*\{(\d+)\};", code)
+        assert shape_values == ["1024", "6144"], (
+            "Expected per-callee GM workspace shapes (small=512*8*1 side / f32, "
+            f"large=(1024*8+2048*8) / f32), got {shape_values}. Generated code:\n{code}"
+        )
+
 
 class TestUnregisteredOpError:
     """Test that unregistered/misplaced ops in Orchestration functions raise errors."""

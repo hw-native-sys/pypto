@@ -9,7 +9,12 @@
 1. 找出每个函数体中包含 `aic_initialize_pipe` 或 `aiv_initialize_pipe` 的函数。
 2. 给上述每个函数追加一个新的 Out-tensor 参数 `__gm_pipe_buffer`。
 3. 沿调用图向上传播参数：调用了已新增参数函数的调用者，也会拿到该参数（让工作区从 Orchestration 一路下沉到 AIC/AIV）。
-4. 在 Orchestration 函数停止——它**不会**收到该参数，而是改为在每个调用点注入 `tensor.create`，在主机侧本地物化工作区并传入。
+4. 在 Orchestration 函数停止——它**不会**收到该参数，而是改为在每个调用点注入占位 `tensor.create`，由 codegen 后续计算真实大小并在主机侧物化。
+
+本 Pass 只在 IR 中连通 `__gm_pipe_buffer` 参数。GM 缓冲区 footprint 和槽位分配由
+codegen 负责：双向 `dir_mask=3` pipe 按一个共享双向工作区计量；其他显式 pipe
+按 `(pipe id, direction)` 分配互不重叠的 GM 区域，从而让 PTO codegen 可以独立映射
+每条 frontend pipe。
 
 本 Pass 受 `BackendHandler::RequiresGMPipeBuffer()` **后端门控**。不需要 GM 路由 pipe 的后端（例如带直连核间通道的 Ascend950）会把它视为 no-op。
 
@@ -54,7 +59,8 @@ program = inject_pass(program)
 
 阶段 3 — 在 Orchestration 调用点注入 tensor.create：
   对 orch_needs_tensor_create 中的每个 Orchestration 函数，prepend 一条
-  物化工作区的 tensor.create，并改写相关调用以传递该工作区。
+  占位 tensor.create，并改写相关调用以传递该工作区。codegen 根据
+  initialize_pipe 元数据计算最终分配形状。
 ```
 
 ## 示例
@@ -104,10 +110,8 @@ class After:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, y):
         out_0 = pl.create_tensor([16, 128], dtype=pl.FP32)
-        # 由本 Pass 注入：工作区大小按 FP32 元素数计算（ceil(required_bytes / 4)）。
-        # 当前契约使用 FP32：tensor.create 的 shape 即元素数，配合 FP32 即可
-        # 得到 4 * elements 字节的底层缓冲。
-        __gm_pipe_buffer = pl.create_tensor([math.ceil(required_bytes / 4)], dtype=pl.FP32)
+        # 由本 Pass 注入的占位 tensor.create；最终分配形状由 codegen 生成。
+        __gm_pipe_buffer = pl.create_tensor([1], dtype=pl.FP32)
         return self.compute(x, y, out_0, __gm_pipe_buffer)
 ```
 
@@ -124,8 +128,8 @@ Pass InjectGMPipeBuffer();
 - `HasInitializePipeOps` —— 递归扫描 `aic_initialize_pipe` / `aiv_initialize_pipe`（通过 `op_predicates::IsInitializePipe`）
 - `AddGMSlotBufferParam` —— 追加 Out-tensor 参数
 - `RewriteCallsForGMBuffer` —— 改写调用者的调用点
-- `CreateGMPipeBufferTensorCreate` —— 构造 Orchestration 侧的 `tensor.create`
-- `RewriteCallsWithPerCallGMBuffer` —— 驱动 Orchestration 侧的改写：插入 `tensor.create` 并按调用点转发工作区
+- `CreateGMPipeBufferTensorCreate` —— 构造 Orchestration 侧的占位 `tensor.create`
+- `RewriteCallsWithPerCallGMBuffer` —— 驱动 Orchestration 侧的改写：插入占位并按调用点转发工作区
 
 **Python 绑定**：`python/bindings/modules/passes.cpp`
 
@@ -154,4 +158,4 @@ passes.def("inject_gm_pipe_buffer", &pass::InjectGMPipeBuffer,
 | 通过 `BackendHandler::RequiresGMPipeBuffer()` 进行后端门控 | 后端可按需启用，无需在 Pass 代码中散落 `if (backend == "910B")` 之类的分支（参见 `pass-context-config.md`） |
 | 通过 `initialize_pipe` 操作识别种子，而非按函数名匹配 | 对函数重命名不敏感，也避免误改不需要 setup 的函数 |
 | 在 Orchestration 停止传播 | Orchestration 是主机侧调度层，由它来物化工作区并下发给设备侧被调函数最为自然 |
-| 通过 `tensor.create` 在调用点物化工作区 | 保持 Orchestration 对外签名稳定，让 codegen 直接发出常规的主机侧分配 |
+| IR 分配保持为占位 | 让该 IR Pass 聚焦于参数连线，由 codegen 处理后端 footprint 和每条 pipe 的 GM offset |

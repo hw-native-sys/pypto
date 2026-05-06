@@ -174,18 +174,18 @@ pl.system.bar_m()                        # Matrix barrier
 pl.system.bar_all()                      # Global barrier
 
 # Cross-core operations (TPUSH/TPOP protocol)
-pl.tpush_to_aic(tile, aiv_idx=0)             # Vector → Cube push
-pl.tpush_to_aiv(tile, aiv_idx=0)             # Cube → Vector push
-tile = pl.tpop_from_aic(aiv_idx=0)           # Pop from Cube pipe
-tile = pl.tpop_from_aiv(aiv_idx=0)           # Pop from Vector pipe
-pl.tfree_to_aic(aiv_idx=0)                   # Release slot to Cube
-pl.tfree_to_aiv(aiv_idx=0)                   # Release slot to Vector
+pl.tpush_to_aic(tile0, split=0, id=0)        # Vector → Cube push on pipe 0
+pl.tpush_to_aic(tile1, split=0, id=1)        # Vector → Cube push on pipe 1
+tile0 = pl.tpop_from_aiv(split=0, id=0)      # Cube pops from Vector pipe 0
+tile1 = pl.tpop_from_aiv(split=0, id=1)      # Cube pops from Vector pipe 1
+pl.tfree_to_aiv(tile0, id=0)                 # Release slot to Vector pipe 0
+pl.tfree_to_aiv(tile1, id=1)                 # Release slot to Vector pipe 1
 
 # Cross-core pipe initialization and buffer management
 buf = pl.reserve_buffer(name="slot_buf", size=4096, base=pl.AUTO)
 peer = pl.import_peer_buffer(name="slot_buf", peer_func="other_func")
-pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=buf.base)
-pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=peer.base)
+pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, id=0)
+pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, id=0)
 ```
 
 ## Statements

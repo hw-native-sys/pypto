@@ -163,26 +163,27 @@ sub-window carved out by `pto.subview`.
 
 | PyPTO Operation | Generated PTO-ISA | Description |
 | --------------- | ----------------- | ----------- |
-| `tile.tpush_to_aiv(tile, split=N)` | `pto.tpush_to_aiv ins(%tile : type) {split = N}` | Cube → Vector push |
-| `tile.tpush_to_aic(tile, split=N)` | `pto.tpush_to_aic ins(%tile : type) {split = N}` | Vector → Cube push |
-| `tile.tpop_from_aic(split=N)` | `%buf = pto.tpop_from_aic {split = N} -> type` | Pop from Cube pipe |
-| `tile.tpop_from_aiv(split=N)` | `%buf = pto.tpop_from_aiv {split = N} -> type` | Pop from Vector pipe |
-| `system.tfree_to_aic(tile_from_tpop)` | `pto.tfree_from_aic {split = N}` | Release a consumer slot back to Cube |
-| `system.tfree_to_aiv(tile_from_tpop)` | `pto.tfree_from_aiv {split = N}` | Release a consumer slot back to Vector |
-| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube pipe init |
-| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector pipe init |
+| `tile.tpush_to_aiv(tile, split=N[, id=I])` | `pto.tpush_to_aiv ins(%tile : type) {[id = I, ]split = N}` | Cube → Vector push |
+| `tile.tpush_to_aic(tile, split=N[, id=I])` | `pto.tpush_to_aic ins(%tile : type) {[id = I, ]split = N}` | Vector → Cube push |
+| `tile.tpop_from_aic(split=N[, id=I])` | `%buf = pto.tpop_from_aic {[id = I, ]split = N} -> type` | Pop from Cube pipe |
+| `tile.tpop_from_aiv(split=N[, id=I])` | `%buf = pto.tpop_from_aiv {[id = I, ]split = N} -> type` | Pop from Vector pipe |
+| `system.tfree_to_aic(tile_from_tpop[, id=I])` | `pto.tfree_from_aic {[id = I, ]split = N}` | Release a consumer slot back to Cube |
+| `system.tfree_to_aiv(tile_from_tpop[, id=I])` | `pto.tfree_from_aiv {[id = I, ]split = N}` | Release a consumer slot back to Vector |
+| `system.aic_initialize_pipe(...)` | `pto.aic_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Cube pipe init |
+| `system.aiv_initialize_pipe(...)` | `pto.aiv_initialize_pipe {[id = I, ]dir_mask = D, slot_size = S} (c2v_consumer_buf = %ssa : i32, v2c_consumer_buf = %ssa : i32)` | Vector pipe init |
 | `system.reserve_buffer(...)` | `%name = pto.reserve_buffer {name = "N", size = S, location = #pto.address_space<loc>, auto = false, base = B} -> i32` | Reserve buffer |
 | `system.import_peer_buffer(...)` | `%name = pto.import_reserved_buffer {name = "N", peer_func = @F} -> i32` | Import peer buffer |
 
 **Notes:**
 
 - Push ops use an `ins()` clause with a typed tile buffer; frontend pop ops produce an SSA result with a `-> !pto.tile_buf<...>` result type
+- `id` is optional. When omitted, PTOAS defaults to frontend pipe id `0`. Use explicit ids only when authoring multiple independent frontend pipes; automatic bidirectional mixed-kernel setup keeps a single `dir_mask = 3` pipe.
 - If the pushed tile was allocated with dynamic `valid_row` / `valid_col` operands or updated by
   `tile.set_validshape`, `tpush` emits the same tile handle after its runtime valid shape has been
   updated. For split `tpush`, codegen temporarily uses a full non-split transport dimension (`cols`
   for up/down, `rows` for left/right), then restores the producer tile's logical valid shape;
   consumer-side dynamic tpop operands carry the logical extents used by compute and store.
-- When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store.
+- When a tpop result `TileView.valid_shape` differs from the physical tile shape, PTO codegen emits PTOAS frontend operands as `%buf = pto.tpop_from_*(%valid_row, %valid_col) {[id = I, ]split = N} -> !pto.tile_buf<..., v_row=?, v_col=?, ...>`. This covers dynamic expressions and static non-full shapes such as `[0, 0]`; the operands carry the logical extents used by compute and store.
 - For split consumers, `SplitVectorKernel` localizes those dynamic tpop
   valid-shape operands per subblock (for example global `[8, 16]` becomes
   `[8, 16]` then `[0, 16]` under up/down split of a `[16, 16]` tile).

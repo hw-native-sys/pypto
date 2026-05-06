@@ -349,19 +349,19 @@ REGISTER_OP("system.sync_src")
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `tile.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `aiv_idx` |
-| `tile.tpush_to_aic` | 1 (tile) | Push tile from Vector to Cube | `aiv_idx` |
-| `tile.tpop_from_aic` | 0 | Pop tile from Cube pipe (→ TileType) | `aiv_idx` |
-| `tile.tpop_from_aiv` | 0 | Pop tile from Vector pipe (→ TileType) | `aiv_idx` |
-| `system.tfree_to_aic` | 0 | Release slot back to Cube producer | `aiv_idx` |
-| `system.tfree_to_aiv` | 0 | Release slot back to Vector producer | `aiv_idx` |
+| `tile.tpush_to_aiv` | 1 (tile) | Push tile from Cube to Vector | `split`, optional `id` |
+| `tile.tpush_to_aic` | 1 (tile) | Push tile from Vector to Cube | `split`, optional `id` |
+| `tile.tpop_from_aic` | 0 | Pop tile from Cube pipe (→ TileType) | `split`, optional `id` |
+| `tile.tpop_from_aiv` | 0 | Pop tile from Vector pipe (→ TileType) | `split`, optional `id` |
+| `system.tfree_to_aic` | 1 (tile) | Release slot back to Cube producer | optional `id` |
+| `system.tfree_to_aiv` | 1 (tile) | Release slot back to Vector producer | optional `id` |
 
 ### Pipe Initialization Operations
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size` |
-| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size` |
+| `system.aic_initialize_pipe` | 2 | Init cross-core pipe on Cube side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `id` |
+| `system.aiv_initialize_pipe` | 2 | Init cross-core pipe on Vector side (positional: `c2v_consumer_buf`, `v2c_consumer_buf`, i32 SSA) | `dir_mask`, `slot_size`, optional `id` |
 
 ### Buffer Management Operations
 
@@ -387,15 +387,15 @@ class CrossCoreExample:
         pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512)
 
         tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
-        pl.tpush_to_aic(tile_a, aiv_idx=0)
+        pl.tpush_to_aic(tile_a, split=0)
 
     @pl.function(type=pl.FunctionType.InCore)
     def cube_consumer(self, out: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
         buf = pl.reserve_buffer(name="v2c_buf", size=4096, base=0x1000)
         pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512)
 
-        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
-        pl.tfree_to_aiv(aiv_idx=0)
+        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=0)
+        pl.tfree_to_aiv(received)
         result: pl.Tensor[[16, 16], pl.FP32] = pl.store(received, [0, 0], out)
         return result
 ```

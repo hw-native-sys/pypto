@@ -20,6 +20,7 @@ Tests:
   BiDirectUDTest : V↔C, updown split.              c += (a+1) @ b (parallel over N in blocks)
   BiDirectLRTest : V↔C, left-right split.          c += (a+1) @ b (parallel over N in blocks)
   BiDirectNoSplitTest : V↔C, no split.             c += (a+1) @ b (parallel over N in blocks)
+  MultiPipeNoSplitTest : two explicit V→C pipes with ids 0 and 1.
 """
 
 import sys
@@ -36,6 +37,9 @@ K = 64
 N = 512
 N_BLOCK = 64
 N_BLOCKS = N // N_BLOCK
+MULTI_PIPE_DIM = 16
+MULTI_PIPE_SLOT_SIZE = MULTI_PIPE_DIM * MULTI_PIPE_DIM * 4
+MULTI_PIPE_BUFFER_SIZE = MULTI_PIPE_SLOT_SIZE * 8
 
 _PLATFORM_TO_BACKEND: dict[str, BackendType] = {
     "a2a3": BackendType.Ascend910B,
@@ -544,6 +548,140 @@ class BiDirectNoSplitTest(PTOTestCase):
         tensors["c"][:] = c_prev + torch.matmul(a + 1, b)
 
 
+@pl.program
+class MultiPipeNoSplitProgram:
+    """Explicit two-pipe no-split V2C program."""
+
+    @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+    def vector_multi_pipe(
+        self,
+        a: pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32],
+        b: pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32],
+        output: pl.Out[pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32]],
+    ):
+        v2c_peer_0 = pl.import_peer_buffer(name="v2c_slot_buffer_0", peer_func="cube_multi_pipe")
+        v2c_peer_1 = pl.import_peer_buffer(name="v2c_slot_buffer_1", peer_func="cube_multi_pipe")
+        pl.aiv_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_peer_0,
+            dir_mask=2,
+            slot_size=MULTI_PIPE_SLOT_SIZE,
+            id=0,
+        )
+        pl.aiv_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_peer_1,
+            dir_mask=2,
+            slot_size=MULTI_PIPE_SLOT_SIZE,
+            id=1,
+        )
+
+        a_tile: pl.Tile[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32, pl.Mem.Vec] = pl.load(
+            a,
+            [0, 0],
+            [MULTI_PIPE_DIM, MULTI_PIPE_DIM],
+        )
+        b_tile: pl.Tile[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32, pl.Mem.Vec] = pl.load(
+            b,
+            [0, 0],
+            [MULTI_PIPE_DIM, MULTI_PIPE_DIM],
+        )
+        sum_tile: pl.Tile[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32, pl.Mem.Vec] = pl.add(a_tile, b_tile)
+        diff_tile: pl.Tile[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32, pl.Mem.Vec] = pl.sub(a_tile, b_tile)
+        # Push in reverse id order so the test fails if ids collapse onto one FIFO.
+        pl.tpush_to_aic(diff_tile, split=0, id=1)
+        pl.tpush_to_aic(sum_tile, split=0, id=0)
+
+    @pl.function(type=pl.FunctionType.AIC)
+    def cube_multi_pipe(
+        self,
+        a: pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32],
+        b: pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32],
+        output: pl.Out[pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32]],
+    ) -> pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32]:
+        v2c_buf_0 = pl.reserve_buffer(
+            name="v2c_slot_buffer_0",
+            size=MULTI_PIPE_BUFFER_SIZE,
+            base=pl.AUTO,
+        )
+        v2c_buf_1 = pl.reserve_buffer(
+            name="v2c_slot_buffer_1",
+            size=MULTI_PIPE_BUFFER_SIZE,
+            base=pl.AUTO,
+        )
+        pl.aic_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_buf_0,
+            dir_mask=2,
+            slot_size=MULTI_PIPE_SLOT_SIZE,
+            id=0,
+        )
+        pl.aic_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_buf_1,
+            dir_mask=2,
+            slot_size=MULTI_PIPE_SLOT_SIZE,
+            id=1,
+        )
+        sum_tile: pl.Tile[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32, pl.Mem.Mat] = pl.tpop_from_aiv(
+            split=0,
+            id=0,
+        )
+        diff_tile: pl.Tile[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32, pl.Mem.Mat] = pl.tpop_from_aiv(
+            split=0,
+            id=1,
+        )
+        sum_left = pl.move(sum_tile, target_memory=pl.Mem.Left)
+        diff_right = pl.move(diff_tile, target_memory=pl.Mem.Right)
+        result: pl.Tile[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32] = pl.matmul(sum_left, diff_right)
+        pl.tfree_to_aiv(sum_tile, id=0)
+        pl.tfree_to_aiv(diff_tile, id=1)
+        return pl.store(result, [0, 0], output)
+
+    @pl.function(type=pl.FunctionType.Group)
+    def group_func(
+        self,
+        a: pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32],
+        b: pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32],
+        output: pl.Out[pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32]],
+    ) -> pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32]:
+        result = self.cube_multi_pipe(a, b, output)
+        self.vector_multi_pipe(a, b, output)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32],
+        b: pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32],
+        output: pl.Out[pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32]],
+    ) -> pl.Tensor[[MULTI_PIPE_DIM, MULTI_PIPE_DIM], pl.FP32]:
+        result = self.group_func(a, b, output)
+        return result
+
+
+class MultiPipeNoSplitTest(PTOTestCase):
+    """Explicit two-pipe V->C setup: output = (a + b) @ (a - b)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "cross_core_multiple_pipes_nosplit"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [MULTI_PIPE_DIM, MULTI_PIPE_DIM], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [MULTI_PIPE_DIM, MULTI_PIPE_DIM], DataType.FP32, init_value=torch.randn),
+            TensorSpec("output", [MULTI_PIPE_DIM, MULTI_PIPE_DIM], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MultiPipeNoSplitProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["output"][:] = torch.matmul(tensors["a"] + tensors["b"], tensors["a"] - tensors["b"])
+
+
 class TestCrossCore:
     """Cross-core communication system tests."""
 
@@ -599,6 +737,13 @@ class TestCrossCore:
             pytest.xfail("950 backend cross-core bidirect no-split not yet stable on sim")
         result = test_runner.run(BiDirectNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core bidirect no-split compilation failed: {result.error}"
+
+    def test_multiple_pipes_nosplit(self, test_runner, backend_type, platform):
+        """Explicit multiple pipe ids: compile through full pipeline and verify correctness."""
+        if platform == "a5sim":
+            pytest.xfail("950 backend explicit multi-pipe no-split not yet validated on sim")
+        result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
+        assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
 
 
 if __name__ == "__main__":

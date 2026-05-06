@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iomanip>
 #include <ios>
 #include <limits>
@@ -40,7 +41,10 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -65,6 +69,8 @@ using ir::VarPtr;
 using ir::WhileStmtPtr;
 using ir::YieldStmtPtr;
 
+namespace transform_utils = ir::transform_utils;
+
 namespace {
 
 bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
@@ -83,11 +89,16 @@ bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
 std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(const std::shared_ptr<const ir::TileType>& tile_type) {
   ExprPtr valid_row_expr;
   ExprPtr valid_col_expr;
-  if (!tile_type || !tile_type->tile_view_.has_value()) {
+  if (!tile_type) {
     return {valid_row_expr, valid_col_expr};
   }
 
-  const auto& tile_view = tile_type->tile_view_.value();
+  const auto& optional_tile_view = tile_type->tile_view_;
+  if (!optional_tile_view) {
+    return {valid_row_expr, valid_col_expr};
+  }
+
+  const auto& tile_view = *optional_tile_view;
   if (tile_view.valid_shape.size() >= 1 && tile_view.valid_shape[0] &&
       !As<ir::ConstInt>(tile_view.valid_shape[0])) {
     valid_row_expr = tile_view.valid_shape[0];
@@ -102,6 +113,17 @@ std::pair<ExprPtr, ExprPtr> GetTileValidShapeExprs(const std::shared_ptr<const i
 bool HasDynamicTileValidShape(const std::shared_ptr<const ir::TileType>& tile_type) {
   auto [valid_row_expr, valid_col_expr] = GetTileValidShapeExprs(tile_type);
   return valid_row_expr || valid_col_expr;
+}
+
+int GetGMPipeSlotCount(int dir_mask) {
+  const int bidirectional = ir::core_affinity::kDirMaskC2V | ir::core_affinity::kDirMaskV2C;
+  if (dir_mask == bidirectional) {
+    return 4;
+  }
+  if (dir_mask == ir::core_affinity::kDirMaskC2V || dir_mask == ir::core_affinity::kDirMaskV2C) {
+    return 8;
+  }
+  return 0;
 }
 
 bool ShouldAliasScatterUpdateResultToInput(const AssignStmtPtr& stmt) {
@@ -120,6 +142,8 @@ bool ShouldAliasScatterUpdateResultToInput(const AssignStmtPtr& stmt) {
   auto input_memref = ir::GetDefinedMemRef(input_tile_type);
   return result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get();
 }
+
+const auto& FlattenBody = transform_utils::FlattenToStmts;
 
 }  // namespace
 
@@ -203,6 +227,8 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   fs_.constants_section.clear();
   fs_.body_section.str("");
   fs_.body_section.clear();
+  gm_slot_buffer_offsets_.clear();
+  PrepareGMSlotBufferLayout(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
   stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"} {\n";
@@ -216,6 +242,57 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
 
   stream_ << "}\n";
   return stream_.str();
+}
+
+void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
+  std::map<std::pair<int, int>, int> slot_size_by_pipe;
+
+  std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
+  scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
+    for (const auto& stmt : stmts) {
+      auto call = transform_utils::GetCallFromStmt(stmt);
+      if (ir::op_predicates::IsInitializePipe(call)) {
+        const int pipe_id = call->GetKwarg<int>("id", 0);
+        const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
+        const int slot_size = call->GetKwarg<int>("slot_size", 0);
+        if (dir_mask > 0 && slot_size > 0) {
+          const auto key = std::make_pair(pipe_id, dir_mask);
+          auto [it, inserted] = slot_size_by_pipe.emplace(key, slot_size);
+          CHECK(inserted || it->second == slot_size)
+              << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
+              << " uses inconsistent slot_size values: " << it->second << " and " << slot_size;
+        }
+      }
+      if (auto for_stmt = As<ir::ForStmt>(stmt)) {
+        scan_stmts(FlattenBody(for_stmt->body_));
+      } else if (auto if_stmt = As<ir::IfStmt>(stmt)) {
+        scan_stmts(FlattenBody(if_stmt->then_body_));
+        if (if_stmt->else_body_.has_value()) {
+          scan_stmts(FlattenBody(if_stmt->else_body_.value()));
+        }
+      } else if (auto while_stmt = As<ir::WhileStmt>(stmt)) {
+        scan_stmts(FlattenBody(while_stmt->body_));
+      }
+    }
+  };
+
+  for (const auto& [gvar, func] : program->functions_) {
+    (void)gvar;
+    if (func->body_) {
+      scan_stmts(FlattenBody(func->body_));
+    }
+  }
+
+  int64_t byte_offset = 0;
+  for (const auto& [key, slot_size] : slot_size_by_pipe) {
+    gm_slot_buffer_offsets_[key] = byte_offset;
+    const int dir_mask = key.second;
+    const int slot_count = GetGMPipeSlotCount(dir_mask);
+    CHECK(slot_count > 0) << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
+    CHECK(byte_offset <= std::numeric_limits<int64_t>::max() - static_cast<int64_t>(slot_count) * slot_size)
+        << "GM slot buffer offset overflow while assigning frontend pipe id " << key.first;
+    byte_offset += static_cast<int64_t>(slot_count) * slot_size;
+  }
 }
 
 void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
@@ -384,7 +461,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     if (auto tensor_type = As<TensorType>(var->GetType())) {
       // Skip tensor view for GM slot buffer workspace parameter (raw pointer, no view needed)
       if (var->name_hint_ == "__gm_pipe_buffer") {
-        RecordGMSlotBufferSSA(GetVarName(var));
+        RecordGMSlotBufferSSA(GetVarName(var), tensor_type->dtype_);
         continue;
       }
       std::string tensor_view = NewNamedTemp(var->name_hint_ + "_view");
@@ -469,10 +546,14 @@ void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
         if (auto call = As<ir::Call>(op->value_)) {
           // Track tpop result vars with their split value so codegen can:
           // 1. Skip alloc_tile for them
-          // 2. Propagate split to tfree
+          // 2. Propagate split and explicit pipe id to tfree
           if (call->op_->name_ == "tile.tpop_from_aiv" || call->op_->name_ == "tile.tpop_from_aic") {
             int split = call->GetKwarg<int>("split", 0);
-            tpop_result_vars[op->var_.get()] = TpopResultInfo{split, call->op_->name_};
+            std::optional<int> pipe_id;
+            if (call->HasKwarg("id")) {
+              pipe_id = call->GetKwarg<int>("id", 0);
+            }
+            tpop_result_vars[op->var_.get()] = TpopResultInfo{split, call->op_->name_, pipe_id};
           }
         }
       }
@@ -877,20 +958,66 @@ const PTOCodegen::SubviewMaterializationInfo* PTOCodegen::GetSubviewMaterializat
   return it != fs_.subview_materializations.end() ? &it->second : nullptr;
 }
 
-void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa) { fs_.gm_slot_buffer_ssa = ssa; }
+void PTOCodegen::RecordGMSlotBufferSSA(const std::string& ssa, const DataType& dtype) {
+  CHECK(dtype == DataType::FP32) << "__gm_pipe_buffer must use FP32 elements, got " << dtype.ToString();
+  fs_.gm_slot_buffer_ssa = ssa;
+  fs_.gm_slot_buffer_dtype = dtype;
+}
 
 std::string PTOCodegen::GetGMSlotBufferSSA() const { return fs_.gm_slot_buffer_ssa; }
 
-int PTOCodegen::GetValidatedTpopSplit(const ir::Var* var, const std::string& expected_tpop_op_name,
-                                      const std::string& tfree_op_name) const {
-  INTERNAL_CHECK(var != nullptr) << "Internal error: null var passed to GetValidatedTpopSplit";
+std::string PTOCodegen::GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask) {
+  if (fs_.gm_slot_buffer_ssa.empty()) {
+    return "";
+  }
+
+  const auto key = std::make_pair(pipe_id, dir_mask);
+  auto it = fs_.gm_slot_buffer_region_by_pipe.find(key);
+  if (it != fs_.gm_slot_buffer_region_by_pipe.end()) {
+    return it->second;
+  }
+
+  auto offset_it = gm_slot_buffer_offsets_.find(key);
+  CHECK(offset_it != gm_slot_buffer_offsets_.end())
+      << "Internal error: missing GM slot buffer offset for frontend pipe id " << pipe_id << " and dir_mask "
+      << dir_mask;
+  const int64_t byte_offset = offset_it->second;
+
+  std::string region_ssa = fs_.gm_slot_buffer_ssa;
+  if (byte_offset != 0) {
+    const auto element_bytes = static_cast<int64_t>((fs_.gm_slot_buffer_dtype.GetBit() + 7) / 8);
+    CHECK(element_bytes > 0) << "Unsupported __gm_pipe_buffer dtype: " << fs_.gm_slot_buffer_dtype.ToString();
+    CHECK(byte_offset % element_bytes == 0)
+        << "GM slot buffer byte offset must be aligned to " << fs_.gm_slot_buffer_dtype.ToString()
+        << " elements, got " << byte_offset;
+    const int64_t elem_offset = byte_offset / element_bytes;
+    std::string offset_ssa = GetOrEmitConstant(elem_offset, DataType::INDEX);
+    region_ssa = NewTemp();
+    const std::string elem_type = GetTypeString(fs_.gm_slot_buffer_dtype);
+    Emit(region_ssa + " = pto.addptr " + fs_.gm_slot_buffer_ssa + ", " + offset_ssa + " : <" + elem_type +
+         "> -> <" + elem_type + ">");
+  }
+
+  fs_.gm_slot_buffer_region_by_pipe[key] = region_ssa;
+  return region_ssa;
+}
+
+const TpopResultInfo& PTOCodegen::GetValidatedTpopInfo(const ir::Var* var,
+                                                       const std::string& expected_tpop_op_name,
+                                                       const std::string& tfree_op_name) const {
+  INTERNAL_CHECK(var != nullptr) << "Internal error: null var passed to GetValidatedTpopInfo";
   auto it = fs_.tpop_result_vars.find(var);
   INTERNAL_CHECK_SPAN(it != fs_.tpop_result_vars.end(), var->span_)
-      << "Internal error: GetValidatedTpopSplit called for var not in fs_.tpop_result_vars";
+      << "Internal error: GetValidatedTpopInfo called for var not in fs_.tpop_result_vars";
   CHECK(it->second.op_name == expected_tpop_op_name)
       << tfree_op_name << " requires its tile argument to come from " << expected_tpop_op_name << ", got "
       << it->second.op_name;
-  return it->second.split;
+  return it->second;
+}
+
+int PTOCodegen::GetValidatedTpopSplit(const ir::Var* var, const std::string& expected_tpop_op_name,
+                                      const std::string& tfree_op_name) const {
+  return GetValidatedTpopInfo(var, expected_tpop_op_name, tfree_op_name).split;
 }
 
 bool PTOCodegen::IsAICFunction() const {

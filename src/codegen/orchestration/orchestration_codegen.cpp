@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -41,6 +43,8 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/core_affinity.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
@@ -94,6 +98,86 @@ namespace {
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 
+int GetGMPipeSlotCount(int dir_mask) {
+  const int bidirectional = core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C;
+  if (dir_mask == bidirectional) {
+    return 4;
+  }
+  if (dir_mask == core_affinity::kDirMaskC2V || dir_mask == core_affinity::kDirMaskV2C) {
+    return 8;
+  }
+  return 0;
+}
+
+int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const FunctionPtr& root_func) {
+  std::map<std::pair<int, int>, int> slot_size_by_pipe;
+
+  std::unordered_set<std::string> visited_funcs;
+  std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
+  std::function<void(const FunctionPtr&)> scan_func;
+  scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
+    for (const auto& stmt : stmts) {
+      auto call = transform_utils::GetCallFromStmt(stmt);
+      if (op_predicates::IsInitializePipe(call)) {
+        const int pipe_id = call->GetKwarg<int>("id", 0);
+        const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
+        const int slot_size = call->GetKwarg<int>("slot_size", 0);
+        if (dir_mask > 0 && slot_size > 0) {
+          const auto key = std::make_pair(pipe_id, dir_mask);
+          auto [it, inserted] = slot_size_by_pipe.emplace(key, slot_size);
+          CHECK(inserted || it->second == slot_size)
+              << "initialize_pipe for frontend pipe id " << pipe_id << " and dir_mask " << dir_mask
+              << " uses inconsistent slot_size values: " << it->second << " and " << slot_size;
+        }
+      } else if (call) {
+        auto gv = As<GlobalVar>(call->op_);
+        if (gv) {
+          scan_func(program->GetFunction(gv->name_));
+        }
+      }
+
+      if (auto for_stmt = As<ForStmt>(stmt)) {
+        scan_stmts(transform_utils::FlattenToStmts(for_stmt->body_));
+      } else if (auto if_stmt = As<IfStmt>(stmt)) {
+        scan_stmts(transform_utils::FlattenToStmts(if_stmt->then_body_));
+        const auto& else_body = if_stmt->else_body_;
+        if (else_body) {
+          scan_stmts(transform_utils::FlattenToStmts(*else_body));
+        }
+      } else if (auto while_stmt = As<WhileStmt>(stmt)) {
+        scan_stmts(transform_utils::FlattenToStmts(while_stmt->body_));
+      }
+    }
+  };
+
+  scan_func = [&](const FunctionPtr& func) {
+    if (!func || !visited_funcs.insert(func->name_).second) {
+      return;
+    }
+    if (func->body_) {
+      scan_stmts(transform_utils::FlattenToStmts(func->body_));
+    }
+  };
+
+  scan_func(root_func);
+
+  int64_t total_bytes = 0;
+  for (const auto& [key, slot_size] : slot_size_by_pipe) {
+    const int dir_mask = key.second;
+    const int slot_count = GetGMPipeSlotCount(dir_mask);
+    CHECK(slot_count > 0) << "initialize_pipe has invalid dir_mask for GM slot buffer: " << dir_mask;
+    CHECK(total_bytes <= std::numeric_limits<int64_t>::max() -
+                             static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size))
+        << "GM slot buffer size overflow while sizing frontend pipe id " << key.first;
+    total_bytes += static_cast<int64_t>(slot_count) * static_cast<int64_t>(slot_size);
+  }
+
+  if (total_bytes == 0) {
+    return 0;
+  }
+  return (total_bytes + static_cast<int64_t>(sizeof(float)) - 1) / static_cast<int64_t>(sizeof(float));
+}
+
 // ---------------------------------------------------------------------------
 // Template / boilerplate generation helpers
 // ---------------------------------------------------------------------------
@@ -133,9 +217,11 @@ std::string GenerateConfigFunction(int expected_arg_count) {
 }
 
 bool RequiresDualAivDispatch(const FunctionPtr& aiv_func) {
-  return aiv_func != nullptr &&
-         ((aiv_func->GetSplitMode().has_value() && aiv_func->GetSplitMode().value() != SplitMode::None) ||
-          (aiv_func->HasAttr(kDualAivDispatchAttr) && aiv_func->GetAttr<bool>(kDualAivDispatchAttr, false)));
+  if (aiv_func == nullptr) {
+    return false;
+  }
+  return aiv_func->GetSplitMode().value_or(SplitMode::None) != SplitMode::None ||
+         (aiv_func->HasAttr(kDualAivDispatchAttr) && aiv_func->GetAttr<bool>(kDualAivDispatchAttr, false));
 }
 
 // Returns the opening of a rt_submit_{aic,aiv}_task call.
@@ -234,12 +320,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return "(int64_t)" + name + ".shapes[" + std::to_string(axis) + "]";
   }
 
-  [[nodiscard]] std::string GetTensorCreateScaleExpr(const std::string& result_var) const override {
-    auto it = tensor_create_scale_expr_by_emit_name_.find(result_var);
-    if (it == tensor_create_scale_expr_by_emit_name_.end()) {
-      return "";
+  [[nodiscard]] std::string GetTensorCreateSizeExpr(const std::string& result_var,
+                                                    const std::string& default_dim_expr) const override {
+    auto size_it = tensor_create_size_expr_by_emit_name_.find(result_var);
+    if (size_it != tensor_create_size_expr_by_emit_name_.end()) {
+      return size_it->second;
     }
-    return it->second;
+    return CodegenBase::GetTensorCreateSizeExpr(result_var, default_dim_expr);
   }
 
   void VisitStmt_(const ForStmtPtr& for_stmt) override {
@@ -505,9 +592,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "if (" << cond_expr << ") {\n";
     VisitScopedBranchBody(if_stmt->then_body_, if_stmt->return_vars_);
 
-    if (if_stmt->else_body_.has_value()) {
+    const auto& else_body = if_stmt->else_body_;
+    if (else_body.has_value()) {
       code_ << Indent() << "} else {\n";
-      VisitScopedBranchBody(*if_stmt->else_body_, if_stmt->return_vars_);
+      VisitScopedBranchBody(*else_body, if_stmt->return_vars_);
     }
 
     code_ << Indent() << "}\n";
@@ -990,10 +1078,26 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return var && var->name_hint_.rfind("gm_pipe_buffer_", 0) == 0;
   }
 
-  [[nodiscard]] std::string ResolveLaunchCoreNumForCreate(const std::vector<StmtPtr>& stmts,
-                                                          size_t create_stmt_idx,
-                                                          const VarPtr& create_var) const {
-    if (!create_var) return "";
+  int64_t GetGMPipeWorkspaceElements(const FunctionPtr& root_func) {
+    INTERNAL_CHECK(root_func != nullptr)
+        << "Internal error: GM pipe workspace root function must not be null";
+    auto it = gm_pipe_workspace_elements_by_callee_.find(root_func->name_);
+    if (it == gm_pipe_workspace_elements_by_callee_.end()) {
+      const int64_t elements = ComputeGMPipeWorkspaceElements(program_, root_func);
+      it = gm_pipe_workspace_elements_by_callee_.emplace(root_func->name_, elements).first;
+    }
+    return it->second;
+  }
+
+  struct GMPipeCreateUse {
+    FunctionPtr callee;
+    std::string core_num_expr;
+  };
+
+  [[nodiscard]] std::optional<GMPipeCreateUse> ResolveGMPipeCreateUse(const std::vector<StmtPtr>& stmts,
+                                                                      size_t create_stmt_idx,
+                                                                      const VarPtr& create_var) const {
+    if (!create_var) return std::nullopt;
 
     for (size_t i = create_stmt_idx + 1; i < stmts.size(); ++i) {
       auto assign = As<AssignStmt>(stmts[i]);
@@ -1020,18 +1124,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (!uses_create_var) continue;
 
       auto gv = As<GlobalVar>(call->op_);
-      if (!gv) return "";
+      if (!gv) return std::nullopt;
       auto callee_func = program_->GetFunction(gv->name_);
-      if (!callee_func) return "";
-      if (callee_func->func_type_ != FunctionType::Spmd && callee_func->func_type_ != FunctionType::Group) {
-        return "";
-      }
+      if (!callee_func) return std::nullopt;
 
       auto core_num_expr = callee_func->GetAttr<ExprPtr>("core_num", nullptr);
-      if (!core_num_expr) return "";
-      return RenderLaunchCoreNum(core_num_expr);
+      std::string rendered_core_num;
+      if ((callee_func->func_type_ == FunctionType::Spmd || callee_func->func_type_ == FunctionType::Group) &&
+          core_num_expr) {
+        rendered_core_num = RenderLaunchCoreNum(core_num_expr);
+      }
+      return GMPipeCreateUse{callee_func, rendered_core_num};
     }
-    return "";
+    return std::nullopt;
   }
 
   static bool ExprRefsAnyOf(const ExprPtr& expr, const std::unordered_set<const Var*>& vars) {
@@ -1115,10 +1220,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
       declared_var_ptrs_.insert(assign->var_.get());
       std::string emit_var = ReserveVarEmitName(assign->var_.get());
       if (IsInjectedGMPipeCreateVar(assign->var_)) {
-        std::string core_num_expr = ResolveLaunchCoreNumForCreate(stmts, stmt_idx, assign->var_);
+        auto create_use = ResolveGMPipeCreateUse(stmts, stmt_idx, assign->var_);
+        CHECK(create_use.has_value())
+            << "Internal error: injected gm_pipe_buffer tensor.create is not passed to a callee";
+        int64_t workspace_elems = GetGMPipeWorkspaceElements(create_use->callee);
+        CHECK(workspace_elems > 0)
+            << "Internal error: injected gm_pipe_buffer tensor.create found without initialize_pipe ops";
+        std::string size_expr = std::to_string(workspace_elems);
+        const std::string& core_num_expr = create_use->core_num_expr;
         if (!core_num_expr.empty()) {
-          tensor_create_scale_expr_by_emit_name_[emit_var] = core_num_expr;
+          size_expr = "static_cast<uint32_t>((" + size_expr + ") * (" + core_num_expr + "))";
         }
+        tensor_create_size_expr_by_emit_name_[emit_var] = size_expr;
       }
       creates.push_back({emit_var, call});
       batched_create_stmts_.insert(stmt.get());
@@ -1129,15 +1242,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     auto& registry = OrchestrationOpRegistry::GetInstance();
     auto handler = registry.Get("tensor.create");
-    INTERNAL_CHECK_SPAN(handler.has_value(), creates[0].call->span_)
-        << "Internal error: tensor.create handler not registered";
+    if (!handler.has_value()) {
+      INTERNAL_CHECK_SPAN(false, creates[0].call->span_)
+          << "Internal error: tensor.create handler not registered";
+    }
+    const auto& tensor_create_handler = *handler;
 
     for (size_t batch_start = 0; batch_start < creates.size(); batch_start += kMaxAllocTensorsArgs) {
       size_t batch_end = std::min(batch_start + kMaxAllocTensorsArgs, creates.size());
 
       for (size_t i = batch_start; i < batch_end; i++) {
         current_result_var_ = creates[i].emit_name;
-        std::string gen_code = (*handler)(creates[i].call, *this);
+        std::string gen_code = tensor_create_handler(creates[i].call, *this);
         std::istringstream iss(gen_code);
         std::string line;
         while (std::getline(iss, line)) {
@@ -1482,7 +1598,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
   std::unordered_set<const Var*> effective_uses_;
-  std::unordered_map<std::string, std::string> tensor_create_scale_expr_by_emit_name_;
+  std::unordered_map<std::string, int64_t> gm_pipe_workspace_elements_by_callee_;
+  std::unordered_map<std::string, std::string> tensor_create_size_expr_by_emit_name_;
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {

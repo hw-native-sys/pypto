@@ -21,8 +21,8 @@
  *   1. Finds every function that issues initialize_pipe ops.
  *   2. Adds a fresh __gm_pipe_buffer Out-tensor parameter to each, propagating
  *      the parameter upward through callers — except Orchestration functions,
- *      which instead get a per-call-site tensor.create that materializes the
- *      workspace locally.
+ *      which instead get a per-call-site placeholder tensor.create. Codegen
+ *      owns the real hardware workspace size and per-pipe offsets.
  *
  * The pass is gated on BackendHandler::RequiresGMPipeBuffer(); other backends
  * see it as a no-op. Nothing else in the pipeline depends on its output, so it
@@ -54,7 +54,6 @@
 #include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/utils/cross_core_pipe.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
@@ -221,9 +220,8 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
   return SeqStmts::Flatten(std::move(new_stmts), body->span_);
 }
 
-CallPtr CreateGMPipeBufferTensorCreate(int64_t buffer_size_bytes, const Span& span) {
-  int64_t shape_dim = (buffer_size_bytes + 3) / 4;  // FP32 elements (ceil)
-  auto shape_elem = std::make_shared<ConstInt>(shape_dim, DataType::INDEX, span);
+CallPtr CreateGMPipeBufferTensorCreate(const Span& span) {
+  auto shape_elem = std::make_shared<ConstInt>(1, DataType::INDEX, span);
   auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{shape_elem}, span);
   return OpRegistry::GetInstance().Create("tensor.create", {shape_tuple},
                                           {{"dtype", std::any(DataType::FP32)},
@@ -234,8 +232,7 @@ CallPtr CreateGMPipeBufferTensorCreate(int64_t buffer_size_bytes, const Span& sp
 
 StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
                                         const std::unordered_set<std::string>& modified_funcs,
-                                        int64_t gm_buffer_bytes, int64_t gm_buffer_elems, const Span& span,
-                                        int& counter) {
+                                        int64_t gm_buffer_elems, const Span& span, int& counter) {
   auto gm_type = std::make_shared<TensorType>(std::vector<int64_t>{gm_buffer_elems}, DataType::FP32,
                                               std::nullopt, std::nullopt);
   auto stmts = FlattenBody(body);
@@ -249,7 +246,7 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
 
     std::string var_name = std::string("gm_pipe_buffer_") + std::to_string(counter++);
     auto gm_var = std::make_shared<Var>(var_name, gm_type, span);
-    auto create_call = CreateGMPipeBufferTensorCreate(gm_buffer_bytes, span);
+    auto create_call = CreateGMPipeBufferTensorCreate(span);
     auto create_stmt = std::make_shared<AssignStmt>(gm_var, create_call, span);
 
     // Preserve the original Call's kwargs_ / attrs_ (compiler metadata such as
@@ -283,8 +280,8 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
       }
     }
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      auto nb = RewriteCallsWithPerCallGMBuffer(for_stmt->body_, modified_funcs, gm_buffer_bytes,
-                                                gm_buffer_elems, span, counter);
+      auto nb =
+          RewriteCallsWithPerCallGMBuffer(for_stmt->body_, modified_funcs, gm_buffer_elems, span, counter);
       if (nb != for_stmt->body_) {
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = nb;
@@ -294,13 +291,12 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         new_stmts.push_back(stmt);
       }
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      auto nt = RewriteCallsWithPerCallGMBuffer(if_stmt->then_body_, modified_funcs, gm_buffer_bytes,
-                                                gm_buffer_elems, span, counter);
+      auto nt = RewriteCallsWithPerCallGMBuffer(if_stmt->then_body_, modified_funcs, gm_buffer_elems, span,
+                                                counter);
       std::optional<StmtPtr> ne;
       const auto& else_body = if_stmt->else_body_;
       if (else_body.has_value()) {
-        ne = RewriteCallsWithPerCallGMBuffer(*else_body, modified_funcs, gm_buffer_bytes, gm_buffer_elems,
-                                             span, counter);
+        ne = RewriteCallsWithPerCallGMBuffer(*else_body, modified_funcs, gm_buffer_elems, span, counter);
       }
       bool body_changed = (nt != if_stmt->then_body_);
       if (!body_changed && ne.has_value() && else_body.has_value()) {
@@ -316,8 +312,8 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         new_stmts.push_back(stmt);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      auto nb = RewriteCallsWithPerCallGMBuffer(while_stmt->body_, modified_funcs, gm_buffer_bytes,
-                                                gm_buffer_elems, span, counter);
+      auto nb =
+          RewriteCallsWithPerCallGMBuffer(while_stmt->body_, modified_funcs, gm_buffer_elems, span, counter);
       if (nb != while_stmt->body_) {
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = nb;
@@ -334,48 +330,6 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
   return SeqStmts::Flatten(std::move(new_stmts), body->span_);
 }
 
-int64_t ComputeGMBufferSizeFromPipeOps(const std::vector<FunctionPtr>& functions) {
-  int64_t max_bytes = 0;
-  std::function<void(const std::vector<StmtPtr>&)> scan_stmts;
-  scan_stmts = [&](const std::vector<StmtPtr>& stmts) {
-    for (const auto& stmt : stmts) {
-      auto call = transform_utils::GetCallFromStmt(stmt);
-      if (op_predicates::IsInitializePipe(call)) {
-        int ss = call->GetKwarg<int>("slot_size", 0);
-        int dm = call->GetKwarg<int>("dir_mask", 0);
-        if (ss > 0 && dm != 0) {
-          // Mirror the per-direction `buffer_size` formula from
-          // cross_core_pipe.cpp (buffer_size = slot_size * GetSlotNumForDirMask).
-          // For bidirectional pipes the two reserve_buffers share this workspace
-          // at runtime via the AllocateMemoryAddr layout; the AIC/AIV-side a2a3
-          // tests pin both the per-direction reserve sizes and the workspace
-          // shape and would catch any drift here.
-          int64_t bytes =
-              static_cast<int64_t>(ss) * static_cast<int64_t>(cross_core_pipe::GetSlotNumForDirMask(dm));
-          if (bytes > max_bytes) {
-            max_bytes = bytes;
-          }
-        }
-      }
-      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-        scan_stmts(FlattenBody(for_stmt->body_));
-      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-        scan_stmts(FlattenBody(if_stmt->then_body_));
-        if (if_stmt->else_body_.has_value()) {
-          scan_stmts(FlattenBody(if_stmt->else_body_.value()));
-        }
-      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-        scan_stmts(FlattenBody(while_stmt->body_));
-      }
-    }
-  };
-  for (const auto& func : functions) {
-    if (!func->body_) continue;
-    scan_stmts(FlattenBody(func->body_));
-  }
-  return max_bytes;
-}
-
 void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
   std::unordered_map<std::string, FunctionPtr*> func_by_name;
   for (auto& func : functions) func_by_name[func->name_] = &func;
@@ -390,10 +344,6 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
     }
   }
   if (pipe_funcs.empty()) return;
-
-  int64_t gm_buffer_bytes = ComputeGMBufferSizeFromPipeOps(functions);
-  INTERNAL_CHECK(gm_buffer_bytes > 0) << "Internal error: cross-core pipe functions found but no "
-                                         "initialize_pipe ops to determine buffer size";
 
   // Propagate upward, stopping at Orchestration boundaries (they materialize
   // the buffer locally instead of taking it as a parameter).
@@ -416,11 +366,11 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
     }
   }
 
-  int64_t gm_buffer_elems = (gm_buffer_bytes + 3) / 4;
+  constexpr int64_t kGMPipeBufferPlaceholderElems = 1;
 
   for (auto& func : functions) {
     if (needs_gm_param.count(func->name_) && !HasGMPipeBufferParam(func)) {
-      func = AddGMSlotBufferParam(func, gm_buffer_elems);
+      func = AddGMSlotBufferParam(func, kGMPipeBufferPlaceholderElems);
     }
   }
 
@@ -468,8 +418,8 @@ void InjectGMSlotBufferInPlace(std::vector<FunctionPtr>& functions) {
     if (mod_callees.empty()) continue;
 
     int counter = 0;
-    auto new_body = RewriteCallsWithPerCallGMBuffer(func->body_, mod_callees, gm_buffer_bytes,
-                                                    gm_buffer_elems, func->span_, counter);
+    auto new_body = RewriteCallsWithPerCallGMBuffer(func->body_, mod_callees, kGMPipeBufferPlaceholderElems,
+                                                    func->span_, counter);
     auto updated = MutableCopy(func);
     updated->body_ = new_body;
     func = updated;

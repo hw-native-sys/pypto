@@ -153,8 +153,7 @@ void VerifyInitializePipeOperands(const FunctionPtr& func, std::vector<Diagnosti
   WalkStmtsVerifyInitializePipe(FlattenBody(func->body_), func->name_, diagnostics);
 }
 
-void TryCountReserveImportFromStmt(const StmtPtr& stmt, int& reserve_count, int& import_count,
-                                   const std::string& func_name, std::vector<Diagnostic>& diagnostics) {
+void TryCountReserveImportFromStmt(const StmtPtr& stmt, int& reserve_count, int& import_count) {
   CallPtr call;
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     call = std::dynamic_pointer_cast<const Call>(assign->value_);
@@ -166,50 +165,91 @@ void TryCountReserveImportFromStmt(const StmtPtr& stmt, int& reserve_count, int&
   if (!op) return;
   if (op->name_ == "system.reserve_buffer") {
     ++reserve_count;
-    if (reserve_count == 2) {
-      diagnostics.emplace_back(
-          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
-          "Function '" + func_name + "' must contain at most one 'system.reserve_buffer' call", call->span_);
-    }
   } else if (op->name_ == "system.import_peer_buffer") {
     ++import_count;
-    if (import_count == 2) {
-      diagnostics.emplace_back(
-          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
-          "Function '" + func_name + "' must contain at most one 'system.import_peer_buffer' call",
-          call->span_);
-    }
+  }
+}
+
+void AccumulateRequiredReserveImportFromInitializePipe(const CallPtr& call, FunctionType func_type,
+                                                       int& required_reserve_count,
+                                                       int& required_import_count) {
+  if (!call || !call->op_) return;
+  auto op = std::dynamic_pointer_cast<const Op>(call->op_);
+  if (!op || (op->name_ != "system.aic_initialize_pipe" && op->name_ != "system.aiv_initialize_pipe")) {
+    return;
+  }
+  const int dir_mask = call->GetKwarg<int>("dir_mask", 0);
+  const bool c2v_active = (dir_mask & kDirMaskC2V) != 0;
+  const bool v2c_active = (dir_mask & kDirMaskV2C) != 0;
+  if (func_type == FunctionType::AIC) {
+    if (c2v_active) ++required_import_count;
+    if (v2c_active) ++required_reserve_count;
+  } else if (func_type == FunctionType::AIV) {
+    if (c2v_active) ++required_reserve_count;
+    if (v2c_active) ++required_import_count;
   }
 }
 
 void WalkStmtsCountReserveImport(const std::vector<StmtPtr>& stmts, int& reserve_count, int& import_count,
-                                 const std::string& func_name, std::vector<Diagnostic>& diagnostics) {
+                                 int& required_reserve_count, int& required_import_count,
+                                 FunctionType func_type) {
   for (const auto& stmt : stmts) {
-    TryCountReserveImportFromStmt(stmt, reserve_count, import_count, func_name, diagnostics);
+    TryCountReserveImportFromStmt(stmt, reserve_count, import_count);
+    AccumulateRequiredReserveImportFromInitializePipe(transform_utils::GetCallFromStmt(stmt), func_type,
+                                                      required_reserve_count, required_import_count);
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
-      WalkStmtsCountReserveImport(FlattenBody(for_stmt->body_), reserve_count, import_count, func_name,
-                                  diagnostics);
+      WalkStmtsCountReserveImport(FlattenBody(for_stmt->body_), reserve_count, import_count,
+                                  required_reserve_count, required_import_count, func_type);
     } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
-      WalkStmtsCountReserveImport(FlattenBody(if_stmt->then_body_), reserve_count, import_count, func_name,
-                                  diagnostics);
+      WalkStmtsCountReserveImport(FlattenBody(if_stmt->then_body_), reserve_count, import_count,
+                                  required_reserve_count, required_import_count, func_type);
       if (const auto& else_body = if_stmt->else_body_) {
-        WalkStmtsCountReserveImport(FlattenBody(*else_body), reserve_count, import_count, func_name,
-                                    diagnostics);
+        WalkStmtsCountReserveImport(FlattenBody(*else_body), reserve_count, import_count,
+                                    required_reserve_count, required_import_count, func_type);
       }
     } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
-      WalkStmtsCountReserveImport(FlattenBody(while_stmt->body_), reserve_count, import_count, func_name,
-                                  diagnostics);
+      WalkStmtsCountReserveImport(FlattenBody(while_stmt->body_), reserve_count, import_count,
+                                  required_reserve_count, required_import_count, func_type);
     }
   }
 }
 
-void VerifyAtMostOneReserveAndImportPeerBuffer(const FunctionPtr& func,
-                                               std::vector<Diagnostic>& diagnostics) {
+void VerifyReserveAndImportPeerBufferCoverage(const FunctionPtr& func, std::vector<Diagnostic>& diagnostics) {
   if (!func->body_) return;
   int reserve_count = 0;
   int import_count = 0;
-  WalkStmtsCountReserveImport(FlattenBody(func->body_), reserve_count, import_count, func->name_,
-                              diagnostics);
+  int required_reserve_count = 0;
+  int required_import_count = 0;
+  WalkStmtsCountReserveImport(FlattenBody(func->body_), reserve_count, import_count, required_reserve_count,
+                              required_import_count, func->func_type_);
+  if (reserve_count < required_reserve_count) {
+    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                             "Function '" + func->name_ +
+                                 "' has fewer 'system.reserve_buffer' calls than initialized pipe "
+                                 "directions require",
+                             func->span_);
+  }
+  if (reserve_count > required_reserve_count) {
+    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                             "Function '" + func->name_ +
+                                 "' has more 'system.reserve_buffer' calls than initialized pipe "
+                                 "directions require",
+                             func->span_);
+  }
+  if (import_count < required_import_count) {
+    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                             "Function '" + func->name_ +
+                                 "' has fewer 'system.import_peer_buffer' calls than initialized pipe "
+                                 "directions require",
+                             func->span_);
+  }
+  if (import_count > required_import_count) {
+    diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                             "Function '" + func->name_ +
+                                 "' has more 'system.import_peer_buffer' calls than initialized pipe "
+                                 "directions require",
+                             func->span_);
+  }
 }
 
 class MixedKernelExpandedVerifier : public IRVisitor {
@@ -462,7 +502,7 @@ class MixedKernelExpandedPropertyVerifierImpl : public PropertyVerifier {
       if (func->func_type_ == FunctionType::AIC || func->func_type_ == FunctionType::AIV) {
         TpopMemoryVerifier verifier(diagnostics, func->name_, func->func_type_);
         verifier.VisitStmt(func->body_);
-        VerifyAtMostOneReserveAndImportPeerBuffer(func, diagnostics);
+        VerifyReserveAndImportPeerBufferCoverage(func, diagnostics);
         VerifyCrossCorePipeSetup(func, diagnostics);
         VerifyInitializePipeOperands(func, diagnostics);
         VerifyTpopTfreeMatching(func, diagnostics);

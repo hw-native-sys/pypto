@@ -144,6 +144,29 @@ class CodegenBase : public ir::IRVisitor {
   }
 
   /**
+   * @brief Optional full size expression for a one-dimensional tensor.create
+   *
+   * Subclasses may override the emitted shape expression while preserving the
+   * IR tensor type. The default keeps the original dimension expression, with
+   * backward-compatible scale support through GetTensorCreateScaleExpr().
+   * Override expressions must evaluate to a non-negative runtime size that is
+   * representable as uint32_t because the host orchestration runtime consumes
+   * tensor.create dimensions as uint32_t values.
+   *
+   * @param result_var Emitted result variable name of tensor.create
+   * @param default_dim_expr Default emitted dimension expression
+   * @return C++ scalar expression string for the runtime allocation shape
+   */
+  [[nodiscard]] virtual std::string GetTensorCreateSizeExpr(const std::string& result_var,
+                                                            const std::string& default_dim_expr) const {
+    const std::string scale_expr = GetTensorCreateScaleExpr(result_var);
+    if (scale_expr.empty()) {
+      return default_dim_expr;
+    }
+    return "static_cast<uint32_t>((" + default_dim_expr + ") * (" + scale_expr + "))";
+  }
+
+  /**
    * @brief Get the runtime DataType enum string for generated code
    *
    * Returns the fully qualified DataType enum name as used by the runtime

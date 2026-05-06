@@ -20,6 +20,10 @@ Protocol under test (V2C unidirectional):
 Bidirectional:
   1. Vector → Cube (V2C): Vector preprocesses (add), pushes to Cube
   2. Cube → Vector (C2V): Cube does matmul, pushes result back to Vector for post-processing
+
+Multiple explicit pipes:
+  1. Vector → Cube (V2C): Vector pushes one tile on pipe id 0
+  2. Vector → Cube (V2C): Vector pushes another tile on pipe id 1
 """
 
 import re
@@ -154,7 +158,7 @@ class BidirectionalCrossCorProgram:
         pl.tpush_to_aic(sum_tile, split=0)
 
         # Receive matmul result back from Cube (C2V direction)
-        mm_result: pl.Tile[[16, 16], pl.FP32] = pl.tpop_from_aic(split=0)
+        mm_result: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
 
         # Post-process: apply exp (Vector op)
         processed: pl.Tile[[16, 16], pl.FP32] = pl.exp(mm_result)
@@ -179,7 +183,7 @@ class BidirectionalCrossCorProgram:
         pl.aic_initialize_pipe(dir_mask=3, slot_size=512, c2v_consumer_buf=c2v_peer, v2c_consumer_buf=v2c_buf)
 
         # Receive preprocessed tile from Vector (V2C direction)
-        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=0)
+        received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
 
         # Matmul (Cube op)
         w_tile: pl.Tile[[16, 16], pl.FP16] = pl.load(weight, [0, 0], [16, 16])
@@ -190,6 +194,73 @@ class BidirectionalCrossCorProgram:
 
         # Push matmul result back to Vector for post-processing (C2V direction)
         pl.tpush_to_aiv(mm_result, split=0)
+
+
+# ============================================================================
+# Multiple-Pipe Cross-Core Test Program
+# ============================================================================
+
+
+@pl.program
+class MultiPipeSameDirectionCrossCoreProgram:
+    """Two explicit V2C frontend pipes from Vector to Cube."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def vector_multi_pipe(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+    ):
+        v2c_peer_0 = pl.import_peer_buffer(name="v2c_slot_buffer_0", peer_func="cube_multi_pipe")
+        v2c_peer_1 = pl.import_peer_buffer(name="v2c_slot_buffer_1", peer_func="cube_multi_pipe")
+        pl.aiv_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_peer_0,
+            dir_mask=2,
+            slot_size=512,
+            id=0,
+        )
+        pl.aiv_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_peer_1,
+            dir_mask=2,
+            slot_size=512,
+            id=1,
+        )
+
+        tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+        tile_b: pl.Tile[[16, 16], pl.FP16] = pl.load(b, [0, 0], [16, 16])
+        sum_tile: pl.Tile[[16, 16], pl.FP16] = pl.add(tile_a, tile_b)
+        diff_tile: pl.Tile[[16, 16], pl.FP16] = pl.sub(tile_a, tile_b)
+        pl.tpush_to_aic(sum_tile, split=0, id=0)
+        pl.tpush_to_aic(diff_tile, split=0, id=1)
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def cube_multi_pipe(self):
+        v2c_buf_0 = pl.reserve_buffer(name="v2c_slot_buffer_0", size=4096, base=0x1000)
+        v2c_buf_1 = pl.reserve_buffer(name="v2c_slot_buffer_1", size=4096, base=0x2000)
+        pl.aic_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_buf_0,
+            dir_mask=2,
+            slot_size=512,
+            id=0,
+        )
+        pl.aic_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_buf_1,
+            dir_mask=2,
+            slot_size=512,
+            id=1,
+        )
+
+        sum_tile: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0, id=0)
+        diff_tile: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0, id=1)
+        sum_left = pl.move(sum_tile, target_memory=pl.Mem.Left)
+        diff_right = pl.move(diff_tile, target_memory=pl.Mem.Right)
+        _ = pl.matmul(sum_left, diff_right)
+        pl.tfree_to_aiv(sum_tile)
+        pl.tfree_to_aiv(diff_tile)
 
 
 # ============================================================================
@@ -706,6 +777,35 @@ class TestCrossCoreTpushTpopCodegen:
         ):
             self._compile_and_generate(MismatchedTfreeProgram)
 
+    def test_tfree_rejects_mismatched_pipe_id(self):
+        """Explicit tfree id must match the originating tpop pipe id."""
+
+        @pl.program
+        class MismatchedTfreeIdProgram:
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube_consumer(self):
+                pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                pl.aic_initialize_pipe(
+                    pl.const(0, pl.INT32),
+                    pipe_buf,
+                    dir_mask=2,
+                    slot_size=512,
+                    id=1,
+                )
+                received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(
+                    split=0,
+                    id=1,
+                )
+                pl.tfree_to_aiv(received, id=0)
+
+        with pytest.raises(
+            Exception,
+            match=re.escape(
+                "system.tfree_to_aiv pipe id 0 does not match originating tile.tpop_from_aiv pipe id 1"
+            ),
+        ):
+            self._compile_and_generate(MismatchedTfreeIdProgram)
+
     def test_tpop_user_stays_after_if_defined_scalar_dependency(self):
         """A tpop user that depends on an if-defined scalar must not be hoisted before the if."""
 
@@ -740,9 +840,8 @@ class TestCrossCoreTpushTpopCodegen:
             "The tpop user must remain after the if-defined scalar dependency"
         )
 
-    @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
     def test_bidirectional_vector(self):
-        """Test Vector kernel with bidirectional communication."""
+        """Test Vector kernel keeps bidirectional communication on one default pipe."""
         codes = self._compile_and_generate(BidirectionalCrossCorProgram)
         vector_code = codes["vector_bidir"]
 
@@ -758,6 +857,7 @@ class TestCrossCoreTpushTpopCodegen:
         # Bidirectional init
         assert "pto.aiv_initialize_pipe" in vector_code, "Should contain aiv_initialize_pipe"
         assert "dir_mask = 3" in vector_code, "Should have dir_mask = 3 (bidirectional)"
+        assert "{id =" not in vector_code, "Legacy bidirectional default pipe should not emit explicit id"
         assert "c2v_consumer_buf = " in vector_code, "Should have c2v_consumer_buf as SSA reference"
         assert "v2c_consumer_buf = " in vector_code, "Should have v2c_consumer_buf as SSA reference"
         # V2C producer side: preprocess + push
@@ -768,9 +868,8 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.texp" in vector_code, "Should do exp post-processing (Vector op)"
         assert "pto.tfree_from_aic" in vector_code, "Should free C2V slot"
 
-    @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
     def test_bidirectional_cube(self):
-        """Test Cube kernel with bidirectional communication."""
+        """Test Cube kernel keeps bidirectional communication on one default pipe."""
         codes = self._compile_and_generate(BidirectionalCrossCorProgram)
         cube_code = codes["cube_bidir"]
 
@@ -786,6 +885,7 @@ class TestCrossCoreTpushTpopCodegen:
         # Bidirectional init with SSA consumer buffer references
         assert "pto.aic_initialize_pipe" in cube_code, "Should contain aic_initialize_pipe"
         assert "dir_mask = 3" in cube_code, "Should have dir_mask = 3 (bidirectional)"
+        assert "{id =" not in cube_code, "Legacy bidirectional default pipe should not emit explicit id"
         assert "c2v_consumer_buf = " in cube_code, "Should have c2v_consumer_buf as SSA reference"
         assert "v2c_consumer_buf = " in cube_code, "Should have v2c_consumer_buf as SSA reference"
         # V2C consumer side: receive preprocessed data
@@ -795,7 +895,64 @@ class TestCrossCoreTpushTpopCodegen:
         assert "pto.tpush_to_aiv" in cube_code, "Should push to AIV"
         assert "pto.tmatmul" in cube_code, "Should do matmul (Cube op)"
 
-    @pytest.mark.skip(reason="Only testing CrossCoreTpushTpopProgram")
+    def test_multiple_pipe_vector(self):
+        """Test Vector kernel with two explicit V2C frontend pipes."""
+        codes = self._compile_and_generate(MultiPipeSameDirectionCrossCoreProgram)
+        vector_code = codes["vector_multi_pipe"]
+
+        assert vector_code, "Vector multi-pipe MLIR should not be empty"
+        # Buffer setup: V2C producer imports two peer buffers
+        assert vector_code.count("pto.import_reserved_buffer") == 2
+        assert 'name = "v2c_slot_buffer_0"' in vector_code
+        assert 'name = "v2c_slot_buffer_1"' in vector_code
+        assert "peer_func = @cube_multi_pipe" in vector_code, "Should reference cube_multi_pipe"
+        # Multiple explicit V2C init ops
+        assert "pto.aiv_initialize_pipe" in vector_code, "Should contain aiv_initialize_pipe"
+        assert "dir_mask = 3" not in vector_code, "Explicit multi-pipe program should not combine dirs"
+        assert "dir_mask = 1" not in vector_code
+        assert "pto.aiv_initialize_pipe {id = 0, dir_mask = 2" in vector_code
+        assert "pto.aiv_initialize_pipe {id = 1, dir_mask = 2" in vector_code
+        assert "v2c_consumer_buf = " in vector_code, "Should have v2c_consumer_buf as SSA reference"
+        # V2C producer side: preprocess + push
+        assert "pto.tadd" in vector_code, "Should do elementwise add (Vector op)"
+        assert "pto.tsub" in vector_code, "Should do elementwise sub (Vector op)"
+        assert "pto.tpush_to_aic" in vector_code, "Should push to AIC"
+        assert "pto.tpop_from_aic" not in vector_code
+        assert "pto.tfree_from_aic" not in vector_code
+        assert vector_code.count("{id = 0, split = 0}") == 1
+        assert vector_code.count("{id = 1, split = 0}") == 1
+
+    def test_multiple_pipe_cube(self):
+        """Test Cube kernel with two explicit V2C frontend pipes."""
+        codes = self._compile_and_generate(MultiPipeSameDirectionCrossCoreProgram)
+        cube_code = codes["cube_multi_pipe"]
+
+        assert cube_code, "Cube multi-pipe MLIR should not be empty"
+        # Buffer setup: V2C consumer reserves two buffers with explicit bases
+        assert cube_code.count("pto.reserve_buffer") == 2
+        assert 'name = "v2c_slot_buffer_0"' in cube_code
+        assert 'name = "v2c_slot_buffer_1"' in cube_code
+        assert "auto = false" in cube_code, "Should have auto = false for explicit base"
+        assert "base = 4096" in cube_code, "Should have explicit base address (0x1000 = 4096)"
+        assert "base = 8192" in cube_code, "Should have explicit base address (0x2000 = 8192)"
+        assert "-> i32" in cube_code, "Buffer ops should return i32"
+        assert "pto.import_reserved_buffer" not in cube_code
+        # Multiple explicit V2C init ops with SSA consumer buffer references
+        assert "pto.aic_initialize_pipe" in cube_code, "Should contain aic_initialize_pipe"
+        assert "dir_mask = 3" not in cube_code, "Explicit multi-pipe program should not combine dirs"
+        assert "dir_mask = 1" not in cube_code
+        assert "pto.aic_initialize_pipe {id = 0, dir_mask = 2" in cube_code
+        assert "pto.aic_initialize_pipe {id = 1, dir_mask = 2" in cube_code
+        assert "v2c_consumer_buf = " in cube_code, "Should have v2c_consumer_buf as SSA reference"
+        # V2C consumer side: receive preprocessed data
+        assert "pto.tpop_from_aiv" in cube_code, "Should pop from AIV"
+        assert "pto.tfree_from_aiv" in cube_code, "Should free V2C slot"
+        assert "pto.tmatmul" in cube_code, "Should do matmul (Cube op)"
+        assert "pto.tpush_to_aiv" not in cube_code
+        # tpop ids are inherited by tfree even when user code omits tfree id.
+        assert cube_code.count("{id = 0, split = 0}") == 2
+        assert cube_code.count("{id = 1, split = 0}") == 2
+
     def test_all_cross_core_pto_ops_covered(self):
         """Verify all 10 cross-core PTO operations are exercised across both test programs."""
         unidir_codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
@@ -993,6 +1150,121 @@ class TestExpandMixedKernelCodegen:
         aiv_body = _extract_func_section(codes["main_incore_0_aiv"], "main_incore_0_aiv")
         assert "pto.tpop_from_aic" in aiv_body, "AIV should pop the sliced row from AIC"
         assert "pto.tstore" in aiv_body, "AIV should store the popped row to the output tensor"
+
+    def test_bidirectional_mixed_kernel_keeps_combined_pipe(self):
+        """Automatic bidirectional mixed kernels keep the legacy combined pipe."""
+
+        @pl.program
+        class BidirectionalMixed:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                x_tile = pl.load(x, [0, 0], [16, 128])
+                x_sum = pl.add(x_tile, x_tile)
+                x_sum_mat = pl.move(
+                    x_sum,
+                    target_memory=pl.MemorySpace.Mat,
+                    blayout=pl.TileLayout.col_major,
+                    slayout=pl.TileLayout.row_major,
+                )
+                x_left = pl.move(x_sum_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0 = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 64], pl.BF16],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                out_0: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                z: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0(x, y, out_0)
+                return z
+
+        codes = self._expand_and_generate(BidirectionalMixed)
+        aic_body = _extract_func_section(codes["main_incore_0_aic"], "main_incore_0_aic")
+        aiv_body = _extract_func_section(codes["main_incore_0_aiv"], "main_incore_0_aiv")
+
+        assert "pto.aic_initialize_pipe {dir_mask = 3, slot_size = 4096}" in aic_body
+        assert "pto.aiv_initialize_pipe {dir_mask = 3, slot_size = 4096}" in aiv_body
+        assert "{id =" not in aic_body
+        assert "{id =" not in aiv_body
+        assert "pto.tpush_to_aiv" in aic_body and "{split = 0}" in aic_body
+        assert "pto.tpop_from_aiv {split = 0}" in aic_body
+        assert "pto.tfree_from_aiv {split = 0}" in aic_body
+        assert "pto.tpush_to_aic" in aiv_body and "{split = 0}" in aiv_body
+        assert "pto.tpop_from_aic {split = 0}" in aiv_body
+        assert "pto.tfree_from_aic {split = 0}" in aiv_body
+
+    def test_multiple_pipe_ids_offset_gm_buffers_on_a2a3(self):
+        """Explicit pipe ids share one GM workspace but point at disjoint regions."""
+
+        @pl.program
+        class MultiplePipeSetup:
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube_kernel(self):
+                c2v_peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="vector_kernel")
+                v2c_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=32768, base=0x1000)
+                pl.aic_initialize_pipe(c2v_peer, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192, id=0)
+                pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_buf, dir_mask=2, slot_size=4096, id=1)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector_kernel(self):
+                c2v_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=65536, base=0x2000)
+                v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_kernel")
+                pl.aiv_initialize_pipe(c2v_buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192, id=0)
+                pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=4096, id=1)
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group_func(self):
+                self.cube_kernel()
+                self.vector_kernel()
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                self.group_func()
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+            transformed = ir.PassManager.get_strategy(ir.OptimizationStrategy.Default).run_passes(
+                MultiplePipeSetup
+            )
+            codegen_instance = codegen.PTOCodegen()
+            groups, _ = _build_group_mapping(transformed)
+            group_funcs = next(iter(groups.values()))
+            mlir_code = codegen_instance.generate(
+                ir.Program(group_funcs, "multiple_pipe_a2a3", transformed.span)
+            )
+        finally:
+            backend.reset_for_testing()
+
+        aic_body = _extract_func_section(mlir_code, "cube_kernel")
+        aiv_body = _extract_func_section(mlir_code, "vector_kernel")
+
+        for body in (aic_body, aiv_body):
+            assert "pto.aic_initialize_pipe {id = 0, dir_mask = 1" in body or (
+                "pto.aiv_initialize_pipe {id = 0, dir_mask = 1" in body
+            )
+            assert "id = 1, dir_mask = 2" in body
+            assert re.search(r"pto.addptr %arg\d+", body)
+            assert "arith.constant 16384 : index" in body
+            assert re.search(r"gm_slot_buffer = %arg\d+ : !pto.ptr<f32>", body)
+            assert body.count("gm_slot_buffer = %") == 2
+            assert "dir_mask = 3" not in body
 
 
 if __name__ == "__main__":

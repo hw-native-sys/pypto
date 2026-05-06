@@ -108,10 +108,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     VisitStmt(op->then_body_);
     indent_level_--;
 
-    if (op->else_body_.has_value()) {
+    const auto& else_body = op->else_body_;
+    if (else_body) {
       Emit("} else {");
       indent_level_++;
-      VisitStmt(*op->else_body_);
+      VisitStmt(*else_body);
       indent_level_--;
     }
     Emit("}");
@@ -200,7 +201,10 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
 
     Emit("} else {");
     indent_level_++;
-    emit_branch(*op->else_body_, "else");
+    const auto& else_body = op->else_body_;
+    INTERNAL_CHECK_SPAN(else_body.has_value(), op->span_)
+        << "Internal error: IfStmt with return_vars has no else_body";
+    emit_branch(*else_body, "else");
     indent_level_--;
     Emit("}");
   }

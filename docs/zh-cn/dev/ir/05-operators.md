@@ -343,19 +343,19 @@ REGISTER_OP("system.sync_src")
 
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
-| `tile.tpush_to_aiv` | 1 (tile) | 从 Cube 推送 tile 到 Vector | `aiv_idx` |
-| `tile.tpush_to_aic` | 1 (tile) | 从 Vector 推送 tile 到 Cube | `aiv_idx` |
-| `tile.tpop_from_aic` | 0 | 从 Cube 管道弹出 tile（→ TileType） | `aiv_idx` |
-| `tile.tpop_from_aiv` | 0 | 从 Vector 管道弹出 tile（→ TileType） | `aiv_idx` |
-| `system.tfree_to_aic` | 0 | 向 Cube 生产者释放槽位 | `aiv_idx` |
-| `system.tfree_to_aiv` | 0 | 向 Vector 生产者释放槽位 | `aiv_idx` |
+| `tile.tpush_to_aiv` | 1 (tile) | 从 Cube 推送 tile 到 Vector | `split`，可选 `id` |
+| `tile.tpush_to_aic` | 1 (tile) | 从 Vector 推送 tile 到 Cube | `split`，可选 `id` |
+| `tile.tpop_from_aic` | 0 | 从 Cube 管道弹出 tile（→ TileType） | `split`，可选 `id` |
+| `tile.tpop_from_aiv` | 0 | 从 Vector 管道弹出 tile（→ TileType） | `split`，可选 `id` |
+| `system.tfree_to_aic` | 1 (tile) | 向 Cube 生产者释放槽位 | 可选 `id` |
+| `system.tfree_to_aiv` | 1 (tile) | 向 Vector 生产者释放槽位 | 可选 `id` |
 
 ### 管道初始化操作
 
 | 操作 | 参数 | 描述 | Kwargs |
 | ---- | ---- | ---- | ------ |
-| `system.aic_initialize_pipe` | 2 | 在 Cube 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size` |
-| `system.aiv_initialize_pipe` | 2 | 在 Vector 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size` |
+| `system.aic_initialize_pipe` | 2 | 在 Cube 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `id` |
+| `system.aiv_initialize_pipe` | 2 | 在 Vector 侧初始化跨核管道（位置参数：`c2v_consumer_buf`、`v2c_consumer_buf`，i32 SSA） | `dir_mask`, `slot_size`，可选 `id` |
 
 ### 缓冲区管理操作
 
@@ -381,15 +381,15 @@ class CrossCoreExample:
         pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512)
 
         tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
-        pl.tpush_to_aic(tile_a, aiv_idx=0)
+        pl.tpush_to_aic(tile_a, split=0)
 
     @pl.function(type=pl.FunctionType.InCore)
     def cube_consumer(self, out: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
         buf = pl.reserve_buffer(name="v2c_buf", size=4096, base=0x1000)
         pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512)
 
-        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(aiv_idx=0)
-        pl.tfree_to_aiv(aiv_idx=0)
+        received: pl.Tile[[16, 16], pl.FP16] = pl.tpop_from_aiv(split=0)
+        pl.tfree_to_aiv(received)
         result: pl.Tensor[[16, 16], pl.FP32] = pl.store(received, [0, 0], out)
         return result
 ```

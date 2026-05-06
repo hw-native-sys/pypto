@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -29,13 +30,14 @@ namespace pypto {
 namespace ir {
 namespace tpop_tfree {
 
-bool IsTpopAssignStmt(const StmtPtr& stmt, VarPtr* result_var = nullptr);
+bool IsTpopAssignStmt(const StmtPtr& stmt, VarPtr* result_var = nullptr, CallPtr* tpop_call = nullptr);
 bool IsExpectedTpopOp(const std::string& op_name, FunctionType func_type);
 bool IsExpectedTpopAssignStmt(const StmtPtr& stmt, FunctionType func_type, VarPtr* result_var = nullptr);
 bool IsTfreeStmt(const StmtPtr& stmt, VarPtr* tile_var = nullptr, std::string* op_name = nullptr);
 
 std::string GetTfreeOpName(core_affinity::CoreSide side);
-CallPtr CreateTfree(core_affinity::CoreSide side, const ExprPtr& tile, const Span& span);
+CallPtr CreateTfree(core_affinity::CoreSide side, const ExprPtr& tile, const Span& span,
+                    std::optional<int> pipe_id = std::nullopt);
 
 std::unordered_set<const Var*> CollectStmtVarRefs(const StmtPtr& stmt);
 std::unordered_set<const Var*> CollectCallArgVarRefs(const StmtPtr& stmt);
@@ -45,6 +47,7 @@ struct TpopLifetime {
   size_t tfree_idx = std::numeric_limits<size_t>::max();
   VarPtr tpop_var;
   size_t last_use_idx;
+  std::optional<int> pipe_id;
 };
 
 const Var* CanonicalizeTpopRef(const Var* var, const std::unordered_map<const Var*, VarPtr>& tpop_var_remap);

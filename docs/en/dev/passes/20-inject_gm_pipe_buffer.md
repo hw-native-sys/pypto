@@ -9,7 +9,12 @@ On Ascend910B, cross-core `tpush`/`tpop` rides through a shared GM buffer instea
 1. Finds every function whose body issues `aic_initialize_pipe` or `aiv_initialize_pipe`.
 2. Adds a fresh `__gm_pipe_buffer` Out-tensor parameter to each such function.
 3. Propagates the parameter upward through the call graph: any caller of a function that took the new parameter also gets it added (so the workspace flows from Orchestration down to AIC/AIV).
-4. Stops at Orchestration functions — they do **not** receive the parameter. Instead, the pass injects a per-call-site `tensor.create` so the workspace is materialized locally on the host side and passed in.
+4. Stops at Orchestration functions — they do **not** receive the parameter. Instead, the pass injects a per-call-site placeholder `tensor.create` that codegen later sizes and materializes on the host side.
+
+The pass only wires the `__gm_pipe_buffer` argument through IR. GM buffer footprint and slot allocation
+are codegen responsibilities: codegen sizes bidirectional `dir_mask=3` pipes as one shared bidirectional
+workspace, and otherwise allocates disjoint GM regions per `(pipe id, direction)` so PTO codegen can map
+each explicit frontend pipe independently.
 
 The pass is **backend-gated** on `BackendHandler::RequiresGMPipeBuffer()`. Backends without GM-routed pipes (e.g. Ascend950 with its direct cross-core fabric) see this pass as a no-op.
 
@@ -55,8 +60,8 @@ Phase 2 — Append the parameter to each seed (and propagate upward):
 
 Phase 3 — Inject tensor.create at Orchestration call sites:
   For each Orchestration function recorded in orch_needs_tensor_create,
-  prepend a tensor.create that materializes the workspace and rewrite each
-  affected call to pass it.
+  prepend a placeholder tensor.create and rewrite each affected call to pass it.
+  Codegen computes the final allocation shape from initialize_pipe metadata.
 ```
 
 ## Example
@@ -106,10 +111,8 @@ class After:
     @pl.function(type=pl.FunctionType.Orchestration)
     def main(self, x, y):
         out_0 = pl.create_tensor([16, 128], dtype=pl.FP32)
-        # Injected: workspace sized in FP32 elements (ceil(required_bytes / 4)).
-        # FP32 is the contract today because tensor.create's element-count shape
-        # paired with FP32 yields a backing of `4 * elements` bytes.
-        __gm_pipe_buffer = pl.create_tensor([math.ceil(required_bytes / 4)], dtype=pl.FP32)
+        # Injected placeholder; codegen emits the final allocation shape.
+        __gm_pipe_buffer = pl.create_tensor([1], dtype=pl.FP32)
         return self.compute(x, y, out_0, __gm_pipe_buffer)
 ```
 
@@ -126,8 +129,8 @@ Pass InjectGMPipeBuffer();
 - `HasInitializePipeOps` — recursive scan for `aic_initialize_pipe` / `aiv_initialize_pipe` (uses `op_predicates::IsInitializePipe`)
 - `AddGMSlotBufferParam` — append the Out-tensor parameter
 - `RewriteCallsForGMBuffer` — rewrite a caller's call sites
-- `CreateGMPipeBufferTensorCreate` — synthesize the Orchestration-side `tensor.create`
-- `RewriteCallsWithPerCallGMBuffer` — drive the Orchestration-side rewrite, hoisting the `tensor.create` and forwarding the workspace per call site
+- `CreateGMPipeBufferTensorCreate` — synthesize the Orchestration-side placeholder `tensor.create`
+- `RewriteCallsWithPerCallGMBuffer` — drive the Orchestration-side rewrite, hoisting the placeholder and forwarding the workspace per call site
 
 **Python binding**: `python/bindings/modules/passes.cpp`
 
@@ -156,4 +159,4 @@ The pass preserves all properties it requires (no-op on non-910B backends; same-
 | Backend-gated via `BackendHandler::RequiresGMPipeBuffer()` | Lets each backend opt in without scattering `if (backend == "910B")` checks in pass code (see `pass-context-config.md`) |
 | Detect via `initialize_pipe` ops, not function-name patterns | Robust to renaming and to functions that legitimately do not need cross-core setup |
 | Stop propagation at Orchestration | Orchestration is the host-side scheduler; it is the right layer to materialize the workspace and hand it to device-side callees |
-| Materialize workspace via `tensor.create` at the call site | Keeps the Orchestration signature stable for the user and lets the codegen emit a regular host-side allocation |
+| Keep IR allocation as a placeholder | Keeps the IR pass focused on argument wiring while codegen handles backend footprint and per-pipe GM offsets |

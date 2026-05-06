@@ -60,13 +60,14 @@ after every consumer-side `tpop` chain.
 Setup is derived from the split bodies:
 
 - `dir_mask`: `C2V=1`, `V2C=2`, bidirectional=`3`
+- `id`: omitted for automatic setup, so PTOAS uses the default frontend pipe id `0`
 - `slot_size`: max tile byte size across all directions (`shape * dtype bits / 8`)
 - `slot_num`: `8` for unidirectional, `4` per direction for bidirectional
 - `buffer_size`: `slot_num * slot_size`
 - buffer names: `<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
 - reserve-buffer base: `AUTO` on insertion, then resolved to an explicit address by `AllocateMemoryAddr`
 
-When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved.
+When cross-core directions use different tile sizes, the pass picks `max(all observed tile byte sizes)` as the common `slot_size` for `initialize_pipe`. Smaller tiles leave unused bytes in each slot but hardware correctness is preserved. Explicit user-authored programs can still create multiple independent pipes by supplying different `id` values to `initialize_pipe` and matching `tpush` / `tpop` / `tfree` ops.
 
 For consumer-side cross-core tiles, the pass also ensures each `tile.tpop_*` has a matching
 `system.tfree_*`. When an existing free is obviously too early, the pass delays it to a later statement in the same
@@ -343,4 +344,4 @@ true last use of that tile.
 | Two-stage post-split loop-state repair | First makes loop-carried state valid, then re-strips iter_args after DCE removes dead shared aliases, with a final DCE to clean up exposed init-value chains |
 | Auto-generated pipe setup | Tensor-level mixed kernels do not need handwritten `reserve_buffer` / `import_peer_buffer` / `initialize_pipe`; the pass derives them from cross-core tile ops |
 | Auto-generated tfree chains | Consumer-side split kernels insert missing `tfree` calls, rewrite them to free the canonical popped tile value, and delay obviously early frees within the same block without reordering independent `tpop` chains |
-| Max-slot-size policy | Uses `max(all tile byte sizes)` as the single `initialize_pipe.slot_size`, matching the backend assumption of one reserve/import buffer per function while supporting mixed tile sizes across directions |
+| Max-slot-size policy | Uses `max(all tile byte sizes)` as the single `initialize_pipe.slot_size`, matching the backend assumption of one automatic reserve/import buffer per direction while preserving legacy bidirectional `dir_mask=3` behavior |

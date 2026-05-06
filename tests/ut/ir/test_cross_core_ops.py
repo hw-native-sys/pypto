@@ -25,6 +25,32 @@ def test_tpush_ops_return_unknown_type():
         assert isinstance(call.type, ir.UnknownType)
 
 
+def test_frontend_pipe_id_kwarg_is_accepted():
+    """Cross-core frontend ops accept an optional PTOAS pipe id."""
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([64], DataType.FP32)
+    tile_var = ir.Var("t", tile_type, span)
+    z = ConstInt(0, DataType.INT32, span)
+
+    tpush = ir.create_op_call("tile.tpush_to_aiv", [tile_var], {"split": 0, "id": 7}, span)
+    assert tpush.kwargs["id"] == 7
+
+    tpop_op = ir.get_op("tile.tpop_from_aic")
+    tpop = ir.Call(tpop_op, [], {"split": 0, "id": 7}, tile_type, span)
+    assert tpop.kwargs["id"] == 7
+
+    tfree = ir.create_op_call("system.tfree_to_aic", [tile_var], {"id": 7}, span)
+    assert tfree.kwargs["id"] == 7
+
+    init = ir.create_op_call(
+        "system.aiv_initialize_pipe",
+        [z, z],
+        {"dir_mask": 1, "slot_size": 256, "id": 7},
+        span,
+    )
+    assert init.kwargs["id"] == 7
+
+
 def test_tpop_ops_return_tile_type():
     """Test tpop ops return TileType when constructed with explicit type."""
     span = ir.Span.unknown()

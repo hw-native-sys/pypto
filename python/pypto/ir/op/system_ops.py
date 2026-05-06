@@ -169,6 +169,7 @@ def aic_initialize_pipe(
     *,
     dir_mask: int,
     slot_size: int,
+    id: int | None = None,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIC side.
@@ -178,10 +179,13 @@ def aic_initialize_pipe(
         v2c_consumer_buf: V2C consumer buffer base (Expr, int, or DSL ``Scalar``; default 0)
         dir_mask: Direction mask for pipe
         slot_size: Size of each pipe slot
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     kwargs = {"dir_mask": dir_mask, "slot_size": slot_size}
+    if id is not None:
+        kwargs["id"] = id
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aic_initialize_pipe", args, kwargs, actual_span)
 
@@ -192,6 +196,7 @@ def aiv_initialize_pipe(
     *,
     dir_mask: int,
     slot_size: int,
+    id: int | None = None,
     span: Span | None = None,
 ) -> Call:
     """Initialize cross-core pipe on AIV side.
@@ -201,10 +206,13 @@ def aiv_initialize_pipe(
         v2c_consumer_buf: V2C consumer buffer base (Expr, int, or DSL ``Scalar``; default 0)
         dir_mask: Direction mask for pipe
         slot_size: Size of each pipe slot
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     kwargs = {"dir_mask": dir_mask, "slot_size": slot_size}
+    if id is not None:
+        kwargs["id"] = id
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
     return _ir_core.create_op_call("system.aiv_initialize_pipe", args, kwargs, actual_span)
 
@@ -249,27 +257,35 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
 # ============================================================================
 
 
-def tfree_to_aic(tile: Expr, span: Span | None = None) -> Call:
+def tfree_to_aic(tile: Expr, span: Span | None = None, *, id: int | None = None) -> Call:
     """Release ring buffer slot back to AIC producer.
 
     Called by AIV consumer after finishing with data from tpop_from_aic.
 
     Args:
         tile: Tile expression obtained from tpop_from_aic to release
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("system.tfree_to_aic", [tile], {}, actual_span)
+    kwargs = {}
+    if id is not None:
+        kwargs["id"] = id
+    return _ir_core.create_op_call("system.tfree_to_aic", [tile], kwargs, actual_span)
 
 
-def tfree_to_aiv(tile: Expr, span: Span | None = None) -> Call:
+def tfree_to_aiv(tile: Expr, span: Span | None = None, *, id: int | None = None) -> Call:
     """Release ring buffer slot back to AIV producer.
 
     Called by AIC consumer after finishing with data from tpop_from_aiv.
 
     Args:
         tile: Tile expression obtained from tpop_from_aiv to release
+        id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("system.tfree_to_aiv", [tile], {}, actual_span)
+    kwargs = {}
+    if id is not None:
+        kwargs["id"] = id
+    return _ir_core.create_op_call("system.tfree_to_aiv", [tile], kwargs, actual_span)

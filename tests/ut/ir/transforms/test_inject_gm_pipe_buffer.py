@@ -89,7 +89,7 @@ def test_gm_pipe_injection_preserves_split_mode_for_a2a3_cross_core_functions():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
             pl.aic_initialize_pipe(pl.const(0, pl.INT32), pipe_buf, dir_mask=2, slot_size=512)
@@ -103,7 +103,7 @@ def test_gm_pipe_injection_preserves_split_mode_for_a2a3_cross_core_functions():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ):
             v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
             pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
@@ -115,7 +115,7 @@ def test_gm_pipe_injection_preserves_split_mode_for_a2a3_cross_core_functions():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             updated = self.cube_consumer(a, out, gm_pipe_buffer)
             self.vector_producer(a, out, gm_pipe_buffer)
@@ -127,14 +127,77 @@ def test_gm_pipe_injection_preserves_split_mode_for_a2a3_cross_core_functions():
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
-            gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [1024],
+            gm_pipe_buffer_0: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
+                [1],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
                 manual_dep=True,
             )
             updated = self.group_func(a, out, gm_pipe_buffer_0)
             return updated
+
+    After = _run_inject(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_gm_pipe_injection_sizes_multiple_single_direction_pipes():
+    """InjectGMPipeBuffer keeps GM workspace sizing as a codegen concern."""
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_kernel(self):
+            c2v_peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="vector_kernel")
+            v2c_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=32768, base=0x1000)
+            pl.aic_initialize_pipe(c2v_peer, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192, id=0)
+            pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_buf, dir_mask=2, slot_size=4096, id=1)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vector_kernel(self):
+            c2v_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=65536, base=0x2000)
+            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_kernel")
+            pl.aiv_initialize_pipe(c2v_buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192, id=0)
+            pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=4096, id=1)
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group_func(self):
+            self.cube_kernel()
+            self.vector_kernel()
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self):
+            self.group_func()
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_kernel(self, gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]]):
+            c2v_peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="vector_kernel")
+            v2c_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=32768, base=0x1000)
+            pl.aic_initialize_pipe(c2v_peer, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192, id=0)
+            pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_buf, dir_mask=2, slot_size=4096, id=1)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vector_kernel(self, gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]]):
+            c2v_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=65536, base=0x2000)
+            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_kernel")
+            pl.aiv_initialize_pipe(c2v_buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192, id=0)
+            pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=4096, id=1)
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group_func(self, gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]]):
+            self.cube_kernel(gm_pipe_buffer)
+            self.vector_kernel(gm_pipe_buffer)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self):
+            gm_pipe_buffer_0: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
+                [1],
+                dtype=pl.FP32,
+                layout=pl.TensorLayout.ND,
+                manual_dep=True,
+            )
+            self.group_func(gm_pipe_buffer_0)
 
     After = _run_inject(Before)
     ir.assert_structural_equal(After, Expected)
@@ -195,7 +258,7 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
             if True:
@@ -210,7 +273,7 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ):
             v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
             if True:
@@ -223,7 +286,7 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             updated = self.cube_consumer(a, out, gm_pipe_buffer)
             self.vector_producer(a, out, gm_pipe_buffer)
@@ -235,8 +298,8 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
-            gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [1024],
+            gm_pipe_buffer_0: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
+                [1],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
                 manual_dep=True,
@@ -310,7 +373,7 @@ def test_gm_pipe_buffer_per_call_allocation():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
             pl.aic_initialize_pipe(pl.const(0, pl.INT32), pipe_buf, dir_mask=2, slot_size=512)
@@ -324,7 +387,7 @@ def test_gm_pipe_buffer_per_call_allocation():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ):
             v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
             pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
@@ -336,7 +399,7 @@ def test_gm_pipe_buffer_per_call_allocation():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             updated = self.cube_consumer(a, out, gm_pipe_buffer)
             self.vector_producer(a, out, gm_pipe_buffer)
@@ -348,15 +411,15 @@ def test_gm_pipe_buffer_per_call_allocation():
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
-            gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [1024],
+            gm_pipe_buffer_0: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
+                [1],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
                 manual_dep=True,
             )
             out_1: pl.Tensor[[16, 16], pl.FP16] = self.group_func(a, out, gm_pipe_buffer_0)
-            gm_pipe_buffer_1: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [1024],
+            gm_pipe_buffer_1: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
+                [1],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
                 manual_dep=True,
@@ -424,7 +487,7 @@ def test_gm_pipe_buffer_per_call_inside_for_loop():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
             pl.aic_initialize_pipe(pl.const(0, pl.INT32), pipe_buf, dir_mask=2, slot_size=512)
@@ -438,7 +501,7 @@ def test_gm_pipe_buffer_per_call_inside_for_loop():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ):
             v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
             pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
@@ -450,7 +513,7 @@ def test_gm_pipe_buffer_per_call_inside_for_loop():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             updated = self.cube_consumer(a, out, gm_pipe_buffer)
             self.vector_producer(a, out, gm_pipe_buffer)
@@ -463,8 +526,8 @@ def test_gm_pipe_buffer_per_call_inside_for_loop():
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             for b, (out_iter,) in pl.range(4, init_values=(out,)):
-                gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                    [1024],
+                gm_pipe_buffer_0: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
+                    [1],
                     dtype=pl.FP32,
                     layout=pl.TensorLayout.ND,
                     manual_dep=True,
@@ -537,7 +600,7 @@ def test_gm_pipe_buffer_param_direction_is_out():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
             pl.aic_initialize_pipe(pl.const(0, pl.INT32), pipe_buf, dir_mask=2, slot_size=512)
@@ -551,7 +614,7 @@ def test_gm_pipe_buffer_param_direction_is_out():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ):
             v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
             pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
@@ -563,7 +626,7 @@ def test_gm_pipe_buffer_param_direction_is_out():
             self,
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
-            gm_pipe_buffer: pl.Out[pl.Tensor[[1024], pl.FP32]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             updated = self.cube_consumer(a, out, gm_pipe_buffer)
             self.vector_producer(a, out, gm_pipe_buffer)
@@ -575,8 +638,8 @@ def test_gm_pipe_buffer_param_direction_is_out():
             a: pl.Tensor[[16, 16], pl.FP16],
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
-            gm_pipe_buffer_0: pl.Tensor[[1024], pl.FP32] = pl.tensor.create(
-                [1024],
+            gm_pipe_buffer_0: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
+                [1],
                 dtype=pl.FP32,
                 layout=pl.TensorLayout.ND,
                 manual_dep=True,

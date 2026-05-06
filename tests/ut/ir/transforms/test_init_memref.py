@@ -553,7 +553,7 @@ class TestDynamicValidShape:
         # Two tile vars: seed and updated
         seed = ir.Var("seed", tile_type, span)
         updated = ir.Var("updated", tile_type, span)
-        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"aiv_idx": 0}, tile_type, span)
+        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
         muls_call = ir.Call(ir.Op("tile.muls"), [seed], {"scalar": 1.0}, tile_type, span)
 
         # Phi return var
@@ -628,7 +628,7 @@ class TestEdgeCases:
         )
         dynamic_tile = ir.Var("dynamic_tile", dynamic_tile_type, span)
 
-        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"aiv_idx": 0}, dynamic_tile_type, span)
+        tpop_call = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, dynamic_tile_type, span)
         body = ir.SeqStmts(
             [ir.AssignStmt(dynamic_tile, tpop_call, span), ir.ReturnStmt([dynamic_tile], span)], span
         )

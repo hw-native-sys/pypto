@@ -53,6 +53,7 @@ REGISTER_OP("system.tfree_to_aic")
     .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
     .set_cross_core_role(core_affinity::CrossCoreRole::TFree)
     .add_argument("tile", "Tile buffer obtained from tpop to release")
+    .set_attr<int>("id")
     .f_deduce_type(DeduceUnknownType);
 
 // Release slot back to AIV producer (called by AIC consumer after tpop_from_aiv)
@@ -62,6 +63,7 @@ REGISTER_OP("system.tfree_to_aiv")
     .set_core_affinity(core_affinity::CoreAffinity::CUBE)
     .set_cross_core_role(core_affinity::CrossCoreRole::TFree)
     .add_argument("tile", "Tile buffer obtained from tpop to release")
+    .set_attr<int>("id")
     .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIC side
@@ -74,6 +76,7 @@ REGISTER_OP("system.aic_initialize_pipe")
     .add_argument("v2c_consumer_buf", "V2C consumer buffer base (i32 SSA)")
     .set_attr<int>("dir_mask")
     .set_attr<int>("slot_size")
+    .set_attr<int>("id")
     .f_deduce_type(DeduceUnknownType);
 
 // Initialize pipe on AIV side
@@ -86,6 +89,7 @@ REGISTER_OP("system.aiv_initialize_pipe")
     .add_argument("v2c_consumer_buf", "V2C consumer buffer base (i32 SSA)")
     .set_attr<int>("dir_mask")
     .set_attr<int>("slot_size")
+    .set_attr<int>("id")
     .f_deduce_type(DeduceUnknownType);
 
 // Reserve a named buffer in a kernel
