@@ -39,6 +39,8 @@ __all__ = [
     "div",
     "divs",
     "maximum",
+    "cmp",
+    "cmps",
     "row_max",
     "row_sum",
     "row_min",
@@ -497,6 +499,41 @@ def maximum(lhs: Tensor, rhs: Tensor) -> Tensor:
     lhs_expr = lhs.unwrap()
     rhs_expr = rhs.unwrap()
     call_expr = _ir_ops.maximum(lhs_expr, rhs_expr)
+    return Tensor(expr=call_expr)
+
+
+def cmp(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr, cmp_type: int = 0) -> Tensor:
+    """Element-wise comparison of tensor and tensor or scalar (returns 0/1 tensor).
+
+    Auto-dispatches to ``tensor.cmp`` (tensor vs tensor) or ``tensor.cmps``
+    (tensor vs scalar) based on the ``rhs`` type.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or scalar
+        cmp_type: Comparison type code (0=eq, 1=ne, 2=lt, 3=le, 4=gt, 5=ge)
+
+    Returns:
+        Tensor of 0/1 with the same shape and dtype as ``lhs``
+    """
+    lhs_expr = lhs.unwrap()
+    call_expr = _ir_ops.cmp(lhs_expr, _unwrap_rhs(rhs), cmp_type=cmp_type)
+    return Tensor(expr=call_expr)
+
+
+def cmps(lhs: Tensor, rhs: int | float | Expr | Scalar, cmp_type: int = 0) -> Tensor:
+    """Element-wise comparison of tensor and scalar (returns 0/1 tensor).
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side scalar
+        cmp_type: Comparison type code (0=eq, 1=ne, 2=lt, 3=le, 4=gt, 5=ge)
+
+    Returns:
+        Tensor of 0/1 with the same shape and dtype as ``lhs``
+    """
+    lhs_expr = lhs.unwrap()
+    call_expr = _ir_ops.cmps(lhs_expr, _unwrap_rhs(rhs), cmp_type=cmp_type)
     return Tensor(expr=call_expr)
 
 

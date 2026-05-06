@@ -221,6 +221,120 @@ class TileCmpsTestCase(PTOTestCase):
         _write_expected_outputs(tensors, tensors["lhs"], torch.tensor(0.0, dtype=tensors["lhs"].dtype))
 
 
+@pl.program
+class TensorCmpProgram:
+    """Tensor-to-tensor comparison for all cmp_type modes; lowers to tile.cmp + tile.full + tile.sel."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        lhs: pl.Tensor[[M, N], pl.FP32],
+        rhs: pl.Tensor[[M, N], pl.FP32],
+        eq: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ne: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        lt: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        le: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        gt: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ge: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> tuple[
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+    ]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            eq = pl.assemble(eq, pl.tensor.cmp(lhs, rhs, cmp_type=0), [0, 0])
+            ne = pl.assemble(ne, pl.tensor.cmp(lhs, rhs, cmp_type=1), [0, 0])
+            lt = pl.assemble(lt, pl.tensor.cmp(lhs, rhs, cmp_type=2), [0, 0])
+            le = pl.assemble(le, pl.tensor.cmp(lhs, rhs, cmp_type=3), [0, 0])
+            gt = pl.assemble(gt, pl.tensor.cmp(lhs, rhs, cmp_type=4), [0, 0])
+            ge = pl.assemble(ge, pl.tensor.cmp(lhs, rhs, cmp_type=5), [0, 0])
+        return eq, ne, lt, le, gt, ge
+
+
+@pl.program
+class TensorCmpsProgram:
+    """Tensor-to-scalar comparison; lowers to tile.cmps + tile.full + tile.sel."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        lhs: pl.Tensor[[M, N], pl.FP32],
+        eq: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ne: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        lt: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        le: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        gt: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ge: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> tuple[
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+        pl.Tensor[[M, N], pl.FP32],
+    ]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            eq = pl.assemble(eq, pl.tensor.cmps(lhs, 0.0, cmp_type=0), [0, 0])
+            ne = pl.assemble(ne, pl.tensor.cmps(lhs, 0.0, cmp_type=1), [0, 0])
+            lt = pl.assemble(lt, pl.tensor.cmps(lhs, 0.0, cmp_type=2), [0, 0])
+            le = pl.assemble(le, pl.tensor.cmps(lhs, 0.0, cmp_type=3), [0, 0])
+            gt = pl.assemble(gt, pl.tensor.cmps(lhs, 0.0, cmp_type=4), [0, 0])
+            ge = pl.assemble(ge, pl.tensor.cmps(lhs, 0.0, cmp_type=5), [0, 0])
+        return eq, ne, lt, le, gt, ge
+
+
+class TensorCmpTestCase(PTOTestCase):
+    """Tensor cmp: compare two FP32 tensors; pass-driven tile lowering."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return "tensor_cmp"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("lhs", [M, N], DataType.FP32, init_value=_cmp_lhs()),
+            TensorSpec("rhs", [M, N], DataType.FP32, init_value=_cmp_rhs()),
+            *(TensorSpec(name, [M, N], DataType.FP32, is_output=True) for name in _OUTPUT_NAMES),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorCmpProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        _write_expected_outputs(tensors, tensors["lhs"], tensors["rhs"])
+
+
+class TensorCmpsTestCase(PTOTestCase):
+    """Tensor cmps: compare an FP32 tensor with scalar zero; pass-driven tile lowering."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return "tensor_cmps"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("lhs", [M, N], DataType.FP32, init_value=_cmp_lhs()),
+            *(TensorSpec(name, [M, N], DataType.FP32, is_output=True) for name in _OUTPUT_NAMES),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorCmpsProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        _write_expected_outputs(tensors, tensors["lhs"], torch.tensor(0.0, dtype=tensors["lhs"].dtype))
+
+
 class TestTileCmpOperations:
     """Test tile comparison operations across supported platforms."""
 
@@ -232,6 +346,20 @@ class TestTileCmpOperations:
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
     def test_tile_cmps(self, test_runner, platform):
         result = test_runner.run(TileCmpsTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+class TestTensorCmpOperations:
+    """Test tensor-level comparison ops (lowered by ConvertTensorToTileOps)."""
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_tensor_cmp(self, test_runner, platform):
+        result = test_runner.run(TensorCmpTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_tensor_cmps(self, test_runner, platform):
+        result = test_runner.run(TensorCmpsTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

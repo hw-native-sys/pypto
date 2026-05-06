@@ -149,6 +149,7 @@ class OpConversionRegistry {
   void RegisterReductionOps();
   void RegisterSortOps();
   void RegisterGatherOps();
+  void RegisterCmpOps();
 
   std::unordered_map<std::string, ConversionEntry> conversions_;
 };

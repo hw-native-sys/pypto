@@ -91,6 +91,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterReductionOps();
   RegisterSortOps();
   RegisterGatherOps();
+  RegisterCmpOps();
 }
 
 // ============================================================================
@@ -1224,6 +1225,63 @@ void OpConversionRegistry::RegisterGatherOps() {
           return ConversionResult{std::move(prologue), out_2d};
         }
       });
+}
+
+// ============================================================================
+// Tensor compare ops: lower to packed mask + tile.full(one/zero) + tile.sel
+// ============================================================================
+
+void OpConversionRegistry::RegisterCmpOps() {
+  auto MakeCmpConv = [](const std::string& tile_cmp_op) -> ConversionFunc {
+    return [tile_cmp_op](const std::vector<ExprPtr>& args,
+                         const std::vector<std::pair<std::string, std::any>>& kwargs,
+                         const Span& span) -> ConversionResult {
+      auto& op_reg = OpRegistry::GetInstance();
+      auto lhs_tile = As<TileType>(args[0]->GetType());
+      CHECK(lhs_tile) << tile_cmp_op << " conversion: lhs must be TileType after memory promotion, got "
+                      << args[0]->GetType()->TypeName();
+
+      std::vector<StmtPtr> prologue;
+
+      // 1) packed mask = tile.cmp / tile.cmps(lhs, rhs, cmp_type=K)
+      auto mask_call = op_reg.Create(tile_cmp_op, args, kwargs, span);
+      auto mask_var = std::make_shared<Var>("cmp_mask", mask_call->GetType(), span);
+      prologue.push_back(std::make_shared<AssignStmt>(mask_var, mask_call, span));
+
+      // 2) one / zero tiles via tile.full
+      auto shape_tuple = std::make_shared<MakeTuple>(lhs_tile->shape_, span);
+      auto make_full = [&](double v, const std::string& name) {
+        std::vector<std::pair<std::string, std::any>> kw = {{"dtype", lhs_tile->dtype_}};
+        ExprPtr val =
+            lhs_tile->dtype_.IsFloat()
+                ? ExprPtr(std::make_shared<ConstFloat>(v, lhs_tile->dtype_, span))
+                : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), lhs_tile->dtype_, span));
+        auto call = op_reg.Create("tile.full", {shape_tuple, val}, kw, span);
+        auto var = std::make_shared<Var>(name, call->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+        return var;
+      };
+      auto one_var = make_full(1.0, "cmp_one");
+      auto zero_var = make_full(0.0, "cmp_zero");
+
+      // 3) tmp scratch tile [1, 32] UINT8 in Vec memory
+      std::vector<ExprPtr> tmp_shape_dims = {std::make_shared<ConstInt>(1, DataType::INDEX, span),
+                                             std::make_shared<ConstInt>(32, DataType::INDEX, span)};
+      auto tmp_shape_tuple = std::make_shared<MakeTuple>(tmp_shape_dims, span);
+      std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType::UINT8},
+                                                              {"target_memory", MemorySpace::Vec}};
+      auto tmp_call = op_reg.Create("tile.create", {tmp_shape_tuple}, tmp_kw, span);
+      auto tmp_var = std::make_shared<Var>("cmp_tmp", tmp_call->GetType(), span);
+      prologue.push_back(std::make_shared<AssignStmt>(tmp_var, tmp_call, span));
+
+      // 4) tile.sel(mask, one, zero, tmp)
+      auto sel_call = op_reg.Create("tile.sel", {mask_var, one_var, zero_var, tmp_var}, span);
+      return ConversionResult{std::move(prologue), sel_call};
+    };
+  };
+
+  RegisterCustom("tensor.cmp", MakeCmpConv("tile.cmp"));
+  RegisterCustom("tensor.cmps", MakeCmpConv("tile.cmps"));
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,
