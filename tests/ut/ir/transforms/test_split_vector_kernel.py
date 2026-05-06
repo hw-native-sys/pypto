@@ -893,3 +893,100 @@ class TestSplitVectorKernelNoSplitA2A3:
             r"pl.TileView\(valid_shape=\[0, 0\]\)\]",
             printed,
         )
+
+    def test_no_split_dual_dispatch_lane1_loop_init_uses_empty_accumulator(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                    [16, 16], dtype=pl.FP32, value=0.0
+                )
+                for kb, (acc_iter,) in pl.range(4, init_values=(acc,)):
+                    z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                        split=0
+                    )
+                    next_acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, z_vec)
+                    pl.tfree_to_aic(z_vec)
+                    acc_final: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.yield_(next_acc)
+                incremented: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_final, 1.0)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(incremented, [0, 0], out)
+                return updated
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+        lane1 = printed.split("else:", 1)[1]
+
+        assert re.search(
+            r"acc__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
+            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.full",
+            lane1,
+        )
+        assert re.search(r"pl.range\(4, init_values=\(acc__ssa_v0_\d+,\)\)", lane1)
+        assert "pl.range(4, init_values=(acc__ssa_v0,))" not in lane1
+        assert re.search(
+            r"incremented__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
+            r"pl.TileView\(valid_shape=\[0, 0\]\)\]",
+            lane1,
+        )
+
+    def test_no_split_dual_dispatch_lane1_while_init_uses_empty_accumulator(self):
+        """Cover lane1 replay for while-loop tile/scalar carried state."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                    [16, 16], dtype=pl.FP32, value=0.0
+                )
+                count: pl.Scalar[pl.INDEX] = 0
+                for acc_iter, count_iter in pl.while_(init_values=(acc, count)):
+                    pl.cond(count_iter < 4)
+                    z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                        split=0
+                    )
+                    next_acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, z_vec)
+                    next_count: pl.Scalar[pl.INDEX] = count_iter + 1
+                    pl.tfree_to_aic(z_vec)
+                    acc_final, count_final = pl.yield_(next_acc, next_count)
+                incremented: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_final, 1.0)
+                updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(incremented, [0, 0], out)
+                return updated
+
+        actual = _run_split_vector_kernel(Before)
+        printed = python_print(actual)
+        lane1 = printed.split("else:", 1)[1]
+
+        assert re.search(
+            r"acc__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
+            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.full",
+            lane1,
+        )
+        assert re.search(
+            r"for acc_iter_\d+, count_iter_\d+ in pl.while_"
+            r"\(init_values=\(acc__ssa_v0_\d+, count__ssa_v0_\d+\)\)",
+            lane1,
+        )
+        assert "pl.while_(init_values=(acc__ssa_v0, count__ssa_v0))" not in lane1
+        assert re.search(r"pl.cond\(count_iter_\d+ < 4\)", lane1)
+        assert re.search(
+            r"incremented__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
+            r"pl.TileView\(valid_shape=\[0, 0\]\)\]",
+            lane1,
+        )

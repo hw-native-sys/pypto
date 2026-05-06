@@ -811,6 +811,74 @@ NoSplitSharedPrefix SplitNoSplitSharedPipeSetupPrefix(const std::vector<StmtPtr>
   return result;
 }
 
+TypePtr Lane1LoopVarType(const TypePtr& original_type, const ExprPtr& init_value) {
+  if (!std::dynamic_pointer_cast<const TileType>(original_type) || !init_value) {
+    return original_type;
+  }
+  auto init_type = init_value->GetType();
+  if (std::dynamic_pointer_cast<const TileType>(init_type)) {
+    return init_type;
+  }
+  return original_type;
+}
+
+std::vector<IterArgPtr> RebuildLane1LoopIterArgs(const std::vector<IterArgPtr>& iter_args,
+                                                 const ExprReplacementMap& entry_replacements,
+                                                 ExprReplacementMap& scoped_replacements) {
+  std::vector<IterArgPtr> new_iter_args;
+  new_iter_args.reserve(iter_args.size());
+
+  for (const auto& iter_arg : iter_args) {
+    auto new_init = SubstituteExprIfNeeded(iter_arg->initValue_, entry_replacements);
+    auto new_type = Lane1LoopVarType(iter_arg->GetType(), new_init);
+    if (new_init != iter_arg->initValue_ || new_type != iter_arg->GetType()) {
+      auto new_iter_arg =
+          std::make_shared<IterArg>(iter_arg->name_hint_, new_type, new_init, iter_arg->span_);
+      scoped_replacements[iter_arg.get()] = new_iter_arg;
+      new_iter_args.push_back(new_iter_arg);
+    } else {
+      new_iter_args.push_back(iter_arg);
+    }
+  }
+
+  return new_iter_args;
+}
+
+std::vector<VarPtr> RebuildLane1LoopReturnVars(const std::vector<VarPtr>& return_vars,
+                                               const std::vector<IterArgPtr>& iter_args,
+                                               ExprReplacementMap& replacements) {
+  INTERNAL_CHECK(return_vars.size() == iter_args.size())
+      << "Internal error: return_vars and iter_args sizes must match";
+
+  std::vector<VarPtr> new_return_vars;
+  new_return_vars.reserve(return_vars.size());
+
+  for (size_t i = 0; i < return_vars.size(); ++i) {
+    const auto& return_var = return_vars[i];
+    auto new_type = return_var->GetType();
+    if (i < iter_args.size()) {
+      new_type = Lane1LoopVarType(return_var->GetType(), iter_args[i]);
+    }
+    if (new_type != return_var->GetType()) {
+      auto new_return_var = std::make_shared<Var>(return_var->name_hint_, new_type, return_var->span_);
+      replacements[return_var.get()] = new_return_var;
+      new_return_vars.push_back(new_return_var);
+    } else {
+      new_return_vars.push_back(return_var);
+    }
+  }
+
+  return new_return_vars;
+}
+
+std::optional<ChunkConfig> SubstituteChunkConfigIfNeeded(const std::optional<ChunkConfig>& chunk_config,
+                                                         const ExprReplacementMap& replacements) {
+  if (!chunk_config.has_value()) return std::nullopt;
+  auto new_size = SubstituteExprIfNeeded(chunk_config->size, replacements);
+  if (new_size == chunk_config->size) return chunk_config;
+  return ChunkConfig{new_size, chunk_config->policy};
+}
+
 // Lane 1 still needs to replay cross-core handshakes so Ascend910B GM-backed
 // pipes stay balanced. Tile-producing replay work is forced to static
 // valid_shape=0, letting PTO ops run as empty tiles while preserving the tpush /
@@ -868,21 +936,34 @@ std::vector<StmtPtr> BuildNoSplitLane1ReplayStmts(const std::vector<StmtPtr>& st
 
     if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
       auto loop_replacements = replacements;
+      auto new_iter_args = RebuildLane1LoopIterArgs(for_stmt->iter_args_, replacements, loop_replacements);
+      auto new_return_vars = RebuildLane1LoopReturnVars(for_stmt->return_vars_, new_iter_args, replacements);
       auto new_body_stmts =
           BuildNoSplitLane1ReplayStmts(transform_utils::FlattenToStmts(for_stmt->body_), loop_replacements);
       auto new_for = MutableCopy(for_stmt);
+      new_for->start_ = SubstituteExprIfNeeded(for_stmt->start_, replacements);
+      new_for->stop_ = SubstituteExprIfNeeded(for_stmt->stop_, replacements);
+      new_for->step_ = SubstituteExprIfNeeded(for_stmt->step_, replacements);
+      new_for->iter_args_ = std::move(new_iter_args);
       new_for->body_ = loop_repair::MakeBody(new_body_stmts, for_stmt->span_);
+      new_for->return_vars_ = std::move(new_return_vars);
+      new_for->chunk_config_ = SubstituteChunkConfigIfNeeded(for_stmt->chunk_config_, replacements);
       result.push_back(new_for);
       continue;
     }
 
     if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
       auto loop_replacements = replacements;
+      auto new_iter_args = RebuildLane1LoopIterArgs(while_stmt->iter_args_, replacements, loop_replacements);
+      auto new_return_vars =
+          RebuildLane1LoopReturnVars(while_stmt->return_vars_, new_iter_args, replacements);
       auto new_body_stmts =
           BuildNoSplitLane1ReplayStmts(transform_utils::FlattenToStmts(while_stmt->body_), loop_replacements);
       auto new_while = MutableCopy(while_stmt);
-      new_while->condition_ = SubstituteExprIfNeeded(while_stmt->condition_, replacements);
+      new_while->condition_ = SubstituteExprIfNeeded(while_stmt->condition_, loop_replacements);
+      new_while->iter_args_ = std::move(new_iter_args);
       new_while->body_ = loop_repair::MakeBody(new_body_stmts, while_stmt->span_);
+      new_while->return_vars_ = std::move(new_return_vars);
       result.push_back(new_while);
       continue;
     }
