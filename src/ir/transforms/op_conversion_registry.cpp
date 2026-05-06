@@ -1241,6 +1241,34 @@ void OpConversionRegistry::RegisterCmpOps() {
       CHECK(lhs_tile) << tile_cmp_op << " conversion: lhs must be TileType after memory promotion, got "
                       << args[0]->GetType()->TypeName();
 
+      // Compute the broadcasted shape and promoted dtype shared by the
+      // synthesized one/zero/sel tiles. Aligning with the elementwise binary
+      // deducer keeps the conversion result consistent with the IR's inferred
+      // type for tensor.cmp / tensor.cmps (which promotes dtype and broadcasts
+      // shape across both operands).
+      std::vector<ExprPtr> result_shape;
+      DataType result_dtype = lhs_tile->dtype_;
+      if (auto rhs_tile = As<TileType>(args[1]->GetType())) {
+        auto broadcast_result = BroadcastShapes(lhs_tile->shape_, rhs_tile->shape_);
+        CHECK(broadcast_result.success)
+            << tile_cmp_op << " conversion: incompatible shapes " << FormatShape(lhs_tile->shape_) << " and "
+            << FormatShape(rhs_tile->shape_);
+        result_shape = broadcast_result.shape;
+        auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_tile->dtype_);
+        CHECK(promoted) << tile_cmp_op << " conversion: incompatible dtypes " << lhs_tile->dtype_.ToString()
+                        << " and " << rhs_tile->dtype_.ToString();
+        result_dtype = *promoted;
+      } else if (auto rhs_scalar = As<ScalarType>(args[1]->GetType())) {
+        result_shape = lhs_tile->shape_;
+        auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_scalar->dtype_);
+        CHECK(promoted) << tile_cmp_op << " conversion: incompatible dtypes " << lhs_tile->dtype_.ToString()
+                        << " and " << rhs_scalar->dtype_.ToString();
+        result_dtype = *promoted;
+      } else {
+        CHECK(false) << tile_cmp_op << " conversion: rhs must be TileType or ScalarType, got "
+                     << args[1]->GetType()->TypeName();
+      }
+
       std::vector<StmtPtr> prologue;
 
       // 1) packed mask = tile.cmp / tile.cmps(lhs, rhs, cmp_type=K)
@@ -1248,14 +1276,14 @@ void OpConversionRegistry::RegisterCmpOps() {
       auto mask_var = std::make_shared<Var>("cmp_mask", mask_call->GetType(), span);
       prologue.push_back(std::make_shared<AssignStmt>(mask_var, mask_call, span));
 
-      // 2) one / zero tiles via tile.full
-      auto shape_tuple = std::make_shared<MakeTuple>(lhs_tile->shape_, span);
+      // 2) one / zero tiles via tile.full, sized to the broadcasted compare
+      //    shape and the promoted dtype so tile.sel sees matching operands.
+      auto shape_tuple = std::make_shared<MakeTuple>(result_shape, span);
       auto make_full = [&](double v, const std::string& name) {
-        std::vector<std::pair<std::string, std::any>> kw = {{"dtype", lhs_tile->dtype_}};
-        ExprPtr val =
-            lhs_tile->dtype_.IsFloat()
-                ? ExprPtr(std::make_shared<ConstFloat>(v, lhs_tile->dtype_, span))
-                : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), lhs_tile->dtype_, span));
+        std::vector<std::pair<std::string, std::any>> kw = {{"dtype", result_dtype}};
+        ExprPtr val = result_dtype.IsFloat()
+                          ? ExprPtr(std::make_shared<ConstFloat>(v, result_dtype, span))
+                          : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), result_dtype, span));
         auto call = op_reg.Create("tile.full", {shape_tuple, val}, kw, span);
         auto var = std::make_shared<Var>(name, call->GetType(), span);
         prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
