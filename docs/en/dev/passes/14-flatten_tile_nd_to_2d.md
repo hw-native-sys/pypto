@@ -53,7 +53,7 @@ Per-statement handling:
 | `tile.store` (2D tensor) | Pass through unchanged |
 | `tile.create`/`tile.full` (>2D) | Rebuild with flattened 2D shape directly |
 | `tile.sum`/`tile.max`/`tile.min` (>2D) | Remap axis to 1 (last axis of 2D) |
-| `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast and any operand-side transpose carried in the producer `tile.load(target_memory=Mat, transpose=True)` |
+| `tile.batch_matmul` | Expand to per-batch 2D `tile.matmul`, honoring batch broadcast and any operand-side transpose carried in the producer `tile.load(target_memory=Mat, transpose=True)`. When the rhs has no effective batch (`prod(rhs_batch_dims) == 1`), the rhs page extraction is hoisted out of the per-batch unroll so only one rhs.load is emitted (saves B-1 redundant rhs loads) |
 | `tile.batch_matmul_acc` | Expand to per-batch 2D `tile.matmul_acc`, slicing the (already-flattened) accumulator per batch index; an explicit `tile.move(target_memory=Acc)` is inserted when the accumulator is in another memory space |
 | Other tile ops (>2D) | Substitute vars, re-create with 2D types |
 | 1D/2D tile ops | Unchanged |

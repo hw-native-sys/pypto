@@ -850,6 +850,19 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
     }
   }
 
+  // Hoist rhs.ExtractBatchPage when rhs has no effective batch (all rhs batch
+  // dims are 1, or rhs is 2D). In that case BuildOperandFlatBatchIndex would
+  // return 0 for every iteration, so ExtractBatchPage emits identical IR each
+  // round — emit it once outside the loop and reuse the resulting Var across
+  // all per-batch matmuls. Saves (batch_count - 1) redundant rhs loads.
+  const int64_t batch_count_rhs = MultiplyStaticDims(rhs_batch_dims, "tile.batch_matmul rhs batch size");
+  std::optional<BatchPageResult> hoisted_rhs_page;
+  if (batch_count_rhs == 1 && batch_count > 1) {
+    hoisted_rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, /*batch_index=*/0, "rhs", def_map,
+                                        ctx, op_registry, span);
+    out.stmts.insert(out.stmts.end(), hoisted_rhs_page->stmts.begin(), hoisted_rhs_page->stmts.end());
+  }
+
   // Unroll batch dimensions.
   for (int64_t i = 0; i < batch_count; ++i) {
     auto output_batch_indices = BuildBatchIndices(i, output_batch_dims);
@@ -858,16 +871,24 @@ BatchMatmulResult LowerBatchMatmul(const AssignStmtPtr& assign, const CallPtr& c
     int64_t rhs_batch_idx =
         BuildOperandFlatBatchIndex(rhs_batch_dims, output_batch_dims, output_batch_indices);
 
-    // Extract 2D pages.
+    // Extract 2D pages. lhs always extracted per batch; rhs reuses the hoisted
+    // var when applicable.
     auto lhs_page = ExtractBatchPage(lhs_info, lhs_dims, lhs_batch_dims, lhs_batch_idx, "lhs", def_map, ctx,
                                      op_registry, span);
-    auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", def_map, ctx,
-                                     op_registry, span);
     out.stmts.insert(out.stmts.end(), lhs_page.stmts.begin(), lhs_page.stmts.end());
-    out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
+
+    VarPtr rhs_var;
+    if (hoisted_rhs_page) {
+      rhs_var = hoisted_rhs_page->var;
+    } else {
+      auto rhs_page = ExtractBatchPage(rhs_info, rhs_dims, rhs_batch_dims, rhs_batch_idx, "rhs", def_map, ctx,
+                                       op_registry, span);
+      out.stmts.insert(out.stmts.end(), rhs_page.stmts.begin(), rhs_page.stmts.end());
+      rhs_var = rhs_page.var;
+    }
 
     // Emit tile.matmul.
-    auto matmul = op_registry.Create("tile.matmul", {lhs_page.var, rhs_page.var}, span);
+    auto matmul = op_registry.Create("tile.matmul", {lhs_page.var, rhs_var}, span);
     auto matmul_var = std::make_shared<Var>("matmul_" + std::to_string(i), matmul->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(matmul_var, matmul, span));
 
@@ -1146,6 +1167,11 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
   // tile.batch_matmul. When ExtractBatchPage Strategy 1 re-emits per-batch loads
   // from the original tensor, the full-batch load becomes dead code. Skip emitting
   // it to avoid wasted memory and potential hardware pipeline interference.
+  //
+  // Exception: when LowerBatchMatmul will take the unified single-matmul fast path,
+  // the operand loads are NOT dead — the fast path uses tile.reshape on the original
+  // load result, not Strategy-1 per-batch re-emission. Operands of such batch_matmuls
+  // must stay in the IR.
   //
   // Safety: we count ALL Var references across every statement type (Return, Yield,
   // If conditions, For/While bounds, etc.), not just Call arguments. A Var used

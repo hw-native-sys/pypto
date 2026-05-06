@@ -52,7 +52,7 @@ program_2d = flatten_pass(program)
 | `tile.store`（2D 张量） | 直接透传 |
 | `tile.create`/`tile.full`（>2D） | 直接使用展平的 2D 形状重建 |
 | `tile.sum`/`tile.max`/`tile.min`（>2D） | 将 axis 映射为 1（2D 的最后轴） |
-| `tile.batch_matmul` | 展开为逐 batch 的 2D `tile.matmul`，处理 batch broadcast；operand 的 transpose 通过生产侧 `tile.load(target_memory=Mat, transpose=True)` 携带 |
+| `tile.batch_matmul` | 展开为逐 batch 的 2D `tile.matmul`，并处理 batch broadcast；operand 的 transpose 通过生产侧 `tile.load(target_memory=Mat, transpose=True)` 携带。当 rhs 实质无 batch（`prod(rhs_batch_dims) == 1`）时，rhs 的 page 提取会被提到 unroll 循环外，整段只发射一次 rhs.load（省掉 B-1 次冗余 rhs 加载） |
 | `tile.batch_matmul_acc` | 展开为逐 batch 的 2D `tile.matmul_acc`，按 batch 索引切分（已展平的）累加器；累加器若不在 Acc 内存空间会插入显式 `tile.move(target_memory=Acc)` |
 | 其他 Tile 操作（>2D） | 替换变量，使用 2D 类型重新创建 |
 | 1D/2D Tile 操作 | 不变 |

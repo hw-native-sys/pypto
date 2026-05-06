@@ -205,6 +205,68 @@ class TestBatchMatmulATranspose(PTOTestCase):
         tensors["c"][:] = torch.bmm(tensors["a"].transpose(-2, -1), tensors["b"])
 
 
+class TestBatchMatmulLhsNdRhs2d(PTOTestCase):
+    """Tile-level batch matmul with rhs as a true 2D (non-batched) operand.
+
+    Exercises FlattenTileNdTo2D's rhs-hoist optimization: lhs is `[B, M, K]`,
+    rhs is shared `[K, N]` across all batches, so the lowering hoists the
+    rhs.load out of the per-batch unroll loop (saves B-1 redundant loads).
+    """
+
+    __test__ = False
+
+    def __init__(self, batch: int = 2, m: int = 64, k: int = 64, n: int = 64, config=None):
+        super().__init__(config)
+        self.batch = batch
+        self.M = m
+        self.K = k
+        self.N = n
+
+    def get_name(self) -> str:
+        return f"batch_matmul_lhs_nd_rhs_2d_{self.batch}x{self.M}x{self.K}x{self.N}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [self.batch, self.M, self.K], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [self.K, self.N], DataType.FP32, init_value=torch.randn),
+            TensorSpec("c", [self.batch, self.M, self.N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        B, M, K, N = self.batch, self.M, self.K, self.N
+
+        @pl.program
+        class BatchMatmulLhsNdRhs2dProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def batch_matmul_lhs_nd_rhs_2d(
+                self,
+                a: pl.Tensor[[B, M, K], pl.FP32],
+                b: pl.Tensor[[K, N], pl.FP32],
+                c: pl.Out[pl.Tensor[[B, M, N], pl.FP32]],
+            ) -> pl.Tensor[[B, M, N], pl.FP32]:
+                tile_a = pl.load(a, offsets=[0, 0, 0], shapes=[B, M, K], target_memory=pl.MemorySpace.Mat)
+                tile_b = pl.load(b, offsets=[0, 0], shapes=[K, N], target_memory=pl.MemorySpace.Mat)
+                tile_c = pl.batch_matmul(tile_a, tile_b)
+                out_c = pl.store(tile_c, offsets=[0, 0, 0], output_tensor=c)
+                return out_c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[B, M, K], pl.FP32],
+                b: pl.Tensor[[K, N], pl.FP32],
+                c: pl.Out[pl.Tensor[[B, M, N], pl.FP32]],
+            ) -> pl.Tensor[[B, M, N], pl.FP32]:
+                out_c = self.batch_matmul_lhs_nd_rhs_2d(a, b, c)
+                return out_c
+
+        return BatchMatmulLhsNdRhs2dProgram
+
+    def compute_expected(self, tensors, params=None):
+        # torch.matmul broadcasts 2D rhs across all batches of 3D lhs.
+        tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
+
+
 class TestBatchMatmulOperations:
     """Test suite for tile-level batch matrix multiplication.
 
@@ -259,6 +321,21 @@ class TestBatchMatmulOperations:
         test_case = TestBatchMatmulATranspose(batch=batch, m=m, k=k, n=n)
         result = test_runner.run(test_case)
         assert result.passed, f"Test failed (A-trans): {result.error}"
+
+    @pytest.mark.parametrize(
+        "batch,m,k,n",
+        [
+            (2, 64, 64, 64),
+            (4, 32, 64, 32),
+            # batch=1 falls through the existing batch_count==1 fast path.
+            (1, 64, 64, 64),
+        ],
+    )
+    def test_batch_matmul_lhs_nd_rhs_2d(self, test_runner, batch, m, k, n):
+        """lhs ND × rhs 2D triggers FlattenTileNdTo2D's rhs-hoist optimization."""
+        test_case = TestBatchMatmulLhsNdRhs2d(batch=batch, m=m, k=k, n=n)
+        result = test_runner.run(test_case)
+        assert result.passed, f"Test failed (lhs ND × rhs 2D): {result.error}"
 
 
 if __name__ == "__main__":
