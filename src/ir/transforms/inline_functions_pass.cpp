@@ -296,14 +296,6 @@ std::vector<StmtPtr> SpliceInlineCall(const FunctionPtr& callee, const std::vect
       << "Inline call to '" << callee->name_ << "' has " << args.size() << " argument(s) but callee expects "
       << callee->params_.size();
 
-  // 0. Reject nested returns up-front. Splicing only consumes the trailing
-  //    top-level return; any nested ReturnStmt would otherwise survive the
-  //    splice and trigger the outer caller to return prematurely.
-  NestedReturnCounter ret_counter;
-  ret_counter.VisitStmt(callee->body_);
-  CHECK(ret_counter.count <= 1) << "Inline function '" << callee->name_ << "' contains " << ret_counter.count
-                                << " ReturnStmt(s); only a single trailing return is supported";
-
   // 1. Param substitution map
   std::unordered_map<const Var*, ExprPtr> param_subst;
   for (size_t i = 0; i < callee->params_.size(); ++i) {
@@ -356,6 +348,19 @@ std::vector<StmtPtr> SpliceInlineCall(const FunctionPtr& callee, const std::vect
   };
   extract_from_stmt(renamed_body);
 
+  // 4a. Reject any ReturnStmt that survived extraction (nested inside an
+  //     If/For/While branch, or non-trailing). Such returns would otherwise
+  //     splice straight into the caller and trigger the OUTER function to
+  //     return prematurely. The pre-splice total-count alone isn't enough:
+  //     a single ReturnStmt nested in `if c: return x` passes a `count <= 1`
+  //     check yet still miscompiles, especially for EvalStmt call sites
+  //     where there's no LHS-driven `has_return` guard downstream.
+  NestedReturnCounter post_extract;
+  for (const auto& s : spliced) post_extract.VisitStmt(s);
+  CHECK(post_extract.count == 0) << "Inline function '" << callee->name_
+                                 << "' contains a non-trailing ReturnStmt; only a single trailing return is "
+                                    "supported (early-return inside an If/For/While branch is rejected)";
+
   // 5. Wire up the return value(s) at the call site
   if (lhs) {
     CHECK(has_return) << "Inline function '" << callee->name_
@@ -407,6 +412,25 @@ class InlineCallsMutator : public IRMutator {
     }
     if (!any_changed) return op;
     return SeqStmts::Flatten(std::move(new_stmts), op->span_);
+  }
+
+  // Bare AssignStmt body — e.g. `if c: x = inline_f(...)` where the IfStmt's
+  // then_body is a single AssignStmt, not a SeqStmts. InlineFunctions runs
+  // before NormalizeStmtStructure, so non-SeqStmts bodies are possible. Wrap
+  // the splice in a SeqStmts so the parent body remains a single Stmt;
+  // SeqStmts::Flatten collapses any redundant nesting later.
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto handled = HandleTopLevelInlineCall(op);
+    if (!handled.has_value()) return IRMutator::VisitStmt_(op);
+    changed_ = true;
+    return SeqStmts::Flatten(std::move(*handled), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    auto handled = HandleTopLevelInlineCall(op);
+    if (!handled.has_value()) return IRMutator::VisitStmt_(op);
+    changed_ = true;
+    return SeqStmts::Flatten(std::move(*handled), op->span_);
   }
 
  private:
