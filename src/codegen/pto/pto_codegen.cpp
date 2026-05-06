@@ -366,9 +366,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   indent_level_++;
   fs_.constants_indent = GetIndent();
 
-  // Pre-emit address constants now that indent_level_ is set. The dtype
-  // is whatever the IR ConstInt declares — codegen is a 1:1 mapping over
-  // the IR's type, never an override.
+  // Pre-emit alloc_tile address constants now that indent_level_ is set.
+  // For addr constants specifically, codegen preserves the IR ConstInt
+  // dtype 1:1 (other operands like valid_row/valid_col adapt to the
+  // consumer's type via cast_to_index — see ComputeAllocTileFields).
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
     if (fs_.tpop_result_vars.count(tile_var.get()) > 0) continue;
     auto memref = ir::GetDefinedMemRef(tile_type);
