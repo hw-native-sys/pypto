@@ -27,7 +27,7 @@ Two distinct rewrites share one pass because both depend on
    `BackendHandler::RequiresNoSplitDualAivDispatch()` returns `true`
    (Ascend910B today) and only on AIV functions tagged
    `dual_aiv_dispatch=True` by `ExpandMixedKernel` (see
-   [`ExpandMixedKernel`](18-expand_mixed_kernel.md), the "no function
+   [`ExpandMixedKernel`](19-expand_mixed_kernel.md), the "no function
    split mode" paragraph). The pass injects `subblock_idx`, hoists shared
    pipe-setup calls (`reserve_buffer`, `import_peer_buffer`,
    `aic_initialize_pipe`, `aiv_initialize_pipe`) above the lane branch,
@@ -389,9 +389,9 @@ def split_vector_kernel() -> Pass:
 
 ## Related
 
-- [`ExpandMixedKernel`](18-expand_mixed_kernel.md) — upstream producer of
+- [`ExpandMixedKernel`](19-expand_mixed_kernel.md) — upstream producer of
   AIC/AIV functions and of the `dual_aiv_dispatch` marker.
-- [`InjectGMPipeBuffer`](19-inject_gm_pipe_buffer.md) — runs immediately
+- [`InjectGMPipeBuffer`](20-inject_gm_pipe_buffer.md) — runs immediately
   before; backend-gated GM pipe buffer wiring this pass relies on.
-- [`NormalizeReturnOrder`](21-normalize_return_order.md) — runs immediately
+- [`NormalizeReturnOrder`](22-normalize_return_order.md) — runs immediately
   after; sees the per-lane tile shapes produced here.

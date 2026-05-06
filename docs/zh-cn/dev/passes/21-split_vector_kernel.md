@@ -26,7 +26,7 @@ Pass 据此把函数体包装为 `if subblock_idx == 0 ... else`，让 AIC↔AIV
    `BackendHandler::RequiresNoSplitDualAivDispatch()` 返回 `true`
    （目前只有 Ascend910B）且 AIV 函数被
    `ExpandMixedKernel` 打上 `dual_aiv_dispatch=True` 标记时启用，参见
-   [`ExpandMixedKernel`](18-expand_mixed_kernel.md) 中的「no function
+   [`ExpandMixedKernel`](19-expand_mixed_kernel.md) 中的「no function
    split mode」段落。本 Pass 注入 `subblock_idx`，把
    `reserve_buffer`、`import_peer_buffer`、`aic_initialize_pipe`、
    `aiv_initialize_pipe` 这些共享 pipe-setup 调用从分支前缀中外提到分
@@ -380,9 +380,9 @@ def split_vector_kernel() -> Pass:
 
 ## 相关文档
 
-- [`ExpandMixedKernel`](18-expand_mixed_kernel.md) —— 上游 Pass，产生
+- [`ExpandMixedKernel`](19-expand_mixed_kernel.md) —— 上游 Pass，产生
   AIC/AIV 函数和 `dual_aiv_dispatch` 标记。
-- [`InjectGMPipeBuffer`](19-inject_gm_pipe_buffer.md) —— 紧邻上游；本
+- [`InjectGMPipeBuffer`](20-inject_gm_pipe_buffer.md) —— 紧邻上游；本
   Pass 依赖它布置好的 backend-gated GM pipe buffer。
-- [`NormalizeReturnOrder`](21-normalize_return_order.md) —— 紧邻下游；
+- [`NormalizeReturnOrder`](22-normalize_return_order.md) —— 紧邻下游；
   会观察到本 Pass 产出的 per-lane tile 形状。

@@ -12,7 +12,7 @@
 
 **前置条件**: SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、TileMemoryInferred、NormalizedStmtStructure。
 
-**流水线位置**: 位于 [`NormalizeReturnOrder`](21-normalize_return_order.md) 之后、`CanonicalizeIOOrder` 与 `InitMemRef` 之前（slot 20.5）。此时 tile 结构决策已完成；同时早于 `CanonicalizeIOOrder`/`InitMemRef`/`MemoryReuse`，使其看到每个副本独立的 tile 变量。
+**流水线位置**: 位于 [`NormalizeReturnOrder`](22-normalize_return_order.md) 之后、`CanonicalizeIOOrder` 与 `InitMemRef` 之前（slot 20.5）。此时 tile 结构决策已完成；同时早于 `CanonicalizeIOOrder`/`InitMemRef`/`MemoryReuse`，使其看到每个副本独立的 tile 变量。
 
 ## API
 
@@ -131,5 +131,5 @@ else:
 
 ## 相关
 
-- [`CanonicalizeIOOrder`](23-canonicalize_io_order.md) —— 下一个 Pass，对 `ForKind::Pipeline` 作用域内的 `SeqStmts` 做 IO 顺序规范化
+- [`CanonicalizeIOOrder`](24-canonicalize_io_order.md) —— 下一个 Pass，对 `ForKind::Pipeline` 作用域内的 `SeqStmts` 做 IO 顺序规范化
 - [`UnrollLoops`](02-unroll_loops.md) —— slot #1 的全展开 Pass，仍是 `pl.unroll(N)` 的主要降级路径
