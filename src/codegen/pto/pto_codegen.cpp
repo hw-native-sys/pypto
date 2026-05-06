@@ -366,12 +366,14 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   indent_level_++;
   fs_.constants_indent = GetIndent();
 
-  // Pre-emit i64 address constants now that indent_level_ is set
+  // Pre-emit address constants now that indent_level_ is set. The dtype
+  // is whatever the IR ConstInt declares — codegen is a 1:1 mapping over
+  // the IR's type, never an override.
   for (const auto& [tile_var, tile_type] : fs_.tile_var_allocs) {
     if (fs_.tpop_result_vars.count(tile_var.get()) > 0) continue;
     auto memref = ir::GetDefinedMemRef(tile_type);
-    if (memref && As<ir::ConstInt>(memref->byte_offset_)) {
-      GetOrEmitConstant(As<ir::ConstInt>(memref->byte_offset_)->value_, DataType::INT64);
+    if (auto const_offset = memref ? As<ir::ConstInt>(memref->byte_offset_) : nullptr) {
+      GetOrEmitConstant(const_offset->value_, const_offset->dtype());
     }
   }
 
@@ -714,7 +716,7 @@ PTOCodegen::AllocTileFields PTOCodegen::ComputeAllocTileFields(
   auto memref = ir::GetDefinedMemRef(tile_type);
   if (memref) {
     if (auto const_offset = As<ir::ConstInt>(memref->byte_offset_)) {
-      fields.addr_ssa = GetOrEmitConstant(const_offset->value_, DataType::INT64);
+      fields.addr_ssa = GetOrEmitConstant(const_offset->value_, const_offset->dtype());
     }
   }
   return fields;

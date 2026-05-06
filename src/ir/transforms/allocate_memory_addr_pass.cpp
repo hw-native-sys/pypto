@@ -330,8 +330,12 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       // result MemRef offset, so collapsing all members onto base_addr is safe
       // (and matches the existing post-pass invariant that byte_offset_ is a
       // ConstInt the verifier can read).
+      //
+      // INT64 dtype is required by the PTOAS dialect's `pto.alloc_tile` addr
+      // operand. PTO codegen reads this dtype from the ConstInt 1:1 — no
+      // codegen-side override.
       auto base_addr_expr =
-          std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INDEX, Span::unknown());
+          std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INT64, Span::unknown());
       for (const auto& old_memref : group) {
         auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, base_addr_expr,
                                                    old_memref->size_, old_memref->span_);

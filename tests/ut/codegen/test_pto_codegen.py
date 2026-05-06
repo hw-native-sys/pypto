@@ -286,12 +286,15 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     span = ir.Span.unknown()
     zero = ir.ConstInt(0, DataType.INDEX, span)
     size = ir.ConstInt(128, DataType.INDEX, span)
+    # MemRef byte_offset must be INT64 (PTOAS addr operand requires i64) — see
+    # MemRef(VarPtr, int64_t, ...) ctor and AllocateMemoryAddrPass.
+    byte_offset_zero = ir.ConstInt(0, DataType.INT64, span)
 
     input_tensor = ir.Var("a", ir.TensorType([128, 128], DataType.FP32), span)
     output_tensor = ir.Var("output", ir.TensorType([128, 128], DataType.FP32), span)
     m_var = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
     n_var = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
-    shared_memref = ir.MemRef(ir.MemorySpace.Vec, zero, 128 * 128 * 4, 0)
+    shared_memref = ir.MemRef(ir.MemorySpace.Vec, byte_offset_zero, 128 * 128 * 4, 0)
 
     load_view = ir.TileView(valid_shape=[m_var, n_var])
     load_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, load_view, ir.MemorySpace.Vec)
@@ -352,7 +355,9 @@ def test_pto_codegen_fillpad_shared_memref_uses_single_alloc_tile():
     alloc_lines = _get_alloc_tile_lines(mlir_code)
 
     assert len(alloc_lines) == 2, f"Expected two alloc_tiles for per-var alloc model, got: {alloc_lines}"
-    # Both share the same addr (same MemRef)
+    # Both share the same addr (same MemRef). The PTOAS dialect requires `i64`
+    # for the alloc_tile addr operand, so AllocateMemoryAddrPass declares the
+    # final byte_offset_ ConstInt as INT64 and codegen emits it 1:1.
     assert "addr = %c0_i64" in alloc_lines[0]
     assert "addr = %c0_i64" in alloc_lines[1]
     # All alloc_tile types use dynamic v_row=?, v_col=?; the actual extents
@@ -377,12 +382,15 @@ def test_pto_codegen_fillpad_inplace():
     span = ir.Span.unknown()
     zero = ir.ConstInt(0, DataType.INDEX, span)
     size = ir.ConstInt(128, DataType.INDEX, span)
+    # MemRef byte_offset must be INT64 (PTOAS addr operand requires i64) — see
+    # MemRef(VarPtr, int64_t, ...) ctor and AllocateMemoryAddrPass.
+    byte_offset_zero = ir.ConstInt(0, DataType.INT64, span)
 
     input_tensor = ir.Var("a", ir.TensorType([128, 128], DataType.FP32), span)
     output_tensor = ir.Var("output", ir.TensorType([128, 128], DataType.FP32), span)
     m_var = ir.Var("m", ir.ScalarType(DataType.INDEX), span)
     n_var = ir.Var("n", ir.ScalarType(DataType.INDEX), span)
-    shared_memref = ir.MemRef(ir.MemorySpace.Vec, zero, 128 * 128 * 4, 0)
+    shared_memref = ir.MemRef(ir.MemorySpace.Vec, byte_offset_zero, 128 * 128 * 4, 0)
 
     load_view = ir.TileView(valid_shape=[m_var, n_var])
     load_tile_type = ir.TileType([128, 128], DataType.FP32, shared_memref, load_view, ir.MemorySpace.Vec)
@@ -440,7 +448,9 @@ def test_pto_codegen_fillpad_inplace():
     mlir_code = _generate_mlir(program)
     alloc_lines = _get_alloc_tile_lines(mlir_code)
 
-    # Both allocs share the same addr (same MemRef)
+    # Both allocs share the same addr (same MemRef). Address dtype tracks
+    # MemRef::byte_offset_ — declared INT64 by AllocateMemoryAddrPass so the
+    # codegen emits `i64` as required by the PTOAS dialect's addr operand.
     assert len(alloc_lines) == 2, f"Expected two alloc_tiles for per-var alloc model, got: {alloc_lines}"
     assert "addr = %c0_i64" in alloc_lines[0]
     assert "addr = %c0_i64" in alloc_lines[1]

@@ -67,7 +67,10 @@ MemRef::MemRef(VarPtr base, ExprPtr byte_offset, uint64_t size, Span span)
       size_(size) {}
 
 MemRef::MemRef(VarPtr base, int64_t byte_offset, uint64_t size, Span span)
-    : MemRef(std::move(base), std::make_shared<ConstInt>(byte_offset, DataType::INDEX, Span::unknown()), size,
+    // INT64 dtype matches AllocateMemoryAddrPass (which materializes the final
+    // concrete address) and the PTOAS dialect's `i64` requirement on the
+    // alloc_tile addr operand. Codegen reads dtype from the ConstInt 1:1.
+    : MemRef(std::move(base), std::make_shared<ConstInt>(byte_offset, DataType::INT64, Span::unknown()), size,
              std::move(span)) {}
 
 MemRef::MemRef(std::string name, VarPtr base, ExprPtr byte_offset, uint64_t size, Span span)
