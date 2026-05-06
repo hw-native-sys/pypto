@@ -12,7 +12,7 @@ The orchestration codegen generates PTO2 runtime C++ code that manages task-grap
 
 - Wraps device memory pointers (via `ChipStorageTaskArgs`) into `Tensor` objects
 - Builds `Arg` objects and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
-- Submits tasks to AIC (CUBE) or AIV (VECTOR) cores via `pto2_rt_submit_*_task`
+- Submits tasks to AIC (CUBE) or AIV (VECTOR) cores via `rt_submit_*_task`
 - Handles control flow (loops, conditionals) with `PTO2_SCOPE`
 
 **Pipeline:** `IR (Orchestration function) → OrchestrationCodegen → C++ (PTO2 runtime API)`
@@ -113,7 +113,7 @@ PTO2_SCOPE() {
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
     params_t0.add_output(tmp);               // pre-allocated tensor uses add_output(const Tensor&)
-    pto2_rt_submit_aiv_task(0, params_t0);
+    rt_submit_aiv_task(0, params_t0);
 
     // ForStmt example — plain for loop, no nested PTO2_SCOPE
     for (int64_t i = start; i < stop; i += step) {
@@ -172,7 +172,7 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 // Generated C++
 Arg params_t0;
 params_t0.add_output(ext_output);
-pto2_rt_submit_aiv_task(0, params_t0);
+rt_submit_aiv_task(0, params_t0);
 const Tensor& result = ext_output;  // alias — result refers to ext_output
 ```
 
@@ -184,8 +184,8 @@ The codegen determines whether to submit to AIC (CUBE) or AIV (VECTOR) based on 
 
 | MemorySpace | Core Type | Submit Function |
 | ----------- | --------- | --------------- |
-| `Left`, `Right`, `Acc` | CUBE (AIC) | `pto2_rt_submit_aic_task` |
-| `Vec`, `Mat` (default) | VECTOR (AIV) | `pto2_rt_submit_aiv_task` |
+| `Left`, `Right`, `Acc` | CUBE (AIC) | `rt_submit_aic_task` |
+| `Vec`, `Mat` (default) | VECTOR (AIV) | `rt_submit_aiv_task` |
 
 ### Tuple Handling
 
@@ -204,7 +204,7 @@ params_t0.add_inout(ext_pij);
 params_t0.add_inout(ext_mij);
 params_t0.add_inout(ext_lij);
 params_t0.add_scalar(to_u64(scale));  // scalar after all tensors
-pto2_rt_submit_aiv_task(0, params_t0);
+rt_submit_aiv_task(0, params_t0);
 ```
 
 ### Group Functions (Mixed Kernels)
@@ -216,7 +216,7 @@ When a kernel uses both AIC and AIV cores (mixed kernel), the codegen generates 
 Arg params_t0;
 // ... add_input / add_inout / add_scalar calls ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-pto2_rt_submit_task(mixed_0, params_t0);
+rt_submit_task(mixed_0, params_t0);
 ```
 
 ## Operation Mappings
@@ -282,14 +282,14 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         params_t0.add_input(ext_a);
         params_t0.add_input(ext_b);
         params_t0.add_output(c);
-        pto2_rt_submit_aiv_task(0, params_t0);
+        rt_submit_aiv_task(0, params_t0);
 
         // Task 1: kernel_add (c + b → d)
         Arg params_t1;
         params_t1.add_input(c);
         params_t1.add_input(ext_b);
         params_t1.add_output(ext_d);
-        pto2_rt_submit_aiv_task(1, params_t1);
+        rt_submit_aiv_task(1, params_t1);
     }
 }
 
@@ -338,7 +338,7 @@ Tensor acc = ext_acc;  // iter_arg initialization
 for (int64_t i = 0; i < 4; i += 1) {
     Arg params_t0;
     // ... add_input / add_inout calls ...
-    pto2_rt_submit_aiv_task(0, params_t0);
+    rt_submit_aiv_task(0, params_t0);
 }
 ```
 
@@ -360,13 +360,13 @@ if (condition) {
     PTO2_SCOPE() {
         Arg params_t0;
         // ... add_input / add_inout calls ...
-        pto2_rt_submit_aiv_task(0, params_t0);
+        rt_submit_aiv_task(0, params_t0);
     }
 } else {
     PTO2_SCOPE() {
         Arg params_t1;
         // ... add_input / add_inout calls ...
-        pto2_rt_submit_aiv_task(1, params_t1);
+        rt_submit_aiv_task(1, params_t1);
     }
 }
 ```

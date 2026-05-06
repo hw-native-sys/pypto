@@ -539,7 +539,7 @@ output_dir/
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
-编排代码生成使用 PTO2 运行时 API (`pto2_rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
+编排代码生成使用 PTO2 运行时 API (`rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
 
 ### 参数解包
 

@@ -137,10 +137,10 @@ bool RequiresDualAivDispatch(const FunctionPtr& aiv_func) {
           (aiv_func->HasAttr(kDualAivDispatchAttr) && aiv_func->GetAttr<bool>(kDualAivDispatchAttr, false)));
 }
 
-// Returns the opening of a pto2_rt_submit_{aic,aiv}_task call.
+// Returns the opening of a rt_submit_{aic,aiv}_task call.
 // Caller appends: func_id << ", " << params << ");".
 std::string CoreTypeToSubmitPrefix(CoreType core_type) {
-  std::string func = core_type == CoreType::CUBE ? "pto2_rt_submit_aic_task" : "pto2_rt_submit_aiv_task";
+  std::string func = core_type == CoreType::CUBE ? "rt_submit_aic_task" : "rt_submit_aiv_task";
   return func + "(";
 }
 
@@ -1017,8 +1017,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     // AIV-only Group: pure vector SPMD kernel (no AIC callee).
     // Dispatch as a single AIV task with core_num/sync_start from the Group.
-    // Use pto2_rt_submit_aiv_task which dispatches across independent AIV cores,
-    // unlike pto2_rt_submit_task (MixedKernels) which dispatches full clusters.
+    // Use rt_submit_aiv_task which dispatches across independent AIV cores,
+    // unlike rt_submit_task (MixedKernels) which dispatches full clusters.
     if (info.aic_name.empty() && !info.aiv_name.empty()) {
       FunctionPtr aiv_func = program_->GetFunction(info.aiv_name);
       INTERNAL_CHECK(aiv_func != nullptr) << "Internal error: AIV function '" << info.aiv_name
@@ -1090,7 +1090,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitLaunchSpec(ind, task_var, launch_func);
 
     std::string submit_expr =
-        "pto2_rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
+        "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
     EmitTaskSubmitAndBind(submit_expr);
   }
 

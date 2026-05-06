@@ -150,7 +150,7 @@ Executes compiled programs on Ascend hardware. Manages the three-program executi
 - Coordinate Host ↔ AICPU ↔ AICore execution
 - Handle device memory, synchronization, and handshake protocols
 
-**Interface with pypto:** The orchestration C++ code that pypto generates uses the PTO2 runtime API (`pto2_rt_submit_task`, `make_tensor_external`, etc.), which simpler implements. The runtime API is the contract between pypto's orchestration codegen and simpler.
+**Interface with pypto:** The orchestration C++ code that pypto generates uses the PTO2 runtime API (`rt_submit_task`, `make_tensor_external`, etc.), which simpler implements. The runtime API is the contract between pypto's orchestration codegen and simpler.
 
 ## Interface Summary
 

@@ -545,7 +545,7 @@ output_dir/
 └── kernel_config.py                 # Runtime/orchestration/kernel config
 ```
 
-The orchestration codegen generates identical orchestration C++ code using the PTO2 runtime API (`pto2_rt_submit_task`, `make_tensor_external`, etc.).
+The orchestration codegen generates identical orchestration C++ code using the PTO2 runtime API (`rt_submit_task`, `make_tensor_external`, etc.).
 
 ### Argument Unpacking
 

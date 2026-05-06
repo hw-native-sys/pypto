@@ -150,7 +150,7 @@ Python DSL → IR（不可变树）→ Pass Pipeline（20+ passes）→ CodeGen
 - 协调 Host ↔ AICPU ↔ AICore 执行
 - 管理设备内存、同步和握手协议
 
-**与 pypto 的接口：** pypto 生成的 orchestration C++ 代码使用 PTO2 runtime API（`pto2_rt_submit_task`、`make_tensor_external` 等），simpler 实现该 API。运行时 API 是 pypto orchestration codegen 和 simpler 之间的契约。
+**与 pypto 的接口：** pypto 生成的 orchestration C++ 代码使用 PTO2 runtime API（`rt_submit_task`、`make_tensor_external` 等），simpler 实现该 API。运行时 API 是 pypto orchestration codegen 和 simpler 之间的契约。
 
 ## 接口总结
 

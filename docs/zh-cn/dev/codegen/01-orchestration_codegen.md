@@ -12,7 +12,7 @@
 
 - 将设备内存指针（通过 `ChipStorageTaskArgs`）封装为 `Tensor` 对象
 - 构建 `Arg` 对象，调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类
-- 通过 `pto2_rt_submit_*_task` 向 AIC（CUBE）或 AIV（VECTOR）核心提交任务
+- 通过 `rt_submit_*_task` 向 AIC（CUBE）或 AIV（VECTOR）核心提交任务
 - 处理控制流（循环、条件分支），使用 `PTO2_SCOPE`
 
 **流水线：** `IR（Orchestration 函数）→ OrchestrationCodegen → C++（PTO2 运行时 API）`
@@ -113,7 +113,7 @@ PTO2_SCOPE() {
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
     params_t0.add_output(tmp);               // 预分配张量使用 add_output(const Tensor&)
-    pto2_rt_submit_aiv_task(0, params_t0);
+    rt_submit_aiv_task(0, params_t0);
 
     // ForStmt 示例 — 普通 for 循环，不嵌套独立的 PTO2_SCOPE
     for (int64_t i = start; i < stop; i += step) {
@@ -172,7 +172,7 @@ result = self.kernel_add(a, b, output)  # result ≠ output
 // 生成的 C++
 Arg params_t0;
 params_t0.add_output(ext_output);
-pto2_rt_submit_aiv_task(0, params_t0);
+rt_submit_aiv_task(0, params_t0);
 const Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 ```
 
@@ -184,8 +184,8 @@ const Tensor& result = ext_output;  // 别名 — result 引用 ext_output
 
 | MemorySpace | 核心类型 | 提交函数 |
 | ----------- | -------- | -------- |
-| `Left`、`Right`、`Acc` | CUBE (AIC) | `pto2_rt_submit_aic_task` |
-| `Vec`、`Mat`（默认） | VECTOR (AIV) | `pto2_rt_submit_aiv_task` |
+| `Left`、`Right`、`Acc` | CUBE (AIC) | `rt_submit_aic_task` |
+| `Vec`、`Mat`（默认） | VECTOR (AIV) | `rt_submit_aiv_task` |
 
 ### 元组处理
 
@@ -204,7 +204,7 @@ params_t0.add_inout(ext_pij);
 params_t0.add_inout(ext_mij);
 params_t0.add_inout(ext_lij);
 params_t0.add_scalar(to_u64(scale));  // 标量在所有张量之后
-pto2_rt_submit_aiv_task(0, params_t0);
+rt_submit_aiv_task(0, params_t0);
 ```
 
 ### Group 函数（混合核）
@@ -216,7 +216,7 @@ pto2_rt_submit_aiv_task(0, params_t0);
 Arg params_t0;
 // ... add_input / add_inout / add_scalar 调用 ...
 MixedKernels mixed_0 = {aic_id, aiv_id, INVALID_KERNEL_ID};
-pto2_rt_submit_task(mixed_0, params_t0);
+rt_submit_task(mixed_0, params_t0);
 ```
 
 ## 操作映射
@@ -282,14 +282,14 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         params_t0.add_input(ext_a);
         params_t0.add_input(ext_b);
         params_t0.add_output(c);
-        pto2_rt_submit_aiv_task(0, params_t0);
+        rt_submit_aiv_task(0, params_t0);
 
         // 任务 1: kernel_add (c + b → d)
         Arg params_t1;
         params_t1.add_input(c);
         params_t1.add_input(ext_b);
         params_t1.add_output(ext_d);
-        pto2_rt_submit_aiv_task(1, params_t1);
+        rt_submit_aiv_task(1, params_t1);
     }
 }
 
@@ -337,7 +337,7 @@ Tensor acc = ext_acc;  // 迭代参数初始化
 for (int64_t i = 0; i < 4; i += 1) {
     Arg params_t0;
     // ... add_input / add_inout 调用 ...
-    pto2_rt_submit_aiv_task(0, params_t0);
+    rt_submit_aiv_task(0, params_t0);
 }
 ```
 
@@ -359,13 +359,13 @@ if (condition) {
     PTO2_SCOPE() {
         Arg params_t0;
         // ... add_input / add_inout 调用 ...
-        pto2_rt_submit_aiv_task(0, params_t0);
+        rt_submit_aiv_task(0, params_t0);
     }
 } else {
     PTO2_SCOPE() {
         Arg params_t1;
         // ... add_input / add_inout 调用 ...
-        pto2_rt_submit_aiv_task(1, params_t1);
+        rt_submit_aiv_task(1, params_t1);
     }
 }
 ```
