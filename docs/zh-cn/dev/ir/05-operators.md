@@ -400,6 +400,23 @@ class CrossCoreExample:
 
 参阅 [TPUSH/TPOP ISA 参考](../../reference/pto-isa/01-tpush_tpop.md) 和[缓冲区管理](../../reference/pto-isa/02-buffer_management.md)了解硬件细节。
 
+### 跨 Rank 信号操作
+
+| 操作 | 参数 | 说明 | Kwargs |
+| ---- | ---- | ---- | ------ |
+| `tile.notify` | 2 (signal, value) | 向远端 rank 信号槽写入或原子加 INT32 值 | `op`（`"atomic_add"` 或 `"set"`） |
+| `tile.wait` | 2 (signal, cmp_value) | 阻塞直至本地 INT32 信号槽满足给定比较 | `cmp`（`"eq"`、`"ne"`、`"gt"`、`"ge"`、`"lt"`、`"le"`） |
+
+两者的 `signal` 都是一个 1 元素 INT32 tensor，视图指向 GM 中的信号槽：`tile.notify` 写远端 rank 的槽（通常通过 `pl.import_peer_buffer` 获取），`tile.wait` 轮询本地 rank 的槽。整数操作数（`value` / `cmp_value`）可以是 Python `int`、`Scalar` 或 `Expr`。在 AIV 侧分别 lowering 为 `pto::comm::TNOTIFY` / `pto::comm::TWAIT`。
+
+```python
+import pypto.language as pl
+
+# 在 AIV 侧 InCore 函数内部：
+pl.tile.notify(remote_signal, 1, op="atomic_add")  # 生产者
+pl.tile.wait(local_signal, 1, cmp="ge")             # 消费者
+```
+
 ## 文件组织
 
 | 目录/文件 | 内容 |

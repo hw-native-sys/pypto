@@ -406,6 +406,23 @@ class CrossCoreExample:
 
 See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Buffer Management](../../reference/pto-isa/02-buffer_management.md) for hardware details.
 
+### Cross-Rank Signal Operations
+
+| Operation | Args | Description | Kwargs |
+| --------- | ---- | ----------- | ------ |
+| `tile.notify` | 2 (signal, value) | Write or atomic-add an INT32 value into a remote rank's signal slot | `op` (`"atomic_add"` or `"set"`) |
+| `tile.wait` | 2 (signal, cmp_value) | Block until a local INT32 signal slot satisfies the given comparison | `cmp` (`"eq"`, `"ne"`, `"gt"`, `"ge"`, `"lt"`, `"le"`) |
+
+For both ops, `signal` is a 1-element INT32 tensor that views a GM signal slot. `tile.notify` targets a remote rank's slot (typically obtained via `pl.import_peer_buffer`); `tile.wait` polls the local rank's slot. The integer operand (`value` / `cmp_value`) is a Python int, `Scalar`, or `Expr`. They lower to `pto::comm::TNOTIFY` / `pto::comm::TWAIT` on the AIV side.
+
+```python
+import pypto.language as pl
+
+# inside an InCore function on AIV side:
+pl.tile.notify(remote_signal, 1, op="atomic_add")  # producer side
+pl.tile.wait(local_signal, 1, cmp="ge")             # consumer side
+```
+
 ## File Organization
 
 | Directory/File | Contents |

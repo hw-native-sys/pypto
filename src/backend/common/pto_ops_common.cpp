@@ -1939,6 +1939,78 @@ static std::string GetPipeBufOperandI32SSA(codegen::PTOCodegen& codegen, const i
   return codegen.GetExprAsCode(expr);
 }
 
+// tile.notify: cross-rank signal write/atomic-add → pto.comm.tnotify
+// signal: 1-element INT32 Tensor viewing remote rank's HCCL signal slot
+// value:  signless integer scalar (ConstInt or i32 SSA)
+// kwarg `op`: "atomic_add" | "set" → MLIR enum #pto.notify_op<...>
+static std::string MakeTileNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+
+  CHECK(op->args_.size() == 2) << "tile.notify requires 2 arguments (signal, value), got "
+                               << op->args_.size();
+
+  const auto notify_op = op->GetKwarg<std::string>("op");
+  CHECK(notify_op == "atomic_add" || notify_op == "set")
+      << "tile.notify 'op' attribute must be 'atomic_add' or 'set', got '" << notify_op << "'";
+
+  auto signal_tensor_type = As<ir::TensorType>(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(signal_tensor_type, op->span_)
+      << "tile.notify signal must be a TensorType (GM signal-window view)";
+  CHECK(signal_tensor_type->dtype_ == DataType::INT32)
+      << "tile.notify signal must be INT32, got element type "
+      << codegen.GetTypeString(signal_tensor_type->dtype_);
+
+  std::string sig = codegen.GetExprAsCode(op->args_[0]);
+  std::string sig_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  if (sig_type.empty()) {
+    sig_type = "!pto.ptr<" + codegen.GetTypeString(signal_tensor_type->dtype_) + ">";
+  }
+
+  // value is a signless integer scalar; reuse the i32 SSA/ConstInt lifter from pipe-buffer ops.
+  std::string val = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
+
+  std::ostringstream oss;
+  oss << "pto.comm.tnotify " << sig << ", " << val << " {notifyOp = #pto.notify_op<" << notify_op << ">}"
+      << " : " << sig_type << ", i32";
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// tile.wait: cross-rank signal poll → pto.comm.twait
+// signal:    1-element INT32 Tensor in local rank's HCCL window
+// cmp_value: signless integer scalar (ConstInt or i32 SSA)
+// kwarg `cmp`: "eq"|"ne"|"gt"|"ge"|"lt"|"le" → MLIR enum #pto.wait_cmp<...>
+static std::string MakeTileWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+
+  CHECK(op->args_.size() == 2) << "tile.wait requires 2 arguments (signal, cmp_value), got "
+                               << op->args_.size();
+
+  const auto cmp = op->GetKwarg<std::string>("cmp");
+  CHECK(cmp == "eq" || cmp == "ne" || cmp == "gt" || cmp == "ge" || cmp == "lt" || cmp == "le")
+      << "tile.wait 'cmp' attribute must be one of eq|ne|gt|ge|lt|le, got '" << cmp << "'";
+
+  auto signal_tensor_type = As<ir::TensorType>(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(signal_tensor_type, op->span_)
+      << "tile.wait signal must be a TensorType (GM signal-window view)";
+  CHECK(signal_tensor_type->dtype_ == DataType::INT32) << "tile.wait signal must be INT32, got element type "
+                                                       << codegen.GetTypeString(signal_tensor_type->dtype_);
+
+  std::string sig = codegen.GetExprAsCode(op->args_[0]);
+  std::string sig_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  if (sig_type.empty()) {
+    sig_type = "!pto.ptr<" + codegen.GetTypeString(signal_tensor_type->dtype_) + ">";
+  }
+
+  std::string val = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
+
+  std::ostringstream oss;
+  oss << "pto.comm.twait " << sig << ", " << val << " {cmp = #pto.wait_cmp<" << cmp << ">}"
+      << " : " << sig_type << ", i32";
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper to format initialize_pipe operand list
 static void EmitInitializePipeOperands(std::ostringstream& oss, const std::string& gm_ssa,
                                        const std::string& c2v_ssa, const std::string& v2c_ssa) {
@@ -2494,6 +2566,12 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.tpop_from_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTpopFromAicCodegenPTO(op, codegen);
+  });
+  reg("tile.notify", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTileNotifyCodegenPTO(op, codegen);
+  });
+  reg("tile.wait", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTileWaitCodegenPTO(op, codegen);
   });
   reg("system.tfree_to_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTfreeToAicCodegenPTO(op, codegen);

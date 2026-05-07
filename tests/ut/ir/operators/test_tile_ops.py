@@ -2819,5 +2819,116 @@ class TestTileCiOp:
         assert pl.tile.arange is pl.tile.ci
 
 
+class TestTileNotifyOp:
+    """Tests for tile.notify (cross-rank signal write/atomic-add, pto::comm::TNOTIFY)."""
+
+    @staticmethod
+    def _make_signal_var(span):
+        """Build a 1-element INT32 tensor var to stand in for a Signal location."""
+        dim1 = ir.ConstInt(1, DataType.INT32, span)
+        signal_type = ir.TensorType([dim1], DataType.INT32)
+        return ir.Var("signal", signal_type, span)
+
+    def test_tile_notify_atomic_add(self):
+        span = ir.Span.unknown()
+        signal = self._make_signal_var(span)
+        value = ir.ConstInt(1, DataType.INT32, span)
+
+        call = tile.notify(signal, value, op="atomic_add")
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.notify"
+        assert len(call.args) == 2
+        assert call.args[0] is signal
+        assert "tile.notify" in str(call)
+        assert 'op="atomic_add"' in str(call) or "op='atomic_add'" in str(call)
+
+    def test_tile_notify_set(self):
+        span = ir.Span.unknown()
+        signal = self._make_signal_var(span)
+        value = ir.ConstInt(7, DataType.INT32, span)
+
+        call = tile.notify(signal, value, op="set")
+
+        assert call.op.name == "tile.notify"
+        assert 'op="set"' in str(call) or "op='set'" in str(call)
+
+    def test_tile_notify_rejects_invalid_op(self):
+        span = ir.Span.unknown()
+        signal = self._make_signal_var(span)
+        value = ir.ConstInt(1, DataType.INT32, span)
+
+        with pytest.raises(ValueError, match=r"atomic_add.*set"):
+            tile.notify(signal, value, op="bogus")
+
+    def test_tile_notify_in_program(self):
+        """End-to-end: tile.notify appears in printed IR of a @pl.program."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                signal_buf: pl.Tensor[[1], pl.INT32],
+            ) -> pl.Tensor[[1], pl.INT32]:
+                pl.tile.notify(signal_buf, 1, op="atomic_add")
+                return signal_buf
+
+        ir_str = str(Program)
+        assert "tile.notify" in ir_str
+        assert "atomic_add" in ir_str
+
+
+class TestTileWaitOp:
+    """Tests for tile.wait (cross-rank signal poll, pto::comm::TWAIT)."""
+
+    @staticmethod
+    def _make_signal_var(span):
+        """Build a 1-element INT32 tensor var to stand in for a Signal location."""
+        dim1 = ir.ConstInt(1, DataType.INT32, span)
+        signal_type = ir.TensorType([dim1], DataType.INT32)
+        return ir.Var("signal", signal_type, span)
+
+    @pytest.mark.parametrize("cmp", ["eq", "ne", "gt", "ge", "lt", "le"])
+    def test_tile_wait_all_cmps(self, cmp):
+        span = ir.Span.unknown()
+        signal = self._make_signal_var(span)
+        cmp_value = ir.ConstInt(1, DataType.INT32, span)
+
+        call = tile.wait(signal, cmp_value, cmp=cmp)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.wait"
+        assert len(call.args) == 2
+        assert call.args[0] is signal
+        assert "tile.wait" in str(call)
+        assert f'cmp="{cmp}"' in str(call) or f"cmp='{cmp}'" in str(call)
+
+    def test_tile_wait_rejects_invalid_cmp(self):
+        span = ir.Span.unknown()
+        signal = self._make_signal_var(span)
+        cmp_value = ir.ConstInt(1, DataType.INT32, span)
+
+        with pytest.raises(ValueError, match=r"eq.*ne.*gt.*ge.*lt.*le"):
+            tile.wait(signal, cmp_value, cmp="bogus")
+
+    def test_tile_wait_in_program(self):
+        """End-to-end: tile.wait appears in printed IR of a @pl.program."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                signal_buf: pl.Tensor[[1], pl.INT32],
+            ) -> pl.Tensor[[1], pl.INT32]:
+                pl.tile.wait(signal_buf, 1, cmp="ge")
+                return signal_buf
+
+        ir_str = str(Program)
+        assert "tile.wait" in ir_str
+        assert "ge" in ir_str
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

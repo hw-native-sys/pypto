@@ -15,6 +15,7 @@ tpop ops accept optional shape/dtype kwargs to create typed results.
 """
 
 from pypto.ir.op import system_ops as _ir_ops
+from pypto.ir.op import tile_ops as _ir_tile_ops
 from pypto.ir.op.system_ops import (
     AUTO,
     aic_initialize_pipe,
@@ -26,9 +27,9 @@ from pypto.ir.op.system_ops import (
     sync_src,
 )
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import Call, Span
+from pypto.pypto_core.ir import Call, ConstInt, Expr, Span
 
-from ..typing import Scalar, Tile
+from ..typing import Scalar, Tensor, Tile
 
 __all__ = [
     "AUTO",
@@ -47,6 +48,8 @@ __all__ = [
     "import_peer_buffer",
     "tfree_to_aic",
     "tfree_to_aiv",
+    "notify",
+    "wait",
 ]
 
 
@@ -143,3 +146,67 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
     """
     call = _ir_ops.import_peer_buffer(name=name, peer_func=peer_func, span=span)
     return Scalar(DataType.INT32, call)
+
+
+def notify(
+    signal: Tensor,
+    value: int | Scalar | Expr,
+    *,
+    op: str,
+    span: Span | None = None,
+) -> Call:
+    """Send a flag notification to a remote rank's signal slot.
+
+    Lowers to ``pto::comm::TNOTIFY`` via PTOAS ``pto.comm.tnotify``. The
+    signal is a 1-element INT32 ``pl.Tensor`` (GM) that views the destination
+    rank's signal location in its HCCL window — typically obtained via
+    :func:`import_peer_buffer`.
+
+    Args:
+        signal: Destination signal tensor (1-element INT32) in remote rank's window.
+        value: INT32 scalar value to write or atomic-add (Python int, Scalar, or Expr).
+        op: Notify operation, ``"atomic_add"`` or ``"set"``.
+        span: Optional source span.
+
+    Returns:
+        The IR ``Call`` for ``tile.notify`` (used for its side effect; no return value).
+    """
+    if isinstance(value, Scalar):
+        value_expr: Expr = value.unwrap()
+    elif isinstance(value, Expr):
+        value_expr = value
+    else:
+        value_expr = ConstInt(int(value), DataType.INT32, Span.unknown())
+    return _ir_tile_ops.notify(signal.unwrap(), value_expr, op=op, span=span)
+
+
+def wait(
+    signal: Tensor,
+    cmp_value: int | Scalar | Expr,
+    *,
+    cmp: str,
+    span: Span | None = None,
+) -> Call:
+    """Block until a local INT32 signal slot satisfies a comparison.
+
+    Lowers to ``pto::comm::TWAIT`` via PTOAS ``pto.comm.twait``. The signal
+    is a 1-element INT32 ``pl.Tensor`` (GM) in the local rank's window — the
+    slot peers ``pl.tile.notify`` into.
+
+    Args:
+        signal: Local signal tensor (1-element INT32) to poll.
+        cmp_value: INT32 scalar comparison value (Python int, Scalar, or Expr).
+        cmp: Comparison predicate, one of ``"eq"`` | ``"ne"`` | ``"gt"`` |
+            ``"ge"`` | ``"lt"`` | ``"le"``.
+        span: Optional source span.
+
+    Returns:
+        The IR ``Call`` for ``tile.wait`` (used for its side effect; no return value).
+    """
+    if isinstance(cmp_value, Scalar):
+        cmp_expr: Expr = cmp_value.unwrap()
+    elif isinstance(cmp_value, Expr):
+        cmp_expr = cmp_value
+    else:
+        cmp_expr = ConstInt(int(cmp_value), DataType.INT32, Span.unknown())
+    return _ir_tile_ops.wait(signal.unwrap(), cmp_expr, cmp=cmp, span=span)

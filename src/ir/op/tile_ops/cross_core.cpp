@@ -83,5 +83,39 @@ REGISTER_OP("tile.tpop_from_aiv")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 
+// ============================================================================
+// Cross-Rank Signal Operations (notify / wait)
+// ============================================================================
+
+// Notify a remote rank by writing or atomic-adding a value into its signal slot.
+// The signal operand is a 1-element INT32 Tensor that views the destination
+// rank's GM signal location (typically obtained via import_peer_buffer);
+// codegen lowers this to `pto::comm::TNOTIFY` via PTOAS `pto.comm.tnotify`.
+REGISTER_OP("tile.notify")
+    .set_description(
+        "Send a flag notification to a remote rank: write or atomic-add an INT32 value "
+        "into the destination signal slot")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .add_argument("signal", "Destination signal tensor (1-element INT32, GM, remote-rank window)")
+    .add_argument("value", "INT32 scalar value to write or atomic-add")
+    .set_attr<std::string>("op")  // "atomic_add" | "set"
+    .no_memory_spec()
+    .f_deduce_type(DeduceUnknownType);
+
+// Block until the local rank's signal slot satisfies `signal <cmp> cmp_value`.
+// The signal operand is a 1-element INT32 Tensor in local-rank GM (the slot
+// peers atomic-add or set into via tile.notify); codegen lowers this to
+// `pto::comm::TWAIT` via PTOAS `pto.comm.twait`.
+REGISTER_OP("tile.wait")
+    .set_description("Block until a local INT32 signal slot satisfies the given comparison against cmp_value")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .add_argument("signal", "Local signal tensor (1-element INT32, GM) to poll")
+    .add_argument("cmp_value", "INT32 scalar comparison value")
+    .set_attr<std::string>("cmp")  // "eq" | "ne" | "gt" | "ge" | "lt" | "le"
+    .no_memory_spec()
+    .f_deduce_type(DeduceUnknownType);
+
 }  // namespace ir
 }  // namespace pypto

@@ -1721,5 +1721,125 @@ class TestTileMoveAccNoopElision:
         )
 
 
+class TestTileNotifyPtoCodegen:
+    """PTO codegen tests for tile.notify (cross-rank signal write/atomic-add)."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_notify_set_codegen(self):
+        """pl.tile.notify(sig, v, op="set") emits pto.comm.tnotify with notifyOp = #pto.notify_op<set>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_notify_set(
+                self,
+                signal: pl.Tensor[[1], pl.INT32],
+            ) -> pl.Tensor[[1], pl.INT32]:
+                pl.tile.notify(signal, 1, op="set")
+                return signal
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.comm.tnotify" in mlir, f"pto.comm.tnotify not emitted:\n{mlir}"
+        assert "#pto.notify_op<set>" in mlir, f"notifyOp<set> attribute missing:\n{mlir}"
+        notify_line = next((line for line in mlir.splitlines() if "pto.comm.tnotify" in line), "")
+        assert ", i32" in notify_line, f"Expected i32 value type annotation:\n{notify_line}"
+
+    def test_tile_notify_atomic_add_codegen(self):
+        """pl.tile.notify(sig, v, op='atomic_add') emits #pto.notify_op<atomic_add>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_notify_atomic(
+                self,
+                signal: pl.Tensor[[1], pl.INT32],
+            ) -> pl.Tensor[[1], pl.INT32]:
+                pl.tile.notify(signal, 7, op="atomic_add")
+                return signal
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.comm.tnotify" in mlir
+        assert "#pto.notify_op<atomic_add>" in mlir, f"notifyOp<atomic_add> missing:\n{mlir}"
+
+    def test_tile_notify_rejects_non_int32_signal(self):
+        """tile.notify codegen rejects non-INT32 signal tensors."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_notify_bad_dtype(
+                self,
+                signal: pl.Tensor[[1], pl.FP32],
+            ) -> pl.Tensor[[1], pl.FP32]:
+                pl.tile.notify(signal, 1, op="set")
+                return signal
+
+        with pytest.raises(Exception, match=r"tile\.notify signal must be INT32"):
+            self._generate_mlir(Prog)
+
+
+class TestTileWaitPtoCodegen:
+    """PTO codegen tests for tile.wait (cross-rank signal poll)."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    @pytest.mark.parametrize("cmp", ["eq", "ne", "gt", "ge", "lt", "le"])
+    def test_tile_wait_all_cmps_codegen(self, cmp):
+        """pl.tile.wait emits pto.comm.twait with cmp = #pto.wait_cmp<...>."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_wait(
+                self,
+                signal: pl.Tensor[[1], pl.INT32],
+            ) -> pl.Tensor[[1], pl.INT32]:
+                pl.tile.wait(signal, 1, cmp=cmp)
+                return signal
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.comm.twait" in mlir, f"pto.comm.twait not emitted:\n{mlir}"
+        assert f"#pto.wait_cmp<{cmp}>" in mlir, f"wait_cmp<{cmp}> attribute missing:\n{mlir}"
+        wait_line = next((line for line in mlir.splitlines() if "pto.comm.twait" in line), "")
+        assert ", i32" in wait_line, f"Expected i32 value type annotation:\n{wait_line}"
+
+    def test_tile_wait_rejects_non_int32_signal(self):
+        """tile.wait codegen rejects non-INT32 signal tensors."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_wait_bad_dtype(
+                self,
+                signal: pl.Tensor[[1], pl.FP32],
+            ) -> pl.Tensor[[1], pl.FP32]:
+                pl.tile.wait(signal, 1, cmp="ge")
+                return signal
+
+        with pytest.raises(Exception, match=r"tile\.wait signal must be INT32"):
+            self._generate_mlir(Prog)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
