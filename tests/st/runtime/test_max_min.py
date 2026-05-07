@@ -25,7 +25,8 @@ from harness.core.harness import ONBOARD_PLATFORMS, DataType, PTOTestCase, Tenso
 
 M = 16
 N = 16
-SCALAR = 0.0
+# Cover negative, zero, and positive scalars.
+SCALARS = [-2.5, 0.0, 2.5]
 
 
 def _lhs() -> torch.Tensor:
@@ -94,54 +95,58 @@ class TileMinimumProgram:
         return out
 
 
-@pl.program
-class TileMaximumsProgram:
-    """Element-wise maximum of an FP32 tile and a scalar."""
+def _make_tile_maximums_program(scalar: float):
+    """Build a program parametrized by scalar value."""
 
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        lhs: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        lhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(lhs, [0, 0], [M, N], valid_shapes=[M, N])
-        out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.maximums(lhs_tile, SCALAR)
-        out = pl.store(out_tile, [0, 0], out)
-        return out
+    @pl.program
+    class TileMaximumsProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[M, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            lhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(lhs, [0, 0], [M, N], valid_shapes=[M, N])
+            out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.maximums(lhs_tile, scalar)
+            out = pl.store(out_tile, [0, 0], out)
+            return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        lhs: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        out = self.kernel(lhs, out)
-        return out
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrator(
+            self,
+            lhs: pl.Tensor[[M, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            out = self.kernel(lhs, out)
+            return out
+
+    return TileMaximumsProgram
 
 
-@pl.program
-class TileMinimumsProgram:
-    """Element-wise minimum of an FP32 tile and a scalar."""
+def _make_tile_minimums_program(scalar: float):
+    @pl.program
+    class TileMinimumsProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            lhs: pl.Tensor[[M, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            lhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(lhs, [0, 0], [M, N], valid_shapes=[M, N])
+            out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.minimums(lhs_tile, scalar)
+            out = pl.store(out_tile, [0, 0], out)
+            return out
 
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        lhs: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        lhs_tile: pl.Tile[[M, N], pl.FP32] = pl.load(lhs, [0, 0], [M, N], valid_shapes=[M, N])
-        out_tile: pl.Tile[[M, N], pl.FP32] = pl.tile.minimums(lhs_tile, SCALAR)
-        out = pl.store(out_tile, [0, 0], out)
-        return out
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orchestrator(
+            self,
+            lhs: pl.Tensor[[M, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            out = self.kernel(lhs, out)
+            return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        lhs: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        out = self.kernel(lhs, out)
-        return out
+    return TileMinimumsProgram
 
 
 class TileMaximumTestCase(PTOTestCase):
@@ -189,12 +194,16 @@ class TileMinimumTestCase(PTOTestCase):
 
 
 class TileMaximumsTestCase(PTOTestCase):
-    """tile.maximums: element-wise max of an FP32 tile with scalar 0.0."""
+    """tile.maximums: element-wise max of an FP32 tile with a scalar."""
 
     __test__ = False
 
+    def __init__(self, scalar: float, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+        self._scalar = scalar
+
     def get_name(self) -> str:
-        return "tile_maximums"
+        return f"tile_maximums_s{self._scalar}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -203,20 +212,24 @@ class TileMaximumsTestCase(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TileMaximumsProgram
+        return _make_tile_maximums_program(self._scalar)
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        scalar = torch.tensor(SCALAR, dtype=tensors["lhs"].dtype)
+        scalar = torch.tensor(self._scalar, dtype=tensors["lhs"].dtype)
         tensors["out"][:] = torch.maximum(tensors["lhs"], scalar)
 
 
 class TileMinimumsTestCase(PTOTestCase):
-    """tile.minimums: element-wise min of an FP32 tile with scalar 0.0."""
+    """tile.minimums: element-wise min of an FP32 tile with a scalar."""
 
     __test__ = False
 
+    def __init__(self, scalar: float, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+        self._scalar = scalar
+
     def get_name(self) -> str:
-        return "tile_minimums"
+        return f"tile_minimums_s{self._scalar}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -225,10 +238,10 @@ class TileMinimumsTestCase(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TileMinimumsProgram
+        return _make_tile_minimums_program(self._scalar)
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        scalar = torch.tensor(SCALAR, dtype=tensors["lhs"].dtype)
+        scalar = torch.tensor(self._scalar, dtype=tensors["lhs"].dtype)
         tensors["out"][:] = torch.minimum(tensors["lhs"], scalar)
 
 
@@ -246,13 +259,15 @@ class TestTileMaxMinOperations:
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    def test_tile_maximums(self, test_runner, platform):
-        result = test_runner.run(TileMaximumsTestCase(platform=platform))
+    @pytest.mark.parametrize("scalar", SCALARS)
+    def test_tile_maximums(self, test_runner, platform, scalar):
+        result = test_runner.run(TileMaximumsTestCase(scalar, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    def test_tile_minimums(self, test_runner, platform):
-        result = test_runner.run(TileMinimumsTestCase(platform=platform))
+    @pytest.mark.parametrize("scalar", SCALARS)
+    def test_tile_minimums(self, test_runner, platform, scalar):
+        result = test_runner.run(TileMinimumsTestCase(scalar, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
@@ -295,34 +310,36 @@ class TensorMinimumProgram:
         return out
 
 
-@pl.program
-class TensorMaximumScalarProgram:
-    """Element-wise maximum of FP32 tensor and scalar; lowers to tile.maximums."""
+def _make_tensor_maximum_scalar_program(scalar: float):
+    @pl.program
+    class TensorMaximumScalarProgram:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            lhs: pl.Tensor[[M, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.assemble(out, pl.tensor.maximum(lhs, scalar), [0, 0])
+            return out
 
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        lhs: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            out = pl.assemble(out, pl.tensor.maximum(lhs, SCALAR), [0, 0])
-        return out
+    return TensorMaximumScalarProgram
 
 
-@pl.program
-class TensorMinimumScalarProgram:
-    """Element-wise minimum of FP32 tensor and scalar; lowers to tile.minimums."""
+def _make_tensor_minimum_scalar_program(scalar: float):
+    @pl.program
+    class TensorMinimumScalarProgram:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            lhs: pl.Tensor[[M, N], pl.FP32],
+            out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+        ) -> pl.Tensor[[M, N], pl.FP32]:
+            with pl.at(level=pl.Level.CORE_GROUP):
+                out = pl.assemble(out, pl.tensor.minimum(lhs, scalar), [0, 0])
+            return out
 
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        lhs: pl.Tensor[[M, N], pl.FP32],
-        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-    ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            out = pl.assemble(out, pl.tensor.minimum(lhs, SCALAR), [0, 0])
-        return out
+    return TensorMinimumScalarProgram
 
 
 class TensorMaximumTestCase(PTOTestCase):
@@ -380,11 +397,12 @@ class TensorMaximumScalarTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, platform: str | None = None, config=None):
+    def __init__(self, scalar: float, *, platform: str | None = None, config=None):
         super().__init__(config, platform=platform)
+        self._scalar = scalar
 
     def get_name(self) -> str:
-        return "tensor_maximum_scalar"
+        return f"tensor_maximum_scalar_s{self._scalar}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -393,10 +411,10 @@ class TensorMaximumScalarTestCase(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TensorMaximumScalarProgram
+        return _make_tensor_maximum_scalar_program(self._scalar)
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        scalar = torch.tensor(SCALAR, dtype=tensors["lhs"].dtype)
+        scalar = torch.tensor(self._scalar, dtype=tensors["lhs"].dtype)
         tensors["out"][:] = torch.maximum(tensors["lhs"], scalar)
 
 
@@ -405,11 +423,12 @@ class TensorMinimumScalarTestCase(PTOTestCase):
 
     __test__ = False
 
-    def __init__(self, *, platform: str | None = None, config=None):
+    def __init__(self, scalar: float, *, platform: str | None = None, config=None):
         super().__init__(config, platform=platform)
+        self._scalar = scalar
 
     def get_name(self) -> str:
-        return "tensor_minimum_scalar"
+        return f"tensor_minimum_scalar_s{self._scalar}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -418,10 +437,10 @@ class TensorMinimumScalarTestCase(PTOTestCase):
         ]
 
     def get_program(self) -> Any:
-        return TensorMinimumScalarProgram
+        return _make_tensor_minimum_scalar_program(self._scalar)
 
     def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
-        scalar = torch.tensor(SCALAR, dtype=tensors["lhs"].dtype)
+        scalar = torch.tensor(self._scalar, dtype=tensors["lhs"].dtype)
         tensors["out"][:] = torch.minimum(tensors["lhs"], scalar)
 
 
@@ -439,13 +458,15 @@ class TestTensorMaxMinOperations:
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    def test_tensor_maximum_scalar(self, test_runner, platform):
-        result = test_runner.run(TensorMaximumScalarTestCase(platform=platform))
+    @pytest.mark.parametrize("scalar", SCALARS)
+    def test_tensor_maximum_scalar(self, test_runner, platform, scalar):
+        result = test_runner.run(TensorMaximumScalarTestCase(scalar, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
-    def test_tensor_minimum_scalar(self, test_runner, platform):
-        result = test_runner.run(TensorMinimumScalarTestCase(platform=platform))
+    @pytest.mark.parametrize("scalar", SCALARS)
+    def test_tensor_minimum_scalar(self, test_runner, platform, scalar):
+        result = test_runner.run(TensorMinimumScalarTestCase(scalar, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

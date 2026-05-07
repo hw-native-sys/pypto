@@ -207,6 +207,8 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
     return [tile_op, tile_scalar_op](const std::vector<ExprPtr>& args,
                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
                                      const Span& span) -> ConversionResult {
+      INTERNAL_CHECK(args.size() == 2)
+          << "tensor.maximum/minimum conversion expects 2 args, got " << args.size();
       auto& op_reg = OpRegistry::GetInstance();
       const std::string& chosen = As<ScalarType>(args[1]->GetType()) ? tile_scalar_op : tile_op;
       if (kwargs.empty()) {
