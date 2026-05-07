@@ -629,6 +629,86 @@ class TestForLoopBreakContinue(PTOTestCase):
         tensors["c"][192:] = 0.0
 
 
+class TestOrchRangeCarryRebind(PTOTestCase):
+    """Reproducer for issue #1286: orchestration ``pl.range`` with carry-rebind to
+    a freshly-allocated GM tensor.
+
+    The orchestrator runs 4 iterations. Each iteration allocates a fresh
+    ``next_hidden`` tensor via ``pl.create_tensor``, calls an InCore kernel
+    that reads from ``current_hidden`` and writes ``+1`` into ``next_hidden``
+    (no inout/output_existing on ``current_hidden``), then rebinds
+    ``current_hidden = next_hidden``. After 4 iterations the result is
+    copied to ``c``.
+
+    Expected: c == a + 4 (each iter adds 1).
+    Buggy behaviour (current code): each iter sees the loop-entry value of
+    ``current_hidden`` (i.e. the original input ``a``), so c == a + 1 (only
+    the last iteration's +1 is reflected, because ``next_hidden`` is what the
+    final copy reads — actually since we copy ``current_hidden`` after the
+    loop, c == a (no rebind ever observed)).
+    """
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return "orch_range_carry_rebind"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [16, 64], DataType.FP32, init_value=10.0),
+            TensorSpec("c", [16, 64], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class OrchRangeCarryRebindProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_add_one(
+                self,
+                src: pl.Tensor[[16, 64], pl.FP32],
+                dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                tile_in: pl.Tile[[16, 64], pl.FP32] = pl.load(src, [0, 0], [16, 64])
+                tile_out: pl.Tile[[16, 64], pl.FP32] = pl.add(tile_in, 1.0)
+                out: pl.Tensor[[16, 64], pl.FP32] = pl.store(tile_out, [0, 0], dst)
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_copy(
+                self,
+                src: pl.Tensor[[16, 64], pl.FP32],
+                dst: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                tile_in: pl.Tile[[16, 64], pl.FP32] = pl.load(src, [0, 0], [16, 64])
+                out: pl.Tensor[[16, 64], pl.FP32] = pl.store(tile_in, [0, 0], dst)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[16, 64], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                # Initialise carry from the input (one copy so we don't write
+                # back into `a` itself).
+                current_hidden: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                current_hidden = self.kernel_copy(a, current_hidden)
+                for _ in pl.range(4):
+                    next_hidden: pl.Tensor[[16, 64], pl.FP32] = pl.create_tensor([16, 64], dtype=pl.FP32)
+                    next_hidden = self.kernel_add_one(current_hidden, next_hidden)
+                    current_hidden = next_hidden  # carry rebind across iterations
+                c = self.kernel_copy(current_hidden, c)
+                return c
+
+        return OrchRangeCarryRebindProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["c"][:] = tensors["a"] + 4.0
+
+
 class TestCtrlFlowOperations:
     """Test suite for control flow operations."""
 
@@ -694,6 +774,12 @@ class TestCtrlFlowOperations:
     def test_for_loop_break_continue(self, test_runner, platform):
         """Test for loop with break and continue."""
         result = test_runner.run(TestForLoopBreakContinue(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_orch_range_carry_rebind(self, test_runner, platform):
+        """Reproducer for issue #1286: orchestration pl.range carry rebind to fresh tensor."""
+        result = test_runner.run(TestOrchRangeCarryRebind(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

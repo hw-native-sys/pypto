@@ -41,6 +41,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/type.h"
 
@@ -243,9 +244,187 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     std::string loop_var = GetVarName(for_stmt->loop_var_);
+    // Guard against an empty emit name (e.g. python `for _ in pl.range(...)`
+    // turns into an SSA name that GetSSABaseName strips to ""). Without this
+    // we would emit `for (int64_t  = 0; ...)`, which compiles only by accident.
+    if (loop_var.empty()) {
+      loop_var = ReserveSyntheticEmitName("i");
+      emit_name_map_[for_stmt->loop_var_.get()] = loop_var;
+    }
     std::string start_expr = GenerateExprString(for_stmt->start_);
     std::string stop_expr = GenerateExprString(for_stmt->stop_);
     std::string step_expr = GenerateExprString(for_stmt->step_);
+
+    INTERNAL_CHECK_SPAN(for_stmt->iter_args_.size() == for_stmt->return_vars_.size(), for_stmt->span_)
+        << "Internal error: ForStmt iter_args/return_vars size mismatch";
+
+    // Classify each iter_arg by its yield: trivial (yields back the iter_arg
+    // itself, no body-level rebind) vs rebind (yields a different value, e.g.
+    // a freshly-created tensor). The two need different lowerings:
+    //
+    //   trivial: alias iter_arg/return_var to the init's emit name. The runtime
+    //     dependency tracker keys off Tensor* identity, and OUTPUT_EXISTING /
+    //     INOUT params record the address of the Tensor lvalue passed in. If we
+    //     materialised a fresh `Tensor` value for the carry, the kernel reads
+    //     and writes would see a different `&tensor` than the producer that
+    //     materialised the buffer, breaking dep chains. So for the trivial case
+    //     we keep the legacy aliasing behaviour.
+    //
+    //   rebind: predeclare a mutable carry variable initialised from the init,
+    //     and route YieldStmt to assign back to it. Without this, a python
+    //     rebind like `current = next` inside the loop body would never
+    //     propagate to the next iteration or to code following the loop. See
+    //     issue #1286.
+    //
+    // We need to know which case applies before visiting the body, so we look
+    // up the yield once here.
+    auto yield = transform_utils::GetLastYieldStmt(for_stmt->body_);
+    std::vector<bool> is_rebind(for_stmt->iter_args_.size(), false);
+    if (yield) {
+      INTERNAL_CHECK_SPAN(yield->value_.size() == for_stmt->iter_args_.size(), for_stmt->span_)
+          << "Internal error: ForStmt yield/iter_args size mismatch";
+      // Build the alias-equivalence set for each iter_arg. A Var is in
+      // `iter_arg`'s class if it IS the iter_arg, or it was assigned the
+      // result of `tensor.assemble(<member>, ...)` — assemble writes in place
+      // to its first arg so the result Var is just another name for the same
+      // backing buffer. The transitive closure is computed by repeatedly
+      // walking AssignStmts in the body until no new members are added.
+      // (This mirrors HandleTensorAssembleAssign at codegen-emit time, but
+      // we need it pre-body so we can decide on the carry lowering.)
+      std::vector<std::unordered_set<const Var*>> aliases(for_stmt->iter_args_.size());
+      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+        aliases[i].insert(for_stmt->iter_args_[i].get());
+      }
+      // Collect: (a) AssignStmts producing tensor.assemble aliases, and (b)
+      // nested ForStmts (so we can map their iter_args -> their return_vars,
+      // which are how a parent's carry "comes out of" an inner loop).
+      class AliasingNodeCollector : public IRVisitor {
+       public:
+        std::vector<AssignStmtPtr> assigns_;
+        std::vector<ForStmtPtr> nested_fors_;
+        void VisitStmt_(const AssignStmtPtr& a) override {
+          assigns_.push_back(a);
+          IRVisitor::VisitStmt_(a);
+        }
+        void VisitStmt_(const ForStmtPtr& f) override {
+          nested_fors_.push_back(f);
+          IRVisitor::VisitStmt_(f);
+        }
+      };
+      AliasingNodeCollector collector;
+      collector.VisitStmt(for_stmt->body_);
+      // Index assignments by produced var so rule (d) can climb tuple chains.
+      std::unordered_map<const Var*, AssignStmtPtr> var_to_assign;
+      for (const auto& a : collector.assigns_) {
+        var_to_assign[a->var_.get()] = a;
+      }
+
+      bool changed = true;
+      while (changed) {
+        changed = false;
+        for (const auto& assign : collector.assigns_) {
+          // (d) TupleGetItemExpr: climb to the tuple-producing call and resolve
+          // the corresponding output arg. Multi-output InCore kernels return
+          // tuples; each `var = ret_tuple[i]` extract should alias the i-th
+          // output-side arg of the call (using the codegen's own indexing).
+          if (auto tge = As<TupleGetItemExpr>(assign->value_)) {
+            auto tuple_var = AsVarLike(tge->tuple_);
+            if (tuple_var) {
+              auto it = var_to_assign.find(tuple_var.get());
+              if (it != var_to_assign.end()) {
+                auto tcall = As<Call>(it->second->value_);
+                if (tcall) {
+                  auto tdirs = tcall->GetArgDirections();
+                  if (tdirs.size() == tcall->args_.size()) {
+                    int64_t out_seen = 0;
+                    int64_t target_idx = static_cast<int64_t>(tge->index_);
+                    for (size_t a = 0; a < tdirs.size(); ++a) {
+                      if (tdirs[a] != ArgDirection::OutputExisting && tdirs[a] != ArgDirection::InOut &&
+                          tdirs[a] != ArgDirection::Output) {
+                        continue;
+                      }
+                      if (out_seen == target_idx) {
+                        auto out_arg = AsVarLike(tcall->args_[a]);
+                        if (out_arg) {
+                          for (auto& cls : aliases) {
+                            if (cls.count(out_arg.get()) && !cls.count(assign->var_.get())) {
+                              cls.insert(assign->var_.get());
+                              changed = true;
+                            }
+                          }
+                        }
+                        break;
+                      }
+                      ++out_seen;
+                    }
+                  }
+                }
+              }
+            }
+            continue;
+          }
+          auto call = As<Call>(assign->value_);
+          if (!call) continue;
+          // (a) tensor.assemble: result var aliases its first arg (the target).
+          if (call->op_->name_ == "tensor.assemble" && !call->args_.empty()) {
+            auto first_arg = AsVarLike(call->args_[0]);
+            if (first_arg) {
+              for (auto& cls : aliases) {
+                if (cls.count(first_arg.get()) && !cls.count(assign->var_.get())) {
+                  cls.insert(assign->var_.get());
+                  changed = true;
+                }
+              }
+            }
+          }
+          // (c) Calls with output_existing/inout args (e.g. InCore kernels):
+          // the result aliases the FIRST output-side arg, mirroring the codegen
+          // alias `const Tensor& result = args[out_idx];` emitted later by
+          // GenerateSingleReturnAlias / GenerateTupleReturnAliases. If that arg
+          // is in an iter_arg's class, the result is in the class too.
+          auto call_dirs = call->GetArgDirections();
+          if (call_dirs.size() == call->args_.size()) {
+            for (size_t a = 0; a < call_dirs.size(); ++a) {
+              if (call_dirs[a] != ArgDirection::OutputExisting && call_dirs[a] != ArgDirection::InOut) {
+                continue;
+              }
+              auto out_arg = AsVarLike(call->args_[a]);
+              if (!out_arg) continue;
+              for (auto& cls : aliases) {
+                if (cls.count(out_arg.get()) && !cls.count(assign->var_.get())) {
+                  cls.insert(assign->var_.get());
+                  changed = true;
+                }
+              }
+              break;  // only the first output-side arg is the alias target
+            }
+          }
+        }
+        // (b) Nested ForStmts: the parent's carry threaded through a nested
+        // loop comes out via the nested loop's return_var. Specifically, for
+        // each (nested iter_arg, nested return_var) pair, if nested iter_arg's
+        // init value is in the parent class, then nested return_var is too.
+        for (const auto& nf : collector.nested_fors_) {
+          for (size_t k = 0; k < nf->iter_args_.size(); ++k) {
+            auto init_var = AsVarLike(nf->iter_args_[k]->initValue_);
+            if (!init_var) continue;
+            const auto* rv = nf->return_vars_[k].get();
+            for (auto& cls : aliases) {
+              if (cls.count(init_var.get()) && !cls.count(rv)) {
+                cls.insert(rv);
+                changed = true;
+              }
+            }
+          }
+        }
+      }
+      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+        auto yield_var = AsVarLike(yield->value_[i]);
+        // True rebind iff yield value is not in the iter_arg's alias class
+        // (i.e. not the iter_arg itself nor any tensor.assemble alias of it).
+        is_rebind[i] = !yield_var || !aliases[i].count(yield_var.get());
+      }
+    }
 
     for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
       const auto& iter_arg = for_stmt->iter_args_[i];
@@ -253,8 +432,32 @@ class OrchestrationStmtCodegen : public CodegenBase {
       std::string init_var_name = TryGetVarName(iter_arg->initValue_);
       INTERNAL_CHECK_SPAN(!init_var_name.empty(), for_stmt->span_)
           << "Internal error: ForStmt iter_arg initValue must be a variable, got non-variable expr";
-      emit_name_map_[iter_arg.get()] = init_var_name;
-      emit_name_map_[return_var.get()] = init_var_name;
+      // Function tensor params get rewritten to `ext_<name>` in the emitted C++,
+      // so the bare emit name is not a valid identifier when the init value is
+      // a param. Apply the same translation as everything else that names a
+      // tensor in the emitted code.
+      init_var_name = GetExternalTensorName(init_var_name);
+
+      if (is_rebind[i]) {
+        // Pick a fresh, distinct name for the carry. We can't reuse
+        // ReserveVarEmitName(return_var) because the lineage analyzer has
+        // already populated emit_name_map_[return_var] with the init's param
+        // name (when the iter_arg's init value is a function parameter), which
+        // would emit the self-referential `auto x = x;`. Use the return_var's
+        // raw name_hint (e.g. `current_hidden__rv_v3`) — uniqued against all
+        // declared names.
+        std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
+        code_ << Indent() << GetCppType(return_var->GetType()) << " " << carry_name << " = " << init_var_name
+              << ";\n";
+        emit_name_map_[iter_arg.get()] = carry_name;
+        emit_name_map_[return_var.get()] = carry_name;
+      } else {
+        // Trivial yield: preserve the legacy aliasing — both names route to
+        // the init's emit name. YieldStmt for this slot will be a self-assign
+        // and skipped (see VisitStmt_(YieldStmtPtr) for the equality guard).
+        emit_name_map_[iter_arg.get()] = init_var_name;
+        emit_name_map_[return_var.get()] = init_var_name;
+      }
     }
 
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
@@ -264,7 +467,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
     indent_ += 4;
 
     auto saved = current_return_vars_;
+    // Only register return_vars whose yield is a true rebind. Trivial slots
+    // are aliased to the init name and don't need a yield-time assignment;
+    // emitting one would just produce `init = init;`.
     current_return_vars_.clear();
+    for (size_t i = 0; i < for_stmt->return_vars_.size(); ++i) {
+      if (is_rebind[i]) {
+        current_return_vars_.push_back(for_stmt->return_vars_[i]);
+      } else {
+        current_return_vars_.push_back(nullptr);
+      }
+    }
     VisitStmt(for_stmt->body_);
     current_return_vars_ = saved;
 
@@ -349,7 +562,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitStmt_(const YieldStmtPtr& yield_stmt) override {
     for (size_t i = 0; i < yield_stmt->value_.size(); ++i) {
       std::string value_expr = GenerateExprString(yield_stmt->value_[i]);
-      if (i < current_return_vars_.size()) {
+      if (i < current_return_vars_.size() && current_return_vars_[i]) {
+        // Null slots in current_return_vars_ are placeholders for trivial
+        // yields (where the body does not rebind the iter_arg) — skip those.
+        // See VisitStmt_(ForStmtPtr) for how the placeholder is set up.
         auto yield_var = AsVarLike(yield_stmt->value_[i]);
         if (current_return_vars_[i].get() != yield_var.get()) {
           code_ << Indent() << GetVarName(current_return_vars_[i]) << " = " << value_expr << ";\n";
