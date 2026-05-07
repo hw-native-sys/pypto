@@ -198,7 +198,25 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
   RegisterCustom("tensor.sub", MakeBroadcastBinaryConv("tile.sub", "tile.row_expand_sub"));
   RegisterCustom("tensor.mul", MakeBroadcastBinaryConv("tile.mul", "tile.row_expand_mul"));
   RegisterCustom("tensor.div", MakeBroadcastBinaryConv("tile.div", "tile.row_expand_div"));
-  RegisterCustom("tensor.maximum", MakeBroadcastBinaryConv("tile.maximum", "tile.maximum"));
+  // tensor.maximum/minimum dispatch by rhs type:
+  //   tensor rhs → tile.maximum/minimum
+  //   scalar rhs → tile.maximums/minimums
+  // There is no tensor.maximums/minimums front-end op — the unified tensor op
+  // is rewritten here based on the rhs operand type.
+  auto MakeMinMaxConv = [](const std::string& tile_op, const std::string& tile_scalar_op) -> ConversionFunc {
+    return [tile_op, tile_scalar_op](const std::vector<ExprPtr>& args,
+                                     const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                     const Span& span) -> ConversionResult {
+      auto& op_reg = OpRegistry::GetInstance();
+      const std::string& chosen = As<ScalarType>(args[1]->GetType()) ? tile_scalar_op : tile_op;
+      if (kwargs.empty()) {
+        return ConversionResult{op_reg.Create(chosen, args, span)};
+      }
+      return ConversionResult{op_reg.Create(chosen, args, kwargs, span)};
+    };
+  };
+  RegisterCustom("tensor.maximum", MakeMinMaxConv("tile.maximum", "tile.maximums"));
+  RegisterCustom("tensor.minimum", MakeMinMaxConv("tile.minimum", "tile.minimums"));
 }
 
 // ============================================================================

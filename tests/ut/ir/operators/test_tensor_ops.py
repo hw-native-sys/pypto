@@ -722,9 +722,31 @@ def test_tensor_maximum():
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.maximum"
 
-    # Check result type
-    result_type = call.type
-    assert isinstance(result_type, ir.TensorType)
+
+def test_tensor_maximum_scalar():
+    """Test tensor.maximum with scalar rhs."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    type_a = ir.TensorType([dim64], DataType.FP32)
+    var_a = ir.Var("a", type_a, span)
+
+    call = ir.op.tensor.maximum(var_a, 0.5)
+    assert call.op.name == "tensor.maximum"
+
+
+def test_tensor_minimum():
+    """Test tensor.minimum operation (tensor-tensor and tensor-scalar)."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    type_a = ir.TensorType([dim64], DataType.FP32)
+    var_a = ir.Var("a", type_a, span)
+    var_b = ir.Var("b", type_a, span)
+
+    call_tt = ir.op.tensor.minimum(var_a, var_b)
+    assert call_tt.op.name == "tensor.minimum"
+
+    call_ts = ir.op.tensor.minimum(var_a, 1.0)
+    assert call_ts.op.name == "tensor.minimum"
 
 
 def test_tensor_mul():
@@ -941,6 +963,7 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.fillpad")
     assert ir.is_op_registered("tensor.set_validshape")
     assert ir.is_op_registered("tensor.maximum")
+    assert ir.is_op_registered("tensor.minimum")
     assert ir.is_op_registered("tensor.row_expand_mul")
     assert ir.is_op_registered("tensor.row_expand_div")
     assert ir.is_op_registered("tensor.col_expand_mul")

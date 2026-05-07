@@ -39,6 +39,7 @@ __all__ = [
     "div",
     "divs",
     "maximum",
+    "minimum",
     "cmp",
     "row_max",
     "row_sum",
@@ -485,19 +486,39 @@ def divs(lhs: Tensor, rhs: int | float | Expr | Scalar) -> Tensor:
     return Tensor(expr=call_expr)
 
 
-def maximum(lhs: Tensor, rhs: Tensor) -> Tensor:
-    """Element-wise maximum of two tensors.
+def maximum(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
+    """Element-wise maximum of tensor and tensor or scalar.
+
+    The conversion pass handles the tensor-vs-tensor / tensor-vs-scalar
+    dispatch internally — there is no separate ``maximums`` front-end op.
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
+        rhs: Right-hand side tensor or scalar
 
     Returns:
         Tensor wrapping the maximum operation
     """
     lhs_expr = lhs.unwrap()
-    rhs_expr = rhs.unwrap()
-    call_expr = _ir_ops.maximum(lhs_expr, rhs_expr)
+    call_expr = _ir_ops.maximum(lhs_expr, _unwrap_rhs(rhs))
+    return Tensor(expr=call_expr)
+
+
+def minimum(lhs: Tensor, rhs: int | float | Tensor | Scalar | Expr) -> Tensor:
+    """Element-wise minimum of tensor and tensor or scalar.
+
+    The conversion pass handles the tensor-vs-tensor / tensor-vs-scalar
+    dispatch internally — there is no separate ``minimums`` front-end op.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or scalar
+
+    Returns:
+        Tensor wrapping the minimum operation
+    """
+    lhs_expr = lhs.unwrap()
+    call_expr = _ir_ops.minimum(lhs_expr, _unwrap_rhs(rhs))
     return Tensor(expr=call_expr)
 
 

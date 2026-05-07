@@ -519,19 +519,52 @@ def divs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.divs", [lhs, rhs_expr], {}, actual_span)
 
 
-def maximum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
-    """Element-wise maximum of two tensors.
+def maximum(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise maximum of tensor and tensor or scalar.
+
+    Emits a single ``tensor.maximum`` op; the conversion pass dispatches to
+    ``tile.maximum`` (tensor-vs-tensor) or ``tile.maximums`` (tensor-vs-scalar)
+    based on the rhs operand type.
 
     Args:
         lhs: Left-hand side tensor
-        rhs: Right-hand side tensor
+        rhs: Right-hand side tensor or scalar (int/float/Expr)
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:
         Call expression for element-wise maximum
     """
     actual_span = _get_span_or_capture(span)
-    return _ir_core.create_op_call("tensor.maximum", [lhs, rhs], {}, actual_span)
+    rhs_expr = (
+        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("tensor.maximum", [lhs, rhs_expr], {}, actual_span)
+
+
+def minimum(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+    """Element-wise minimum of tensor and tensor or scalar.
+
+    Emits a single ``tensor.minimum`` op; the conversion pass dispatches to
+    ``tile.minimum`` (tensor-vs-tensor) or ``tile.minimums`` (tensor-vs-scalar)
+    based on the rhs operand type.
+
+    Args:
+        lhs: Left-hand side tensor
+        rhs: Right-hand side tensor or scalar (int/float/Expr)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise minimum
+    """
+    actual_span = _get_span_or_capture(span)
+    rhs_expr = (
+        _normalize_expr(rhs, actual_span, int_dtype=DataType.FP32, float_dtype=DataType.FP32)
+        if not isinstance(rhs, Expr)
+        else rhs
+    )
+    return _ir_core.create_op_call("tensor.minimum", [lhs, rhs_expr], {}, actual_span)
 
 
 def cmp(lhs: Expr, rhs: int | float | Expr, cmp_type: int = 0, span: Span | None = None) -> Call:

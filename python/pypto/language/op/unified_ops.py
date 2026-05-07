@@ -24,6 +24,7 @@ __all__ = [
     "mul",
     "div",
     "maximum",
+    "minimum",
     "exp",
     "neg",
     "abs",
@@ -225,13 +226,34 @@ def div(lhs, rhs):
 # ---------------------------------------------------------------------------
 
 
-def maximum(lhs: T, rhs: T) -> T:
+@overload
+def maximum(lhs: Tensor, rhs: Tensor | int | float | Scalar) -> Tensor: ...
+@overload
+def maximum(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile: ...
+def maximum(lhs, rhs):
     """Element-wise maximum, dispatched by input type."""
-    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
         return _tensor.maximum(lhs, rhs)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.maximum(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
+        return _tile.maximums(lhs, rhs)
     _raise_type_dispatch_error("maximum", lhs, rhs)
+
+
+@overload
+def minimum(lhs: Tensor, rhs: Tensor | int | float | Scalar) -> Tensor: ...
+@overload
+def minimum(lhs: Tile, rhs: Tile | int | float | Scalar) -> Tile: ...
+def minimum(lhs, rhs):
+    """Element-wise minimum, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
+        return _tensor.minimum(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.minimum(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
+        return _tile.minimums(lhs, rhs)
+    _raise_type_dispatch_error("minimum", lhs, rhs)
 
 
 def exp(input: T) -> T:

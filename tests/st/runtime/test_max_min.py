@@ -256,5 +256,198 @@ class TestTileMaxMinOperations:
         assert result.passed, f"Test failed: {result.error}"
 
 
+# ---------------------------------------------------------------------------
+# Tensor-level ops: rely on ConvertTensorToTileOps to dispatch to
+# tile.maximum/minimum (tensor rhs) or tile.maximums/minimums (scalar rhs).
+# Use Opaque + pl.at(CORE_GROUP) + pl.assemble to write back to Out params.
+# ---------------------------------------------------------------------------
+
+
+@pl.program
+class TensorMaximumProgram:
+    """Element-wise maximum of two FP32 tensors; lowers to tile.maximum."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        lhs: pl.Tensor[[M, N], pl.FP32],
+        rhs: pl.Tensor[[M, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.assemble(out, pl.tensor.maximum(lhs, rhs), [0, 0])
+        return out
+
+
+@pl.program
+class TensorMinimumProgram:
+    """Element-wise minimum of two FP32 tensors; lowers to tile.minimum."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        lhs: pl.Tensor[[M, N], pl.FP32],
+        rhs: pl.Tensor[[M, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.assemble(out, pl.tensor.minimum(lhs, rhs), [0, 0])
+        return out
+
+
+@pl.program
+class TensorMaximumScalarProgram:
+    """Element-wise maximum of FP32 tensor and scalar; lowers to tile.maximums."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        lhs: pl.Tensor[[M, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.assemble(out, pl.tensor.maximum(lhs, SCALAR), [0, 0])
+        return out
+
+
+@pl.program
+class TensorMinimumScalarProgram:
+    """Element-wise minimum of FP32 tensor and scalar; lowers to tile.minimums."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        lhs: pl.Tensor[[M, N], pl.FP32],
+        out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+    ) -> pl.Tensor[[M, N], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.assemble(out, pl.tensor.minimum(lhs, SCALAR), [0, 0])
+        return out
+
+
+class TensorMaximumTestCase(PTOTestCase):
+    """tensor.maximum (tensor-tensor): lowers to tile.maximum."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return "tensor_maximum"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("lhs", [M, N], DataType.FP32, init_value=_lhs()),
+            TensorSpec("rhs", [M, N], DataType.FP32, init_value=_rhs()),
+            TensorSpec("out", [M, N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorMaximumProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.maximum(tensors["lhs"], tensors["rhs"])
+
+
+class TensorMinimumTestCase(PTOTestCase):
+    """tensor.minimum (tensor-tensor): lowers to tile.minimum."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return "tensor_minimum"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("lhs", [M, N], DataType.FP32, init_value=_lhs()),
+            TensorSpec("rhs", [M, N], DataType.FP32, init_value=_rhs()),
+            TensorSpec("out", [M, N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorMinimumProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["out"][:] = torch.minimum(tensors["lhs"], tensors["rhs"])
+
+
+class TensorMaximumScalarTestCase(PTOTestCase):
+    """tensor.maximum (tensor-scalar): lowers to tile.maximums."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return "tensor_maximum_scalar"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("lhs", [M, N], DataType.FP32, init_value=_lhs()),
+            TensorSpec("out", [M, N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorMaximumScalarProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        scalar = torch.tensor(SCALAR, dtype=tensors["lhs"].dtype)
+        tensors["out"][:] = torch.maximum(tensors["lhs"], scalar)
+
+
+class TensorMinimumScalarTestCase(PTOTestCase):
+    """tensor.minimum (tensor-scalar): lowers to tile.minimums."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return "tensor_minimum_scalar"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("lhs", [M, N], DataType.FP32, init_value=_lhs()),
+            TensorSpec("out", [M, N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return TensorMinimumScalarProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        scalar = torch.tensor(SCALAR, dtype=tensors["lhs"].dtype)
+        tensors["out"][:] = torch.minimum(tensors["lhs"], scalar)
+
+
+class TestTensorMaxMinOperations:
+    """Test tensor-level max/min ops (lowered by ConvertTensorToTileOps)."""
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_tensor_maximum(self, test_runner, platform):
+        result = test_runner.run(TensorMaximumTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_tensor_minimum(self, test_runner, platform):
+        result = test_runner.run(TensorMinimumTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_tensor_maximum_scalar(self, test_runner, platform):
+        result = test_runner.run(TensorMaximumScalarTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", ONBOARD_PLATFORMS)
+    def test_tensor_minimum_scalar(self, test_runner, platform):
+        result = test_runner.run(TensorMinimumScalarTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

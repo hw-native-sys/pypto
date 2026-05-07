@@ -281,6 +281,45 @@ class TestConvertTensorToTileOps:
         )
         _assert_convert_equal(before, expected)
 
+    @pytest.mark.parametrize(
+        ("rhs_kind", "tensor_factory", "tile_factory"),
+        [
+            (
+                "two_inputs_max",
+                lambda ins: tensor_ops.maximum(ins[0], ins[1]),
+                lambda ts: tile_ops.maximum(ts[0], ts[1]),
+            ),
+            (
+                "scalar_max",
+                lambda ins: tensor_ops.maximum(ins[0], 1.0),
+                lambda ts: tile_ops.maximums(ts[0], 1.0),
+            ),
+            (
+                "two_inputs_min",
+                lambda ins: tensor_ops.minimum(ins[0], ins[1]),
+                lambda ts: tile_ops.minimum(ts[0], ts[1]),
+            ),
+            (
+                "scalar_min",
+                lambda ins: tensor_ops.minimum(ins[0], 1.0),
+                lambda ts: tile_ops.minimums(ts[0], 1.0),
+            ),
+        ],
+    )
+    def test_maximum_minimum_dispatch(self, rhs_kind, tensor_factory, tile_factory):
+        """tensor.maximum/minimum dispatches by rhs type to tile.{maximum,minimum}{,s}."""
+        in_specs: list[InSpec] = [("x", [64], DataType.FP32)]
+        if rhs_kind in ("two_inputs_max", "two_inputs_min"):
+            in_specs.append(("y", [64], DataType.FP32))
+        before, expected = _make_pair(
+            in_specs=in_specs,
+            out_shape=[64],
+            out_dtype=DataType.FP32,
+            tensor_op=tensor_factory,
+            tile_op=tile_factory,
+        )
+        _assert_convert_equal(before, expected)
+
     @pytest.mark.parametrize(("op_name", "tensor_op", "tile_op"), _UNARY_1D_OPS)
     def test_unary_op_1d(self, op_name, tensor_op, tile_op):
         """tensor.<unary>(x) -> tile.<unary>(x_tile) on 1D FP32."""
