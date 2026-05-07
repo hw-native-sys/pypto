@@ -1942,6 +1942,39 @@ def test_pto_codegen_explicit_stride_dn_view_row_load_uses_scalar_fallback():
     assert "pto.tsetval" in mlir_code
 
 
+def test_pto_codegen_explicit_stride_dn_iter_arg_row_load_uses_base_pointer():
+    """Scalar fallback recovers the raw pointer for tensor-view loop aliases."""
+
+    @pl.program
+    class ExplicitStrideDNIterArgProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            weights_t: pl.Tensor[
+                [64, 16],
+                pl.FP32,
+                pl.TensorView(stride=[1, 64], layout=pl.TensorLayout.DN),
+            ],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            for i, (weights_iter, out_iter) in pl.range(1, init_values=(weights_t, out)):
+                tile: pl.Tile[[1, 16], pl.FP32] = pl.load(weights_iter, [0, 0], [1, 16])
+                updated: pl.Tensor[[1, 16], pl.FP32] = pl.store(tile, [0, 0], out_iter)
+                unused_weights, result = pl.yield_(weights_iter, updated)
+            return result
+
+    mlir_code = _generate_default_mlir(ExplicitStrideDNIterArgProgram)
+    lines = _get_mlir_lines(mlir_code)
+
+    view_line = _single_line(lines, "pto.make_tensor_view %arg0")
+    weights_view_name = view_line.split("=")[0].strip()
+
+    assert f"pto.load_scalar {weights_view_name}" not in mlir_code
+    assert "pto.load_scalar %arg0" in mlir_code
+    assert "scf.for" in mlir_code
+    assert "pto.tsetval" in mlir_code
+
+
 def test_pto_codegen_make_tensor_view_accepts_dynamic_shape_expressions():
     """make_tensor_view should lower non-Var dynamic shape/stride expressions via index casts."""
     span = ir.Span.unknown()

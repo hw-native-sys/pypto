@@ -228,8 +228,8 @@ static std::string GetExprAsIndexCode(const ir::ExprPtr& expr, codegen::PTOCodeg
     if (scalar_type->dtype_ == DataType::INDEX) {
       return ssa;
     }
-    CHECK(scalar_type->dtype_.IsInt()) << "Index operand must be integer or index type, got "
-                                       << codegen.GetTypeString(scalar_type->dtype_);
+    CHECK(scalar_type->dtype_.IsInt())
+        << "Index operand must be integer or index type, got " << codegen.GetTypeString(scalar_type->dtype_);
     std::string idx = codegen.NewTemp();
     codegen.Emit(idx + " = arith.index_cast " + ssa + " : " + codegen.GetTypeString(scalar_type->dtype_) +
                  " to index");
@@ -430,7 +430,10 @@ static std::string MakeExplicitStrideDNVecRowLoadCodegenPTO(
     lowered_strides.push_back(GetExprAsIndexCode(stride, codegen));
   }
 
-  std::string src_ptr = codegen.GetVarName(tensor);
+  auto src_ptr = codegen.TryGetTensorBasePointerName(tensor);
+  CHECK(src_ptr.has_value()) << "Explicit-stride DN Vec row load scalar fallback requires a raw "
+                                "!pto.ptr-backed tensor source, got tensor '"
+                             << tensor->name_hint_ << "'";
   std::string ptr_type = "!pto.ptr<" + dtype_str + ">";
   std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
   std::string c1 = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
@@ -446,7 +449,7 @@ static std::string MakeExplicitStrideDNVecRowLoadCodegenPTO(
       EmitExplicitStrideOffsetPTO(src_indices, lowered_strides, codegen, tensor->name_hint_ + "_src_offset");
 
   std::string scalar = codegen.NewNamedTemp(tensor->name_hint_ + "_scalar");
-  codegen.Emit(scalar + " = pto.load_scalar " + src_ptr + "[" + src_offset + "] : " + ptr_type + " -> " +
+  codegen.Emit(scalar + " = pto.load_scalar " + *src_ptr + "[" + src_offset + "] : " + ptr_type + " -> " +
                dtype_str);
 
   std::ostringstream tsetval;

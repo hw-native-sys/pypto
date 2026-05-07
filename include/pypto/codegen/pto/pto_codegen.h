@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -103,6 +104,15 @@ class PTOCodegen : public CodegenBase {
    * @return Tensor view name
    */
   std::string GetOrCreateTensorView(const ir::VarPtr& tensor);
+
+  /**
+   * @brief Return the raw pointer SSA backing a tensor, if known.
+   *
+   * Tensor aliases such as loop IterArgs and tile.store results may resolve to
+   * tensor-view SSAs through GetVarName(). Scalar pointer ops must use the
+   * original !pto.ptr SSA instead.
+   */
+  [[nodiscard]] std::optional<std::string> TryGetTensorBasePointerName(const ir::VarPtr& tensor) const;
 
   /**
    * @brief Get or emit a numeric constant of any dtype (int, index, or float).
@@ -449,6 +459,8 @@ class PTOCodegen : public CodegenBase {
 
     std::map<const ir::Var*, std::string> var_to_mlir;
     std::map<const ir::Var*, std::string> tensor_to_view;
+    std::map<const ir::Var*, std::string> tensor_to_base_ptr;
+    std::map<std::string, std::string> tensor_view_to_base_ptr;
     std::map<const ir::Var*, std::string> memref_to_mlir;    ///< keyed by base_ Ptr
     std::map<const ir::Var*, const ir::Var*> var_to_memref;  ///< maps tile var → base_ Ptr
     std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
@@ -494,6 +506,8 @@ class PTOCodegen : public CodegenBase {
 
       var_to_mlir.clear();
       tensor_to_view.clear();
+      tensor_to_base_ptr.clear();
+      tensor_view_to_base_ptr.clear();
       memref_to_mlir.clear();
       var_to_memref.clear();
       memref_to_tile_type.clear();

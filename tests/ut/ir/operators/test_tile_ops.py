@@ -2165,9 +2165,11 @@ class TestTileLoadOp:
         tile_type = call.type
 
         assert isinstance(tile_type, ir.TileType)
-        assert [dim.value for dim in tile_type.shape] == [1, 16]
+        assert all(isinstance(dim, ir.ConstInt) for dim in tile_type.shape)
+        assert [dim.value for dim in tile_type.shape if isinstance(dim, ir.ConstInt)] == [1, 16]
         eff = tile_type.get_effective_tile_view()
-        assert [dim.value for dim in eff.valid_shape] == [1, 16]
+        assert all(isinstance(dim, ir.ConstInt) for dim in eff.valid_shape)
+        assert [dim.value for dim in eff.valid_shape if isinstance(dim, ir.ConstInt)] == [1, 16]
         assert eff.blayout == ir.TileLayout.row_major
 
 

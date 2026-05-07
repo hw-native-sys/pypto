@@ -312,7 +312,9 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   std::set<const ir::Var*> param_keys;
   for (size_t j = 0; j < tensor_param_indices.size(); j++) {
     const auto& param = func->params_[tensor_param_indices[j]];
-    BindVarToMlir(param, "%arg" + std::to_string(j));
+    std::string arg_name = "%arg" + std::to_string(j);
+    BindVarToMlir(param, arg_name);
+    fs_.tensor_to_base_ptr[GetVarKey(param)] = arg_name;
     param_keys.insert(GetVarKey(param));
   }
   for (size_t j = 0; j < scalar_param_indices.size(); j++) {
@@ -1061,6 +1063,12 @@ void PTOCodegen::BindVarToMlir(const VarPtr& var, const std::string& mlir_name) 
 
 void PTOCodegen::BindTensorView(const VarPtr& var, const std::string& tensor_view_name) {
   fs_.tensor_to_view[GetVarKey(var)] = tensor_view_name;
+  if (auto base_ptr = TryGetTensorBasePointerName(var)) {
+    fs_.tensor_view_to_base_ptr[tensor_view_name] = *base_ptr;
+  } else if (auto it = fs_.tensor_view_to_base_ptr.find(tensor_view_name);
+             it != fs_.tensor_view_to_base_ptr.end()) {
+    fs_.tensor_to_base_ptr[GetVarKey(var)] = it->second;
+  }
 }
 
 void PTOCodegen::BindVarToMemRef(const VarPtr& var, const ir::Var* base_ptr) {
@@ -1128,6 +1136,18 @@ void PTOCodegen::RegisterVarToMlir(const VarPtr& var, const std::string& mlir_na
 
 void PTOCodegen::RegisterTensorView(const VarPtr& var, const std::string& tensor_view_name) {
   BindTensorView(var, tensor_view_name);
+}
+
+std::optional<std::string> PTOCodegen::TryGetTensorBasePointerName(const VarPtr& tensor) const {
+  if (auto it = fs_.tensor_to_base_ptr.find(GetVarKey(tensor)); it != fs_.tensor_to_base_ptr.end()) {
+    return it->second;
+  }
+  if (auto iter_arg = As<ir::IterArg>(tensor)) {
+    if (auto init_var = As<ir::Var>(iter_arg->initValue_)) {
+      return TryGetTensorBasePointerName(init_var);
+    }
+  }
+  return std::nullopt;
 }
 
 int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) const {
