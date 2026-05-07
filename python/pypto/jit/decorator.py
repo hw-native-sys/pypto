@@ -739,7 +739,7 @@ class JITFunction:
         contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, dynamic_dims)
         dynvar_bindings, dynvar_literals = _build_dynvar_bindings(contexts)
         _backfill_entry_dynvar_bindings(self._func, self._get_deps(), dynvar_bindings, dynvar_literals)
-        class_name = f"_jit_{self.__name__}_{self._get_source_hash()}"
+        class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals)
         source = specializer.specialize()
         rename_map = specializer.rename_map
@@ -770,7 +770,7 @@ class JITFunction:
         contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, dynamic_dims)
         dynvar_bindings, dynvar_literals = _build_dynvar_bindings(contexts)
         _backfill_entry_dynvar_bindings(self._func, self._get_deps(), dynvar_bindings, dynvar_literals)
-        class_name = f"_jit_{self.__name__}_{self._get_source_hash()}"
+        class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals)
         source = specializer.specialize()
         rename_map = specializer.rename_map
