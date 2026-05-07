@@ -2785,7 +2785,7 @@ class TestNoOpAliasSkip:
         )
         # Sanity: the task submission must still be present; the fix only
         # drops the no-op alias, not the actual kernel call.
-        assert "pto2_rt_submit_aiv_task" in code, f"task submission missing from form C output. Code:\n{code}"
+        assert "rt_submit_aiv_task" in code, f"task submission missing from form C output. Code:\n{code}"
 
 
 if __name__ == "__main__":
