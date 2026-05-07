@@ -184,8 +184,14 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   }
   tile_view.valid_shape = valid_elements;
 
-  // Return TileType with same dtype as tensor and TileView containing valid_shape
-  return std::make_shared<TileType>(tile_shape, tensor_type->dtype_, std::nullopt, tile_view);
+  // Return TileType with same dtype as tensor and TileView containing valid_shape.
+  // When target_memory is specified, write it into memory_space_ so the constructed
+  // type is internally coherent (tile_view layout and memory_space agree). This
+  // lets CanonicalizeTileViewInPlace collapse the explicit Mat-style view to
+  // nullopt against the matching implicit, giving a unique canonical encoding
+  // that round-trips through print/parse.
+  return std::make_shared<TileType>(tile_shape, tensor_type->dtype_, std::nullopt, tile_view,
+                                    target_memory_opt);
 }
 
 TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
