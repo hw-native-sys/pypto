@@ -1732,10 +1732,12 @@ class TestNdTensorMatmulConversion:
 #   future pass / IRBuilder bypasses ``OpRegistry::Create`` for tile.load
 #   construction.
 #
-# The tests below close the coverage gap on three layers: the deducer
-# self-consistency invariant in ``DeduceTileLoadType``, the Form A path in
-# ``FlattenTileNdTo2D``, and the canonical TileType encoding the printer
-# and parser depend on.
+# The tests below close the structural coverage gap. Both go through the
+# public ``OpRegistry::Create`` path and so cannot probe the deducer in
+# isolation — they assert the end-to-end invariant (target_memory in,
+# coherent canonical TileType out) and exercise the previously-uncovered
+# Form A construction in ``FlattenTileNdTo2D`` under the autouse
+# ``RoundtripInstrument``.
 # ----------------------------------------------------------------------------
 
 
@@ -1749,11 +1751,15 @@ class TestFlattenTileNdTo2DMatLoadRoundtrip:
     def test_tile_load_emits_coherent_memory_space(self, target_memory):
         """``tile.load`` result type's ``memory_space`` must match ``target_memory``.
 
-        This is the deducer-level invariant. With the fix at
-        ``memory.cpp:188`` ``DeduceTileLoadType`` itself sets the field; without
-        the fix ``OpRegistry::Create``'s ``set_output_memory_from_kwarg``
-        backfill is the sole protection. The test covers the public path
-        (``OpRegistry::Create``) and would fire if either layer regresses.
+        End-to-end op-creation invariant. The call goes through
+        ``tile_ops.load`` -> ``ir.create_op_call`` -> ``OpRegistry::Create``,
+        so it exercises the full public construction path. Two layers protect
+        this invariant: ``DeduceTileLoadType`` (passes ``target_memory_opt``
+        into the ``TileType`` constructor) and ``OpRegistry::Create``'s
+        ``set_output_memory_from_kwarg`` backfill. Either alone is sufficient
+        for the assertion to hold, so this test fires only if BOTH layers
+        regress simultaneously — the deducer self-consistency invariant
+        cannot be probed in isolation through this Python entry point.
         """
         x_var = ir.Var("x", ir.TensorType([16, 128], DataType.FP16), ir.Span.unknown())
         call = tile_ops.load(x_var, [0, 0], [16, 128], target_memory=target_memory)
