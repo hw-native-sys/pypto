@@ -48,6 +48,19 @@ bool IsTensorTypedArg(const ExprPtr& arg) {
   return false;
 }
 
+/// Return true iff `ty` is a scalar or a tuple recursively composed only of scalars.
+bool IsScalarOrTupleOfScalarsType(const TypePtr& ty) {
+  if (!ty) return false;
+  if (As<ScalarType>(ty)) return true;
+  if (auto tuple = As<TupleType>(ty)) {
+    for (const auto& elem_ty : tuple->types_) {
+      if (!IsScalarOrTupleOfScalarsType(elem_ty)) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 /// Compute the per-position ParamDirection vector for a callee, expanding Group/Spmd
 /// callees whose effective directions depend on inner-task call sites.
 std::vector<ParamDirection> ResolveCalleeDirections(const ProgramPtr& program, const CallPtr& call,
@@ -96,6 +109,82 @@ bool ExprReferencesAnyOf(const ExprPtr& expr, const std::unordered_set<const Var
   }
   return false;
 }
+
+/// Return true if `expr` references any Var in `vars`, expanding through scalar
+/// SSA-style local defs recorded in `scalar_defs`.
+bool ExprReferencesAnyOfExpanded(const ExprPtr& expr, const std::unordered_set<const Var*>& vars,
+                                 const std::unordered_map<const Var*, ExprPtr>& scalar_defs,
+                                 const std::unordered_map<std::string, ExprPtr>& scalar_name_defs,
+                                 std::unordered_set<const Var*>& visiting) {
+  if (!expr) return false;
+  if (auto var = AsVarLike(expr)) {
+    if (vars.count(var.get()) > 0) return true;
+    if (visiting.count(var.get()) > 0) return false;
+    auto it = scalar_defs.find(var.get());
+    if (it == scalar_defs.end()) {
+      auto name_it = scalar_name_defs.find(var->name_hint_);
+      if (name_it == scalar_name_defs.end()) return false;
+      visiting.insert(var.get());
+      bool refs = ExprReferencesAnyOfExpanded(name_it->second, vars, scalar_defs, scalar_name_defs, visiting);
+      visiting.erase(var.get());
+      return refs;
+    }
+    visiting.insert(var.get());
+    bool refs = ExprReferencesAnyOfExpanded(it->second, vars, scalar_defs, scalar_name_defs, visiting);
+    visiting.erase(var.get());
+    return refs;
+  }
+  if (auto bin = As<BinaryExpr>(expr)) {
+    return ExprReferencesAnyOfExpanded(bin->left_, vars, scalar_defs, scalar_name_defs, visiting) ||
+           ExprReferencesAnyOfExpanded(bin->right_, vars, scalar_defs, scalar_name_defs, visiting);
+  }
+  if (auto un = As<UnaryExpr>(expr)) {
+    return ExprReferencesAnyOfExpanded(un->operand_, vars, scalar_defs, scalar_name_defs, visiting);
+  }
+  if (auto tgi = As<TupleGetItemExpr>(expr)) {
+    return ExprReferencesAnyOfExpanded(tgi->tuple_, vars, scalar_defs, scalar_name_defs, visiting);
+  }
+  if (auto call = As<Call>(expr)) {
+    for (const auto& arg : call->args_) {
+      if (ExprReferencesAnyOfExpanded(arg, vars, scalar_defs, scalar_name_defs, visiting)) return true;
+    }
+  }
+  if (auto tuple = As<MakeTuple>(expr)) {
+    for (const auto& e : tuple->elements_) {
+      if (ExprReferencesAnyOfExpanded(e, vars, scalar_defs, scalar_name_defs, visiting)) return true;
+    }
+  }
+  return false;
+}
+
+/// Collect scalar / tuple-of-scalar defs from the original function body so
+/// call-site analyses can expand hoisted temps such as `d0 = i * 256`.
+class ScalarDefCollector : public IRVisitor {
+ public:
+  const std::unordered_map<const Var*, ExprPtr>& defs() const { return defs_; }
+  const std::unordered_map<std::string, ExprPtr>& unique_name_defs() const { return unique_name_defs_; }
+
+ protected:
+  void VisitStmt_(const AssignStmtPtr& op) override {
+    if (IsScalarOrTupleOfScalarsType(op->var_->GetType()) ||
+        IsScalarOrTupleOfScalarsType(op->value_->GetType())) {
+      defs_[op->var_.get()] = op->value_;
+      if (!ambiguous_names_.count(op->var_->name_hint_)) {
+        auto [it, inserted] = unique_name_defs_.emplace(op->var_->name_hint_, op->value_);
+        if (!inserted) {
+          unique_name_defs_.erase(it);
+          ambiguous_names_.insert(op->var_->name_hint_);
+        }
+      }
+    }
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  std::unordered_map<const Var*, ExprPtr> defs_;
+  std::unordered_map<std::string, ExprPtr> unique_name_defs_;
+  std::unordered_set<std::string> ambiguous_names_;
+};
 
 /// Visitor that checks whether every tile.store to a given Out parameter uses
 /// an offset that references another function parameter (indicating
@@ -413,11 +502,15 @@ class CallDirectionMutator : public IRMutator {
   CallDirectionMutator(
       ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
       const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots,
-      const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root)
+      const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root,
+      const std::unordered_map<const Var*, ExprPtr>& scalar_defs,
+      const std::unordered_map<std::string, ExprPtr>& scalar_name_defs)
       : program_(std::move(program)),
         buffer_roots_(buffer_roots),
         first_writer_roots_(first_writer_roots),
-        enclosing_param_dir_by_root_(enclosing_param_dir_by_root) {}
+        enclosing_param_dir_by_root_(enclosing_param_dir_by_root),
+        scalar_defs_(scalar_defs),
+        scalar_name_defs_(scalar_name_defs) {}
 
  protected:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
@@ -521,9 +614,13 @@ class CallDirectionMutator : public IRMutator {
             }
             // Callee check passed; now verify call-site loop-variance.
             for (size_t pi : offset_params) {
-              if (pi < call->args_.size() && ExprReferencesAnyOf(call->args_[pi], sequential_loop_vars_)) {
-                disjoint = true;
-                break;
+              if (pi < op->args_.size()) {
+                std::unordered_set<const Var*> visiting;
+                if (ExprReferencesAnyOfExpanded(op->args_[pi], sequential_loop_vars_, scalar_defs_,
+                                                scalar_name_defs_, visiting)) {
+                  disjoint = true;
+                  break;
+                }
               }
             }
           }
@@ -570,6 +667,8 @@ class CallDirectionMutator : public IRMutator {
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
   const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots_;
   const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root_;
+  const std::unordered_map<const Var*, ExprPtr>& scalar_defs_;
+  const std::unordered_map<std::string, ExprPtr>& scalar_name_defs_;
   int sequential_depth_ = 0;
   std::unordered_set<const Var*> sequential_loop_vars_;
   mutable std::unordered_map<std::string, std::unordered_map<size_t, std::unordered_set<size_t>>>
@@ -606,8 +705,12 @@ Pass DeriveCallDirections() {
       PriorWriterCollector pw_collector(program, br_collector.buffer_roots);
       pw_collector.Run(func->body_);
 
+      ScalarDefCollector scalar_defs_collector;
+      scalar_defs_collector.VisitStmt(func->body_);
+
       CallDirectionMutator mutator(program, br_collector.buffer_roots, pw_collector.first_writer_roots,
-                                   enclosing_param_dir_by_root);
+                                   enclosing_param_dir_by_root, scalar_defs_collector.defs(),
+                                   scalar_defs_collector.unique_name_defs());
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
 
