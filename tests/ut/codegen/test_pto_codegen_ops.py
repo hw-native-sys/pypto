@@ -905,6 +905,41 @@ class TestTileSliceCodegen:
                 f"subview result type should be rows=4,cols=64 (slice shape), got:\n{line}"
             )
 
+    def test_tile_slice_static_valid_inferred_with_dynamic_offset(self):
+        """tile.slice with dynamic offset should infer static v_row/v_col when source valid >= slice size.
+
+        Regression test for: InferSubviewTileTypeComponents was missing the case where
+        the source valid extent is a static constant >= the requested slice size but the
+        offset is dynamic. Before the fix, v_row/v_col were left as dynamic ('?') even
+        though any offset within bounds leaves exactly `size` valid elements.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 32], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                col_off: pl.Scalar[pl.INDEX],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(src, [0, 0], [32, 32])
+                sliced: pl.Tile[[16, 16], pl.FP32] = pl.tile.slice(src_tile, [16, 16], [row_off, col_off])
+                return pl.store(sliced, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines, "no pto.subview line emitted"
+        result_type = subview_lines[0].split("->", 1)[-1]
+        assert "v_row=16" in result_type and "v_col=16" in result_type, (
+            f"Source valid [32,32] >= slice size [16,16] with dynamic offset must yield "
+            f"static v_row=16, v_col=16 in result tile_buf type, got:\n{subview_lines[0]}"
+        )
+        assert "v_row=?" not in result_type and "v_col=?" not in result_type, (
+            f"v_row/v_col must not be dynamic ('?') when source valid >= slice size, got:\n{subview_lines[0]}"
+        )
+
 
 class TestTileAssembleCodegen:
     """Tests for tile.assemble PTO code generation (pto.subview + pto.tmov).

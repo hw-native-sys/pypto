@@ -239,10 +239,19 @@ static codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::Tile
       *out_dynamic = false;
       return;
     }
+    // offset=0 and slice shape matches the full source valid extent
     if (offset_const && offset_const->value_ == 0 && dim_idx < source_valid.size() &&
         ExprsEquivalentForSubview(shape_tuple.elements_[dim_idx], source_valid[dim_idx])) {
       *out_value = size;
       *out_dynamic = false;
+      return;
+    }
+    // Any valid offset leaves exactly `size` valid elements in this dimension,
+    // so v_row/v_col is statically known regardless of the offset value.
+    if (valid_const && valid_const->value_ >= size) {
+      *out_value = size;
+      *out_dynamic = false;
+      return;
     }
   };
 
