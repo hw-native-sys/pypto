@@ -1710,7 +1710,7 @@ def minimum(lhs: Expr, rhs: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.minimum", [lhs, rhs], {}, actual_span)
 
 
-def maxs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+def maximums(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise maximum of tile and scalar.
 
     Computes max(lhs, rhs) element-wise. Maps to the TMAXS hardware intrinsic.
@@ -1729,10 +1729,10 @@ def maxs(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tile.maxs", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.maximums", [lhs, rhs_expr], {}, actual_span)
 
 
-def mins(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
+def minimums(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
     """Element-wise minimum of tile and scalar.
 
     Computes min(lhs, rhs) element-wise. Maps to the TMINS hardware intrinsic.
@@ -1751,7 +1751,7 @@ def mins(lhs: Expr, rhs: int | float | Expr, span: Span | None = None) -> Call:
         if not isinstance(rhs, Expr)
         else rhs
     )
-    return _ir_core.create_op_call("tile.mins", [lhs, rhs_expr], {}, actual_span)
+    return _ir_core.create_op_call("tile.minimums", [lhs, rhs_expr], {}, actual_span)
 
 
 # ============================================================================

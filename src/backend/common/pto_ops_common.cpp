@@ -86,7 +86,7 @@ static bool RequiresRowMajorLayout(std::string_view op_name) {
       "tile.adds",
       "tile.muls",
       "tile.divs",
-      "tile.maxs",
+      "tile.maximums",
       "tile.lrelu",
       // Ternary scalar ops (Tile x Scalar x Tile)
       "tile.addsc",
@@ -1954,8 +1954,8 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.xors",            "pto.txors",            2},
     {"tile.shls",            "pto.tshls",            2},
     {"tile.shrs",            "pto.tshrs",            2},
-    {"tile.maxs",            "pto.tmaxs",            2},
-    {"tile.mins",            "pto.tmins",            2},
+    {"tile.maximums",        "pto.tmaxs",            2},
+    {"tile.minimums",        "pto.tmins",            2},
     {"tile.lrelu",           "pto.tlrelu",           2},
     // Ternary scalar operations (tile x scalar + carry/select)
     {"tile.addsc",           "pto.taddsc",           3},

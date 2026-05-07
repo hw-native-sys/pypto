@@ -284,6 +284,7 @@ REGISTER_OP("tile.maximum")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.maximum");
@@ -297,6 +298,7 @@ REGISTER_OP("tile.minimum")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileOpElementwiseBinaryType(args, kwargs, "tile.minimum");
@@ -425,7 +427,7 @@ REGISTER_OP("tile.shrs")
       return DeduceTileOpIntScalarBinaryType(args, kwargs, "tile.shrs");
     });
 
-REGISTER_OP("tile.maxs")
+REGISTER_OP("tile.maximums")
     .set_op_category("TileOp")
     .set_description("Element-wise maximum of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
@@ -434,10 +436,10 @@ REGISTER_OP("tile.maxs")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.maxs");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.maximums");
     });
 
-REGISTER_OP("tile.mins")
+REGISTER_OP("tile.minimums")
     .set_op_category("TileOp")
     .set_description("Element-wise minimum of tile and scalar")
     .add_argument("lhs", "Tile (TileType)")
@@ -446,7 +448,7 @@ REGISTER_OP("tile.mins")
     .set_output_memory(MemorySpace::Vec)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.mins");
+      return DeduceTileOpScalarBinaryType(args, kwargs, "tile.minimums");
     });
 
 REGISTER_OP("tile.and")

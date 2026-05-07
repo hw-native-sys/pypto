@@ -1752,8 +1752,8 @@ class TestTileBitwiseArithmeticOps:
         ir_str = str(Program)
         assert "tile.shls" in ir_str
 
-    def test_tile_maxs(self):
-        """Test tile.maxs operator - element-wise maximum of tile and scalar."""
+    def test_tile_maximums(self):
+        """Test tile.maximums operator - element-wise maximum of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1764,15 +1764,15 @@ class TestTileBitwiseArithmeticOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                tile_c: pl.Tile[[16, 16], pl.FP32] = pl.maxs(tile_a, 0.0)
+                tile_c: pl.Tile[[16, 16], pl.FP32] = pl.maximums(tile_a, 0.0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
-        assert "tile.maxs" in ir_str
+        assert "tile.maximums" in ir_str
 
-    def test_tile_mins(self):
-        """Test tile.mins operator - element-wise minimum of tile and scalar."""
+    def test_tile_minimums(self):
+        """Test tile.minimums operator - element-wise minimum of tile and scalar."""
 
         @pl.program
         class Program:
@@ -1783,12 +1783,12 @@ class TestTileBitwiseArithmeticOps:
                 output: pl.Tensor[[128, 128], pl.FP32],
             ) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                tile_c: pl.Tile[[16, 16], pl.FP32] = pl.mins(tile_a, 0.0)
+                tile_c: pl.Tile[[16, 16], pl.FP32] = pl.minimums(tile_a, 0.0)
                 result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
                 return result
 
         ir_str = str(Program)
-        assert "tile.mins" in ir_str
+        assert "tile.minimums" in ir_str
 
     def test_tile_shr(self):
         """Test tile.shr operator - element-wise bitwise right shift of two tiles."""

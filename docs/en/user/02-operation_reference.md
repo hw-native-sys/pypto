@@ -103,8 +103,8 @@ Transfer data between memory hierarchy levels.
 | `subs` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Subtract scalar |
 | `muls` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Multiply by scalar |
 | `divs` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Divide by scalar |
-| `maxs` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Max with scalar |
-| `mins` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Min with scalar |
+| `maximums` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Max with scalar |
+| `minimums` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | Min with scalar |
 
 ### Three-Input Arithmetic
 

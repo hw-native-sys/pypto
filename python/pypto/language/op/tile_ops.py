@@ -105,8 +105,8 @@ __all__ = [
     "shls",
     "shr",
     "shrs",
-    "maxs",
-    "mins",
+    "maximums",
+    "minimums",
     "prelu",
     "not_",
     "addc",
@@ -1640,7 +1640,7 @@ def shrs(lhs: Tile, rhs: int | Expr | Scalar) -> Tile:
     return Tile(expr=call_expr)
 
 
-def maxs(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
+def maximums(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise maximum of tile and scalar.
 
     Computes max(lhs, rhs) element-wise. Maps to the TMAXS hardware intrinsic.
@@ -1650,14 +1650,14 @@ def maxs(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
         rhs: Scalar value
 
     Returns:
-        Tile wrapping the maxs operation
+        Tile wrapping the maximums operation
     """
     rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
-    call_expr = _ir_ops.maxs(lhs.unwrap(), rhs_expr)
+    call_expr = _ir_ops.maximums(lhs.unwrap(), rhs_expr)
     return Tile(expr=call_expr)
 
 
-def mins(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
+def minimums(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
     """Element-wise minimum of tile and scalar.
 
     Computes min(lhs, rhs) element-wise. Maps to the TMINS hardware intrinsic.
@@ -1667,10 +1667,10 @@ def mins(lhs: Tile, rhs: int | float | Expr | Scalar) -> Tile:
         rhs: Scalar value
 
     Returns:
-        Tile wrapping the mins operation
+        Tile wrapping the minimums operation
     """
     rhs_expr = rhs.unwrap() if isinstance(rhs, Scalar) else rhs
-    call_expr = _ir_ops.mins(lhs.unwrap(), rhs_expr)
+    call_expr = _ir_ops.minimums(lhs.unwrap(), rhs_expr)
     return Tile(expr=call_expr)
 
 

@@ -98,8 +98,8 @@
 | `subs` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | 减标量 |
 | `muls` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | 乘标量 |
 | `divs` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | 除以标量 |
-| `maxs` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | 与标量取最大值 |
-| `mins` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | 与标量取最小值 |
+| `maximums` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | 与标量取最大值 |
+| `minimums` | `(lhs: Tile, rhs: int \| float \| Scalar) -> Tile` | 与标量取最小值 |
 
 ### 三输入算术
 

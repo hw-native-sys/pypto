@@ -863,8 +863,8 @@ def _register_ops() -> None:
         m[f"{prefix}.subs"] = _binop("-")
         m[f"{prefix}.muls"] = _binop("*")
         m[f"{prefix}.divs"] = _binop("/")
-        m[f"{prefix}.maxs"] = _torch_fn("maximum", 2)
-        m[f"{prefix}.mins"] = _torch_fn("minimum", 2)
+        m[f"{prefix}.maximums"] = _torch_fn("maximum", 2)
+        m[f"{prefix}.minimums"] = _torch_fn("minimum", 2)
         m[f"{prefix}.rems"] = _binop("%")
 
         # unary
