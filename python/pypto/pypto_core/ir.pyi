@@ -413,6 +413,13 @@ class TensorType(ShapedType):
     tensor_view: Final[TensorView | None]
     """Optional tensor view information."""
 
+    manual_dep: Final[bool]
+    """When True, the runtime skips OverlapMap dep tracking for this buffer.
+
+    The user is responsible for ordering (e.g. via disjoint writes, manual
+    scope, or pl.no_dep at call sites). Default False.
+    """
+
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
         """Create a tensor type without memory reference.
@@ -483,6 +490,44 @@ class TensorType(ShapedType):
             dtype: Element data type
             memref: Optional memory reference
             tensor_view: Optional tensor view information
+        """
+
+    @overload
+    def __init__(
+        self,
+        shape: Sequence[Expr],
+        dtype: DataType,
+        memref: MemRef | None,
+        tensor_view: TensorView | None,
+        manual_dep: bool,
+    ) -> None:
+        """Create a tensor type with manual_dep flag.
+
+        Args:
+            shape: Shape dimensions as Expr nodes
+            dtype: Element data type
+            memref: Optional memory reference
+            tensor_view: Optional tensor view information
+            manual_dep: When True, runtime skips OverlapMap dep tracking
+        """
+
+    @overload
+    def __init__(
+        self,
+        shape: Sequence[int],
+        dtype: DataType,
+        memref: MemRef | None,
+        tensor_view: TensorView | None,
+        manual_dep: bool,
+    ) -> None:
+        """Create a tensor type with constant shape and manual_dep flag.
+
+        Args:
+            shape: Shape dimensions as integers
+            dtype: Element data type
+            memref: Optional memory reference
+            tensor_view: Optional tensor view information
+            manual_dep: When True, runtime skips OverlapMap dep tracking
         """
 
 class TileView:

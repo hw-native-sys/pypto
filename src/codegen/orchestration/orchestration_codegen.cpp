@@ -147,7 +147,11 @@ std::string CoreTypeToSubmitPrefix(CoreType core_type) {
 std::string GenerateMakeTensorExternal(const std::string& var_name, int orch_index,
                                        const TensorTypePtr& tensor_type, const CodegenBase& codegen) {
   std::ostringstream oss;
-  oss << "    Tensor ext_" << var_name << " = from_tensor_arg(orch_args.tensor(" << orch_index << "));\n";
+  oss << "    Tensor ext_" << var_name << " = from_tensor_arg(orch_args.tensor(" << orch_index << ")";
+  if (tensor_type && tensor_type->manual_dep_) {
+    oss << ", /*manual_dep=*/true";
+  }
+  oss << ");\n";
   return oss.str();
 }
 

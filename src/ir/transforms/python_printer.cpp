@@ -398,6 +398,11 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
       oss << ", " << PrintMemRef(*tensor_type->memref_.value());
     }
 
+    // Manual-dep marker — emitted last so parser can strip from any tail position.
+    if (tensor_type->manual_dep_) {
+      oss << ", " << prefix_ << ".ManualDep";
+    }
+
     oss << "]";
     return oss.str();
   }

@@ -405,6 +405,7 @@ using ShapedTypePtr = std::shared_ptr<const ShapedType>;
 class TensorType : public ShapedType {
  public:
   std::optional<TensorView> tensor_view_;  ///< Optional tensor view information
+  bool manual_dep_ = false;                ///< Skip runtime OverlapMap dep tracking; user manages ordering
 
   /**
    * @brief Create a tensor type without memory reference or tensor view
@@ -469,6 +470,36 @@ class TensorType : public ShapedType {
              std::optional<TensorView> tensor_view)
       : ShapedType(dtype, shape, std::move(memref)), tensor_view_(std::move(tensor_view)) {}
 
+  /**
+   * @brief Create a tensor type with manual_dep flag (most-permissive shared_ptr form)
+   *
+   * @param shape Shape dimensions
+   * @param dtype Element data type
+   * @param memref Optional memory reference (shared pointer)
+   * @param tensor_view Optional tensor view information
+   * @param manual_dep When true, the runtime skips OverlapMap dep tracking for this buffer
+   */
+  TensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
+             std::optional<TensorView> tensor_view, bool manual_dep)
+      : ShapedType(dtype, std::move(shape), std::move(memref)),
+        tensor_view_(std::move(tensor_view)),
+        manual_dep_(manual_dep) {}
+
+  /**
+   * @brief Create a tensor type with manual_dep flag (constant shape form)
+   *
+   * @param shape Shape dimensions
+   * @param dtype Element data type
+   * @param memref Optional memory reference (shared pointer)
+   * @param tensor_view Optional tensor view information
+   * @param manual_dep When true, the runtime skips OverlapMap dep tracking for this buffer
+   */
+  TensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
+             std::optional<TensorView> tensor_view, bool manual_dep)
+      : ShapedType(dtype, shape, std::move(memref)),
+        tensor_view_(std::move(tensor_view)),
+        manual_dep_(manual_dep) {}
+
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::TensorType; }
   [[nodiscard]] std::string TypeName() const override { return "TensorType"; }
   [[nodiscard]] std::optional<MemorySpace> GetMemorySpace() const override { return MemorySpace::DDR; }
@@ -480,7 +511,8 @@ class TensorType : public ShapedType {
 
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(ShapedType::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&TensorType::tensor_view_, "tensor_view")));
+                          std::make_tuple(reflection::UsualField(&TensorType::tensor_view_, "tensor_view"),
+                                          reflection::UsualField(&TensorType::manual_dep_, "manual_dep")));
   }
 };
 

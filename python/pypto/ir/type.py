@@ -61,6 +61,7 @@ def _tensor_type_init_wrapper(
     dtype: DataType,
     memref: MemRef | None = None,
     tensor_view: _TensorViewBase | None = None,
+    manual_dep: bool = False,
 ):
     """Wrapped __init__ for TensorType that supports integer shapes, optional MemRef and TensorView.
 
@@ -70,10 +71,11 @@ def _tensor_type_init_wrapper(
         dtype: Element data type
         memref: Optional memory reference
         tensor_view: Optional tensor view information
+        manual_dep: When True, the runtime skips OverlapMap dep tracking for this buffer.
     """
     shape_exprs = _normalize_shape(shape)
-    # Always pass all 4 arguments to native constructor (memref and tensor_view can be None)
-    _native_tensor_type_init(self, shape_exprs, dtype, memref, tensor_view)
+    # Pass all 5 arguments to native constructor; the manual_dep overload is selected.
+    _native_tensor_type_init(self, shape_exprs, dtype, memref, tensor_view, manual_dep)
 
 
 def _tile_type_init_wrapper(

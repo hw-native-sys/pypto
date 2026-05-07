@@ -1049,6 +1049,16 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
         return false;
       }
     }
+    // Compare manual_dep flag (off-OverlapMap opt-out)
+    if (lhs_tensor->manual_dep_ != rhs_tensor->manual_dep_) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "TensorType manual_dep mismatch (" << lhs_tensor->manual_dep_
+            << " != " << rhs_tensor->manual_dep_ << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
     return true;
   } else if (auto lhs_tile = As<TileType>(lhs)) {
     auto rhs_tile = As<TileType>(rhs);

@@ -350,6 +350,17 @@ void BindIR(nb::module_& m) {
       nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
       "Create a tensor type with constant shape, optional memory reference and tensor view");
+  tensor_type_class.def(
+      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>,
+               bool>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
+      nb::arg("manual_dep") = false,
+      "Create a tensor type with manual_dep flag (skip OverlapMap dep tracking at runtime)");
+  tensor_type_class.def(nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>,
+                                 std::optional<TensorView>, bool>(),
+                        nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
+                        nb::arg("tensor_view") = nb::none(), nb::arg("manual_dep") = false,
+                        "Create a tensor type with constant shape and manual_dep flag");
   BindFields<TensorType>(tensor_type_class);
 
   // TileType - const shared_ptr
