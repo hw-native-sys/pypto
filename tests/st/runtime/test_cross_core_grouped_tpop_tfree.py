@@ -237,6 +237,12 @@ class TestCrossCoreGroupedTpopTfree:
                     [("a", a), ("b", b), ("output", output)],
                     {"output"},
                 )
+                if test_config.runtime_profiling:
+                    swimlane_dir = work_dir / "swimlane_data"
+                    swimlane_dir.mkdir(parents=True, exist_ok=True)
+                    output_prefix: str | None = str(swimlane_dir)
+                else:
+                    output_prefix = None
                 execute_on_device(
                     chip_callable,
                     orch_args,
@@ -245,7 +251,7 @@ class TestCrossCoreGroupedTpopTfree:
                     device_id,
                     block_dim=runtime_cfg.get("block_dim", 24),
                     aicpu_thread_num=runtime_cfg.get("aicpu_thread_num", 4),
-                    enable_profiling=test_config.runtime_profiling,
+                    output_prefix=output_prefix,
                 )
                 validate_golden(
                     outputs,
