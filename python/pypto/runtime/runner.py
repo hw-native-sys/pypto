@@ -44,6 +44,7 @@ from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase
 
 from .device_tensor import DeviceTensor
 
+
 def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
     """Load pre-computed golden outputs from ``data/out/{name}.pt`` files.
 
