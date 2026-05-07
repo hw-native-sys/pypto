@@ -676,8 +676,11 @@ def execute_compiled(
             )
 
     # Snapshot profiling state before execution
+    swimlane_dir: Path | None = None
     if runtime_profiling:
-        pre_run_logs, device_log_dir, pre_run_perf_files = _snapshot_profiling_state(platform, device_id)
+        swimlane_dir = work_dir / "swimlane_data"
+        swimlane_dir.mkdir(parents=True, exist_ok=True)
+        pre_run_logs, device_log_dir = _snapshot_profiling_state(platform, device_id)
 
     execute_on_device(
         chip_callable,
@@ -686,11 +689,10 @@ def execute_compiled(
         runtime_name,
         device_id,
         level=level,
-        enable_profiling=runtime_profiling,
+        output_prefix=str(swimlane_dir) if swimlane_dir is not None else None,
     )
 
     # Collect swimlane data after execution
     if runtime_profiling:
-        _collect_swimlane_data(
-            work_dir, platform, device_id, pre_run_logs, device_log_dir, pre_run_perf_files
-        )
+        assert swimlane_dir is not None
+        _collect_swimlane_data(swimlane_dir, platform, device_id, pre_run_logs, device_log_dir)
