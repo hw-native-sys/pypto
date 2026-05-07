@@ -643,6 +643,36 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionsAttr(
 }
 
 /**
+ * @brief Reserved attr key for per-arg ``ArgDirection::NoDep`` overrides
+ *
+ * The parser sets this when the user wraps a kernel-call argument in
+ * ``pl.no_dep(...)`` to mark a single arg position as no-dep without
+ * forcing the whole call to a manual dep mode. Value type is
+ * ``std::vector<int32_t>``: the argument indices to be set to NoDep.
+ *
+ * ``DeriveCallDirections`` reads this attr AFTER computing the per-arg
+ * directions and overwrites each indicated slot to ``ArgDirection::NoDep``,
+ * leaving every other position as the auto-derived direction.
+ */
+inline constexpr const char* kAttrArgDirectionOverrides = "arg_direction_overrides";
+
+/**
+ * Build a copy of ``attrs`` with ``kAttrArgDirectionOverrides`` set to
+ * ``no_dep_indices``. Replaces an existing entry if present; otherwise appends.
+ */
+inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAttr(
+    std::vector<std::pair<std::string, std::any>> attrs, std::vector<int32_t> no_dep_indices) {
+  for (auto& [k, v] : attrs) {
+    if (k == kAttrArgDirectionOverrides) {
+      v = std::move(no_dep_indices);
+      return attrs;
+    }
+  }
+  attrs.emplace_back(kAttrArgDirectionOverrides, std::move(no_dep_indices));
+  return attrs;
+}
+
+/**
  * @brief Expression to create a tuple from multiple expressions
  *
  * Takes a list of expressions and creates a tuple value.

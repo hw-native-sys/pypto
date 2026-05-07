@@ -109,7 +109,11 @@ class CallDirectionChecker : public IRVisitor {
       if (i >= effective.size()) continue;
       ParamDirection cd = effective[i];
       if (cd == ParamDirection::In && is_tensor) {
-        if (d != ArgDirection::Input) {
+        // Allow Input (default) or NoDep (caller-site override via pl.no_dep).
+        // Both are read-only at the runtime level; NoDep additionally skips
+        // OverlapMap dep tracking. NoDep is forbidden on Out/InOut params
+        // because it would suppress producer registration for a writer.
+        if (d != ArgDirection::Input && d != ArgDirection::NoDep) {
           std::ostringstream oss;
           oss << "tensor argument at index " << i << " has " << ArgDirectionToString(d)
               << " but callee param direction is In";

@@ -3395,7 +3395,10 @@ class ASTParser:
                     arg_directions = self._extract_arg_directions_from_attrs(method_name, call, span)
                     if arg_directions is None:
                         arg_directions = []
-                    args = [self.parse_expression(arg) for arg in call.args]
+                    # Detect ``pl.no_dep(...)`` wrappers at call-arg positions and
+                    # collect their indices for the arg_direction_overrides attr.
+                    unwrapped_args, no_dep_indices = self._strip_no_dep_wrappers(call.args)
+                    args = [self.parse_expression(arg) for arg in unwrapped_args]
                     return_types = func_obj.return_types if func_obj else []
                     if func_obj is not None and return_types:
                         return_types = ir.deduce_call_return_type(
@@ -3404,7 +3407,12 @@ class ASTParser:
                             return_types,
                         )
                     return self._make_call_with_return_type(
-                        gvar, args, return_types, span, arg_directions=arg_directions
+                        gvar,
+                        args,
+                        return_types,
+                        span,
+                        arg_directions=arg_directions,
+                        no_dep_indices=no_dep_indices,
                     )
                 else:
                     raise UndefinedVariableError(
@@ -3534,8 +3542,10 @@ class ASTParser:
         return_types: list[ir.Type],
         span: ir.Span,
         arg_directions: list[ir.ArgDirection] | None = None,
+        no_dep_indices: list[int] | None = None,
     ) -> ir.Expr:
-        """Create an ir.Call, attaching the return type and (optional) call-site directions.
+        """Create an ir.Call, attaching the return type, optional call-site directions
+        and optional per-arg ``NoDep`` overrides.
 
         Args:
             gvar: GlobalVar identifying the callee
@@ -3548,6 +3558,10 @@ class ASTParser:
                 with ``attrs['arg_directions']`` populated. When ``None`` or empty
                 the call is constructed without explicit directions (legacy form;
                 ``DeriveCallDirections`` will fill them in later).
+            no_dep_indices: Optional list of arg positions wrapped in ``pl.no_dep(...)``
+                at the call site. Stored as ``attrs['arg_direction_overrides']`` so
+                ``DeriveCallDirections`` can overwrite the auto-derived direction at
+                each indicated slot to ``ArgDirection.NoDep``.
         """
         if not return_types:
             return_type: ir.Type = ir.UnknownType()
@@ -3556,13 +3570,57 @@ class ASTParser:
         else:
             return_type = ir.TupleType(return_types)
 
+        attrs: dict[str, Any] | None = None
         if arg_directions:
             attrs = {"arg_directions": list(arg_directions)}
+        if no_dep_indices:
+            attrs = attrs or {}
+            attrs["arg_direction_overrides"] = list(no_dep_indices)
+
+        if attrs is not None:
             return ir.Call(gvar, args, {}, attrs, return_type, span)
 
         if not return_types:
             return ir.Call(gvar, args, span)
         return ir.Call(gvar, args, return_type, span)
+
+    @staticmethod
+    def _strip_no_dep_wrappers(
+        arg_nodes: list[ast.expr],
+    ) -> tuple[list[ast.expr], list[int]]:
+        """Detect ``pl.no_dep(arg)`` wrappers in a kernel-call argument list.
+
+        Returns a parallel list of unwrapped arg ASTs (so the inner expression
+        is what gets parsed into IR) plus the indices of arguments that were
+        wrapped — these become ``ArgDirection.NoDep`` overrides at codegen
+        time via ``DeriveCallDirections``.
+
+        Recognised forms (single positional arg only, no kwargs):
+            pl.no_dep(t)   — Attribute(value=Name("pl"), attr="no_dep")
+            no_dep(t)      — Name("no_dep")  (in case the user does
+                             ``from pypto.language import no_dep``)
+
+        A trailing ``pl.no_dep`` with multiple args or any keyword is NOT a
+        valid wrapper and is left in place; the parser will hit it later
+        as a normal call and surface a clear error.
+        """
+        unwrapped: list[ast.expr] = []
+        indices: list[int] = []
+        for i, raw in enumerate(arg_nodes):
+            if (
+                isinstance(raw, ast.Call)
+                and len(raw.args) == 1
+                and not raw.keywords
+                and (
+                    (isinstance(raw.func, ast.Attribute) and raw.func.attr == "no_dep")
+                    or (isinstance(raw.func, ast.Name) and raw.func.id == "no_dep")
+                )
+            ):
+                unwrapped.append(raw.args[0])
+                indices.append(i)
+            else:
+                unwrapped.append(raw)
+        return unwrapped, indices
 
     @staticmethod
     def _reject_keyword_args(

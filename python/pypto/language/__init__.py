@@ -93,7 +93,7 @@ from .op.system_ops import (
     tpush_to_aic,
     tpush_to_aiv,
 )
-from .op.tensor_ops import assemble, create_tensor, dim, expand_clone, full, scatter_update
+from .op.tensor_ops import assemble, create_tensor, dim, expand_clone, full, no_dep, scatter_update
 from .op.tensor_ops import ci as arange
 from .op.tile_ops import (
     MemRefType,
@@ -361,6 +361,7 @@ __all__ = [
     "assemble",
     "dim",
     "full",
+    "no_dep",
     "scatter_update",
     "arange",
     "ChunkConfig",

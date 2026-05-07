@@ -555,6 +555,25 @@ class CallDirectionMutator : public IRMutator {
       }
     }
 
+    // Apply user-specified per-arg overrides (e.g. pl.no_dep(...) at call site).
+    // Stored as a vector<int32_t> of arg indices that should resolve to NoDep,
+    // overriding the auto-derived direction at those slots.
+    for (const auto& [k, v] : call->attrs_) {
+      if (k != kAttrArgDirectionOverrides) continue;
+      const auto* indices = std::any_cast<std::vector<int32_t>>(&v);
+      if (!indices) {
+        INTERNAL_CHECK_SPAN(false, call->span_)
+            << "Internal error: " << kAttrArgDirectionOverrides << " attr must hold std::vector<int32_t>";
+      }
+      for (int32_t idx : *indices) {
+        INTERNAL_CHECK_SPAN(idx >= 0 && static_cast<size_t>(idx) < dirs.size(), call->span_)
+            << "Internal error: arg_direction_overrides index " << idx << " out of range for call to '"
+            << call->op_->name_ << "' (args size " << call->args_.size() << ")";
+        dirs[static_cast<size_t>(idx)] = ArgDirection::NoDep;
+      }
+      break;
+    }
+
     // Skip rewriting if directions are unchanged.
     if (call->GetArgDirections() == dirs) {
       return call;

@@ -143,17 +143,48 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
-      // Lists/tuples currently only used to carry `vector<ArgDirection>` (e.g. attrs["arg_directions"]).
-      // Reject non-ArgDirection sequences to avoid silently dropping metadata.
-      std::vector<ArgDirection> dirs;
-      for (auto elem : nb::cast<nb::sequence>(item.second)) {
-        if (!nb::isinstance<ArgDirection>(elem)) {
-          throw pypto::TypeError("Unsupported list element type for key: " + key +
-                                 " (expected ArgDirection)");
-        }
-        dirs.push_back(nb::cast<ArgDirection>(elem));
+      // Lists/tuples currently carry one of:
+      //   - vector<ArgDirection> for attrs["arg_directions"]
+      //   - vector<int32_t>      for attrs["arg_direction_overrides"]
+      //     (per-arg NoDep override indices set by ``pl.no_dep`` parser)
+      // Distinguish by element type. Reject empty sequences with a helpful error.
+      auto seq = nb::cast<nb::sequence>(item.second);
+      bool empty = true;
+      bool first_is_arg_direction = false;
+      bool first_is_int = false;
+      for (auto elem : seq) {
+        empty = false;
+        first_is_arg_direction = nb::isinstance<ArgDirection>(elem);
+        first_is_int = nb::isinstance<nb::int_>(elem) && !nb::isinstance<nb::bool_>(elem);
+        break;
       }
-      kwargs.emplace_back(key, std::move(dirs));
+      if (empty) {
+        // Default to empty vector<ArgDirection> for back-compat with existing
+        // arg_directions=[] usage.
+        kwargs.emplace_back(key, std::vector<ArgDirection>{});
+      } else if (first_is_arg_direction) {
+        std::vector<ArgDirection> dirs;
+        for (auto elem : seq) {
+          if (!nb::isinstance<ArgDirection>(elem)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key +
+                                   " (expected ArgDirection)");
+          }
+          dirs.push_back(nb::cast<ArgDirection>(elem));
+        }
+        kwargs.emplace_back(key, std::move(dirs));
+      } else if (first_is_int) {
+        std::vector<int32_t> idxs;
+        for (auto elem : seq) {
+          if (nb::isinstance<nb::bool_>(elem) || !nb::isinstance<nb::int_>(elem)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key + " (expected int)");
+          }
+          idxs.push_back(static_cast<int32_t>(nb::cast<int64_t>(elem)));
+        }
+        kwargs.emplace_back(key, std::move(idxs));
+      } else {
+        throw pypto::TypeError("Unsupported list element type for key: " + key +
+                               " (expected ArgDirection or int)");
+      }
     } else {
       throw pypto::TypeError("Unsupported kwarg type for key: " + key);
     }

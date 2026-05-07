@@ -960,3 +960,132 @@ class _RewriteUserCall(ir.IRMutator):
 
     def run(self, program):
         return self.visit_program(program)
+
+
+# ---------------------------------------------------------------------------
+# pl.no_dep override
+# ---------------------------------------------------------------------------
+
+
+class TestNoDepOverride:
+    """``pl.no_dep(arg)`` at a kernel call site sets ArgDirection.NoDep at that slot."""
+
+    @pl.program
+    class _Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            b: pl.Tensor[[16, 16], pl.FP32],
+            c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ):
+            return c
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            shared: pl.Tensor[[16, 16], pl.FP32],
+            c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ):
+            c = self.kernel(a, pl.no_dep(shared), c)
+            return c
+
+    def test_no_dep_at_marked_slot(self):
+        new_prog = passes.derive_call_directions()(self._Prog)
+        calls = _user_calls(new_prog)
+        assert len(calls) == 1
+        # 0=a (Input), 1=shared marked NoDep, 2=c (OutputExisting first writer at top level).
+        assert _dirs(calls[0]) == [
+            ir.ArgDirection.Input,
+            ir.ArgDirection.NoDep,
+            ir.ArgDirection.OutputExisting,
+        ]
+
+    def test_no_no_dep_keeps_input(self):
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                shared: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                c = self.kernel(a, shared, c)
+                return c
+
+        new_prog = passes.derive_call_directions()(P)
+        calls = _user_calls(new_prog)
+        assert len(calls) == 1
+        assert _dirs(calls[0]) == [
+            ir.ArgDirection.Input,
+            ir.ArgDirection.Input,
+            ir.ArgDirection.OutputExisting,
+        ]
+
+    def test_multiple_no_dep_slots(self):
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                return c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                c = self.kernel(pl.no_dep(a), pl.no_dep(b), c)
+                return c
+
+        new_prog = passes.derive_call_directions()(P)
+        calls = _user_calls(new_prog)
+        assert _dirs(calls[0]) == [
+            ir.ArgDirection.NoDep,
+            ir.ArgDirection.NoDep,
+            ir.ArgDirection.OutputExisting,
+        ]
+
+    def test_no_dep_on_inout_param_rejected(self):
+        # The verifier forbids NoDep on Out/InOut params: NoDep is a read-only
+        # opt-out that would suppress producer registration if applied to a
+        # writer. ``derive_call_directions()`` runs the property verifier as
+        # post-condition, so the override surfaces as a build-time failure.
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                return b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                b = self.kernel(a, pl.no_dep(b))
+                return b
+
+        with pytest.raises(Exception, match="NoDep|InOut"):  # noqa: PT011
+            passes.derive_call_directions()(P)
