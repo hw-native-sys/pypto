@@ -183,6 +183,7 @@ from .op.unified_ops import (
 from .optimizations import auto_chunk, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
+from .scope import manual_scope
 from .typing import DynVar, InOut, IntLike, ManualDep, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
@@ -361,6 +362,7 @@ __all__ = [
     "assemble",
     "dim",
     "full",
+    "manual_scope",
     "no_dep",
     "scatter_update",
     "arange",

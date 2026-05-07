@@ -154,15 +154,19 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       bool empty = true;
       bool first_is_arg_direction = false;
       bool first_is_int = false;
+      bool first_is_var = false;
       for (auto elem : seq) {
         empty = false;
         first_is_arg_direction = nb::isinstance<ArgDirection>(elem);
         first_is_int = nb::isinstance<nb::int_>(elem) && !nb::isinstance<nb::bool_>(elem);
+        first_is_var = nb::isinstance<Var>(elem);
         break;
       }
       if (empty) {
         if (key == kAttrArgDirectionOverrides) {
           kwargs.emplace_back(key, std::vector<int32_t>{});
+        } else if (key == kAttrManualDepEdges || key == kAttrUserManualDepEdges) {
+          kwargs.emplace_back(key, std::vector<VarPtr>{});
         } else {
           kwargs.emplace_back(key, std::vector<ArgDirection>{});
         }
@@ -190,9 +194,19 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
           idxs.push_back(static_cast<int32_t>(v));
         }
         kwargs.emplace_back(key, std::move(idxs));
+      } else if (first_is_var) {
+        // attrs["manual_dep_edges"] / attrs["user_manual_dep_edges"]: vector<VarPtr>
+        std::vector<VarPtr> vars;
+        for (auto elem : seq) {
+          if (!nb::isinstance<Var>(elem)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key + " (expected Var)");
+          }
+          vars.push_back(nb::cast<VarPtr>(elem));
+        }
+        kwargs.emplace_back(key, std::move(vars));
       } else {
         throw pypto::TypeError("Unsupported list element type for key: " + key +
-                               " (expected ArgDirection or int)");
+                               " (expected ArgDirection, int, or Var)");
       }
     } else {
       throw pypto::TypeError("Unsupported kwarg type for key: " + key);
@@ -780,6 +794,14 @@ void BindIR(nb::module_& m) {
           lst.append(nb::cast(i));
         }
         result[key.c_str()] = lst;
+      } else if (value.type() == typeid(std::vector<VarPtr>)) {
+        // Used by attrs["manual_dep_edges"] / attrs["user_manual_dep_edges"].
+        const auto& vars = AnyCast<std::vector<VarPtr>>(value, "converting to Python: " + key);
+        nb::list lst;
+        for (const auto& v : vars) {
+          lst.append(nb::cast(v));
+        }
+        result[key.c_str()] = lst;
       }
     }
     return result;
@@ -1093,6 +1115,7 @@ void BindIR(nb::module_& m) {
       .value("Cluster", ScopeKind::Cluster, "Cluster scope for co-scheduled AIC + AIV groups")
       .value("Hierarchy", ScopeKind::Hierarchy, "Distributed hierarchy scope (uses level/role)")
       .value("Spmd", ScopeKind::Spmd, "SPMD dispatch scope (core_num/sync_start)")
+      .value("Runtime", ScopeKind::Runtime, "Runtime orchestration scope (PTO2_SCOPE wrapper)")
       .export_values();
 
   // SplitMode enum
@@ -1161,6 +1184,16 @@ void BindIR(nb::module_& m) {
       nb::arg("core_num"), nb::arg("sync_start") = false, nb::arg("name_hint") = "", nb::arg("body"),
       nb::arg("span"), "Create an SPMD scope statement (int core_num is wrapped as ConstInt)");
   BindFields<SpmdScopeStmt>(spmd_scope_stmt_class);
+
+  // RuntimeScopeStmt
+  auto runtime_scope_stmt_class = nb::class_<RuntimeScopeStmt, ScopeStmt>(
+      ir, "RuntimeScopeStmt",
+      "Runtime orchestration scope: emits PTO2_SCOPE() (manual=False) or "
+      "PTO2_SCOPE(PTO2ScopeMode::MANUAL) (manual=True) wrappers in codegen");
+  runtime_scope_stmt_class.def(nb::init<bool, std::string, const StmtPtr&, const Span&>(),
+                               nb::arg("manual") = false, nb::arg("name_hint") = "", nb::arg("body"),
+                               nb::arg("span"), "Create a Runtime scope statement");
+  BindFields<RuntimeScopeStmt>(runtime_scope_stmt_class);
 
   // SeqStmts - const shared_ptr
   auto seq_stmts_class =

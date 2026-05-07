@@ -191,6 +191,7 @@ class StmtFunctor {
   virtual R VisitStmt_(const ClusterScopeStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const HierarchyScopeStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const SpmdScopeStmtPtr& op, Args... args) = 0;
+  virtual R VisitStmt_(const RuntimeScopeStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const SeqStmtsPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const EvalStmtPtr& op, Args... args) = 0;
   virtual R VisitStmt_(const BreakStmtPtr& op, Args... args) = 0;
@@ -219,6 +220,7 @@ R StmtFunctor<R, Args...>::VisitStmt(const StmtPtr& stmt, Args... args) {
   STMT_FUNCTOR_DISPATCH(ClusterScopeStmt);
   STMT_FUNCTOR_DISPATCH(HierarchyScopeStmt);
   STMT_FUNCTOR_DISPATCH(SpmdScopeStmt);
+  STMT_FUNCTOR_DISPATCH(RuntimeScopeStmt);
   STMT_FUNCTOR_DISPATCH(SeqStmts);
   STMT_FUNCTOR_DISPATCH(EvalStmt);
   STMT_FUNCTOR_DISPATCH(BreakStmt);

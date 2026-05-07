@@ -301,6 +301,9 @@ class ASTParser:
         # Track loop kinds for break/continue validation
         self._loop_kind_stack: list[str] = []
         self._scope_kind_stack: list[ir.ScopeKind] = []
+        # Depth of nested ``with pl.manual_scope():`` blocks. Used to gate the
+        # ``deps=[var]`` kwarg recognition on kernel calls.
+        self._manual_scope_depth: int = 0
 
         # Inline function expansion state
         self._inline_mode = False
@@ -2518,6 +2521,21 @@ class ASTParser:
             )
         return name_hint
 
+    def _parse_manual_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+        """Parse ``with pl.manual_scope():`` into a Runtime scope with manual=True."""
+        if context_expr.args or context_expr.keywords:
+            raise ParserSyntaxError(
+                "pl.manual_scope() does not accept arguments",
+                span=self.span_tracker.get_span(stmt),
+                hint="Use 'with pl.manual_scope():' without arguments",
+            )
+        span = self.span_tracker.get_span(stmt)
+        self._manual_scope_depth += 1
+        try:
+            self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=True)
+        finally:
+            self._manual_scope_depth -= 1
+
     def _parse_legacy_scope(
         self,
         stmt: ast.With,
@@ -2825,6 +2843,7 @@ class ASTParser:
         name_hint: str = "",
         core_num: "ir.Expr | None" = None,
         sync_start: bool | None = None,
+        manual: bool | None = None,
     ) -> None:
         """Build a scope statement from a with-statement body."""
         with self.builder.scope(
@@ -2836,6 +2855,7 @@ class ASTParser:
             name_hint=name_hint,
             core_num=core_num,
             sync_start=sync_start,
+            manual=manual,
         ):
             with self._scope_kind_context(scope_kind):
                 self.scope_manager.enter_scope("scope")
@@ -2936,6 +2956,11 @@ class ASTParser:
         if isinstance(context_expr, ast.Call):
             func = context_expr.func
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pl":
+                # Manual scope: with pl.manual_scope(): ...
+                if func.attr == "manual_scope":
+                    self._parse_manual_scope(stmt, context_expr)
+                    return
+
                 # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
                 if func.attr in _SCOPE_KIND_MAP:
                     self._parse_legacy_scope(stmt, context_expr, func.attr, _SCOPE_KIND_MAP)
@@ -3383,9 +3408,14 @@ class ASTParser:
                     gvar = self.global_vars[method_name]
                     span = self.span_tracker.get_span(call)
                     # ``attrs={"arg_directions": [...]}`` is the preferred way to
-                    # surface call-site directions on cross-function calls; any
-                    # other keyword argument is still rejected.
-                    self._reject_keyword_args(method_name, call, span, allowed={"attrs"})
+                    # surface call-site directions on cross-function calls.
+                    # Inside a ``with pl.manual_scope():`` block we additionally
+                    # accept ``deps=[var1, var2, ...]`` to attach explicit
+                    # dependency edges (Phase 4); other kwargs still rejected.
+                    allowed_kwargs = {"attrs"}
+                    if self._manual_scope_depth > 0:
+                        allowed_kwargs.add("deps")
+                    self._reject_keyword_args(method_name, call, span, allowed=allowed_kwargs)
 
                     # Validate argument count before parsing args to fail fast
                     func_obj = self.gvar_to_func.get(gvar)
@@ -3399,6 +3429,11 @@ class ASTParser:
                     # collect their indices for the arg_direction_overrides attr.
                     unwrapped_args, no_dep_indices = self._strip_no_dep_wrappers(call.args)
                     args = [self.parse_expression(arg) for arg in unwrapped_args]
+                    # Inside manual_scope, parse the optional ``deps=[var1, var2]`` kwarg
+                    # into a list of VarPtr for the explicit-edge attr.
+                    user_dep_vars: list[ir.Var] = []
+                    if self._manual_scope_depth > 0:
+                        user_dep_vars = self._parse_manual_scope_deps_kwarg(method_name, call, span)
                     return_types = func_obj.return_types if func_obj else []
                     if func_obj is not None and return_types:
                         return_types = ir.deduce_call_return_type(
@@ -3413,6 +3448,7 @@ class ASTParser:
                         span,
                         arg_directions=arg_directions,
                         no_dep_indices=no_dep_indices,
+                        user_dep_vars=user_dep_vars,
                     )
                 else:
                     raise UndefinedVariableError(
@@ -3535,6 +3571,39 @@ class ASTParser:
             hint="Use pl.*, pl.tensor.*, pl.tile.*, or pl.system.* operations",
         )
 
+    def _parse_manual_scope_deps_kwarg(self, method_name: str, call: ast.Call, span: ir.Span) -> list[ir.Var]:
+        """Extract the optional ``deps=[var1, var2]`` kwarg on a self.kernel(...) call.
+
+        Only valid inside a ``with pl.manual_scope():`` block. Each list entry
+        must be a tensor variable produced by a prior ``self.kernel(...)`` call
+        in the same manual scope. The parser cannot fully validate the
+        producer-Var relationship (that's a verifier job); it only enforces
+        that each entry resolves to an ``ir.Var``.
+
+        Returns an empty list when ``deps=`` is absent.
+        """
+        deps_kw = next((kw for kw in call.keywords if kw.arg == "deps"), None)
+        if deps_kw is None:
+            return []
+        if not isinstance(deps_kw.value, (ast.List, ast.Tuple)):
+            raise ParserTypeError(
+                f"'{method_name}' deps= must be a list/tuple of tensor variables",
+                span=span,
+                hint="Use deps=[other_tensor_var] where other_tensor_var was "
+                "assigned by a prior self.kernel(...) call in the same manual_scope.",
+            )
+        out: list[ir.Var] = []
+        for elt in deps_kw.value.elts:
+            expr = self.parse_expression(elt)
+            if not isinstance(expr, ir.Var):
+                raise ParserTypeError(
+                    f"'{method_name}' deps= entries must be tensor variables, got '{ast.unparse(elt)}'",
+                    span=span,
+                    hint="Each entry must be a name produced by a prior self.kernel(...) call.",
+                )
+            out.append(expr)
+        return out
+
     def _make_call_with_return_type(
         self,
         gvar: ir.GlobalVar,
@@ -3543,6 +3612,7 @@ class ASTParser:
         span: ir.Span,
         arg_directions: list[ir.ArgDirection] | None = None,
         no_dep_indices: list[int] | None = None,
+        user_dep_vars: list[ir.Var] | None = None,
     ) -> ir.Expr:
         """Create an ir.Call, attaching the return type, optional call-site directions
         and optional per-arg ``NoDep`` overrides.
@@ -3562,6 +3632,10 @@ class ASTParser:
                 at the call site. Stored as ``attrs['arg_direction_overrides']`` so
                 ``DeriveCallDirections`` can overwrite the auto-derived direction at
                 each indicated slot to ``ArgDirection.NoDep``.
+            user_dep_vars: Optional list of tensor Vars from a manual_scope
+                ``deps=[var1, var2]`` kwarg. Stored as
+                ``attrs['user_manual_dep_edges']`` so ``DeriveManualScopeDeps``
+                can merge them with auto-derived data-flow edges.
         """
         if not return_types:
             return_type: ir.Type = ir.UnknownType()
@@ -3576,6 +3650,9 @@ class ASTParser:
         if no_dep_indices:
             attrs = attrs or {}
             attrs["arg_direction_overrides"] = list(no_dep_indices)
+        if user_dep_vars:
+            attrs = attrs or {}
+            attrs["user_manual_dep_edges"] = list(user_dep_vars)
 
         if attrs is not None:
             return ir.Call(gvar, args, {}, attrs, return_type, span)

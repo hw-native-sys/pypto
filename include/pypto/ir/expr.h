@@ -673,6 +673,60 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
 }
 
 /**
+ * @brief Reserved attr key for user-supplied explicit dep edges set inside
+ * a ``with pl.manual_scope():`` block via the ``deps=[v1, v2, ...]`` kwarg.
+ *
+ * Value type: ``std::vector<VarPtr>`` referencing IR Vars produced by prior
+ * Call assignments in the same manual scope. ``DeriveManualScopeDeps``
+ * merges this list with auto-derived data-flow edges into the resolved
+ * ``kAttrManualDepEdges``; codegen only consumes the resolved attr.
+ */
+inline constexpr const char* kAttrUserManualDepEdges = "user_manual_dep_edges";
+
+/**
+ * Build a copy of ``attrs`` with ``kAttrUserManualDepEdges`` set to ``vars``.
+ * Replaces an existing entry if present; otherwise appends.
+ */
+inline std::vector<std::pair<std::string, std::any>> WithUserManualDepEdgesAttr(
+    std::vector<std::pair<std::string, std::any>> attrs, std::vector<VarPtr> vars) {
+  for (auto& [k, v] : attrs) {
+    if (k == kAttrUserManualDepEdges) {
+      v = std::move(vars);
+      return attrs;
+    }
+  }
+  attrs.emplace_back(kAttrUserManualDepEdges, std::move(vars));
+  return attrs;
+}
+
+/**
+ * @brief Reserved attr key for the resolved set of dep edges that codegen
+ * emits as ``params.add_dep(...)`` calls. Populated by ``DeriveManualScopeDeps``.
+ *
+ * Value type: ``std::vector<VarPtr>``, deduplicated by Var identity. Union of:
+ *   1. user-specified edges (kAttrUserManualDepEdges, set by parser)
+ *   2. data-flow-derived edges: tensor args referencing prior-call Vars,
+ *      EXCLUDING any arg slot whose ``arg_directions`` is ``NoDep``.
+ */
+inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
+
+/**
+ * Build a copy of ``attrs`` with ``kAttrManualDepEdges`` set to ``vars``.
+ * Replaces an existing entry if present; otherwise appends.
+ */
+inline std::vector<std::pair<std::string, std::any>> WithManualDepEdgesAttr(
+    std::vector<std::pair<std::string, std::any>> attrs, std::vector<VarPtr> vars) {
+  for (auto& [k, v] : attrs) {
+    if (k == kAttrManualDepEdges) {
+      v = std::move(vars);
+      return attrs;
+    }
+  }
+  attrs.emplace_back(kAttrManualDepEdges, std::move(vars));
+  return attrs;
+}
+
+/**
  * @brief Expression to create a tuple from multiple expressions
  *
  * Takes a list of expressions and creates a tuple value.

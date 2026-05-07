@@ -204,6 +204,13 @@ inline const PassProperties kCanonicalizeIOOrderProperties{
 inline const PassProperties kDeriveCallDirectionsProperties{.required = {IRProperty::SplitIncoreOrch},
                                                             .produced = {IRProperty::CallDirectionsResolved}};
 
+/// ``DeriveManualScopeDeps`` consumes ``CallDirectionsResolved`` (so it can
+/// identify NoDep slots) and writes the per-Call ``manual_dep_edges`` attr
+/// inside ``RuntimeScopeStmt(manual=true)`` regions. It does not introduce a
+/// new IRProperty — codegen reads the attr directly.
+inline const PassProperties kDeriveManualScopeDepsProperties{.required = {IRProperty::CallDirectionsResolved},
+                                                             .produced = {}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

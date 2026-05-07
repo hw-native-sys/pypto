@@ -261,8 +261,13 @@ class SSAConverter {
       // Then substitute within the Call's return type (e.g., TensorView.valid_shape)
       auto call = std::static_pointer_cast<const Call>(result);
       auto new_type = converter_.SubstType(call->GetType());
-      if (new_type.get() != call->GetType().get()) {
-        return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, new_type, call->span_);
+      auto new_attrs = converter_.SubstCallAttrs(call->attrs_);
+      bool type_changed = new_type.get() != call->GetType().get();
+      bool attrs_changed = new_attrs.has_value();
+      if (type_changed || attrs_changed) {
+        return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_,
+                                            attrs_changed ? std::move(*new_attrs) : call->attrs_,
+                                            type_changed ? new_type : call->GetType(), call->span_);
       }
       return result;
     }
@@ -285,6 +290,48 @@ class SSAConverter {
       out.push_back(ne);
     }
     return {std::move(out), changed};
+  }
+
+  /// Substitute Var references stored in Call attrs that hold
+  /// ``std::vector<VarPtr>`` (currently only the manual_dep_edges family).
+  /// Returns a rebuilt attrs vector when any Var was rewritten, otherwise
+  /// std::nullopt so the caller can keep the existing attrs vector verbatim.
+  std::optional<std::vector<std::pair<std::string, std::any>>> SubstCallAttrs(
+      const std::vector<std::pair<std::string, std::any>>& attrs) {
+    bool changed = false;
+    std::vector<std::pair<std::string, std::any>> out;
+    out.reserve(attrs.size());
+    for (const auto& [k, v] : attrs) {
+      if (k == kAttrUserManualDepEdges || k == kAttrManualDepEdges) {
+        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+        if (edges) {
+          std::vector<VarPtr> new_edges;
+          new_edges.reserve(edges->size());
+          bool any = false;
+          for (const auto& e : *edges) {
+            if (!e) {
+              new_edges.push_back(e);
+              continue;
+            }
+            auto it = cur_.find(e.get());
+            if (it != cur_.end() && it->second.get() != e.get()) {
+              new_edges.push_back(it->second);
+              any = true;
+            } else {
+              new_edges.push_back(e);
+            }
+          }
+          if (any) {
+            changed = true;
+            out.emplace_back(k, std::any(std::move(new_edges)));
+            continue;
+          }
+        }
+      }
+      out.emplace_back(k, v);
+    }
+    if (!changed) return std::nullopt;
+    return out;
   }
 
   TypePtr SubstType(const TypePtr& type) {
@@ -377,7 +424,7 @@ class SSAConverter {
     if (kind == ObjectKind::EvalStmt) return ConvertEval(As<EvalStmt>(s));
     if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::AutoInCoreScopeStmt ||
         kind == ObjectKind::ClusterScopeStmt || kind == ObjectKind::HierarchyScopeStmt ||
-        kind == ObjectKind::SpmdScopeStmt) {
+        kind == ObjectKind::SpmdScopeStmt || kind == ObjectKind::RuntimeScopeStmt) {
       return ConvertScope(As<ScopeStmt>(s));
     }
     return s;
@@ -884,6 +931,7 @@ class SSAConverter {
     if (auto cluster = As<ClusterScopeStmt>(op)) return rewrite(cluster);
     if (auto hier = As<HierarchyScopeStmt>(op)) return rewrite(hier);
     if (auto spmd = As<SpmdScopeStmt>(op)) return rewrite(spmd);
+    if (auto runtime_scope = As<RuntimeScopeStmt>(op)) return rewrite(runtime_scope);
     INTERNAL_UNREACHABLE_SPAN(op->span_) << "Unknown ScopeStmt subclass: " << op->TypeName();
     return op;
   }

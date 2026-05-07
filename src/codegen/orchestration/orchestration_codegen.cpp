@@ -272,16 +272,41 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
-    code_ << Indent() << "PTO2_SCOPE() {\n";
-    indent_ += 4;
+    // Inside a MANUAL scope, the runtime forbids nested AUTO scope, so we
+    // omit the implicit ``PTO2_SCOPE()`` wrapper around the loop body.
+    bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
+    if (emit_implicit_scope) {
+      code_ << Indent() << "PTO2_SCOPE() {\n";
+      indent_ += 4;
+    }
 
     auto saved = current_return_vars_;
     current_return_vars_.clear();
     VisitStmt(for_stmt->body_);
     current_return_vars_ = saved;
 
+    if (emit_implicit_scope) {
+      indent_ -= 4;
+      code_ << Indent() << "}\n";
+    }
     indent_ -= 4;
     code_ << Indent() << "}\n";
+  }
+
+  void VisitStmt_(const RuntimeScopeStmtPtr& scope) override {
+    code_ << Indent() << "PTO2_SCOPE(" << (scope->manual_ ? "PTO2ScopeMode::MANUAL" : "") << ") {\n";
+    indent_ += 4;
+    std::unordered_map<const Var*, int> saved_map;
+    if (scope->manual_) {
+      ++in_manual_scope_depth_;
+      saved_map = std::move(manual_task_id_map_);
+      manual_task_id_map_.clear();
+    }
+    VisitStmt(scope->body_);
+    if (scope->manual_) {
+      --in_manual_scope_depth_;
+      manual_task_id_map_ = std::move(saved_map);
+    }
     indent_ -= 4;
     code_ << Indent() << "}\n";
   }
@@ -323,7 +348,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
         } else {
           result_key = var_name;
         }
+        int task_idx_before = task_counter_;
         GenerateFunctionCallCode(call, result_key);
+
+        if (in_manual_scope_depth_ > 0 && task_counter_ > task_idx_before) {
+          // Bind the LHS Var to the just-emitted ``task_<n>`` so a downstream
+          // sibling call inside the same manual scope can ``add_dep`` on it.
+          manual_task_id_map_[assign->var_.get()] = task_idx_before;
+        }
 
         if (!As<TupleType>(call->GetType())) {
           if (effective_uses_.count(assign->var_.get())) {
@@ -768,8 +800,38 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void EmitTaskSubmitAndBind(const std::string& submit_expr) {
-    code_ << Indent() << submit_expr << ";\n";
+    if (in_manual_scope_depth_ > 0) {
+      // Manual scope: capture task id so later siblings can ``add_dep`` on it.
+      const std::string outs_var = "task_" + std::to_string(task_counter_) + "_outs";
+      const std::string id_var = "task_" + std::to_string(task_counter_);
+      code_ << Indent() << "TaskOutputTensors " << outs_var << " = " << submit_expr << ";\n";
+      code_ << Indent() << "PTO2TaskId " << id_var << " = " << outs_var << ".task_id();\n";
+    } else {
+      code_ << Indent() << submit_expr << ";\n";
+    }
     task_counter_++;
+  }
+
+  /// Emit ``params_t<n>.add_dep(task_<m>);`` for every entry resolved by the
+  /// ``DeriveManualScopeDeps`` pass. No-op outside a manual scope (auto scope
+  /// derives deps from data flow at runtime).
+  void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
+    if (in_manual_scope_depth_ == 0) return;
+    for (const auto& [k, v] : call->attrs_) {
+      if (k != kAttrManualDepEdges) continue;
+      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+      INTERNAL_CHECK_SPAN(edges != nullptr, call->span_)
+          << "Internal error: " << kAttrManualDepEdges << " attr must hold std::vector<VarPtr>";
+      for (const auto& edge : *edges) {
+        if (!edge) continue;
+        auto it = manual_task_id_map_.find(edge.get());
+        INTERNAL_CHECK_SPAN(it != manual_task_id_map_.end(), call->span_)
+            << "Internal error: manual_dep_edge var '" << edge->name_hint_
+            << "' has no producer task in current manual scope";
+        code_ << Indent() << task_var << ".add_dep(task_" << it->second << ");\n";
+      }
+      break;
+    }
   }
 
   static constexpr size_t kMaxAllocTensorsArgs = 16;
@@ -975,6 +1037,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
+    EmitManualDeps(call, task_var);
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
@@ -1007,6 +1070,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
     EmitLaunchSpec(ind, task_var, spmd_func);
+    EmitManualDeps(call, task_var);
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
@@ -1046,6 +1110,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
 
       EmitLaunchSpec(ind, task_var, launch_func);
+      EmitManualDeps(call, task_var);
 
       std::string submit_expr =
           CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
@@ -1092,6 +1157,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << third_id << "};\n";
 
     EmitLaunchSpec(ind, task_var, launch_func);
+    EmitManualDeps(call, task_var);
 
     std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
     EmitTaskSubmitAndBind(submit_expr);
@@ -1207,16 +1273,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void VisitScopedBranchBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
     indent_ += 4;
-    code_ << Indent() << "PTO2_SCOPE() {\n";
-    indent_ += 4;
+    bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
+    if (emit_implicit_scope) {
+      code_ << Indent() << "PTO2_SCOPE() {\n";
+      indent_ += 4;
+    }
 
     auto saved = current_return_vars_;
     current_return_vars_.assign(return_vars.begin(), return_vars.end());
     VisitStmt(body);
     current_return_vars_ = saved;
 
-    indent_ -= 4;
-    code_ << Indent() << "}\n";
+    if (emit_implicit_scope) {
+      indent_ -= 4;
+      code_ << Indent() << "}\n";
+    }
     indent_ -= 4;
   }
 
@@ -1265,6 +1336,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::vector<VarPtr> current_return_vars_;
   int task_counter_ = 0;
   int alloc_counter_ = 0;
+  /// Depth of nested ``RuntimeScopeStmt(manual=true)``. While > 0, the codegen
+  /// suppresses the implicit ``PTO2_SCOPE()`` wrapper around ForStmt/IfStmt
+  /// bodies (the runtime forbids nesting AUTO scope inside MANUAL).
+  int in_manual_scope_depth_ = 0;
+  /// Map from a producer ``Var`` (LHS of an AssignStmt whose RHS is a kernel
+  /// Call inside the current manual scope) to the integer task index assigned
+  /// by ``EmitTaskSubmitAndBind``. Cleared on entry to each manual scope so
+  /// task ids never leak across scopes.
+  std::unordered_map<const Var*, int> manual_task_id_map_;
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;
   std::unordered_set<const Var*> declared_var_ptrs_;

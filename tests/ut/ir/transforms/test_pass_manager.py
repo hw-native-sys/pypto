@@ -53,6 +53,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "AllocateMemoryAddr",
     "FuseCreateAssembleToSlice",
     "DeriveCallDirections",
+    "DeriveManualScopeDeps",
     "Simplify",
 ]
 
@@ -82,6 +83,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "AllocateMemoryAddr",
     "FuseCreateAssembleToSlice",
     "DeriveCallDirections",
+    "DeriveManualScopeDeps",
     "Simplify",
 ]
 

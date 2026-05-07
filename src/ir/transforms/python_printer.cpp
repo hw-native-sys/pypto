@@ -246,6 +246,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const ClusterScopeStmtPtr& op) override;
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override;
   void VisitStmt_(const SpmdScopeStmtPtr& op) override;
+  void VisitStmt_(const RuntimeScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
@@ -1240,6 +1241,20 @@ void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
     stream_ << GetIndent();
     PrintLeadingComments(stmt);
     VisitStmt(stmt);
+  }
+}
+
+void IRPythonPrinter::VisitStmt_(const RuntimeScopeStmtPtr& op) {
+  // Only the manual=true form has a DSL surface today.
+  // Auto scope (manual=false) is reserved; printer falls back to a
+  // transparent body emit so that round-trip never fails on legacy IR.
+  if (op->manual_) {
+    stream_ << "with " << prefix_ << ".manual_scope():\n";
+    IncreaseIndent();
+    PrintStmtBlock(op->body_);
+    DecreaseIndent();
+  } else {
+    PrintStmtBlock(op->body_);
   }
 }
 

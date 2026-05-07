@@ -262,6 +262,7 @@ class IRBuilder:
         name_hint: str = "",
         core_num: int | ir.Expr | None = None,
         sync_start: bool | None = None,
+        manual: bool | None = None,
     ) -> Iterator["ScopeBuilder"]:
         """Context manager for building scope statements.
 
@@ -292,7 +293,7 @@ class IRBuilder:
 
         core_num_expr = _normalize_expr(core_num, begin_span) if core_num is not None else None
         self._builder.begin_scope(
-            scope_kind, begin_span, level, role, split, name_hint, core_num_expr, sync_start
+            scope_kind, begin_span, level, role, split, name_hint, core_num_expr, sync_start, manual
         )
         builder_obj = ScopeBuilder(self)
         try:

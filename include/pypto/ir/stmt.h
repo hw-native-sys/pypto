@@ -162,7 +162,8 @@ enum class ScopeKind : uint8_t {
   AutoInCore = 1,  ///< AutoInCore scope for automatic chunking
   Cluster = 2,     ///< Cluster scope for co-scheduled AIC + AIV groups
   Hierarchy = 3,   ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
-  Spmd = 4         ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
+  Spmd = 4,        ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
+  Runtime = 5      ///< Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)
 };
 
 /**
@@ -256,7 +257,7 @@ inline ForKind StringToForKind(const std::string& str) {
 /**
  * @brief Convert ScopeKind to string
  * @param kind The scope kind
- * @return String representation ("InCore", "AutoInCore", "Cluster", "Hierarchy", or "Spmd")
+ * @return String representation ("InCore", "AutoInCore", "Cluster", "Hierarchy", "Spmd", or "Runtime")
  */
 inline std::string ScopeKindToString(ScopeKind kind) {
   switch (kind) {
@@ -270,6 +271,8 @@ inline std::string ScopeKindToString(ScopeKind kind) {
       return "Hierarchy";
     case ScopeKind::Spmd:
       return "Spmd";
+    case ScopeKind::Runtime:
+      return "Runtime";
   }
   throw pypto::TypeError("Unknown ScopeKind");
 }
@@ -882,6 +885,46 @@ class SpmdScopeStmt : public ScopeStmt {
 };
 
 using SpmdScopeStmtPtr = std::shared_ptr<const SpmdScopeStmt>;
+
+/**
+ * @brief Runtime orchestration scope: a PTO2_SCOPE wrapper at codegen.
+ *
+ * Marks a region wrapped by the simpler runtime's PTO2_SCOPE block. The
+ * ``manual_`` flag picks between two modes:
+ *   - manual_ = false → PTO2_SCOPE()                       (auto-dep via TensorMap)
+ *   - manual_ = true  → PTO2_SCOPE(PTO2ScopeMode::MANUAL)  (no auto-dep, compiler emits add_dep)
+ *
+ * Inside a manual=true region, the ``DeriveManualScopeDeps`` pass walks
+ * SSA data flow plus user-supplied ``deps=[...]`` on each kernel call to
+ * compute explicit dependency edges (``Call.attrs[manual_dep_edges]``).
+ * Codegen reads those edges and emits ``params.add_dep(...)`` calls.
+ *
+ * The runtime forbids:
+ *   - Manual scope nested inside another manual scope
+ *   - Auto scope nested inside a manual scope (codegen suppresses the
+ *     implicit ``PTO2_SCOPE()`` wrap on ForStmt/IfStmt bodies inside manual)
+ */
+class RuntimeScopeStmt : public ScopeStmt {
+ public:
+  RuntimeScopeStmt(bool manual, std::string name_hint, StmtPtr body, Span span,
+                   std::vector<std::string> leading_comments = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+        manual_(manual) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::RuntimeScopeStmt; }
+  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Runtime; }
+  [[nodiscard]] std::string TypeName() const override { return "RuntimeScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&RuntimeScopeStmt::manual_, "manual")));
+  }
+
+ public:
+  bool manual_;  ///< true = MANUAL scope; false = AUTO scope (default PTO2_SCOPE())
+};
+
+using RuntimeScopeStmtPtr = std::shared_ptr<const RuntimeScopeStmt>;
 
 /**
  * @brief Sequence of statements

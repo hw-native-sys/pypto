@@ -567,6 +567,35 @@ Pass FuseCreateAssembleToSlice();
 Pass DeriveCallDirections();
 
 /**
+ * @brief Resolve manual-dependency edges inside ``RuntimeScopeStmt(manual=true)``.
+ *
+ * For every kernel ``Call`` inside a manual scope, populate
+ * ``Call.attrs[manual_dep_edges]`` (vector<VarPtr>) as the de-duplicated
+ * union of:
+ *   1. user-specified edges from ``Call.attrs[user_manual_dep_edges]``
+ *      (set by the parser when the user writes
+ *      ``self.kernel(..., deps=[var1, var2])``);
+ *   2. data-flow edges: every tensor argument that resolves to a Var
+ *      previously assigned by a Call in the same manual scope, EXCLUDING
+ *      arg slots whose resolved direction is ``ArgDirection::NoDep``
+ *      (so ``pl.no_dep(x)`` correctly suppresses the auto edge).
+ *
+ * Codegen reads only ``manual_dep_edges`` and emits
+ * ``params.add_dep(task_<emit_name>, ...)`` calls before the
+ * ``rt_submit_*_task(...)`` line.
+ *
+ * Hard caps:
+ *   - The runtime forbids more than 16 explicit dep edges per submit
+ *     (``PTO2_MAX_EXPLICIT_DEPS``). The pass diagnoses this case as an
+ *     error so the user refactors before codegen sees an unrepresentable IR.
+ *
+ * Requirements:
+ *   - DeriveCallDirections must run first (``arg_directions`` populated
+ *     so we can identify NoDep slots).
+ */
+Pass DeriveManualScopeDeps();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws

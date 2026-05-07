@@ -2788,5 +2788,114 @@ class TestNoOpAliasSkip:
         assert "rt_submit_aiv_task" in code, f"task submission missing from form C output. Code:\n{code}"
 
 
+class TestManualScopeCodegen:
+    """Codegen for ``with pl.manual_scope():`` and the ``deps=[var]`` Call kwarg."""
+
+    @pytest.fixture(autouse=True)
+    def _no_roundtrip_verification(self):
+        """The python_printer doesn't surface ``Call.attrs['manual_dep_edges']``,
+        so the pipeline's print -> parse -> assert_structural_equal roundtrip
+        fails after DeriveManualScopeDeps. Property verification still runs.
+        """
+        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+        instruments: list[_core_passes.PassInstrument] = [
+            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with _core_passes.PassContext(instruments):
+            yield
+
+    def test_manual_scope_emits_manual_pto2_scope_and_task_id_capture(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a = self.k1(x)
+                    b = self.k2(a)
+                return b
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code
+        # Every kernel submit inside a manual scope captures task id state.
+        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code
+        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code
+        assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code
+        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code
+        # Auto-derived data-flow edge: k2 consumes `a`, producer of task 0.
+        assert "params_t1.add_dep(task_0);" in code
+
+    def test_manual_scope_emits_explicit_user_deps(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k3(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a = self.k1(x)
+                    b = self.k2(x)
+                    # Explicit deps even though `c` doesn't consume `a`/`b` data.
+                    c = self.k3(x, deps=[a, b])
+                return c
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "params_t2.add_dep(task_0);" in code
+        assert "params_t2.add_dep(task_1);" in code
+
+    def test_auto_scope_does_not_emit_task_id_capture(self):
+        """Sanity: auto scope keeps the legacy fire-and-forget submit."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a = self.k1(x)
+                return a
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+        assert "PTO2ScopeMode::MANUAL" not in code
+        assert "TaskOutputTensors task_0_outs" not in code
+        assert "add_dep(task_" not in code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

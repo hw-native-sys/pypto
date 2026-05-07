@@ -292,13 +292,15 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 
 void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level,
                            std::optional<Role> role, std::optional<SplitMode> split, std::string name_hint,
-                           ExprPtr core_num, std::optional<bool> sync_start) {
+                           ExprPtr core_num, std::optional<bool> sync_start, std::optional<bool> manual) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
   CHECK(scope_kind != ScopeKind::Hierarchy || level.has_value())
       << "Hierarchy scope requires a level at " << span.to_string();
+  CHECK(scope_kind != ScopeKind::Runtime || manual.has_value())
+      << "Runtime scope requires manual flag at " << span.to_string();
   context_stack_.push_back(std::make_unique<ScopeContext>(
-      scope_kind, span, level, role, split, std::move(name_hint), std::move(core_num), sync_start));
+      scope_kind, span, level, role, split, std::move(name_hint), std::move(core_num), sync_start, manual));
 }
 
 StmtPtr IRBuilder::EndScope(const Span& end_span) {
@@ -323,6 +325,7 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   auto name_hint = scope_ctx->GetNameHint();
   auto core_num = scope_ctx->GetCoreNum();
   auto sync_start = scope_ctx->GetSyncStart();
+  auto manual = scope_ctx->GetManual();
 
   // Create scope statement before popping context so that if construction throws
   // (e.g. validation CHECK fails) the builder state stays consistent.
@@ -348,6 +351,11 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
       CHECK(core_num != nullptr) << "Spmd scope requires core_num";
       scope_stmt = std::make_shared<const SpmdScopeStmt>(core_num, sync_start.value_or(false),
                                                          std::move(name_hint), body, combined_span);
+      break;
+    case ScopeKind::Runtime:
+      CHECK(manual.has_value()) << "Runtime scope requires manual flag";
+      scope_stmt =
+          std::make_shared<const RuntimeScopeStmt>(*manual, std::move(name_hint), body, combined_span);
       break;
   }
   // Safety net: every ScopeKind value above must populate scope_stmt. The switch has

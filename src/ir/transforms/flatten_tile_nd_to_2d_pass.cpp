@@ -1293,6 +1293,8 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         result.push_back(rewrite(hier));
       } else if (auto spmd = As<SpmdScopeStmt>(stmt)) {
         result.push_back(rewrite(spmd));
+      } else if (auto runtime_scope = As<RuntimeScopeStmt>(stmt)) {
+        result.push_back(rewrite(runtime_scope));
       } else {
         INTERNAL_UNREACHABLE_SPAN(scope->span_) << "Unknown ScopeStmt subclass: " << scope->TypeName();
       }

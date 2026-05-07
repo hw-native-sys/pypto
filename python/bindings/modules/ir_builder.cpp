@@ -243,6 +243,7 @@ void BindIRBuilder(nb::module_& m) {
       .def("begin_scope", &IRBuilder::BeginScope, nb::arg("scope_kind"), nb::arg("span"),
            nb::arg("level") = nb::none(), nb::arg("role") = nb::none(), nb::arg("split") = nb::none(),
            nb::arg("name_hint") = "", nb::arg("core_num") = nb::none(), nb::arg("sync_start") = nb::none(),
+           nb::arg("manual") = nb::none(),
            "Begin building a scope statement.\n\n"
            "Creates a new scope context. Must be closed with end_scope().\n\n"
            "Args:\n"
@@ -253,7 +254,9 @@ void BindIRBuilder(nb::module_& m) {
            "    split: Split mode for cross-core transfer (default: None)\n"
            "    name_hint: User-provided scope name hint (default: empty, auto-generated)\n"
            "    core_num: SPMD block count expression (default: None)\n"
-           "    sync_start: Require sync-start for SPMD dispatch (default: None)\n\n"
+           "    sync_start: Require sync-start for SPMD dispatch (default: None)\n"
+           "    manual: Required for ScopeKind.Runtime — True for MANUAL scope, "
+           "False for AUTO (default: None)\n\n"
            "Raises:\n"
            "    RuntimeError: If not inside a function or loop")
       .def("end_scope", &IRBuilder::EndScope, nb::arg("end_span"),

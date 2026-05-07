@@ -11,10 +11,12 @@
 
 #include "pypto/ir/transforms/base/mutator.h"
 
+#include <any>
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -312,11 +314,52 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   auto new_type = RemapTypeViaVisitor(op->GetType());
   bool type_changed = (new_type.get() != op->GetType().get());
 
-  if (!args_changed && !type_changed) return op;
-  // Preserve attrs_ across mutation: callers of the base mutator should not lose
-  // compiler-internal metadata (e.g., arg_directions) when only argument expressions change.
-  return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, op->attrs_,
-                                      std::move(new_type), op->span_);
+  // Var-typed attrs (manual_dep_edges family) reference Vars defined elsewhere
+  // in the IR; if those Vars get remapped (e.g. a fresh Var minted by the base
+  // ``VisitExpr_(VarPtr)`` because a type field embedded another Var), the
+  // attr entries must be rewritten too — otherwise they dangle to the
+  // pre-mutation Var pointer and downstream codegen / lookup fails.
+  std::vector<std::pair<std::string, std::any>> new_attrs;
+  bool attrs_changed = false;
+  new_attrs.reserve(op->attrs_.size());
+  for (const auto& [k, v] : op->attrs_) {
+    if (k == kAttrUserManualDepEdges || k == kAttrManualDepEdges) {
+      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+      if (edges) {
+        std::vector<VarPtr> new_edges;
+        new_edges.reserve(edges->size());
+        bool any_changed = false;
+        for (const auto& e : *edges) {
+          if (!e) {
+            new_edges.push_back(e);
+            continue;
+          }
+          auto remapped = ExprFunctor<ExprPtr>::VisitExpr(e);
+          auto remapped_var = As<Var>(remapped);
+          if (!remapped_var) {
+            // Should not happen — Var visits return Var. Fall back to original.
+            new_edges.push_back(e);
+            continue;
+          }
+          if (remapped_var.get() != e.get()) {
+            any_changed = true;
+          }
+          new_edges.push_back(std::move(remapped_var));
+        }
+        if (any_changed) {
+          attrs_changed = true;
+          new_attrs.emplace_back(k, std::any(std::move(new_edges)));
+          continue;
+        }
+      }
+    }
+    new_attrs.emplace_back(k, v);
+  }
+
+  if (!args_changed && !type_changed && !attrs_changed) return op;
+  return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_,
+                                      attrs_changed ? std::move(new_attrs) : op->attrs_, std::move(new_type),
+                                      op->span_);
 }
 
 ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {
@@ -770,6 +813,19 @@ StmtPtr IRMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
   if (new_core_num.get() != op->core_num_.get() || new_body.get() != op->body_.get()) {
     auto result = MutableCopy(op);
     result->core_num_ = std::move(new_core_num);
+    result->body_ = std::move(new_body);
+    return result;
+  }
+  return op;
+}
+
+StmtPtr IRMutator::VisitStmt_(const RuntimeScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "RuntimeScopeStmt has null body";
+  auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
+  INTERNAL_CHECK_SPAN(new_body, op->span_) << "RuntimeScopeStmt body mutated to null";
+
+  if (new_body.get() != op->body_.get()) {
+    auto result = MutableCopy(op);
     result->body_ = std::move(new_body);
     return result;
   }

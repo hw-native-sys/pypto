@@ -1935,6 +1935,9 @@ class ScopeKind(enum.Enum):
     Spmd = 4
     """SPMD dispatch scope (core_num/sync_start on ScopeStmt)."""
 
+    Runtime = 5
+    """Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)."""
+
 class SplitMode(enum.Enum):
     """Split mode for cross-core data transfer."""
 
@@ -2047,6 +2050,29 @@ class SpmdScopeStmt(ScopeStmt):
         Accepts either a Python ``int`` (auto-wrapped as ``ConstInt``) or any
         ``Expr`` of integer type.
         """
+
+class RuntimeScopeStmt(ScopeStmt):
+    """Runtime orchestration scope: a PTO2_SCOPE wrapper at codegen.
+
+    The ``manual`` flag picks between two emission modes:
+      - ``manual=False`` → ``PTO2_SCOPE() { ... }`` (auto-dep via TensorMap)
+      - ``manual=True``  → ``PTO2_SCOPE(PTO2ScopeMode::MANUAL) { ... }``
+        (no auto-dep; compiler emits explicit ``add_dep`` from SSA data flow
+        plus user-supplied ``deps=[...]`` on each kernel call)
+    """
+
+    manual: Final[bool]
+    """True = MANUAL scope; False = AUTO scope (default)."""
+
+    def __init__(
+        self,
+        manual: bool = False,
+        name_hint: str = "",
+        *,
+        body: Stmt,
+        span: Span,
+    ) -> None:
+        """Create a Runtime scope statement."""
 
 class SeqStmts(Stmt):
     """Sequence of statements: a sequence of statements."""

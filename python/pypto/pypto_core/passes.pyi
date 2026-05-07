@@ -458,6 +458,22 @@ def derive_call_directions() -> Pass:
     auto-verified by the pipeline.
     """
 
+def derive_manual_scope_deps() -> Pass:
+    """Create a pass that resolves manual-scope task dependency edges.
+
+    For every kernel ``Call`` inside a ``RuntimeScopeStmt(manual=True)``, writes
+    ``Call.attrs['manual_dep_edges']`` as the union of:
+
+    1. user-supplied edges from ``Call.attrs['user_manual_dep_edges']``
+       (parser-set when the DSL passes ``deps=[var, ...]``);
+    2. data-flow edges: every tensor argument whose ``ArgDirection`` is not
+       ``NoDep`` and whose Var resolves to a producer ``AssignStmt`` earlier in
+       the same manual scope.
+
+    The resolved edge count is capped at 16 (mirroring the runtime's
+    ``PTO2_MAX_EXPLICIT_DEPS``); exceeding the cap raises ``ValueError``.
+    """
+
 def flatten_call_expr() -> Pass:
     """Create a pass that flattens nested call expressions."""
 
@@ -646,6 +662,7 @@ __all__ = [
     "inline_functions",
     "normalize_stmt_structure",
     "derive_call_directions",
+    "derive_manual_scope_deps",
     "NestedCallErrorType",
     "UseAfterDefErrorType",
     "DiagnosticSeverity",

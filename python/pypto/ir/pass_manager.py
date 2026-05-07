@@ -159,6 +159,7 @@ class PassManager:
             ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
             ("DeriveCallDirections", lambda: passes.derive_call_directions()),
+            ("DeriveManualScopeDeps", lambda: passes.derive_manual_scope_deps()),
             ("Simplify", lambda: passes.simplify()),
         ]
         cls._strategy_passes = {
