@@ -10,7 +10,7 @@
 """Swimlane JSON output validation tests.
 
 Runs matmul 64x64x64 (PTO backend) with profiling and validates the
-generated l2_perf_records_*.json in build_output/<run_dir>/swimlane_data/.
+generated l2_perf_records.json in build_output/<run_dir>/swimlane_data/.
 
 Requires ``--runtime-profiling`` to be set; pass ``--platform=a2a3`` (or
 ``a5``) to switch the target.  All tests in this file are skipped
@@ -94,14 +94,14 @@ def swimlane_file(test_runner) -> Path:
     if not test_runner.config.runtime_profiling:
         pytest.skip("pass --runtime-profiling to run swimlane tests")
 
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records_*.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records.json"))
 
     result = test_runner.run(_MatmulPTO())
     assert result.passed, f"Matmul execution failed: {result.error}"
 
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records_*.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records.json"))
     new_files = after - before
-    assert new_files, "No l2_perf_records_*.json was generated in build_output/*/swimlane_data/"
+    assert new_files, "No l2_perf_records.json was generated in build_output/*/swimlane_data/"
 
     return max(new_files, key=lambda p: p.stat().st_mtime)
 
@@ -115,7 +115,7 @@ class TestSwimlaneOutput:
     """Validate the structure and content of perf_swimlane_*.json."""
 
     def test_file_generated(self, swimlane_file: Path):
-        """A l2_perf_records_*.json file is created in build_output/*/swimlane_data/."""
+        """A l2_perf_records.json file is created in build_output/*/swimlane_data/."""
         assert swimlane_file.exists(), f"Swimlane file not found: {swimlane_file}"
 
     def test_top_level_structure(self, swimlane_data: dict):
