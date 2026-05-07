@@ -640,7 +640,14 @@ def execute_compiled(
     chip_callable, runtime_name = compile_and_assemble(work_dir, platform, pto_isa_commit)
 
     # Build orch args from user-provided tensors and scalars.
+    #
+    # simpler's ChipStorageTaskArgs requires all add_tensor() calls to precede
+    # any add_scalar() call. Codegen already addresses tensors and scalars from
+    # independent pools (orch_args.tensor(i) / orch_args.scalar(i)), so the
+    # binary ABI is order-agnostic across pools. Dispatch in two passes so the
+    # user-facing source order does not have to obey simpler's constraint.
     orch_args = ChipStorageTaskArgs()
+    # Pass 1: tensors (torch.Tensor + DeviceTensor).
     for i, arg in enumerate(args):
         if isinstance(arg, torch.Tensor):
             if not arg.is_contiguous():
@@ -668,12 +675,16 @@ def execute_compiled(
                 )
             )
         elif isinstance(arg, _SimpleCData):
-            orch_args.add_scalar(scalar_to_uint64(arg))
+            continue  # handled in pass 2
         else:
             raise TypeError(
                 f"Argument at position {i} must be torch.Tensor, DeviceTensor or "
                 f"ctypes scalar, got {type(arg).__name__}"
             )
+    # Pass 2: scalars.
+    for arg in args:
+        if isinstance(arg, _SimpleCData):
+            orch_args.add_scalar(scalar_to_uint64(arg))
 
     # Snapshot profiling state before execution
     swimlane_dir: Path | None = None
