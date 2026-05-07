@@ -218,10 +218,9 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   //
   //  1. Layout tag (ND/DN). Only the canonical trailing-two-dim swap can be
   //     described by toggling the tag — non-trailing transposes leave the tag
-  //     unchanged because ND/DN only describes the trailing two dims. PTOAS
-  //     reads this tag and EmitMakeTensorViews / EmitTileLoadPTO use it to
-  //     drive the implicit "swap last two dims" path used by
-  //     tile.load(transpose=True) sources (see ResolveTransposeLayout).
+  //     unchanged because ND/DN only describes the trailing two dims. Downstream
+  //     passes use this tag to distinguish the canonical trailing transpose from
+  //     non-trailing stride-only views.
   //
   //  2. Explicit strides. tensor.transpose at orchestration level lowers to
   //     runtime Tensor::transpose, a metadata-only swap of shapes / offsets;
@@ -232,13 +231,13 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   //     the actual memory layout instead of fabricating column-major strides
   //     from the swapped shape (which would be wrong for a row-major source).
   //
-  // Why both: the layout tag is needed for PTOAS contracts (it expects DN on
-  // any trailing-transposed view at the kernel boundary), while the explicit
-  // strides are needed because ND/DN alone cannot distinguish "source data is
-  // column-major in the IR shape" (matmul's tile.load(transpose=True) path)
-  // from "source data is row-major and we want a transposed view of it"
-  // (this op's path). The codegen disambiguates by checking
-  // tensor_view_->stride: if it's non-empty, skip the implicit DN swap.
+  // Why both: the layout tag preserves the IR-level trailing-transpose fact,
+  // while the explicit strides are needed because ND/DN alone cannot
+  // distinguish "source data is column-major in the IR shape" (matmul's
+  // tile.load(transpose=True) path) from "source data is row-major and we want
+  // a transposed view of it" (this op's path). The codegen disambiguates by
+  // checking tensor_view_->stride: if it's non-empty, skip the implicit DN swap
+  // and keep the recorded strides authoritative.
   bool is_trailing_swap =
       (static_cast<size_t>(axis1) == ndim - 1 && static_cast<size_t>(axis2) == ndim - 2) ||
       (static_cast<size_t>(axis1) == ndim - 2 && static_cast<size_t>(axis2) == ndim - 1);

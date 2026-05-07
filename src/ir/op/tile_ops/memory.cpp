@@ -163,9 +163,10 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       if (transpose) {
         std::swap(tile_view.blayout, tile_view.slayout);
       }
-    } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
-               last_dim && last_dim->value_ == 1) {
-      tile_view.blayout = TileLayout::col_major;
+    } else if (*target_memory_opt == MemorySpace::Vec) {
+      if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back()); last_dim && last_dim->value_ == 1) {
+        tile_view.blayout = TileLayout::col_major;
+      }
     }
   }
 
@@ -176,12 +177,12 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   if (transpose && shape_elements.size() >= 2) {
     std::iter_swap(shape_elements.end() - 2, shape_elements.end() - 1);
   }
-  std::vector<ExprPtr> tile_shape(shape_elements.begin(), shape_elements.end());
 
   auto valid_elements = valid_shapes_tuple->elements_;
   if (transpose && valid_elements.size() >= 2) {
     std::iter_swap(valid_elements.end() - 2, valid_elements.end() - 1);
   }
+  std::vector<ExprPtr> tile_shape(shape_elements.begin(), shape_elements.end());
   tile_view.valid_shape = valid_elements;
 
   // Return TileType with same dtype as tensor and TileView containing valid_shape

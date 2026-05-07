@@ -15,9 +15,9 @@ is a metadata-only swap, so the IR result must record swapped physical
 strides for the codegen to emit a correctly addressed ``make_tensor_view``.
 
 Run via pytest (requires Ascend a5/a5sim hardware) or as a script with
-``-p {a5,a5sim}``. a2a3 / a2a3sim are intentionally not advertised — that arch
-rejects ``TLOAD(VecTile_RowMajor, GlobalTensor<DN>)`` at the kernel C++ stage
-(only ``ND2ND`` / ``DN2DN`` / ``NZ2NZ`` cross-layout pairs are supported there).
+``-p {a5,a5sim}``. On a2a3, explicit-stride DN row Vec consumers now keep the
+logical row tile and use scalar-load fallback, but this runtime regression stays
+on a5sim because the broader test harness coverage for this file is a5-focused.
 """
 
 import argparse
@@ -67,8 +67,7 @@ def test_transpose_slice_assemble(platform: str) -> None:
 
     Parametrized on ``a5sim`` only — conftest's ``--platform`` allowlist
     intersects with this list, so a2a3 / a2a3sim runners deselect the test
-    at collection time. a5 lifts the ``TLOAD(VecTile_RowMajor, GlobalTensor<DN>)``
-    restriction that fails on a2a3 at the kernel C++ stage.
+    at collection time.
     """
     _run(platform)
 

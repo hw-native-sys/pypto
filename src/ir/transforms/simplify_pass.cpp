@@ -214,6 +214,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
     // Rebuild iter_args before visiting the body so body references pick up
     // the remapped IterArg identity.
+    auto pre_loop_remap = var_remap_;
     bool iter_args_changed = false;
     auto new_iter_args = RebuildVec(
         op->iter_args_, [this](const auto& ia) { return MaybeRebuildIterArg(ia); }, &iter_args_changed);
@@ -324,9 +325,15 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // (Fold A on a nested IfStmt or Fold B on a nested single-trip ForStmt)
     // record remaps from outer Vars to body-internal values; leaking those to
     // siblings of this ForStmt or to the parent scope produces dangling
-    // references. The MaybeRebuildIterArg additions made above stay in
-    // baseline_remap (they're valid in body and after).
-    auto baseline_remap = var_remap_;
+    // references.
+    //
+    // Remaps created by MaybeRebuildIterArg are valid only inside this loop.
+    // They must be active while visiting the body so old IterArg uses point at
+    // the rebuilt loop header, but they must not escape after the ForStmt is
+    // rebuilt. A stale old-IterArg -> new-IterArg remap outside the loop can
+    // turn an out-of-scope body reference into a captured argument during
+    // OutlineIncoreScopes.
+    auto body_remap = var_remap_;
 
     auto new_body = VisitStmt(op->body_);
 
@@ -334,15 +341,28 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       analyzer_->Unbind(op->loop_var_);
     }
 
-    // Discard body-internal remaps — the For is being rebuilt, so the body's
-    // SSA scope is preserved and outside code shouldn't see its private vars.
-    var_remap_ = std::move(baseline_remap);
+    // Discard body-internal and loop-scoped IterArg remaps. The rebuilt ForStmt
+    // owns its iter_args/body references; outside code should only see
+    // return_vars, not private IterArg identities.
+    var_remap_ = std::move(pre_loop_remap);
 
     // Rebuild return_vars after the body so folds discovered inside the body
-    // are visible in return types.
+    // are visible in return types. Return vars are outside the loop body, but
+    // their types may still mention Vars remapped while simplifying iter_arg
+    // init values, so use the body-scope remap only for this rebuild.
+    auto return_var_baseline = var_remap_;
+    var_remap_ = std::move(body_remap);
     bool return_vars_changed = false;
     auto new_return_vars = RebuildVec(
         op->return_vars_, [this](const auto& v) { return MaybeRebuildVar(v); }, &return_vars_changed);
+    auto return_var_remap = std::move(var_remap_);
+    var_remap_ = std::move(return_var_baseline);
+    for (const auto& return_var : op->return_vars_) {
+      auto it = return_var_remap.find(return_var.get());
+      if (it != return_var_remap.end()) {
+        var_remap_[return_var.get()] = it->second;
+      }
+    }
 
     bool changed = (new_start.get() != op->start_.get()) || (new_stop.get() != op->stop_.get()) ||
                    (new_step.get() != op->step_.get()) || (new_body.get() != op->body_.get()) ||

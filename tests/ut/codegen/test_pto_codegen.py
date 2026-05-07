@@ -1898,6 +1898,50 @@ def test_pto_codegen_view_output_uses_physical_stride():
     assert "strides = [%c128_index, %c1_index]" in a_view_lines[0]
 
 
+def test_pto_codegen_explicit_stride_dn_view_row_load_uses_scalar_fallback():
+    """tensor.transpose-style DN row Vec loads keep logical shape semantics.
+
+    On a2a3, Vec TLOAD requires tile/global layouts to match. For a row vector
+    from an explicit-stride DN view, lowering through TLOAD would be either
+    illegal (row-major tile vs DN GlobalTensor) or semantically wrong if the
+    vector is reshaped to [N,1]. Codegen instead fills the original row-major
+    [1,N] tile with scalar loads using the recorded physical strides.
+    """
+
+    @pl.program
+    class ExplicitStrideDNLayoutProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            weights_t: pl.Tensor[
+                [64, 16],
+                pl.FP32,
+                pl.TensorView(stride=[1, 64], layout=pl.TensorLayout.DN),
+            ],
+            out: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+        ) -> pl.Tensor[[1, 16], pl.FP32]:
+            tile: pl.Tile[[1, 16], pl.FP32] = pl.load(weights_t, [0, 0], [1, 16])
+            return pl.store(tile, [0, 0], out)
+
+    mlir_code = _generate_default_mlir(ExplicitStrideDNLayoutProgram)
+    lines = _get_mlir_lines(mlir_code)
+
+    view_line = _single_line(lines, "pto.make_tensor_view %arg0")
+    assert "shape = [%c64_index, %c16_index]" in view_line
+    assert "strides = [%c1_index, %c64_index]" in view_line
+    assert "layout = #pto.layout<dn>" in view_line
+
+    load_tile_line = _single_line(lines, "%tile__ssa_v0 = pto.alloc_tile", startswith=True)
+    assert "rows=1, cols=16" in load_tile_line
+    assert "blayout=row_major" in load_tile_line
+
+    assert "pto.partition_view %weights_t__ssa_v0_view" not in mlir_code
+    assert "pto.tload" not in mlir_code
+    assert "scf.for" in mlir_code
+    assert "pto.load_scalar %arg0" in mlir_code
+    assert "pto.tsetval" in mlir_code
+
+
 def test_pto_codegen_make_tensor_view_accepts_dynamic_shape_expressions():
     """make_tensor_view should lower non-Var dynamic shape/stride expressions via index casts."""
     span = ir.Span.unknown()

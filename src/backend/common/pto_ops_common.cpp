@@ -193,6 +193,51 @@ static std::vector<std::string> GetSizeCodes(const std::vector<ir::ExprPtr>& exp
   return codes;
 }
 
+static bool IsConstIntValue(const ir::ExprPtr& expr, int64_t value) {
+  auto const_int = As<ir::ConstInt>(expr);
+  return const_int && const_int->value_ == value;
+}
+
+static bool HasExplicitDNStrides(const TensorType& tensor_type) {
+  return tensor_type.tensor_view_.has_value() && tensor_type.tensor_view_->layout == ir::TensorLayout::DN &&
+         !tensor_type.tensor_view_->stride.empty();
+}
+
+static bool IsExplicitDNVecRowLoad(const CallPtr& op, const TensorType& tensor_type,
+                                   const std::vector<ir::ExprPtr>& valid_elems) {
+  if (!HasExplicitDNStrides(tensor_type) ||
+      op->GetKwarg<ir::MemorySpace>("target_memory", ir::MemorySpace::DDR) != ir::MemorySpace::Vec) {
+    return false;
+  }
+  if (op->args_.size() < 3 || valid_elems.size() != 2) {
+    return false;
+  }
+  auto shapes_tuple = As<ir::MakeTuple>(op->args_[2]);
+  INTERNAL_CHECK_SPAN(shapes_tuple, op->span_) << "tile.load third argument must be a tuple (shapes)";
+  return shapes_tuple->elements_.size() == 2 && IsConstIntValue(shapes_tuple->elements_[0], 1) &&
+         IsConstIntValue(valid_elems[0], 1);
+}
+
+static std::string GetExprAsIndexCode(const ir::ExprPtr& expr, codegen::PTOCodegen& codegen) {
+  if (auto const_int = As<ir::ConstInt>(expr)) {
+    return codegen.GetOrEmitConstant(const_int->value_, DataType::INDEX);
+  }
+
+  std::string ssa = codegen.GetExprAsCode(expr);
+  if (auto scalar_type = As<ScalarType>(expr->GetType())) {
+    if (scalar_type->dtype_ == DataType::INDEX) {
+      return ssa;
+    }
+    CHECK(scalar_type->dtype_.IsInt()) << "Index operand must be integer or index type, got "
+                                       << codegen.GetTypeString(scalar_type->dtype_);
+    std::string idx = codegen.NewTemp();
+    codegen.Emit(idx + " = arith.index_cast " + ssa + " : " + codegen.GetTypeString(scalar_type->dtype_) +
+                 " to index");
+    return idx;
+  }
+  return ssa;
+}
+
 static bool ExprsEquivalentForSubview(const ir::ExprPtr& lhs, const ir::ExprPtr& rhs) {
   if (lhs.get() == rhs.get()) return true;
   auto lhs_const = As<ir::ConstInt>(lhs);
@@ -317,6 +362,101 @@ static std::string EmitFlatOffsetSSAFromValues(const std::vector<std::string>& i
     acc = add;
   }
   return acc;
+}
+
+static std::string EmitIndexAddPTO(codegen::PTOCodegen& codegen, const std::string& lhs,
+                                   const std::string& rhs, const std::string& name_hint) {
+  std::string result = codegen.NewNamedTemp(name_hint);
+  codegen.Emit(result + " = arith.addi " + lhs + ", " + rhs + " : index");
+  return result;
+}
+
+static std::string EmitIndexMulPTO(codegen::PTOCodegen& codegen, const std::string& lhs,
+                                   const std::string& rhs, const std::string& name_hint) {
+  std::string result = codegen.NewNamedTemp(name_hint);
+  codegen.Emit(result + " = arith.muli " + lhs + ", " + rhs + " : index");
+  return result;
+}
+
+static std::string EmitExplicitStrideOffsetPTO(const std::vector<std::string>& lowered_indices,
+                                               const std::vector<std::string>& lowered_strides,
+                                               codegen::PTOCodegen& codegen, const std::string& name_hint) {
+  INTERNAL_CHECK(lowered_indices.size() == lowered_strides.size())
+      << "Index count (" << lowered_indices.size() << ") must match stride rank (" << lowered_strides.size()
+      << ")";
+  INTERNAL_CHECK(!lowered_indices.empty()) << "Explicit-stride offset requires at least one index";
+
+  std::string acc;
+  for (size_t i = 0; i < lowered_indices.size(); ++i) {
+    std::string term = lowered_indices[i];
+    if (lowered_strides[i] != codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX)) {
+      term = EmitIndexMulPTO(codegen, lowered_indices[i], lowered_strides[i], name_hint + "_mul");
+    }
+    if (acc.empty()) {
+      acc = term;
+    } else {
+      acc = EmitIndexAddPTO(codegen, acc, term, name_hint);
+    }
+  }
+  return acc;
+}
+
+static std::string MakeExplicitStrideDNVecRowLoadCodegenPTO(
+    const ir::VarPtr& tensor, const TensorType& tensor_type, const ir::MakeTuple& offsets_tuple,
+    const ir::MakeTuple& valid_shapes_tuple, const std::string& tile_buf, const std::string& tile_buf_type,
+    const std::string& dtype_str, codegen::PTOCodegen& codegen) {
+  const auto& offsets = offsets_tuple.elements_;
+  const auto& valid_shapes = valid_shapes_tuple.elements_;
+  INTERNAL_CHECK(tensor_type.tensor_view_.has_value()) << "Explicit-stride DN view requires tensor_view";
+  const auto& tensor_view = *tensor_type.tensor_view_;
+  const auto& strides = tensor_view.stride;
+
+  INTERNAL_CHECK_SPAN(offsets.size() == 2, offsets_tuple.span_)
+      << "Explicit-stride DN Vec row load fallback requires 2D offsets";
+  INTERNAL_CHECK_SPAN(valid_shapes.size() == 2, valid_shapes_tuple.span_)
+      << "Explicit-stride DN Vec row load fallback requires 2D valid_shapes";
+  INTERNAL_CHECK_SPAN(strides.size() == 2, offsets_tuple.span_)
+      << "Explicit-stride DN Vec row load fallback requires 2D strides";
+
+  std::vector<std::string> lowered_offsets;
+  lowered_offsets.reserve(offsets.size());
+  for (const auto& offset : offsets) {
+    lowered_offsets.push_back(GetExprAsIndexCode(offset, codegen));
+  }
+
+  std::vector<std::string> lowered_strides;
+  lowered_strides.reserve(strides.size());
+  for (const auto& stride : strides) {
+    lowered_strides.push_back(GetExprAsIndexCode(stride, codegen));
+  }
+
+  std::string src_ptr = codegen.GetVarName(tensor);
+  std::string ptr_type = "!pto.ptr<" + dtype_str + ">";
+  std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+  std::string c1 = codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+  std::string stop = GetExprAsIndexCode(valid_shapes[1], codegen);
+
+  std::string loop_var = codegen.NewNamedTemp(tensor->name_hint_ + "_col");
+  codegen.Emit("scf.for " + loop_var + " = " + c0 + " to " + stop + " step " + c1 + " {");
+  codegen.IncreaseIndent();
+
+  std::vector<std::string> src_indices = lowered_offsets;
+  src_indices[1] = EmitIndexAddPTO(codegen, lowered_offsets[1], loop_var, tensor->name_hint_ + "_src_col");
+  std::string src_offset =
+      EmitExplicitStrideOffsetPTO(src_indices, lowered_strides, codegen, tensor->name_hint_ + "_src_offset");
+
+  std::string scalar = codegen.NewNamedTemp(tensor->name_hint_ + "_scalar");
+  codegen.Emit(scalar + " = pto.load_scalar " + src_ptr + "[" + src_offset + "] : " + ptr_type + " -> " +
+               dtype_str);
+
+  std::ostringstream tsetval;
+  tsetval << "pto.tsetval ins(" << loop_var << ", " << scalar << " : index, " << dtype_str << ") outs("
+          << tile_buf << " : " << tile_buf_type << ")";
+  codegen.Emit(tsetval.str());
+
+  codegen.DecreaseIndent();
+  codegen.Emit("}");
+  return "";
 }
 
 // Helper function for input & output generation (with type annotations)
@@ -1161,6 +1301,10 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   auto offset_elems = offsets_tuple->elements_;
   if (dn_swap && offset_elems.size() >= 2) {
     std::iter_swap(offset_elems.rbegin(), offset_elems.rbegin() + 1);
+  }
+  if (IsExplicitDNVecRowLoad(op, *tensor_type, valid_elems)) {
+    return MakeExplicitStrideDNVecRowLoadCodegenPTO(tensor, *tensor_type, *offsets_tuple, *valid_shapes_tuple,
+                                                    tile_buf, tile_buf_type, dtype_str, codegen);
   }
 
   std::string partition_type = MakePartitionTensorViewType(GetDimStrings(valid_elems), dtype_str);

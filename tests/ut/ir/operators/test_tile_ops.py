@@ -2150,6 +2150,26 @@ class TestTileLoadOp:
         # Just verifying it builds without error
         assert Prog is not None
 
+    def test_vec_load_from_explicit_stride_dn_tensor_keeps_row_vector_type(self):
+        """Explicit-stride DN row loads preserve the logical Vec row tile type."""
+        span = ir.Span.unknown()
+        stride = [
+            ir.ConstInt(1, DataType.INDEX, span),
+            ir.ConstInt(64, DataType.INDEX, span),
+        ]
+        tensor_view = ir.TensorView(stride=stride, layout=ir.TensorLayout.DN)
+        tensor_type = ir.TensorType([64, 16], DataType.FP32, memref=None, tensor_view=tensor_view)
+        tensor = ir.Var("weights_t", tensor_type, span)
+
+        call = tile.load(tensor, [0, 0], [1, 16], target_memory=ir.MemorySpace.Vec)
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert [dim.value for dim in tile_type.shape] == [1, 16]
+        eff = tile_type.get_effective_tile_view()
+        assert [dim.value for dim in eff.valid_shape] == [1, 16]
+        assert eff.blayout == ir.TileLayout.row_major
+
 
 class TestTileCreateOp:
     """Tests for tile.create layout inference."""

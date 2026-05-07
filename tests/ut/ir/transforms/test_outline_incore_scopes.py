@@ -10,6 +10,7 @@
 """Unit tests for OutlineIncoreScopes pass."""
 
 import re
+import textwrap
 
 import pypto.language as pl
 import pytest
@@ -540,6 +541,60 @@ class TestOutlineIncoreScopes:
         assert "init" not in incore_params, (
             "outer loop's init value 'init' must NOT be a parameter of the incore function"
         )
+
+    def test_simplified_single_trip_loop_does_not_capture_cloned_outer_iter_arg(self):
+        """A folded inner single-trip loop must keep outer IterArg use-sites stable.
+
+        The DeepSeek decode-front k_idx path has an outer parallel loop carrying
+        a tensor through an IterArg and an inner one-trip K loop. Simplify folds
+        that inner loop before OutlineIncoreScopes runs. A cloned outer IterArg
+        use-site would become a free variable in the outlined function and the
+        orchestration call would pass stale pre-loop data.
+        """
+
+        program = pl.parse_program(
+            textwrap.dedent(
+                """
+                @pl.program
+                class P:
+                    @pl.function
+                    def main(
+                        self,
+                        x: pl.Tensor[[16, 128], pl.FP32],
+                        w: pl.Tensor[[128, 128], pl.FP32],
+                    ) -> pl.Tensor[[16, 128], pl.FP32]:
+                        buf = x
+                        with pl.at(level=pl.Level.CORE_GROUP, name_hint="outer_iter_single_trip_inner"):
+                            for n0 in pl.parallel(0, 128, 128):
+                                acc = pl.full([16, 128], dtype=pl.FP32, value=0.0)
+                                for k0 in pl.range(0, 128, 128):
+                                    x_tile = buf[:, k0 : k0 + 128]
+                                    w_tile = w[k0 : k0 + 128, n0 : n0 + 128]
+                                    part = pl.matmul(x_tile, w_tile, out_dtype=pl.FP32)
+                                    acc = pl.add(acc, part)
+                                buf = pl.assemble(buf, acc, [0, n0])
+                        return buf
+                """
+            )
+        )
+
+        program = passes.convert_to_ssa()(program)
+        simplified = passes.simplify()(program)
+        simplified_text = simplified.as_python()
+
+        assert "pl.tensor.slice(buf__iter_v1, [16, 128], [0, 0])" in simplified_text
+        assert "buf__iter_v1_1" not in simplified_text
+
+        outlined = passes.outline_incore_scopes()(simplified)
+        printed = outlined.as_python()
+        incore_section = printed.split("@pl.function(type=pl.FunctionType.InCore")[1].split("@pl.function")[0]
+        param_match = re.search(r"def \w+\((.*?)\)\s*->", incore_section, re.DOTALL)
+        assert param_match is not None
+        incore_params = param_match.group(1)
+
+        assert "buf__ssa_v0" in incore_params
+        assert "buf__iter" not in incore_params
+        assert "self.outer_iter_single_trip_inner(buf__ssa_v0, w__ssa_v0)" in printed
 
 
 class TestSplitIncoreOrchVerifier:

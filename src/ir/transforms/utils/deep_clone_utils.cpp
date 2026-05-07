@@ -103,16 +103,10 @@ class DeepCloneMutator : public IRMutator {
     if (it != expr_map_.end()) {
       return it->second;
     }
-    // Create fresh IterArg with cloned initValue_ and a remapped type — the
-    // type may embed expressions (shape dims, TileView/TensorView fields,
-    // MemRef byte_offset) that reference Vars in expr_map_.
-    INTERNAL_CHECK_SPAN(op->initValue_, op->span_) << "IterArg has null initValue";
-    auto new_init = IRMutator::VisitExpr(op->initValue_);
-    auto new_type = RemapType(op->GetType());
-    auto fresh =
-        std::make_shared<IterArg>(op->name_hint_, std::move(new_type), std::move(new_init), op->span_);
-    expr_map_[op.get()] = fresh;
-    return fresh;
+    // External loop-carried variables are use-sites, not definitions of the
+    // cloned subtree. Keep them stable unless the caller explicitly seeded a
+    // replacement or this IterArg was pre-registered from a DefField.
+    return op;
   }
 
   ExprPtr VisitExpr_(const MemRefPtr& op) override {
@@ -152,6 +146,18 @@ class DeepCloneMutator : public IRMutator {
     }
     auto new_type = RemapType(op->GetType());
     auto fresh = std::make_shared<Var>(op->name_hint_, std::move(new_type), op->span_);
+    expr_map_[op.get()] = fresh;
+  }
+
+  /// Create a fresh IterArg for a loop's DefField and register it in expr_map_.
+  /// Use-sites of outer IterArgs are intentionally not cloned by VisitExpr_.
+  void CloneIterArg(const IterArgPtr& op) {
+    if (expr_map_.count(op.get())) return;  // Already mapped (e.g. pre-seeded)
+    INTERNAL_CHECK_SPAN(op->initValue_, op->span_) << "IterArg has null initValue";
+    auto new_init = IRMutator::VisitExpr(op->initValue_);
+    auto new_type = RemapType(op->GetType());
+    auto fresh =
+        std::make_shared<IterArg>(op->name_hint_, std::move(new_type), std::move(new_init), op->span_);
     expr_map_[op.get()] = fresh;
   }
 
@@ -213,8 +219,14 @@ class DeepCloneMutator : public IRMutator {
       for (const auto& var : desc.Get(stmt)) {
         if (var) CloneVar(var);
       }
+    } else if constexpr (std::is_same_v<FieldType, IterArgPtr>) {
+      const auto& iter_arg = desc.Get(stmt);
+      if (iter_arg) CloneIterArg(iter_arg);
+    } else if constexpr (std::is_same_v<FieldType, std::vector<IterArgPtr>>) {
+      for (const auto& iter_arg : desc.Get(stmt)) {
+        if (iter_arg) CloneIterArg(iter_arg);
+      }
     }
-    // IterArgPtr and vector<IterArgPtr> DefFields are handled by VisitExpr_(IterArgPtr)
   }
 
   std::unordered_map<const Var*, ExprPtr> expr_map_;
