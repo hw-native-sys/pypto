@@ -3600,6 +3600,11 @@ class ASTParser:
             no_dep(t)      — Name("no_dep")  (in case the user does
                              ``from pypto.language import no_dep``)
 
+        The match is intentionally tight — only the bare ``pl.no_dep``
+        attribute access (or a ``no_dep`` import) qualifies. ``obj.no_dep(x)``
+        on a user-defined object is left in place so the parser surfaces a
+        normal-call error path instead of silently stripping the wrapper.
+
         A trailing ``pl.no_dep`` with multiple args or any keyword is NOT a
         valid wrapper and is left in place; the parser will hit it later
         as a normal call and surface a clear error.
@@ -3612,7 +3617,12 @@ class ASTParser:
                 and len(raw.args) == 1
                 and not raw.keywords
                 and (
-                    (isinstance(raw.func, ast.Attribute) and raw.func.attr == "no_dep")
+                    (
+                        isinstance(raw.func, ast.Attribute)
+                        and raw.func.attr == "no_dep"
+                        and isinstance(raw.func.value, ast.Name)
+                        and raw.func.value.id == "pl"
+                    )
                     or (isinstance(raw.func, ast.Name) and raw.func.id == "no_dep")
                 )
             ):

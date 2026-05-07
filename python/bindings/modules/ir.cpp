@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <any>
 #include <cctype>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -143,11 +144,12 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
-      // Lists/tuples currently carry one of:
+      // Lists/tuples carry exactly one of:
       //   - vector<ArgDirection> for attrs["arg_directions"]
       //   - vector<int32_t>      for attrs["arg_direction_overrides"]
       //     (per-arg NoDep override indices set by ``pl.no_dep`` parser)
-      // Distinguish by element type. Reject empty sequences with a helpful error.
+      // Empty sequences are key-disambiguated: kAttrArgDirectionOverrides
+      // gets vector<int32_t>{}, everything else gets vector<ArgDirection>{}.
       auto seq = nb::cast<nb::sequence>(item.second);
       bool empty = true;
       bool first_is_arg_direction = false;
@@ -159,9 +161,11 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
         break;
       }
       if (empty) {
-        // Default to empty vector<ArgDirection> for back-compat with existing
-        // arg_directions=[] usage.
-        kwargs.emplace_back(key, std::vector<ArgDirection>{});
+        if (key == kAttrArgDirectionOverrides) {
+          kwargs.emplace_back(key, std::vector<int32_t>{});
+        } else {
+          kwargs.emplace_back(key, std::vector<ArgDirection>{});
+        }
       } else if (first_is_arg_direction) {
         std::vector<ArgDirection> dirs;
         for (auto elem : seq) {
@@ -178,7 +182,12 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
           if (nb::isinstance<nb::bool_>(elem) || !nb::isinstance<nb::int_>(elem)) {
             throw pypto::TypeError("Unsupported list element type for key: " + key + " (expected int)");
           }
-          idxs.push_back(static_cast<int32_t>(nb::cast<int64_t>(elem)));
+          int64_t v = nb::cast<int64_t>(elem);
+          if (v < std::numeric_limits<int32_t>::min() || v > std::numeric_limits<int32_t>::max()) {
+            throw pypto::ValueError("List value " + std::to_string(v) + " for key: " + key +
+                                    " is out of int32 range");
+          }
+          idxs.push_back(static_cast<int32_t>(v));
         }
         kwargs.emplace_back(key, std::move(idxs));
       } else {
@@ -759,6 +768,16 @@ void BindIR(nb::module_& m) {
         nb::list lst;
         for (auto d : dirs) {
           lst.append(nb::cast(d));
+        }
+        result[key.c_str()] = lst;
+      } else if (value.type() == typeid(std::vector<int32_t>)) {
+        // Used by attrs["arg_direction_overrides"] (per-arg NoDep override
+        // indices). Surface as a Python list[int] so attribute readback
+        // round-trips through the binding.
+        const auto& idxs = AnyCast<std::vector<int32_t>>(value, "converting to Python: " + key);
+        nb::list lst;
+        for (auto i : idxs) {
+          lst.append(nb::cast(i));
         }
         result[key.c_str()] = lst;
       }

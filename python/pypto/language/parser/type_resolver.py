@@ -1137,9 +1137,19 @@ class TypeResolver:
         """Check if an AST node is the ``pl.ManualDep`` marker.
 
         ``ManualDep`` is a marker class (not callable). It appears in tensor
-        annotations as a bare reference: ``pl.ManualDep`` or ``ManualDep``.
+        annotations as a bare reference: ``pl.ManualDep`` (rooted at the
+        ``pl`` module) or ``ManualDep`` (when imported directly).
+
+        The match is tight on purpose — ``some_obj.ManualDep`` on a user
+        object does not qualify, so a stray attribute named ``ManualDep`` on
+        an unrelated object cannot silently mark a tensor as manual-dep.
         """
-        if isinstance(node, ast.Attribute) and node.attr == "ManualDep":
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "ManualDep"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "pl"
+        ):
             return True
         if isinstance(node, ast.Name) and node.id == "ManualDep":
             return True

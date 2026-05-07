@@ -9,7 +9,9 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -18,6 +20,7 @@
 #include <vector>
 
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
