@@ -62,7 +62,8 @@ class TileMaximumProgram:
         rhs: pl.Tensor[[M, N], pl.FP32],
         out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        return self.kernel(lhs, rhs, out)
+        out = self.kernel(lhs, rhs, out)
+        return out
 
 
 @pl.program
@@ -89,7 +90,8 @@ class TileMinimumProgram:
         rhs: pl.Tensor[[M, N], pl.FP32],
         out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        return self.kernel(lhs, rhs, out)
+        out = self.kernel(lhs, rhs, out)
+        return out
 
 
 @pl.program
@@ -113,7 +115,8 @@ class TileMaximumsProgram:
         lhs: pl.Tensor[[M, N], pl.FP32],
         out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        return self.kernel(lhs, out)
+        out = self.kernel(lhs, out)
+        return out
 
 
 @pl.program
@@ -137,7 +140,8 @@ class TileMinimumsProgram:
         lhs: pl.Tensor[[M, N], pl.FP32],
         out: pl.Out[pl.Tensor[[M, N], pl.FP32]],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        return self.kernel(lhs, out)
+        out = self.kernel(lhs, out)
+        return out
 
 
 class TileMaximumTestCase(PTOTestCase):
