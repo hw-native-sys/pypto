@@ -67,6 +67,29 @@ def _run_to_legalize_then_fold(program: ir.Program) -> ir.Program:
 
 
 class TestFoldNoOpReshape:
+    def test_noop_reshape_is_folded(self):
+        """A reshape that preserves shape and shares MemRef must be folded out."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
+                # Identical shape + same MemRef after LegalizePTOBufferReuse → no-op reshape.
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(tile_a, [64, 64])
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
+                return result
+
+        # The same-shape reshape exists in the input...
+        assert _count_reshape_calls(Before) == 1
+        After = _run_to_legalize_then_fold(Before)
+        # ...and FoldNoOpReshape rewrites it into a Var-to-Var assignment, dropping the Call.
+        assert _count_reshape_calls(After) == 0
+
     def test_genuine_reshape_kept(self):
         """A reshape that changes physical shape must NOT be folded."""
 
