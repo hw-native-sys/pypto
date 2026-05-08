@@ -130,6 +130,15 @@ inline const PassProperties kResolveTransposeLayoutProperties{
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::TileOps2D}};
 
+// -- Materialize tensor strides pass (RFC #1300 §2.4) ------------------------
+
+inline const PassProperties kMaterializeTensorStridesProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::TileMemoryInferred, IRProperty::NormalizedStmtStructure,
+                 IRProperty::TensorViewCanonical}};
+
 // -- Resolve backend op layouts pass ------------------------------------------
 
 inline const PassProperties kResolveBackendOpLayoutsProperties{

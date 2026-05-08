@@ -424,6 +424,13 @@ void BindPass(nb::module_& m) {
              "is a function parameter and annotates that parameter's TensorType with the DN\n"
              "(column-major) layout. The shape is preserved -- DN is a codegen hint only.\n"
              "Orchestration and Opaque functions are returned unchanged.");
+  passes.def("materialize_tensor_strides", &pass::MaterializeTensorStrides,
+             "Create the MaterializeTensorStrides pass (RFC #1300 §2.4).\n\n"
+             "Walks every TensorType reachable from the program and rewrites any\n"
+             "(view.has_value() && view.stride.empty()) slot to its packed canonical\n"
+             "stride per BuildLogicalStridesFromLayout. Bare TensorTypes are left\n"
+             "untouched. Idempotent. Produces TensorViewCanonical so the registry\n"
+             "auto-verifies after the pass runs.");
   passes.def("resolve_backend_op_layouts", &pass::ResolveBackendOpLayouts,
              "Create a pass that repairs backend-required layouts for constrained elementwise tile ops\n\n"
              "Repairs `[N,1]` col-major vector inputs at constrained use-sites by reshaping them\n"

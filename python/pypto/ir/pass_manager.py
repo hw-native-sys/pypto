@@ -153,6 +153,13 @@ class PassManager:
             ("NormalizeReturnOrder", lambda: passes.normalize_return_order()),
             ("LowerPipelineLoops", lambda: passes.lower_pipeline_loops()),
             ("CanonicalizeIOOrder", lambda: passes.canonicalize_io_order()),
+            # NOTE (RFC #1300 §2.4): the MaterializeTensorStrides pass is
+            # registered (passes.materialize_tensor_strides()) but is NOT yet
+            # inserted into the default pipeline. It would materialize DN stride
+            # to the canonical (logical-shape) form, which still conflicts with
+            # the legacy "source shape + post-emit swap" path in pto codegen
+            # (`get_shape_source_idx`, `dn_swap`). The pipeline insertion will
+            # land alongside the codegen cleanup in a later phase (P6/P7).
             ("InitMemRef", lambda: passes.init_mem_ref()),
             ("MemoryReuse", lambda: passes.memory_reuse()),
             ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),

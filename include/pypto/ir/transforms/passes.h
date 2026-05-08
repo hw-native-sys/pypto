@@ -440,6 +440,25 @@ Pass InferTileMemorySpace();
 Pass ResolveTransposeLayout();
 
 /**
+ * @brief Materialize implicit ND/DN strides on every TensorType (RFC #1300 §2.4)
+ *
+ * Walks every TensorType reachable from the program and rewrites any
+ * ``view.has_value() && view.stride.empty()`` slot to its packed canonical
+ * form (per ``BuildLogicalStridesFromLayout``). Bare TensorTypes
+ * (``!view.has_value()``) are left untouched — they are implicitly
+ * ND-packed and the strict ``TensorViewCanonical`` verifier accepts them.
+ *
+ * After this pass runs, the codegen-entry contract holds: every TensorType
+ * that carries a TensorView has explicit stride matching its layout / shape.
+ * The pass is idempotent — re-running it on already-canonical IR is a no-op.
+ *
+ * Produces ``IRProperty::TensorViewCanonical`` so PassPipeline auto-verifies
+ * (via the registry's weak-mode verifier; the strict form is a P3 follow-up
+ * once consumers depend on materialized stride).
+ */
+Pass MaterializeTensorStrides();
+
+/**
  * @brief Repair backend-required layouts for constrained elementwise tile ops
  *
  * For current layout-constrained elementwise ops, rewrites `[N, 1]`
