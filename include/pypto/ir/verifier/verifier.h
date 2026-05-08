@@ -322,6 +322,27 @@ PropertyVerifierPtr CreateTileTypeCoherencePropertyVerifier();
  */
 PropertyVerifierPtr CreateOrchestrationReferencesResolvedPropertyVerifier();
 
+/**
+ * @brief Factory function for creating TensorViewCanonical property verifier
+ *
+ * Verifies that every TensorType.tensor_view_ in the program satisfies the
+ * canonical form per RFC #1300 §2.2:
+ *   - layout is one of {ND, DN} (NZ is tile-only and rejected)
+ *   - when stride is non-empty: rank matches shape, innermost-stride is 1 at
+ *     the layout-specific axis, and outer dims are valid packed/strided
+ *   - when stride is empty: this is allowed in the "weak" mode (default —
+ *     pre-MaterializeTensorStrides) and rejected in the "strict" mode
+ *     (post-MaterializeTensorStrides, P3+)
+ *
+ * Symbolic strides are accepted under relaxed_symbolic semantics (RFC Open Q2).
+ *
+ * @param require_materialized When true, reject tensor_view_ with empty stride
+ *   (the strict, codegen-entry contract). When false, accept empty stride as
+ *   "implicitly packed canonical" — used during early pipeline stages.
+ * @return Shared pointer to TensorViewCanonical PropertyVerifier
+ */
+PropertyVerifierPtr CreateTensorViewCanonicalPropertyVerifier(bool require_materialized = false);
+
 }  // namespace ir
 }  // namespace pypto
 

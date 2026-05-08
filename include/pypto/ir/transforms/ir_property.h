@@ -58,6 +58,8 @@ enum class IRProperty : uint64_t {
   InlineFunctionsEliminated,        ///< No FunctionType::Inline functions or Calls to them remain
   OrchestrationReferencesResolved,  ///< Every non-builtin Call in an Orchestration function targets a
                                     ///< Function that exists in the Program
+  TensorViewCanonical,              ///< TensorView canonicality verified (weak: stride.empty() ok; strict:
+                                    ///< requires materialization, RFC #1300 §2.2)
   kCount                            ///< Sentinel (must be last)
 };
 

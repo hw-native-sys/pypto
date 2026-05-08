@@ -77,6 +77,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "InlineFunctionsEliminated";
     case IRProperty::OrchestrationReferencesResolved:
       return "OrchestrationReferencesResolved";
+    case IRProperty::TensorViewCanonical:
+      return "TensorViewCanonical";
     default:
       return "Unknown";
   }

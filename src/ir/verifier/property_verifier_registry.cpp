@@ -66,6 +66,11 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,
            CreateOrchestrationReferencesResolvedPropertyVerifier);
+  // TensorViewCanonical (RFC #1300): the registry returns the weak-mode
+  // verifier (stride.empty() accepted as implicitly packed canonical).
+  // P3's MaterializeTensorStrides constructs the strict variant directly.
+  Register(IRProperty::TensorViewCanonical,
+           []() { return CreateTensorViewCanonicalPropertyVerifier(/*require_materialized=*/false); });
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

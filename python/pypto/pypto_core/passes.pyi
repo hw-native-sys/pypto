@@ -45,6 +45,7 @@ class IRProperty(Enum):
     TileTypeCoherence = ...
     InlineFunctionsEliminated = ...
     OrchestrationReferencesResolved = ...
+    TensorViewCanonical = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -151,6 +152,22 @@ def get_default_verify_properties() -> IRPropertySet:
 
 def get_structural_properties() -> IRPropertySet:
     """Get structural invariant properties."""
+
+def verify_tensor_view_canonical(
+    program: Program,
+    require_materialized: bool = False,
+) -> list[Diagnostic]:
+    """Run the TensorViewCanonical verifier directly (RFC #1300 P2).
+
+    Args:
+        program: Program to verify.
+        require_materialized: When False (default — weak mode), accept
+            ``stride.empty()`` as implicitly packed canonical. When True
+            (strict codegen-entry contract), reject empty stride.
+
+    Returns:
+        List of diagnostics; empty if the program is canonical.
+    """
 
 class Pass:
     """Opaque pass object. Do not instantiate directly - use factory functions."""
