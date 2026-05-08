@@ -297,12 +297,44 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(MODE)])` | `AutoInCore` | AutoInCore + split hint (independent entries) |
 | `pl.at(level=pl.Level.HOST)` *(or any non-`CORE_GROUP` level)* | `Hierarchy` | Distributed hierarchy scope |
 | `pl.cluster()` | `Cluster` | Co-scheduled AIC+AIV group |
+| `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator region where the user manages task ordering — see [Manual dependency primitives](#manual-dependency-primitives) |
 | `pl.incore()` *(deprecated)* | `InCore` | Use `pl.at(level=pl.Level.CORE_GROUP)` instead |
 | `pl.auto_incore(split=...)` *(deprecated)* | `AutoInCore` | Use `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(...)])` |
 | `pl.at(..., optimization=pl.chunked_loop_optimizer[(split=...)])` *(deprecated)* | `AutoInCore` | Use `pl.at(..., optimizations=[pl.auto_chunk, pl.split(...)])` |
 | `pl.at(..., split=...)` *(deprecated)* | `InCore` | Use `pl.at(..., optimizations=[pl.split(...)])` |
 
 See [Language Guide](../../user/01-language_guide.md#incore-scopes) for examples.
+
+### Manual dependency primitives
+
+By default the runtime auto-derives task→task dependencies from buffer
+read/write overlap (the `OverlapMap`). Two complementary primitives let the
+user opt out and manage ordering explicitly:
+
+| Surface | Granularity | Effect |
+| ------- | ----------- | ------ |
+| `pl.no_dep(arg)` | per-call argument | At a kernel call site, the wrapped argument's `ArgDirection` becomes `NoDep`. Auto-tracking ignores that slot for this submission only. |
+| `with pl.manual_scope():` | per-region | Lowers to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; codegen instead emits explicit `params.add_dep(task_<m>);` calls. |
+| `kernel(..., deps=[var, ...])` | per-call (manual_scope only) | Adds explicit task-id edges to the call's `manual_dep_edges` set, on top of any auto-derived data-flow edges. Each entry must be a tensor `Var` produced by a prior `self.kernel(...)` in the same `manual_scope`. |
+
+```python
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    with pl.manual_scope():
+        a = self.k1(x)              # task_0
+        b = self.k2(x)              # task_1, no auto edge to task_0 (uses x, not a)
+        c = self.k3(a, deps=[b])    # task_2, auto edge a -> 0; user edge -> 1
+    return c
+```
+
+Inside `with pl.manual_scope():`, the [DeriveManualScopeDeps](../passes/31-derive_manual_scope_deps.md)
+pass resolves the union of user `deps=[...]` entries and data-flow producers
+(NoDep-aware) and writes them to the IR for codegen. The list is capped at 16
+edges per call to mirror the runtime's `PTO2_MAX_EXPLICIT_DEPS`.
+
+`pl.no_dep(arg)` works in both auto and manual scopes — in auto scope it
+suppresses the OverlapMap entry for that argument; in manual scope it also
+suppresses the data-flow edge that would otherwise be derived from `arg`.
 
 ### Yield Statement
 

@@ -43,6 +43,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 28 | `28-allocate_memory_addr.md` | 28th pass |
 | 29 | `29-fuse_create_assemble_to_slice.md` | 29th pass |
 | 30 | `30-derive_call_directions.md` | 30th pass |
+| 31 | `31-derive_manual_scope_deps.md` | 31st pass |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

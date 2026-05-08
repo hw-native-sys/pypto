@@ -178,6 +178,7 @@ field from the `Stmt` base class. See [Leading comments on statements](#leading-
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster region; outlined to `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_` (optional) | Pipeline-stage region for a given Level/Role |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_` (integer-typed `Expr`), `sync_start_` | SPMD launch region; outlined to `Function(Spmd)` |
+| **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator runtime region (`PTO2_SCOPE`); `manual_=true` selects manual dependency mode |
 | **YieldStmt** | `values_` | Yield values in loop iteration |
 | **EvalStmt** | `expr_` | Evaluate expression for side effects |
 | **SeqStmts** | `stmts_` | General statement sequence |
@@ -273,13 +274,13 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 ### ScopeStmt Details
 
 `ScopeStmt` is an **abstract base class** that marks a region with a specific
-execution context. The five concrete subclasses below each carry only the
+execution context. The six concrete subclasses below each carry only the
 fields valid for their kind — invalid combinations are unrepresentable at
 construction. Use `s.scope_kind` (or `s.GetScopeKind()` in C++) to recover the
 kind from a `ScopeStmt`-typed reference, or `isinstance(s, InCoreScopeStmt)`
 to dispatch on the concrete type.
 
-All five share the common base fields `name_hint_: str` and `body_: StmtPtr`.
+All six share the common base fields `name_hint_: str` and `body_: StmtPtr`.
 Note that `pl.at(level=Level.CORE_GROUP)` lowers to `InCoreScopeStmt` /
 `AutoInCoreScopeStmt`, not `HierarchyScopeStmt` — the parser rejects `role=`
 at `CORE_GROUP`. `HierarchyScopeStmt` is reserved for non-`CORE_GROUP` levels
@@ -302,6 +303,9 @@ hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.SubWorker,
 # with pl.spmd(8):
 spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
                         sync_start=False, name_hint="", body=body, span=span)
+
+# with pl.manual_scope(): (orchestrator runtime region with manual dep mode)
+runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
 
 # for i in pl.spmd(8):                    # loop-style surface syntax
 #     offset = i * 64
@@ -332,6 +336,13 @@ spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
   - `OutlineClusterScopes` extracts `ClusterScopeStmt` into `Function(Group)`
     and standalone `SpmdScopeStmt` into `Function(Spmd)`
   - `OutlineHierarchyScopes` extracts `HierarchyScopeStmt`
+  - `DeriveManualScopeDeps` populates `Call.attrs["manual_dep_edges"]` for
+    every kernel call inside `RuntimeScopeStmt(manual=true)` so codegen can
+    emit explicit `params.add_dep(task_<m>);` calls.
+- `RuntimeScopeStmt` lowers to `PTO2_SCOPE()` for `manual=false` and
+  `PTO2_SCOPE(PTO2ScopeMode::MANUAL)` for `manual=true`. It is created by
+  `pl.manual_scope()` (manual mode) and by the orchestration codegen path
+  (auto mode); it is **not** outlined into a separate function.
 
 **Transformation:**
 

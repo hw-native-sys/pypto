@@ -296,12 +296,43 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(MODE)])` | `AutoInCore` | AutoInCore + split 提示（条目独立） |
 | `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 级别） | `Hierarchy` | 分布式层级作用域 |
 | `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
+| `pl.manual_scope()` | `Runtime(manual=true)` | 由用户管理任务排序的 orchestrator 区域——见[手工依赖原语](#手工依赖原语) |
 | `pl.incore()` *(已弃用)* | `InCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP)` |
 | `pl.auto_incore(split=...)` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(...)])` |
 | `pl.at(..., optimization=pl.chunked_loop_optimizer[(split=...)])` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(..., optimizations=[pl.auto_chunk, pl.split(...)])` |
 | `pl.at(..., split=...)` *(已弃用)* | `InCore` | 请改用 `pl.at(..., optimizations=[pl.split(...)])` |
 
 示例参见 [语言指南](../../user/01-language_guide.md#incore-作用域)。
+
+### 手工依赖原语
+
+默认情况下 runtime 通过缓冲区读写重叠（`OverlapMap`）自动推导任务间依赖。
+两个互补的原语让用户可以选择性地退出自动跟踪并显式管理排序：
+
+| 表层语法 | 粒度 | 作用 |
+| -------- | ---- | ---- |
+| `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`。该次提交对该槽位不进入自动跟踪。 |
+| `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；codegen 改为发出显式 `params.add_dep(task_<m>);`。 |
+| `kernel(..., deps=[var, ...])` | per-call（仅 manual_scope 内） | 在数据流自动推导出的边之上，向调用的 `manual_dep_edges` 集合追加显式 task-id 边。每个条目必须是同一 `manual_scope` 内由先前 `self.kernel(...)` 产生的 tensor `Var`。 |
+
+```python
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+    with pl.manual_scope():
+        a = self.k1(x)              # task_0
+        b = self.k2(x)              # task_1，对 task_0 没有自动边（用 x，不用 a）
+        c = self.k3(a, deps=[b])    # task_2，自动边 a -> 0；用户边 -> 1
+    return c
+```
+
+`with pl.manual_scope():` 内由 [DeriveManualScopeDeps](../passes/31-derive_manual_scope_deps.md)
+pass 把用户 `deps=[...]` 与数据流 producer（NoDep 感知）的并集解析后写入
+IR 供 codegen 使用。每个 call 上限 16 条边，对齐 runtime 的
+`PTO2_MAX_EXPLICIT_DEPS`。
+
+`pl.no_dep(arg)` 在 auto / manual 两种 scope 下都生效——auto scope 抑制
+该参数的 OverlapMap 入口；manual scope 同时抑制本会从 `arg` 推导出的
+数据流边。
 
 ### Yield 语句
 

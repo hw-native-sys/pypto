@@ -175,6 +175,7 @@ for_stmt = ir.ForStmt(i, start, stop, step, [sum_iter], body, [sum_final], span)
 | **ClusterScopeStmt** | `name_hint_`, `body_` | Cluster 区域；由 `OutlineClusterScopes` 提取为 `Function(Group)` |
 | **HierarchyScopeStmt** | `name_hint_`, `body_`, `level_`, `role_`（可选） | 给定 Level/Role 的流水线阶段区域 |
 | **SpmdScopeStmt** | `name_hint_`, `body_`, `core_num_`（整型 `Expr`）, `sync_start_` | SPMD 启动区域；提取为 `Function(Spmd)` |
+| **RuntimeScopeStmt** | `name_hint_`, `body_`, `manual_` | Orchestrator 运行时区域（`PTO2_SCOPE`）；`manual_=true` 选择手工依赖模式 |
 | **YieldStmt** | `values_` | 在循环迭代中产出值 |
 | **EvalStmt** | `expr_` | 为副作用求值表达式 |
 | **SeqStmts** | `stmts_` | 通用语句序列 |
@@ -239,12 +240,12 @@ while_stmt = ir.WhileStmt(condition, [x_iter], body, [x_final], span)
 
 ### ScopeStmt 详细说明
 
-`ScopeStmt` 是一个**抽象基类**，用于标记具有特定执行上下文的区域。下列五个具体子类
+`ScopeStmt` 是一个**抽象基类**，用于标记具有特定执行上下文的区域。下列六个具体子类
 各自只携带其类型有效的字段——非法组合在构造时即不可表达。在 `ScopeStmt` 类型的引用上，
 可使用 `s.scope_kind`（C++ 中为 `s.GetScopeKind()`）来取回类型，或使用
 `isinstance(s, InCoreScopeStmt)` 在具体类型上分派。
 
-五个子类共享公共基类字段 `name_hint_: str` 和 `body_: StmtPtr`。注意：
+六个子类共享公共基类字段 `name_hint_: str` 和 `body_: StmtPtr`。注意：
 `pl.at(level=Level.CORE_GROUP)` 实际下沉到 `InCoreScopeStmt` /
 `AutoInCoreScopeStmt`，而非 `HierarchyScopeStmt`——解析器会在 `CORE_GROUP`
 拒绝 `role=`。`HierarchyScopeStmt` 仅用于非 `CORE_GROUP` 的层级
@@ -267,6 +268,9 @@ hier = ir.HierarchyScopeStmt(level=ir.Level.HOST, role=ir.Role.SubWorker,
 # with pl.spmd(8):
 spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
                         sync_start=False, name_hint="", body=body, span=span)
+
+# with pl.manual_scope(): (orchestrator 运行时区域，使用手工依赖模式)
+runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
 
 # for i in pl.spmd(8):                    # loop-style 语法糖
 #     offset = i * 64
@@ -296,6 +300,13 @@ spmd = ir.SpmdScopeStmt(core_num=ir.ConstInt(8, DataType.INDEX, span),
   - `OutlineClusterScopes` 将 `ClusterScopeStmt` 提取为 `Function(Group)`，
     将独立的 `SpmdScopeStmt` 提取为 `Function(Spmd)`
   - `OutlineHierarchyScopes` 提取 `HierarchyScopeStmt`
+  - `DeriveManualScopeDeps` 为 `RuntimeScopeStmt(manual=true)` 内每个
+    kernel call 填充 `Call.attrs["manual_dep_edges"]`，让 codegen 能发出
+    显式 `params.add_dep(task_<m>);` 调用。
+- `RuntimeScopeStmt` 在 `manual=false` 时下沉为 `PTO2_SCOPE()`，在
+  `manual=true` 时下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。它由
+  `pl.manual_scope()`（manual 模式）和 orchestration codegen 路径
+  （auto 模式）创建；**不会**被独立外提为函数。
 
 **变换示例：**
 
