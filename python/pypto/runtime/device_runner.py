@@ -94,8 +94,8 @@ def _load_binary(path: Path) -> bytes | None:
 # PTO-ISA management
 # ---------------------------------------------------------------------------
 
-_PTO_ISA_HTTPS = "https://github.com/PTO-ISA/pto-isa.git"
-_PTO_ISA_SSH = "git@github.com:PTO-ISA/pto-isa.git"
+_PTO_ISA_HTTPS = "https://gitcode.com/luohuan40/pto-isa.git"
+_PTO_ISA_SSH = "git@gitcode.com:luohuan40/pto-isa.git"
 
 
 def _get_pto_isa_clone_path() -> Path:

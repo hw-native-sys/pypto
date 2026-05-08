@@ -61,7 +61,7 @@ jobs:
 
       - name: Clone pto-isa repository
         run: |
-          git clone https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+          git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa
           cd $GITHUB_WORKSPACE/pto-isa
           git checkout d5bcc23
 
@@ -139,7 +139,7 @@ jobs:
 
       - name: Clone pto-isa repository
         run: |
-          git clone https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+          git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa
           cd $GITHUB_WORKSPACE/pto-isa
           git checkout d5bcc23
 

@@ -245,7 +245,7 @@ jobs:
 
       - name: Clone pto-isa (pypto-lib Qwen3-14B decode)
         run: |
-          git clone https://github.com/PTO-ISA/pto-isa.git $GITHUB_WORKSPACE/pto-isa
+          git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa
           cd $GITHUB_WORKSPACE/pto-isa
           git checkout 2c607938
 
