@@ -24,7 +24,11 @@ jobs:
         extra_args: --all-files
 
   clang-tidy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, arm64, cpu]
+    container:
+      image: localhost:5000/ci-py310:latest
+      options: >-
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
 
     steps:
     - name: Checkout
@@ -35,16 +39,6 @@ jobs:
     - name: Fetch base branch for diff
       if: github.event_name == 'pull_request'
       run: git fetch origin ${{ github.base_ref }} --depth=1
-
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.10"
-
-    - name: Install clang-tidy and dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install clang-tidy==21.1.0 nanobind
 
     - name: Run clang-tidy
       run: |
