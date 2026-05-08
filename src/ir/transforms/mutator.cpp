@@ -335,9 +335,13 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
             continue;
           }
           auto remapped = ExprFunctor<ExprPtr>::VisitExpr(e);
-          auto remapped_var = As<Var>(remapped);
+          // Use AsVarLike so a remapped IterArg (loop-carried tensor) still
+          // matches — As<Var> is exact-kind only and would silently drop the
+          // remap, leaving a stale pointer in the attr.
+          auto remapped_var = AsVarLike(remapped);
           if (!remapped_var) {
-            // Should not happen — Var visits return Var. Fall back to original.
+            // Should not happen — Var/IterArg visits return Var-like. Fall
+            // back to original to avoid corrupting the attr.
             new_edges.push_back(e);
             continue;
           }

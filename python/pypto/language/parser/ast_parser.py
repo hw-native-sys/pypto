@@ -2529,6 +2529,16 @@ class ASTParser:
                 span=self.span_tracker.get_span(stmt),
                 hint="Use 'with pl.manual_scope():' without arguments",
             )
+        if self._manual_scope_depth > 0:
+            # The runtime forbids nesting MANUAL inside MANUAL — codegen would
+            # emit nested ``PTO2_SCOPE(PTO2ScopeMode::MANUAL)`` blocks, which
+            # would fail later. Reject at the source location instead.
+            raise ParserSyntaxError(
+                "pl.manual_scope() may not be nested inside another manual scope",
+                span=self.span_tracker.get_span(stmt),
+                hint="Flatten the nested 'with pl.manual_scope():' into the "
+                "enclosing manual scope, or move it outside.",
+            )
         span = self.span_tracker.get_span(stmt)
         self._manual_scope_depth += 1
         try:

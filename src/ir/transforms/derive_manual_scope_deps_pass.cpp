@@ -77,6 +77,31 @@ class ManualDepMutator : public IRMutator {
     auto assign = As<AssignStmt>(base);
     if (!assign || manual_depth_ == 0) return assign;
 
+    // Tuple unpacking creates ``_tuple_tmp = Call(...); a = tuple_get(_tuple_tmp, 0)``.
+    // The TupleGetItemExpr LHS is not itself a kernel call — register it as
+    // an alias for the underlying tuple's producer so a downstream consumer
+    // of ``a`` finds the same task id.
+    if (auto get_item = As<TupleGetItemExpr>(assign->value_)) {
+      auto tuple_var = AsVarLike(get_item->tuple_);
+      if (tuple_var) {
+        auto it = producer_map_.find(tuple_var.get());
+        if (it != producer_map_.end()) {
+          producer_map_[assign->var_.get()] = it->second;
+        }
+      }
+      return assign;
+    }
+
+    // Trivial Var-to-Var copy (e.g. SSA pre-image, FlattenCallExpr leftover):
+    // forward the producer through the alias.
+    if (auto rhs_var = AsVarLike(assign->value_)) {
+      auto it = producer_map_.find(rhs_var.get());
+      if (it != producer_map_.end()) {
+        producer_map_[assign->var_.get()] = it->second;
+      }
+      return assign;
+    }
+
     auto call = As<Call>(assign->value_);
     if (!call) return assign;
     if (IsBuiltinOp(call->op_->name_)) {

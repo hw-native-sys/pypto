@@ -183,6 +183,143 @@ class TestDeriveManualScopeDeps:
         assert len(edges) == 1
         assert edges[0].same_as(a_var)
 
+    def test_tuple_unpacking_propagates_producer(self):
+        """``a, b = self.kpair(x)`` makes both ``a`` and ``b`` resolve to the
+        kpair task as their producer — otherwise consumers race the call.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kpair(
+                self, x: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                return x, x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k_add(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, b = self.kpair(x)
+                    c = self.k_add(a)
+                return c
+
+        ssa = passes.convert_to_ssa()(Prog)
+        ddir = passes.derive_call_directions()(ssa)
+        ddep = passes.derive_manual_scope_deps()(ddir)
+
+        fn = ddep.get_function("main")
+        assert fn is not None
+        # Find the tuple-temp var (LHS of the only kernel call other than k_add)
+        # and the k_add call.
+        tuple_tmp_var = None
+        kadd_call = None
+
+        def walk(stmt):
+            nonlocal tuple_tmp_var, kadd_call
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    walk(s)
+            elif isinstance(stmt, ir.RuntimeScopeStmt):
+                walk(stmt.body)
+            elif isinstance(stmt, ir.AssignStmt):
+                v = stmt.value
+                if isinstance(v, ir.Call):
+                    if v.op.name == "kpair":
+                        tuple_tmp_var = stmt.var
+                    elif v.op.name == "k_add":
+                        kadd_call = v
+
+        walk(fn.body)
+        assert tuple_tmp_var is not None
+        assert kadd_call is not None
+        edges = kadd_call.attrs.get("manual_dep_edges", [])
+        assert len(edges) == 1
+        assert edges[0].same_as(tuple_tmp_var), "k_add's manual_dep_edge should point at the kpair tuple temp"
+
+    def test_var_to_var_copy_propagates_producer(self):
+        """A trivial ``c = a`` rebind shouldn't lose ``a``'s producer."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a = self.k1(x)
+                    c = a
+                    d = self.k2(c)
+                return d
+
+        ssa = passes.convert_to_ssa()(Prog)
+        ddir = passes.derive_call_directions()(ssa)
+        ddep = passes.derive_manual_scope_deps()(ddir)
+
+        fn = ddep.get_function("main")
+        assert fn is not None
+        a_var = None
+        k2_call = None
+
+        def walk(stmt):
+            nonlocal a_var, k2_call
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    walk(s)
+            elif isinstance(stmt, ir.RuntimeScopeStmt):
+                walk(stmt.body)
+            elif isinstance(stmt, ir.AssignStmt):
+                v = stmt.value
+                if isinstance(v, ir.Call):
+                    if v.op.name == "k1":
+                        a_var = stmt.var
+                    elif v.op.name == "k2":
+                        k2_call = v
+
+        walk(fn.body)
+        assert a_var is not None
+        assert k2_call is not None
+        edges = k2_call.attrs.get("manual_dep_edges", [])
+        assert len(edges) == 1
+        assert edges[0].same_as(a_var)
+
+
+class TestManualScopeNesting:
+    @pytest.fixture(autouse=True)
+    def pass_verification_context(self):
+        instruments: list[_core_passes.PassInstrument] = [
+            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with _core_passes.PassContext(instruments):
+            yield
+
+    def test_nested_manual_scope_rejected(self):
+        """The runtime forbids MANUAL inside MANUAL; reject at parse time."""
+        with pytest.raises(Exception, match="manual_scope"):  # noqa: B017
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        a = self.k1(x)
+                        with pl.manual_scope():  # nested — must error
+                            b = self.k1(a)
+                    return b
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
