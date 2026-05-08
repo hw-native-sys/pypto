@@ -157,6 +157,7 @@ class PassManager:
             ("MemoryReuse", lambda: passes.memory_reuse()),
             ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),
             ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
+            ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
             ("DeriveCallDirections", lambda: passes.derive_call_directions()),
             ("DeriveManualScopeDeps", lambda: passes.derive_manual_scope_deps()),

@@ -300,6 +300,12 @@ void BindPass(nb::module_& m) {
              "replaces create with tensor.slice(target, shape, offsets) and removes\n"
              "the assemble, enabling orchestration codegen to emit .view() directly.");
 
+  passes.def("fold_no_op_reshape", &pass::FoldNoOpReshape,
+             "Fold no-op tile.reshape assignments into Var-to-Var assignments\n\n"
+             "Rewrites `lhs = tile.reshape(rhs, shape)` into `lhs = rhs` when both\n"
+             "sides share the same MemRef root and produce identical TileBufSignatures,\n"
+             "removing the reshape Call so PTO codegen can stay 1:1.");
+
   passes.def("normalize_return_order", &pass::NormalizeReturnOrder,
              "Create a return order normalization pass\n\n"
              "Reorders return tuple values in InCore functions so that return[i]\n"

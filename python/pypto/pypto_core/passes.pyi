@@ -303,6 +303,9 @@ def allocate_memory_addr() -> Pass:
 def fuse_create_assemble_to_slice() -> Pass:
     """Fuse tensor.create + tensor.assemble into tensor.slice in Orchestration functions."""
 
+def fold_no_op_reshape() -> Pass:
+    """Fold no-op tile.reshape assignments into Var-to-Var assignments."""
+
 def normalize_return_order() -> Pass:
     """Create a return order normalization pass."""
 
@@ -636,6 +639,7 @@ __all__ = [
     "legalize_pto_buffer_reuse",
     "allocate_memory_addr",
     "fuse_create_assemble_to_slice",
+    "fold_no_op_reshape",
     "VerificationError",
     "SSAErrorType",
     "TypeCheckErrorType",

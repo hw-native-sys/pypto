@@ -213,6 +213,12 @@ inline const PassProperties kDeriveCallDirectionsProperties{.required = {IRPrope
 inline const PassProperties kDeriveManualScopeDepsProperties{.required = {IRProperty::CallDirectionsResolved},
                                                              .produced = {}};
 
+// -- No-op tile.reshape folding pass -----------------------------------------
+
+inline const PassProperties kFoldNoOpReshapeProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps, IRProperty::HasMemRefs,
+                 IRProperty::TileOps2D}};
+
 }  // namespace pass
 }  // namespace ir
 }  // namespace pypto

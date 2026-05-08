@@ -596,6 +596,22 @@ Pass DeriveCallDirections();
 Pass DeriveManualScopeDeps();
 
 /**
+ * @brief Fold no-op tile.reshape assignments into Var-to-Var assignments
+ *
+ * After LegalizePTOBufferReuse, two TileType variables can share the same
+ * MemRef and the same TileBufSignature — in that case the `tile.reshape`
+ * connecting them is a no-op at the PTO level. This pass rewrites such
+ * `lhs = tile.reshape(rhs, shape)` AssignStmts into plain `lhs = rhs`,
+ * removing the reshape Call. PTO codegen previously dropped the emission
+ * via a peephole; folding into the IR makes codegen 1:1.
+ *
+ * Requirements:
+ * - InCore-type functions only (Opaque/Orchestration are unaffected)
+ * - Must run after LegalizePTOBufferReuse so MemRef merging is finalized
+ */
+Pass FoldNoOpReshape();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws
