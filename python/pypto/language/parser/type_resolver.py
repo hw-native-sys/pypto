@@ -355,24 +355,9 @@ class TypeResolver:
         if type_name == "Tuple":
             return self._resolve_tuple_subscript_type(subscript_node)
 
-        # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref]
-        #         optionally with a trailing ``pl.ManualDep`` marker at any tail position.
+        # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref].
         # Tile: [shape, dtype] plus any ordering of TileView/MemRef/MemorySpace,
         # with the constraint that MemRef requires explicit MemorySpace.
-        # Strip ManualDep marker from Tensor annotations before counting.
-        manual_dep = False
-        if type_name == "Tensor" and isinstance(slice_value, ast.Tuple):
-            kept_elts: list[ast.expr] = []
-            for elt in slice_value.elts:
-                if self._is_manual_dep_node(elt):
-                    manual_dep = True
-                else:
-                    kept_elts.append(elt)
-            if manual_dep:
-                # Build a fresh Tuple node with the marker removed; preserve span via copy_location.
-                stripped = ast.Tuple(elts=kept_elts, ctx=slice_value.ctx)
-                ast.copy_location(stripped, slice_value)
-                slice_value = stripped
         valid_counts = (2, 3, 4) if type_name == "Tensor" else (2, 3, 4, 5)
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in valid_counts:
             if type_name == "Tensor":
@@ -412,7 +397,7 @@ class TypeResolver:
         if n_elts == 2:
             if type_name == "Tile":
                 return ir.TileType(shape, dtype)
-            return ir.TensorType(shape, dtype, None, None, manual_dep)
+            return ir.TensorType(shape, dtype, None, None)
 
         if type_name == "Tile":
             return self._resolve_tile_annotation_args(shape, dtype, list(slice_value.elts[2:]))
@@ -422,13 +407,13 @@ class TypeResolver:
             third = slice_value.elts[2]
             if self._is_memref_node(third):
                 memref = self.resolve_memref(third)
-                return ir.TensorType(shape, dtype, memref, None, manual_dep)
+                return ir.TensorType(shape, dtype, memref, None)
             if self._is_tensorview_node(third):
                 tensor_view = self._resolve_tensorview(third)
-                return ir.TensorType(shape, dtype, None, tensor_view, manual_dep)
+                return ir.TensorType(shape, dtype, None, tensor_view)
             layout = self.resolve_layout(third)
             tensor_view = ir.TensorView([], layout)
-            return ir.TensorType(shape, dtype, None, tensor_view, manual_dep)
+            return ir.TensorType(shape, dtype, None, tensor_view)
 
         # Tensor 4 args: [shape, dtype, layout_or_tensorview, memref]
         third = slice_value.elts[2]
@@ -445,7 +430,7 @@ class TypeResolver:
                 hint="Use pl.Tensor[[shape], dtype, layout, pl.MemRef(...)]",
             )
         memref = self.resolve_memref(memref_node)
-        return ir.TensorType(shape, dtype, memref, tensor_view, manual_dep)
+        return ir.TensorType(shape, dtype, memref, tensor_view)
 
     def _resolve_tile_annotation_args(
         self, shape: "list[int] | list[ir.Expr]", dtype: DataType, extra_nodes: list[ast.expr]
@@ -1132,28 +1117,6 @@ class TypeResolver:
         return (isinstance(func, ast.Attribute) and func.attr == "TensorView") or (
             isinstance(func, ast.Name) and func.id == "TensorView"
         )
-
-    def _is_manual_dep_node(self, node: ast.expr) -> bool:
-        """Check if an AST node is the ``pl.ManualDep`` marker.
-
-        ``ManualDep`` is a marker class (not callable). It appears in tensor
-        annotations as a bare reference: ``pl.ManualDep`` (rooted at the
-        ``pl`` module) or ``ManualDep`` (when imported directly).
-
-        The match is tight on purpose — ``some_obj.ManualDep`` on a user
-        object does not qualify, so a stray attribute named ``ManualDep`` on
-        an unrelated object cannot silently mark a tensor as manual-dep.
-        """
-        if (
-            isinstance(node, ast.Attribute)
-            and node.attr == "ManualDep"
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "pl"
-        ):
-            return True
-        if isinstance(node, ast.Name) and node.id == "ManualDep":
-            return True
-        return False
 
     def _resolve_tensorview(self, node: ast.expr) -> "ir.TensorView":
         """Resolve a pl.TensorView(...) AST call to ir.TensorView.

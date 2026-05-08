@@ -145,7 +145,7 @@ def _simplify_shape_dims(type_: ir.Type, analyzer: "_arith.Analyzer") -> ir.Type
     assert isinstance(type_, (ir.TensorType, ir.TileType))
     simplified_shape = [analyzer.simplify(d) if isinstance(d, ir.Expr) else d for d in type_.shape]
     if isinstance(type_, ir.TensorType):
-        return ir.TensorType(simplified_shape, type_.dtype, type_.memref, type_.tensor_view, type_.manual_dep)
+        return ir.TensorType(simplified_shape, type_.dtype, type_.memref, type_.tensor_view)
     return ir.TileType(simplified_shape, type_.dtype, type_.memref, type_.tile_view, type_.memory_space)
 
 

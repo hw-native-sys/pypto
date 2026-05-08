@@ -20,7 +20,6 @@ from typing import TypeAlias
 
 from pypto.language.typing.direction import InOut, Out
 from pypto.language.typing.dynamic import DynVar, dynamic
-from pypto.language.typing.manual_dep import ManualDep
 from pypto.language.typing.memref import MemRef
 from pypto.language.typing.scalar import Scalar
 from pypto.language.typing.tensor import Tensor
@@ -35,7 +34,6 @@ __all__ = [
     "DynVar",
     "InOut",
     "IntLike",
-    "ManualDep",
     "MemRef",
     "Out",
     "Scalar",

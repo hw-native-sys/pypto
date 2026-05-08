@@ -2896,67 +2896,6 @@ class TestManualScopeCodegen:
         assert "TaskOutputTensors task_0_outs" not in code
         assert "add_dep(task_" not in code
 
-    def test_manual_dep_param_inside_manual_scope_emits_runtime_flag(self):
-        """``pl.Tensor[..., pl.ManualDep]`` reaches the runtime as a flag.
-
-        ``manual_dep=True`` opts a specific buffer out of the runtime's
-        OverlapMap auto-dep tracking. The realistic usage pattern combines
-        the marker with ``with pl.manual_scope():`` — the user has taken
-        ownership of ordering for the whole region, and ``ManualDep``
-        matches that intent at the buffer level so the runtime stays
-        consistent. Without the codegen emitting the flag, the buffer
-        would be silently tracked and edges would be auto-derived,
-        defeating the opt-out.
-        """
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return x
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(
-                self,
-                x: pl.Tensor[[64], pl.FP32, pl.ManualDep],
-                y: pl.Tensor[[64], pl.FP32],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
-                    a = self.k1(x)
-                    b = self.k1(y)
-                return b
-
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed = pm.run_passes(Prog)
-        code = _generate_orch_code(transformed)
-
-        # Param `x` is ManualDep — flag must appear on its from_tensor_arg.
-        assert "Tensor ext_x = from_tensor_arg(orch_args.tensor(0), /*manual_dep=*/true);" in code, code
-        # Param `y` is not ManualDep — the flag must NOT appear.
-        assert "Tensor ext_y = from_tensor_arg(orch_args.tensor(1));" in code, code
-
-    def test_manual_dep_default_false_is_silent(self):
-        """No ManualDep marker → no manual_dep argument anywhere in codegen."""
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return x
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return self.k1(x)
-
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        transformed = pm.run_passes(Prog)
-        code = _generate_orch_code(transformed)
-        assert "/*manual_dep=*/true" not in code, code
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

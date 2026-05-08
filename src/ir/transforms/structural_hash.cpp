@@ -441,8 +441,6 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
-    // Hash manual_dep flag
-    h = hash_combine(h, static_cast<result_type>(tensor_type->manual_dep_ ? 1 : 0));
   } else if (auto tile_type = As<TileType>(type)) {
     // Hash dtype
     h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tile_type->dtype_.Code())));

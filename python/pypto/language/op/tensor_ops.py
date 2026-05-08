@@ -107,10 +107,10 @@ def create(
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
-        manual_dep: When True, the tensor opts out of automatic dependency
-            tracking by codegen (used internally for orchestrator-injected
-            workspace buffers like the GM pipe buffer). Most user code should
-            leave this as False.
+        manual_dep: **Internal-only.** Set by ``InjectGMPipeBuffer`` for the
+            scratch buffers it injects. User code should never set this —
+            order kernel calls explicitly with ``pl.no_dep(...)`` or wrap
+            them in ``with pl.manual_scope():`` instead.
 
     Returns:
         Tensor wrapping the create operation

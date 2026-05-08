@@ -33,10 +33,12 @@ def create(
         shape: List of dimension sizes (int or Expr), or a MakeTuple
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
-        manual_dep: When True, mark the buffer as ``manual_dep`` so codegen
-            opts out of automatic dependency tracking. Used by passes that
-            inject orchestrator workspace buffers (e.g. GM pipe buffer); most
-            users should leave it as the default ``False``.
+        manual_dep: **Internal-only.** When True, the codegen marks this
+            ``tensor.create`` call so the runtime skips OverlapMap dep
+            tracking. Set programmatically by the ``InjectGMPipeBuffer``
+            pass for compiler-injected scratch buffers; user code should
+            never set this — order kernel calls with ``pl.no_dep(...)``
+            or ``with pl.manual_scope():`` instead.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

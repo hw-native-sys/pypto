@@ -549,8 +549,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         }
       }
       if (!changed) return type;
-      return std::make_shared<TensorType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv),
-                                          t->manual_dep_);
+      return std::make_shared<TensorType>(std::move(new_shape), t->dtype_, t->memref_, std::move(new_tv));
     }
     if (auto t = As<TileType>(type)) {
       bool changed = false;

@@ -51,7 +51,7 @@ inline TypePtr CloneTypeWithMemRef(const TypePtr& type, const std::optional<MemR
                                    std::optional<MemorySpace> tile_memory_space_override = std::nullopt) {
   if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
     return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref,
-                                        tensor_type->tensor_view_, tensor_type->manual_dep_);
+                                        tensor_type->tensor_view_);
   }
 
   if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {
@@ -133,7 +133,7 @@ inline TypePtr CloneTypeWithMemRefAndRemapExprs(
       return type;
     }
     return std::make_shared<TensorType>(std::move(new_shape), tensor_type->dtype_, memref,
-                                        std::move(new_tensor_view), tensor_type->manual_dep_);
+                                        std::move(new_tensor_view));
   }
 
   if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {

@@ -184,7 +184,7 @@ from .optimizations import auto_chunk, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import manual_scope
-from .typing import DynVar, InOut, IntLike, ManualDep, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
+from .typing import DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
 Mem = MemorySpace
@@ -238,7 +238,6 @@ __all__ = [
     "DynVar",
     "InOut",
     "IntLike",
-    "ManualDep",
     "Out",
     "dynamic",
     "const",

@@ -355,8 +355,7 @@ class SSAConverter {
         }
       }
       if (changed) {
-        return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, std::move(new_tv),
-                                            t->manual_dep_);
+        return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, std::move(new_tv));
       }
       return type;
     }

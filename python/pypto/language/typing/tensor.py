@@ -15,36 +15,22 @@ from typing import Any, cast, overload
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr, MemRef, TensorLayout
 
-from .manual_dep import ManualDep
-
 
 def _validate_tensor_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
     """Validate TensorMeta.__call__ argument structure."""
-    allowed_kwargs = {"shape", "dtype", "expr", "layout", "memref", "manual_dep", "_annotation_only"}
+    allowed_kwargs = {"shape", "dtype", "expr", "layout", "memref", "_annotation_only"}
     unexpected = set(kwargs) - allowed_kwargs
     if unexpected:
         name = sorted(unexpected)[0]
         raise TypeError(f"Tensor() got an unexpected keyword argument '{name}'")
 
-    if len(args) > 7:
-        raise TypeError(f"Tensor() takes at most 7 positional arguments but {len(args)} were given")
+    if len(args) > 6:
+        raise TypeError(f"Tensor() takes at most 6 positional arguments but {len(args)} were given")
 
-    param_names = ("shape", "dtype", "expr", "layout", "memref", "manual_dep", "_annotation_only")
+    param_names = ("shape", "dtype", "expr", "layout", "memref", "_annotation_only")
     for index, name in enumerate(param_names[: len(args)]):
         if name in kwargs:
             raise TypeError(f"Tensor() got multiple values for argument '{name}'")
-
-
-def _strip_manual_dep_marker(item: tuple) -> tuple[tuple, bool]:
-    """Pull a ``pl.ManualDep`` marker out of a Tensor[...] subscript tuple.
-
-    Returns the remaining tuple (without the marker) and a bool flag.
-    """
-    if not isinstance(item, tuple):
-        return item, False
-    rest = tuple(elt for elt in item if elt is not ManualDep)
-    has_marker = len(rest) != len(item)
-    return rest, has_marker
 
 
 class TensorMeta(type):
@@ -52,23 +38,19 @@ class TensorMeta(type):
 
     def __getitem__(cls, item: tuple) -> "Tensor":
         """Enable Tensor[[shape], dtype], Tensor[[shape], dtype, layout_or_memref],
-        Tensor[[shape], dtype, layout, memref], and an optional ``pl.ManualDep``
-        marker appended at any position to opt out of runtime auto-dep tracking.
+        and Tensor[[shape], dtype, layout, memref] notation.
 
         Args:
-            item: Tuple of 2, 3, 4, or 5 elements (5th allowed only when one is
-                ``pl.ManualDep``).
+            item: Tuple of 2, 3, or 4 elements.
 
         Returns:
-            Tensor instance with shape, dtype, optional layout/memref and
-            ``manual_dep`` flag.
+            Tensor instance with shape, dtype, optional layout/memref.
         """
         if not isinstance(item, tuple):
             raise TypeError(
                 "Tensor requires [shape, dtype], [shape, dtype, layout_or_memref], "
                 "or [shape, dtype, layout, memref] notation"
             )
-        item, manual_dep = _strip_manual_dep_marker(item)
         if len(item) not in (2, 3, 4):
             raise TypeError(
                 "Tensor requires [shape, dtype], [shape, dtype, layout_or_memref], "
@@ -82,16 +64,15 @@ class TensorMeta(type):
                 dtype,
                 layout=layout,
                 memref=memref,
-                manual_dep=manual_dep,
                 _annotation_only=True,
             )
         if len(item) == 3:
             shape, dtype, third = item
             if isinstance(third, MemRef):
-                return cls(shape, dtype, memref=third, manual_dep=manual_dep, _annotation_only=True)
-            return cls(shape, dtype, layout=third, manual_dep=manual_dep, _annotation_only=True)
+                return cls(shape, dtype, memref=third, _annotation_only=True)
+            return cls(shape, dtype, layout=third, _annotation_only=True)
         shape, dtype = item
-        return cls(shape, dtype, manual_dep=manual_dep, _annotation_only=True)
+        return cls(shape, dtype, _annotation_only=True)
 
     @overload
     def __call__(
@@ -101,7 +82,6 @@ class TensorMeta(type):
         expr: Expr | None = None,
         layout: "TensorLayout | None" = None,
         memref: "MemRef | None" = None,
-        manual_dep: bool = False,
         _annotation_only: bool = False,
     ) -> "Tensor": ...
 
@@ -113,7 +93,6 @@ class TensorMeta(type):
         expr: None = None,
         layout: "TensorLayout | None" = None,
         memref: "MemRef | None" = None,
-        manual_dep: bool = False,
         _annotation_only: bool = False,
     ) -> "Tensor": ...
 
@@ -126,7 +105,6 @@ class TensorMeta(type):
             expr: IR expression to wrap (for runtime mode)
             layout: Optional tensor layout (ND, DN, NZ)
             memref: Optional memory reference
-            manual_dep: When True (annotation only), opts out of runtime auto-dep tracking.
             _annotation_only: Internal flag for annotation-only mode
 
         Returns:
@@ -140,8 +118,7 @@ class TensorMeta(type):
         expr = kwargs.get("expr", args[2] if len(args) > 2 else None)
         layout = kwargs.get("layout", args[3] if len(args) > 3 else None)
         memref = kwargs.get("memref", args[4] if len(args) > 4 else None)
-        manual_dep = kwargs.get("manual_dep", args[5] if len(args) > 5 else False)
-        annotation_only = kwargs.get("_annotation_only", args[6] if len(args) > 6 else False)
+        annotation_only = kwargs.get("_annotation_only", args[5] if len(args) > 5 else False)
 
         if (
             isinstance(shape, tuple)
@@ -153,7 +130,7 @@ class TensorMeta(type):
             real_shape, real_dtype = shape
             return cast(
                 "Tensor",
-                type.__call__(cls, real_shape, real_dtype, None, layout, memref, manual_dep, annotation_only),
+                type.__call__(cls, real_shape, real_dtype, None, layout, memref, annotation_only),
             )
 
         if dtype is not None and expr is None and not annotation_only:
@@ -161,7 +138,7 @@ class TensorMeta(type):
 
         return cast(
             "Tensor",
-            type.__call__(cls, shape, dtype, expr, layout, memref, manual_dep, annotation_only),
+            type.__call__(cls, shape, dtype, expr, layout, memref, annotation_only),
         )
 
 
@@ -196,7 +173,6 @@ class Tensor(metaclass=TensorMeta):
         expr: Expr | None = None,
         layout: TensorLayout | None = None,
         memref: MemRef | None = None,
-        manual_dep: bool = False,
         _annotation_only: bool = False,
     ):
         """Initialize Tensor.
@@ -207,7 +183,6 @@ class Tensor(metaclass=TensorMeta):
             expr: IR expression to wrap (for runtime mode)
             layout: Optional tensor layout (ND, DN, NZ)
             memref: Optional memory reference
-            manual_dep: Annotation-only opt-out from runtime auto-dep tracking.
             _annotation_only: Whether this is annotation-only mode
         """
         if _annotation_only:
@@ -215,7 +190,6 @@ class Tensor(metaclass=TensorMeta):
             self.dtype = dtype
             self.layout = layout
             self.memref = memref
-            self.manual_dep = manual_dep
             self._expr = None
         elif expr is not None:
             self._expr = expr
@@ -223,7 +197,6 @@ class Tensor(metaclass=TensorMeta):
             self.dtype = None
             self.layout = None
             self.memref = None
-            self.manual_dep = False
         else:
             raise ValueError(
                 "Tensor must be initialized with either (shape, dtype) for "
