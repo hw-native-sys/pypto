@@ -30,17 +30,17 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"  // INTERNAL_CHECK; transitively pulls in error.h
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
@@ -191,10 +191,12 @@ class MaterializeTensorStridesMutator : public IRMutator {
     auto new_var_expr = IRMutator::VisitExpr(op->var_);
     auto new_value = IRMutator::VisitExpr(op->value_);
     auto new_var = As<Var>(new_var_expr);
-    if (!new_var) {
-      if (new_var_expr.get() == op->var_.get() && new_value.get() == op->value_.get()) return op;
-      return std::make_shared<AssignStmt>(As<Var>(new_var_expr), new_value, op->span_);
-    }
+    // AssignStmt LHS is always a Var by construction; visiting it through the
+    // mutator must yield a Var (or a substituted Var via var_cache_). If we
+    // ever hit a non-Var here, that's a mutator-correctness bug — surface it
+    // immediately rather than passing nullptr to the AssignStmt constructor.
+    INTERNAL_CHECK(new_var) << "MaterializeTensorStrides: AssignStmt LHS visited to non-Var "
+                            << "expression";
 
     if (auto new_call = As<Call>(new_value)) {
       auto rhs_type = new_call->GetType();

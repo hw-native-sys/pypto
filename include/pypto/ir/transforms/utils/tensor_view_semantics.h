@@ -18,11 +18,10 @@
 #include <optional>
 #include <sstream>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
+#include "pypto/core/logging.h"  // CHECK
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
@@ -47,12 +46,20 @@ inline int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
 /// Build an INDEX-typed multiply, folding ConstInt * ConstInt and the
 /// multiplicative identity (×1) so that downstream codegen sees the same
 /// strides whether the source shape is static or dynamic.
+///
+/// Uses ``__builtin_mul_overflow`` to detect signed overflow in the constant
+/// fold path; on overflow, falls back to a symbolic ``Mul`` rather than
+/// silently wrapping (which would yield an incorrect stride that the
+/// canonical-view verifier cannot detect).
 inline ExprPtr MakeIndexMul(const ExprPtr& lhs, const ExprPtr& rhs) {
   auto const_lhs = As<ConstInt>(lhs);
   auto const_rhs = As<ConstInt>(rhs);
   if (const_lhs && const_rhs) {
-    return std::make_shared<ConstInt>(const_lhs->value_ * const_rhs->value_, DataType::INDEX,
-                                      Span::unknown());
+    int64_t folded = 0;
+    if (!__builtin_mul_overflow(const_lhs->value_, const_rhs->value_, &folded)) {
+      return std::make_shared<ConstInt>(folded, DataType::INDEX, Span::unknown());
+    }
+    // Overflow — drop to symbolic so callers / verifiers see a non-folded form.
   }
   if (const_rhs && const_rhs->value_ == 1) return lhs;
   if (const_lhs && const_lhs->value_ == 1) return rhs;

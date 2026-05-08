@@ -653,6 +653,7 @@ __all__ = [
     "get_default_verify_properties",
     "get_structural_properties",
     "verify_properties",
+    "verify_tensor_view_canonical",
     "Pass",
     "PassInstrument",
     "VerificationInstrument",
