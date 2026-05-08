@@ -11,7 +11,9 @@
 
 #include "pypto/ir/transforms/base/visitor.h"
 
+#include <any>
 #include <cstddef>
+#include <vector>
 
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"

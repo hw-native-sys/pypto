@@ -357,9 +357,10 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   }
 
   if (!args_changed && !type_changed && !attrs_changed) return op;
-  return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_,
-                                      attrs_changed ? std::move(new_attrs) : op->attrs_, std::move(new_type),
-                                      op->span_);
+  std::vector<std::pair<std::string, std::any>> attrs_to_use =
+      attrs_changed ? std::move(new_attrs) : op->attrs_;
+  return std::make_shared<const Call>(op->op_, std::move(new_args), op->kwargs_, std::move(attrs_to_use),
+                                      std::move(new_type), op->span_);
 }
 
 ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {

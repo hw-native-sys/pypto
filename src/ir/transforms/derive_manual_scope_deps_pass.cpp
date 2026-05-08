@@ -10,6 +10,7 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -27,7 +28,6 @@
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
@@ -52,7 +52,7 @@ constexpr size_t kManualDepEdgeLimit = 16;
 ///      suppresses the auto edge).
 class ManualDepMutator : public IRMutator {
  public:
-  explicit ManualDepMutator(std::vector<std::string>& errors) : errors_(errors) {}
+  ManualDepMutator() = default;
 
   StmtPtr VisitStmt_(const RuntimeScopeStmtPtr& op) override {
     // Save / restore the producer-Var map so nested scopes don't leak
@@ -80,13 +80,40 @@ class ManualDepMutator : public IRMutator {
     auto call = As<Call>(assign->value_);
     if (!call) return assign;
     if (IsBuiltinOp(call->op_->name_)) {
-      // Builtin tensor.* / tile.* / system.* ops never get a task; just
-      // record the LHS as having no producer Call so consumers don't
-      // accidentally add a phantom edge.
+      // Builtin tensor.* / tile.* / system.* ops never get a task; record
+      // the LHS as a non-producer (no map entry) so consumers don't add a
+      // phantom edge.
       return assign;
     }
 
-    // Compute the resolved manual_dep_edges list for this call.
+    auto new_call = ResolveManualDepsForCall(call);
+    // After resolving, register the LHS Var as a producer for downstream
+    // siblings — the codegen turns this into ``task_<n>``.
+    producer_map_[assign->var_.get()] = assign->var_;
+    if (new_call.get() == call.get()) return assign;
+    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
+  }
+
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    auto base = IRMutator::VisitStmt_(op);
+    auto eval = As<EvalStmt>(base);
+    if (!eval || manual_depth_ == 0) return eval;
+
+    auto call = As<Call>(eval->expr_);
+    if (!call || IsBuiltinOp(call->op_->name_)) return eval;
+
+    // EvalStmt-form kernel calls have no LHS; they still need ``add_dep``
+    // edges emitted, but they never become producers themselves.
+    auto new_call = ResolveManualDepsForCall(call);
+    if (new_call.get() == call.get()) return eval;
+    return std::make_shared<EvalStmt>(new_call, eval->span_);
+  }
+
+ private:
+  /// Compute the resolved ``manual_dep_edges`` for ``call`` (user-supplied +
+  /// data-flow union, NoDep-aware, capped at the runtime limit) and return a
+  /// rewritten Call carrying the attr — or the original Call when no edges.
+  CallPtr ResolveManualDepsForCall(const CallPtr& call) {
     std::vector<VarPtr> deps;
     std::unordered_set<const Var*> seen;
 
@@ -104,10 +131,9 @@ class ManualDepMutator : public IRMutator {
           << "Internal error: " << kAttrUserManualDepEdges << " attr must hold std::vector<VarPtr>";
       for (const auto& var : *user_deps) {
         if (!var) continue;
-        // Only accept vars that are actually producers in this scope; the
-        // verifier reports a clearer error when one isn't, but we silently
-        // accept here so unit tests can hand-build IR fragments without a
-        // full producer trace. The verifier will catch real misuse.
+        // Accept any Var here; the verifier catches real misuse with a
+        // clearer error, and unit tests can hand-build IR fragments without
+        // a full producer trace.
         append_dep(var);
       }
       break;
@@ -125,26 +151,17 @@ class ManualDepMutator : public IRMutator {
     }
 
     // 3. Cap check matching the runtime hard limit.
-    if (deps.size() > kManualDepEdgeLimit) {
-      errors_.push_back("manual_scope: call to '" + call->op_->name_ + "' has " +
-                        std::to_string(deps.size()) + " dependency edges, exceeds runtime cap of " +
-                        std::to_string(kManualDepEdgeLimit));
-    }
+    INTERNAL_CHECK_SPAN(deps.size() <= kManualDepEdgeLimit, call->span_)
+        << "manual_scope: call has " << deps.size() << " dependency edges, exceeds runtime cap of "
+        << kManualDepEdgeLimit;
 
-    // 4. Update producer map: this call's LHS Var becomes a producer.
-    producer_map_[assign->var_.get()] = assign->var_;
-
-    // 5. If we collected nothing, leave the Call unchanged (skip the attr).
-    if (deps.empty()) return assign;
+    if (deps.empty()) return call;
 
     auto new_attrs = WithManualDepEdgesAttr(call->attrs_, std::move(deps));
-    auto new_call = std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
-                                                 call->GetType(), call->span_);
-    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
+    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
+                                        call->GetType(), call->span_);
   }
 
- private:
-  std::vector<std::string>& errors_;
   /// Map from a Var (LHS of an AssignStmt whose RHS is a kernel Call) to the
   /// same Var. The codegen later uses Var emit names to construct
   /// ``task_<name>`` C++ identifiers; we just need the producing Var here.
@@ -161,26 +178,16 @@ Pass DeriveManualScopeDeps() {
     if (!program) return program;
 
     auto new_functions = program->functions_;
-    std::vector<std::string> errors;
-
     for (auto& [gvar, func] : new_functions) {
       if (!func || !func->body_) continue;
 
-      ManualDepMutator mutator(errors);
+      ManualDepMutator mutator;
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
 
       func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
                                         func->return_types_, new_body, func->span_, func->func_type_,
                                         func->level_, func->role_, func->attrs_);
-    }
-
-    if (!errors.empty()) {
-      std::string msg = "DeriveManualScopeDeps reported " + std::to_string(errors.size()) + " error(s):\n";
-      for (const auto& e : errors) {
-        msg += "  - " + e + "\n";
-      }
-      throw pypto::ValueError(msg);
     }
 
     if (new_functions == program->functions_) {

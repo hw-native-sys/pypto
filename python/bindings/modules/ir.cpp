@@ -144,43 +144,16 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<nb::float_>(item.second)) {
       kwargs.emplace_back(key, nb::cast<double>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
-      // Lists/tuples carry exactly one of:
-      //   - vector<ArgDirection> for attrs["arg_directions"]
-      //   - vector<int32_t>      for attrs["arg_direction_overrides"]
-      //     (per-arg NoDep override indices set by ``pl.no_dep`` parser)
-      // Empty sequences are key-disambiguated: kAttrArgDirectionOverrides
-      // gets vector<int32_t>{}, everything else gets vector<ArgDirection>{}.
+      // Lists/tuples carry exactly one element type, dispatched by attr key:
+      //   - kAttrArgDirections          -> vector<ArgDirection>
+      //   - kAttrArgDirectionOverrides  -> vector<int32_t>
+      //   - kAttrManualDepEdges /
+      //     kAttrUserManualDepEdges     -> vector<VarPtr>
+      // Inferring from the first element would silently accept mismatched
+      // payloads (e.g. ``manual_dep_edges=[1]``) and fail later in codegen
+      // instead of raising at parse time.
       auto seq = nb::cast<nb::sequence>(item.second);
-      bool empty = true;
-      bool first_is_arg_direction = false;
-      bool first_is_int = false;
-      bool first_is_var = false;
-      for (auto elem : seq) {
-        empty = false;
-        first_is_arg_direction = nb::isinstance<ArgDirection>(elem);
-        first_is_int = nb::isinstance<nb::int_>(elem) && !nb::isinstance<nb::bool_>(elem);
-        first_is_var = nb::isinstance<Var>(elem);
-        break;
-      }
-      if (empty) {
-        if (key == kAttrArgDirectionOverrides) {
-          kwargs.emplace_back(key, std::vector<int32_t>{});
-        } else if (key == kAttrManualDepEdges || key == kAttrUserManualDepEdges) {
-          kwargs.emplace_back(key, std::vector<VarPtr>{});
-        } else {
-          kwargs.emplace_back(key, std::vector<ArgDirection>{});
-        }
-      } else if (first_is_arg_direction) {
-        std::vector<ArgDirection> dirs;
-        for (auto elem : seq) {
-          if (!nb::isinstance<ArgDirection>(elem)) {
-            throw pypto::TypeError("Unsupported list element type for key: " + key +
-                                   " (expected ArgDirection)");
-          }
-          dirs.push_back(nb::cast<ArgDirection>(elem));
-        }
-        kwargs.emplace_back(key, std::move(dirs));
-      } else if (first_is_int) {
+      if (key == kAttrArgDirectionOverrides) {
         std::vector<int32_t> idxs;
         for (auto elem : seq) {
           if (nb::isinstance<nb::bool_>(elem) || !nb::isinstance<nb::int_>(elem)) {
@@ -194,8 +167,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
           idxs.push_back(static_cast<int32_t>(v));
         }
         kwargs.emplace_back(key, std::move(idxs));
-      } else if (first_is_var) {
-        // attrs["manual_dep_edges"] / attrs["user_manual_dep_edges"]: vector<VarPtr>
+      } else if (key == kAttrManualDepEdges || key == kAttrUserManualDepEdges) {
         std::vector<VarPtr> vars;
         for (auto elem : seq) {
           if (!nb::isinstance<Var>(elem)) {
@@ -205,8 +177,16 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
         }
         kwargs.emplace_back(key, std::move(vars));
       } else {
-        throw pypto::TypeError("Unsupported list element type for key: " + key +
-                               " (expected ArgDirection, int, or Var)");
+        // Default: kAttrArgDirections and any future ArgDirection list key.
+        std::vector<ArgDirection> dirs;
+        for (auto elem : seq) {
+          if (!nb::isinstance<ArgDirection>(elem)) {
+            throw pypto::TypeError("Unsupported list element type for key: " + key +
+                                   " (expected ArgDirection)");
+          }
+          dirs.push_back(nb::cast<ArgDirection>(elem));
+        }
+        kwargs.emplace_back(key, std::move(dirs));
       }
     } else {
       throw pypto::TypeError("Unsupported kwarg type for key: " + key);

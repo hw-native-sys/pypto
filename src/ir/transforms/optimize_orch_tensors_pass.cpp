@@ -1056,8 +1056,9 @@ class AssembleParentStridesOptimizer {
                                      full_strides.end());
 
         TensorView view(std::move(strides), TensorLayout::ND);
-        auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
-                                                     tensor_type->memref_, std::move(view));
+        auto new_type =
+            std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
+                                         std::move(view), tensor_type->manual_dep_);
         auto new_param = std::make_shared<Var>(func->params_[opm.param_index]->name_hint_, new_type,
                                                func->params_[opm.param_index]->span_);
 
@@ -1622,8 +1623,9 @@ class SliceInputStridesOptimizer {
                                      full_strides.end());
 
         TensorView view(std::move(strides), TensorLayout::ND);
-        auto new_type = std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_,
-                                                     tensor_type->memref_, std::move(view));
+        auto new_type =
+            std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, tensor_type->memref_,
+                                         std::move(view), tensor_type->manual_dep_);
         auto new_param = std::make_shared<Var>(func->params_[param_idx]->name_hint_, new_type,
                                                func->params_[param_idx]->span_);
 

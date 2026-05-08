@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <any>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -265,8 +266,9 @@ class SSAConverter {
       bool type_changed = new_type.get() != call->GetType().get();
       bool attrs_changed = new_attrs.has_value();
       if (type_changed || attrs_changed) {
-        return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_,
-                                            attrs_changed ? std::move(*new_attrs) : call->attrs_,
+        std::vector<std::pair<std::string, std::any>> attrs_to_use =
+            attrs_changed ? std::move(*new_attrs) : call->attrs_;
+        return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(attrs_to_use),
                                             type_changed ? new_type : call->GetType(), call->span_);
       }
       return result;
@@ -349,7 +351,8 @@ class SSAConverter {
         }
       }
       if (changed) {
-        return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, std::move(new_tv));
+        return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, std::move(new_tv),
+                                            t->manual_dep_);
       }
       return type;
     }

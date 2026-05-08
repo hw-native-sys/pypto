@@ -132,7 +132,8 @@ FunctionPtr TransformIncoreParams(const FunctionPtr& func) {
 
     auto new_tensor_type = std::make_shared<TensorType>(
         old_tensor_type->shape_, old_tensor_type->dtype_, old_tensor_type->memref_,
-        std::optional<TensorView>(TensorView(std::vector<ExprPtr>{}, TensorLayout::DN)));
+        std::optional<TensorView>(TensorView(std::vector<ExprPtr>{}, TensorLayout::DN)),
+        old_tensor_type->manual_dep_);
 
     auto new_var = std::make_shared<Var>(old_param->name_hint_, new_tensor_type, old_param->span_);
     new_params[idx] = new_var;
