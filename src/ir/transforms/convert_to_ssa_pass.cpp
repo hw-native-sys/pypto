@@ -266,8 +266,12 @@ class SSAConverter {
       bool type_changed = new_type.get() != call->GetType().get();
       bool attrs_changed = new_attrs.has_value();
       if (type_changed || attrs_changed) {
-        std::vector<std::pair<std::string, std::any>> attrs_to_use =
-            attrs_changed ? std::move(*new_attrs) : call->attrs_;
+        std::vector<std::pair<std::string, std::any>> attrs_to_use;
+        if (attrs_changed) {
+          attrs_to_use = std::move(*new_attrs);
+        } else {
+          attrs_to_use = call->attrs_;
+        }
         return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(attrs_to_use),
                                             type_changed ? new_type : call->GetType(), call->span_);
       }
