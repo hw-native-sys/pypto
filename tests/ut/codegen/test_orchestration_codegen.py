@@ -2954,6 +2954,188 @@ class TestManualScopeCodegen:
         assert "TaskOutputTensors task_0_outs" not in code
         assert "add_dep(task_" not in code
 
+    def test_manual_scope_seq_outer_parallel_inner_two_stage_pipeline(self):
+        """End-to-end: ``with pl.manual_scope():`` wrapping
+        ``for i in pl.range(M): for j in pl.parallel(N): stage1; stage2``.
+
+        Each iteration runs a 2-stage pipeline (stage2 reads stage1's output
+        on the same tile). This shapes a verifiable dependency graph where
+        manual_scope must:
+
+        1. **Establish** the stage1 → stage2 dependency *within* an iteration
+           (otherwise stage2 races stage1's write on the shared scratch
+           buffer); and
+        2. **Avoid serializing** across iterations: different ``(i, j)`` tiles
+           write disjoint regions of ``out`` and ``scratch``, so the inner
+           ``pl.parallel(N)`` loop and the outer ``pl.range(M)`` loop should
+           submit tasks at maximum concurrency.
+
+        Because MANUAL mode skips the runtime OverlapMap, the only ordering
+        comes from explicit ``add_dep`` calls. The codegen output therefore
+        proves correct parallelism: present where required (stage2→stage1
+        within each iteration), absent everywhere else.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        M, N = 4, 8
+        TILE_R, TILE_C = 32, 32
+        ROWS, COLS = M * TILE_R, N * TILE_C
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def stage1(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(x, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], scratch)
+                return ret
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def stage2(
+                self,
+                scratch: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(scratch, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                with pl.manual_scope():
+                    for i in pl.range(M):
+                        row: pl.Scalar[pl.INDEX] = i * TILE_R
+                        for j in pl.parallel(N):
+                            col: pl.Scalar[pl.INDEX] = j * TILE_C
+                            scratch = self.stage1(x, scratch, row, col)
+                            out = self.stage2(scratch, out, row, col)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        # MANUAL wrapper + both loops survive without extra auto-scope wrappers.
+        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
+        assert "for (int64_t i = 0; i < 4; i += 1)" in code, code
+        assert "for (int64_t j = 0; j < 8; j += 1)" in code, code
+        assert code.count("PTO2_SCOPE() {") == 1, code
+        assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
+
+        # Both stages capture their task id (so stage2 can ``add_dep`` on
+        # stage1, and any later sibling can ``add_dep`` on either).
+        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
+        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code, code
+        assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
+        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code, code
+
+        # *** Manual dep correctly established WITHIN each iteration ***
+        # stage2 reads what stage1 just wrote to ``scratch``: this dep is
+        # required for correctness.
+        assert "params_t1.add_dep(task_0);" in code, code
+
+        # *** Correct parallelism ACROSS iterations ***
+        # The only ``add_dep`` in the manual scope is the one above; there
+        # is no cross-iteration serialization. Different (i, j) tiles run
+        # in parallel as MANUAL mode allows.
+        assert code.count("add_dep(") == 1, code
+
+    def test_manual_scope_parallel_outer_seq_inner_two_stage_pipeline(self):
+        """End-to-end: outer ``pl.parallel`` + inner ``pl.range`` inside
+        ``with pl.manual_scope():`` with the same 2-stage pipeline.
+
+        Mirror of the previous case with the loop kinds swapped. The same
+        manual-dep contract holds: stage1 → stage2 within an iteration is
+        explicit; cross-iteration is unconstrained so the parallel outer
+        loop dispatches tiles concurrently.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        M, N = 8, 4
+        TILE_R, TILE_C = 32, 32
+        ROWS, COLS = M * TILE_R, N * TILE_C
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def stage1(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(x, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], scratch)
+                return ret
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def stage2(
+                self,
+                scratch: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(scratch, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                with pl.manual_scope():
+                    for i in pl.parallel(M):
+                        row: pl.Scalar[pl.INDEX] = i * TILE_R
+                        for j in pl.range(N):
+                            col: pl.Scalar[pl.INDEX] = j * TILE_C
+                            scratch = self.stage1(x, scratch, row, col)
+                            out = self.stage2(scratch, out, row, col)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
+        assert "for (int64_t i = 0; i < 8; i += 1)" in code, code
+        assert "for (int64_t j = 0; j < 4; j += 1)" in code, code
+        assert code.count("PTO2_SCOPE() {") == 1, code
+        assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
+
+        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
+        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code, code
+        assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
+        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code, code
+
+        # Manual dep WITHIN each iteration: stage2 follows stage1.
+        assert "params_t1.add_dep(task_0);" in code, code
+
+        # Cross-iteration parallel: the ONLY add_dep is the intra-iteration one.
+        assert code.count("add_dep(") == 1, code
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
