@@ -540,6 +540,109 @@ class TestInlineFuncIntegration:
             f"Expected an *_incore_* outlined function from the spliced pl.at body, got {func_names}"
         )
 
+    def test_nested_inline_dep_graph(self):
+        """A @pl.jit.inline that calls another @pl.jit.inline: both deps must be
+        discovered transitively in leaf-first topological order, with the call
+        graph recording who calls whom (regression for issue #1302)."""
+
+        @jit.inline
+        def leaf(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            return out
+
+        @jit.inline
+        def mid(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = leaf(a, out)
+            return out
+
+        @jit
+        def entry(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = mid(a, out)
+            return out
+
+        deps_topo, caller_by_id, callees_by_id = entry._get_dep_graph()
+        assert [d.__name__ for d in deps_topo] == ["leaf", "mid"]
+        assert caller_by_id[id(leaf._func)] is mid._func
+        assert caller_by_id[id(mid._func)] is entry._func
+        assert callees_by_id[id(entry._func)] == ["mid"]
+        assert callees_by_id[id(mid._func)] == ["leaf"]
+        assert callees_by_id[id(leaf._func)] == []
+
+    def test_nested_inline_compiles(self):
+        """End-to-end repro from issue #1302: an entry that calls an inline
+        that calls another inline must compile without raising and the post-pass
+        IR must have spliced both inline bodies."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def leaf(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [32, 32])
+                pl.store(tile, [0, 0], out)
+            return out
+
+        @jit.inline
+        def mid(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = leaf(a, out)
+            return out
+
+        @jit
+        def entry_nested(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = mid(a, out)
+            return out
+
+        a = torch.randn(32, 32)
+        out = torch.empty(32, 32)
+        post_pass = entry_nested.compile_for_test(a, out)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "leaf" not in func_names, f"leaf should be spliced, got {func_names}"
+        assert "mid" not in func_names, f"mid should be spliced, got {func_names}"
+        assert "entry_nested" in func_names
+        assert any("incore" in n for n in func_names), (
+            f"Expected an *_incore_* outlined function from the spliced pl.at body, got {func_names}"
+        )
+
+    def test_nested_inline_diamond(self):
+        """Diamond: entry -> {a_helper, b_helper}, both call the same shared
+        leaf. The shared leaf must be deduplicated in the dep graph."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def shared(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [32, 32])
+                pl.store(tile, [0, 0], out)
+            return out
+
+        @jit.inline
+        def a_helper(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = shared(a, out)
+            return out
+
+        @jit.inline
+        def b_helper(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = shared(a, out)
+            return out
+
+        @jit
+        def entry_diamond(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+            out = a_helper(a, out)
+            out = b_helper(a, out)
+            return out
+
+        deps = entry_diamond._get_deps()
+        assert len(deps) == 3, f"expected dedup'd shared leaf + a_helper + b_helper, got {deps}"
+        assert {d.__name__ for d in deps} == {"shared", "a_helper", "b_helper"}
+
+        a = torch.randn(32, 32)
+        out = torch.empty(32, 32)
+        # Compilation must succeed without "Unsupported function call" errors,
+        # and post-pass IR must have spliced both helpers and the shared leaf.
+        post_pass = entry_diamond.compile_for_test(a, out)
+        func_names = [f.name for f in post_pass.functions.values()]
+        for spliced in ("shared", "a_helper", "b_helper"):
+            assert spliced not in func_names, f"{spliced} should be spliced, got {func_names}"
+        assert "entry_diamond" in func_names
+
 
 class TestOpaqueFuncIntegration:
     """End-to-end @pl.jit.opaque: dep is emitted as a separate Opaque IR function."""
