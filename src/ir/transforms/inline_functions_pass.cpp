@@ -202,9 +202,10 @@ struct SplicedInlineBody {
 //   3. Split the cloned body into pre-return statements and the trailing
 //      return value(s); reject any non-trailing return.
 SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
-  CHECK(callee->params_.size() == args.size())
-      << "Inline call to '" << callee->name_ << "' has " << args.size() << " argument(s) but callee expects "
-      << callee->params_.size();
+  INTERNAL_CHECK_SPAN(callee->params_.size() == args.size(), callee->span_)
+      << "Internal error: inline call to '" << callee->name_ << "' has " << args.size()
+      << " argument(s) but callee expects " << callee->params_.size()
+      << " (parser/type-checker should have caught arity mismatch before InlineFunctions)";
 
   // 1. Build the seed substitution map for DeepClone:
   //    - Each param Var → its actual-arg Expr. The same substitution is
@@ -300,11 +301,14 @@ std::vector<StmtPtr> SpliceInlineCallAsEval(const FunctionPtr& callee, const std
 std::vector<StmtPtr> SpliceInlineCallAsAssign(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
                                               const VarPtr& lhs, const Span& call_site_span) {
   auto body = CloneInlineBody(callee, args);
-  CHECK(body.has_return) << "Inline function '" << callee->name_
-                         << "' is called for its value but has no return statement";
-  CHECK(body.return_values.size() == 1)
-      << "SpliceInlineCallAsAssign requires single-return callee; got " << body.return_values.size()
-      << " return values for '" << callee->name_ << "'";
+  INTERNAL_CHECK_SPAN(body.has_return, call_site_span)
+      << "Internal error: inline function '" << callee->name_
+      << "' is called for its value but has no return statement (parser should reject "
+         "value-use of a void inline function before InlineFunctions runs)";
+  INTERNAL_CHECK_SPAN(body.return_values.size() == 1, call_site_span)
+      << "Internal error: SpliceInlineCallAsAssign requires single-return callee; got "
+      << body.return_values.size() << " return values for '" << callee->name_
+      << "' (caller dispatches multi-return through SpliceInlineCallAsTupleSub)";
 
   ExprPtr final_value = body.return_values[0];
   // Skip the no-op `lhs = lhs` that arises when an arg is also returned —
@@ -328,11 +332,14 @@ std::vector<StmtPtr> SpliceInlineCallAsAssign(const FunctionPtr& callee, const s
 std::vector<StmtPtr> SpliceInlineCallAsTupleSub(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
                                                 std::vector<ExprPtr>& out_substitution) {
   auto body = CloneInlineBody(callee, args);
-  CHECK(body.has_return) << "Inline function '" << callee->name_
-                         << "' is called for its value but has no return statement";
-  CHECK(body.return_values.size() > 1)
-      << "SpliceInlineCallAsTupleSub requires multi-return callee; got " << body.return_values.size()
-      << " return value for '" << callee->name_ << "'";
+  INTERNAL_CHECK_SPAN(body.has_return, callee->span_)
+      << "Internal error: inline function '" << callee->name_
+      << "' is called for its value but has no return statement (parser should reject "
+         "value-use of a void inline function before InlineFunctions runs)";
+  INTERNAL_CHECK_SPAN(body.return_values.size() > 1, callee->span_)
+      << "Internal error: SpliceInlineCallAsTupleSub requires multi-return callee; got "
+      << body.return_values.size() << " return value for '" << callee->name_
+      << "' (caller dispatches single-return through SpliceInlineCallAsAssign)";
   out_substitution = std::move(body.return_values);
   return std::move(body.stmts);
 }
@@ -344,8 +351,10 @@ std::vector<StmtPtr> SpliceInlineCallAsTupleSub(const FunctionPtr& callee, const
 std::vector<StmtPtr> SpliceInlineCallAsReturn(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
                                               const Span& call_site_span) {
   auto body = CloneInlineBody(callee, args);
-  CHECK(body.has_return) << "Inline function '" << callee->name_
-                         << "' is used as a return value but has no return statement";
+  INTERNAL_CHECK_SPAN(body.has_return, call_site_span)
+      << "Internal error: inline function '" << callee->name_
+      << "' is used as a return value but has no return statement (parser should reject "
+         "value-use of a void inline function before InlineFunctions runs)";
   body.stmts.push_back(std::make_shared<const ReturnStmt>(std::move(body.return_values), call_site_span));
   return std::move(body.stmts);
 }
@@ -511,8 +520,15 @@ namespace pass {
  *  5. Drop all Inline functions from the program.
  *
  * Edge cases:
- *  - Multi-return inline: emits `LHS = MakeTuple([rets...])`. Subsequent
- *    Simplify can fold `TupleGetItemExpr(MakeTuple(...), i)` if needed.
+ *  - Multi-return inline: does NOT emit `LHS = MakeTuple([rets...])` —
+ *    orchestration codegen can't lower `MakeTuple`. Instead, the cloned
+ *    return values are recorded in `tuple_subs_` keyed by the LHS Var, and
+ *    downstream `TupleGetItemExpr(LHS, i)` uses are rewritten to the
+ *    corresponding cloned value (see `SpliceInlineCallAsTupleSub`). The LHS
+ *    binding ends up unreferenced and is elided.
+ *  - `return inline_call(...)`: spliced via `SpliceInlineCallAsReturn` to the
+ *    cloned pre-return body followed by a fresh ReturnStmt over the cloned
+ *    trailing values (single or multi).
  *  - Nested Call to inline (e.g. inside a binary expression) is left alone in
  *    v1; the verifier flags any surviving Calls to Inline functions.
  *  - Inline function with no callers is silently dropped in step (5) — that
