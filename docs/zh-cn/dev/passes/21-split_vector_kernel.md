@@ -254,7 +254,10 @@ class After:
         # ... cube ops 不变 ...
         pl.tpush_to_aiv(z_tile, split=1)        # 仅同步 split kwarg
 
-    @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+    @pl.function(
+        type=pl.FunctionType.AIV,
+        attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+    )
     def main_aiv(self, out_0):
         subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
         z_vec: pl.Tile[[8, 128], pl.FP32, pl.Mem.Vec] = pl.tpop_from_aic(split=1)
@@ -282,7 +285,10 @@ def main_aiv(self, data: pl.Tensor[[16, 128], pl.FP32],
 **After**:
 
 ```python
-@pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+@pl.function(
+    type=pl.FunctionType.AIV,
+    attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+)
 def main_aiv(self, data, out_0):
     subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
     prev: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.load(

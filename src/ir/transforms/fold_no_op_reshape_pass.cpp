@@ -37,7 +37,10 @@ bool IsNoOpReshape(const AssignStmtPtr& assign) {
   if (!assign || !assign->var_) return false;
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_ || call->op_->name_ != "tile.reshape") return false;
-  if (call->args_.size() < 1) return false;
+  // Canonical tile.reshape arity is exactly 2 (tile, shape). Anything else
+  // is malformed IR and should remain visible to the verifier rather than
+  // being silently folded.
+  if (call->args_.size() != 2) return false;
 
   auto src_var = AsVarLike(call->args_[0]);
   if (!src_var) return false;

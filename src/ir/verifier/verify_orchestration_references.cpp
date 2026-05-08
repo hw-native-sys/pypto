@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -27,7 +26,13 @@ namespace pypto {
 namespace ir {
 namespace {
 
-using ::pypto::codegen::IsBuiltinOp;
+/// Local copy of the builtin-op classifier. Verifiers live in the IR layer
+/// and must not depend on `pypto::codegen::IsBuiltinOp`. The classification
+/// is intentionally a 3-line string-prefix check; if a third reader appears,
+/// promote it to a shared IR utility.
+bool IsBuiltinOpName(const std::string& name) {
+  return name.rfind("tile.", 0) == 0 || name.rfind("tensor.", 0) == 0 || name.rfind("system.", 0) == 0;
+}
 
 class OrchestrationCallTargetChecker : public IRVisitor {
  public:
@@ -39,7 +44,7 @@ class OrchestrationCallTargetChecker : public IRVisitor {
   void VisitExpr_(const CallPtr& call) override {
     IRVisitor::VisitExpr_(call);
     if (!call || !call->op_) return;
-    if (IsBuiltinOp(call->op_->name_)) return;
+    if (IsBuiltinOpName(call->op_->name_)) return;
     if (program_ && program_->GetFunction(call->op_->name_)) return;
 
     std::ostringstream oss;
