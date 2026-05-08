@@ -16,7 +16,6 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
-#include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/pass_properties.h"

@@ -55,7 +55,7 @@ enum class IRProperty : uint64_t {
   PipelineResolved,         ///< No ForKind::Pipeline survives; produced by CanonicalizeIOOrder
   CallDirectionsResolved,   ///< Every non-builtin Call has explicit attrs['arg_directions']
   TileTypeCoherence,        ///< Every TileType has canonical tile_view (implicit views stored as nullopt)
-  InlineFunctionsEliminated,  ///< No FunctionType::Inline functions or Calls to them remain
+  InlineFunctionsEliminated,        ///< No FunctionType::Inline functions or Calls to them remain
   OrchestrationReferencesResolved,  ///< Every non-builtin Call in an Orchestration function targets a
                                     ///< Function that exists in the Program
   kCount                            ///< Sentinel (must be last)
