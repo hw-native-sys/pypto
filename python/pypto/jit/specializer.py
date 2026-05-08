@@ -301,6 +301,7 @@ class _BodyTransformer(ast.NodeTransformer):
         param_names: list[str] | None = None,
         initial_used_names: set[str] | None = None,
         py_globals: dict[str, Any] | None = None,
+        dep_param_names: dict[str, list[str]] | None = None,
     ) -> None:
         super().__init__()
         self._meta = tensor_meta
@@ -310,6 +311,11 @@ class _BodyTransformer(ast.NodeTransformer):
         self._dv_names = dynvar_python_names
         self._dep_names = dep_names
         self._dynvar_var_names = dynvar_var_names
+        # Maps dep_name → ordered parameter list. Used by ``visit_Call`` to
+        # normalise keyword args to positional, so generated
+        # ``self.<dep>(a, out=out)`` calls become parser-accepted
+        # ``self.<dep>(a, out)``.
+        self._dep_param_names = dep_param_names or {}
         # Module-level globals from the originating function. Used by
         # ``visit_Name`` to inline imported int/float/bool constants
         # (e.g. ``BATCH = 16`` from a config module) at their use sites.
@@ -613,14 +619,36 @@ class _BodyTransformer(ast.NodeTransformer):
         return cast("ast.expr", self.generic_visit(node))
 
     def visit_Call(self, node: ast.Call) -> ast.expr:
-        """Rewrite dep_func(args) → self.dep_func(args) for multi-function JIT."""
+        """Rewrite dep_func(args) → self.dep_func(args) for multi-function JIT.
+
+        Keyword args are normalised to positional based on the dep's
+        parameter order (so ``dep(a, out=out)`` becomes ``self.dep(a, out)``).
+        Inter-function calls inside ``@pl.program`` only accept positional
+        args — preserving keyword form would make the parser reject the call.
+        """
         if isinstance(node.func, ast.Name) and node.func.id in self._dep_names:
+            dep_name = node.func.id
             new_func = ast.Attribute(
                 value=ast.Name(id="self", ctx=ast.Load()),
-                attr=node.func.id,
+                attr=dep_name,
                 ctx=ast.Load(),
             )
-            new_node = ast.Call(func=new_func, args=node.args, keywords=node.keywords)
+            param_order = self._dep_param_names.get(dep_name)
+            if param_order is not None and node.keywords:
+                pos_args = list(node.args)
+                kw_by_name = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+                # Append keyword-bound args in dep's parameter order, skipping
+                # params already covered by positional args.
+                for param in param_order[len(pos_args) :]:
+                    if param in kw_by_name:
+                        pos_args.append(kw_by_name.pop(param))
+                # Any remaining keywords (e.g. **kwargs splats or unknown names)
+                # are kept as-is so we don't silently drop them; the parser
+                # will surface them as a clear error.
+                remaining_kw = [kw for kw in node.keywords if kw.arg is None or kw.arg in kw_by_name]
+                new_node = ast.Call(func=new_func, args=pos_args, keywords=remaining_kw)
+            else:
+                new_node = ast.Call(func=new_func, args=node.args, keywords=node.keywords)
             ast.copy_location(new_node, node)
             return cast("ast.expr", self.generic_visit(new_node))
         return cast("ast.expr", self.generic_visit(node))
@@ -956,6 +984,12 @@ class Specializer:
         self._dv_literals = dynvar_literals or {}
         # Accumulated alias→original map across all specialized functions.
         self._rename_map: dict[str, str] = {}
+        # Param order per function — lets the body transformer rewrite
+        # ``self.<dep>(a, out=out)`` keyword args into all-positional form
+        # (the parser rejects keyword args on inter-function calls).
+        self._dep_param_names: dict[str, list[str]] = {
+            ctx.func_name: list(ctx.param_names) for ctx in contexts
+        }
 
     @property
     def rename_map(self) -> dict[str, str]:
@@ -1063,6 +1097,7 @@ class Specializer:
             param_names=all_param_names,
             initial_used_names=all_defined,
             py_globals=ctx.py_globals,
+            dep_param_names=self._dep_param_names,
         )
         new_body = [transformer.visit(stmt) for stmt in func_def.body]
         # Accumulate alias→original renames for error message rewriting.
