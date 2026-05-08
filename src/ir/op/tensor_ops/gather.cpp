@@ -46,15 +46,17 @@ TypePtr DeduceTensorGatherType(const std::vector<ExprPtr>& args,
   CHECK(input_type) << "The operator " << op_name << " requires input to be a TensorType, but got "
                     << args[0]->GetType()->TypeName();
   CHECK(input_type->dtype_ == DataType::FP16 || input_type->dtype_ == DataType::FP32 ||
-        input_type->dtype_ == DataType::INT16 || input_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires input dtype to be FP16, FP32, INT16, or INT32, but got "
+        input_type->dtype_ == DataType::INT8 || input_type->dtype_ == DataType::INT16 ||
+        input_type->dtype_ == DataType::INT32)
+      << "The operator " << op_name
+      << " requires input dtype to be FP16, FP32, INT8, INT16, or INT32, but got "
       << input_type->dtype_.ToString();
 
   auto index_type = As<TensorType>(args[1]->GetType());
   CHECK(index_type) << "The operator " << op_name << " requires index to be a TensorType, but got "
                     << args[1]->GetType()->TypeName();
-  CHECK(index_type->dtype_ == DataType::INT32)
-      << "The operator " << op_name << " requires index dtype to be INT32, but got "
+  CHECK(index_type->dtype_ == DataType::INT32 || index_type->dtype_ == DataType::INT16)
+      << "The operator " << op_name << " requires index dtype to be INT16 or INT32, but got "
       << index_type->dtype_.ToString();
 
   const int64_t rank = static_cast<int64_t>(input_type->shape_.size());
@@ -101,8 +103,8 @@ REGISTER_OP("tensor.gather")
         "Gather elements of input along the specified dimension using the index tensor "
         "(tensor-level). Supports rank>=2 and any dim; lowered via tile.transpose + "
         "tile.reshape + tile.gather by ConvertTensorToTileOps.")
-    .add_argument("input", "Input tensor (TensorType; FP16, FP32, INT16, or INT32)")
-    .add_argument("index", "Index tensor (TensorType, INT32, same shape as output)")
+    .add_argument("input", "Input tensor (TensorType; FP16, FP32, INT8, INT16, or INT32)")
+    .add_argument("index", "Index tensor (TensorType; INT16 or INT32, same shape as output)")
     .set_attr<int>("dim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

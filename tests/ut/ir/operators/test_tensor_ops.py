@@ -2474,14 +2474,15 @@ def test_tensor_gather_rejects_bad_dim():
 
 
 def test_tensor_gather_rejects_non_int32_index():
-    inp, idx = _make_gather_inputs(idx_dtype=DataType.INT16)
-    with pytest.raises(Exception, match=r"index dtype to be INT32"):
+    # IR accepts INT16/INT32 indices; reject anything else.
+    inp, idx = _make_gather_inputs(idx_dtype=DataType.INT8)
+    with pytest.raises(Exception, match=r"index dtype to be INT16 or INT32"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
 def test_tensor_gather_rejects_unsupported_input_dtype():
     inp, idx = _make_gather_inputs(src_dtype=DataType.UINT32)
-    with pytest.raises(Exception, match=r"FP16, FP32, INT16, or INT32"):
+    with pytest.raises(Exception, match=r"FP16, FP32, INT8, INT16, or INT32"):
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 

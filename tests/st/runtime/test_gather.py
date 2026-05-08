@@ -16,6 +16,10 @@ Covers the generalized contract beyond the original MVP (rank-2 + dim=-1):
 3. Rank-3 + dim=-1 (collapses leading dims via ``tile.reshape``).
 4. Rank-3 + dim=1 (middle axis — flat-index gather).
 5. Rank-3 + dim=-3 (negative-dim normalization on the first axis).
+6. Rank-2 + dim=0 (first axis — flat-index gather).
+7. Rank-4 + dim=-1 (last axis — collapses leading dims via ``tile.reshape``).
+8. Rank-4 + dim=2 (interior axis — flat-index gather, mixed-radix decomposition).
+9. Rank-2 + dim=-1, INT8 src + INT32 idx (Ascend950).
 
 All cases are validated against a torch ``gather`` reference.
 """
@@ -137,6 +141,90 @@ class GatherRank3NegFirstDimProgram:
         return output
 
 
+@pl.program
+class GatherRank2FirstDimProgram:
+    """Rank-2 + dim=0 (first axis) — flat-index gather.
+
+    Last dim is 8 (8×4=32 bytes) to satisfy the hardware tile column
+    alignment requirement.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[8, 8], pl.FP32],
+        idx: pl.Tensor[[3, 8], pl.INT32],
+        output: pl.Out[pl.Tensor[[3, 8], pl.FP32]],
+    ) -> pl.Tensor[[3, 8], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, dim=0, index=idx)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class GatherRank4LastDimProgram:
+    """Rank-4 + dim=-1: collapses leading dims via ``tile.reshape``.
+
+    Last dim is 8 (8×4=32 bytes) to satisfy the hardware tile column
+    alignment requirement.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[2, 2, 2, 16], pl.FP32],
+        idx: pl.Tensor[[2, 2, 2, 8], pl.INT32],
+        output: pl.Out[pl.Tensor[[2, 2, 2, 8], pl.FP32]],
+    ) -> pl.Tensor[[2, 2, 2, 8], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, dim=-1, index=idx)
+            output = pl.assemble(output, out, [0, 0, 0, 0])
+        return output
+
+
+@pl.program
+class GatherRank4InteriorDimProgram:
+    """Rank-4 + dim=2 (interior axis) — flat-index gather with mixed-radix decomposition.
+
+    Last dim is 8 (8×4=32 bytes) to satisfy the hardware tile column
+    alignment requirement.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[2, 2, 4, 8], pl.FP32],
+        idx: pl.Tensor[[2, 2, 3, 8], pl.INT32],
+        output: pl.Out[pl.Tensor[[2, 2, 3, 8], pl.FP32]],
+    ) -> pl.Tensor[[2, 2, 3, 8], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, dim=2, index=idx)
+            output = pl.assemble(output, out, [0, 0, 0, 0])
+        return output
+
+
+@pl.program
+class GatherRank2INT8Program:
+    """Rank-2 + dim=-1, INT8 src + INT32 idx (Ascend950).
+
+    INT8 elements are 1 byte wide, so cols must be a multiple of 32 to
+    satisfy the 32-byte tile column alignment requirement.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[4, 64], pl.INT8],
+        idx: pl.Tensor[[4, 32], pl.INT32],
+        output: pl.Out[pl.Tensor[[4, 32], pl.INT8]],
+    ) -> pl.Tensor[[4, 32], pl.INT8]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, dim=-1, index=idx)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
 # --- Test cases ---
 
 
@@ -145,9 +233,6 @@ class _GatherBaseTestCase(PTOTestCase):
 
     def get_strategy(self) -> OptimizationStrategy:
         return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
 
 
 class GatherRank2LastDimTestCase(_GatherBaseTestCase):
@@ -168,6 +253,9 @@ class GatherRank2LastDimTestCase(_GatherBaseTestCase):
 
     def get_program(self) -> Any:
         return GatherRank2LastDimProgram
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         # torch.gather semantics: out[b, k] = inp[b, idx[b, k]]
@@ -194,6 +282,9 @@ class GatherRank2SmallerLeadingTestCase(_GatherBaseTestCase):
 
     def get_program(self) -> Any:
         return GatherRank2SmallerLeadingProgram
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         # torch's index broadcast along the non-gather axis must match the
@@ -222,6 +313,9 @@ class GatherRank3LastDimTestCase(_GatherBaseTestCase):
     def get_program(self) -> Any:
         return GatherRank3LastDimProgram
 
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
     def compute_expected(self, tensors, params=None):
         inp = tensors["inp"]
         idx = tensors["idx"].to(torch.int64)
@@ -246,6 +340,9 @@ class GatherRank3MiddleDimTestCase(_GatherBaseTestCase):
 
     def get_program(self) -> Any:
         return GatherRank3MiddleDimProgram
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
         inp = tensors["inp"]
@@ -272,11 +369,131 @@ class GatherRank3NegFirstDimTestCase(_GatherBaseTestCase):
     def get_program(self) -> Any:
         return GatherRank3NegFirstDimProgram
 
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
     def compute_expected(self, tensors, params=None):
         inp = tensors["inp"]
         idx = tensors["idx"].to(torch.int64)
         # dim=-3 normalizes to dim=0 on rank-3
         tensors["output"][:] = torch.gather(inp, dim=0, index=idx)
+
+
+class GatherRank2FirstDimTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank2_first_dim"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [8, 8], DataType.FP32, init_value=torch.randn),
+            TensorSpec(
+                "idx",
+                [3, 8],
+                DataType.INT32,
+                init_value=lambda: _rand_indices(0, 8, (3, 8)),
+            ),
+            TensorSpec("output", [3, 8], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank2FirstDimProgram
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def compute_expected(self, tensors, params=None):
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=0, index=idx)
+
+
+class GatherRank4LastDimTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank4_last_dim"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [2, 2, 2, 16], DataType.FP32, init_value=torch.randn),
+            TensorSpec(
+                "idx",
+                [2, 2, 2, 8],
+                DataType.INT32,
+                init_value=lambda: _rand_indices(0, 16, (2, 2, 2, 8)),
+            ),
+            TensorSpec("output", [2, 2, 2, 8], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank4LastDimProgram
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def compute_expected(self, tensors, params=None):
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
+
+
+class GatherRank4InteriorDimTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank4_interior_dim"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [2, 2, 4, 8], DataType.FP32, init_value=torch.randn),
+            TensorSpec(
+                "idx",
+                [2, 2, 3, 8],
+                DataType.INT32,
+                init_value=lambda: _rand_indices(0, 4, (2, 2, 3, 8)),
+            ),
+            TensorSpec("output", [2, 2, 3, 8], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank4InteriorDimProgram
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def compute_expected(self, tensors, params=None):
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=2, index=idx)
+
+
+class GatherRank2INT8TestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank2_int8"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "inp",
+                [4, 64],
+                DataType.INT8,
+                init_value=lambda: torch.randint(-128, 128, (4, 64), dtype=torch.int8),
+            ),
+            TensorSpec(
+                "idx",
+                [4, 32],
+                DataType.INT32,
+                init_value=lambda: _rand_indices(0, 64, (4, 32)),
+            ),
+            TensorSpec("output", [4, 32], DataType.INT8, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank2INT8Program
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend950
+
+    def compute_expected(self, tensors, params=None):
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
 
 
 # --- Tests ---
@@ -286,29 +503,58 @@ class TestGather:
     """Verify ``pl.tensor.gather`` against a torch reference for the
     generalized rank/dim contract introduced by issue #676."""
 
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank2_last_dim(self, test_runner, platform):
         result = test_runner.run(GatherRank2LastDimTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank2_smaller_leading(self, test_runner, platform):
         result = test_runner.run(GatherRank2SmallerLeadingTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank3_last_dim(self, test_runner, platform):
         result = test_runner.run(GatherRank3LastDimTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank3_middle_dim(self, test_runner, platform):
         result = test_runner.run(GatherRank3MiddleDimTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
+    @pytest.mark.platforms("a2a3", "a2a3sim")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank3_neg_first_dim(self, test_runner, platform):
         result = test_runner.run(GatherRank3NegFirstDimTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3", "a2a3sim")
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_rank2_first_dim(self, test_runner, platform):
+        result = test_runner.run(GatherRank2FirstDimTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3", "a2a3sim")
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_rank4_last_dim(self, test_runner, platform):
+        result = test_runner.run(GatherRank4LastDimTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a2a3", "a2a3sim")
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_rank4_interior_dim(self, test_runner, platform):
+        result = test_runner.run(GatherRank4InteriorDimTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.platforms("a5", "a5sim")
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_rank2_int8(self, test_runner, platform):
+        result = test_runner.run(GatherRank2INT8TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
