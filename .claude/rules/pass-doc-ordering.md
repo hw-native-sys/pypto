@@ -37,14 +37,15 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 22 | `22-normalize_return_order.md` | 22nd pass |
 | 23 | `23-lower_pipeline_loops.md` | 23rd pass |
 | 24 | `24-canonicalize_io_order.md` | 24th pass |
-| 25 | `25-init_memref.md` | 25th pass |
-| 26 | `26-memory_reuse.md` | 26th pass |
-| 27 | `27-legalize_pto_buffer_reuse.md` | 27th pass |
-| 28 | `28-allocate_memory_addr.md` | 28th pass |
-| 29 | `29-fold_no_op_reshape.md` | 29th pass |
-| 30 | `30-fuse_create_assemble_to_slice.md` | 30th pass |
-| 31 | `31-derive_call_directions.md` | 31st pass |
-| 32 | `32-derive_manual_scope_deps.md` | 32nd pass |
+| 25 | `25-materialize_tensor_strides.md` | 25th pass (RFC #1300 P3 — registered, not yet wired into Default; activates with P6/P7) |
+| 26 | `26-init_memref.md` | 26th pass |
+| 27 | `27-memory_reuse.md` | 27th pass |
+| 28 | `28-legalize_pto_buffer_reuse.md` | 28th pass |
+| 29 | `29-allocate_memory_addr.md` | 29th pass |
+| 30 | `30-fold_no_op_reshape.md` | 30th pass |
+| 31 | `31-fuse_create_assemble_to_slice.md` | 31st pass |
+| 32 | `32-derive_call_directions.md` | 32nd pass |
+| 33 | `33-derive_manual_scope_deps.md` | 33rd pass |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

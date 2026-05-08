@@ -84,6 +84,45 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
   `valid_shape` 部分时的填充模式。与 `TileView.pad` 对称；
   `tensor.slice(..., pad_value=PadValue.zero)` 会写入该字段。
 
+#### Canonical TensorView 形式（RFC #1300）
+
+按 RFC #1300 的设计，`(shape, stride, layout)` 三元组在各 pass / verifier /
+codegen 之间统一为单一可机械读取的形式：
+
+- `shape` 是**逻辑** shape —— 消费者索引时使用的维度。
+- `stride[i]` 是第 *i* 个**逻辑**维递增 1 时的元素步长。
+- `layout` 是 `(shape, stride)` 上的派生标签 / 断言，并非独立描述。
+  ND / DN 各定义 packed canonical（紧致存储）与 strided 家族（sub-view 继承
+  父 stride）两种合法形态。
+
+Packed canonical 公式（`BuildLogicalStridesFromLayout`，见
+[`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h)）：
+
+| Layout | Packed canonical |
+| ------ | ---------------- |
+| `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]` |
+| `DN`（`n ≥ 2`） | `stride[n-2] = 1`；`stride[n-1] = shape[n-2]`；`stride[n-3] = shape[n-2] * shape[n-1]`；外层按行主序 |
+| `NZ` | 无法用 flat stride 表达 —— 仅 tile 用，分形布局 |
+
+**同一 canonical TensorView 的两种写法**：
+
+- **隐式** —— `view.has_value() && view.stride.empty()`：layout 已设但
+  stride 为空，消费者按对应 layout 的 packed canonical 解释。
+- **显式** —— 每个维度的 stride 都已写出。
+
+[`MaterializeTensorStrides`](../passes/25-materialize_tensor_strides.md) Pass
+将所有隐式形态展开为显式 packed canonical，让 codegen 看到单一契约。
+`TensorViewCanonical` IRProperty + verifier 强制此不变量：
+
+- **弱模式**（registry 默认，`passes.PropertyVerifierRegistry.verify`）：
+  接受 `stride.empty()` 作为隐式 packed canonical。
+- **严格模式**（codegen 入口契约，
+  `passes.verify_tensor_view_canonical(program, require_materialized=True)`）：
+  必须有非空 `view.stride` 且与 layout 家族一致。
+
+两种模式都拒绝 `TensorType` 上的 `NZ`（NZ 仅 tile 使用），并按
+`relaxed_symbolic` 语义接受符号 stride。
+
 ### TileType
 
 专用张量类型，带可选内存和视图信息，用于硬件优化操作。

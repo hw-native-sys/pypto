@@ -380,15 +380,16 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 10. `NormalizeReturnOrder`
 11. [`LowerPipelineLoops`](23-lower_pipeline_loops.md)
 12. [`CanonicalizeIOOrder`](24-canonicalize_io_order.md)
-13. `InitMemRef`
-14. `MemoryReuse`
-15. [`LegalizePTOBufferReuse`](27-legalize_pto_buffer_reuse.md)
-16. `AllocateMemoryAddr`
-17. [`FoldNoOpReshape`](29-fold_no_op_reshape.md)
-18. [`FuseCreateAssembleToSlice`](30-fuse_create_assemble_to_slice.md)
-19. [`DeriveCallDirections`](31-derive_call_directions.md)
-20. [`DeriveManualScopeDeps`](32-derive_manual_scope_deps.md)
-21. `Simplify`
+13. [`MaterializeTensorStrides`](25-materialize_tensor_strides.md) — registered, not yet wired into the default pipeline (will activate alongside the codegen cleanup in RFC #1300 P6/P7)
+14. `InitMemRef`
+15. `MemoryReuse`
+16. [`LegalizePTOBufferReuse`](28-legalize_pto_buffer_reuse.md)
+17. `AllocateMemoryAddr`
+18. [`FoldNoOpReshape`](30-fold_no_op_reshape.md)
+19. [`FuseCreateAssembleToSlice`](31-fuse_create_assemble_to_slice.md)
+20. [`DeriveCallDirections`](32-derive_call_directions.md)
+21. [`DeriveManualScopeDeps`](33-derive_manual_scope_deps.md)
+22. `Simplify`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

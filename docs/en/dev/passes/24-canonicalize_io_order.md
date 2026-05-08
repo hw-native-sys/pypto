@@ -120,5 +120,6 @@ All four `off_k` lift first to unblock the loads. All four `tile_x_k` are now co
 ## Related
 
 - [`LowerPipelineLoops`](23-lower_pipeline_loops.md) — upstream producer of replicated regions that benefit from this pass; leaves `ForKind::Pipeline` as the scope marker this pass consumes
-- [`MemoryReuse`](26-memory_reuse.md) — runs after this pass; benefits from the co-live tiles in replicated regions
+- [`MaterializeTensorStrides`](25-materialize_tensor_strides.md) — registered for the slot immediately after this pass (RFC #1300 P3); fills empty TensorView strides before codegen-prep
+- [`MemoryReuse`](27-memory_reuse.md) — runs after this pass; benefits from the co-live tiles in replicated regions
 - RFC #1026 / PR #1029 — InOut-use discipline + dependency analysis utility

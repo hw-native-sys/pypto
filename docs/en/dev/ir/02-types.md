@@ -84,6 +84,47 @@ tensor_with_both = ir.TensorType([128, 256], DataType.FP16, memref=memref, tenso
   when loads/slices read outside the `valid_shape`. Peer of `TileView.pad`;
   `tensor.slice(..., pad_value=PadValue.zero)` writes this field.
 
+#### Canonical TensorView form (RFC #1300)
+
+Per RFC #1300, the `(shape, stride, layout)` triple has a single canonical
+interpretation across passes / verifiers / codegen:
+
+- `shape` is the **logical** shape — the dimensions consumers index by.
+- `stride[i]` is the element step when the *i-th* logical dim increments by 1.
+- `layout` is a derivable / asserted *tag* over `(shape, stride)`, not an
+  independent description. ND and DN each have a packed canonical and a
+  strided family (sub-views inheriting the parent's stride).
+
+The packed canonical formulas (`BuildLogicalStridesFromLayout` in
+[`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h)):
+
+| Layout | Packed canonical |
+| ------ | ---------------- |
+| `ND` | `stride[n-1] = 1; stride[k] = stride[k+1] * shape[k+1]` |
+| `DN` (`n ≥ 2`) | `stride[n-2] = 1`; `stride[n-1] = shape[n-2]`; `stride[n-3] = shape[n-2] * shape[n-1]`; outer dims row-major |
+| `NZ` | not representable as flat strides — tile-only fractal |
+
+**Two ways to spell the same canonical TensorView**:
+
+- **Implicit** — `view.has_value() && view.stride.empty()`: layout tag is
+  set, stride is left blank; consumers must treat it as the packed
+  canonical for the carried layout.
+- **Explicit** — every dimension's stride is spelled out.
+
+The [`MaterializeTensorStrides`](../passes/25-materialize_tensor_strides.md)
+pass rewrites every implicit form to its explicit packed canonical so
+codegen sees a single contract. The `TensorViewCanonical` `IRProperty` +
+verifier enforces this:
+
+- **Weak mode** (registry default, `passes.PropertyVerifierRegistry.verify`):
+  `stride.empty()` is accepted as implicitly packed canonical.
+- **Strict mode** (codegen-entry contract,
+  `passes.verify_tensor_view_canonical(program, require_materialized=True)`):
+  `view.stride` must be non-empty and match the layout family.
+
+Both modes reject `NZ` on `TensorType` (NZ is tile-only) and accept
+symbolic dims under `relaxed_symbolic` semantics.
+
 ### TileType
 
 Specialized tensor with optional memory and view information for hardware-optimized operations.

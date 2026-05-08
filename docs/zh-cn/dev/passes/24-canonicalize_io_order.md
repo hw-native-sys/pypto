@@ -120,5 +120,6 @@ for i in pl.range(0, 8, 4):
 ## 相关
 
 - [`LowerPipelineLoops`](23-lower_pipeline_loops.md) —— 上游复制区域生成者；保留 `ForKind::Pipeline` 标记供本 Pass 识别
-- [`MemoryReuse`](26-memory_reuse.md) —— 在本 Pass 之后运行；受益于复制区域中同时活跃的 tile
+- [`MaterializeTensorStrides`](25-materialize_tensor_strides.md) —— 紧随本 Pass 之后的预留位置（RFC #1300 P3）；在 codegen 前补齐 TensorView 的 stride
+- [`MemoryReuse`](27-memory_reuse.md) —— 在本 Pass 之后运行；受益于复制区域中同时活跃的 tile
 - RFC #1026 / PR #1029 —— InOut-use 规约 + 依赖分析工具
