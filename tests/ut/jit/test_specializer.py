@@ -11,16 +11,19 @@
 
 import ast
 import textwrap
+import warnings
 
 import pypto.language as pl
 import pytest
 from pypto.jit.specializer import (
     SpecializeContext,
+    Specializer,
     TensorMeta,
     _BodyTransformer,
     _classify_params,
     _collect_dynamic_dims,
     _collect_dynvar_names,
+    _infer_return_type,
     specialize,
 )
 from pypto.pypto_core import DataType, ir
@@ -869,6 +872,138 @@ class TestVariableRebinding:
         out = self._transform(src)
         assert "x_v1" not in out
         assert "y = x" in out
+
+
+class TestInferReturnType:
+    """Coverage for `_infer_return_type` — the JIT specializer's annotation inferer."""
+
+    @staticmethod
+    def _meta(shape=(32, 32), dtype=DataType.FP32) -> TensorMeta:
+        return TensorMeta(shape=shape, dtype=dtype)
+
+    def test_tuple_return_emits_tuple_annotation(self):
+        """`return out0, out1` -> `tuple[T_out0, T_out1]` (issue #1304)."""
+        func_def = _parse_func(
+            """
+            def f(a, out0, out1):
+                return out0, out1
+            """
+        )
+        meta = {"a": self._meta(), "out0": self._meta(), "out1": self._meta()}
+        ann = _infer_return_type(func_def, meta, set(), {}, ["out0", "out1"])
+        assert ann == ("tuple[pl.Tensor[[32, 32], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]")
+
+    def test_tuple_return_with_unknown_element_drops_annotation(self):
+        """Tuple returns with non-tensor elements bail to no annotation."""
+        func_def = _parse_func(
+            """
+            def f(a, out):
+                return out, a_local
+            """
+        )
+        meta = {"a": self._meta(), "out": self._meta()}
+        # `a_local` isn't in tensor_meta — can't infer it.
+        assert _infer_return_type(func_def, meta, set(), {}, ["out"]) is None
+
+    def test_return_call_drops_annotation(self):
+        """`return f(...)` can't be inferred — caller may have multi-return."""
+        func_def = _parse_func(
+            """
+            def f(a, out):
+                return inline_call(a, out)
+            """
+        )
+        meta = {"a": self._meta(), "out": self._meta()}
+        assert _infer_return_type(func_def, meta, set(), {}, ["out"]) is None
+
+    def test_bare_tensor_param_return_inferred(self):
+        """Bare `pl.Tensor` returns (no `pl.Out`) — issue #1304 deprecation case."""
+        func_def = _parse_func(
+            """
+            def f(a, out):
+                return out
+            """
+        )
+        meta = {"a": self._meta(), "out": self._meta()}
+        # No out_params at all (bare pl.Tensor params).
+        ann = _infer_return_type(func_def, meta, set(), {}, [])
+        assert ann == "pl.Tensor[[32, 32], pl.FP32]"
+
+
+class TestSpecializerInlineDeprecation:
+    """`@pl.jit.inline` should emit bare `pl.Tensor[...]` and warn on `pl.Out`."""
+
+    def _spec(self, ctx_args: dict) -> str:
+        ctx = _make_ctx(**ctx_args)
+        return Specializer("Generated", [ctx], {}).specialize()
+
+    def test_inline_strips_pl_out_and_warns(self):
+        """Inline helpers with pl.Out -> bare pl.Tensor + DeprecationWarning."""
+        src = """
+            def util(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+                return out
+        """
+        meta = {
+            "a": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+        }
+        with pytest.warns(DeprecationWarning, match="pl.Out annotations are deprecated"):
+            out = self._spec(
+                {
+                    "func_name": "util",
+                    "source": src,
+                    "func_type": "inline",
+                    "param_names": ["a", "out"],
+                    "tensor_meta": meta,
+                }
+            )
+        # Generated source must use bare pl.Tensor[...] for `out`, not pl.Out[...].
+        assert "out: pl.Tensor[[32, 32], pl.FP32]" in out
+        assert "pl.Out[pl.Tensor[[32, 32], pl.FP32]]" not in out
+
+    def test_inline_with_bare_tensor_no_warning(self):
+        """Bare `pl.Tensor` inline params don't trigger the deprecation warning."""
+        src = """
+            def util(a: pl.Tensor, out: pl.Tensor):
+                return out
+        """
+        meta = {
+            "a": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+        }
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self._spec(
+                {
+                    "func_name": "util",
+                    "source": src,
+                    "func_type": "inline",
+                    "param_names": ["a", "out"],
+                    "tensor_meta": meta,
+                }
+            )
+        assert not any(issubclass(w.category, DeprecationWarning) for w in caught)
+
+    def test_orchestration_keeps_pl_out(self):
+        """Non-inline functions keep `pl.Out[...]` annotations untouched."""
+        src = """
+            def util(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+                return out
+        """
+        meta = {
+            "a": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+        }
+        out = self._spec(
+            {
+                "func_name": "util",
+                "source": src,
+                "func_type": "orchestration",
+                "param_names": ["a", "out"],
+                "tensor_meta": meta,
+            }
+        )
+        assert "pl.Out[pl.Tensor[[32, 32], pl.FP32]]" in out
 
 
 if __name__ == "__main__":

@@ -181,9 +181,18 @@ class NestedReturnCounter : public IRVisitor {
   }
 };
 
-// Splice a call site into a SeqStmts. Returns the splice's statements, in order.
+// Result of splicing an inline call's body without yet wiring up its return
+// values into a specific caller statement. The caller picks the wiring form
+// (assign / drop / return / ...) based on its own statement kind.
+struct SplicedInlineBody {
+  std::vector<StmtPtr> stmts;          // Pre-return statements, in order
+  std::vector<ExprPtr> return_values;  // Trailing-return values (empty if has_return is false)
+  bool has_return;                     // Whether the body ended with a ReturnStmt
+};
+
+// Steps 1-3 of an inline splice — call-site-form-agnostic. Used by every
+// SpliceInlineCall* helper.
 //
-// For `LHS = inline_call(arg1, ...)`:
 //   1. Build the substitution seed: params → actual args, locally-defined
 //      Vars → fresh `_inlineN` Vars.
 //   2. DeepClone the callee body with that seed. The clone uses the same
@@ -192,12 +201,7 @@ class NestedReturnCounter : public IRVisitor {
 //      actual, ...)` whenever the actual arg is a Var.
 //   3. Split the cloned body into pre-return statements and the trailing
 //      return value(s); reject any non-trailing return.
-//   4. For the return value(s):
-//        - If lhs is set and return has 1 value: emit `LHS = renamed_ret[0]`
-//        - If lhs is set and return has N values: emit `LHS = MakeTuple(...)`
-//        - If lhs is null (EvalStmt): drop the return
-std::vector<StmtPtr> SpliceInlineCall(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
-                                      const VarPtr& lhs, const Span& call_site_span) {
+SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
   CHECK(callee->params_.size() == args.size())
       << "Inline call to '" << callee->name_ << "' has " << args.size() << " argument(s) but callee expects "
       << callee->params_.size();
@@ -280,26 +284,70 @@ std::vector<StmtPtr> SpliceInlineCall(const FunctionPtr& callee, const std::vect
                                  << "' contains a non-trailing ReturnStmt; only a single trailing return is "
                                     "supported (early-return inside an If/For/While branch is rejected)";
 
-  // 4. Wire up the return value(s) at the call site
-  if (lhs) {
-    CHECK(has_return) << "Inline function '" << callee->name_
-                      << "' is called for its value but has no return statement";
-    ExprPtr final_value;
-    if (return_values.size() == 1) {
-      final_value = return_values[0];
-    } else {
-      // Multi-return: pack into MakeTuple. The LHS is expected to have TupleType.
-      final_value = std::make_shared<MakeTuple>(return_values, call_site_span);
-    }
-    // Skip the no-op `lhs = lhs` that arises when an arg is also returned —
-    // it would otherwise survive into SSA and break structural equality.
-    if (auto var_expr = As<Var>(final_value); var_expr && var_expr.get() == lhs.get()) {
-      return spliced;
-    }
-    spliced.push_back(std::make_shared<const AssignStmt>(lhs, final_value, call_site_span));
-  }
+  return SplicedInlineBody{std::move(spliced), std::move(return_values), has_return};
+}
 
-  return spliced;
+// Splice an EvalStmt-shaped call (no LHS) — drop the return, return only
+// the pre-return statements.
+std::vector<StmtPtr> SpliceInlineCallAsEval(const FunctionPtr& callee, const std::vector<ExprPtr>& args) {
+  auto body = CloneInlineBody(callee, args);
+  return std::move(body.stmts);
+}
+
+// Splice a single-return call into `LHS = inlined_return_value`. CHECK-fails
+// if the callee returns multiple values — multi-return goes through
+// SpliceInlineCallAsTupleSub, which avoids the dead `LHS = MakeTuple(...)`.
+std::vector<StmtPtr> SpliceInlineCallAsAssign(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
+                                              const VarPtr& lhs, const Span& call_site_span) {
+  auto body = CloneInlineBody(callee, args);
+  CHECK(body.has_return) << "Inline function '" << callee->name_
+                         << "' is called for its value but has no return statement";
+  CHECK(body.return_values.size() == 1)
+      << "SpliceInlineCallAsAssign requires single-return callee; got " << body.return_values.size()
+      << " return values for '" << callee->name_ << "'";
+
+  ExprPtr final_value = body.return_values[0];
+  // Skip the no-op `lhs = lhs` that arises when an arg is also returned —
+  // it would otherwise survive into SSA and break structural equality.
+  if (auto var_expr = As<Var>(final_value); var_expr && var_expr.get() == lhs.get()) {
+    return std::move(body.stmts);
+  }
+  body.stmts.push_back(std::make_shared<const AssignStmt>(lhs, final_value, call_site_span));
+  return std::move(body.stmts);
+}
+
+// Splice a multi-return call without emitting `LHS = MakeTuple(values)`.
+// Instead, hands back the cloned return values via `out_substitution` so the
+// caller (the InlineCallsMutator) can substitute downstream
+// `TupleGetItemExpr(LHS, i)` uses with `values[i]` directly.
+//
+// Why no MakeTuple: orchestration codegen can't lower a MakeTuple expression,
+// and the parser-generated tuple-unpack pattern (`_tuple_tmp = call(); y_i =
+// _tuple_tmp[i]`) means every LHS use is a TupleGetItemExpr — substituting
+// makes the LHS unreferenced and the binding effectively dead.
+std::vector<StmtPtr> SpliceInlineCallAsTupleSub(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
+                                                std::vector<ExprPtr>& out_substitution) {
+  auto body = CloneInlineBody(callee, args);
+  CHECK(body.has_return) << "Inline function '" << callee->name_
+                         << "' is called for its value but has no return statement";
+  CHECK(body.return_values.size() > 1)
+      << "SpliceInlineCallAsTupleSub requires multi-return callee; got " << body.return_values.size()
+      << " return value for '" << callee->name_ << "'";
+  out_substitution = std::move(body.return_values);
+  return std::move(body.stmts);
+}
+
+// Splice a `return inline_call(args...)` statement: emit the cloned pre-return
+// body followed by a fresh ReturnStmt that returns the callee's trailing return
+// values directly. Single-return → ReturnStmt({v}); multi-return →
+// ReturnStmt({v0, v1, ...}). No MakeTuple, no temporary.
+std::vector<StmtPtr> SpliceInlineCallAsReturn(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
+                                              const Span& call_site_span) {
+  auto body = CloneInlineBody(callee, args);
+  CHECK(body.has_return) << "Inline function '" << callee->name_
+                         << "' is used as a return value but has no return statement";
+  body.stmts.push_back(std::make_shared<const ReturnStmt>(std::move(body.return_values), call_site_span));
+  return std::move(body.stmts);
 }
 
 // =============================================================================
@@ -352,22 +400,78 @@ class InlineCallsMutator : public IRMutator {
     return SeqStmts::Flatten(std::move(*handled), op->span_);
   }
 
- private:
-  // Recognise `LHS = inline_call(args...)` or `EvalStmt(inline_call(args...))`
-  // and return the spliced sequence; otherwise return std::nullopt.
-  std::optional<std::vector<StmtPtr>> HandleTopLevelInlineCall(const StmtPtr& stmt) {
-    auto call = transform_utils::GetCallFromStmt(stmt);
-    if (!call) return std::nullopt;
-    auto callee = LookupInlineCallee(call);
-    if (!callee) return std::nullopt;
+  // `return inline_call(...)`. Same SeqStmts caveat as AssignStmt /
+  // EvalStmt: a function body that is a bare ReturnStmt (no enclosing
+  // SeqStmts) reaches this override directly.
+  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+    auto handled = HandleTopLevelInlineCall(op);
+    if (!handled.has_value()) return IRMutator::VisitStmt_(op);
+    changed_ = true;
+    return SeqStmts::Flatten(std::move(*handled), op->span_);
+  }
 
-    if (auto assign = As<AssignStmt>(stmt)) {
-      return SpliceInlineCall(callee, call->args_, assign->var_, assign->span_);
+  // Apply tuple substitutions registered by multi-return inline splices:
+  // `TupleGetItemExpr(LHS_var, i)` → `return_values[i]`. The substituted
+  // expression is then visited again (via VisitExpr) to fold any nested
+  // TupleGetItemExpr's the same way.
+  ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
+    // Fast-path the common case: programs without multi-return inline calls
+    // never populate tuple_subs_, so every TupleGetItemExpr in the IR would
+    // otherwise pay an unnecessary VisitExpr+find on the tuple operand.
+    if (tuple_subs_.empty()) return IRMutator::VisitExpr_(op);
+
+    auto recursed_tuple = VisitExpr(op->tuple_);
+    if (auto var = As<Var>(recursed_tuple)) {
+      auto it = tuple_subs_.find(var.get());
+      if (it != tuple_subs_.end() && op->index_ >= 0 && static_cast<size_t>(op->index_) < it->second.size()) {
+        // Visit the replacement so nested substitutions also apply.
+        return VisitExpr(it->second[op->index_]);
+      }
     }
-    if (auto eval = As<EvalStmt>(stmt)) {
-      return SpliceInlineCall(callee, call->args_, /*lhs=*/nullptr, eval->span_);
+    if (recursed_tuple.get() == op->tuple_.get()) return op;
+    return std::make_shared<TupleGetItemExpr>(recursed_tuple, op->index_, op->span_);
+  }
+
+ private:
+  // Recognise `LHS = inline_call(args...)`, `EvalStmt(inline_call(args...))`,
+  // or `ReturnStmt({inline_call(args...)})` and return the spliced sequence;
+  // otherwise return std::nullopt.
+  std::optional<std::vector<StmtPtr>> HandleTopLevelInlineCall(const StmtPtr& stmt) {
+    if (auto call = transform_utils::GetCallFromStmt(stmt)) {
+      if (auto callee = LookupInlineCallee(call)) {
+        if (auto assign = As<AssignStmt>(stmt)) {
+          return SpliceAssignCallSite(callee, call->args_, assign->var_, assign->span_);
+        }
+        if (auto eval = As<EvalStmt>(stmt)) {
+          return SpliceInlineCallAsEval(callee, call->args_);
+        }
+      }
+    }
+    // ReturnStmt's value list isn't covered by GetCallFromStmt — handle it
+    // here. The form is exactly `return inline_call(args...)`: a single Call
+    // expression as the only return value.
+    if (auto ret = As<ReturnStmt>(stmt); ret && ret->value_.size() == 1) {
+      if (auto call = As<Call>(ret->value_[0])) {
+        if (auto callee = LookupInlineCallee(call)) {
+          return SpliceInlineCallAsReturn(callee, call->args_, ret->span_);
+        }
+      }
     }
     return std::nullopt;
+  }
+
+  // Dispatch on callee return arity: single-return → `LHS = value` AssignStmt;
+  // multi-return → record `LHS → values` for downstream TupleGetItemExpr
+  // substitution and emit no LHS assignment.
+  std::vector<StmtPtr> SpliceAssignCallSite(const FunctionPtr& callee, const std::vector<ExprPtr>& args,
+                                            const VarPtr& lhs, const Span& span) {
+    if (callee->return_types_.size() > 1) {
+      std::vector<ExprPtr> sub;
+      auto stmts = SpliceInlineCallAsTupleSub(callee, args, sub);
+      tuple_subs_[lhs.get()] = std::move(sub);
+      return stmts;
+    }
+    return SpliceInlineCallAsAssign(callee, args, lhs, span);
   }
 
   FunctionPtr LookupInlineCallee(const CallPtr& call) const {
@@ -379,6 +483,11 @@ class InlineCallsMutator : public IRMutator {
 
   const std::unordered_map<std::string, FunctionPtr>& inline_fns_;
   bool changed_ = false;
+  // LHS Var → return values, populated by SpliceAssignCallSite for multi-return
+  // call sites. Subsequent TupleGetItemExpr uses of the Var are substituted
+  // with the corresponding value, so the LHS Var ends up with no references
+  // and we never emit a `LHS = MakeTuple(...)` assignment.
+  std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_subs_;
 };
 
 }  // namespace

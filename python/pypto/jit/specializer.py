@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -789,33 +790,63 @@ def _infer_return_type(
     dynvar_names: dict[str, str],
     out_params: list[str],
 ) -> str | None:
-    """Infer the return type annotation string from Out parameters.
+    """Infer the return type annotation string from the return statement.
 
-    Examines the function's return statement.  If it returns a name that
-    is in out_params, uses that param's tensor type (without Out[]).
-    Falls back to the first Out param if the return statement is absent or
-    not a simple name.
+    Examines the function's return statement:
+    - ``return a, b, ...``  -> ``tuple[T_a, T_b, ...]`` when every element is a
+      tensor-typed name we can resolve via ``tensor_meta`` (covers both ``pl.Out``
+      and bare ``pl.Tensor`` params).
+    - ``return name``       -> that name's tensor type (without ``Out[]``) when
+      ``name`` is a tensor-typed param.
+    - ``return f(...)``     -> ``None`` (return type depends on f, which we
+      can't resolve here).
+    - No tensor-typed params -> ``None``.
 
-    Returns None if no Out params exist (return type cannot be inferred).
+    Falls back to the first ``Out`` param's tensor type as a last resort —
+    matches the legacy single-return convention before bare ``pl.Tensor``
+    inline params were supported.
     """
-    if not out_params:
-        return None
-
-    # Try to find a bare return statement
-    returned_name: str | None = None
+    # Find the first return-with-value
+    return_node: ast.Return | None = None
     for node in ast.walk(func_def):
         if isinstance(node, ast.Return) and node.value is not None:
-            if isinstance(node.value, ast.Name):
-                returned_name = node.value.id
+            return_node = node
             break
 
-    target_param = returned_name if returned_name in out_params else out_params[0]
+    # Multi-return: `return a, b, ...` -> emit `tuple[T_a, T_b, ...]`
+    if return_node is not None and isinstance(return_node.value, ast.Tuple):
+        elt_annotations: list[str] = []
+        for elt in return_node.value.elts:
+            if not isinstance(elt, ast.Name) or elt.id not in tensor_meta:
+                return None  # Can't infer this element — drop the annotation
+            meta = tensor_meta[elt.id]
+            elt_annotations.append(
+                _build_tensor_annotation(elt.id, meta, dynamic_dims, dynvar_names, is_out=False)
+            )
+        return f"tuple[{', '.join(elt_annotations)}]"
 
-    if target_param not in tensor_meta:
+    # `return f(...)`: the result type depends on f's declared return types,
+    # which we don't have here. Emit no annotation rather than wrongly assuming
+    # `out_params[0]` — the caller may be a multi-return function.
+    if return_node is not None and isinstance(return_node.value, ast.Call):
         return None
 
-    meta = tensor_meta[target_param]
-    return _build_tensor_annotation(target_param, meta, dynamic_dims, dynvar_names, is_out=False)
+    # `return name`: use that name's tensor type if known.
+    if (
+        return_node is not None
+        and isinstance(return_node.value, ast.Name)
+        and return_node.value.id in tensor_meta
+    ):
+        target_param = return_node.value.id
+        meta = tensor_meta[target_param]
+        return _build_tensor_annotation(target_param, meta, dynamic_dims, dynvar_names, is_out=False)
+
+    # Fallback: first Out param's tensor type (legacy single-return convention).
+    if out_params and out_params[0] in tensor_meta:
+        meta = tensor_meta[out_params[0]]
+        return _build_tensor_annotation(out_params[0], meta, dynamic_dims, dynvar_names, is_out=False)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1059,14 +1090,33 @@ class Specializer:
         # Classify parameters
         out_params, tensor_params, scalar_dtype_strs = _classify_params(func_def)
 
+        # Inline helpers are spliced at the call site before SSA conversion,
+        # so their parameters are already in-place aliases of the caller's
+        # variables — `pl.Out[...]` is redundant ceremony there. Warn the user
+        # so they migrate to bare `pl.Tensor[...]`, and drop the wrapper from
+        # the generated source so downstream passes see the simpler form.
+        is_inline = ctx.func_type == "inline"
+        if is_inline and out_params:
+            warnings.warn(
+                f"@pl.jit.inline helper '{ctx.func_name}' uses pl.Out[...] on "
+                f"parameter(s) {out_params!r}. pl.Out annotations are deprecated "
+                f"for inline helpers because the body is spliced at the call "
+                f"site before SSA conversion — the parameter is already an "
+                f"in-place alias of the caller's variable. Drop the pl.Out "
+                f"wrapper; bare pl.Tensor[...] works the same.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         # Collect all param names (excluding self)
         all_param_names = [arg.arg for arg in func_def.args.args if arg.arg != "self"]
 
         # Build decorator
         decorator = self._build_decorator(ctx, func_def)
 
-        # Build parameter list with updated annotations
-        params = self._build_params(all_param_names, out_params, tensor_params, scalar_dtype_strs, ctx)
+        params = self._build_params(
+            all_param_names, out_params, tensor_params, scalar_dtype_strs, ctx, is_inline=is_inline
+        )
 
         # Infer return type
         ret_type = _infer_return_type(
@@ -1184,12 +1234,18 @@ class Specializer:
         tensor_params: list[str],
         scalar_dtype_strs: dict[str, str],
         ctx: SpecializeContext,
+        is_inline: bool = False,
     ) -> list[str]:
-        """Build the annotated parameter strings for the function signature."""
+        """Build the annotated parameter strings for the function signature.
+
+        When ``is_inline`` is True, ``pl.Out[...]`` wrappers are stripped from
+        tensor params — inline helpers don't have a calling convention boundary,
+        so the direction tag carries no information.
+        """
         result: list[str] = []
         for name in all_param_names:
             if name in tensor_params:
-                is_out = name in out_params
+                is_out = (name in out_params) and not is_inline
                 meta = ctx.tensor_meta.get(name)
                 if meta is None:
                     raise ValueError(

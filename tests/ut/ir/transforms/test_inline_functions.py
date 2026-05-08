@@ -492,5 +492,143 @@ class TestInlineFunctionsParamRebinding:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestInlineReturnAndMultiReturn:
+    """`return inline_call(...)` and tuple-unpack of multi-return inline calls.
+
+    Issue #1304 — these forms previously slipped through InlineFunctions because
+    the mutator only handled ``AssignStmt`` and ``EvalStmt`` call sites and
+    emitted dead ``LHS = MakeTuple(...)`` bindings for multi-return.
+    """
+
+    def test_return_inline_call_single_return(self):
+        """`return inline_call(...)` with a single-return inline: body spliced,
+        outer ReturnStmt rewritten to return the cloned return value directly."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def proj(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                qo: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                return self.proj(a, qo)
+
+        After = passes.inline_functions()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                qo: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                qo = pl.tensor.assemble(qo, a, [0])
+                return qo
+
+        ir.assert_structural_equal(After, Expected)
+
+    def test_return_inline_call_multi_return(self):
+        """`return inline_call(...)` with a multi-return inline: outer
+        ReturnStmt rewritten to return the cloned values directly — no
+        intermediate MakeTuple."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def proj(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                o0: pl.Out[pl.Tensor[[4], pl.FP32]],
+                o1: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                o0 = pl.tensor.assemble(o0, x, [0])
+                o1 = pl.tensor.assemble(o1, x, [0])
+                return o0, o1
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                q: pl.Out[pl.Tensor[[4], pl.FP32]],
+                k: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                return self.proj(a, q, k)
+
+        After = passes.inline_functions()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                q: pl.Out[pl.Tensor[[4], pl.FP32]],
+                k: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                q = pl.tensor.assemble(q, a, [0])
+                k = pl.tensor.assemble(k, a, [0])
+                return q, k
+
+        ir.assert_structural_equal(After, Expected)
+
+    def test_tuple_unpack_inline_call_multi_return(self):
+        """`y0, y1 = inline_call(...)` — multi-return inline call site
+        substitutes TupleGetItemExpr uses with the return values, leaves no
+        live MakeTuple binding."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def proj(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                o0: pl.Out[pl.Tensor[[4], pl.FP32]],
+                o1: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                o0 = pl.tensor.assemble(o0, x, [0])
+                o1 = pl.tensor.assemble(o1, x, [0])
+                return o0, o1
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                q: pl.Out[pl.Tensor[[4], pl.FP32]],
+                k: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                y0, y1 = self.proj(a, q, k)
+                return y0, y1
+
+        After = passes.inline_functions()(Before)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                q: pl.Out[pl.Tensor[[4], pl.FP32]],
+                k: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> tuple[pl.Tensor[[4], pl.FP32], pl.Tensor[[4], pl.FP32]]:
+                q = pl.tensor.assemble(q, a, [0])
+                k = pl.tensor.assemble(k, a, [0])
+                y0: pl.Tensor[[4], pl.FP32] = q
+                y1: pl.Tensor[[4], pl.FP32] = k
+                return y0, y1
+
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
