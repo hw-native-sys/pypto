@@ -128,12 +128,21 @@ std::optional<SplitMode> ResolveSplitMode(const FunctionPtr& func) {
   return inferred_mode;
 }
 
-std::vector<std::pair<std::string, std::any>> WithSplitAttr(const FunctionPtr& func, SplitMode mode) {
+std::vector<std::pair<std::string, std::any>> WithSplitAttrs(const FunctionPtr& func, SplitMode mode,
+                                                             bool is_aiv) {
   auto attrs = func->attrs_;
-  attrs.erase(std::remove_if(attrs.begin(), attrs.end(), [](const auto& kv) { return kv.first == "split"; }),
-              attrs.end());
+  attrs.erase(
+      std::remove_if(attrs.begin(), attrs.end(),
+                     [](const auto& kv) { return kv.first == "split" || kv.first == kDualAivDispatchAttr; }),
+      attrs.end());
   if (mode != SplitMode::None) {
     attrs.emplace_back("split", static_cast<int>(mode));
+    // AIV functions with a non-None split mode require dual-AIV dispatch at
+    // codegen. Stamp the attribute here so codegen reads it directly instead
+    // of re-deriving from SplitMode.
+    if (is_aiv) {
+      attrs.emplace_back(kDualAivDispatchAttr, true);
+    }
   }
   return attrs;
 }
@@ -1026,7 +1035,7 @@ FunctionPtr ProcessFunction(const FunctionPtr& func, SplitMode mode) {
   auto new_func = MutableCopy(func);
   new_func->params_ = new_params;
   new_func->body_ = cloned_body;
-  new_func->attrs_ = WithSplitAttr(func, mode);
+  new_func->attrs_ = WithSplitAttrs(func, mode, is_aiv);
   return new_func;
 }
 

@@ -105,7 +105,10 @@ class TestSplitVectorKernelUpDown:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=1)
 
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
                 z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
@@ -147,7 +150,10 @@ class TestSplitVectorKernelUpDown:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=1)
 
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
                 z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
@@ -235,7 +241,10 @@ class TestSplitVectorKernelUpDown:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=1)
 
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
@@ -347,7 +356,10 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
             def main_aiv(
                 self,
                 subblock_idx: pl.Tensor[[16, 128], pl.FP32],
@@ -409,7 +421,10 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
                 acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
@@ -443,7 +458,10 @@ class TestSplitVectorKernelUpDown:
 
         @pl.program
         class Expected:
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
                 acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
@@ -571,7 +589,10 @@ class TestSplitVectorKernelLeftRight:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=2)
 
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+            )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
                 z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
@@ -621,7 +642,10 @@ class TestSplitVectorKernelLeftRight:
                 z_tile = pl.matmul(x_left, y_right)
                 pl.tpush_to_aiv(z_tile, split=2)
 
-            @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+            )
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
