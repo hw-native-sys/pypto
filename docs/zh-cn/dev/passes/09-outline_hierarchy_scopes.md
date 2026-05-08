@@ -225,8 +225,16 @@ passes.def("outline_hierarchy_scopes", &pass::OutlineHierarchyScopes,
 | 属性 | 值 |
 | ---- | -- |
 | 所需 | SSAForm |
-| 产生 | SSAForm, HierarchyOutlined |
+| 产生 | SSAForm, HierarchyOutlined, OrchestrationReferencesResolved |
 | 失效 | — |
+
+该 Pass 是程序中所有 `FunctionType::Orchestration` 函数的唯一产生者
+—— 它正是从 `ScopeStmt(Hierarchy)` 区域提取出这些函数的。Pass 返回后，
+Orchestration 函数体内每一个非 builtin Call 必然指向 Program 中存在的
+Function（被提取的 callee 也在同一步加入 Program），因此
+`OrchestrationReferencesResolved` 属性成立。流水线通过注册的
+`OrchestrationReferencesResolvedPropertyVerifier` 自动验证；codegen 不再
+做这项检查。
 
 ## HierarchyOutlined 属性验证器
 

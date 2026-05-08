@@ -76,6 +76,7 @@
 | **NoNestedInCore** | NoNestedInCore | 无嵌套 InCore 作用域（`InCoreScopeStmt` 内含 `InCoreScopeStmt`） |
 | **InOutUseValid** | InOutUseValid | 作为 InOut/Out 传入用户函数调用的变量，在调用之后不得再被读取（RFC #1026）。Group 类型函数体目前跳过，待后续完善。 |
 | **PipelineLoopValid** | PipelineLoopValid | 每个 `ForStmt` 上的双向不变量：`kind_ == ForKind::Pipeline` ⇔ 含有 `pipeline_stages` 属性。任一方向失败即表示 pipeline 循环格式错误。 |
+| **OrchestrationReferencesResolved** | OrchestrationReferencesResolved | `FunctionType::Orchestration` 函数体内每一个非 builtin Call 必须对应到 Program 中存在的 Function。取代 codegen 端原本在生成时抛错的 `ValidateOrchestrationReferences` 遍历。 |
 
 ### SSAVerify
 

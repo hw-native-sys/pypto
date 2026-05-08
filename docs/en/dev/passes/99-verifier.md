@@ -76,6 +76,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **NoNestedInCore** | NoNestedInCore | No nested InCore scopes (`InCoreScopeStmt` inside `InCoreScopeStmt`) |
 | **InOutUseValid** | InOutUseValid | Variables passed as InOut/Out to user-function calls are not read after the call (RFC #1026). Group-typed function bodies are skipped pending follow-up. |
 | **PipelineLoopValid** | PipelineLoopValid | Bidirectional invariant on every `ForStmt`: `kind_ == ForKind::Pipeline` ⇔ `pipeline_stages` attr present. Either direction failing means the pipeline loop is malformed. |
+| **OrchestrationReferencesResolved** | OrchestrationReferencesResolved | Every non-builtin Call inside a `FunctionType::Orchestration` function targets a Function that exists in the surrounding Program. Replaces the codegen-side `ValidateOrchestrationReferences` walk that used to throw at codegen time. |
 
 ### SSAVerify
 

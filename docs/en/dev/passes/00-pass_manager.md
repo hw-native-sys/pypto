@@ -40,6 +40,7 @@ Framework for organizing and executing IR transformation passes on Programs with
 | `MixedKernelExpanded` | Mixed InCore functions split into AIC + AIV + Group |
 | `AllocatedMemoryAddr` | All MemRefs have valid addresses within buffer limits |
 | `TileTypeCoherence` | Every TileType has canonical tile_view (implicit views stored as nullopt) |
+| `OrchestrationReferencesResolved` | Every non-builtin Call inside a `FunctionType::Orchestration` function targets a Function in the surrounding Program |
 
 ### IRPropertySet
 
@@ -78,6 +79,7 @@ struct PassProperties {
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
+| FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | FuseCreateAssembleToSlice | — | — | — |
 | DeriveCallDirections | SplitIncoreOrch | CallDirectionsResolved | — |
 | DeriveManualScopeDeps | CallDirectionsResolved | — | — |
@@ -382,10 +384,11 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 14. `MemoryReuse`
 15. [`LegalizePTOBufferReuse`](27-legalize_pto_buffer_reuse.md)
 16. `AllocateMemoryAddr`
-17. `FuseCreateAssembleToSlice`
-18. [`DeriveCallDirections`](30-derive_call_directions.md)
-19. [`DeriveManualScopeDeps`](31-derive_manual_scope_deps.md)
-20. `Simplify`
+17. [`FoldNoOpReshape`](29-fold_no_op_reshape.md)
+18. [`FuseCreateAssembleToSlice`](30-fuse_create_assemble_to_slice.md)
+19. [`DeriveCallDirections`](31-derive_call_directions.md)
+20. [`DeriveManualScopeDeps`](32-derive_manual_scope_deps.md)
+21. `Simplify`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

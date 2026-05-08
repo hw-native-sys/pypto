@@ -40,6 +40,7 @@
 | `MixedKernelExpanded` | 混合 InCore 函数已拆分为 AIC + AIV + Group |
 | `AllocatedMemoryAddr` | 所有 MemRef 在缓冲区限制内具有有效地址 |
 | `TileTypeCoherence` | 每个 TileType 都具有规范的 tile_view（隐式视图存储为 nullopt） |
+| `OrchestrationReferencesResolved` | `FunctionType::Orchestration` 函数体内每一个非 builtin Call 必须对应到 Program 中存在的 Function |
 
 ### IRPropertySet
 
@@ -78,6 +79,7 @@ struct PassProperties {
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
 | MemoryReuse | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | AllocateMemoryAddr | TypeChecked, SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | AllocatedMemoryAddr | — |
+| FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | FuseCreateAssembleToSlice | — | — | — |
 | DeriveCallDirections | SplitIncoreOrch | CallDirectionsResolved | — |
 | DeriveManualScopeDeps | CallDirectionsResolved | — | — |
@@ -382,10 +384,11 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 14. `MemoryReuse`
 15. [`LegalizePTOBufferReuse`](27-legalize_pto_buffer_reuse.md)
 16. `AllocateMemoryAddr`
-17. `FuseCreateAssembleToSlice`
-18. [`DeriveCallDirections`](30-derive_call_directions.md)
-19. [`DeriveManualScopeDeps`](31-derive_manual_scope_deps.md)
-20. `Simplify`
+17. [`FoldNoOpReshape`](29-fold_no_op_reshape.md)
+18. [`FuseCreateAssembleToSlice`](30-fuse_create_assemble_to_slice.md)
+19. [`DeriveCallDirections`](31-derive_call_directions.md)
+20. [`DeriveManualScopeDeps`](32-derive_manual_scope_deps.md)
+21. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

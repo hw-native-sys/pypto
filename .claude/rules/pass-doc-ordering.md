@@ -41,9 +41,10 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 26 | `26-memory_reuse.md` | 26th pass |
 | 27 | `27-legalize_pto_buffer_reuse.md` | 27th pass |
 | 28 | `28-allocate_memory_addr.md` | 28th pass |
-| 29 | `29-fuse_create_assemble_to_slice.md` | 29th pass |
-| 30 | `30-derive_call_directions.md` | 30th pass |
-| 31 | `31-derive_manual_scope_deps.md` | 31st pass |
+| 29 | `29-fold_no_op_reshape.md` | 29th pass |
+| 30 | `30-fuse_create_assemble_to_slice.md` | 30th pass |
+| 31 | `31-derive_call_directions.md` | 31st pass |
+| 32 | `32-derive_manual_scope_deps.md` | 32nd pass |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

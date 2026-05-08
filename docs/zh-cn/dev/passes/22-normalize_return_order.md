@@ -239,7 +239,7 @@ def normalize_return_order() -> Pass:
   改写的 `InCore` 函数
 - [`LowerPipelineLoops`](23-lower_pipeline_loops.md) —— 紧随其后运行；展开
   流水线作用域时消费规范化后的返回值
-- [`DeriveCallDirections`](30-derive_call_directions.md) —— 后续基于本
+- [`DeriveCallDirections`](31-derive_call_directions.md) —— 后续基于本
   Pass 规范化的返回形态分析调用签名
 - [PTO 代码生成总览](../codegen/00-pto_codegen.md) 与
   [编排代码生成](../codegen/01-orchestration_codegen.md) —— 直接消费规范

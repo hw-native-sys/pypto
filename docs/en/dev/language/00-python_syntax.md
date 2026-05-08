@@ -327,7 +327,7 @@ def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
     return c
 ```
 
-Inside `with pl.manual_scope():`, the [DeriveManualScopeDeps](../passes/31-derive_manual_scope_deps.md)
+Inside `with pl.manual_scope():`, the [DeriveManualScopeDeps](../passes/32-derive_manual_scope_deps.md)
 pass resolves the union of user `deps=[...]` entries and data-flow producers
 (NoDep-aware) and writes them to the IR for codegen. The list is capped at 16
 edges per call to mirror the runtime's `PTO2_MAX_EXPLICIT_DEPS`.

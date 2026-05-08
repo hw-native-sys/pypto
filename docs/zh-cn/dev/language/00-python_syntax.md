@@ -325,7 +325,7 @@ def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
     return c
 ```
 
-`with pl.manual_scope():` 内由 [DeriveManualScopeDeps](../passes/31-derive_manual_scope_deps.md)
+`with pl.manual_scope():` 内由 [DeriveManualScopeDeps](../passes/32-derive_manual_scope_deps.md)
 pass 把用户 `deps=[...]` 与数据流 producer（NoDep 感知）的并集解析后写入
 IR 供 codegen 使用。每个 call 上限 16 条边，对齐 runtime 的
 `PTO2_MAX_EXPLICIT_DEPS`。

@@ -87,6 +87,22 @@ functions whose `attrs["split"]` is non-`None` have had their tile shapes,
 adjusted to per-lane form. Source: `include/pypto/ir/transforms/pass_properties.h`,
 `include/pypto/ir/transforms/ir_property.h`.
 
+### Function-attribute invariant on exit
+
+The pass treats `attrs["dual_aiv_dispatch"]` as the single source of truth
+for the dual-AIV dispatch decision and maintains the following invariant
+on the AIV function it returns:
+
+```text
+SplitMode resolved to non-None  ⇒  attrs["dual_aiv_dispatch"] == true
+```
+
+`ExpandMixedKernel` is the other writer of this attribute (it sets it on
+the no-split mixed-kernel path); `SplitVectorKernel` ensures the split
+path also reflects in the attribute. Orchestration codegen
+(`RequiresDualAivDispatch` in `src/codegen/orchestration/orchestration_codegen.cpp`)
+reads only this attribute and never re-derives from `SplitMode`.
+
 ## Algorithm — split-mode
 
 `ProcessFunction` rewrites a single AIC or AIV function whose
@@ -140,8 +156,11 @@ adjusted to per-lane form. Source: `include/pypto/ir/transforms/pass_properties.
    so every reference (param, iter_arg, return_var, tpop result) sees the
    rewritten Var node.
 6. DeepClone is applied to detach from any shared IR sub-trees.
-7. WithSplitAttr stamps the resolved SplitMode onto Function::attrs
-   (overwriting any prior `split` entry).
+7. WithSplitAttrs stamps the resolved SplitMode onto Function::attrs
+   (overwriting any prior `split` entry). For AIV functions whose
+   resolved mode is non-None it *also* writes `dual_aiv_dispatch=true`
+   so orchestration codegen has a single attribute to read instead of
+   re-deriving the dual-AIV decision from `SplitMode`.
 ```
 
 `tile_vars` is the per-pass map that tracks which `Var`s carry halved
