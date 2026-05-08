@@ -9,6 +9,8 @@
 
 """Tests for @pl.jit decorator: decoration, cache hit/miss, and bind_dynamic."""
 
+import warnings
+
 import pypto.language as pl
 import pytest
 from pypto.ir import OptimizationStrategy, PassManager
@@ -677,6 +679,125 @@ class TestInlineFuncIntegration:
         func_names = [f.name for f in post_pass.functions.values()]
         assert "helper" not in func_names, f"helper should be spliced, got {func_names}"
         assert "entry_mixed" in func_names
+
+    def test_inline_multi_return_tuple_unpack(self):
+        """Multi-return @pl.jit.inline + tuple-unpack at call site (issue #1304).
+
+        Pre-fix: ParserSyntaxError ('TupleGetItemExpr requires tuple to have
+        TupleType, got TensorType') because the specializer emitted a single-
+        tensor return annotation.
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def two_returns(
+            a: pl.Tensor,
+            o0: pl.Out[pl.Tensor],
+            o1: pl.Out[pl.Tensor],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [32, 32])
+                pl.store(tile, [0, 0], o0)
+                pl.store(tile, [0, 0], o1)
+            return o0, o1
+
+        @jit
+        def entry(
+            a: pl.Tensor,
+            o0: pl.Out[pl.Tensor],
+            o1: pl.Out[pl.Tensor],
+        ):
+            y0, y1 = two_returns(a, o0, o1)
+            return y0, y1
+
+        a = torch.randn(32, 32)
+        o0 = torch.empty(32, 32)
+        o1 = torch.empty(32, 32)
+        post_pass = entry.compile_for_test(a, o0, o1)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "two_returns" not in func_names
+        assert "entry" in func_names
+
+    def test_inline_multi_return_direct_return(self):
+        """Multi-return @pl.jit.inline + ``return inline_call(...)`` (issue #1304).
+
+        Pre-fix: RuntimeError reporting the inline function as undefined, because
+        InlineCallsMutator only handled AssignStmt/EvalStmt — ReturnStmt-shaped
+        call sites slipped past splicing.
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def two_returns(
+            a: pl.Tensor,
+            o0: pl.Out[pl.Tensor],
+            o1: pl.Out[pl.Tensor],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [32, 32])
+                pl.store(tile, [0, 0], o0)
+                pl.store(tile, [0, 0], o1)
+            return o0, o1
+
+        @jit
+        def entry(
+            a: pl.Tensor,
+            o0: pl.Out[pl.Tensor],
+            o1: pl.Out[pl.Tensor],
+        ):
+            return two_returns(a, o0, o1)
+
+        a = torch.randn(32, 32)
+        o0 = torch.empty(32, 32)
+        o1 = torch.empty(32, 32)
+        post_pass = entry.compile_for_test(a, o0, o1)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "two_returns" not in func_names
+        assert "entry" in func_names
+
+    def test_inline_with_bare_tensor_no_pl_out(self):
+        """@pl.jit.inline helpers with bare ``pl.Tensor`` params (no ``pl.Out``)
+        compile cleanly without DeprecationWarning. The body is spliced
+        identically — `pl.Out` is redundant on inline helpers because the
+        splice happens before SSA.
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def two_returns_no_out(
+            a: pl.Tensor,
+            o0: pl.Tensor,  # bare — no pl.Out
+            o1: pl.Tensor,  # bare — no pl.Out
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(a, [0, 0], [32, 32])
+                pl.store(tile, [0, 0], o0)
+                pl.store(tile, [0, 0], o1)
+            return o0, o1
+
+        @jit
+        def entry(
+            a: pl.Tensor,
+            o0: pl.Out[pl.Tensor],
+            o1: pl.Out[pl.Tensor],
+        ):
+            y0, y1 = two_returns_no_out(a, o0, o1)
+            return y0, y1
+
+        a = torch.randn(32, 32)
+        o0 = torch.empty(32, 32)
+        o1 = torch.empty(32, 32)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            post_pass = entry.compile_for_test(a, o0, o1)
+        # Bare pl.Tensor inline params must not emit the deprecation warning.
+        assert not any(issubclass(w.category, DeprecationWarning) for w in caught), (
+            f"Unexpected DeprecationWarning for bare pl.Tensor inline params: "
+            f"{[str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]}"
+        )
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "two_returns_no_out" not in func_names
+        assert "entry" in func_names
 
 
 class TestOpaqueFuncIntegration:
