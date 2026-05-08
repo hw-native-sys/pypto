@@ -34,6 +34,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -60,53 +61,12 @@ int NormalizeAxis(int axis, size_t ndim) {
   return axis;
 }
 
-/**
- * @brief Compute the product of shape dimensions (for static shapes)
- *
- * @param shape The shape dimensions
- * @return The product if all dimensions are ConstInt, -1 otherwise
- */
-int64_t ComputeShapeProduct(const std::vector<ExprPtr>& shape) {
-  int64_t product = 1;
-  for (const auto& dim : shape) {
-    auto const_dim = As<ConstInt>(dim);
-    if (!const_dim) {
-      return -1;  // Dynamic shape, cannot compute product
-    }
-    product *= const_dim->value_;
-  }
-  return product;
-}
-
-/// Build an INDEX-typed multiply, folding ConstInt * ConstInt and the
-/// multiplicative identity (×1) so that downstream codegen sees the same
-/// strides whether the source shape is static or dynamic.
-ExprPtr MakeIndexMul(const ExprPtr& lhs, const ExprPtr& rhs) {
-  auto const_lhs = As<ConstInt>(lhs);
-  auto const_rhs = As<ConstInt>(rhs);
-  if (const_lhs && const_rhs) {
-    return std::make_shared<ConstInt>(const_lhs->value_ * const_rhs->value_, DataType::INDEX,
-                                      Span::unknown());
-  }
-  if (const_rhs && const_rhs->value_ == 1) return lhs;
-  if (const_lhs && const_lhs->value_ == 1) return rhs;
-  return std::make_shared<Mul>(lhs, rhs, DataType::INDEX, Span::unknown());
-}
-
-/// Build row-major strides for the given shape:
-///   strides[ndim-1] = 1; strides[i] = strides[i+1] * shape[i+1].
-/// Works for static and dynamic dims; ConstInt chains collapse to a single
-/// ConstInt via MakeIndexMul.
-std::vector<ExprPtr> BuildRowMajorStrides(const std::vector<ExprPtr>& shape) {
-  size_t ndim = shape.size();
-  if (ndim == 0) return {};
-  std::vector<ExprPtr> strides(ndim);
-  strides[ndim - 1] = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
-  for (int i = static_cast<int>(ndim) - 2; i >= 0; --i) {
-    strides[i] = MakeIndexMul(strides[i + 1], shape[i + 1]);
-  }
-  return strides;
-}
+// Stride / shape-product helpers live in
+// include/pypto/ir/transforms/utils/tensor_view_semantics.h so passes,
+// verifiers, and op type-inference all share one implementation.
+using tensor_view_semantics::BuildRowMajorStrides;
+using tensor_view_semantics::ComputeShapeProduct;
+using tensor_view_semantics::MakeIndexMul;
 
 }  // anonymous namespace
 

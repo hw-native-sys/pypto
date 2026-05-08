@@ -51,6 +51,7 @@
 #include "pypto/ir/transforms/structural_comparison.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/parent_stmt_analysis.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
@@ -367,6 +368,48 @@ void BindIR(nb::module_& m) {
       .def_rw("layout", &TensorView::layout, "Tensor layout type")
       .def_rw("valid_shape", &TensorView::valid_shape, "Valid shape for each dimension")
       .def_rw("pad", &TensorView::pad, "Pad mode for out-of-valid-shape accesses");
+
+  // ---------------------------------------------------------------------------
+  // tensor_view_semantics free functions (RFC #1300 §2.2/§2.3)
+  // Exposed under ir.tensor_view_semantics so passes/verifiers/tests share one
+  // implementation of the canonical (shape, stride, layout) invariants.
+  auto tvs = ir.def_submodule("tensor_view_semantics",
+                              "Canonical-form helpers for TensorType.tensor_view_ (RFC #1300).");
+
+  tvs.def("build_logical_strides_from_layout", &tensor_view_semantics::BuildLogicalStridesFromLayout,
+          nb::arg("shape"), nb::arg("layout"),
+          "Build packed canonical strides for (shape, layout). "
+          "Raises ValueError on NZ layout or DN with rank < 2.");
+
+  tvs.def(
+      "derive_layout_from_strides",
+      [](const std::vector<ExprPtr>& shape,
+         const std::vector<ExprPtr>& stride) -> std::optional<TensorLayout> {
+        return tensor_view_semantics::DeriveLayoutFromStrides(shape, stride);
+      },
+      nb::arg("shape"), nb::arg("stride"),
+      "Statically derive layout from (shape, stride). "
+      "Returns None for symbolic / non-canonical cases.");
+
+  tvs.def(
+      "check_canonical_view",
+      [](const std::vector<ExprPtr>& shape, const std::vector<ExprPtr>& stride, TensorLayout layout,
+         bool relaxed_symbolic) -> std::pair<bool, std::string> {
+        auto r = tensor_view_semantics::CheckCanonicalView(shape, stride, layout, relaxed_symbolic);
+        return {r.ok, r.reason};
+      },
+      nb::arg("shape"), nb::arg("stride"), nb::arg("layout"), nb::arg("relaxed_symbolic") = true,
+      "Verify (shape, stride, layout) is canonical. Returns (ok, reason).");
+
+  tvs.def("is_canonical_view", &tensor_view_semantics::IsCanonicalView, nb::arg("shape"), nb::arg("stride"),
+          nb::arg("layout"), nb::arg("relaxed_symbolic") = true,
+          "Convenience wrapper around check_canonical_view returning only the ok flag.");
+
+  tvs.def("canonicalize_view", &tensor_view_semantics::CanonicalizeView, nb::arg("shape"), nb::arg("layout"),
+          "Build a packed canonical TensorView for (shape, layout).");
+
+  tvs.def("compute_shape_product", &tensor_view_semantics::ComputeShapeProduct, nb::arg("shape"),
+          "Static product of shape dimensions; -1 if any dim is dynamic.");
 
   // TensorType - const shared_ptr
   auto tensor_type_class = nb::class_<TensorType, ShapedType>(ir, "TensorType", "Tensor type representation");

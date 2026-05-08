@@ -407,6 +407,53 @@ class TensorView:
             pad: Pad mode for out-of-valid-shape accesses (defaults to PadValue.null)
         """
 
+class _TensorViewSemanticsModule:
+    """Canonical-form helpers for TensorType.tensor_view_ (RFC #1300)."""
+
+    @staticmethod
+    def build_logical_strides_from_layout(shape: Sequence[Expr], layout: TensorLayout) -> list[Expr]:
+        """Build packed canonical strides for (shape, layout).
+
+        Raises:
+            ValueError: if layout is NZ, or DN with rank < 2.
+        """
+
+    @staticmethod
+    def derive_layout_from_strides(shape: Sequence[Expr], stride: Sequence[Expr]) -> TensorLayout | None:
+        """Statically derive layout from (shape, stride).
+
+        Returns ``None`` for symbolic / non-canonical cases.
+        """
+
+    @staticmethod
+    def check_canonical_view(
+        shape: Sequence[Expr],
+        stride: Sequence[Expr],
+        layout: TensorLayout,
+        relaxed_symbolic: bool = True,
+    ) -> tuple[bool, str]:
+        """Verify (shape, stride, layout) is canonical. Returns (ok, reason)."""
+
+    @staticmethod
+    def is_canonical_view(
+        shape: Sequence[Expr],
+        stride: Sequence[Expr],
+        layout: TensorLayout,
+        relaxed_symbolic: bool = True,
+    ) -> bool:
+        """Convenience wrapper around check_canonical_view returning only the ok flag."""
+
+    @staticmethod
+    def canonicalize_view(shape: Sequence[Expr], layout: TensorLayout) -> TensorView:
+        """Build a packed canonical TensorView for (shape, layout)."""
+
+    @staticmethod
+    def compute_shape_product(shape: Sequence[Expr]) -> int:
+        """Static product of shape dimensions; -1 if any dim is dynamic."""
+
+tensor_view_semantics: _TensorViewSemanticsModule
+"""Submodule with canonical-form helpers for TensorType.tensor_view_ (RFC #1300)."""
+
 class TensorType(ShapedType):
     """Tensor type representation."""
 
