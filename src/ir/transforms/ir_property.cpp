@@ -75,6 +75,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TileTypeCoherence";
     case IRProperty::InlineFunctionsEliminated:
       return "InlineFunctionsEliminated";
+    case IRProperty::OrchestrationReferencesResolved:
+      return "OrchestrationReferencesResolved";
     default:
       return "Unknown";
   }

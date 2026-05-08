@@ -312,6 +312,16 @@ PropertyVerifierPtr CreateCallDirectionsResolvedPropertyVerifier();
  */
 PropertyVerifierPtr CreateTileTypeCoherencePropertyVerifier();
 
+/**
+ * @brief Factory function for creating OrchestrationReferencesResolved property verifier
+ *
+ * Verifies that every non-builtin Call inside an Orchestration function targets
+ * a Function that exists in the surrounding Program. Replaces the codegen-side
+ * ValidateOrchestrationReferences check that used to throw at codegen time.
+ * @return Shared pointer to OrchestrationReferencesResolved PropertyVerifier
+ */
+PropertyVerifierPtr CreateOrchestrationReferencesResolvedPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

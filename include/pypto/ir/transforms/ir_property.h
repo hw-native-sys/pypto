@@ -56,7 +56,9 @@ enum class IRProperty : uint64_t {
   CallDirectionsResolved,   ///< Every non-builtin Call has explicit attrs['arg_directions']
   TileTypeCoherence,        ///< Every TileType has canonical tile_view (implicit views stored as nullopt)
   InlineFunctionsEliminated,  ///< No FunctionType::Inline functions or Calls to them remain
-  kCount                      ///< Sentinel (must be last)
+  OrchestrationReferencesResolved,  ///< Every non-builtin Call in an Orchestration function targets a
+                                    ///< Function that exists in the Program
+  kCount                            ///< Sentinel (must be last)
 };
 
 static_assert(

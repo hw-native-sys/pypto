@@ -1687,7 +1687,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   CHECK(program != nullptr) << "Cannot generate orchestration for null program";
   CHECK(func != nullptr) << "Cannot generate orchestration for null function";
 
-  ValidateOrchestrationReferences(program, func);
+  // OrchestrationReferencesResolved is verified by the pass pipeline (registered
+  // as a property produced by OutlineHierarchyScopes). Codegen assumes well-formed IR.
 
   std::map<std::string, int> func_name_to_id;
   std::map<std::string, CoreType> func_name_to_core_type;

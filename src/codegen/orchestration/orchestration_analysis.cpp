@@ -68,46 +68,6 @@ std::string FormatConstFloatValue(const ConstFloatPtr& c, const std::string& cpp
   return std::to_string(v);  // double
 }
 
-void ValidateOrchestrationReferences(const ProgramPtr& program, const FunctionPtr& func) {
-  CHECK(func->func_type_ == FunctionType::Orchestration)
-      << "ValidateOrchestrationReferences should only be called on Orchestration functions";
-
-  class FunctionCallCollector : public IRVisitor {
-   public:
-    std::set<std::string> called_functions_;
-
-    void VisitExpr_(const CallPtr& call) override {
-      if (!IsBuiltinOp(call->op_->name_)) {
-        called_functions_.insert(call->op_->name_);
-      }
-      IRVisitor::VisitExpr_(call);
-    }
-  };
-
-  FunctionCallCollector collector;
-  collector.VisitStmt(func->body_);
-
-  std::vector<std::string> missing_functions;
-  for (const auto& func_name : collector.called_functions_) {
-    if (!program->GetFunction(func_name)) {
-      missing_functions.push_back(func_name);
-    }
-  }
-
-  if (!missing_functions.empty()) {
-    std::ostringstream oss;
-    oss << "Orchestration function '" << func->name_ << "' references undefined functions. "
-        << "The Program must contain all functions referenced in orchestration calls.\n"
-        << "Missing functions: [";
-    for (size_t i = 0; i < missing_functions.size(); ++i) {
-      if (i > 0) oss << ", ";
-      oss << "'" << missing_functions[i] << "'";
-    }
-    oss << "]";
-    throw pypto::ValueError(oss.str());
-  }
-}
-
 int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,
                       int* next_func_id) {
   if (func_name_to_id->find(func_name) == func_name_to_id->end()) {

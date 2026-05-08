@@ -64,6 +64,8 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::CallDirectionsResolved, CreateCallDirectionsResolvedPropertyVerifier);
   Register(IRProperty::TileTypeCoherence, CreateTileTypeCoherencePropertyVerifier);
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
+  Register(IRProperty::OrchestrationReferencesResolved,
+           CreateOrchestrationReferencesResolvedPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {
