@@ -279,6 +279,85 @@ def test_tensor_exp():
 
 
 # =============================================================================
+# Tensor sin/cos tests (FP32-only)
+# =============================================================================
+
+
+def test_tensor_sin_creates_call():
+    """tensor.sin on an FP32 tensor produces a Call with FP32 output of the same shape."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+    tensor_var = ir.Var("x", tensor_type, span)
+
+    call = ir.op.tensor.sin(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.sin"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_cos_creates_call():
+    """tensor.cos on an FP32 tensor produces a Call with FP32 output of the same shape."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+    tensor_var = ir.Var("x", tensor_type, span)
+
+    call = ir.op.tensor.cos(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.cos"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_sin_rejects_integer_input():
+    """tensor.sin must reject INT32 input with an error mentioning the op name and FP32."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.INT32)
+    tensor_var = ir.Var("x", tensor_type, span)
+
+    with pytest.raises(ValueError, match=r"tensor\.sin.*FP32"):
+        ir.op.tensor.sin(tensor_var)
+
+
+def test_tensor_sin_rejects_fp16_input():
+    """tensor.sin must reject FP16 input with an FP32-mentioning error."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("x", tensor_type, span)
+
+    with pytest.raises(ValueError, match=r"(?i)FP32"):
+        ir.op.tensor.sin(tensor_var)
+
+
+def test_tensor_cos_rejects_bf16_input():
+    """tensor.cos must reject BF16 input with an error mentioning the op name and FP32."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.BF16)
+    tensor_var = ir.Var("x", tensor_type, span)
+
+    with pytest.raises(ValueError, match=r"tensor\.cos.*FP32"):
+        ir.op.tensor.cos(tensor_var)
+
+
+# =============================================================================
 # Tensor neg tests
 # =============================================================================
 

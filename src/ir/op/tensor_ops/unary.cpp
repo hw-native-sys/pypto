@@ -11,7 +11,7 @@
 
 /**
  * @file unary.cpp
- * @brief Unary tensor operations (neg, recip, exp, sqrt, rsqrt, cast, abs)
+ * @brief Unary tensor operations (neg, recip, exp, sqrt, rsqrt, cast, abs, sin, cos)
  *
  * This file implements unary operations for tensors that operate element-wise.
  */
@@ -127,6 +127,25 @@ TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
   return std::make_shared<TensorType>(tensor_type->shape_, out_dtype);
 }
 
+// Shared FP32-only deducer for transcendental ops (tensor.sin, tensor.cos).
+// These ops are intentionally FP32-only to avoid silent precision loss; callers
+// must explicitly cast non-FP32 inputs via tensor.cast.
+TypePtr DeduceTensorFP32OnlyType(const std::string& op_name, const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 1) << op_name << " requires exactly 1 argument, but got " << args.size();
+
+  auto tensor_type = As<TensorType>(args[0]->GetType());
+  CHECK(tensor_type) << op_name << " requires first argument to be a TensorType, but got "
+                     << args[0]->GetType()->TypeName();
+
+  // FP32-only: do NOT auto-promote. Reject non-FP32 inputs with an actionable error.
+  CHECK(tensor_type->dtype_ == DataType::FP32)
+      << op_name << " is FP32-only, but got input with dtype " << tensor_type->dtype_.ToString()
+      << ". Cast the input to FP32 explicitly via pl.cast(x, pl.FP32) before applying " << op_name << ".";
+
+  return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_);
+}
+
 TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.cast requires exactly 1 argument (input), but got " << args.size();
@@ -198,6 +217,24 @@ REGISTER_OP("tensor.exp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorExpType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.sin")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise sine operation (radians). FP32-only.")
+    .add_argument("input", "Input tensor (TensorType, FP32)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorFP32OnlyType("tensor.sin", args, kwargs);
+    });
+
+REGISTER_OP("tensor.cos")
+    .set_op_category("TensorOp")
+    .set_description("Element-wise cosine operation (radians). FP32-only.")
+    .add_argument("input", "Input tensor (TensorType, FP32)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorFP32OnlyType("tensor.cos", args, kwargs);
     });
 
 REGISTER_OP("tensor.sqrt")

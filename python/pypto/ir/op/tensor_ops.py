@@ -845,6 +845,34 @@ def exp(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.exp", [input], {}, actual_span)
 
 
+def sin(input: Expr, span: Span | None = None) -> Call:
+    """Element-wise sine operation (input in radians). FP32-only.
+
+    Args:
+        input: Input tensor (must be FP32; cast explicitly otherwise)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise sine
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.sin", [input], {}, actual_span)
+
+
+def cos(input: Expr, span: Span | None = None) -> Call:
+    """Element-wise cosine operation (input in radians). FP32-only.
+
+    Args:
+        input: Input tensor (must be FP32; cast explicitly otherwise)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise cosine
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.cos", [input], {}, actual_span)
+
+
 def neg(input: Expr, span: Span | None = None) -> Call:
     """Element-wise negation operation.
 
