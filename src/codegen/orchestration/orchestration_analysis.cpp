@@ -29,6 +29,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
+#include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -336,35 +337,14 @@ std::vector<ParamDirection> ComputeGroupEffectiveDirections(const FunctionPtr& g
       return declared;
     }
 
-    class InnerCallFinder : public IRVisitor {
-     public:
-      explicit InnerCallFinder(const ProgramPtr& program) : program_(program) {}
-      const ProgramPtr& program_;
-      std::vector<std::pair<CallPtr, FunctionPtr>> inner_calls;
-
-     protected:
-      void VisitExpr_(const CallPtr& call) override {
-        if (auto gv = As<GlobalVar>(call->op_)) {
-          auto callee = program_->GetFunction(gv->name_);
-          if (callee && callee->func_type_ != FunctionType::Orchestration &&
-              callee->func_type_ != FunctionType::Opaque) {
-            inner_calls.emplace_back(call, callee);
-            return;
-          }
-        }
-        IRVisitor::VisitExpr_(call);
-      }
-    };
-
-    InnerCallFinder finder(program);
-    finder.VisitStmt(func->body_);
-    if (!finder.inner_calls.empty()) {
+    auto inner_calls = ir::CollectInnerCalls(func, program);
+    if (!inner_calls.empty()) {
       std::unordered_map<const Var*, size_t> param_to_index;
       for (size_t i = 0; i < func->params_.size(); ++i) {
         param_to_index[func->params_[i].get()] = i;
       }
 
-      for (const auto& [inner_call, inner_callee] : finder.inner_calls) {
+      for (const auto& [inner_call, inner_callee] : inner_calls) {
         const auto& inner_args = inner_call->args_;
         std::vector<ParamDirection> inner_dirs;
         if (inner_callee->func_type_ == FunctionType::Group ||

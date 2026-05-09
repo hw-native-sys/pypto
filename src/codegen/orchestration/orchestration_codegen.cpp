@@ -48,6 +48,7 @@
 #include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/transforms/utils/var_collectors.h"
+#include "pypto/ir/transforms/utils/wrapper_call_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -899,76 +900,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
   };
 
   WrapperCallInfo FindWrapperInnerCall(const FunctionPtr& wrapper_func) {
-    class InnerCallFinder : public IRVisitor {
-     public:
-      explicit InnerCallFinder(const ProgramPtr& program) : program_(program) {}
-      const ProgramPtr& program_;
-      CallPtr inner_call;
-      FunctionPtr inner_callee;
-
-     protected:
-      void VisitExpr_(const CallPtr& call) override {
-        if (inner_call) return;
-        if (auto gv = As<GlobalVar>(call->op_)) {
-          auto callee = program_->GetFunction(gv->name_);
-          if (callee) {
-            inner_call = call;
-            inner_callee = callee;
-            return;
-          }
-        }
-        IRVisitor::VisitExpr_(call);
-      }
-    };
-
-    InnerCallFinder finder(program_);
-    finder.VisitStmt(wrapper_func->body_);
-    return {std::move(finder.inner_call), std::move(finder.inner_callee)};
+    auto info = ir::FindFirstInnerCall(wrapper_func, program_);
+    return {std::move(info.inner_call), std::move(info.inner_callee)};
   }
 
   /// Walk the Group function body to find the AIC and AIV callee names
   /// and the inner InCore call (needed for param reordering).
   GroupCalleeInfo FindGroupCallees(const FunctionPtr& group_func) {
-    class CalleeFinder : public IRVisitor {
-     public:
-      explicit CalleeFinder(const ProgramPtr& program) : program_(program) {}
-      const ProgramPtr& program_;
-      std::string aic_name;
-      std::string aiv_name;
-      CallPtr inner_call;
-      FunctionPtr inner_callee;
-
-     protected:
-      void VisitExpr_(const CallPtr& call) override {
-        if (auto gv = As<GlobalVar>(call->op_)) {
-          auto callee = program_->GetFunction(gv->name_);
-          if (callee) {
-            if (callee->func_type_ == FunctionType::AIC && aic_name.empty()) {
-              aic_name = callee->name_;
-              if (!inner_call) {
-                inner_call = call;
-                inner_callee = callee;
-              }
-            } else if (callee->func_type_ == FunctionType::AIV && aiv_name.empty()) {
-              aiv_name = callee->name_;
-              if (!inner_call) {
-                inner_call = call;
-                inner_callee = callee;
-              }
-            } else if (callee->func_type_ == FunctionType::InCore && !inner_call) {
-              inner_call = call;
-              inner_callee = callee;
-            }
-          }
-        }
-        IRVisitor::VisitExpr_(call);
-      }
-    };
-
-    CalleeFinder finder(program_);
-    finder.VisitStmt(group_func->body_);
-    return {std::move(finder.aic_name), std::move(finder.aiv_name), std::move(finder.inner_call),
-            std::move(finder.inner_callee)};
+    auto info = ir::FindGroupCallees(group_func, program_);
+    return {std::move(info.aic_name), std::move(info.aiv_name), std::move(info.inner_call),
+            std::move(info.inner_callee)};
   }
 
   /// Build task params for a wrapper function call, reordered to match the
