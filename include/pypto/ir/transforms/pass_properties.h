@@ -66,6 +66,15 @@ inline const PassProperties kNormalizeStmtStructureProperties{
 
 inline const PassProperties kSimplifyProperties{};
 
+// -- Math op lowering pass (tile.sin / tile.cos -> primitive arithmetic) ------
+//
+// Decomposition currently unimplemented — the pass is a no-op skeleton. When
+// the decomposition lands it operates purely within the existing tile-op
+// vocabulary, so it neither requires nor produces nor invalidates any
+// IRProperty.
+
+inline const PassProperties kLowerMathOpsProperties{};
+
 // -- Outlining pass -----------------------------------------------------------
 
 inline const PassProperties kOutlineIncoreScopesProperties{

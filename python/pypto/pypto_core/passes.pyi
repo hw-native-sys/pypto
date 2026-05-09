@@ -479,6 +479,16 @@ def split_vector_kernel() -> Pass:
 def simplify() -> Pass:
     """Create a pass that simplifies expressions and statements using algebraic rules and bound analysis."""
 
+def lower_math_ops() -> Pass:
+    """Create a pass that lowers ``tile.sin`` / ``tile.cos`` to primitive arithmetic tile ops.
+
+    The decomposition uses Cody-Waite range reduction followed by a degree-9
+    Horner polynomial evaluation. Currently a no-op skeleton — actual
+    decomposition lands in a follow-up.
+
+    Idempotent: running the pass twice yields the same IR after the first run.
+    """
+
 def derive_call_directions() -> Pass:
     """Create a pass that derives per-argument :class:`ir.ArgDirection` for every cross-function ``Call``.
 
@@ -692,6 +702,7 @@ __all__ = [
     "inject_gm_pipe_buffer",
     "split_vector_kernel",
     "simplify",
+    "lower_math_ops",
     "flatten_call_expr",
     "inline_functions",
     "normalize_stmt_structure",

@@ -524,6 +524,16 @@ Pass RunVerifier(const IRPropertySet& properties);
 Pass Simplify();
 
 /**
+ * @brief Lower ``tile.sin`` / ``tile.cos`` to compositions of primitive
+ *        arithmetic tile ops using Cody-Waite range reduction and a
+ *        degree-9 Horner polynomial.
+ *
+ * Currently a no-op skeleton — actual decomposition lands in a follow-up.
+ * Idempotent: running the pass twice yields the same IR after the first run.
+ */
+Pass LowerMathOps();
+
+/**
  * @brief Create a pass that flattens nested call expressions
  */
 Pass FlattenCallExpr();
