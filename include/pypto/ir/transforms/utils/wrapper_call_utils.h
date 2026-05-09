@@ -47,10 +47,14 @@ WrapperCallInfo FindFirstInnerCall(const FunctionPtr& wrapper, const ProgramPtr&
 /**
  * @brief Result of a Group-function callee scan.
  *
- * `aic_name` / `aiv_name` are the names of the first AIC / AIV callees
- * encountered (empty if none). `inner_call` / `inner_callee` point at the
- * first AIC, AIV, or InCore call (priority AIC > AIV > InCore) — the call
- * whose argument shape orchestration codegen reorders against.
+ * - `aic_name` / `aiv_name` — the names of the first AIC / AIV callees
+ *   encountered (empty if none).
+ * - `inner_call` / `inner_callee` — the **first** AIC, AIV, or InCore call
+ *   in source order, regardless of type. Used by orchestration codegen as
+ *   the parameter-order reference for wrapper arg reconciliation. After
+ *   `ExpandMixedKernel`, Group bodies are emitted as `AIC → AIV` so the
+ *   AIC call is naturally first in practice; the function does not enforce
+ *   a type priority.
  */
 struct GroupCalleeInfo {
   std::string aic_name;
@@ -61,7 +65,7 @@ struct GroupCalleeInfo {
 
 /**
  * @brief Group-specific scan: locate the AIC / AIV callees and the first
- *        InCore-variant inner call inside @p group_func.
+ *        AIC/AIV/InCore inner call inside @p group_func.
  *
  * @return aggregated info; any field may be empty / nullptr if not present.
  */

@@ -70,6 +70,12 @@ WrapperCallInfo FindFirstInnerCall(const FunctionPtr& wrapper, const ProgramPtr&
 GroupCalleeInfo FindGroupCallees(const FunctionPtr& group_func, const ProgramPtr& program) {
   GroupCalleeInfo info;
   if (!group_func || !group_func->body_ || !program) return info;
+  // `aic_name` / `aiv_name` are first-match-per-type. `inner_call` is
+  // first-match in source order regardless of type — this matches the
+  // behavior of the original CalleeFinder in orchestration_codegen.cpp
+  // and is what BuildWrapperReorderedParams expects (the call whose arg
+  // order it reorders against). Group bodies emitted by ExpandMixedKernel
+  // place AIC before AIV in source order, so the AIC call wins in practice.
   CallVisitor visitor(program, [&](const CallPtr& call, const FunctionPtr& callee) {
     if (callee->func_type_ == FunctionType::AIC && info.aic_name.empty()) {
       info.aic_name = callee->name_;
