@@ -348,6 +348,44 @@ REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
   return oss.str();
 }
 
+REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
+  // tensor.as_layout(input, shape, layout=...) -> metadata reinterpret only.
+  // The op is internal-only (RFC #1300 §3.3): future passes inject it at
+  // orch ↔ InCore bridge sites to expose a different (shape, stride, layout)
+  // view over the same physical buffer. The validity check in
+  // ``DeduceTensorAsLayoutType`` restricts accepted reinterprets to RFC §4.2
+  // canonical pairs — currently row-major ``[..., a, b]`` ND ≡
+  // ``[..., b, a]`` DN-packed, i.e. a swap of the trailing two dims.
+  //
+  // Runtime ``Tensor::transpose(N-2, N-1)`` is a zero-copy metadata swap of
+  // shapes / raw_shapes / offsets (the same primitive ``tensor.transpose``
+  // already lowers to). Emitting it here gives consumers a Tensor handle
+  // whose runtime metadata matches the IR's post-reinterpret TensorType, so
+  // downstream ops that read ``result.shape()`` see the right values.
+  //
+  // Identity cases (``as_layout(x, x.shape, x.layout)``) are folded out by
+  // the Simplify pass, so codegen never sees them.
+  CHECK(op->args_.size() == 2) << "tensor.as_layout requires 2 args (input, shape) plus a 'layout' kwarg";
+
+  std::string input_name = codegen.TryGetVarName(op->args_[0]);
+  CHECK(!input_name.empty()) << "tensor.as_layout input must be a variable";
+
+  auto input_type = As<TensorType>(op->args_[0]->GetType());
+  CHECK(input_type) << "tensor.as_layout input must be TensorType";
+
+  int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
+  CHECK(ndim >= 2) << "tensor.as_layout: only the trailing-two-dim canonical pair is currently supported, "
+                   << "but input is " << ndim << "D";
+
+  std::string ext_input_name = codegen.GetExternalTensorName(input_name);
+  std::string result_var = codegen.GetCurrentResultTarget();
+
+  std::ostringstream oss;
+  oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << (ndim - 2) << ", "
+      << (ndim - 1) << ");";
+  return oss.str();
+}
+
 REGISTER_ORCHESTRATION_OP(tensor_dim, ("tensor.dim")) {
   // tensor.dim(tensor, axis) -> extract shape dimension as scalar
   // Validation already performed by DeduceTensorDimType during type deduction.
