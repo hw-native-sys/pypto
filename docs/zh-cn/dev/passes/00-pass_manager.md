@@ -71,6 +71,7 @@ struct PassProperties {
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
+| LowerMathOps | — | — | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
 | AutoTileMatmulL0 | SSAForm, IncoreTileOps, TileOps2D | SSAForm, IncoreTileOps, TileOps2D | — |
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
@@ -368,40 +369,41 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 `Default` 和 `DebugTileOptimization` 共享的 PTO tile 阶段顺序为：
 
-1. `FlattenTileNdTo2D`
-2. [`AutoTileMatmulL0`](15-auto_tile_matmul_l0.md)
-3. `InferTileMemorySpace`
-4. `ResolveTransposeLayout`
-5. [`ResolveBackendOpLayouts`](18-resolve_backend_op_layouts.md)
-6. `NormalizeStmtStructure`
-7. `ExpandMixedKernel`
-8. [`InjectGMPipeBuffer`](20-inject_gm_pipe_buffer.md)
-9. [`SplitVectorKernel`](21-split_vector_kernel.md)
-10. `NormalizeReturnOrder`
-11. [`LowerPipelineLoops`](23-lower_pipeline_loops.md)
-12. [`CanonicalizeIOOrder`](24-canonicalize_io_order.md)
-13. [`MaterializeTensorStrides`](25-materialize_tensor_strides.md) —— 已注册但尚未接入默认 pipeline（将随 RFC #1300 P6/P7 的 codegen 清理一起启用）
-14. `InitMemRef`
-15. `MemoryReuse`
-16. [`LegalizePTOBufferReuse`](28-legalize_pto_buffer_reuse.md)
-17. `AllocateMemoryAddr`
-18. [`FoldNoOpReshape`](30-fold_no_op_reshape.md)
-19. [`FuseCreateAssembleToSlice`](31-fuse_create_assemble_to_slice.md)
-20. [`DeriveCallDirections`](32-derive_call_directions.md)
-21. [`DeriveManualScopeDeps`](33-derive_manual_scope_deps.md)
-22. `Simplify`
+1. [`LowerMathOps`](14-lower_math_ops.md)
+2. [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md)
+3. [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)
+4. `InferTileMemorySpace`
+5. `ResolveTransposeLayout`
+6. [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md)
+7. `NormalizeStmtStructure`
+8. `ExpandMixedKernel`
+9. [`InjectGMPipeBuffer`](21-inject_gm_pipe_buffer.md)
+10. [`SplitVectorKernel`](22-split_vector_kernel.md)
+11. `NormalizeReturnOrder`
+12. [`LowerPipelineLoops`](24-lower_pipeline_loops.md)
+13. [`CanonicalizeIOOrder`](25-canonicalize_io_order.md)
+14. [`MaterializeTensorStrides`](26-materialize_tensor_strides.md) —— 已注册但尚未接入默认 pipeline（将随 RFC #1300 P6/P7 的 codegen 清理一起启用）
+15. `InitMemRef`
+16. `MemoryReuse`
+17. [`LegalizePTOBufferReuse`](29-legalize_pto_buffer_reuse.md)
+18. `AllocateMemoryAddr`
+19. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
+20. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
+21. [`DeriveCallDirections`](33-derive_call_directions.md)
+22. [`DeriveManualScopeDeps`](34-derive_manual_scope_deps.md)
+23. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用
 `Default`，以保证主维护流水线持续被覆盖。
 
-[`ResolveBackendOpLayouts`](18-resolve_backend_op_layouts.md) 会根据
+[`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md) 会根据
 backend 注册的 layout 元数据修复受约束的逐元素 tile 操作。对于当前 PTO
 上要求 `row_major` 的逐元素算子，它会在受约束 use-site 把 `[N, 1]`
 向量操作数改写成 `[1, N]` 的 `tile.reshape`，其 layout 由目标 shape
 自动推导为 `row_major`，并在需要时把结果 reshape 回原始向量 shape。
 
-[`NormalizeReturnOrder`](22-normalize_return_order.md) 对 InCore 函数的 `ReturnStmt::value_` 重新排序，使
+[`NormalizeReturnOrder`](23-normalize_return_order.md) 对 InCore 函数的 `ReturnStmt::value_` 重新排序，使
 `return[i]` 对应声明顺序中第 i 个 `Out`/`InOut` 参数，并同步更新调用点的
 `TupleGetItemExpr` 索引。这样编排代码生成可以直接通过
 `out_indices[i]` 查找输出参数，而不需要追踪 `tile.store`/yield 链。该 pass

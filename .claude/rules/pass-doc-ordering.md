@@ -26,26 +26,27 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 11 | `11-outline_cluster_scopes.md` | 11th pass |
 | 12 | `12-convert_tensor_to_tile_ops.md` | 12th pass |
 | 13 | `13-optimize_orch_tensors.md` | 13th pass |
-| 14 | `14-flatten_tile_nd_to_2d.md` | 14th pass |
-| 15 | `15-auto_tile_matmul_l0.md` | 15th pass |
-| 16 | `16-infer_tile_memory_space.md` | 16th pass |
-| 17 | `17-resolve_transpose_layout.md` | 17th pass |
-| 18 | `18-resolve_backend_op_layouts.md` | 18th pass |
-| 19 | `19-expand_mixed_kernel.md` | 19th pass |
-| 20 | `20-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
-| 21 | `21-split_vector_kernel.md` | 21st pass |
-| 22 | `22-normalize_return_order.md` | 22nd pass |
-| 23 | `23-lower_pipeline_loops.md` | 23rd pass |
-| 24 | `24-canonicalize_io_order.md` | 24th pass |
-| 25 | `25-materialize_tensor_strides.md` | 25th pass (RFC #1300 P3 — registered, not yet wired into Default; activates with P6/P7) |
-| 26 | `26-init_memref.md` | 26th pass |
-| 27 | `27-memory_reuse.md` | 27th pass |
-| 28 | `28-legalize_pto_buffer_reuse.md` | 28th pass |
-| 29 | `29-allocate_memory_addr.md` | 29th pass |
-| 30 | `30-fold_no_op_reshape.md` | 30th pass |
-| 31 | `31-fuse_create_assemble_to_slice.md` | 31st pass |
-| 32 | `32-derive_call_directions.md` | 32nd pass |
-| 33 | `33-derive_manual_scope_deps.md` | 33rd pass |
+| 14 | `14-lower_math_ops.md` | 14th pass (first tile_pto pass) |
+| 15 | `15-flatten_tile_nd_to_2d.md` | 15th pass |
+| 16 | `16-auto_tile_matmul_l0.md` | 16th pass |
+| 17 | `17-infer_tile_memory_space.md` | 17th pass |
+| 18 | `18-resolve_transpose_layout.md` | 18th pass |
+| 19 | `19-resolve_backend_op_layouts.md` | 19th pass |
+| 20 | `20-expand_mixed_kernel.md` | 20th pass |
+| 21 | `21-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
+| 22 | `22-split_vector_kernel.md` | 22nd pass |
+| 23 | `23-normalize_return_order.md` | 23rd pass |
+| 24 | `24-lower_pipeline_loops.md` | 24th pass |
+| 25 | `25-canonicalize_io_order.md` | 25th pass |
+| 26 | `26-materialize_tensor_strides.md` | 26th pass (RFC #1300 P3 — registered, not yet wired into Default; activates with P6/P7) |
+| 27 | `27-init_memref.md` | 27th pass |
+| 28 | `28-memory_reuse.md` | 28th pass |
+| 29 | `29-legalize_pto_buffer_reuse.md` | 29th pass |
+| 30 | `30-allocate_memory_addr.md` | 30th pass |
+| 31 | `31-fold_no_op_reshape.md` | 31st pass |
+| 32 | `32-fuse_create_assemble_to_slice.md` | 32nd pass |
+| 33 | `33-derive_call_directions.md` | 33rd pass |
+| 34 | `34-derive_manual_scope_deps.md` | 34th pass |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 
