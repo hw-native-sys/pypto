@@ -80,7 +80,7 @@ class TestOrchestration:
 
         @pl.program
         class BasicProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -164,7 +164,7 @@ class TestOrchestration:
 
         @pl.program
         class TensorReadProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -203,7 +203,7 @@ class TestOrchestration:
 
         @pl.program
         class ConfigProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -238,7 +238,7 @@ class TestOrchestration:
 
         @pl.program
         class IndependentProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -292,7 +292,7 @@ class TestOrchestration:
 
         @pl.program
         class VectorExampleProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -305,7 +305,7 @@ class TestOrchestration:
                 out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add_scalar(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -317,7 +317,7 @@ class TestOrchestration:
                 out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
                 return out
 
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_mul(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -437,7 +437,7 @@ class TestOrchestration:
 
         @pl.program
         class TupleIntermediateProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_pair(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -453,7 +453,7 @@ class TestOrchestration:
                 rd: pl.Tensor[[16, 16], pl.FP32] = pl.store(d, [0, 0], out_d)
                 return rs, rd
 
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -502,7 +502,7 @@ class TestOrchestration:
 
         @pl.program
         class TupleOutputProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_pair(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -550,7 +550,7 @@ class TestOrchestration:
 
         @pl.program
         class FourTupleProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def online_update(
                 self,
                 mij: pl.Tensor[[16, 1], pl.FP32],
@@ -576,7 +576,7 @@ class TestOrchestration:
                 dst_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(dst_tile, [0, 0], dst)
                 return mi_out, li_out, oi_out, dst_out
 
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -641,7 +641,7 @@ class TestOrchestration:
 
         @pl.program
         class TensorCreateProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_fill(
                 self,
                 a: pl.Tensor[[32, 32], pl.FP16],
@@ -682,7 +682,7 @@ class TestOrchestration:
 
         @pl.program
         class InplaceProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def online_update(
                 self,
                 mij: pl.Tensor[[16, 1], pl.FP32],
@@ -783,7 +783,7 @@ class TestOrchestration:
 
         @pl.program
         class TensorDimProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -823,7 +823,7 @@ class TestOrchestration:
 
         @pl.program
         class ForViewProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_add(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -1011,7 +1011,7 @@ class TestOrchestration:
 
         @pl.program
         class IfProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_process(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -1061,7 +1061,7 @@ class TestOrchestration:
 
         @pl.program
         class MultipleTupleProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_a(
                 self,
                 x: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
@@ -1076,7 +1076,7 @@ class TestOrchestration:
                 y_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(yt, [0, 0], y)
                 return x_out, y_out
 
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_b(
                 self,
                 a: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
@@ -1154,7 +1154,7 @@ class TestOrchestration:
 
         @pl.program
         class TupleForLoopProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_init(
                 self,
                 a: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
@@ -1169,7 +1169,7 @@ class TestOrchestration:
                 b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(bt, [0, 0], b)
                 return a_out, b_out
 
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel_update(
                 self,
                 x: pl.Tensor[[16, 16], pl.FP32],
@@ -1445,7 +1445,7 @@ class TestOrchestration:
 
         @pl.program
         class NumericSuffixProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel(
                 self,
                 x: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
@@ -1790,7 +1790,7 @@ class TestOrchestration:
 
         @pl.program
         class MultiScalarProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -2428,7 +2428,7 @@ class TestLocalAllocWAWPromotion:
 
         @pl.program
         class TwoLoopAllocProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def task_init(
                 self,
                 x: pl.Tensor[[16, 16], pl.FP32],
@@ -2438,7 +2438,7 @@ class TestLocalAllocWAWPromotion:
                 out: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], buf)
                 return out
 
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def task_compute(
                 self,
                 x: pl.Tensor[[16, 16], pl.FP32],
@@ -2448,7 +2448,7 @@ class TestLocalAllocWAWPromotion:
                 out: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], buf)
                 return out
 
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def task_read(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -2490,7 +2490,7 @@ class TestLocalAllocWAWPromotion:
 
         @pl.program
         class ExternalOutProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kernel(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -2528,7 +2528,7 @@ class TestLocalAllocWAWPromotion:
 
         @pl.program
         class SingleParallelProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def task(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -2573,7 +2573,7 @@ class TestLocalAllocWAWPromotion:
 
         @pl.program
         class TwoParallelProgram:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def task(
                 self,
                 a: pl.Tensor[[16, 16], pl.FP32],
@@ -2753,7 +2753,7 @@ class TestNoOpAliasSkip:
 
         @pl.program
         class FormA:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kern(
                 self,
                 x: pl.Tensor[[16, 16], pl.FP32],
@@ -2782,7 +2782,7 @@ class TestNoOpAliasSkip:
 
         @pl.program
         class FormB:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kern(
                 self,
                 x: pl.Tensor[[16, 16], pl.FP32],
@@ -2817,7 +2817,7 @@ class TestNoOpAliasSkip:
 
         @pl.program
         class FormC:
-            @pl.function(type=pl.FunctionType.InCore)
+            @pl.function(type=pl.FunctionType.AIV)
             def kern(
                 self,
                 x: pl.Tensor[[16, 16], pl.FP32],

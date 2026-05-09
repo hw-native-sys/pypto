@@ -57,43 +57,25 @@ namespace codegen {
 using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 CoreType InferFunctionCoreType(const FunctionPtr& func) {
-  if (func->func_type_ == FunctionType::AIC) return CoreType::CUBE;
-  if (func->func_type_ == FunctionType::AIV) return CoreType::VECTOR;
-
-  class CoreTypeCollector : public IRVisitor {
-   public:
-    bool has_cube_ = false;
-    bool has_vector_ = false;
-
-    void VisitExpr_(const CallPtr& call) override {
-      for (const auto& arg : call->args_) {
-        if (auto tile = As<TileType>(arg->GetType())) {
-          auto memory_space = tile->GetMemorySpace();
-          if (!memory_space.has_value()) {
-            continue;
-          }
-          if (IsCubeMemorySpace(*memory_space)) {
-            has_cube_ = true;
-          } else if (*memory_space == MemorySpace::Vec) {
-            has_vector_ = true;
-          }
-        }
-      }
-      IRVisitor::VisitExpr_(call);
-    }
-  };
-
-  CoreTypeCollector collector;
-  collector.VisitStmt(func->body_);
-
-  CHECK(!(collector.has_cube_ && collector.has_vector_))
-      << "Function " << func->name_ << " contains both CUBE and VECTOR memory spaces. "
-      << "A function can only use one core type.";
-
-  if (collector.has_cube_) {
-    return CoreType::CUBE;
+  // After ExpandMixedKernel runs (part of every Default / DebugTileOptimization
+  // pipeline), every InCore function reaching codegen has been split into AIC,
+  // AIV, or Group / Spmd wrappers. The two callers of this function
+  // (GenerateUserFunctionCall and GenerateSpmdCallCode) both filter Spmd /
+  // Group out before invoking it. Tests that bypass the pipeline must declare
+  // their kernels with the appropriate AIC / AIV type explicitly so codegen
+  // sees the concrete core type without re-deriving from body memory spaces.
+  switch (func->func_type_) {
+    case FunctionType::AIC:
+      return CoreType::CUBE;
+    case FunctionType::AIV:
+      return CoreType::VECTOR;
+    default:
+      INTERNAL_UNREACHABLE_SPAN(func->span_)
+          << "InferFunctionCoreType expects AIC or AIV (Spmd/Group are filtered upstream); got "
+          << FunctionTypeToString(func->func_type_) << " on function '" << func->name_
+          << "'. Either run ExpandMixedKernel before codegen or declare the function "
+          << "with @pl.function(type=pl.FunctionType.AIC|AIV) directly.";
   }
-  return CoreType::VECTOR;
 }
 
 namespace {
