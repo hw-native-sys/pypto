@@ -79,4 +79,4 @@ repos:
       rev: v1.1.407
       hooks:
       - id: pyright
-        additional_dependencies: [pytest==7.0.0, torch==2.8.0]
+        additional_dependencies: [pytest==7.0.0, torch==2.8.0, numpy==2.0.0]
