@@ -449,9 +449,8 @@ void BindPass(nb::module_& m) {
       "simplify", &pass::Simplify,
       "Create a pass that simplifies expressions and statements using algebraic rules and bound analysis");
   passes.def("lower_math_ops", &pass::LowerMathOps,
-             "Create a pass that lowers tile.sin / tile.cos to compositions of primitive\n"
-             "arithmetic tile ops (Cody-Waite range reduction + degree-9 Horner polynomial).\n"
-             "Currently a no-op skeleton — actual decomposition lands in a follow-up.");
+             "Decompose tile.sin/tile.cos into primitive arithmetic ops "
+             "(Cody-Waite range reduction + degree-9 Horner polynomial). FP32-only. Idempotent.");
   passes.def("flatten_call_expr", &pass::FlattenCallExpr,
              "Create a pass that flattens nested call expressions");
   passes.def("inline_functions", &pass::InlineFunctions,

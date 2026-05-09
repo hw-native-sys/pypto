@@ -152,7 +152,8 @@ All constants are FP32 literals (transcribed from `src/ir/transforms/lower_math_
 
 - **Absolute error**: ≤ ~1e-5 over `|x| ≤ 2π · 1024` (validated against NumPy by `tests/ut/ir/transforms/test_lower_math_ops_numerical.py`). Inside one period, `max abs error` observed is ~1 ulp ≈ 1.19e-7.
 - **Range-reduction breakdown**: beyond `|x| ≈ 2^17`, the FP32 representation of `x` itself loses fractional precision, so range-reduction error dominates regardless of how many π-correction terms are used. The 4-part Cody-Waite split chosen here is the standard CANN/PyPTO recipe and matches the reference implementation's behaviour on every tested `x` magnitude.
-- **dtype**: FP32-only. FP16, BF16, and integer inputs are rejected at op-construction time (well before the pass runs) — see `tests/ut/ir/operators/test_unary_math_ops.py` for the rejection cases.
+- **dtype**: FP32-only. FP16, BF16, and integer inputs are rejected at op-construction time (well before the pass runs) — see `tests/ut/ir/operators/test_tensor_ops.py` (tensor.sin/cos rejection) and `tests/ut/ir/operators/test_tile_ops.py` (tile.sin/cos rejection) for the rejection cases.
+- **NaN/Inf**: NaN inputs propagate to NaN output (the polynomial preserves NaN). Inf inputs produce indeterminate values because the range-reduction `k = round(x/π)` step overflows; this matches the documented `|x| ≤ 2^17` validity range.
 
 ## Idempotency
 

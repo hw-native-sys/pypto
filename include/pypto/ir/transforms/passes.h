@@ -524,12 +524,16 @@ Pass RunVerifier(const IRPropertySet& properties);
 Pass Simplify();
 
 /**
- * @brief Lower ``tile.sin`` / ``tile.cos`` to compositions of primitive
- *        arithmetic tile ops using Cody-Waite range reduction and a
- *        degree-9 Horner polynomial.
+ * @brief Decompose ``tile.sin`` / ``tile.cos`` into primitive tile ops
+ *        (``tile.muls``, ``tile.adds``, ``tile.add``, ``tile.sub``,
+ *        ``tile.mul``, ``tile.cast``) using Cody-Waite range reduction with
+ *        a 4-part π split and a degree-9 odd Horner polynomial in t².
  *
- * Currently a no-op skeleton — actual decomposition lands in a follow-up.
- * Idempotent: running the pass twice yields the same IR after the first run.
+ * FP32-only — non-FP32 inputs are rejected at op-construction time by the
+ * op deducer, never reaching this pass.
+ *
+ * Idempotent: running the pass twice yields the same IR after the first run,
+ * since no ``tile.sin`` / ``tile.cos`` remains.
  */
 Pass LowerMathOps();
 

@@ -480,13 +480,15 @@ def simplify() -> Pass:
     """Create a pass that simplifies expressions and statements using algebraic rules and bound analysis."""
 
 def lower_math_ops() -> Pass:
-    """Create a pass that lowers ``tile.sin`` / ``tile.cos`` to primitive arithmetic tile ops.
+    """Lower ``tile.sin`` / ``tile.cos`` to compositions of primitive arithmetic tile ops.
 
-    The decomposition uses Cody-Waite range reduction followed by a degree-9
-    Horner polynomial evaluation. Currently a no-op skeleton — actual
-    decomposition lands in a follow-up.
+    Decomposes trig ops using Cody-Waite range reduction (4-part π split) and a
+    degree-9 odd Horner polynomial in t², emitting only:
+    ``tile.muls``, ``tile.adds``, ``tile.add``, ``tile.sub``, ``tile.mul``, ``tile.cast``.
 
-    Idempotent: running the pass twice yields the same IR after the first run.
+    FP32-only. Non-FP32 inputs are rejected at op-construction time.
+
+    Idempotent: running twice yields the same IR after the first run.
     """
 
 def derive_call_directions() -> Pass:
