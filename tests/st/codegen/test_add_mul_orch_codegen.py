@@ -26,6 +26,7 @@ source of truth and ensure examples are guarded by tests.
 import pytest
 import torch
 from examples.models.vector_dag import example_orch
+from pypto.ir import FunctionType
 
 
 class TestOrchestrationCodegen:
@@ -36,7 +37,7 @@ class TestOrchestrationCodegen:
 
         Verifies that:
         - JIT entry compiles successfully through the full pass pipeline
-        - Post-pass IR has the expected number of functions (3 InCore + 1 Orchestration)
+        - Post-pass IR has 3 outlined InCore (AIV) functions + 1 Orchestration
         - No exceptions are raised during compilation
         """
         example_orch._cache.clear()
@@ -46,9 +47,17 @@ class TestOrchestrationCodegen:
 
         program = example_orch.compile_for_test(a, b, output)
 
-        # Sanity-check the post-pass IR shape.
+        # Verify post-pass IR shape: the example_orch entry composes three
+        # @pl.jit.incore helpers (kernel_add_16, kernel_add_scalar_16,
+        # kernel_mul_16); after OutlineIncoreScopes / pass pipeline the program
+        # should hold exactly one Orchestration function plus three on-chip
+        # (AIV) functions outlined from the incore scopes.
         assert program is not None, "compile_for_test returned None"
-        assert len(program.functions) > 0, "compile_for_test produced no functions"
+        types = [fn.func_type for fn in program.functions.values()]
+        orch_count = sum(1 for t in types if t == FunctionType.Orchestration)
+        aiv_count = sum(1 for t in types if t == FunctionType.AIV)
+        assert orch_count == 1, f"expected 1 Orchestration function, got {orch_count} (types={types})"
+        assert aiv_count == 3, f"expected 3 AIV functions, got {aiv_count} (types={types})"
 
 
 if __name__ == "__main__":

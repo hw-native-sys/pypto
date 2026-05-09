@@ -27,6 +27,8 @@ def test_ssa_violation(x: pl.Tensor, result: pl.Out[pl.Tensor]):
 
 
 if __name__ == "__main__":
+    import sys
+
     import torch
     from pypto.backend.pto_backend import PartialCodegenError
     from pypto.runtime import RunConfig
@@ -36,5 +38,6 @@ if __name__ == "__main__":
     try:
         test_ssa_violation(x, result, config=RunConfig())
         print("ERROR: expected the invalid kernel to be rejected")
+        sys.exit(1)
     except PartialCodegenError as e:
         print(f"OK -- caught expected error: {type(e).__name__}")
