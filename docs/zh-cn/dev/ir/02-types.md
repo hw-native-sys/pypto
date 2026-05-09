@@ -38,6 +38,39 @@ tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 `TensorType.memory_space` 始终是 `ir.Mem.DDR`。`MemRef` 只保存地址、大小和
 id；内存空间不再存储在 `MemRef` 本身上。
 
+### DistributedTensorType
+
+`DistributedTensorType` 是 `TensorType` 的精确 `ObjectKind` 子类，作为 chip
+orchestrator / InCore 形参的类型注解，用来切片 CommGroup HCCL window buffer。
+它的存在让跨 rank op 的 verifier（后续 milestone 引入）可以静态拒绝普通的
+`Tensor` 实参 —— `As<TensorType>` **不会**匹配 `DistributedTensorType`
+（精确 `ObjectKind` 匹配语义，见
+[ir-kind-traits.md](../../../../.claude/rules/ir-kind-traits.md)），跨 rank op 用
+`As<DistributedTensorType>` 派生。
+
+DSL 形式是 `pld.DistributedTensor[[shape], dtype]`:
+
+```python
+import pypto.language.distributed as pld
+import pypto.language as pl
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(self, data: pld.DistributedTensor[[256], pl.FP32]): ...
+```
+
+IR 层：
+
+```python
+t = ir.DistributedTensorType([64], DataType.FP32)
+assert isinstance(t, ir.TensorType)            # C++ 继承关系保留
+# As<TensorType>(t) → null；As<DistributedTensorType>(t) → 转型成功
+```
+
+分配侧的元数据（buffer 名字、host staging 标志）挂在 alloc op
+（`pld.alloc_window_buffer`，后续 milestone 引入）和 `program.comm_groups`
+中的 `ir.WindowBuffer` slot 上，**不**在类型本身。Tile 类型没有 distributed
+变体；跨 rank op 始终作用在 `DistributedTensor` 上。
+
 ### 带 TensorView 的 TensorType
 
 带有布局和步长信息的张量，用于优化内存访问。

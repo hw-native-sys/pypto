@@ -104,7 +104,11 @@ DEFINE_KIND_TRAIT(InlineStmt, ObjectKind::InlineStmt)
 DEFINE_KIND_TRAIT(UnknownType, ObjectKind::UnknownType)
 DEFINE_KIND_TRAIT(ScalarType, ObjectKind::ScalarType)
 // ShapedType is both a concrete type and a base class - handled separately below
+// TensorType: precise-match (DistributedTensorType is a subclass with its own
+// ObjectKind, so As<TensorType>(dt) returns nullptr by design — see
+// .claude/rules/ir-kind-traits.md and the L3 distributed plan).
 DEFINE_KIND_TRAIT(TensorType, ObjectKind::TensorType)
+DEFINE_KIND_TRAIT(DistributedTensorType, ObjectKind::DistributedTensorType)
 DEFINE_KIND_TRAIT(TileType, ObjectKind::TileType)
 DEFINE_KIND_TRAIT(TupleType, ObjectKind::TupleType)
 DEFINE_KIND_TRAIT(MemRefType, ObjectKind::MemRefType)
@@ -113,6 +117,8 @@ DEFINE_KIND_TRAIT(PtrType, ObjectKind::PtrType)
 // Other IR node types
 DEFINE_KIND_TRAIT(Function, ObjectKind::Function)
 DEFINE_KIND_TRAIT(Program, ObjectKind::Program)
+DEFINE_KIND_TRAIT(WindowBuffer, ObjectKind::WindowBuffer)
+DEFINE_KIND_TRAIT(CommGroup, ObjectKind::CommGroup)
 
 // Op kinds
 DEFINE_KIND_TRAIT(Op, ObjectKind::Op)
@@ -189,19 +195,22 @@ struct KindTrait<UnaryExpr> {
 // Type base class - matches any type kind
 template <>
 struct KindTrait<Type> {
-  static constexpr ObjectKind kinds[] = {ObjectKind::UnknownType, ObjectKind::ScalarType,
-                                         ObjectKind::ShapedType,  ObjectKind::TensorType,
-                                         ObjectKind::TileType,    ObjectKind::TupleType};
+  static constexpr ObjectKind kinds[] = {ObjectKind::UnknownType,
+                                         ObjectKind::ScalarType,
+                                         ObjectKind::ShapedType,
+                                         ObjectKind::TensorType,
+                                         ObjectKind::DistributedTensorType,
+                                         ObjectKind::TileType,
+                                         ObjectKind::TupleType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 
 // ShapedType can be used as both a concrete type and a base class
-// It matches itself, TensorType, and TileType
+// It matches itself, TensorType, DistributedTensorType, and TileType
 template <>
 struct KindTrait<ShapedType> {
-  // For base class matching: includes ShapedType, TensorType, TileType
   static constexpr ObjectKind kinds[] = {ObjectKind::ShapedType, ObjectKind::TensorType,
-                                         ObjectKind::TileType};
+                                         ObjectKind::DistributedTensorType, ObjectKind::TileType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 

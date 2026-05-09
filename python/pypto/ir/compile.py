@@ -174,6 +174,13 @@ def compile(  # noqa: PLR0913
             _write_files(exc.files, output_dir)
             raise
         _write_files(files, output_dir)
+
+        # Emit the comm-group manifest alongside generated host_orch.py so the
+        # runner can re-enter the output directory without holding the live
+        # Program. No-op when the program declares no CommGroup.
+        from .comm_manifest import emit_comm_manifest  # noqa: PLC0415
+
+        emit_comm_manifest(transformed_program, output_dir)
     finally:
         if owns_profiler and prof is not None:
             prof.__exit__(None, None, None)

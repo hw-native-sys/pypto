@@ -260,9 +260,12 @@ class TypeResolver:
         return None
 
     def _get_type_name(self, node: ast.expr) -> str | None:
-        """Extract the type name from an AST node referencing Tensor, Tile, or Scalar.
+        """Extract the type name from an AST node referencing Tensor, Tile, Scalar,
+        Tuple, or DistributedTensor.
 
-        Handles both ``pl.Tensor`` (ast.Attribute) and bare ``Tensor`` (ast.Name).
+        Handles both ``pl.Tensor`` (ast.Attribute) and bare ``Tensor`` (ast.Name);
+        ``pld.DistributedTensor`` is recognized either as ``pld.DistributedTensor``
+        or bare ``DistributedTensor``.
 
         Args:
             node: AST expression to check
@@ -270,9 +273,10 @@ class TypeResolver:
         Returns:
             Type name string if recognized, None otherwise
         """
-        if isinstance(node, ast.Attribute) and node.attr in ("Tensor", "Tile", "Scalar", "Tuple"):
+        valid = ("Tensor", "Tile", "Scalar", "Tuple", "DistributedTensor")
+        if isinstance(node, ast.Attribute) and node.attr in valid:
             return node.attr
-        if isinstance(node, ast.Name) and node.id in ("Tensor", "Tile", "Scalar", "Tuple"):
+        if isinstance(node, ast.Name) and node.id in valid:
             return node.id
         return None
 
@@ -356,18 +360,22 @@ class TypeResolver:
             return self._resolve_tuple_subscript_type(subscript_node)
 
         # Tensor: [shape, dtype], [shape, dtype, layout_or_memref], [shape, dtype, layout, memref].
+        # DistributedTensor: same forms as Tensor — only the IR ObjectKind differs.
         # Tile: [shape, dtype] plus any ordering of TileView/MemRef/MemorySpace,
         # with the constraint that MemRef requires explicit MemorySpace.
-        valid_counts = (2, 3, 4) if type_name == "Tensor" else (2, 3, 4, 5)
+        is_distributed = type_name == "DistributedTensor"
+        is_tensor_like = type_name == "Tensor" or is_distributed
+        tensor_ctor = ir.DistributedTensorType if is_distributed else ir.TensorType
+        valid_counts = (2, 3, 4) if is_tensor_like else (2, 3, 4, 5)
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in valid_counts:
-            if type_name == "Tensor":
+            if is_tensor_like:
                 message = (
                     f"{type_name} subscript requires [shape, dtype], [shape, dtype, layout_or_memref], "
                     f"or [shape, dtype, layout, memref], got: {ast.unparse(slice_value)}"
                 )
                 hint = (
-                    "Use pl.Tensor[[shape], dtype], pl.Tensor[[shape], dtype, layout], "
-                    "or pl.Tensor[[shape], dtype, pl.MemRef(...)] format"
+                    f"Use {type_name}[[shape], dtype], {type_name}[[shape], dtype, layout], "
+                    f"or {type_name}[[shape], dtype, pl.MemRef(...)] format"
                 )
             else:
                 message = (
@@ -397,25 +405,25 @@ class TypeResolver:
         if n_elts == 2:
             if type_name == "Tile":
                 return ir.TileType(shape, dtype)
-            return ir.TensorType(shape, dtype, None, None)
+            return tensor_ctor(shape, dtype, None, None)
 
         if type_name == "Tile":
             return self._resolve_tile_annotation_args(shape, dtype, list(slice_value.elts[2:]))
 
-        # 3 args: [shape, dtype, layout_or_memref] for Tensor
+        # 3 args: [shape, dtype, layout_or_memref_or_tensorview] for Tensor / DistributedTensor
         if n_elts == 3:
             third = slice_value.elts[2]
             if self._is_memref_node(third):
                 memref = self.resolve_memref(third)
-                return ir.TensorType(shape, dtype, memref, None)
+                return tensor_ctor(shape, dtype, memref, None)
             if self._is_tensorview_node(third):
                 tensor_view = self._resolve_tensorview(third)
-                return ir.TensorType(shape, dtype, None, tensor_view)
+                return tensor_ctor(shape, dtype, None, tensor_view)
             layout = self.resolve_layout(third)
             tensor_view = ir.TensorView([], layout)
-            return ir.TensorType(shape, dtype, None, tensor_view)
+            return tensor_ctor(shape, dtype, None, tensor_view)
 
-        # Tensor 4 args: [shape, dtype, layout_or_tensorview, memref]
+        # Tensor / DistributedTensor 4 args: [shape, dtype, layout_or_tensorview, memref]
         third = slice_value.elts[2]
         if self._is_tensorview_node(third):
             tensor_view = self._resolve_tensorview(third)
@@ -425,12 +433,12 @@ class TypeResolver:
         memref_node = slice_value.elts[3]
         if not self._is_memref_node(memref_node):
             raise ParserTypeError(
-                "Tensor 4th argument must be pl.MemRef(...)",
+                f"{type_name} 4th argument must be pl.MemRef(...)",
                 span=self._get_span(memref_node),
-                hint="Use pl.Tensor[[shape], dtype, layout, pl.MemRef(...)]",
+                hint=f"Use {type_name}[[shape], dtype, layout, pl.MemRef(...)]",
             )
         memref = self.resolve_memref(memref_node)
-        return ir.TensorType(shape, dtype, memref, tensor_view)
+        return tensor_ctor(shape, dtype, memref, tensor_view)
 
     def _resolve_tile_annotation_args(
         self, shape: "list[int] | list[ir.Expr]", dtype: DataType, extra_nodes: list[ast.expr]

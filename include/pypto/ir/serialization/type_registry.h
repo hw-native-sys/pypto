@@ -45,6 +45,14 @@ class DeserializerContext {
   virtual IRNodePtr DeserializeNode(const msgpack::object& obj, msgpack::zone& zone) = 0;
   virtual msgpack::object GetFieldObj(const msgpack::object& fields_obj, const std::string& field_name) = 0;
 
+  /**
+   * @brief Whether ``field_name`` is present in ``fields_obj``.
+   *
+   * Lets deserializers handle optional / forward-compatible fields without
+   * tripping ``GetFieldObj``'s missing-field exception.
+   */
+  virtual bool HasField(const msgpack::object& fields_obj, const std::string& field_name) = 0;
+
   template <typename T>
   T GetField(const msgpack::object& fields_obj, const std::string& field_name) {
     msgpack::object field_obj = GetFieldObj(fields_obj, field_name);

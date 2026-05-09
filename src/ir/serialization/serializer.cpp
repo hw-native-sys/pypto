@@ -112,6 +112,7 @@ class FieldSerializerVisitor {
   result_type VisitLeafField(const Span& field);
   result_type VisitLeafField(const std::vector<TypePtr>& field);
   result_type VisitLeafField(const std::vector<std::pair<std::string, std::any>>& field);
+  result_type VisitLeafField(const std::vector<int64_t>& field);
 
   // Field kind hooks
   template <typename FVisitOp>
@@ -234,6 +235,8 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(InlineStmt);
     SERIALIZE_FIELDS(Function);
     SERIALIZE_FIELDS(Program);
+    SERIALIZE_FIELDS(WindowBuffer);
+    SERIALIZE_FIELDS(CommGroup);
 
 #undef SERIALIZE_FIELDS
 #undef SERIALIZE_FIELDS_BASE
@@ -388,7 +391,12 @@ class IRSerializer::Impl {
 
     if (auto scalar_type = As<ScalarType>(type)) {
       type_map["dtype"] = msgpack::object(scalar_type->dtype_.Code(), zone);
-    } else if (auto tensor_type = As<TensorType>(type)) {
+    } else if (type->GetKind() == ObjectKind::TensorType ||
+               type->GetKind() == ObjectKind::DistributedTensorType) {
+      // DistributedTensorType has identical fields to TensorType — share the
+      // serialization code via static_cast. The "type_kind" key already
+      // distinguishes the two for the deserializer.
+      auto tensor_type = std::static_pointer_cast<const TensorType>(type);
       type_map["dtype"] = msgpack::object(tensor_type->dtype_.Code(), zone);
 
       std::vector<msgpack::object> shape_vec;
@@ -620,6 +628,15 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<Role>
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const SplitMode& field) {
   return msgpack::object(static_cast<uint8_t>(field), zone_);
+}
+
+msgpack::object FieldSerializerVisitor::VisitLeafField(const std::vector<int64_t>& field) {
+  std::vector<msgpack::object> vec;
+  vec.reserve(field.size());
+  for (auto v : field) {
+    vec.emplace_back(v, zone_);
+  }
+  return msgpack::object(vec, zone_);
 }
 
 msgpack::object FieldSerializerVisitor::VisitLeafField(const std::optional<SplitMode>& field) {

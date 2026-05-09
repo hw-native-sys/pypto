@@ -380,6 +380,10 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       }
 
       return std::make_shared<TensorType>(shape, DataType(dtype_code), memref, tensor_view);
+    } else if (type_kind == "DistributedTensorType") {
+      // DistributedTensorType currently carries only shape + dtype (no memref /
+      // tensor_view at the surface; alloc-side metadata lives on the alloc op).
+      return std::make_shared<DistributedTensorType>(shape, DataType(dtype_code));
     } else if (type_kind == "TileType") {
       std::optional<MemRefPtr> memref;
       std::optional<TileView> tile_view;
@@ -446,6 +450,22 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       }
     }
     throw RuntimeError("Missing required field: " + field_name);
+  }
+
+  bool HasField(const msgpack::object& fields_obj, const std::string& field_name) override {
+    if (fields_obj.type != msgpack::type::MAP) {
+      return false;
+    }
+    msgpack::object_kv* p = fields_obj.via.map.ptr;
+    msgpack::object_kv* const pend = fields_obj.via.map.ptr + fields_obj.via.map.size;
+    for (; p < pend; ++p) {
+      std::string key;
+      p->key.convert(key);
+      if (key == field_name) {
+        return true;
+      }
+    }
+    return false;
   }
 
  private:

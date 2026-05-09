@@ -140,6 +140,14 @@ class StructuralHasher {
     }
   }
 
+  result_type VisitLeafField(const std::vector<int64_t>& field) {
+    result_type h = 0;
+    for (auto v : field) {
+      h = hash_combine(h, static_cast<result_type>(std::hash<int64_t>{}(v)));
+    }
+    return h;
+  }
+
   result_type VisitLeafField(const int& field) { return static_cast<result_type>(std::hash<int>{}(field)); }
 
   result_type VisitLeafField(const int64_t& field) {
@@ -231,6 +239,8 @@ class StructuralHasher {
     }
     return static_cast<result_type>(0);
   }
+
+  result_type VisitLeafField(const bool& field) { return static_cast<result_type>(std::hash<bool>{}(field)); }
 
   result_type VisitLeafField(const std::optional<bool>& field) {
     if (field.has_value()) {
@@ -567,6 +577,8 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(InlineStmt)
   HASH_DISPATCH(Function)
   HASH_DISPATCH(Program)
+  HASH_DISPATCH(WindowBuffer)
+  HASH_DISPATCH(CommGroup)
 
   // Free Var types (including MemRef and IterArg) that may be mapped to other free vars.
   // These have already been dispatched above for field hashing;

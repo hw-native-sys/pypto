@@ -487,6 +487,50 @@ class TensorType : public ShapedType {
 using TensorTypePtr = std::shared_ptr<const TensorType>;
 
 /**
+ * @brief Distributed tensor type — a per-rank slice of a CommGroup HCCL window buffer.
+ *
+ * Subclass of :class:`TensorType` distinguished only by ``ObjectKind`` so that
+ * verifiers can reject plain ``TensorType`` arguments to cross-rank ops
+ * (``pld.tile.remote_load`` / ``pld.system.notify`` / ``pld.system.wait``).
+ *
+ * Note ``As<TensorType>`` does NOT match ``DistributedTensorType`` (precise
+ * ObjectKind match). This is intentional — the cross-rank ops use
+ * ``As<DistributedTensorType>`` to enforce that only window-bound tensors flow
+ * through them.
+ */
+class DistributedTensorType : public TensorType {
+ public:
+  DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype) : TensorType(std::move(shape), dtype) {}
+
+  DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, MemRefPtr memref)
+      : TensorType(std::move(shape), dtype, std::move(memref)) {}
+
+  DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref)
+      : TensorType(std::move(shape), dtype, std::move(memref)) {}
+
+  DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
+                        std::optional<TensorView> tensor_view)
+      : TensorType(std::move(shape), dtype, std::move(memref), std::move(tensor_view)) {}
+
+  DistributedTensorType(const std::vector<int64_t>& shape, DataType dtype)
+      : TensorType(shape, dtype, std::nullopt) {}
+
+  DistributedTensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref)
+      : TensorType(shape, dtype, std::move(memref)) {}
+
+  DistributedTensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
+                        std::optional<TensorView> tensor_view)
+      : TensorType(shape, dtype, std::move(memref), std::move(tensor_view)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::DistributedTensorType; }
+  [[nodiscard]] std::string TypeName() const override { return "DistributedTensorType"; }
+
+  static constexpr auto GetFieldDescriptors() { return TensorType::GetFieldDescriptors(); }
+};
+
+using DistributedTensorTypePtr = std::shared_ptr<const DistributedTensorType>;
+
+/**
  * @brief Tile type representation
  *
  * Represents a tile type (multi-dimensional tensor).

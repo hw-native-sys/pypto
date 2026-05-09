@@ -44,6 +44,13 @@ Program::Program(const std::vector<FunctionPtr>& functions, std::string name, Sp
   }
 }
 
+// Vector-based constructor with CommGroup metadata.
+Program::Program(const std::vector<FunctionPtr>& functions, std::vector<CommGroupPtr> comm_groups,
+                 std::string name, Span span)
+    : Program(functions, std::move(name), std::move(span)) {
+  comm_groups_ = std::move(comm_groups);
+}
+
 FunctionPtr Program::GetFunction(const std::string& name) const {
   auto it = functions_.find(std::make_shared<const GlobalVar>(name));
   if (it != functions_.end()) {

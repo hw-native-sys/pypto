@@ -109,12 +109,15 @@ enum class ObjectKind {
   ScalarType,
   ShapedType,
   TensorType,
+  DistributedTensorType,
   TileType,
   TupleType,
 
   // Other IR node kinds
   Function,
   Program,
+  WindowBuffer,
+  CommGroup,
 
   // Op kinds
   Op,

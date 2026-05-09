@@ -216,12 +216,37 @@ class StructuralEqualImpl {
     return true;
   }
 
+  result_type VisitLeafField(const std::vector<int64_t>& lhs, const std::vector<int64_t>& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "vector<int64_t> mismatch (size " << lhs.size() << " vs " << rhs.size() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
   // Leaf field comparisons (dual-node version)
   result_type VisitLeafField(const int& lhs, const int& rhs) {
     if (lhs != rhs) {
       if constexpr (AssertMode) {
         std::ostringstream msg;
         msg << "Integer value mismatch (" << lhs << " != " << rhs << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
+  }
+
+  result_type VisitLeafField(const bool& lhs, const bool& rhs) {
+    if (lhs != rhs) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "Bool value mismatch (" << (lhs ? "true" : "false") << " != " << (rhs ? "true" : "false")
+            << ")";
         ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
       }
       return false;
@@ -930,6 +955,8 @@ bool StructuralEqualImpl<AssertMode>::Equal(const IRNodePtr& lhs, const IRNodePt
   EQUAL_DISPATCH(InlineStmt)
   EQUAL_DISPATCH(Function)
   EQUAL_DISPATCH_TRANSPARENT(Program)
+  EQUAL_DISPATCH(WindowBuffer)
+  EQUAL_DISPATCH(CommGroup)
 
   throw pypto::TypeError("Unknown IR node type in StructuralEqualImpl::Equal: " + lhs->TypeName());
 }
@@ -970,8 +997,13 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     return true;
-  } else if (auto lhs_tensor = As<TensorType>(lhs)) {
-    auto rhs_tensor = As<TensorType>(rhs);
+  } else if (lhs->GetKind() == ObjectKind::TensorType ||
+             lhs->GetKind() == ObjectKind::DistributedTensorType) {
+    // DistributedTensorType has identical fields to TensorType — share the
+    // comparison code via static_cast. The TypeName check above already
+    // guarantees both sides have matching kinds.
+    auto lhs_tensor = std::static_pointer_cast<const TensorType>(lhs);
+    auto rhs_tensor = std::static_pointer_cast<const TensorType>(rhs);
     if (!rhs_tensor) {
       if constexpr (AssertMode) {
         ThrowMismatch("Type cast failed for TensorType", IRNodePtr(), IRNodePtr(), "", "");

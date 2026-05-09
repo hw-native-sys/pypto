@@ -532,6 +532,55 @@ class TensorType(ShapedType):
             tensor_view: Optional tensor view information
         """
 
+class DistributedTensorType(TensorType):
+    """Tensor backed by a per-rank slice of a CommGroup HCCL window buffer.
+
+    Subclass of :class:`TensorType` distinguished only by ``ObjectKind`` so
+    that verifiers for cross-rank ops can reject plain :class:`TensorType`
+    arguments. Note ``As<TensorType>`` does NOT match
+    ``DistributedTensorType`` (precise ObjectKind match) — use
+    ``As<DistributedTensorType>`` to dispatch on the distributed variant.
+
+    Mirrors :class:`TensorType`'s constructor surface — memref / tensor_view
+    are equally valid on the distributed flavour.
+    """
+
+    @overload
+    def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
+        """Create a distributed tensor type."""
+
+    @overload
+    def __init__(self, shape: Sequence[Expr], dtype: DataType, memref: MemRef | None) -> None:
+        """Create a distributed tensor type with optional memref."""
+
+    @overload
+    def __init__(
+        self,
+        shape: Sequence[Expr],
+        dtype: DataType,
+        memref: MemRef | None,
+        tensor_view: TensorView | None,
+    ) -> None:
+        """Create a distributed tensor type with optional memref and tensor_view."""
+
+    @overload
+    def __init__(self, shape: Sequence[int], dtype: DataType) -> None:
+        """Create a distributed tensor type with constant shape."""
+
+    @overload
+    def __init__(self, shape: Sequence[int], dtype: DataType, memref: MemRef | None) -> None:
+        """Create a distributed tensor type with constant shape and optional memref."""
+
+    @overload
+    def __init__(
+        self,
+        shape: Sequence[int],
+        dtype: DataType,
+        memref: MemRef | None,
+        tensor_view: TensorView | None,
+    ) -> None:
+        """Create a distributed tensor type with constant shape, optional memref and tensor_view."""
+
 class TileView:
     """Tile view: read-only representation of valid shape, stride, start offset,
     layouts, fractal, and pad. Construct with all values; fields cannot be mutated
@@ -2265,6 +2314,11 @@ class Program(IRNode):
     functions: Final[dict[GlobalVar, Function]]
     """Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name."""
 
+    comm_groups: Final[list[CommGroup]]
+    """CommGroups declared on the program. Participates in structural
+    equality / hashing through reflection."""
+
+    @overload
     def __init__(
         self,
         functions: list[Function],
@@ -2280,6 +2334,16 @@ class Program(IRNode):
             name: Program name (optional)
             span: Source location
         """
+
+    @overload
+    def __init__(
+        self,
+        functions: list[Function],
+        comm_groups: list[CommGroup],
+        name: str,
+        span: Span,
+    ) -> None:
+        """Create a program from a list of functions and CommGroup metadata."""
 
     def get_function(self, name: str) -> Function | None:
         """Get a function by name.
@@ -2327,6 +2391,67 @@ class Program(IRNode):
         Returns:
             Program with type information
         """
+
+class WindowBuffer(IRNode):
+    """Per-rank allocation spec for a named CommGroup HCCL window buffer.
+
+    Maps 1:1 to ``simpler.task_interface.ChipBufferSpec`` at submit-time.
+    Participates in structural equality / hashing via reflection.
+    """
+
+    name: Final[str]
+    """Buffer name (parser-extracted from the alloc-op LHS, globally unique)."""
+
+    size: Final[Expr]
+    """Per-rank element count (ConstInt or symbolic Expr). Allocation-only —
+    does not carry a multi-dim shape."""
+
+    dtype: Final[DataType]
+    """Element data type."""
+
+    load_from_host: Final[bool]
+    """``True`` if this slot participates in pre-fork H2D staging. The specific
+    host tensor that supplies the staged data is recorded on the alloc op, not
+    on this allocation spec."""
+
+    store_to_host: Final[bool]
+    """``True`` if this slot participates in post-task D2H staging."""
+
+    def __init__(
+        self,
+        name: str,
+        size: Expr,
+        dtype: DataType,
+        load_from_host: bool = False,
+        store_to_host: bool = False,
+        span: Span = ...,
+    ) -> None:
+        """Create a WindowBuffer."""
+
+class CommGroup(IRNode):
+    """A communication group inferred for a ``@pl.program``.
+
+    The ``CollectCommGroups`` pass (added in N4) populates
+    ``program.comm_groups`` from ``pld.alloc_window_buffer`` ops and their
+    dispatch coverage. Participates in structural equality / hashing via
+    reflection.
+    """
+
+    devices: Final[list[int]]
+    """Ascending-sorted physical device-id list. **Empty list means "all
+    devices"** (every entry of ``DistributedConfig.device_ids``, resolved by
+    the driver at submit-time)."""
+
+    slots: Final[list[WindowBuffer]]
+    """Allocation slots shared by every rank in the group (alloc-order)."""
+
+    def __init__(
+        self,
+        devices: list[int],
+        slots: list[WindowBuffer],
+        span: Span = ...,
+    ) -> None:
+        """Create a CommGroup. Pass an empty ``devices`` list for "all devices"."""
 
 @overload
 def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int: ...

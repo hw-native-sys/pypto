@@ -38,6 +38,41 @@ tensor_with_memref = ir.TensorType(shape, DataType.FP32, memref)
 `TensorType.memory_space` is always `ir.Mem.DDR`. `MemRef` carries address,
 size, and id; memory space is not stored on `MemRef` itself.
 
+### DistributedTensorType
+
+`DistributedTensorType` is a precise-`ObjectKind` subclass of `TensorType`
+used as the function-signature type for chip orchestrator / InCore parameters
+that slice a CommGroup HCCL window buffer. It exists so cross-rank op
+verifiers (introduced in later milestones) can reject plain `Tensor`
+arguments — `As<TensorType>` does NOT match a `DistributedTensorType`
+(precise `ObjectKind` semantics; see
+[ir-kind-traits.md](../../../../.claude/rules/ir-kind-traits.md)). Use
+`As<DistributedTensorType>` to dispatch on the distributed variant.
+
+The DSL surface is `pld.DistributedTensor[[shape], dtype]`:
+
+```python
+import pypto.language.distributed as pld
+import pypto.language as pl
+
+@pl.function(type=pl.FunctionType.InCore)
+def kernel(self, data: pld.DistributedTensor[[256], pl.FP32]): ...
+```
+
+At the IR level:
+
+```python
+t = ir.DistributedTensorType([64], DataType.FP32)
+assert isinstance(t, ir.TensorType)            # C++ inheritance preserved
+# As<TensorType>(t) → null; As<DistributedTensorType>(t) → cast.
+```
+
+Allocation-side metadata (the buffer name, host-staging flags) lives on the
+allocation op (`pld.alloc_window_buffer`, added in a later milestone) and on
+the `ir.WindowBuffer` slot in `program.comm_groups`, not on the type itself.
+Tile types do not have a distributed variant; cross-rank ops always operate
+on `DistributedTensor`.
+
 ### TensorType with TensorView
 
 Tensor with layout and stride information for optimized memory access.

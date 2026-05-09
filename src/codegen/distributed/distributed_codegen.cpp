@@ -172,15 +172,18 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   is_worker_context_ = is_sub_worker;
 
   // Build function signature
-  // Orchestrators: def func(orch, _args, config, *, tensors, callables, sub_ids, _keep):
+  // Orchestrators: def func(orch, _args, config, *, tensors, callables, sub_ids, _keep, contexts):
   // SubWorkers are not emitted as Python functions (they run on device or as registered callables)
   if (is_sub_worker) {
     is_worker_context_ = false;
     return;
   }
 
+  // ``contexts`` is always present in the signature; for comm-less programs it
+  // is an empty list (and goes unused inside the body), which lets the runner
+  // dispatch with a single uniform call shape.
   std::ostringstream sig;
-  sig << "def " << func->name_ << "(orch, _args, config, *, tensors, callables, sub_ids, _keep):";
+  sig << "def " << func->name_ << "(orch, _args, config, *, tensors, callables, sub_ids, _keep, contexts):";
   emitter_.EmitLine(sig.str());
   emitter_.IncreaseIndent();
 
@@ -207,7 +210,7 @@ void DistributedCodegen::EmitEntryFunction() {
   current_func_ = entry_func_;
 
   // Entry function signature
-  emitter_.EmitLine("def entry(orch, _args, config, *, tensors, callables, sub_ids, _keep):");
+  emitter_.EmitLine("def entry(orch, _args, config, *, tensors, callables, sub_ids, _keep, contexts):");
   emitter_.IncreaseIndent();
 
   // Register parameter names
@@ -396,9 +399,10 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
       }
       if (callee->role_.has_value() && *callee->role_ == ir::Role::Orchestrator) {
         // Orchestrator-to-orchestrator calls: emit as direct function call
-        current_expr_value_ = callee->name_ +
-                              "(orch, _args, config, "
-                              "tensors=tensors, callables=callables, sub_ids=sub_ids, _keep=_keep)";
+        current_expr_value_ =
+            callee->name_ +
+            "(orch, _args, config, "
+            "tensors=tensors, callables=callables, sub_ids=sub_ids, _keep=_keep, contexts=contexts)";
         return;
       }
       // Chip-level function (Orchestration/InCore with no role) called from HOST orchestrator

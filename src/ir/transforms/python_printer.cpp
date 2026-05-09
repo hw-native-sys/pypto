@@ -375,10 +375,23 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return prefix_ + ".Scalar[" + prefix_ + "." + DataTypeToString(scalar_type->dtype_) + "]";
   }
 
-  if (auto tensor_type = As<TensorType>(type)) {
+  // Tensor / DistributedTensor share the same rendering surface — only the
+  // subscript head differs (``pl.Tensor`` vs ``pld.DistributedTensor``). Note
+  // ``As<TensorType>`` is precise-match and would not fire for the subclass,
+  // so dispatch on DistributedTensorType first and pass it through the
+  // TensorType base for shared field access.
+  TensorTypePtr tensor_type;
+  std::string tensor_head;
+  if (auto dt_tensor = As<DistributedTensorType>(type)) {
+    tensor_type = dt_tensor;
+    tensor_head = "pld.DistributedTensor";
+  } else if (auto plain_tensor = As<TensorType>(type)) {
+    tensor_type = plain_tensor;
+    tensor_head = prefix_ + ".Tensor";
+  }
+  if (tensor_type) {
     std::ostringstream oss;
-    // Subscript-style: pl.Tensor[[shape], dtype]
-    oss << prefix_ << ".Tensor[[";
+    oss << tensor_head << "[[";
     PrintShapeDims(oss, tensor_type->shape_);
     oss << "], " << prefix_ << "." << DataTypeToString(tensor_type->dtype_);
 

@@ -429,6 +429,33 @@ void BindIR(nb::module_& m) {
       "Create a tensor type with constant shape, optional memory reference and tensor view");
   BindFields<TensorType>(tensor_type_class);
 
+  // DistributedTensorType - subclass of TensorType used as the param type for
+  // cross-rank ops (pld.tile.remote_load / pld.system.notify / pld.system.wait).
+  // Distinguished from TensorType only by ObjectKind so verifiers can reject
+  // plain Tensors. Otherwise mirrors TensorType's ctor overloads — memref /
+  // tensor_view variants are equally valid on the distributed flavour.
+  auto dist_tensor_type_class = nb::class_<DistributedTensorType, TensorType>(
+      ir, "DistributedTensorType", "Tensor backed by a per-rank slice of a CommGroup HCCL window buffer");
+  dist_tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType>(), nb::arg("shape"),
+                             nb::arg("dtype"), "Create a distributed tensor type");
+  dist_tensor_type_class.def(nb::init<const std::vector<int64_t>&, DataType>(), nb::arg("shape"),
+                             nb::arg("dtype"), "Create a distributed tensor type with constant shape");
+  dist_tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>>(),
+                             nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
+                             "Create a distributed tensor type with optional memref");
+  dist_tensor_type_class.def(nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>>(),
+                             nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(),
+                             "Create a distributed tensor type with constant shape and optional memref");
+  dist_tensor_type_class.def(
+      nb::init<const std::vector<ExprPtr>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
+      "Create a distributed tensor type with optional memref and tensor_view");
+  dist_tensor_type_class.def(
+      nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
+      nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
+      "Create a distributed tensor type with constant shape, optional memref and tensor_view");
+  BindFields<DistributedTensorType>(dist_tensor_type_class);
+
   // TileType - const shared_ptr
   auto tile_type_class =
       nb::class_<TileType, ShapedType>(ir, "TileType", "Tile type representation (multi-dimensional tensor)");
@@ -1413,6 +1440,11 @@ void BindIR(nb::module_& m) {
                     nb::arg("functions"), nb::arg("name"), nb::arg("span"),
                     "Create a program from a list of functions. "
                     "GlobalVar references are created automatically from function names.");
+  program_class.def(
+      nb::init<const std::vector<FunctionPtr>&, std::vector<CommGroupPtr>, const std::string&, const Span&>(),
+      nb::arg("functions"), nb::arg("comm_groups"), nb::arg("name"), nb::arg("span"),
+      "Create a program from a list of functions and CommGroup metadata. "
+      "GlobalVar references are created automatically from function names.");
   program_class.def("get_function", &Program::GetFunction, nb::arg("name"),
                     "Get a function by name, returns None if not found");
   program_class.def("get_global_var", &Program::GetGlobalVar, nb::arg("name"),
@@ -1436,6 +1468,33 @@ void BindIR(nb::module_& m) {
       "Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name");
   program_class.def_ro("name", &Program::name_, "Program name");
   program_class.def_ro("span", &Program::span_, "Source location");
+  program_class.def_ro("comm_groups", &Program::comm_groups_,
+                       "List of CommGroups declared on the program. CommGroups participate "
+                       "in structural equality / hashing through reflection.");
+
+  // CommGroup / WindowBuffer — IRNode-typed host-side metadata attached to a Program.
+  auto window_buffer_class = nb::class_<WindowBuffer, IRNode>(
+      ir, "WindowBuffer",
+      "Per-rank allocation spec for a named CommGroup HCCL window buffer. "
+      "Maps 1:1 to simpler.task_interface.ChipBufferSpec at submit-time. "
+      "size_ is the per-rank element count; load_from_host_ / store_to_host_ "
+      "are bool flags marking host-staging participation (the actual host "
+      "tensor binding is recorded on the alloc op, not here).");
+  window_buffer_class.def(nb::init<std::string, ExprPtr, DataType, bool, bool, Span>(), nb::arg("name"),
+                          nb::arg("size"), nb::arg("dtype"), nb::arg("load_from_host") = false,
+                          nb::arg("store_to_host") = false, nb::arg("span") = Span::unknown(),
+                          "Create a WindowBuffer.");
+  BindFields<WindowBuffer>(window_buffer_class);
+
+  auto comm_group_class =
+      nb::class_<CommGroup, IRNode>(ir, "CommGroup",
+                                    "A communication group inferred from pld.alloc_window_buffer ops: a "
+                                    "device-id list (empty = all devices) and a list of WindowBuffer slots "
+                                    "shared by every rank in the group.");
+  comm_group_class.def(nb::init<std::vector<int64_t>, std::vector<WindowBufferPtr>, Span>(),
+                       nb::arg("devices"), nb::arg("slots"), nb::arg("span") = Span::unknown(),
+                       "Create a CommGroup. ``devices`` empty = all devices.");
+  BindFields<CommGroup>(comm_group_class);
 
   // Python-style printer function - unified API for IRNode
   ir.def(

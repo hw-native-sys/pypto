@@ -13,15 +13,20 @@ from __future__ import annotations
 
 import ctypes
 import importlib.util
+import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np  # pyright: ignore[reportMissingImports]
 import torch
 
+from pypto.ir.comm_manifest import COMM_MANIFEST_FILENAME, COMM_MANIFEST_VERSION
+
 if TYPE_CHECKING:
-    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +99,107 @@ def _load_generated_module(path: Path) -> Any:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+# ---------------------------------------------------------------------------
+# Manifest → ChipBootstrapConfig translation (runtime side).
+#
+# The compile-time half (Program → manifest dict, written to
+# ``output_dir/orchestration/<COMM_MANIFEST_FILENAME>``) lives in
+# ``pypto.ir.comm_manifest``. The runtime only consumes the file.
+# ---------------------------------------------------------------------------
+
+
+def _build_chip_bootstrap_configs_from_manifest(
+    manifest: dict[str, Any] | None,
+    dc: DistributedConfig,
+    rootinfo_path: str,
+) -> list[Any] | None:
+    """Materialise a manifest dict into a list of ``ChipBootstrapConfig``.
+
+    Returns ``None`` for ``manifest is None`` (no CommGroup).
+
+    The CommGroup's ``devices`` is a list of physical device ids — **an empty
+    list means "all devices"** (every entry of ``dc.device_ids``). Covered
+    ranks receive comm + buffers; the rest stay comm-less so simpler's
+    per-device cfg list stays 1:1 with ``device_ids``.
+    """
+    if manifest is None:
+        return None
+
+    from simpler.task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+        ChipBootstrapConfig,
+        ChipBufferSpec,
+        ChipCommBootstrapConfig,
+    )
+
+    version = manifest.get("version")
+    if version != COMM_MANIFEST_VERSION:
+        raise RuntimeError(
+            f"comm manifest version mismatch: file is {version!r}, runtime expects {COMM_MANIFEST_VERSION}"
+        )
+
+    comm_groups = manifest["comm_groups"]
+    if len(comm_groups) != 1:
+        raise RuntimeError(
+            f"comm manifest must declare exactly one CommGroup (got {len(comm_groups)}); "
+            "if you need multiple groups, file a follow-up — currently unsupported."
+        )
+    group = comm_groups[0]
+
+    n_devices = len(dc.device_ids)
+    devices_field = list(group.get("devices", []))
+    if not devices_field:
+        # Empty list = all devices.
+        covered_ranks = list(range(n_devices))
+    else:
+        covered_ranks = sorted(int(d) for d in devices_field)
+        if any(d < 0 or d >= n_devices for d in covered_ranks):
+            raise RuntimeError(
+                f"CommGroup devices {covered_ranks!r} contains entries outside "
+                f"DistributedConfig.device_ids range [0, {n_devices})"
+            )
+    nranks_value = len(covered_ranks)
+
+    specs: list[Any] = []
+    for slot in group["slots"]:
+        count = int(slot["size"])
+        # Round up to whole bytes — works uniformly for FP4/INT4 sub-byte dtypes.
+        nbytes = (count * int(slot["bits_per_element"]) + 7) // 8
+        specs.append(
+            ChipBufferSpec(
+                name=slot["name"],
+                dtype=slot["dtype"],
+                count=count,
+                nbytes=nbytes,
+                load_from_host=bool(slot.get("load_from_host", False)),
+                store_to_host=bool(slot.get("store_to_host", False)),
+            )
+        )
+
+    window_size = sum(spec.nbytes for spec in specs)
+
+    covered_set = set(covered_ranks)
+    cfgs: list[Any] = []
+    rank_in_group = 0
+    for r in range(n_devices):
+        if r in covered_set:
+            cfgs.append(
+                ChipBootstrapConfig(
+                    comm=ChipCommBootstrapConfig(
+                        rank=rank_in_group,
+                        nranks=nranks_value,
+                        rootinfo_path=rootinfo_path,
+                        window_size=window_size,
+                    ),
+                    buffers=specs,
+                )
+            )
+            rank_in_group += 1
+        else:
+            # Devices outside the group: skip HCCL bring-up entirely.
+            cfgs.append(ChipBootstrapConfig())
+    return cfgs
 
 
 def execute_distributed(  # noqa: PLR0912
@@ -186,7 +292,30 @@ def execute_distributed(  # noqa: PLR0912
             if fn is not None:
                 sub_worker_fns[fn_name] = fn
 
-    # 5. Create and configure Worker
+    # 5. Build per-chip bootstrap configs from the AOT comm manifest emitted at
+    #    compile time (output_dir/orchestration/comm_manifest.json). Comm-less
+    #    programs (no CommGroup declared) skip the manifest entirely and the
+    #    runner stays on the existing comm-less Worker path.
+    manifest_path = output_dir / "orchestration" / COMM_MANIFEST_FILENAME
+    manifest: dict[str, Any] | None = None
+    try:
+        with manifest_path.open("r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except FileNotFoundError:
+        pass
+
+    chip_bootstrap_configs: list[Any] | None = None
+    rootinfo_path: str | None = None
+    if manifest is not None:
+        # ``mkstemp`` returns a unique, unpredictable path and atomically creates
+        # the file (mode 0o600) — safer than a PID-derived name, which is racy
+        # under PID recycling. The fd is closed immediately because HCCL only
+        # needs the path: comm bring-up overwrites the file on rank-0 and
+        # reads it on the other ranks.
+        rootinfo_fd, rootinfo_path = tempfile.mkstemp(prefix="pypto_distributed_rootinfo_", suffix=".bin")
+        os.close(rootinfo_fd)
+        chip_bootstrap_configs = _build_chip_bootstrap_configs_from_manifest(manifest, dc, rootinfo_path)
+
     num_sub = max(dc.num_sub_workers, len(sub_worker_fns))
     w = Worker(
         level=3,
@@ -194,6 +323,7 @@ def execute_distributed(  # noqa: PLR0912
         num_sub_workers=num_sub,
         platform=compiled.platform,
         runtime=runtime_name,
+        chip_bootstrap_configs=chip_bootstrap_configs,
     )
 
     # 6. Register SubWorker callables
@@ -206,6 +336,9 @@ def execute_distributed(  # noqa: PLR0912
     # 7. Build the orchestration closure and execute
     _keep: list[Any] = []
 
+    # Codegen always emits ``contexts`` in the entry signature; for comm-less
+    # programs ``w.chip_contexts`` is an empty list and the body simply ignores
+    # it, so the runner uses a single uniform call shape.
     def orch_fn(orch, _unused_args, _unused_cfg):
         entry_fn(
             orch,
@@ -215,6 +348,7 @@ def execute_distributed(  # noqa: PLR0912
             callables=chip_callables,
             sub_ids=sub_ids,
             _keep=_keep,
+            contexts=w.chip_contexts,
         )
 
     call_config = CallConfig()
@@ -225,3 +359,8 @@ def execute_distributed(  # noqa: PLR0912
         w.run(orch_fn)
     finally:
         w.close()
+        if rootinfo_path is not None:
+            try:
+                os.unlink(rootinfo_path)
+            except FileNotFoundError:
+                pass
