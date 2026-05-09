@@ -1211,6 +1211,40 @@ def exp(tile: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.exp", [tile], {}, actual_span)
 
 
+def sin(tile: Expr, span: Span | None = None) -> Call:
+    """Element-wise sine of a tile (radians).
+
+    FP32-only: non-FP32 inputs are rejected. Cast explicitly via
+    ``pl.cast(tile, pl.FP32)`` before applying.
+
+    Args:
+        tile: Input tile (TileType, FP32)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise sine
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.sin", [tile], {}, actual_span)
+
+
+def cos(tile: Expr, span: Span | None = None) -> Call:
+    """Element-wise cosine of a tile (radians).
+
+    FP32-only: non-FP32 inputs are rejected. Cast explicitly via
+    ``pl.cast(tile, pl.FP32)`` before applying.
+
+    Args:
+        tile: Input tile (TileType, FP32)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for element-wise cosine
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.cos", [tile], {}, actual_span)
+
+
 def recip(tile: Expr, span: Span | None = None) -> Call:
     """Element-wise reciprocal (1/x) of a tile.
 

@@ -91,6 +91,24 @@ TypePtr DeduceTileRsqrtType(const std::vector<ExprPtr>& args,
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
 
+// Shared FP32-only deducer for transcendental tile ops (tile.sin, tile.cos).
+// These ops are intentionally FP32-only to avoid silent precision loss; callers
+// must explicitly cast non-FP32 inputs via tile.cast (or pl.cast at the DSL layer).
+TypePtr DeduceTileFP32OnlyType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs,
+                               const std::string& op_name) {
+  // Reuse the standard unary deducer for shape/layout handling and basic validation.
+  TypePtr base_type = DeduceTileUnaryType(args, kwargs, op_name);
+  auto tile_type = As<TileType>(base_type);
+
+  // FP32-only: do NOT auto-promote. Reject non-FP32 inputs with an actionable error.
+  CHECK(tile_type->dtype_ == DataType::FP32)
+      << op_name << " is FP32-only, but got input with dtype " << tile_type->dtype_.ToString()
+      << ". Cast the input to FP32 explicitly via pl.cast(tile, pl.FP32) before applying " << op_name << ".";
+
+  return base_type;
+}
+
 TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
                            const std::vector<std::pair<std::string, std::any>>& kwargs,
                            const std::string& op_name) {
@@ -152,6 +170,28 @@ REGISTER_OP("tile.exp")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileUnaryType(args, kwargs, "tile.exp");
+    });
+
+REGISTER_OP("tile.sin")
+    .set_op_category("TileOp")
+    .set_description("Element-wise sine of a tile (radians). FP32 only.")
+    .add_argument("tile", "Input tile (TileType, FP32)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileFP32OnlyType(args, kwargs, "tile.sin");
+    });
+
+REGISTER_OP("tile.cos")
+    .set_op_category("TileOp")
+    .set_description("Element-wise cosine of a tile (radians). FP32 only.")
+    .add_argument("tile", "Input tile (TileType, FP32)")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileFP32OnlyType(args, kwargs, "tile.cos");
     });
 
 REGISTER_OP("tile.recip")

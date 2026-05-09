@@ -349,6 +349,69 @@ class TestTileUnaryOps:
         ir_str = str(Program)
         assert "tile.neg" in ir_str
 
+    # ------------------------------------------------------------------
+    # tile.sin / tile.cos (FP32-only)
+    # ------------------------------------------------------------------
+
+    def test_tile_sin_creates_call(self):
+        """tile.sin on an FP32 tile produces a Call with FP32 output of the same shape."""
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([32, 64], DataType.FP32)
+        tile_var = ir.Var("x", tile_type, span)
+
+        call = tile.sin(tile_var)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.sin"
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        assert len(result_type.shape) == 2
+
+    def test_tile_cos_creates_call(self):
+        """tile.cos on an FP32 tile produces a Call with FP32 output of the same shape."""
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([32, 64], DataType.FP32)
+        tile_var = ir.Var("x", tile_type, span)
+
+        call = tile.cos(tile_var)
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.cos"
+
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+        assert len(result_type.shape) == 2
+
+    def test_tile_sin_rejects_fp16(self):
+        """tile.sin must reject FP16 input with an error mentioning the op name and FP32."""
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([32, 64], DataType.FP16)
+        tile_var = ir.Var("x", tile_type, span)
+
+        with pytest.raises(ValueError, match=r"tile\.sin.*FP32"):
+            tile.sin(tile_var)
+
+    def test_tile_cos_rejects_bf16(self):
+        """tile.cos must reject BF16 input with an error mentioning the op name and FP32."""
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([32, 64], DataType.BF16)
+        tile_var = ir.Var("x", tile_type, span)
+
+        with pytest.raises(ValueError, match=r"tile\.cos.*FP32"):
+            tile.cos(tile_var)
+
+    def test_tile_sin_rejects_int32(self):
+        """tile.sin must reject INT32 input with an FP32-mentioning error."""
+        span = ir.Span.unknown()
+        tile_type = ir.TileType([32, 64], DataType.INT32)
+        tile_var = ir.Var("x", tile_type, span)
+
+        with pytest.raises(ValueError, match=r"(?i)FP32"):
+            tile.sin(tile_var)
+
 
 class TestTileReductionOps:
     """Test suite for tile-level reduction operators."""
