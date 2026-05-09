@@ -235,5 +235,45 @@ def test_cos_lowering_is_idempotent():
     ir.assert_structural_equal(twice, once)
 
 
+def test_both_sin_and_cos_in_same_function():
+    """Verify sin and cos lowering don't interfere when both appear in one function."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            x_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            a: pl.Tile[[16, 16], pl.FP32] = pl.tile.sin(x_tile)
+            b: pl.Tile[[16, 16], pl.FP32] = pl.tile.cos(x_tile)
+            y_tile: pl.Tile[[16, 16], pl.FP32] = pl.tile.add(a, b)
+            out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+            return out_0
+
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            out_0: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+            r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
+            return r
+
+    after = passes.lower_math_ops()(Prog)
+    op_names = set(_collect_op_names(after))
+
+    # Both sin and cos must be removed by the lowering.
+    assert "tile.sin" not in op_names
+    assert "tile.cos" not in op_names
+
+    # Every emitted op must be either an allowed primitive or framework op.
+    framework_ops = {"tile.load", "tile.store", "tensor.create", "main_incore_0"}
+    leftover = op_names - _DECOMP_PRIMITIVES - framework_ops
+    assert not leftover, f"Unexpected ops after lowering: {sorted(leftover)}"
+
+    # Sanity: the decomposition actually emitted primitives for both sin and cos.
+    assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
