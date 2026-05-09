@@ -18,6 +18,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
@@ -290,6 +291,93 @@ inline bool IsCanonicalView(const std::vector<ExprPtr>& shape, const std::vector
 /// MaterializeTensorStrides pass to fill stride.empty() slots.
 inline TensorView CanonicalizeView(const std::vector<ExprPtr>& shape, TensorLayout layout) {
   return TensorView(BuildLogicalStridesFromLayout(shape, layout), layout, /*valid_shape=*/{});
+}
+
+namespace detail {
+
+/// Return the row-major-equivalent shape for ``(shape, view)``.
+///
+/// The §4.2 invariant says: row-major `[..., dim_a, dim_b]` ND ≡ `[..., dim_b, dim_a]`
+/// DN-packed describe the same physical offset set. Both forms reduce to the
+/// same row-major shape `[..., dim_a, dim_b]` (we always normalize to "the
+/// trailing two dims as the source row-major buffer expected them"):
+///
+///   - bare TensorType / ND-packed view   → shape unchanged
+///   - DN-packed view                     → shape with trailing two dims swapped
+///   - anything else (NZ, strided, custom stride) → return ``std::nullopt``
+///     so the caller treats the as_layout as not statically equivalent
+inline std::optional<std::vector<ExprPtr>> RowMajorEquivalentShape(const std::vector<ExprPtr>& shape,
+                                                                   const std::optional<TensorView>& view) {
+  if (!view.has_value()) {
+    return shape;  // bare tensor — already row-major.
+  }
+  if (view->layout == TensorLayout::ND) {
+    // ND-packed and ND with empty stride both reduce to the source shape.
+    if (view->stride.empty()) return shape;
+    auto packed = BuildLogicalStridesFromLayout(shape, TensorLayout::ND);
+    if (packed.size() != view->stride.size()) return std::nullopt;
+    for (size_t i = 0; i < packed.size(); ++i) {
+      if (!StaticEqual(packed[i], view->stride[i])) return std::nullopt;
+    }
+    return shape;
+  }
+  if (view->layout == TensorLayout::DN) {
+    if (shape.size() < 2) return std::nullopt;
+    if (view->stride.empty()) {
+      // DN-packed with implicit stride.
+    } else {
+      auto packed = BuildLogicalStridesFromLayout(shape, TensorLayout::DN);
+      if (packed.size() != view->stride.size()) return std::nullopt;
+      for (size_t i = 0; i < packed.size(); ++i) {
+        if (!StaticEqual(packed[i], view->stride[i])) return std::nullopt;
+      }
+    }
+    // DN-packed [..., dim_a, dim_b] ≡ row-major [..., dim_b, dim_a].
+    std::vector<ExprPtr> result = shape;
+    std::swap(result[result.size() - 2], result[result.size() - 1]);
+    return result;
+  }
+  // NZ / unknown: fall through.
+  return std::nullopt;
+}
+
+inline bool ShapeListsEquivalent(const std::vector<ExprPtr>& lhs, const std::vector<ExprPtr>& rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (lhs[i].get() == rhs[i].get()) continue;
+    auto lc = As<ConstInt>(lhs[i]);
+    auto rc = As<ConstInt>(rhs[i]);
+    if (lc && rc && lc->value_ == rc->value_) continue;
+    return false;
+  }
+  return true;
+}
+
+}  // namespace detail
+
+/// True iff ``(src_shape, src_view)`` and ``(target_shape, target_layout-canonical)``
+/// describe the same physical offset set with one-to-one logical-index mapping.
+///
+/// Restricted to the canonical pairs proven equivalent in RFC #1300 §4.2:
+///
+///   - row-major ``[..., a, b]`` ND  ≡  ``[..., b, a]`` DN-packed
+///
+/// Both forms reduce to the same row-major-equivalent shape; this helper
+/// normalizes both sides via ``RowMajorEquivalentShape`` and structurally
+/// compares them. Returns ``false`` for any other reinterpret (NZ, custom
+/// stride, etc.), deferring those cases to a future extension when a real
+/// use case appears.
+inline bool AsLayoutOffsetMapEquivalent(const std::vector<ExprPtr>& src_shape,
+                                        const std::optional<TensorView>& src_view,
+                                        const std::vector<ExprPtr>& target_shape,
+                                        TensorLayout target_layout) {
+  if (target_layout == TensorLayout::NZ) return false;
+
+  TensorView target_view(std::vector<ExprPtr>{}, target_layout, std::vector<ExprPtr>{});
+  auto src_rm = detail::RowMajorEquivalentShape(src_shape, src_view);
+  auto tgt_rm = detail::RowMajorEquivalentShape(target_shape, std::make_optional(std::move(target_view)));
+  if (!src_rm.has_value() || !tgt_rm.has_value()) return false;
+  return detail::ShapeListsEquivalent(*src_rm, *tgt_rm);
 }
 
 }  // namespace pypto::ir::tensor_view_semantics

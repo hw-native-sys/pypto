@@ -280,6 +280,75 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
 // Registration Function for Tensor Transform Operations
 // ============================================================================
 
+namespace {
+// Helper for reading typed kwargs from the deduce-type entry point.
+// Mirrors the per-file copies in tile_ops/{memory,reduction,sort}.cpp and
+// tensor_ops/reduction.cpp; consider extracting to a shared header in a
+// follow-up cleanup.
+template <typename T>
+T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+           const std::optional<T>& default_value = std::nullopt) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) {
+      return AnyCast<T>(v, "kwarg key: " + key);
+    }
+  }
+  CHECK(default_value.has_value()) << "tensor op kwarg '" << key << "' is required but missing";
+  return *default_value;
+}
+}  // namespace
+
+TypePtr DeduceTensorAsLayoutType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  // tensor.as_layout(src, shape, layout=...) — pure metadata reinterpret.
+  // The op points at the same physical memory as src, but exposes a different
+  // (shape, stride, layout) triple to consumers. See RFC #1300 §3.3.
+  CHECK(args.size() == 2) << "tensor.as_layout requires 2 args (src, shape) plus a 'layout' kwarg, but got "
+                          << args.size() << " positional args";
+
+  // (a) src must be TensorType.
+  auto src_type = As<TensorType>(args[0]->GetType());
+  CHECK(src_type) << "tensor.as_layout: src must be TensorType, got " << args[0]->GetType()->TypeName();
+
+  // (b) shape: extract MakeTuple elements like tensor.reshape does.
+  auto shape_tuple = As<MakeTuple>(args[1]);
+  CHECK(shape_tuple) << "tensor.as_layout: shape must be a MakeTuple, got " << args[1]->GetType()->TypeName();
+  std::vector<ExprPtr> new_shape = shape_tuple->elements_;
+  CHECK(!new_shape.empty()) << "tensor.as_layout: target shape must be non-empty";
+
+  // (c) layout kwarg — TensorLayout enum.
+  auto new_layout = GetKwarg<TensorLayout>(kwargs, "layout");
+
+  // (1) Element count match (only when both products are statically known).
+  int64_t src_product = ComputeShapeProduct(src_type->shape_);
+  int64_t new_product = ComputeShapeProduct(new_shape);
+  if (src_product > 0 && new_product > 0) {
+    CHECK(src_product == new_product) << "tensor.as_layout: element count mismatch — src has " << src_product
+                                      << " elements, target has " << new_product;
+  }
+
+  // (2) NZ rejected on TensorType (NZ is tile-only / fractal).
+  CHECK(new_layout != TensorLayout::NZ)
+      << "tensor.as_layout: NZ layout is not allowed on TensorType (NZ is tile-only)";
+
+  // (3) Offset-map equivalence — only RFC §4.2 canonical pairs are accepted
+  //     for now. Any other reinterpret is rejected; future passes can extend
+  //     ``AsLayoutOffsetMapEquivalent`` when concrete use cases appear.
+  CHECK(tensor_view_semantics::AsLayoutOffsetMapEquivalent(src_type->shape_, src_type->tensor_view_,
+                                                           new_shape, new_layout))
+      << "tensor.as_layout: target view does not cover the same physical offsets as src — "
+      << "only RFC #1300 §4.2 canonical pairs are supported (row-major [..,a,b] ND ≡ "
+      << "[..,b,a] DN-packed). src.shape=" << src_type->shape_.size()
+      << "D, target.layout=" << TensorLayoutToString(new_layout);
+
+  // Build the canonical view at the target shape/layout. Stride is the packed
+  // canonical for the target layout; downstream consumers (Simplify, codegen)
+  // read this directly.
+  auto new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
+  return std::make_shared<TensorType>(new_shape, src_type->dtype_, src_type->memref_,
+                                      std::make_optional(std::move(new_view)));
+}
+
 REGISTER_OP("tensor.reshape")
     .set_op_category("TensorOp")
     .set_description("Reshape tensor to new shape")
@@ -299,6 +368,21 @@ REGISTER_OP("tensor.transpose")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorTransposeType(args, kwargs);
+    });
+
+REGISTER_OP("tensor.as_layout")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Reinterpret a TensorType as a different (shape, layout) view over the same "
+        "physical memory. Pure metadata — emits no PTOAS instructions; downstream "
+        "make_tensor_view consumes the new view directly. Internal-only; passes "
+        "(e.g. LowerTransposeLoadParamLayout) inject this at orch ↔ InCore call sites. "
+        "See RFC #1300 §3.3.")
+    .add_argument("input", "Input tensor (TensorType)")
+    .add_argument("shape", "Target logical shape (TupleType of ScalarType(INT64))")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorAsLayoutType(args, kwargs);
     });
 
 TypePtr DeduceTensorConcatType(const std::vector<ExprPtr>& args,
