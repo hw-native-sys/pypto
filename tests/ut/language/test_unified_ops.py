@@ -1071,6 +1071,50 @@ class TestPromotedSinCos:
             pl.cos(x)
 
 
+class TestPromotedTileSinCos:
+    """``pl.tile.sin`` and ``pl.tile.cos`` DSL wrappers (FP32-only, tile-only)."""
+
+    def test_pl_tile_sin_wrapper(self):
+        """``pl.tile.sin(t)`` returns a ``Tile`` wrapping a ``tile.sin`` Call."""
+        span = ir.Span.unknown()
+        t = Tile(expr=ir.Var("t", ir.TileType([64, 64], DataType.FP32), span))
+        result = pl.tile.sin(t)
+        assert isinstance(result, Tile)
+        call = result.unwrap()
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.sin"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+
+    def test_pl_tile_cos_wrapper(self):
+        """``pl.tile.cos(t)`` returns a ``Tile`` wrapping a ``tile.cos`` Call."""
+        span = ir.Span.unknown()
+        t = Tile(expr=ir.Var("t", ir.TileType([64, 64], DataType.FP32), span))
+        result = pl.tile.cos(t)
+        assert isinstance(result, Tile)
+        call = result.unwrap()
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.cos"
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP32
+
+    def test_pl_tile_sin_rejects_fp16(self):
+        """``pl.tile.sin`` propagates the IR-level FP32-only validation for FP16 input."""
+        span = ir.Span.unknown()
+        t = Tile(expr=ir.Var("t", ir.TileType([64, 64], DataType.FP16), span))
+        with pytest.raises(ValueError, match=r"tile\.sin.*FP32"):
+            pl.tile.sin(t)
+
+    def test_pl_tile_cos_rejects_bf16(self):
+        """``pl.tile.cos`` propagates the IR-level FP32-only validation for BF16 input."""
+        span = ir.Span.unknown()
+        t = Tile(expr=ir.Var("t", ir.TileType([64, 64], DataType.BF16), span))
+        with pytest.raises(ValueError, match=r"tile\.cos.*FP32"):
+            pl.tile.cos(t)
+
+
 class TestUnifiedOpsTypeErrors:
     """Passing invalid types to unified_ops raises TypeError."""
 

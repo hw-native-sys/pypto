@@ -51,6 +51,8 @@ __all__ = [
     "divs",
     "neg",
     "exp",
+    "sin",
+    "cos",
     "sqrt",
     "rsqrt",
     "recip",
@@ -745,6 +747,32 @@ def exp(tile: Tile) -> Tile:
         Tile wrapping the exp operation
     """
     call_expr = _ir_ops.exp(tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def sin(tile: Tile) -> Tile:
+    """Element-wise sine of a tile (radians). FP32 only.
+
+    Args:
+        tile: Input tile (FP32)
+
+    Returns:
+        Tile wrapping the sin operation
+    """
+    call_expr = _ir_ops.sin(tile.unwrap())
+    return Tile(expr=call_expr)
+
+
+def cos(tile: Tile) -> Tile:
+    """Element-wise cosine of a tile (radians). FP32 only.
+
+    Args:
+        tile: Input tile (FP32)
+
+    Returns:
+        Tile wrapping the cos operation
+    """
+    call_expr = _ir_ops.cos(tile.unwrap())
     return Tile(expr=call_expr)
 
 
