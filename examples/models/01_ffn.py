@@ -8,17 +8,17 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-FFN module programs (64x64 tiles).
+FFN module JIT entries (64x64 tiles).
 
-Each program implements a full FFN forward pass (gate projection -> activation ->
+Each entry implements a full FFN forward pass (gate projection -> activation ->
 down projection):
 
-  FFNGeluProgram   -- output = GELU(hidden_states @ gate_proj_weight) @ down_proj_weight
-  FFNSwigluProgram -- output = SwiGLU(gate, up) @ down_proj_weight
-  FFNReluProgram   -- output = ReLU(hidden_states @ gate_proj_weight) @ down_proj_weight
+  ffn_gelu   -- output = GELU(hidden_states @ gate_proj_weight) @ down_proj_weight
+  ffn_swiglu -- output = SwiGLU(gate, up) @ down_proj_weight
+  ffn_relu   -- output = ReLU(hidden_states @ gate_proj_weight) @ down_proj_weight
 
 Concepts introduced:
-  - Module-level @pl.function: shared kernel reused across multiple programs
+  - Module-level @pl.jit.incore: shared kernel reused across multiple JIT entries
   - Multi-kernel orchestration: matmul -> activation -> matmul pipeline
   - Direct call to module-level kernels (no self. prefix)
 
@@ -27,156 +27,164 @@ Next: examples/models/02_vector_dag.py
 """
 
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
-# ── Shared cube matmul kernel (module-level, reusable across programs) ────────
+# ── Shared cube matmul kernel (module-level, reusable across entries) ────────
 
 
-@pl.function(type=pl.FunctionType.InCore)
-def matmul_kernel(
-    a: pl.Tensor[[64, 64], pl.FP32],
-    b: pl.Tensor[[64, 64], pl.FP32],
-    output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-) -> pl.Tensor[[64, 64], pl.FP32]:
+@pl.jit.incore
+def matmul_kernel(a: pl.Tensor, b: pl.Tensor, output: pl.Out[pl.Tensor]):
     """Cube InCore: compute a @ b and store result to GM."""
     tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
     tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
     tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
     tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
     tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-    out = pl.store(tile_c_l0c, [0, 0], output)
-    return out
+    pl.store(tile_c_l0c, [0, 0], output)
+    return output
 
 
-# ── FFN with GELU activation ─────────────────────────────────────────────────
+# ── Activation kernels (module-level @pl.jit.incore) ─────────────────────────
 
 
-@pl.program
-class FFNGeluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def gelu_kernel(
-        self,
-        x: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Vector InCore: apply GELU activation -- x * sigmoid(1.702 * x)."""
-        tile_x = pl.load(x, [0, 0], [64, 64])
-        x_scaled = pl.mul(tile_x, 1.702)
-        x_neg = pl.mul(x_scaled, -1.0)
-        exp_neg = pl.exp(x_neg)
-        denom = pl.add(exp_neg, 1.0)
-        sigmoid = pl.recip(denom)
-        result = pl.mul(tile_x, sigmoid)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def ffn_gelu_orch(
-        self,
-        hidden_states: pl.Tensor[[64, 64], pl.FP32],
-        gate_proj_weight: pl.Tensor[[64, 64], pl.FP32],
-        down_proj_weight: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        # gate = hidden_states @ gate_proj_weight
-        gate = pl.create_tensor([64, 64], dtype=pl.FP32)
-        gate_done = matmul_kernel(hidden_states, gate_proj_weight, gate)
-        # activated = GELU(gate)
-        activated = pl.create_tensor([64, 64], dtype=pl.FP32)
-        activated_done = self.gelu_kernel(gate_done, activated)
-        # output = activated @ down_proj_weight
-        output_done = matmul_kernel(activated_done, down_proj_weight, output)
-        return output_done
+@pl.jit.incore
+def gelu_kernel(x: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Vector InCore: apply GELU activation -- x * sigmoid(1.702 * x)."""
+    tile_x = pl.load(x, [0, 0], [64, 64])
+    x_scaled = pl.mul(tile_x, 1.702)
+    x_neg = pl.mul(x_scaled, -1.0)
+    exp_neg = pl.exp(x_neg)
+    denom = pl.add(exp_neg, 1.0)
+    sigmoid = pl.recip(denom)
+    result = pl.mul(tile_x, sigmoid)
+    pl.store(result, [0, 0], output)
+    return output
 
 
-# ── FFN with SwiGLU activation ───────────────────────────────────────────────
+@pl.jit.incore
+def swiglu_kernel(gate: pl.Tensor, up: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Vector InCore: apply SwiGLU activation -- gate * sigmoid(gate) * up."""
+    tile_gate = pl.load(gate, [0, 0], [64, 64])
+    tile_up = pl.load(up, [0, 0], [64, 64])
+    gate_neg = pl.mul(tile_gate, -1.0)
+    exp_neg = pl.exp(gate_neg)
+    denom = pl.add(exp_neg, 1.0)
+    sigmoid = pl.recip(denom)
+    swish = pl.mul(tile_gate, sigmoid)
+    result = pl.mul(swish, tile_up)
+    pl.store(result, [0, 0], output)
+    return output
 
 
-@pl.program
-class FFNSwigluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def swiglu_kernel(
-        self,
-        gate: pl.Tensor[[64, 64], pl.FP32],
-        up: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Vector InCore: apply SwiGLU activation -- gate * sigmoid(gate) * up."""
-        tile_gate = pl.load(gate, [0, 0], [64, 64])
-        tile_up = pl.load(up, [0, 0], [64, 64])
-        gate_neg = pl.mul(tile_gate, -1.0)
-        exp_neg = pl.exp(gate_neg)
-        denom = pl.add(exp_neg, 1.0)
-        sigmoid = pl.recip(denom)
-        swish = pl.mul(tile_gate, sigmoid)
-        result = pl.mul(swish, tile_up)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def ffn_swiglu_orch(
-        self,
-        hidden_states: pl.Tensor[[64, 64], pl.FP32],
-        gate_proj_weight: pl.Tensor[[64, 64], pl.FP32],
-        up_proj_weight: pl.Tensor[[64, 64], pl.FP32],
-        down_proj_weight: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        # gate = hidden_states @ gate_proj_weight
-        gate = pl.create_tensor([64, 64], dtype=pl.FP32)
-        gate_done = matmul_kernel(hidden_states, gate_proj_weight, gate)
-        # up = hidden_states @ up_proj_weight
-        up = pl.create_tensor([64, 64], dtype=pl.FP32)
-        up_done = matmul_kernel(hidden_states, up_proj_weight, up)
-        # activated = SwiGLU(gate, up)
-        activated = pl.create_tensor([64, 64], dtype=pl.FP32)
-        activated_done = self.swiglu_kernel(gate_done, up_done, activated)
-        # output = activated @ down_proj_weight
-        output_done = matmul_kernel(activated_done, down_proj_weight, output)
-        return output_done
+@pl.jit.incore
+def relu_kernel(x: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Vector InCore: apply ReLU activation -- max(0, x)."""
+    tile_x = pl.load(x, [0, 0], [64, 64])
+    result = pl.relu(tile_x)
+    pl.store(result, [0, 0], output)
+    return output
 
 
-# ── FFN with ReLU activation ─────────────────────────────────────────────────
+# ── FFN orchestration entries (@pl.jit) ───────────────────────────────────────
 
 
-@pl.program
-class FFNReluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def relu_kernel(
-        self,
-        x: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Vector InCore: apply ReLU activation -- max(0, x)."""
-        tile_x = pl.load(x, [0, 0], [64, 64])
-        result = pl.relu(tile_x)
-        out = pl.store(result, [0, 0], output)
-        return out
+@pl.jit
+def ffn_gelu(
+    hidden_states: pl.Tensor,
+    gate_proj_weight: pl.Tensor,
+    down_proj_weight: pl.Tensor,
+    output: pl.Out[pl.Tensor],
+):
+    """FFN with GELU activation."""
+    # gate = hidden_states @ gate_proj_weight
+    gate = pl.create_tensor([64, 64], dtype=pl.FP32)
+    gate = matmul_kernel(hidden_states, gate_proj_weight, gate)
+    # activated = GELU(gate)
+    activated = pl.create_tensor([64, 64], dtype=pl.FP32)
+    activated = gelu_kernel(gate, activated)
+    # output = activated @ down_proj_weight
+    output = matmul_kernel(activated, down_proj_weight, output)
+    return output
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def ffn_relu_orch(
-        self,
-        hidden_states: pl.Tensor[[64, 64], pl.FP32],
-        gate_proj_weight: pl.Tensor[[64, 64], pl.FP32],
-        down_proj_weight: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        # gate = hidden_states @ gate_proj_weight
-        gate = pl.create_tensor([64, 64], dtype=pl.FP32)
-        gate_done = matmul_kernel(hidden_states, gate_proj_weight, gate)
-        # activated = ReLU(gate)
-        activated = pl.create_tensor([64, 64], dtype=pl.FP32)
-        activated_done = self.relu_kernel(gate_done, activated)
-        # output = activated @ down_proj_weight
-        output_done = matmul_kernel(activated_done, down_proj_weight, output)
-        return output_done
+
+@pl.jit
+def ffn_swiglu(
+    hidden_states: pl.Tensor,
+    gate_proj_weight: pl.Tensor,
+    up_proj_weight: pl.Tensor,
+    down_proj_weight: pl.Tensor,
+    output: pl.Out[pl.Tensor],
+):
+    """FFN with SwiGLU activation."""
+    # gate = hidden_states @ gate_proj_weight
+    gate = pl.create_tensor([64, 64], dtype=pl.FP32)
+    gate = matmul_kernel(hidden_states, gate_proj_weight, gate)
+    # up = hidden_states @ up_proj_weight
+    up = pl.create_tensor([64, 64], dtype=pl.FP32)
+    up = matmul_kernel(hidden_states, up_proj_weight, up)
+    # activated = SwiGLU(gate, up)
+    activated = pl.create_tensor([64, 64], dtype=pl.FP32)
+    activated = swiglu_kernel(gate, up, activated)
+    # output = activated @ down_proj_weight
+    output = matmul_kernel(activated, down_proj_weight, output)
+    return output
+
+
+@pl.jit
+def ffn_relu(
+    hidden_states: pl.Tensor,
+    gate_proj_weight: pl.Tensor,
+    down_proj_weight: pl.Tensor,
+    output: pl.Out[pl.Tensor],
+):
+    """FFN with ReLU activation."""
+    # gate = hidden_states @ gate_proj_weight
+    gate = pl.create_tensor([64, 64], dtype=pl.FP32)
+    gate = matmul_kernel(hidden_states, gate_proj_weight, gate)
+    # activated = ReLU(gate)
+    activated = pl.create_tensor([64, 64], dtype=pl.FP32)
+    activated = relu_kernel(gate, activated)
+    # output = activated @ down_proj_weight
+    output = matmul_kernel(activated, down_proj_weight, output)
+    return output
 
 
 if __name__ == "__main__":
-    for name, prog in [
-        ("FFNGelu", FFNGeluProgram),
-        ("FFNSwiglu", FFNSwigluProgram),
-        ("FFNRelu", FFNReluProgram),
-    ]:
-        print(f"=== {name} ===")
-        print(prog.as_python())
-        print()
+    cfg = RunConfig()
+    torch.manual_seed(0)
+
+    hidden_states = torch.randn(64, 64, dtype=torch.float32)
+    gate_proj_weight = torch.randn(64, 64, dtype=torch.float32)
+    up_proj_weight = torch.randn(64, 64, dtype=torch.float32)
+    down_proj_weight = torch.randn(64, 64, dtype=torch.float32)
+
+    # FFN + GELU: GELU(hidden @ gate_proj) @ down_proj, GELU = x * sigmoid(1.702 * x)
+    output = torch.zeros(64, 64, dtype=torch.float32)
+    ffn_gelu(hidden_states, gate_proj_weight, down_proj_weight, output, config=cfg)
+    gate = hidden_states @ gate_proj_weight
+    expected_gelu = (gate * torch.sigmoid(1.702 * gate)) @ down_proj_weight
+    assert torch.allclose(output, expected_gelu, rtol=3e-3, atol=3e-3), (
+        f"ffn_gelu failed: max diff = {(output - expected_gelu).abs().max().item()}"
+    )
+
+    # FFN + SwiGLU: SwiGLU(gate, up) @ down_proj, SwiGLU = gate * sigmoid(gate) * up
+    output = torch.zeros(64, 64, dtype=torch.float32)
+    ffn_swiglu(hidden_states, gate_proj_weight, up_proj_weight, down_proj_weight, output, config=cfg)
+    gate = hidden_states @ gate_proj_weight
+    up = hidden_states @ up_proj_weight
+    expected_swiglu = (gate * torch.sigmoid(gate) * up) @ down_proj_weight
+    assert torch.allclose(output, expected_swiglu, rtol=3e-3, atol=3e-3), (
+        f"ffn_swiglu failed: max diff = {(output - expected_swiglu).abs().max().item()}"
+    )
+
+    # FFN + ReLU: ReLU(hidden @ gate_proj) @ down_proj
+    output = torch.zeros(64, 64, dtype=torch.float32)
+    ffn_relu(hidden_states, gate_proj_weight, down_proj_weight, output, config=cfg)
+    gate = hidden_states @ gate_proj_weight
+    expected_relu = torch.relu(gate) @ down_proj_weight
+    assert torch.allclose(output, expected_relu, rtol=3e-3, atol=3e-3), (
+        f"ffn_relu failed: max diff = {(output - expected_relu).abs().max().item()}"
+    )
+
+    print("OK")

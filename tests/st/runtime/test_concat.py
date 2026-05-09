@@ -7,52 +7,28 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""
-Runtime tests for tile.concat (column-wise concatenation).
-"""
-
-from typing import Any
+"""Runtime tests for tile.concat (column-wise concatenation) using @pl.jit."""
 
 import pytest
-from examples.kernels.concat import TileConcat32x32Program
-from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
-
-
-class TileConcatTestCase(PTOTestCase):
-    """Test case for tile column-wise concatenation (32x16 + 32x16 -> 32x32)."""
-
-    __test__ = False
-
-    def __init__(self, *, platform: str | None = None, config=None):
-        super().__init__(config, platform=platform)
-
-    def get_name(self) -> str:
-        return "tile_concat_32x32"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [32, 16], DataType.FP32, init_value=1.0),
-            TensorSpec("b", [32, 16], DataType.FP32, init_value=2.0),
-            TensorSpec("c", [32, 32], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return TileConcat32x32Program
-
-    def compute_expected(self, tensors, params=None):
-        tensors["c"][:, :16] = tensors["a"]
-        tensors["c"][:, 16:] = tensors["b"]
+import torch
+from examples.kernels.concat import tile_concat_32x32
 
 
 class TestConcatOperations:
-    """Test suite for concat operations."""
+    """Test suite for tile.concat operations."""
 
     @pytest.mark.skip(reason="PTOAS doesn't support tconcat now.")
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_tile_concat_32x32(self, test_runner, platform):
+    def test_tile_concat_32x32(self, test_config):
         """Test tile concatenation: 32x16 + 32x16 -> 32x32."""
-        result = test_runner.run(TileConcatTestCase(platform=platform))
-        assert result.passed, f"Test failed: {result.error}"
+        tile_concat_32x32._cache.clear()
+        a = torch.full((32, 16), 1.0, dtype=torch.float32)
+        b = torch.full((32, 16), 2.0, dtype=torch.float32)
+        c = torch.zeros((32, 32), dtype=torch.float32)
+        tile_concat_32x32(a, b, c, config=test_config)
+        expected = torch.cat([a, b], dim=1)
+        assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
+            f"tile_concat_32x32 failed: max diff = {(c - expected).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":

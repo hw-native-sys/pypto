@@ -10,136 +10,88 @@
 """
 Tile element-wise operations: add and multiply.
 
-Programs:
-  TileAddProgram — c = a + b  (128x128)
-  TileMulProgram — c = a * b  (128x128)
+Kernels:
+  tile_add_128 — c = a + b  (128x128)
+  tile_mul_128 — c = a * b  (128x128)
+  tile_add_64  — c = a + b  (64x64)
+  tile_mul_64  — c = a * b  (64x64)
 
 Concepts introduced:
   - pl.mul for element-wise multiplication
-  - Multiple programs in one file
+  - Multiple @pl.jit kernels in one file
 
 Run:  python examples/kernels/01_elementwise.py
 Next: examples/kernels/02_fused_ops.py
 """
 
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
 
-@pl.program
-class TileAddProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_add(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
+@pl.jit
+def tile_add_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.incore():
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, tile_b)
-        out_c = pl.store(tile_c, [0, 0], c)
-        return out_c
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c_ret = self.tile_add(a, b, out_c)
-        return out_c_ret
+        pl.store(tile_c, [0, 0], c)
+    return c
 
 
-@pl.program
-class TileMulProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_mul(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
+@pl.jit
+def tile_mul_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.incore():
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_c = pl.mul(tile_a, tile_b)
-        out_c = pl.store(tile_c, [0, 0], c)
-        return out_c
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c_ret = self.tile_mul(a, b, out_c)
-        return out_c_ret
+        pl.store(tile_c, [0, 0], c)
+    return c
 
 
-@pl.program
-class TileAdd64Program:
+@pl.jit
+def tile_add_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     """Element-wise addition on 64x64 tiles."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_add(
-        self,
-        a: pl.Tensor[[64, 64], pl.FP32],
-        b: pl.Tensor[[64, 64], pl.FP32],
-        c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
+    with pl.incore():
         tile_a = pl.load(a, [0, 0], [64, 64])
         tile_b = pl.load(b, [0, 0], [64, 64])
         tile_c = pl.add(tile_a, tile_b)
-        out_c = pl.store(tile_c, [0, 0], c)
-        return out_c
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[64, 64], pl.FP32],
-        b: pl.Tensor[[64, 64], pl.FP32],
-        out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c_ret = self.tile_add(a, b, out_c)
-        return out_c_ret
+        pl.store(tile_c, [0, 0], c)
+    return c
 
 
-@pl.program
-class TileMul64Program:
+@pl.jit
+def tile_mul_64(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     """Element-wise multiplication on 64x64 tiles."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_mul(
-        self,
-        a: pl.Tensor[[64, 64], pl.FP32],
-        b: pl.Tensor[[64, 64], pl.FP32],
-        c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
+    with pl.incore():
         tile_a = pl.load(a, [0, 0], [64, 64])
         tile_b = pl.load(b, [0, 0], [64, 64])
         tile_c = pl.mul(tile_a, tile_b)
-        out_c = pl.store(tile_c, [0, 0], c)
-        return out_c
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[64, 64], pl.FP32],
-        b: pl.Tensor[[64, 64], pl.FP32],
-        out_c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        out_c_ret = self.tile_mul(a, b, out_c)
-        return out_c_ret
-
-
-# Aliases for backward compatibility with tests that use size-suffixed names
-TileAdd128Program = TileAddProgram
-TileMul128Program = TileMulProgram
+        pl.store(tile_c, [0, 0], c)
+    return c
 
 
 if __name__ == "__main__":
-    print("=== TileAddProgram ===")
-    print(TileAddProgram.as_python())
-    print("\n=== TileMulProgram ===")
-    print(TileMulProgram.as_python())
+    cfg = RunConfig()
+
+    a128 = torch.full((128, 128), 2.0, dtype=torch.float32)
+    b128 = torch.full((128, 128), 3.0, dtype=torch.float32)
+    c128 = torch.zeros((128, 128), dtype=torch.float32)
+    tile_add_128(a128, b128, c128, config=cfg)
+    assert torch.allclose(c128, a128 + b128, rtol=1e-5, atol=1e-5)
+
+    c128 = torch.zeros((128, 128), dtype=torch.float32)
+    tile_mul_128(a128, b128, c128, config=cfg)
+    assert torch.allclose(c128, a128 * b128, rtol=1e-5, atol=1e-5)
+
+    a64 = torch.full((64, 64), 2.0, dtype=torch.float32)
+    b64 = torch.full((64, 64), 3.0, dtype=torch.float32)
+    c64 = torch.zeros((64, 64), dtype=torch.float32)
+    tile_add_64(a64, b64, c64, config=cfg)
+    assert torch.allclose(c64, a64 + b64, rtol=1e-5, atol=1e-5)
+
+    c64 = torch.zeros((64, 64), dtype=torch.float32)
+    tile_mul_64(a64, b64, c64, config=cfg)
+    assert torch.allclose(c64, a64 * b64, rtol=1e-5, atol=1e-5)
+
+    print("OK")

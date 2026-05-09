@@ -10,11 +10,11 @@
 """
 Activation functions (32x128 tiles).
 
-Programs:
-  SiluProgram   -- SiLU:   output = x * sigmoid(x)                    = x / (1 + exp(-x))
-  GeluProgram   -- GELU:   output = x * sigmoid(1.702 * x)            (fast approximation)
-  SwigluProgram -- SwiGLU: output = gate * sigmoid(gate) * up
-  GegluProgram  -- GeGLU:  output = gate * sigmoid(1.702 * gate) * up
+Kernels:
+  silu    -- SiLU:   output = x * sigmoid(x)                    = x / (1 + exp(-x))
+  gelu    -- GELU:   output = x * sigmoid(1.702 * x)            (fast approximation)
+  swiglu  -- SwiGLU: output = gate * sigmoid(gate) * up
+  geglu   -- GeGLU:  output = gate * sigmoid(1.702 * gate) * up
 
 Concepts introduced:
   - pl.exp, pl.recip for building sigmoid from primitives
@@ -26,16 +26,13 @@ Next: examples/kernels/06_softmax.py
 """
 
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
 
-@pl.program
-class SiluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_silu(
-        self,
-        x: pl.Tensor[[32, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
-    ) -> pl.Tensor[[32, 128], pl.FP32]:
+@pl.jit
+def silu(x: pl.Tensor, output: pl.Out[pl.Tensor]):
+    with pl.incore():
         # SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
         tile_x = pl.load(x, [0, 0], [32, 128])
         x_neg = pl.mul(tile_x, -1.0)
@@ -43,27 +40,13 @@ class SiluProgram:
         denom = pl.add(exp_neg, 1.0)
         sigmoid = pl.recip(denom)
         result = pl.mul(tile_x, sigmoid)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def silu_orch(
-        self,
-        x: pl.Tensor[[32, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
-    ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output_ret = self.kernel_silu(x, output)
-        return output_ret
+        pl.store(result, [0, 0], output)
+    return output
 
 
-@pl.program
-class GeluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_gelu(
-        self,
-        x: pl.Tensor[[32, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
-    ) -> pl.Tensor[[32, 128], pl.FP32]:
+@pl.jit
+def gelu(x: pl.Tensor, output: pl.Out[pl.Tensor]):
+    with pl.incore():
         # GELU(x) = x * sigmoid(1.702 * x)  (fast approximation)
         tile_x = pl.load(x, [0, 0], [32, 128])
         x_scaled = pl.mul(tile_x, 1.702)
@@ -72,28 +55,13 @@ class GeluProgram:
         denom = pl.add(exp_neg, 1.0)
         sigmoid = pl.recip(denom)
         result = pl.mul(tile_x, sigmoid)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def gelu_orch(
-        self,
-        x: pl.Tensor[[32, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
-    ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output_ret = self.kernel_gelu(x, output)
-        return output_ret
+        pl.store(result, [0, 0], output)
+    return output
 
 
-@pl.program
-class SwigluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_swiglu(
-        self,
-        gate: pl.Tensor[[32, 128], pl.FP32],
-        up: pl.Tensor[[32, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
-    ) -> pl.Tensor[[32, 128], pl.FP32]:
+@pl.jit
+def swiglu(gate: pl.Tensor, up: pl.Tensor, output: pl.Out[pl.Tensor]):
+    with pl.incore():
         # SwiGLU(gate, up) = Swish(gate) * up = gate * sigmoid(gate) * up
         tile_gate = pl.load(gate, [0, 0], [32, 128])
         tile_up = pl.load(up, [0, 0], [32, 128])
@@ -103,29 +71,13 @@ class SwigluProgram:
         sigmoid = pl.recip(denom)
         swish = pl.mul(tile_gate, sigmoid)
         result = pl.mul(swish, tile_up)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def swiglu_orch(
-        self,
-        gate: pl.Tensor[[32, 128], pl.FP32],
-        up: pl.Tensor[[32, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
-    ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output_ret = self.kernel_swiglu(gate, up, output)
-        return output_ret
+        pl.store(result, [0, 0], output)
+    return output
 
 
-@pl.program
-class GegluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_geglu(
-        self,
-        gate: pl.Tensor[[32, 128], pl.FP32],
-        up: pl.Tensor[[32, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
-    ) -> pl.Tensor[[32, 128], pl.FP32]:
+@pl.jit
+def geglu(gate: pl.Tensor, up: pl.Tensor, output: pl.Out[pl.Tensor]):
+    with pl.incore():
         # GeGLU(gate, up) = GELU(gate) * up
         # GELU approximation: gate * sigmoid(1.702 * gate)
         tile_gate = pl.load(gate, [0, 0], [32, 128])
@@ -137,27 +89,50 @@ class GegluProgram:
         sigmoid = pl.recip(denom)
         gelu_gate = pl.mul(tile_gate, sigmoid)
         result = pl.mul(gelu_gate, tile_up)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def geglu_orch(
-        self,
-        gate: pl.Tensor[[32, 128], pl.FP32],
-        up: pl.Tensor[[32, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
-    ) -> pl.Tensor[[32, 128], pl.FP32]:
-        output_ret = self.kernel_geglu(gate, up, output)
-        return output_ret
+        pl.store(result, [0, 0], output)
+    return output
 
 
 if __name__ == "__main__":
-    for name, prog in [
-        ("SiLU", SiluProgram),
-        ("GELU", GeluProgram),
-        ("SwiGLU", SwigluProgram),
-        ("GeGLU", GegluProgram),
-    ]:
-        print(f"=== {name} ===")
-        print(prog.as_python())
-        print()
+    torch.manual_seed(0)
+    config = RunConfig()
+
+    # SiLU
+    x = torch.randn(32, 128, dtype=torch.float32)
+    out = torch.zeros_like(x)
+    silu(x, out, config=config)
+    expected = x * torch.sigmoid(x)
+    assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
+        f"silu failed: max diff = {(out - expected).abs().max().item()}"
+    )
+
+    # GELU
+    x = torch.randn(32, 128, dtype=torch.float32)
+    out = torch.zeros_like(x)
+    gelu(x, out, config=config)
+    expected = x * torch.sigmoid(1.702 * x)
+    assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
+        f"gelu failed: max diff = {(out - expected).abs().max().item()}"
+    )
+
+    # SwiGLU
+    gate = torch.randn(32, 128, dtype=torch.float32)
+    up = torch.randn(32, 128, dtype=torch.float32)
+    out = torch.zeros_like(gate)
+    swiglu(gate, up, out, config=config)
+    expected = gate * torch.sigmoid(gate) * up
+    assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
+        f"swiglu failed: max diff = {(out - expected).abs().max().item()}"
+    )
+
+    # GeGLU
+    gate = torch.randn(32, 128, dtype=torch.float32)
+    up = torch.randn(32, 128, dtype=torch.float32)
+    out = torch.zeros_like(gate)
+    geglu(gate, up, out, config=config)
+    expected = gate * torch.sigmoid(1.702 * gate) * up
+    assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
+        f"geglu failed: max diff = {(out - expected).abs().max().item()}"
+    )
+
+    print("OK")

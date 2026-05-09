@@ -16,152 +16,66 @@ Three FFN patterns are demonstrated (all on 64x64 tiles):
   3. FFN + ReLU   — ReLU(hidden @ gate_proj) @ down_proj
 """
 
-from typing import Any
-
 import pytest
 import torch
-from examples.models.ffn import (
-    FFNGeluProgram,
-    FFNReluProgram,
-    FFNSwigluProgram,
-)
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.runtime.runner import RunConfig
-
-
-class BaseFFNTest(PTOTestCase):
-    """Base class for FFN tests providing common backend configuration."""
-
-    __test__ = False  # Prevent pytest from collecting this as a test
-
-    def get_strategy(self) -> OptimizationStrategy:
-        return OptimizationStrategy.Default
-
-    def get_backend_type(self) -> BackendType:
-        return BackendType.Ascend910B
-
-
-class TestFFNGelu(BaseFFNTest):
-    """FFN with GELU activation on 64x64 tiles.
-
-    Pipeline: output = GELU(hidden_states @ gate_proj_weight) @ down_proj_weight
-    GELU approximation: x * sigmoid(1.702 * x)
-    """
-
-    __test__ = False  # Not a pytest test class
-
-    def get_name(self) -> str:
-        return "ffn_gelu_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("hidden_states", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("gate_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("down_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return FFNGeluProgram
-
-    def compute_expected(self, tensors, params=None):
-        hidden_states = tensors["hidden_states"]
-        gate_proj_weight = tensors["gate_proj_weight"]
-        down_proj_weight = tensors["down_proj_weight"]
-        gate = hidden_states @ gate_proj_weight
-        activated = gate * torch.sigmoid(1.702 * gate)
-        tensors["output"][:] = activated @ down_proj_weight
-
-
-class TestFFNSwiglu(BaseFFNTest):
-    """FFN with SwiGLU activation on 64x64 tiles.
-
-    Pipeline: output = SwiGLU(gate, up) @ down_proj_weight
-    where gate = hidden_states @ gate_proj_weight
-          up   = hidden_states @ up_proj_weight
-    """
-
-    __test__ = False  # Not a pytest test class
-
-    def get_name(self) -> str:
-        return "ffn_swiglu_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("hidden_states", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("gate_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("up_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("down_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return FFNSwigluProgram
-
-    def compute_expected(self, tensors, params=None):
-        hidden_states = tensors["hidden_states"]
-        gate_proj_weight = tensors["gate_proj_weight"]
-        up_proj_weight = tensors["up_proj_weight"]
-        down_proj_weight = tensors["down_proj_weight"]
-        gate = hidden_states @ gate_proj_weight
-        up = hidden_states @ up_proj_weight
-        activated = gate * torch.sigmoid(gate) * up
-        tensors["output"][:] = activated @ down_proj_weight
-
-
-class TestFFNRelu(BaseFFNTest):
-    """FFN with ReLU activation on 64x64 tiles.
-
-    Pipeline: output = ReLU(hidden_states @ gate_proj_weight) @ down_proj_weight
-    """
-
-    __test__ = False  # Not a pytest test class
-
-    def get_name(self) -> str:
-        return "ffn_relu_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("hidden_states", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("gate_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("down_proj_weight", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return FFNReluProgram
-
-    def compute_expected(self, tensors, params=None):
-        hidden_states = tensors["hidden_states"]
-        gate_proj_weight = tensors["gate_proj_weight"]
-        down_proj_weight = tensors["down_proj_weight"]
-        gate = hidden_states @ gate_proj_weight
-        activated = torch.relu(gate)
-        tensors["output"][:] = activated @ down_proj_weight
+from examples.models.ffn import ffn_gelu, ffn_relu, ffn_swiglu
 
 
 class TestFFNActivationOperations:
     """Test suite for FFN module operations."""
 
-    def test_ffn_gelu_64x64(self, test_runner):
+    def test_ffn_gelu_64x64(self, test_config):
         """Test FFN with GELU activation: GELU(hidden @ gate_proj) @ down_proj."""
-        test_case = TestFFNGelu(RunConfig(atol=3e-3, rtol=3e-3))
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
+        ffn_gelu._cache.clear()
+        torch.manual_seed(0)
+        hidden = torch.randn(64, 64, dtype=torch.float32)
+        gate = torch.randn(64, 64, dtype=torch.float32)
+        down = torch.randn(64, 64, dtype=torch.float32)
+        output = torch.zeros(64, 64, dtype=torch.float32)
 
-    def test_ffn_swiglu_64x64(self, test_runner):
+        ffn_gelu(hidden, gate, down, output, config=test_config)
+
+        gate_out = hidden @ gate
+        expected = (gate_out * torch.sigmoid(1.702 * gate_out)) @ down
+        assert torch.allclose(output, expected, rtol=3e-3, atol=3e-3), (
+            f"ffn_gelu failed: max diff = {(output - expected).abs().max().item()}"
+        )
+
+    def test_ffn_swiglu_64x64(self, test_config):
         """Test FFN with SwiGLU activation: SwiGLU(gate, up) @ down_proj."""
-        test_case = TestFFNSwiglu(RunConfig(atol=3e-3, rtol=3e-3))
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
+        ffn_swiglu._cache.clear()
+        torch.manual_seed(0)
+        hidden = torch.randn(64, 64, dtype=torch.float32)
+        gate = torch.randn(64, 64, dtype=torch.float32)
+        up = torch.randn(64, 64, dtype=torch.float32)
+        down = torch.randn(64, 64, dtype=torch.float32)
+        output = torch.zeros(64, 64, dtype=torch.float32)
 
-    def test_ffn_relu_64x64(self, test_runner):
+        ffn_swiglu(hidden, gate, up, down, output, config=test_config)
+
+        gate_out = hidden @ gate
+        up_out = hidden @ up
+        expected = (gate_out * torch.sigmoid(gate_out) * up_out) @ down
+        assert torch.allclose(output, expected, rtol=3e-3, atol=3e-3), (
+            f"ffn_swiglu failed: max diff = {(output - expected).abs().max().item()}"
+        )
+
+    def test_ffn_relu_64x64(self, test_config):
         """Test FFN with ReLU activation: ReLU(hidden @ gate_proj) @ down_proj."""
-        test_case = TestFFNRelu(RunConfig(atol=3e-3, rtol=3e-3))
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
+        ffn_relu._cache.clear()
+        torch.manual_seed(0)
+        hidden = torch.randn(64, 64, dtype=torch.float32)
+        gate = torch.randn(64, 64, dtype=torch.float32)
+        down = torch.randn(64, 64, dtype=torch.float32)
+        output = torch.zeros(64, 64, dtype=torch.float32)
+
+        ffn_relu(hidden, gate, down, output, config=test_config)
+
+        gate_out = hidden @ gate
+        expected = torch.relu(gate_out) @ down
+        assert torch.allclose(output, expected, rtol=3e-3, atol=3e-3), (
+            f"ffn_relu failed: max diff = {(output - expected).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":

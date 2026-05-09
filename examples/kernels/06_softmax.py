@@ -23,16 +23,13 @@ Next: examples/kernels/07_normalization.py
 """
 
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
 
-@pl.program
-class TileSoftmaxProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_softmax(
-        self,
-        a: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
+@pl.jit
+def tile_softmax(a: pl.Tensor, output: pl.Out[pl.Tensor]):
+    with pl.incore():
         tile_a = pl.load(a, [0, 0], [64, 64])
 
         # Step 1: row-wise max for numerical stability
@@ -52,18 +49,17 @@ class TileSoftmaxProgram:
         # Step 5: divide each row by its sum
         result = pl.row_expand_div(exp_shifted, row_sum)
 
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        output_ret = self.tile_softmax(a, output)
-        return output_ret
+        pl.store(result, [0, 0], output)
+    return output
 
 
 if __name__ == "__main__":
-    print(TileSoftmaxProgram.as_python())
+    torch.manual_seed(0)
+    a = torch.randn(64, 64, dtype=torch.float32)
+    out = torch.zeros_like(a)
+    tile_softmax(a, out, config=RunConfig())
+    expected = torch.softmax(a, dim=-1)
+    assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
+        f"tile_softmax failed: max diff = {(out - expected).abs().max().item()}"
+    )
+    print("OK")

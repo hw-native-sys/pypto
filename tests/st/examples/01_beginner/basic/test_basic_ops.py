@@ -10,146 +10,23 @@
 """
 Basic Fused Operations System Tests for PyPTO.
 
-Corresponds to examples.kernels.fused_ops (02_fused_ops.py), implemented using the PyPTO
-language DSL (@pl.program / pl.tile).
+Corresponds to examples.kernels.fused_ops (02_fused_ops.py), implemented using @pl.jit.
 
 Four fused operation patterns are demonstrated:
-  1. FusedAddScale     — vector: c = (a + b) * 2.0
-  2. FusedAddRelu      — vector: c = relu(a + b)
-  3. FusedMatmulBias   — cube + vector: c = matmul(a, b) + bias
-  4. FusedLinearRelu   — cube + vector: y = relu(matmul(x, w) + bias)
+  1. fused_add_scale     — vector: c = (a + b) * 2.0
+  2. fused_add_relu      — vector: c = relu(a + b)
+  3. fused_matmul_bias   — cube + vector: c = matmul(a, b) + bias
+  4. fused_linear_relu   — cube + vector: y = relu(matmul(x, w) + bias)
 """
-
-from typing import Any
 
 import pytest
 import torch
 from examples.kernels.fused_ops import (
-    FusedAddReluProgram,
-    FusedAddScaleProgram,
-    FusedLinearReluProgram,
-    FusedMatmulBiasProgram,
+    fused_add_relu,
+    fused_add_scale,
+    fused_linear_relu,
+    fused_matmul_bias,
 )
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
-
-
-class FusedAddScale(PTOTestCase):
-    """Fused element-wise add and scale: c = (a + b) * 2.0
-
-    Corresponds to basic_ops.py Example 2: Element-wise Operations.
-    Two vector ops (add, scalar mul) are fused in a single InCore kernel,
-    avoiding an intermediate global memory write-back.
-    """
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "fused_add_scale_128x128"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [128, 128], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [128, 128], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [128, 128], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return FusedAddScaleProgram
-
-    def compute_expected(self, tensors, params=None):
-        """Expected: c = (a + b) * 2.0"""
-        tensors["c"][:] = (tensors["a"] + tensors["b"]) * 2.0
-
-
-class FusedAddRelu(PTOTestCase):
-    """Fused element-wise add and relu: c = relu(a + b)
-
-    Corresponds to basic_ops.py Example 4: Activation Functions.
-    Add and relu activation are fused in a single vector InCore kernel.
-    """
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "fused_add_relu_128x128"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [128, 128], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [128, 128], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [128, 128], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return FusedAddReluProgram
-
-    def compute_expected(self, tensors, params=None):
-        """Expected: c = relu(a + b)"""
-        tensors["c"][:] = torch.relu(tensors["a"] + tensors["b"])
-
-
-class FusedMatmulBias(PTOTestCase):
-    """Fused matmul and bias add: c = matmul(a, b) + bias
-
-    Corresponds to part of basic_ops.py Example 6: Combined Operations.
-    Orchestrates two InCore kernels — cube matmul followed by vector add_bias —
-    without exposing the intermediate result as a program output.
-    """
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "fused_matmul_bias_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [64, 64], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [64, 64], DataType.FP32, init_value=3.0),
-            TensorSpec("bias", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("c", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return FusedMatmulBiasProgram
-
-    def compute_expected(self, tensors, params=None):
-        """Expected: c = matmul(a, b) + bias"""
-        tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"]) + tensors["bias"]
-
-
-class FusedLinearRelu(PTOTestCase):
-    """Fused linear layer with relu: y = relu(matmul(x, w) + bias)
-
-    Corresponds to basic_ops.py Example 6: Combined Operations.
-    Orchestrates two InCore kernels:
-      - matmul_kernel: cube unit computes x @ w
-      - add_bias_relu_kernel: vector unit fuses bias add and relu in one pass
-    """
-
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "fused_linear_relu_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("x", [64, 64], DataType.FP32, init_value=2.0),
-            TensorSpec("w", [64, 64], DataType.FP32, init_value=3.0),
-            TensorSpec("bias", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("y", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return FusedLinearReluProgram
-
-    def compute_expected(self, tensors, params=None):
-        """Expected: y = relu(matmul(x, w) + bias)"""
-        tensors["y"][:] = torch.relu(torch.matmul(tensors["x"], tensors["w"]) + tensors["bias"])
-
-
-# =============================================================================
-# pytest test functions
-# =============================================================================
 
 
 class TestBasicFusedOps:
@@ -162,29 +39,57 @@ class TestBasicFusedOps:
       - Full linear layer (matmul+bias+relu)
     """
 
-    def test_fused_add_scale(self, test_runner):
+    def test_fused_add_scale(self, test_config):
         """Test fused add and scale: c = (a + b) * 2.0"""
-        test_case = FusedAddScale()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Fused add+scale failed: {result.error}"
+        fused_add_scale._cache.clear()
+        a = torch.full((128, 128), 2.0, dtype=torch.float32)
+        b = torch.full((128, 128), 3.0, dtype=torch.float32)
+        c = torch.zeros((128, 128), dtype=torch.float32)
+        fused_add_scale(a, b, c, config=test_config)
+        expected = (a + b) * 2.0
+        assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
+            f"Fused add+scale failed: max diff = {(c - expected).abs().max().item()}"
+        )
 
-    def test_fused_add_relu(self, test_runner):
+    def test_fused_add_relu(self, test_config):
         """Test fused add and relu: c = relu(a + b)"""
-        test_case = FusedAddRelu()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Fused add+relu failed: {result.error}"
+        fused_add_relu._cache.clear()
+        a = torch.full((128, 128), 2.0, dtype=torch.float32)
+        b = torch.full((128, 128), 3.0, dtype=torch.float32)
+        c = torch.zeros((128, 128), dtype=torch.float32)
+        fused_add_relu(a, b, c, config=test_config)
+        expected = torch.relu(a + b)
+        assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
+            f"Fused add+relu failed: max diff = {(c - expected).abs().max().item()}"
+        )
 
-    def test_fused_matmul_bias(self, test_runner):
+    def test_fused_matmul_bias(self, test_config):
         """Test fused matmul and bias add: c = matmul(a, b) + bias"""
-        test_case = FusedMatmulBias()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Fused matmul+bias failed: {result.error}"
+        fused_matmul_bias._cache.clear()
+        torch.manual_seed(0)
+        a = torch.full((64, 64), 2.0, dtype=torch.float32)
+        b = torch.full((64, 64), 3.0, dtype=torch.float32)
+        bias = torch.randn(64, 64, dtype=torch.float32)
+        c = torch.zeros((64, 64), dtype=torch.float32)
+        fused_matmul_bias(a, b, bias, c, config=test_config)
+        expected = torch.matmul(a, b) + bias
+        assert torch.allclose(c, expected, rtol=1e-3, atol=1e-3), (
+            f"Fused matmul+bias failed: max diff = {(c - expected).abs().max().item()}"
+        )
 
-    def test_fused_linear_relu(self, test_runner):
+    def test_fused_linear_relu(self, test_config):
         """Test fused linear layer with relu: y = relu(matmul(x, w) + bias)"""
-        test_case = FusedLinearRelu()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Fused linear+relu failed: {result.error}"
+        fused_linear_relu._cache.clear()
+        torch.manual_seed(0)
+        x = torch.full((64, 64), 2.0, dtype=torch.float32)
+        w = torch.full((64, 64), 3.0, dtype=torch.float32)
+        bias = torch.randn(64, 64, dtype=torch.float32)
+        y = torch.zeros((64, 64), dtype=torch.float32)
+        fused_linear_relu(x, w, bias, y, config=test_config)
+        expected = torch.relu(torch.matmul(x, w) + bias)
+        assert torch.allclose(y, expected, rtol=1e-3, atol=1e-3), (
+            f"Fused linear+relu failed: max diff = {(y - expected).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":

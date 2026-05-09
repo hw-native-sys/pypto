@@ -10,43 +10,40 @@
 """
 Tile column-wise concatenation: c[:, :16] = a, c[:, 16:] = b.
 
-Programs:
-  TileConcat32x32Program -- c[32,32] = concat(a[32,16], b[32,16])
+Kernels:
+  tile_concat_32x32 -- c[32,32] = concat(a[32,16], b[32,16])
 
 Concepts introduced:
   - pl.concat for column-wise tile concatenation
-  - Orchestration with pl.create_tensor (output allocated in orchestration)
 
 Run:  python examples/kernels/04_concat.py
 Next: examples/kernels/05_activation.py
 """
 
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
 
-@pl.program
-class TileConcat32x32Program:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_concat(
-        self,
-        a: pl.Tensor[[32, 16], pl.FP32],
-        b: pl.Tensor[[32, 16], pl.FP32],
-        c: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
+@pl.jit
+def tile_concat_32x32(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    with pl.incore():
         tile_a = pl.load(a, [0, 0], [32, 16])
         tile_b = pl.load(b, [0, 0], [32, 16])
         tile_out: pl.Tile[[32, 32], pl.FP32] = pl.concat(tile_a, tile_b)
-        out_c = pl.store(tile_out, [0, 0], c)
-        return out_c
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self, a: pl.Tensor[[32, 16], pl.FP32], b: pl.Tensor[[32, 16], pl.FP32]
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        out_c = pl.create_tensor([32, 32], dtype=pl.FP32)
-        out_c_ret = self.tile_concat(a, b, out_c)
-        return out_c_ret
+        pl.store(tile_out, [0, 0], c)
+    return c
 
 
 if __name__ == "__main__":
-    print(TileConcat32x32Program.as_python())
+    cfg = RunConfig()
+    torch.manual_seed(0)
+
+    a = torch.randn(32, 16, dtype=torch.float32)
+    b = torch.randn(32, 16, dtype=torch.float32)
+    c = torch.zeros((32, 32), dtype=torch.float32)
+    tile_concat_32x32(a, b, c, config=cfg)
+    expected = torch.cat([a, b], dim=1)
+    assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5)
+
+    print("OK")

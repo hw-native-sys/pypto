@@ -14,56 +14,34 @@ One layer normalization pattern is demonstrated:
   1. LayerNorm  — (x - mean) / sqrt(var + eps) * gamma + beta
 """
 
-from typing import Any
-
 import pytest
 import torch
-from examples.kernels.normalization import LayerNormProgram
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from examples.kernels.normalization import layer_norm
 
 
-class TestLayerNormCore(PTOTestCase):
-    """LayerNorm with 4x64 input: normalize across hidden dim, then scale and shift."""
+class TestLayerNormCore:
+    """LayerNorm with 32x64 input: normalize across hidden dim, then scale and shift."""
 
-    __test__ = False  # Not a pytest test class
+    def test_layer_norm_core(self, test_config):
+        layer_norm._cache.clear()
+        torch.manual_seed(0)
+        x = torch.randn(32, 64, dtype=torch.float32)
+        gamma = torch.randn(1, 64, dtype=torch.float32)
+        beta = torch.randn(1, 64, dtype=torch.float32)
+        output = torch.zeros_like(x)
+        layer_norm(x, gamma, beta, output, config=test_config)
 
-    def get_name(self) -> str:
-        return "layer_norm_core_4x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("x", [32, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("gamma", [1, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("beta", [1, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [32, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return LayerNormProgram
-
-    def compute_expected(self, tensors, _params=None):
-        x = tensors["x"]
-        gamma = tensors["gamma"]
-        beta = tensors["beta"]
         hidden_size = 64
         eps = 1e-5
-
         mean = x.sum(dim=-1, keepdim=True) / hidden_size
         centered = x - mean
         var = (centered**2).sum(dim=-1, keepdim=True) / hidden_size
         std = torch.sqrt(var + eps)
-        normalized = centered / std
-        tensors["output"][:] = normalized * gamma + beta
+        expected = (centered / std) * gamma + beta
 
-
-class TestLayerNormOperations:
-    """Test suite for LayerNorm operations."""
-
-    def test_layer_norm_core_4x64(self, test_runner):
-        """Test LayerNorm: normalize across hidden dim (64), scale by gamma, shift by beta."""
-        test_case = TestLayerNormCore()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
+        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
+            f"layer_norm failed: max diff = {(output - expected).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":

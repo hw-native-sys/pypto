@@ -10,9 +10,9 @@
 """
 Normalization layers: RMSNorm and LayerNorm (32x64 input).
 
-Programs:
-  RMSNormProgram  -- output = x / sqrt(mean(x^2) + eps) * gamma
-  LayerNormProgram -- output = (x - mean) / sqrt(var + eps) * gamma + beta
+Kernels:
+  rms_norm   -- output = x / sqrt(mean(x^2) + eps) * gamma
+  layer_norm -- output = (x - mean) / sqrt(var + eps) * gamma + beta
 
 Concepts introduced:
   - pl.reshape for transposing [32,1] -> [1,32] (ColMajor -> RowMajor workaround)
@@ -26,17 +26,13 @@ Next: examples/kernels/08_assemble.py
 """
 
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
 
-@pl.program
-class RMSNormProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_rms_norm(
-        self,
-        x: pl.Tensor[[32, 64], pl.FP32],
-        gamma: pl.Tensor[[1, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
-    ) -> pl.Tensor[[32, 64], pl.FP32]:
+@pl.jit
+def rms_norm(x: pl.Tensor, gamma: pl.Tensor, output: pl.Out[pl.Tensor]):
+    with pl.incore():
         tile_x = pl.load(x, [0, 0], [32, 64])
         tile_gamma = pl.load(gamma, [0, 0], [1, 64])
 
@@ -65,30 +61,18 @@ class RMSNormProgram:
         # result = normalized * gamma (broadcast gamma across batch)
         result = pl.col_expand_mul(normalized, tile_gamma)
 
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def rms_norm_orch(
-        self,
-        x: pl.Tensor[[32, 64], pl.FP32],
-        gamma: pl.Tensor[[1, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
-    ) -> pl.Tensor[[32, 64], pl.FP32]:
-        output_ret = self.kernel_rms_norm(x, gamma, output)
-        return output_ret
+        pl.store(result, [0, 0], output)
+    return output
 
 
-@pl.program
-class LayerNormProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_layer_norm(
-        self,
-        x: pl.Tensor[[32, 64], pl.FP32],
-        gamma: pl.Tensor[[1, 64], pl.FP32],
-        beta: pl.Tensor[[1, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
-    ) -> pl.Tensor[[32, 64], pl.FP32]:
+@pl.jit
+def layer_norm(
+    x: pl.Tensor,
+    gamma: pl.Tensor,
+    beta: pl.Tensor,
+    output: pl.Out[pl.Tensor],
+):
+    with pl.incore():
         tile_x = pl.load(x, [0, 0], [32, 64])
         tile_gamma = pl.load(gamma, [0, 0], [1, 64])
         tile_beta = pl.load(beta, [0, 0], [1, 64])
@@ -127,23 +111,41 @@ class LayerNormProgram:
         beta_full = pl.col_expand(scaled, tile_beta)
         result = pl.add(scaled, beta_full)
 
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def layer_norm_orch(
-        self,
-        x: pl.Tensor[[32, 64], pl.FP32],
-        gamma: pl.Tensor[[1, 64], pl.FP32],
-        beta: pl.Tensor[[1, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[32, 64], pl.FP32]],
-    ) -> pl.Tensor[[32, 64], pl.FP32]:
-        output_ret = self.kernel_layer_norm(x, gamma, beta, output)
-        return output_ret
+        pl.store(result, [0, 0], output)
+    return output
 
 
 if __name__ == "__main__":
-    print("=== RMSNormProgram ===")
-    print(RMSNormProgram.as_python())
-    print("\n=== LayerNormProgram ===")
-    print(LayerNormProgram.as_python())
+    torch.manual_seed(0)
+    config = RunConfig()
+    eps = 1e-5
+    hidden_size = 64
+
+    # RMSNorm
+    x = torch.randn(32, 64, dtype=torch.float32)
+    gamma = torch.randn(1, 64, dtype=torch.float32)
+    out = torch.zeros_like(x)
+    rms_norm(x, gamma, out, config=config)
+    mean_sq = (x**2).sum(dim=-1, keepdim=True) / hidden_size
+    rms_ref = torch.sqrt(mean_sq + eps)
+    expected = (x / rms_ref) * gamma
+    assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
+        f"rms_norm failed: max diff = {(out - expected).abs().max().item()}"
+    )
+
+    # LayerNorm
+    x = torch.randn(32, 64, dtype=torch.float32)
+    gamma = torch.randn(1, 64, dtype=torch.float32)
+    beta = torch.randn(1, 64, dtype=torch.float32)
+    out = torch.zeros_like(x)
+    layer_norm(x, gamma, beta, out, config=config)
+    mean = x.sum(dim=-1, keepdim=True) / hidden_size
+    centered = x - mean
+    var = (centered**2).sum(dim=-1, keepdim=True) / hidden_size
+    std_ref = torch.sqrt(var + eps)
+    expected = (centered / std_ref) * gamma + beta
+    assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), (
+        f"layer_norm failed: max diff = {(out - expected).abs().max().item()}"
+    )
+
+    print("OK")

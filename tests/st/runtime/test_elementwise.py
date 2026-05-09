@@ -8,104 +8,57 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Runtime tests for tile-based elementwise operations using the PyPTO frontend.
+Runtime tests for tile-based elementwise operations using the @pl.jit frontend.
 
-This module defines integration tests for elementwise add and multiply
-kernels implemented with the internal PTOTestCase harness.  Each test case
-accepts an optional ``platform`` parameter so a single class can run
-on multiple platforms via ``@pytest.mark.parametrize``.
+Verifies that the migrated tile_add_64/tile_add_128/tile_mul_64/tile_mul_128 kernels
+from ``examples.kernels.elementwise`` produce results matching torch references on
+the platform configured via ``test_config``.
 """
-
-from typing import Any
 
 import pytest
 import torch
 from examples.kernels.elementwise import (
-    TileAdd64Program,
-    TileAdd128Program,
-    TileMul64Program,
-    TileMul128Program,
+    tile_add_64,
+    tile_add_128,
+    tile_mul_64,
+    tile_mul_128,
 )
-from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 
-
-class TileAddTestCase(PTOTestCase):
-    """Test case for tile element-wise addition."""
-
-    __test__ = False
-
-    def __init__(self, size: int = 128, *, platform: str | None = None, config=None):
-        super().__init__(config, platform=platform)
-        self.size = size
-
-    def get_name(self) -> str:
-        return f"tile_add_{self.size}x{self.size}"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        s = self.size
-        return [
-            TensorSpec("a", [s, s], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [s, s], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [s, s], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return TileAdd128Program if self.size == 128 else TileAdd64Program
-
-    def compute_expected(self, tensors, params=None):
-        tensors["c"][:] = tensors["a"] + tensors["b"]
-
-
-class TileMulTestCase(PTOTestCase):
-    """Test case for tile element-wise multiplication."""
-
-    __test__ = False
-
-    def __init__(self, size: int = 128, *, platform: str | None = None, config=None):
-        super().__init__(config, platform=platform)
-        self.size = size
-
-    def get_name(self) -> str:
-        return f"tile_mul_{self.size}x{self.size}"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        s = self.size
-        return [
-            TensorSpec("a", [s, s], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [s, s], DataType.FP32, init_value=3.0),
-            TensorSpec("c", [s, s], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return TileMul128Program if self.size == 128 else TileMul64Program
-
-    def compute_expected(self, tensors, params=None):
-        tensors["c"][:] = tensors["a"] * tensors["b"]
-
-
-# =============================================================================
-# pytest test functions
-# =============================================================================
-
-_SIZES = [64, 128]
+_ADD_KERNELS = {64: tile_add_64, 128: tile_add_128}
+_MUL_KERNELS = {64: tile_mul_64, 128: tile_mul_128}
 
 
 class TestElementwiseOperations:
-    """Test suite for elementwise operations across all platforms."""
+    """Test suite for elementwise operations on the configured platform."""
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    @pytest.mark.parametrize("size", _SIZES)
-    def test_tile_add(self, test_runner, platform, size):
-        """Test tile addition with configurable shape and platform."""
-        result = test_runner.run(TileAddTestCase(size=size, platform=platform))
-        assert result.passed, f"Test failed: {result.error}"
+    @pytest.mark.parametrize("size", [64, 128])
+    def test_tile_add(self, test_config, size):
+        """Test tile addition: c = a + b at the given square size."""
+        kernel = _ADD_KERNELS[size]
+        kernel._cache.clear()
+        a = torch.full((size, size), 2.0, dtype=torch.float32)
+        b = torch.full((size, size), 3.0, dtype=torch.float32)
+        c = torch.zeros((size, size), dtype=torch.float32)
+        kernel(a, b, c, config=test_config)
+        expected = a + b
+        assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
+            f"tile_add_{size} failed: max diff = {(c - expected).abs().max().item()}"
+        )
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    @pytest.mark.parametrize("size", _SIZES)
-    def test_tile_mul(self, test_runner, platform, size):
-        """Test tile multiplication with configurable shape and platform."""
-        result = test_runner.run(TileMulTestCase(size=size, platform=platform))
-        assert result.passed, f"Test failed: {result.error}"
+    @pytest.mark.parametrize("size", [64, 128])
+    def test_tile_mul(self, test_config, size):
+        """Test tile multiplication: c = a * b at the given square size."""
+        kernel = _MUL_KERNELS[size]
+        kernel._cache.clear()
+        torch.manual_seed(0)
+        a = torch.randn(size, size, dtype=torch.float32)
+        b = torch.full((size, size), 3.0, dtype=torch.float32)
+        c = torch.zeros((size, size), dtype=torch.float32)
+        kernel(a, b, c, config=test_config)
+        expected = a * b
+        assert torch.allclose(c, expected, rtol=1e-5, atol=1e-5), (
+            f"tile_mul_{size} failed: max diff = {(c - expected).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":

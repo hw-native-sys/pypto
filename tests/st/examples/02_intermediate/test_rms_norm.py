@@ -14,52 +14,31 @@ One RMS normalization pattern is demonstrated:
   1. RMSNorm  — x / sqrt(mean(x^2) + eps) * gamma
 """
 
-from typing import Any
-
 import pytest
 import torch
-from examples.kernels.normalization import RMSNormProgram
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from examples.kernels.normalization import rms_norm
 
 
-class TestRMSNormCore(PTOTestCase):
+class TestRMSNormCore:
     """RMSNorm with 32x64 input: normalize by RMS across hidden dim, then scale by gamma."""
 
-    __test__ = False  # Not a pytest test class
+    def test_rms_norm_core(self, test_config):
+        rms_norm._cache.clear()
+        torch.manual_seed(0)
+        x = torch.randn(32, 64, dtype=torch.float32)
+        gamma = torch.randn(1, 64, dtype=torch.float32)
+        output = torch.zeros_like(x)
+        rms_norm(x, gamma, output, config=test_config)
 
-    def get_name(self) -> str:
-        return "rms_norm_core_32x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("x", [32, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("gamma", [1, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [32, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return RMSNormProgram
-
-    def compute_expected(self, tensors, _params=None):
-        x = tensors["x"]
-        gamma = tensors["gamma"]
         hidden_size = 64
         eps = 1e-5
-
         mean_sq = (x**2).sum(dim=-1, keepdim=True) / hidden_size
         rms = torch.sqrt(mean_sq + eps)
-        normalized = x / rms
-        tensors["output"][:] = normalized * gamma
+        expected = (x / rms) * gamma
 
-
-class TestRMSNormOperations:
-    """Test suite for RMSNorm operations."""
-
-    def test_rms_norm_core_32x64(self, test_runner):
-        """Test RMSNorm: normalize by RMS across hidden dim (64), scale by gamma."""
-        test_case = TestRMSNormCore()
-        result = test_runner.run(test_case)
-        assert result.passed, f"Test failed: {result.error}"
+        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
+            f"rms_norm failed: max diff = {(output - expected).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":

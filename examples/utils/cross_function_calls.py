@@ -7,90 +7,55 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Example demonstrating @pl.program decorator with cross-function calls.
+"""Cross-function composition with @pl.jit.
 
-Key points:
-- Methods in @pl.program class must have 'self' as first parameter (valid Python syntax)
-- Cross-function calls use self.method_name() syntax
-- The parser automatically strips 'self' from IR - it won't appear in generated IR functions
-- Cross-function calls are resolved to GlobalVar references automatically
+Demonstrates that ``@pl.jit.inline`` helpers are auto-discovered as deps of a
+``@pl.jit`` entry function and spliced at the call site. Each helper is a normal
+DSL function; the entry composes them by calling them like Python functions.
+
+This is the @pl.jit equivalent of the older ``@pl.program`` + ``self.method()``
+cross-function-call pattern: in the JIT world, dep discovery happens through the
+entry function's globals, not through a class.
 """
 
 import pypto.language as pl
 
-# Define a program where functions call each other
-# NOTE: For now, test with pl.parse_program to avoid decorator nesting issues
-program_code = """
-@pl.program
-class MathOps:
-    @pl.function
-    def square(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-        result: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
-        return result
 
-    @pl.function
-    def sum_of_squares(
-        self,
-        a: pl.Tensor[[1], pl.INT32],
-        b: pl.Tensor[[1], pl.INT32],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        # Call the square method using self.square()
-        a_squared: pl.Tensor[[1], pl.INT32] = self.square(a)
-        b_squared: pl.Tensor[[1], pl.INT32] = self.square(b)
-        result: pl.Tensor[[1], pl.INT32] = pl.add(a_squared, b_squared)
-        return result
-
-    @pl.function
-    def pythagorean(
-        self,
-        a: pl.Tensor[[1], pl.INT32],
-        b: pl.Tensor[[1], pl.INT32],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        # Call another function in the program using self
-        result: pl.Tensor[[1], pl.INT32] = self.sum_of_squares(a, b)
-        return result
-"""
-
-# Parse the program from the string
-MathOps = pl.parse_program(program_code)
+@pl.jit.inline
+def add_helper(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+    """Tile-wise add: c = a + 1.0."""
+    with pl.incore():
+        tile_a = pl.load(a, [0, 0], [128, 128])
+        tile_c = pl.add(tile_a, 1.0)
+        pl.store(tile_c, [0, 0], c)
+    return c
 
 
-def main():
-    """Demonstrate program usage and introspection."""
-    # MathOps is now an ir.Program object
-    print("=" * 70)
-    print("Program Information")
-    print("=" * 70)
-    print(f"Program name: {MathOps.name}")
-    print(f"Number of functions: {len(MathOps.functions)}")
-    print(f"Function names: {[f.name for f in MathOps.functions.values()]}")
+@pl.jit.inline
+def mul_helper(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+    """Tile-wise multiply: c = a * 2.0."""
+    with pl.incore():
+        tile_a = pl.load(a, [0, 0], [128, 128])
+        tile_c = pl.mul(tile_a, 2.0)
+        pl.store(tile_c, [0, 0], c)
+    return c
 
-    # Verify cross-function calls
-    print("\n" + "=" * 70)
-    print("Function Details")
-    print("=" * 70)
-    sum_func = MathOps.get_function("sum_of_squares")
-    assert sum_func is not None
-    print(f"Function 'sum_of_squares' has {len(sum_func.params)} parameters (self was stripped)")
-    print(f"Parameters: {[p.name_hint for p in sum_func.params]}")
-    print("It calls 'square' internally via GlobalVar references")
 
-    # Print the program back as Python code
-    print("\n" + "=" * 70)
-    print("Program as Python Code")
-    print("=" * 70)
-    code = MathOps.as_python()
-    print(code)
-
-    print("\n" + "=" * 70)
-    print("Round-Trip Test")
-    print("=" * 70)
-    # Parse the printed code back
-    reparsed = pl.parse_program(code)
-    print(f"Reparsed program name: {reparsed.name}")
-    print(f"Reparsed function count: {len(reparsed.functions)}")
-    print("Round-trip successful!")
+@pl.jit
+def main_kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+    """Entry: c = (a + 1.0) * 2.0, composed via two @pl.jit.inline helpers."""
+    intermediate = pl.create_tensor([128, 128], dtype=pl.FP32)
+    intermediate = add_helper(a, intermediate)
+    c = mul_helper(intermediate, c)
+    return c
 
 
 if __name__ == "__main__":
-    main()
+    import torch
+
+    a = torch.randn(128, 128, dtype=torch.float32)
+    c = torch.zeros(128, 128, dtype=torch.float32)
+    prog = main_kernel.compile_for_test(a, c)
+    print(f"main_kernel: {len(prog.functions)} fn(s)")
+    for fn in prog.functions.values():
+        print(f"  {fn.name}: {fn.func_type}")

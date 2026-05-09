@@ -11,32 +11,25 @@
 
 Validates that ``Worker.alloc_tensor`` produces a buffer the runtime can
 consume via ``CompiledProgram(...)`` with ``ContinuousTensor.child_memory=True``
-— i.e. no H2D upload of the DeviceTensor on entry, no D2H copy-back on exit.
+-- i.e. no H2D upload of the DeviceTensor on entry, no D2H copy-back on exit.
 
 Both tests run on hardware/simulator and depend on the ``simpler`` runtime
 package; the ``check_hardware_availability`` fixture in this directory's
 ``conftest.py`` skips them on hosts without a device when only an
 onboard platform is requested.
-"""
 
-from datetime import datetime
-from pathlib import Path
+The kernel under test is the migrated @pl.jit function ``tile_add_128``.  We
+trigger specialization on first call with plain torch tensors, then reach
+into the JIT cache for the underlying ``CompiledProgram`` and re-invoke it
+with a Worker-resident DeviceTensor as the second argument.  The JIT-level
+``_bind_args`` only accepts torch tensors, so the direct ``CompiledProgram``
+call is the supported way to mix host + device tensor inputs.
+"""
 
 import pytest
 import torch
-from examples.kernels.elementwise import TileAddProgram
-from pypto import ir
+from examples.kernels.elementwise import tile_add_128
 from pypto.runtime import RunConfig, Worker
-
-_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output" / "test_device_tensor"
-
-
-@pytest.fixture(scope="module")
-def output_root() -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    root = _BUILD_OUTPUT_DIR / timestamp
-    root.mkdir(parents=True, exist_ok=True)
-    return root
 
 
 def _worker_config(test_config: RunConfig) -> RunConfig:
@@ -51,10 +44,21 @@ def _worker_config(test_config: RunConfig) -> RunConfig:
     return RunConfig(platform=test_config.platform, device_id=test_config.device_id)
 
 
+def _specialize_and_get_compiled(test_config: RunConfig):
+    """Specialize tile_add_128 for [128,128]/fp32 and return the cached CompiledProgram."""
+    tile_add_128._cache.clear()
+    a = torch.full((128, 128), 1.0, dtype=torch.float32)
+    b = torch.full((128, 128), 1.0, dtype=torch.float32)
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    tile_add_128(a, b, c, config=test_config)
+    assert len(tile_add_128._cache) == 1, "tile_add_128 should have one cache entry"
+    return next(iter(tile_add_128._cache.values()))
+
+
 class TestDeviceTensorEndToEnd:
     """End-to-end DeviceTensor execution on hardware/simulator."""
 
-    def test_device_tensor_input_skips_h2d_per_call(self, output_root, test_config):
+    def test_device_tensor_input_skips_h2d_per_call(self, test_config):
         """``compiled(host_a, weight_dev, host_out)`` produces ``a + b``.
 
         ``b`` is uploaded once to a worker-resident DeviceTensor; subsequent
@@ -67,11 +71,7 @@ class TestDeviceTensorEndToEnd:
         3. The handle survives across multiple kernel invocations bound to
            the same Worker.
         """
-        compiled = ir.compile(
-            TileAddProgram,
-            output_dir=str(output_root / "add_devtensor_input"),
-            platform=test_config.platform,
-        )
+        compiled = _specialize_and_get_compiled(test_config)
 
         host_a1 = torch.full((128, 128), 2.0, dtype=torch.float32)
         host_a2 = torch.full((128, 128), 7.0, dtype=torch.float32)
@@ -98,10 +98,10 @@ class TestDeviceTensorEndToEnd:
         )
 
     def test_alloc_tensor_then_copy_from_roundtrip(self, test_config):
-        """``alloc_tensor(init=...)`` → ``copy_from`` recovers the original bytes.
+        """``alloc_tensor(init=...)`` -> ``copy_from`` recovers the original bytes.
 
         Exercises the Worker primitives in isolation: this does NOT involve
-        a CompiledProgram — it just verifies that the H2D upload performed
+        a CompiledProgram -- it just verifies that the H2D upload performed
         by ``alloc_tensor`` lands the exact host bytes on device, and that
         ``copy_from`` reads them back correctly.  A failure here would
         manifest as garbage data in the DeviceTensor consumed by kernels.

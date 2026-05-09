@@ -39,31 +39,35 @@ Concepts introduced:
   - Nested loops with computed offsets
   - Acc->Mat vs Vec->Vec hardware modes
 
-Programs (one representative per distinct pattern):
-  TileAssembleAccMatProgram             -- Acc->Mat: matmul result -> target at offset
-  TileAssembleVecProgram                -- Vec->Vec: single-shot insert
-  TileAssembleRowByRowProgram           -- Vec->Vec: loop + pl.slice + assemble
-  TileAssembleDoubleLoopProgram         -- Vec->Vec: nested loops + pl.slice
-  TileAssembleLoopColBroadcastProgram   -- Vec->Vec: loop with column broadcast (no slice)
-  TileAssembleDoubleLoopBroadcastProgram -- Vec->Vec: nested loops, quadrant broadcast
+Kernels (one representative per distinct pattern):
+  tile_assemble_acc_mat              -- Acc->Mat: matmul result -> target at offset
+  tile_assemble_vec                  -- Vec->Vec: single-shot insert
+  tile_assemble_row_by_row           -- Vec->Vec: loop + pl.slice + assemble
+  tile_assemble_double_loop          -- Vec->Vec: nested loops + pl.slice
+  tile_assemble_loop_col_broadcast   -- Vec->Vec: loop with column broadcast (no slice)
+  tile_assemble_double_loop_broadcast -- Vec->Vec: nested loops, quadrant broadcast
+
+Note: ``__main__`` runs ``compile_for_test`` (full pass pipeline, no device
+execution) for each kernel. The per-mode hardware semantics of TINSERT
+(Acc->Mat NZ vs. Vec->Vec ND_VEC) are best validated on device via
+``tests/st/runtime/test_assemble.py`` rather than against a torch reference.
 
 Run:  python examples/kernels/08_assemble.py
 Next: examples/models/01_ffn.py
 """
 
 import pypto.language as pl
+import torch
 
 
-@pl.program
-class TileAssembleAccMatProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_assemble(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        a: pl.Tensor[[32, 16], pl.FP32],
-        b: pl.Tensor[[16, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
+@pl.jit
+def tile_assemble_acc_mat(
+    x: pl.Tensor,
+    a: pl.Tensor,
+    b: pl.Tensor,
+    y: pl.Out[pl.Tensor],
+):
+    with pl.incore():
         # Load target into Mat (L1)
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Mat)
         # Produce Acc (L0C, FP32) via matmul: GM -> Mat -> Left/Right -> matmul
@@ -76,86 +80,49 @@ class TileAssembleAccMatProgram:
         result = pl.tile.assemble(tile_x, tile_src, [0, 16])
         # Move Mat -> Vec before store
         result_vec = pl.move(result, target_memory=pl.MemorySpace.Vec)
-        out_y = pl.store(result_vec, [0, 0], y)
-        return out_y
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        a: pl.Tensor[[32, 16], pl.FP32],
-        b: pl.Tensor[[16, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y_ret = self.tile_assemble(x, a, b, y)
-        return y_ret
+        pl.store(result_vec, [0, 0], y)
+    return y
 
 
-@pl.program
-class TileAssembleVecProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_assemble(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[32, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
+@pl.jit
+def tile_assemble_vec(
+    x: pl.Tensor,
+    src: pl.Tensor,
+    y: pl.Out[pl.Tensor],
+):
+    with pl.incore():
         # Load target and source into Vec (UB) -- ND/RowMajor layout
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [32, 16], target_memory=pl.MemorySpace.Vec)
         # Assemble: insert src into the left half of x at [0, 0] -- ND_VEC mode
         result = pl.tile.assemble(tile_x, tile_src, [0, 0])
-        out_y = pl.store(result, [0, 0], y)
-        return out_y
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[32, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y_ret = self.tile_assemble(x, src, y)
-        return y_ret
+        pl.store(result, [0, 0], y)
+    return y
 
 
-@pl.program
-class TileAssembleRowByRowProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_assemble(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[32, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
+@pl.jit
+def tile_assemble_row_by_row(
+    x: pl.Tensor,
+    src: pl.Tensor,
+    y: pl.Out[pl.Tensor],
+):
+    with pl.incore():
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [32, 16], target_memory=pl.MemorySpace.Vec)
         for i in pl.range(32):
             row = pl.slice(tile_src, [1, 16], [i, 0])
             tile_x = pl.tile.assemble(tile_x, row, [i, 0])
-        out_y = pl.store(tile_x, [0, 0], y)
-        return out_y
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[32, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y_ret = self.tile_assemble(x, src, y)
-        return y_ret
+        pl.store(tile_x, [0, 0], y)
+    return y
 
 
-@pl.program
-class TileAssembleDoubleLoopProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_assemble(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[32, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
+@pl.jit
+def tile_assemble_double_loop(
+    x: pl.Tensor,
+    src: pl.Tensor,
+    y: pl.Out[pl.Tensor],
+):
+    with pl.incore():
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [32, 16], target_memory=pl.MemorySpace.Vec)
         for b in pl.range(4):
@@ -163,84 +130,102 @@ class TileAssembleDoubleLoopProgram:
                 row = b * 8 + i
                 tile_row = pl.slice(tile_src, [1, 16], [row, 0])
                 tile_x = pl.tile.assemble(tile_x, tile_row, [row, 0])
-        out_y = pl.store(tile_x, [0, 0], y)
-        return out_y
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[32, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y_ret = self.tile_assemble(x, src, y)
-        return y_ret
+        pl.store(tile_x, [0, 0], y)
+    return y
 
 
-@pl.program
-class TileAssembleLoopColBroadcastProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_assemble(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[32, 8], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
+@pl.jit
+def tile_assemble_loop_col_broadcast(
+    x: pl.Tensor,
+    src: pl.Tensor,
+    y: pl.Out[pl.Tensor],
+):
+    with pl.incore():
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [32, 8], target_memory=pl.MemorySpace.Vec)
         for c in pl.range(4):
             tile_x = pl.tile.assemble(tile_x, tile_src, [0, c * 8])
-        out_y = pl.store(tile_x, [0, 0], y)
-        return out_y
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[32, 8], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y_ret = self.tile_assemble(x, src, y)
-        return y_ret
+        pl.store(tile_x, [0, 0], y)
+    return y
 
 
-@pl.program
-class TileAssembleDoubleLoopBroadcastProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def tile_assemble(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[16, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
+@pl.jit
+def tile_assemble_double_loop_broadcast(
+    x: pl.Tensor,
+    src: pl.Tensor,
+    y: pl.Out[pl.Tensor],
+):
+    with pl.incore():
         tile_x = pl.load(x, [0, 0], [32, 32], target_memory=pl.MemorySpace.Vec)
         tile_src = pl.load(src, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
         for b in pl.range(2):
             for c in pl.range(2):
                 tile_x = pl.tile.assemble(tile_x, tile_src, [b * 16, c * 16])
-        out_y = pl.store(tile_x, [0, 0], y)
-        return out_y
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        x: pl.Tensor[[32, 32], pl.FP32],
-        src: pl.Tensor[[16, 16], pl.FP32],
-        y: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
-    ) -> pl.Tensor[[32, 32], pl.FP32]:
-        y_ret = self.tile_assemble(x, src, y)
-        return y_ret
+        pl.store(tile_x, [0, 0], y)
+    return y
 
 
 if __name__ == "__main__":
-    for name, prog in [
-        ("AccMat", TileAssembleAccMatProgram),
-        ("Vec", TileAssembleVecProgram),
-        ("RowByRow", TileAssembleRowByRowProgram),
-        ("DoubleLoop", TileAssembleDoubleLoopProgram),
-        ("LoopColBroadcast", TileAssembleLoopColBroadcastProgram),
-        ("DoubleLoopBroadcast", TileAssembleDoubleLoopBroadcastProgram),
-    ]:
-        print(f"=== TileAssemble{name}Program ===")
-        print(prog.as_python())
-        print()
+    # Smoke test each kernel via compile_for_test (no torch reference --
+    # tile.assemble's per-mode hardware semantics are best validated on device).
+    cases = [
+        (
+            "acc_mat",
+            tile_assemble_acc_mat,
+            (
+                torch.randn(32, 32, dtype=torch.float32),
+                torch.randn(32, 16, dtype=torch.float32),
+                torch.randn(16, 16, dtype=torch.float32),
+                torch.zeros(32, 32, dtype=torch.float32),
+            ),
+        ),
+        (
+            "vec",
+            tile_assemble_vec,
+            (
+                torch.randn(32, 32, dtype=torch.float32),
+                torch.randn(32, 16, dtype=torch.float32),
+                torch.zeros(32, 32, dtype=torch.float32),
+            ),
+        ),
+        (
+            "row_by_row",
+            tile_assemble_row_by_row,
+            (
+                torch.randn(32, 32, dtype=torch.float32),
+                torch.randn(32, 16, dtype=torch.float32),
+                torch.zeros(32, 32, dtype=torch.float32),
+            ),
+        ),
+        (
+            "double_loop",
+            tile_assemble_double_loop,
+            (
+                torch.randn(32, 32, dtype=torch.float32),
+                torch.randn(32, 16, dtype=torch.float32),
+                torch.zeros(32, 32, dtype=torch.float32),
+            ),
+        ),
+        (
+            "loop_col_broadcast",
+            tile_assemble_loop_col_broadcast,
+            (
+                torch.randn(32, 32, dtype=torch.float32),
+                torch.randn(32, 8, dtype=torch.float32),
+                torch.zeros(32, 32, dtype=torch.float32),
+            ),
+        ),
+        (
+            "double_loop_broadcast",
+            tile_assemble_double_loop_broadcast,
+            (
+                torch.randn(32, 32, dtype=torch.float32),
+                torch.randn(16, 16, dtype=torch.float32),
+                torch.zeros(32, 32, dtype=torch.float32),
+            ),
+        ),
+    ]
+    for name, fn, args in cases:
+        prog = fn.compile_for_test(*args)
+        print(f"{name}: {len(prog.functions)} fn(s)")
+    print("OK")

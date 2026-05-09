@@ -10,11 +10,11 @@
 """
 Fused operations: combining multiple ops in a single InCore kernel.
 
-Programs:
-  FusedAddScaleProgram   — c = (a + b) * 2.0           (vector only)
-  FusedAddReluProgram    — c = relu(a + b)              (vector only)
-  FusedMatmulBiasProgram — c = matmul(a, b) + bias      (cube + vector)
-  FusedLinearReluProgram — y = relu(matmul(x, w) + bias) (cube + vector)
+Kernels:
+  fused_add_scale    — c = (a + b) * 2.0           (vector only)
+  fused_add_relu     — c = relu(a + b)              (vector only)
+  fused_matmul_bias  — c = matmul(a, b) + bias      (cube + vector)
+  fused_linear_relu  — y = relu(matmul(x, w) + bias) (cube + vector)
 
 Concepts introduced:
   - Scalar operations: pl.mul(tile, 2.0)
@@ -22,173 +22,119 @@ Concepts introduced:
   - Memory spaces: pl.MemorySpace.Mat (L1), Left (L0A), Right (L0B)
   - pl.move for transferring tiles between memory spaces
   - pl.matmul for cube unit matrix multiplication
-  - Multi-kernel orchestration: pl.create_tensor for intermediate buffers
+  - Multi-kernel orchestration: @pl.jit.incore helpers + pl.create_tensor for intermediate buffers
 
 Run:  python examples/kernels/02_fused_ops.py
 Next: examples/kernels/03_matmul.py
 """
 
 import pypto.language as pl
+import torch
+from pypto.runtime import RunConfig
 
 
-@pl.program
-class FusedAddScaleProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def fused_add_scale(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        """Fused: load a, b -> add -> scale by 2.0 -> store c."""
+@pl.jit
+def fused_add_scale(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    """Fused: load a, b -> add -> scale by 2.0 -> store c."""
+    with pl.incore():
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_sum = pl.add(tile_a, tile_b)
         tile_c = pl.mul(tile_sum, 2.0)
-        out_c = pl.store(tile_c, [0, 0], c)
-        return out_c
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c_ret = self.fused_add_scale(a, b, out_c)
-        return out_c_ret
+        pl.store(tile_c, [0, 0], c)
+    return c
 
 
-@pl.program
-class FusedAddReluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def fused_add_relu(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        """Fused: load a, b -> add -> relu -> store c."""
+@pl.jit
+def fused_add_relu(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
+    """Fused: load a, b -> add -> relu -> store c."""
+    with pl.incore():
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_sum = pl.add(tile_a, tile_b)
         tile_c = pl.relu(tile_sum)
-        out_c = pl.store(tile_c, [0, 0], c)
-        return out_c
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        out_c: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        out_c_ret = self.fused_add_relu(a, b, out_c)
-        return out_c_ret
+        pl.store(tile_c, [0, 0], c)
+    return c
 
 
-@pl.program
-class FusedMatmulBiasProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def matmul_kernel(
-        self,
-        a: pl.Tensor[[64, 64], pl.FP32],
-        b: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Cube InCore: compute a @ b and store to output."""
-        tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
-        tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
-        tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
-        out = pl.store(tile_c_l0c, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def add_bias_kernel(
-        self,
-        x: pl.Tensor[[64, 64], pl.FP32],
-        bias: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Vector InCore: add bias to x and store to output."""
-        tile_x = pl.load(x, [0, 0], [64, 64])
-        tile_bias = pl.load(bias, [0, 0], [64, 64])
-        tile_c = pl.add(tile_x, tile_bias)
-        out = pl.store(tile_c, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        a: pl.Tensor[[64, 64], pl.FP32],
-        b: pl.Tensor[[64, 64], pl.FP32],
-        bias: pl.Tensor[[64, 64], pl.FP32],
-        c: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Orchestrate: c = matmul(a, b) + bias"""
-        mm_out = pl.create_tensor([64, 64], dtype=pl.FP32)
-        mm_done = self.matmul_kernel(a, b, mm_out)
-        c_ret = self.add_bias_kernel(mm_done, bias, c)
-        return c_ret
+@pl.jit.incore
+def _matmul_kernel_64x64(a: pl.Tensor, b: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Cube InCore: compute a @ b and store to output."""
+    tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+    tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+    tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+    tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+    tile_c_l0c = pl.matmul(tile_a_l0a, tile_b_l0b)
+    pl.store(tile_c_l0c, [0, 0], output)
+    return output
 
 
-@pl.program
-class FusedLinearReluProgram:
-    @pl.function(type=pl.FunctionType.InCore)
-    def matmul_kernel(
-        self,
-        x: pl.Tensor[[64, 64], pl.FP32],
-        w: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Cube InCore: compute x @ w and store to output."""
-        tile_x_l1 = pl.load(x, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_w_l1 = pl.load(w, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
-        tile_x_l0a = pl.move(tile_x_l1, target_memory=pl.MemorySpace.Left)
-        tile_w_l0b = pl.move(tile_w_l1, target_memory=pl.MemorySpace.Right)
-        tile_out_l0c = pl.matmul(tile_x_l0a, tile_w_l0b)
-        out = pl.store(tile_out_l0c, [0, 0], output)
-        return out
+@pl.jit.incore
+def _add_bias_kernel_64x64(x: pl.Tensor, bias: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Vector InCore: add bias to x and store to output."""
+    tile_x = pl.load(x, [0, 0], [64, 64])
+    tile_bias = pl.load(bias, [0, 0], [64, 64])
+    tile_c = pl.add(tile_x, tile_bias)
+    pl.store(tile_c, [0, 0], output)
+    return output
 
-    @pl.function(type=pl.FunctionType.InCore)
-    def add_bias_relu_kernel(
-        self,
-        x: pl.Tensor[[64, 64], pl.FP32],
-        bias: pl.Tensor[[64, 64], pl.FP32],
-        output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Vector InCore: fused bias add and relu activation."""
-        tile_x = pl.load(x, [0, 0], [64, 64])
-        tile_bias = pl.load(bias, [0, 0], [64, 64])
-        tile_biased = pl.add(tile_x, tile_bias)
-        tile_y = pl.relu(tile_biased)
-        out = pl.store(tile_y, [0, 0], output)
-        return out
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        x: pl.Tensor[[64, 64], pl.FP32],
-        w: pl.Tensor[[64, 64], pl.FP32],
-        bias: pl.Tensor[[64, 64], pl.FP32],
-        y: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-    ) -> pl.Tensor[[64, 64], pl.FP32]:
-        """Orchestrate: y = relu(matmul(x, w) + bias)"""
-        mm_out = pl.create_tensor([64, 64], dtype=pl.FP32)
-        mm_done = self.matmul_kernel(x, w, mm_out)
-        y_ret = self.add_bias_relu_kernel(mm_done, bias, y)
-        return y_ret
+@pl.jit.incore
+def _add_bias_relu_kernel_64x64(x: pl.Tensor, bias: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Vector InCore: fused bias add and relu activation."""
+    tile_x = pl.load(x, [0, 0], [64, 64])
+    tile_bias = pl.load(bias, [0, 0], [64, 64])
+    tile_biased = pl.add(tile_x, tile_bias)
+    tile_y = pl.relu(tile_biased)
+    pl.store(tile_y, [0, 0], output)
+    return output
+
+
+@pl.jit
+def fused_matmul_bias(a: pl.Tensor, b: pl.Tensor, bias: pl.Tensor, c: pl.Out[pl.Tensor]):
+    """Orchestrate: c = matmul(a, b) + bias"""
+    mm_out = pl.create_tensor([64, 64], dtype=pl.FP32)
+    mm_out = _matmul_kernel_64x64(a, b, mm_out)
+    c = _add_bias_kernel_64x64(mm_out, bias, c)
+    return c
+
+
+@pl.jit
+def fused_linear_relu(x: pl.Tensor, w: pl.Tensor, bias: pl.Tensor, y: pl.Out[pl.Tensor]):
+    """Orchestrate: y = relu(matmul(x, w) + bias)"""
+    mm_out = pl.create_tensor([64, 64], dtype=pl.FP32)
+    mm_out = _matmul_kernel_64x64(x, w, mm_out)
+    y = _add_bias_relu_kernel_64x64(mm_out, bias, y)
+    return y
 
 
 if __name__ == "__main__":
-    for name, prog in [
-        ("FusedAddScale", FusedAddScaleProgram),
-        ("FusedAddRelu", FusedAddReluProgram),
-        ("FusedMatmulBias", FusedMatmulBiasProgram),
-        ("FusedLinearRelu", FusedLinearReluProgram),
-    ]:
-        print(f"=== {name} ===")
-        print(prog.as_python())
-        print()
+    cfg = RunConfig()
+    torch.manual_seed(0)
+
+    # fused_add_scale
+    a = torch.full((128, 128), 2.0, dtype=torch.float32)
+    b = torch.full((128, 128), 3.0, dtype=torch.float32)
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    fused_add_scale(a, b, c, config=cfg)
+    assert torch.allclose(c, (a + b) * 2.0, rtol=1e-5, atol=1e-5)
+
+    # fused_add_relu
+    c = torch.zeros((128, 128), dtype=torch.float32)
+    fused_add_relu(a, b, c, config=cfg)
+    assert torch.allclose(c, torch.relu(a + b), rtol=1e-5, atol=1e-5)
+
+    # fused_matmul_bias
+    a64 = torch.full((64, 64), 2.0, dtype=torch.float32)
+    b64 = torch.full((64, 64), 3.0, dtype=torch.float32)
+    bias = torch.randn(64, 64, dtype=torch.float32)
+    c64 = torch.zeros((64, 64), dtype=torch.float32)
+    fused_matmul_bias(a64, b64, bias, c64, config=cfg)
+    assert torch.allclose(c64, torch.matmul(a64, b64) + bias, rtol=1e-3, atol=1e-3)
+
+    # fused_linear_relu
+    y = torch.zeros((64, 64), dtype=torch.float32)
+    fused_linear_relu(a64, b64, bias, y, config=cfg)
+    assert torch.allclose(y, torch.relu(torch.matmul(a64, b64) + bias), rtol=1e-3, atol=1e-3)
+
+    print("OK")

@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-Vector DAG computation with 3 InCore kernels and 1 Orchestration function.
+Vector DAG computation with 3 InCore kernels and 1 JIT orchestration entry.
 
 Implements: f = (a + b + 1)(a + b + 2) + (a + b)
 
@@ -24,9 +24,8 @@ Dependencies: t0->t1, t0->t2, t1->t3, t2->t3, t3->t4, t0->t4
 Concepts introduced:
   - Multi-kernel orchestration with task dependencies
   - pl.Scalar parameter type
-  - Intermediate tensors allocated in orchestration
+  - Intermediate tensors allocated via pl.create_tensor in the orchestration entry
   - golden() reference for runtime verification
-  - run() for end-to-end compilation and execution
 
 Run:  python examples/models/02_vector_dag.py  (requires hardware)
 Next: examples/models/03_flash_attention.py
@@ -36,148 +35,117 @@ import argparse
 
 import pypto.language as pl
 import torch
-from pypto.backend import BackendType
-from pypto.ir.pass_manager import OptimizationStrategy
-from pypto.runtime import RunConfig, run
+from pypto.runtime import RunConfig
+
+# ── Vector DAG (128x128) kernels ─────────────────────────────────────────────
 
 
-@pl.program
-class VectorDAGProgram:
-    """Vector example program with 3 InCore kernels and 1 Orchestration function."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_add(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        """Adds two tensors element-wise: result = a + b"""
-        a_tile = pl.load(a, [0, 0], [128, 128])
-        b_tile = pl.load(b, [0, 0], [128, 128])
-        result = pl.add(a_tile, b_tile)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_add_scalar(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        scalar: pl.Scalar[pl.FP32],
-        output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        """Adds a scalar to each element: result = a + scalar"""
-        x = pl.load(a, [0, 0], [128, 128])
-        result = pl.add(x, scalar)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_mul(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        output: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        """Multiplies two tensors element-wise: result = a * b"""
-        a_tile = pl.load(a, [0, 0], [128, 128])
-        b_tile = pl.load(b, [0, 0], [128, 128])
-        result = pl.mul(a_tile, b_tile)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orch_vector(
-        self,
-        a: pl.Tensor[[128, 128], pl.FP32],
-        b: pl.Tensor[[128, 128], pl.FP32],
-        f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
-    ) -> pl.Tensor[[128, 128], pl.FP32]:
-        """Orchestration for formula: f = (a + b + 1)(a + b + 2) + (a + b)
-
-        Task graph:
-        t0: c = kernel_add(a, b)
-        t1: d = kernel_add_scalar(c, 1.0)
-        t2: e = kernel_add_scalar(c, 2.0)
-        t3: g = kernel_mul(d, e)
-        t4: f = kernel_add(g, c)
-        """
-        c = pl.create_tensor([128, 128], dtype=pl.FP32)
-        c_done = self.kernel_add(a, b, c)
-        d = pl.create_tensor([128, 128], dtype=pl.FP32)
-        d_done = self.kernel_add_scalar(c_done, 1.0, d)
-        e = pl.create_tensor([128, 128], dtype=pl.FP32)
-        e_done = self.kernel_add_scalar(c_done, 2.0, e)
-        g = pl.create_tensor([128, 128], dtype=pl.FP32)
-        g_done = self.kernel_mul(d_done, e_done, g)
-        f_ret = self.kernel_add(g_done, c_done, f)
-        return f_ret
+@pl.jit.incore
+def kernel_add_128(a: pl.Tensor, b: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Adds two tensors element-wise: result = a + b"""
+    a_tile = pl.load(a, [0, 0], [128, 128])
+    b_tile = pl.load(b, [0, 0], [128, 128])
+    result = pl.add(a_tile, b_tile)
+    pl.store(result, [0, 0], output)
+    return output
 
 
-@pl.program
-class ExampleOrchProgram:
+@pl.jit.incore
+def kernel_add_scalar_128(
+    a: pl.Tensor,
+    scalar: pl.Scalar[pl.FP32],
+    output: pl.Out[pl.Tensor],
+):
+    """Adds a scalar to each element: result = a + scalar"""
+    x = pl.load(a, [0, 0], [128, 128])
+    result = pl.add(x, scalar)
+    pl.store(result, [0, 0], output)
+    return output
+
+
+@pl.jit.incore
+def kernel_mul_128(a: pl.Tensor, b: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Multiplies two tensors element-wise: result = a * b"""
+    a_tile = pl.load(a, [0, 0], [128, 128])
+    b_tile = pl.load(b, [0, 0], [128, 128])
+    result = pl.mul(a_tile, b_tile)
+    pl.store(result, [0, 0], output)
+    return output
+
+
+@pl.jit
+def vector_dag(a: pl.Tensor, b: pl.Tensor, f: pl.Out[pl.Tensor]):
+    """Orchestration for formula: f = (a + b + 1)(a + b + 2) + (a + b)
+
+    Task graph:
+      t0: c = kernel_add(a, b)
+      t1: d = kernel_add_scalar(c, 1.0)
+      t2: e = kernel_add_scalar(c, 2.0)
+      t3: g = kernel_mul(d, e)
+      t4: f = kernel_add(g, c)
+    """
+    c = pl.create_tensor([128, 128], dtype=pl.FP32)
+    c = kernel_add_128(a, b, c)
+    d = pl.create_tensor([128, 128], dtype=pl.FP32)
+    d = kernel_add_scalar_128(c, 1.0, d)
+    e = pl.create_tensor([128, 128], dtype=pl.FP32)
+    e = kernel_add_scalar_128(c, 2.0, e)
+    g = pl.create_tensor([128, 128], dtype=pl.FP32)
+    g = kernel_mul_128(d, e, g)
+    f = kernel_add_128(g, c, f)
+    return f
+
+
+# ── Smaller orchestration DAG (16x16) used by codegen tests ──────────────────
+
+
+@pl.jit.incore
+def kernel_add_16(a: pl.Tensor, b: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Adds two tensors element-wise: result = a + b"""
+    a_tile = pl.load(a, [0, 0], [16, 16])
+    b_tile = pl.load(b, [0, 0], [16, 16])
+    result = pl.add(a_tile, b_tile)
+    pl.store(result, [0, 0], output)
+    return output
+
+
+@pl.jit.incore
+def kernel_add_scalar_16(
+    a: pl.Tensor,
+    scalar: pl.Scalar[pl.FP32],
+    output: pl.Out[pl.Tensor],
+):
+    """Adds a scalar to each element: result = a + scalar"""
+    x = pl.load(a, [0, 0], [16, 16])
+    result = pl.add(x, scalar)
+    pl.store(result, [0, 0], output)
+    return output
+
+
+@pl.jit.incore
+def kernel_mul_16(a: pl.Tensor, b: pl.Tensor, output: pl.Out[pl.Tensor]):
+    """Multiplies two tensors element-wise: result = a * b"""
+    a_tile = pl.load(a, [0, 0], [16, 16])
+    b_tile = pl.load(b, [0, 0], [16, 16])
+    result = pl.mul(a_tile, b_tile)
+    pl.store(result, [0, 0], output)
+    return output
+
+
+@pl.jit
+def example_orch(a: pl.Tensor, b: pl.Tensor, f_result: pl.Out[pl.Tensor]):
     """Simpler orchestration DAG (16x16): f = (a + b + 1)(a + b + 2)
 
     Used by codegen tests. 4 tasks, 3 InCore kernels.
     """
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_add(
-        self,
-        a: pl.Tensor[[16, 16], pl.FP32],
-        b: pl.Tensor[[16, 16], pl.FP32],
-        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-    ) -> pl.Tensor[[16, 16], pl.FP32]:
-        """Adds two tensors element-wise: result = a + b"""
-        a_tile = pl.load(a, [0, 0], [16, 16])
-        b_tile = pl.load(b, [0, 0], [16, 16])
-        result = pl.add(a_tile, b_tile)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_add_scalar(
-        self,
-        a: pl.Tensor[[16, 16], pl.FP32],
-        scalar: pl.Scalar[pl.FP32],
-        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-    ) -> pl.Tensor[[16, 16], pl.FP32]:
-        """Adds a scalar to each element: result = a + scalar"""
-        x = pl.load(a, [0, 0], [16, 16])
-        result = pl.add(x, scalar)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel_mul(
-        self,
-        a: pl.Tensor[[16, 16], pl.FP32],
-        b: pl.Tensor[[16, 16], pl.FP32],
-        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-    ) -> pl.Tensor[[16, 16], pl.FP32]:
-        """Multiplies two tensors element-wise: result = a * b"""
-        a_tile = pl.load(a, [0, 0], [16, 16])
-        b_tile = pl.load(b, [0, 0], [16, 16])
-        result = pl.mul(a_tile, b_tile)
-        out = pl.store(result, [0, 0], output)
-        return out
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def build_example_graph(
-        self,
-        a: pl.Tensor[[16, 16], pl.FP32],
-        b: pl.Tensor[[16, 16], pl.FP32],
-        f_result: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-    ) -> pl.Tensor[[16, 16], pl.FP32]:
-        """Orchestration: f = (a + b + 1)(a + b + 2)"""
-        c = pl.create_tensor([16, 16], dtype=pl.FP32)
-        c_done = self.kernel_add(a, b, c)
-        d = pl.create_tensor([16, 16], dtype=pl.FP32)
-        d_done = self.kernel_add_scalar(c_done, 1.0, d)
-        e = pl.create_tensor([16, 16], dtype=pl.FP32)
-        e_done = self.kernel_add_scalar(c_done, 2.0, e)
-        f_result_ret = self.kernel_mul(d_done, e_done, f_result)
-        return f_result_ret
+    c = pl.create_tensor([16, 16], dtype=pl.FP32)
+    c = kernel_add_16(a, b, c)
+    d = pl.create_tensor([16, 16], dtype=pl.FP32)
+    d = kernel_add_scalar_16(c, 1.0, d)
+    e = pl.create_tensor([16, 16], dtype=pl.FP32)
+    e = kernel_add_scalar_16(c, 2.0, e)
+    f_result = kernel_mul_16(d, e, f_result)
+    return f_result
 
 
 def golden(tensors: dict, params: dict | None = None) -> None:
@@ -202,27 +170,21 @@ def main():
     b = torch.full((128, 128), 3.0, dtype=torch.float32)
     f = torch.zeros((128, 128), dtype=torch.float32)
 
-    run(
-        VectorDAGProgram,
+    vector_dag(
         a,
         b,
         f,
-        config=RunConfig(
-            platform="a2a3",
-            device_id=10,
-            strategy=OptimizationStrategy.Default,
-            backend_type=BackendType.Ascend910B,
-            runtime_profiling=args.runtime_profiling,
-        ),
+        config=RunConfig(runtime_profiling=args.runtime_profiling),
     )
 
     # Golden validation
-    c = a + b
-    expected_f = (c + 1.0) * (c + 2.0) + c
+    tensors = {"a": a, "b": b, "f": f.clone()}
+    golden(tensors)
+    expected_f = tensors["f"]
     assert torch.allclose(f, expected_f, rtol=1e-5, atol=1e-5), (
         f"Validation failed: max diff = {(f - expected_f).abs().max().item()}"
     )
-    print("PASSED")
+    print("OK")
 
 
 if __name__ == "__main__":

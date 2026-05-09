@@ -21,7 +21,7 @@ from typing import Any
 import pypto.language as pl
 import pytest
 import torch
-from examples.kernels.matmul import MatmulaccProgram
+from examples.kernels.matmul import matmul_acc_64
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 
 
@@ -268,35 +268,6 @@ class TestMatmulABTranspose(PTOTestCase):
 
     def compute_expected(self, tensors, params=None):
         tensors["c"][:] = torch.matmul(tensors["a"].to(torch.float32).T, tensors["b"].to(torch.float32).T)
-
-
-class TestMatmulAcc(PTOTestCase):
-    """Test matmul with accumulation (K-split into two chunks).
-
-    Uses MatmulaccProgram which splits K=64 into two K=32 chunks:
-    first chunk via pl.matmul, second via pl.matmul_acc.
-    """
-
-    __test__ = False
-
-    def __init__(self, *, platform: str | None = None, config=None):
-        super().__init__(config, platform=platform)
-
-    def get_name(self) -> str:
-        return "matmulacc_64x64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("b", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("c", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return MatmulaccProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["c"][:] = torch.matmul(tensors["a"], tensors["b"])
 
 
 class TestMatmulAutoL0(PTOTestCase):
@@ -546,11 +517,18 @@ class TestMatmulOperations:
         result = test_runner.run(TestMatmulABTranspose(m=m, k=k, n=n, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_matmulacc(self, test_runner, platform):
-        """Test matmul with accumulation (K split into two chunks)."""
-        result = test_runner.run(TestMatmulAcc(platform=platform))
-        assert result.passed, f"Test failed: {result.error}"
+    def test_matmulacc(self, test_config):
+        """Test matmul_acc_64 (@pl.jit): K=64 split into two K=32 chunks."""
+        matmul_acc_64._cache.clear()
+        torch.manual_seed(0)
+        a = torch.randn(64, 64, dtype=torch.float32)
+        b = torch.randn(64, 64, dtype=torch.float32)
+        c = torch.zeros((64, 64), dtype=torch.float32)
+        matmul_acc_64(a, b, c, config=test_config)
+        expected = torch.matmul(a, b)
+        assert torch.allclose(c, expected, rtol=1e-3, atol=1e-3), (
+            f"matmul_acc_64 failed: max diff = {(c - expected).abs().max().item()}"
+        )
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("m,k,n", _AUTOL0_SHAPES)

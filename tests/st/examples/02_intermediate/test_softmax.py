@@ -14,42 +14,24 @@ One tile reduction pattern is demonstrated:
   1. Softmax    — exp(x - max(x)) / sum(exp(x - max(x)))
 """
 
-from typing import Any
-
 import pytest
 import torch
-from examples.kernels.softmax import TileSoftmaxProgram
-from harness.core.harness import DataType, PTOTestCase, TensorSpec
+from examples.kernels.softmax import tile_softmax
 
 
-class TestTileSoftmax(PTOTestCase):
-    """Test row-wise softmax: output[i] = exp(a[i] - max(a[i])) / sum(exp(a[i] - max(a[i])))."""
+class TestTileSoftmax:
+    """Row-wise softmax: output[i] = exp(a[i] - max(a[i])) / sum(exp(a[i] - max(a[i])))."""
 
-    __test__ = False
-
-    def get_name(self) -> str:
-        return "tile_softmax_64x64"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("a", [64, 64], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [64, 64], DataType.FP32, is_output=True),
-        ]
-
-    def get_program(self) -> Any:
-        return TileSoftmaxProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["output"][:] = torch.softmax(tensors["a"], dim=1)
-
-
-class TestReductionOps:
-    """Test suite for reduction-based tile ops."""
-
-    def test_tile_softmax(self, test_runner):
-        """Test row-wise softmax."""
-        result = test_runner.run(TestTileSoftmax())
-        assert result.passed, f"tile_softmax failed: {result.error}"
+    def test_tile_softmax(self, test_config):
+        tile_softmax._cache.clear()
+        torch.manual_seed(0)
+        a = torch.randn(64, 64, dtype=torch.float32)
+        output = torch.zeros_like(a)
+        tile_softmax(a, output, config=test_config)
+        expected = torch.softmax(a, dim=-1)
+        assert torch.allclose(output, expected, rtol=1e-5, atol=1e-5), (
+            f"tile_softmax failed: max diff = {(output - expected).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":
