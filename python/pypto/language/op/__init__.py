@@ -41,7 +41,7 @@ from .system_ops import (
 )
 
 # Promoted tensor-only ops (accessible as pl.create_tensor, etc.)
-from .tensor_ops import assemble, dim, expand_clone, full, scatter_update
+from .tensor_ops import assemble, cos, dim, expand_clone, full, scatter_update, sin
 from .tensor_ops import ci as arange
 from .tensor_ops import create as create_tensor
 
@@ -225,10 +225,12 @@ __all__ = [
     "arange",
     "create_tensor",
     "assemble",
+    "cos",
     "dim",
     "expand_clone",
     "full",
     "scatter_update",
+    "sin",
     # Promoted system ops
     "aic_initialize_pipe",
     "aiv_initialize_pipe",

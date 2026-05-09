@@ -997,6 +997,80 @@ class TestPromotedOps:
         ir.assert_structural_equal(unified, explicit)
 
 
+class TestPromotedSinCos:
+    """``pl.sin`` and ``pl.cos`` DSL wrappers (FP32-only, tensor-only)."""
+
+    def test_pl_sin_returns_tensor(self):
+        """``pl.sin(x)`` returns a ``Tensor`` wrapping a ``tensor.sin`` Call."""
+        span = ir.Span.unknown()
+        x = Tensor(expr=ir.Var("x", ir.TensorType([64], DataType.FP32), span))
+        result = pl.sin(x)
+        assert isinstance(result, Tensor)
+        call = result.unwrap()
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tensor.sin"
+        result_type = call.type
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.dtype == DataType.FP32
+
+    def test_pl_cos_returns_tensor(self):
+        """``pl.cos(x)`` returns a ``Tensor`` wrapping a ``tensor.cos`` Call."""
+        span = ir.Span.unknown()
+        x = Tensor(expr=ir.Var("x", ir.TensorType([64], DataType.FP32), span))
+        result = pl.cos(x)
+        assert isinstance(result, Tensor)
+        call = result.unwrap()
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tensor.cos"
+        result_type = call.type
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.dtype == DataType.FP32
+
+    def test_pl_sin_matches_explicit(self):
+        """``pl.sin`` and ``pl.tensor.sin`` produce structurally equal IR."""
+
+        @pl.function
+        def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.sin(a)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.sin(a)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_pl_cos_matches_explicit(self):
+        """``pl.cos`` and ``pl.tensor.cos`` produce structurally equal IR."""
+
+        @pl.function
+        def unified(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.cos(a)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            c: pl.Tensor[[64], pl.FP32] = pl.tensor.cos(a)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_pl_sin_rejects_fp16(self):
+        """``pl.sin`` propagates the IR-level FP32-only validation for FP16 input."""
+        span = ir.Span.unknown()
+        x = Tensor(expr=ir.Var("x", ir.TensorType([64], DataType.FP16), span))
+        with pytest.raises(ValueError, match=r"(?i)FP32"):
+            pl.sin(x)
+
+    def test_pl_cos_rejects_bf16(self):
+        """``pl.cos`` propagates the IR-level FP32-only validation for BF16 input."""
+        span = ir.Span.unknown()
+        x = Tensor(expr=ir.Var("x", ir.TensorType([64], DataType.BF16), span))
+        with pytest.raises(ValueError, match=r"(?i)FP32"):
+            pl.cos(x)
+
+
 class TestUnifiedOpsTypeErrors:
     """Passing invalid types to unified_ops raises TypeError."""
 

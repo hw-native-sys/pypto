@@ -57,6 +57,8 @@ __all__ = [
     "expands",
     "expand_clone",
     "exp",
+    "sin",
+    "cos",
     "neg",
     "abs",
     "recip",
@@ -802,6 +804,34 @@ def exp(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.exp(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def sin(input: Tensor) -> Tensor:
+    """Element-wise sine operation (input in radians). FP32-only.
+
+    Args:
+        input: Input tensor (must be FP32; cast explicitly otherwise)
+
+    Returns:
+        Tensor wrapping the sin operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.sin(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def cos(input: Tensor) -> Tensor:
+    """Element-wise cosine operation (input in radians). FP32-only.
+
+    Args:
+        input: Input tensor (must be FP32; cast explicitly otherwise)
+
+    Returns:
+        Tensor wrapping the cos operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.cos(input_expr)
     return Tensor(expr=call_expr)
 
 

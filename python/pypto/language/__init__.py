@@ -93,7 +93,7 @@ from .op.system_ops import (
     tpush_to_aic,
     tpush_to_aiv,
 )
-from .op.tensor_ops import assemble, create_tensor, dim, expand_clone, full, no_dep, scatter_update
+from .op.tensor_ops import assemble, cos, create_tensor, dim, expand_clone, full, no_dep, scatter_update, sin
 from .op.tensor_ops import ci as arange
 from .op.tile_ops import (
     MemRefType,
@@ -359,11 +359,13 @@ __all__ = [
     # Promoted tensor-only
     "create_tensor",
     "assemble",
+    "cos",
     "dim",
     "full",
     "manual_scope",
     "no_dep",
     "scatter_update",
+    "sin",
     "arange",
     "ChunkConfig",
     "ChunkPolicy",
