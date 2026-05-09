@@ -1143,5 +1143,112 @@ class TestFoldComposition:
         ir.assert_structural_equal(after, Expected)
 
 
+# ============================================================================
+# tensor.as_layout folding (RFC #1300 P4-b)
+# ============================================================================
+
+
+class TestAsLayoutFolding:
+    """Simplify drops identity ``tensor.as_layout`` reinterprets per RFC §3.3.
+
+    ``tensor.as_layout`` is internal-only (not in ``pl.*``), so these tests
+    drive the pass with hand-built IR rather than ``@pl.program``.
+
+    Layout encoding refresher (RFC §4.2): row-major ``[a, b]`` ND describes
+    the same physical buffer as ``[b, a]`` DN-packed. The trailing-dim swap
+    is the canonical pair the validity check accepts.
+
+    Note on chain folding: folding ``as_layout(as_layout(x, ...), ...)`` →
+    ``as_layout(x, ...)`` is intentionally not implemented at this layer.
+    After SSA the outer Call references its inner via a Var, not inline,
+    so naive pointer inspection cannot see across the binding. A dedicated
+    SSA-aware chain optimizer can be added if a real pipeline produces such
+    chains.
+    """
+
+    @staticmethod
+    def _build_program(make_body):
+        """Build a 1-function Program whose body produces a tensor expression.
+
+        ``make_body(x_param)`` returns ``(stmts, return_var)``; the function
+        then returns ``return_var``.
+        """
+        x = ir.Var("x", ir.TensorType([ci(8), ci(4)], DataType.FP32), S)
+        stmts, ret_var = make_body(x)
+        body = wrap_stmts(list(stmts) + [ir.ReturnStmt([ret_var], S)])
+        func = ir.Function("main", [x], [ret_var.type], body, S)
+        return ir.Program([func], "test", S)
+
+    @staticmethod
+    def _iter_stmts(stmt):
+        if isinstance(stmt, ir.SeqStmts):
+            for s in stmt.stmts:
+                yield from TestAsLayoutFolding._iter_stmts(s)
+        else:
+            yield stmt
+
+    def _final_assign(self, program):
+        """Return the function's final AssignStmt (the result-producing one)."""
+        func = program.get_function("main")
+        assert func is not None
+        last = None
+        for stmt in self._iter_stmts(func.body):
+            if isinstance(stmt, ir.AssignStmt):
+                last = stmt
+        assert last is not None, "no AssignStmt in body"
+        return last
+
+    def test_eliminates_identity_as_layout(self):
+        """``as_layout(x, x.shape, x.layout)`` simplifies to ``x``: the result
+        type matches the source type, so the call is a no-op."""
+
+        def build(x):
+            # x is bare ND [8, 4]; reinterpret into the same view.
+            same = ir.op.tensor.as_layout(x, [8, 4], ir.TensorLayout.ND)
+            same_var = ir.Var("same", same.type, S)
+            return [ir.AssignStmt(same_var, same, S)], same_var
+
+        prog = self._build_program(build)
+        after = passes.simplify()(prog)
+
+        last = self._final_assign(after).value
+        assert isinstance(last, ir.Var) and last.name_hint == "x", (
+            f"expected identity as_layout to simplify to ``x``, got {type(last).__name__} ({last})"
+        )
+
+    def test_preserves_substantive_as_layout(self):
+        """Genuine reinterprets ([8,4] ND → [4,8] DN) survive the pass."""
+
+        def build(x):
+            call = ir.op.tensor.as_layout(x, [4, 8], ir.TensorLayout.DN)
+            v = ir.Var("y", call.type, S)
+            return [ir.AssignStmt(v, call, S)], v
+
+        prog = self._build_program(build)
+        after = passes.simplify()(prog)
+
+        last = self._final_assign(after).value
+        assert isinstance(last, ir.Call) and last.op.name == "tensor.as_layout"
+
+    def test_preserves_layout_change_at_same_shape(self):
+        """A reinterpret at the same shape but different layout (DN source →
+        ND target) must NOT fold away — the layout difference is the whole
+        point of the reinterpret.
+        """
+        # Build a custom program where the param itself is DN-tagged.
+        src_view = ir.TensorView([ci(1), ci(8)], ir.TensorLayout.DN)
+        src = ir.Var("src", ir.TensorType([ci(8), ci(8)], DataType.FP32, None, src_view), S)
+        call = ir.op.tensor.as_layout(src, [8, 8], ir.TensorLayout.ND)
+        v = ir.Var("y", call.type, S)
+        body = wrap_stmts([ir.AssignStmt(v, call, S), ir.ReturnStmt([v], S)])
+        func = ir.Function("main", [src], [v.type], body, S)
+        prog = ir.Program([func], "test", S)
+
+        after = passes.simplify()(prog)
+
+        last = self._final_assign(after).value
+        assert isinstance(last, ir.Call) and last.op.name == "tensor.as_layout"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

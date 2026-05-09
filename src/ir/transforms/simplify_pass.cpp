@@ -40,6 +40,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -154,11 +155,20 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
   /// Refresh the Call's result type_ so the in-memory IR matches what a
   /// fresh parse would produce (needed for roundtrip structural equality).
+  ///
+  /// Also folds ``tensor.as_layout`` chains and identity reinterprets per
+  /// RFC #1300 §3.3:
+  ///   - ``as_layout(as_layout(x, S1, L1), S2, L2)`` → ``as_layout(x, S2, L2)``
+  ///   - ``as_layout(x, x.shape, x.layout)``         → ``x``
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
+    auto call = std::dynamic_pointer_cast<const Call>(base);
+    if (call && call->op_ && call->op_->name_ == "tensor.as_layout") {
+      base = SimplifyAsLayout(call);
+    }
     auto new_type = SimplifyType(base->GetType());
     if (new_type.get() == base->GetType().get()) return base;
-    auto call = std::dynamic_pointer_cast<const Call>(base);
+    call = std::dynamic_pointer_cast<const Call>(base);
     if (!call) return base;
     return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, call->attrs_, new_type,
                                         call->span_);
@@ -503,6 +513,41 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
  private:
+  /// Identity elimination per RFC #1300 §3.3:
+  /// ``as_layout(x, x.shape, x.layout)`` → ``x``.
+  ///
+  /// Drops a ``tensor.as_layout`` reinterpret when the requested
+  /// ``(shape, layout)`` already matches what the source carries — the call is
+  /// then a no-op metadata reinterpret and downstream consumers can use ``src``
+  /// directly. Returns either the simplified expression or the original Call.
+  ///
+  /// Chain folding (``as_layout(as_layout(x, S1, L1), S2, L2)`` →
+  /// ``as_layout(x, S2, L2)``) is intentionally not implemented here. After
+  /// SSA the outer Call's arg is a Var bound to the inner Call (not the inner
+  /// Call inline), so naive pointer inspection cannot see across the binding.
+  /// A dedicated SSA-aware chain optimizer can be added if real pipelines
+  /// produce such chains.
+  ExprPtr SimplifyAsLayout(const std::shared_ptr<const Call>& call) {
+    if (call->args_.size() != 2) return call;
+    auto src = call->args_[0];
+
+    auto src_tensor = As<TensorType>(src->GetType());
+    auto shape_tuple = As<MakeTuple>(call->args_[1]);
+    auto out_tensor = As<TensorType>(call->GetType());
+    if (src_tensor && shape_tuple && out_tensor &&
+        tensor_view_semantics::detail::ShapeListsEquivalent(src_tensor->shape_, shape_tuple->elements_)) {
+      // Bare TensorType is implicitly ND-packed.
+      TensorLayout src_layout =
+          src_tensor->tensor_view_.has_value() ? src_tensor->tensor_view_->layout : TensorLayout::ND;
+      TensorLayout target_layout =
+          out_tensor->tensor_view_.has_value() ? out_tensor->tensor_view_->layout : TensorLayout::ND;
+      if (src_layout == target_layout) {
+        return src;
+      }
+    }
+    return call;
+  }
+
   /// Compose var-remap (via the base-class `var_remap_`) with analyzer-based
   /// constant folding — the Analyzer only knows about its own bindings and
   /// ignores our Var rebuilds, so remap must run first.
