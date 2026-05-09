@@ -238,6 +238,8 @@ _UNARY_1D_OPS = [
     ("recip", tensor_ops.recip, tile_ops.recip),
     ("sqrt", tensor_ops.sqrt, tile_ops.sqrt),
     ("abs", tensor_ops.abs, tile_ops.abs),
+    ("sin", tensor_ops.sin, tile_ops.sin),
+    ("cos", tensor_ops.cos, tile_ops.cos),
 ]
 
 # 2D row/col-expand-style binary ops with a vector side input.
