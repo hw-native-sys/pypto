@@ -514,36 +514,34 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
  private:
   /// Identity elimination per RFC #1300 §3.3:
-  /// ``as_layout(x, x.shape, x.layout)`` → ``x``.
+  /// ``as_layout(x, layout=x.layout)`` → ``x``.
   ///
-  /// Drops a ``tensor.as_layout`` reinterpret when the requested
-  /// ``(shape, layout)`` already matches what the source carries — the call is
-  /// then a no-op metadata reinterpret and downstream consumers can use ``src``
-  /// directly. Returns either the simplified expression or the original Call.
+  /// Drops a ``tensor.as_layout`` call when the requested target layout
+  /// matches what the source already carries — the call is then a no-op
+  /// metadata reinterpret and downstream consumers can use ``src`` directly.
+  /// (When layouts differ, ``as_layout`` performs the canonical-pair swap;
+  /// such substantive reinterprets are preserved.)
   ///
-  /// Chain folding (``as_layout(as_layout(x, S1, L1), S2, L2)`` →
-  /// ``as_layout(x, S2, L2)``) is intentionally not implemented here. After
-  /// SSA the outer Call's arg is a Var bound to the inner Call (not the inner
-  /// Call inline), so naive pointer inspection cannot see across the binding.
-  /// A dedicated SSA-aware chain optimizer can be added if real pipelines
-  /// produce such chains.
+  /// Chain folding (``as_layout(as_layout(x, L1), L2)`` → ``as_layout(x, L2)``)
+  /// is intentionally not implemented here. After SSA the outer Call's arg is
+  /// a Var bound to the inner Call (not the inner Call inline), so naive
+  /// pointer inspection cannot see across the binding. A dedicated SSA-aware
+  /// chain optimizer can be added if real pipelines produce such chains.
   ExprPtr SimplifyAsLayout(const std::shared_ptr<const Call>& call) {
-    if (call->args_.size() != 2) return call;
+    if (call->args_.size() != 1) return call;
     auto src = call->args_[0];
 
     auto src_tensor = As<TensorType>(src->GetType());
-    auto shape_tuple = As<MakeTuple>(call->args_[1]);
     auto out_tensor = As<TensorType>(call->GetType());
-    if (src_tensor && shape_tuple && out_tensor &&
-        tensor_view_semantics::detail::ShapeListsEquivalent(src_tensor->shape_, shape_tuple->elements_)) {
-      // Bare TensorType is implicitly ND-packed.
-      TensorLayout src_layout =
-          src_tensor->tensor_view_.has_value() ? src_tensor->tensor_view_->layout : TensorLayout::ND;
-      TensorLayout target_layout =
-          out_tensor->tensor_view_.has_value() ? out_tensor->tensor_view_->layout : TensorLayout::ND;
-      if (src_layout == target_layout) {
-        return src;
-      }
+    if (!src_tensor || !out_tensor) return call;
+
+    // Bare TensorType is implicitly ND-packed.
+    TensorLayout src_layout =
+        src_tensor->tensor_view_.has_value() ? src_tensor->tensor_view_->layout : TensorLayout::ND;
+    TensorLayout target_layout =
+        out_tensor->tensor_view_.has_value() ? out_tensor->tensor_view_->layout : TensorLayout::ND;
+    if (src_layout == target_layout) {
+      return src;
     }
     return call;
   }

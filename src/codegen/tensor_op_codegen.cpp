@@ -349,23 +349,21 @@ REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
-  // tensor.as_layout(input, shape, layout=...) -> metadata reinterpret only.
+  // tensor.as_layout(input, layout=...) -> metadata-only layout flip.
   // The op is internal-only (RFC #1300 §3.3): future passes inject it at
-  // orch ↔ InCore bridge sites to expose a different (shape, stride, layout)
-  // view over the same physical buffer. The validity check in
-  // ``DeduceTensorAsLayoutType`` restricts accepted reinterprets to RFC §4.2
-  // canonical pairs — currently row-major ``[..., a, b]`` ND ≡
-  // ``[..., b, a]`` DN-packed, i.e. a swap of the trailing two dims.
+  // orch ↔ InCore bridge sites to flip ND ↔ DN over the same physical buffer.
   //
-  // Runtime ``Tensor::transpose(N-2, N-1)`` is a zero-copy metadata swap of
-  // shapes / raw_shapes / offsets (the same primitive ``tensor.transpose``
-  // already lowers to). Emitting it here gives consumers a Tensor handle
-  // whose runtime metadata matches the IR's post-reinterpret TensorType, so
-  // downstream ops that read ``result.shape()`` see the right values.
+  // For cross-layout flips the trailing-two-dim shape swap (RFC §4.2 canonical
+  // pair) lowers to runtime ``Tensor::transpose(N-2, N-1)`` — a zero-copy
+  // metadata swap. The runtime Tensor handle's shapes / raw_shapes / offsets
+  // then line up with the IR's post-flip TensorType, so downstream ops that
+  // read ``result.shape()`` see the right values.
   //
-  // Identity cases (``as_layout(x, x.shape, x.layout)``) are folded out by
-  // the Simplify pass, so codegen never sees them.
-  CHECK(op->args_.size() == 2) << "tensor.as_layout requires 2 args (input, shape) plus a 'layout' kwarg";
+  // Identity cases (target layout == src layout) are folded out by the
+  // Simplify pass before reaching codegen, so we always see a substantive
+  // layout flip here. ``DeduceTensorAsLayoutType`` already enforced
+  // ``rank >= 2`` for cross-layout flips.
+  CHECK(op->args_.size() == 1) << "tensor.as_layout requires 1 arg (input) plus a 'layout' kwarg";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.as_layout input must be a variable";
@@ -374,8 +372,10 @@ REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
   CHECK(input_type) << "tensor.as_layout input must be TensorType";
 
   int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
-  CHECK(ndim >= 2) << "tensor.as_layout: only the trailing-two-dim canonical pair is currently supported, "
-                   << "but input is " << ndim << "D";
+  INTERNAL_CHECK_SPAN(ndim >= 2, op->span_)
+      << "Internal error: tensor.as_layout reached codegen with rank=" << ndim
+      << "; identity cases (same layout) should have been folded by Simplify, and "
+      << "DeduceTensorAsLayoutType rejects cross-layout flips below rank 2";
 
   std::string ext_input_name = codegen.GetExternalTensorName(input_name);
   std::string result_var = codegen.GetCurrentResultTarget();

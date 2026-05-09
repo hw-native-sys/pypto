@@ -1087,31 +1087,32 @@ def transpose(
 
 def as_layout(
     tensor: Expr,
-    shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     layout: TensorLayout,
     span: Span | None = None,
 ) -> Call:
-    """Reinterpret ``tensor`` as a different ``(shape, layout)`` view (RFC #1300 §3.3).
+    """Flip ``tensor``'s layout tag over the same physical memory (RFC #1300 §3.3).
 
     .. note::
         Internal IR builder — this op is not exposed via ``pypto.language``.
         Passes (e.g. ``LowerTransposeLoadParamLayout`` in P6) inject
-        ``tensor.as_layout`` at orch ↔ InCore call sites to bridge equivalent
-        ``(shape, stride, layout)`` views over the same physical memory. The op
-        emits no PTOAS instruction; downstream ``make_tensor_view`` consumes
-        the new view directly.
+        ``tensor.as_layout`` at orch ↔ InCore call sites to bridge ND ↔ DN views
+        over the same physical buffer. The op emits no PTOAS instruction;
+        downstream ``make_tensor_view`` consumes the new view directly.
+
+    The trailing-two-dim shape swap that comes with a cross-layout flip is
+    mechanical (RFC §4.2: row-major ``[..., a, b]`` ND ≡ ``[..., b, a]``
+    DN-packed) and derived from the source — callers don't pass a target
+    shape. For shape changes, use ``tensor.reshape``.
 
     Validity (enforced by ``DeduceTensorAsLayoutType``):
 
-    1. Total element count of ``tensor.shape`` and ``shape`` must match (when
-       both are statically known).
-    2. ``layout`` must not be ``NZ`` (NZ is tile-only and fractal).
-    3. The reinterpret must reduce to a RFC §4.2 canonical pair — currently
-       row-major ``[..., a, b]`` ND ≡ ``[..., b, a]`` DN-packed.
+    1. ``layout`` must not be ``NZ`` (NZ is tile-only and fractal).
+    2. ``tensor`` must be packed canonical or bare (strided sub-views are
+       rejected — the §4.2 equivalence only holds for packed forms).
+    3. Cross-layout flips require rank ≥ 2.
 
     Args:
-        tensor: Source TensorType expression to reinterpret.
-        shape: Target logical shape, as ints / Exprs / MakeTuple.
+        tensor: Source TensorType (packed canonical or bare).
         layout: Target ``TensorLayout`` (must not be ``NZ``).
         span: Optional source span (auto-captured when omitted).
 
@@ -1120,9 +1121,8 @@ def as_layout(
         ``(shape, stride, layout)`` for the target view.
     """
     actual_span = _get_span_or_capture(span)
-    shape_tuple = _to_make_tuple(shape, actual_span)
     kwargs: dict[str, Any] = {"layout": layout}
-    return _ir_core.create_op_call("tensor.as_layout", [tensor, shape_tuple], kwargs, actual_span)
+    return _ir_core.create_op_call("tensor.as_layout", [tensor], kwargs, actual_span)
 
 
 def set_validshape(

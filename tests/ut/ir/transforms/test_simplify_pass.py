@@ -1199,12 +1199,12 @@ class TestAsLayoutFolding:
         return last
 
     def test_eliminates_identity_as_layout(self):
-        """``as_layout(x, x.shape, x.layout)`` simplifies to ``x``: the result
-        type matches the source type, so the call is a no-op."""
+        """``as_layout(x, x.layout)`` simplifies to ``x``: target layout
+        matches source layout, so the call is a no-op."""
 
         def build(x):
-            # x is bare ND [8, 4]; reinterpret into the same view.
-            same = ir.op.tensor.as_layout(x, [8, 4], ir.TensorLayout.ND)
+            # x is bare ND [8, 4]; flipping to ND is identity.
+            same = ir.op.tensor.as_layout(x, ir.TensorLayout.ND)
             same_var = ir.Var("same", same.type, S)
             return [ir.AssignStmt(same_var, same, S)], same_var
 
@@ -1216,34 +1216,16 @@ class TestAsLayoutFolding:
             f"expected identity as_layout to simplify to ``x``, got {type(last).__name__} ({last})"
         )
 
-    def test_preserves_substantive_as_layout(self):
-        """Genuine reinterprets ([8,4] ND → [4,8] DN) survive the pass."""
+    def test_preserves_substantive_layout_flip(self):
+        """Genuine ND → DN flip (with the auto trailing-pair swap) survives —
+        Simplify only drops layout-tag identities."""
 
         def build(x):
-            call = ir.op.tensor.as_layout(x, [4, 8], ir.TensorLayout.DN)
+            call = ir.op.tensor.as_layout(x, ir.TensorLayout.DN)
             v = ir.Var("y", call.type, S)
             return [ir.AssignStmt(v, call, S)], v
 
         prog = self._build_program(build)
-        after = passes.simplify()(prog)
-
-        last = self._final_assign(after).value
-        assert isinstance(last, ir.Call) and last.op.name == "tensor.as_layout"
-
-    def test_preserves_layout_change_at_same_shape(self):
-        """A reinterpret at the same shape but different layout (DN source →
-        ND target) must NOT fold away — the layout difference is the whole
-        point of the reinterpret.
-        """
-        # Build a custom program where the param itself is DN-tagged.
-        src_view = ir.TensorView([ci(1), ci(8)], ir.TensorLayout.DN)
-        src = ir.Var("src", ir.TensorType([ci(8), ci(8)], DataType.FP32, None, src_view), S)
-        call = ir.op.tensor.as_layout(src, [8, 8], ir.TensorLayout.ND)
-        v = ir.Var("y", call.type, S)
-        body = wrap_stmts([ir.AssignStmt(v, call, S), ir.ReturnStmt([v], S)])
-        func = ir.Function("main", [src], [v.type], body, S)
-        prog = ir.Program([func], "test", S)
-
         after = passes.simplify()(prog)
 
         last = self._final_assign(after).value
