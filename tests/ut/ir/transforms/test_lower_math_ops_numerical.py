@@ -53,7 +53,10 @@ def lowered_sin(x: np.ndarray) -> np.ndarray:
 
     # Range reduction: k = round(x / pi)
     k_f = (x * PI_INV).astype(np.float32)
-    k_i = np.round(k_f).astype(np.int32)  # CAST_ROUND
+    # CAST_ROUND in PTO is round-half-away-from-zero (ISO C lround), not
+    # banker's rounding. ``np.round`` follows IEEE round-half-to-even, so it
+    # would diverge from the hardware on tie inputs (e.g. 0.5, 1.5).
+    k_i = (np.sign(k_f) * np.floor(np.abs(k_f) + 0.5)).astype(np.int32)  # CAST_ROUND
     k_f = k_i.astype(np.float32)
 
     # 4-part Cody-Waite subtraction: t = x - k * pi

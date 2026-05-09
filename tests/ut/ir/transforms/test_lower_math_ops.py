@@ -275,5 +275,51 @@ def test_both_sin_and_cos_in_same_function():
     assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
 
 
+def test_sin_in_return_stmt_is_decomposed():
+    """A ``tile.sin`` Call placed directly inside ``ReturnStmt::value_`` (i.e.
+    not pre-bound to an AssignStmt — the shape pre-SSA / standalone callers can
+    surface) must still be decomposed by the pass.
+
+    SSA-form programs never produce this shape (every Call is bound to an
+    AssignStmt), so the test constructs the IR programmatically via the IR
+    builder API to exercise the ``VisitStmt_(ReturnStmtPtr)`` override.
+    """
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([16, 16], ir.DataType.FP32)
+
+    x_param = ir.Var("x", tile_type, span)
+    sin_call = ir.create_op_call("tile.sin", [x_param], {}, span)
+    body = ir.ReturnStmt([sin_call], span)
+    func = ir.Function("trig_return", [x_param], [tile_type], body, span, ir.FunctionType.InCore)
+    prog = ir.Program([func], "test_program", span)
+
+    after = passes.lower_math_ops()(prog)
+    op_names = set(_collect_op_names(after))
+
+    # The trig op embedded directly in ReturnStmt must be lowered.
+    assert "tile.sin" not in op_names
+
+    # Decomposition primitives must appear in the lowered IR.
+    assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
+
+
+def test_cos_in_return_stmt_is_decomposed():
+    """Mirror of ``test_sin_in_return_stmt_is_decomposed`` for ``tile.cos``."""
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([16, 16], ir.DataType.FP32)
+
+    x_param = ir.Var("x", tile_type, span)
+    cos_call = ir.create_op_call("tile.cos", [x_param], {}, span)
+    body = ir.ReturnStmt([cos_call], span)
+    func = ir.Function("trig_return", [x_param], [tile_type], body, span, ir.FunctionType.InCore)
+    prog = ir.Program([func], "test_program", span)
+
+    after = passes.lower_math_ops()(prog)
+    op_names = set(_collect_op_names(after))
+
+    assert "tile.cos" not in op_names
+    assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

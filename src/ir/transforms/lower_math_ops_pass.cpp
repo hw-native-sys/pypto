@@ -95,13 +95,7 @@ class LowerMathOpsMutator : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
-    INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
-        << name << " requires exactly 1 argument, got " << call->args_.size();
-    auto in_tile_type = As<TileType>(call->args_[0]->GetType());
-    INTERNAL_CHECK_SPAN(in_tile_type, call->span_)
-        << name << " requires a TileType argument, got " << call->args_[0]->GetType()->TypeName();
-    INTERNAL_CHECK_SPAN(in_tile_type->dtype_ == DataType::FP32, call->span_)
-        << name << " is FP32-only, got dtype " << in_tile_type->dtype_.ToString();
+    ValidateTrigCall(call);
 
     // Recurse on the input expression (preserves any var_remap_ substitution).
     ExprPtr x = VisitExpr(call->args_[0]);
@@ -119,7 +113,77 @@ class LowerMathOpsMutator : public IRMutator {
     return std::make_shared<SeqStmts>(std::move(stmts), op->span_);
   }
 
+  // In SSA form (which LowerMathOps assumes), every Call is bound to an
+  // AssignStmt and ReturnStmt::value_ holds only Vars — the override above is
+  // the sole rewrite site. Standalone / pre-SSA invocations of the pass can
+  // still surface a tile.sin / tile.cos Call directly inside ReturnStmt::value_
+  // (e.g. ``return pl.tile.sin(x)``); without this override those would slip
+  // through unlowered. The override lifts each trig Call into a SeqStmts whose
+  // last statement is the (possibly mutated) ReturnStmt referencing fresh
+  // result Vars.
+  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+    std::vector<StmtPtr> prelude;
+    std::vector<ExprPtr> new_values;
+    new_values.reserve(op->value_.size());
+    bool changed = false;
+
+    for (size_t i = 0; i < op->value_.size(); ++i) {
+      INTERNAL_CHECK_SPAN(op->value_[i], op->span_) << "ReturnStmt has null value at index " << i;
+      ExprPtr value = op->value_[i];
+      auto call = As<Call>(value);
+      const bool is_trig = call && (call->op_->name_ == "tile.sin" || call->op_->name_ == "tile.cos");
+      if (is_trig) {
+        ValidateTrigCall(call);
+        const bool is_cos = (call->op_->name_ == "tile.cos");
+        ExprPtr x = VisitExpr(call->args_[0]);
+        const std::string base = "ret" + std::to_string(i);
+        ExprPtr decomposed = LowerSinCos(x, is_cos, base, call->span_, prelude);
+        // Bind the decomposed result to a fresh Var so ReturnStmt::value_
+        // continues to hold a Var (matches the SSA invariant the rest of the
+        // pipeline expects).
+        auto result_var = Bind(prelude, base, "result", decomposed, call->span_);
+        new_values.push_back(result_var);
+        changed = true;
+      } else {
+        ExprPtr new_expr = VisitExpr(value);
+        INTERNAL_CHECK_SPAN(new_expr, op->span_) << "ReturnStmt value at index " << i << " mutated to null";
+        new_values.push_back(new_expr);
+        if (new_expr.get() != value.get()) {
+          changed = true;
+        }
+      }
+    }
+
+    if (!changed) return op;
+
+    StmtPtr new_return;
+    if (prelude.empty()) {
+      auto copy = MutableCopy(op);
+      copy->value_ = std::move(new_values);
+      new_return = copy;
+    } else {
+      auto copy = MutableCopy(op);
+      copy->value_ = std::move(new_values);
+      prelude.push_back(copy);
+      new_return = std::make_shared<SeqStmts>(std::move(prelude), op->span_);
+    }
+    return new_return;
+  }
+
  private:
+  // Shared validator for tile.sin / tile.cos Calls — keeps the AssignStmt and
+  // ReturnStmt overrides honest about input shape, type, and dtype.
+  static void ValidateTrigCall(const CallPtr& call) {
+    const std::string& name = call->op_->name_;
+    INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
+        << name << " requires exactly 1 argument, got " << call->args_.size();
+    auto in_tile_type = As<TileType>(call->args_[0]->GetType());
+    INTERNAL_CHECK_SPAN(in_tile_type, call->span_)
+        << name << " requires a TileType argument, got " << call->args_[0]->GetType()->TypeName();
+    INTERNAL_CHECK_SPAN(in_tile_type->dtype_ == DataType::FP32, call->span_)
+        << name << " is FP32-only, got dtype " << in_tile_type->dtype_.ToString();
+  }
+
   // Mint a unique temp name keyed off the user's target name + a qualifier.
   std::string MakeTempName(const std::string& base, const std::string& qualifier) {
     return auto_name::BuildName(auto_name::GetBaseName(base), qualifier, "tmp", static_cast<int>(temp_id_++));
@@ -232,7 +296,7 @@ class LowerMathOpsMutator : public IRMutator {
     auto sign_pre = Bind(stmts, base, "sign_pre", Add(floor_x4, neg2_k, span), span);
     auto sign = Bind(stmts, base, "sign", Adds(sign_pre, kOne, span), span);
 
-    // ---- Step 3: Horner P(t^2) = (((R0*t^2 + R1)*t^2 + R2)*t^2 + R3)*t^2 + 1 -
+    // ---- Step 3: Horner P(t^2) = (((R0*t^2 + R1)*t^2 + R2)*t^2 + R3)*t^2 + 1
     auto t2 = Bind(stmts, base, "t2sq", Mul(t, t, span), span);
     auto p = Bind(stmts, base, "p_r0", Muls(t2, kR0, span), span);
     p = Bind(stmts, base, "p_r1", Adds(p, kR1, span), span);

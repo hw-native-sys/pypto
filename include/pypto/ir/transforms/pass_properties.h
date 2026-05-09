@@ -68,10 +68,10 @@ inline const PassProperties kSimplifyProperties{};
 
 // -- Math op lowering pass (tile.sin / tile.cos -> primitive arithmetic) ------
 //
-// Decomposition currently unimplemented — the pass is a no-op skeleton. When
-// the decomposition lands it operates purely within the existing tile-op
-// vocabulary, so it neither requires nor produces nor invalidates any
-// IRProperty.
+// LowerMathOps decomposes tile.sin / tile.cos into primitive arithmetic ops
+// (Cody-Waite range reduction + degree-9 Horner polynomial). The pass operates
+// purely within the existing tile-op vocabulary, so it neither requires nor
+// produces nor invalidates any IRProperty.
 
 inline const PassProperties kLowerMathOpsProperties{};
 
