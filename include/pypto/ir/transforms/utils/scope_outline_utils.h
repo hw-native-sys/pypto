@@ -673,7 +673,20 @@ class ScopeOutliner : public IRMutator {
     }
     for (size_t i = 0; i < output_vars.size(); ++i) {
       bool is_store = store_output_set.count(output_vars[i].get()) > 0;
-      if (is_store) continue;  // Store-target outlined Vars aren't seeded into the substitution map.
+      if (is_store) {
+        // Store targets aren't seeded into var_substitution_map, but their types
+        // may still embed remapped shape vars that trigger freshening during
+        // substitution. Check only the outlined var key; the original key may
+        // alias an input param (InOut parameters) and produce a false match.
+        auto it = post_remap.find(outlined_output_vars[i].get());
+        if (it != post_remap.end()) {
+          if (auto freshened = AsVarLike(it->second)) {
+            outlined_output_vars[i] = freshened;
+            return_types[i] = freshened->GetType();
+          }
+        }
+        continue;
+      }
       auto freshened = resolve_to_freshened(output_vars[i], outlined_output_vars[i]);
       outlined_output_vars[i] = freshened;
       return_types[i] = freshened->GetType();
