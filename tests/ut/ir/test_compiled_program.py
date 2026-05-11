@@ -15,7 +15,8 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from pypto import DataType, ir
+from pypto import DataType, backend, ir
+from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram, _extract_param_infos
 from pypto.runtime import DeviceTensor
 
@@ -304,6 +305,45 @@ class TestCompileReturnsCompiledProgram:
         assert result.output_dir.is_dir()
         # Metadata works on the original program
         assert result.param_names == ["a", "b", "c"]
+
+    def test_compile_platform_selects_codegen_backend(self, tmp_path):
+        """platform='a5sim' should compile with the Ascend950 PTO backend."""
+        import pypto.language as pl  # noqa: PLC0415
+
+        backend.reset_for_testing()
+        try:
+
+            @pl.program
+            class SimpleAdd:
+                @pl.function(type=pl.FunctionType.InCore)
+                def add_kernel(
+                    self,
+                    a: pl.Tensor[[128, 128], pl.FP32],
+                    b: pl.Tensor[[128, 128], pl.FP32],
+                    c: pl.Tensor[[128, 128], pl.FP32],
+                ):
+                    tile_a = pl.tile.load(a, offsets=[0, 0], shapes=[128, 128])
+                    tile_b = pl.tile.load(b, offsets=[0, 0], shapes=[128, 128])
+                    tile_c = pl.tile.add(tile_a, tile_b)
+                    pl.tile.store(tile_c, offsets=[0, 0], output_tensor=c)
+
+            output_dir = str(tmp_path / "compiled_a5")
+            result = ir.compile(
+                SimpleAdd,
+                output_dir=output_dir,
+                dump_passes=False,
+                skip_ptoas=True,
+                platform="a5sim",
+            )
+
+            pto_files = list(result.output_dir.rglob("*.pto"))
+            assert isinstance(result, CompiledProgram)
+            assert result.backend_type == BackendType.Ascend950
+            assert result.platform == "a5sim"
+            assert pto_files
+            assert 'pto.target_arch = "a5"' in pto_files[0].read_text()
+        finally:
+            backend.reset_for_testing()
 
 
 class TestExtractParamInfosScalar:

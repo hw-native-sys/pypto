@@ -39,6 +39,17 @@ def _write_files(files: dict[str, str], output_dir: str) -> None:
             f.write(content)
 
 
+def _backend_type_for_platform(platform: str | None, fallback: BackendType) -> BackendType:
+    """Return the codegen backend selected by a runtime platform string."""
+    if platform is None:
+        return fallback
+    if platform in ("a2a3", "a2a3sim"):
+        return BackendType.Ascend910B
+    if platform in ("a5", "a5sim"):
+        return BackendType.Ascend950
+    raise ValueError(f"Invalid platform {platform!r}. Expected 'a2a3sim', 'a2a3', 'a5sim', or 'a5'.")
+
+
 def compile(  # noqa: PLR0913
     program: _ir_core.Program,
     output_dir: str | None = None,
@@ -82,7 +93,8 @@ def compile(  # noqa: PLR0913
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
             ``"a2a3"``, ``"a5sim"``, or ``"a5"``.  Defaults to the
-            simulator for the given *backend_type*.
+            simulator for the given *backend_type*.  When set, it also
+            selects the matching codegen backend.
         distributed_config: Optional :class:`DistributedConfig` for L3+
             distributed programs.  When ``None`` (default), auto-detected
             from the program: if L3+ functions are found, a default
@@ -101,7 +113,8 @@ def compile(  # noqa: PLR0913
         >>> c = compiled(a, b)          # return style
         >>> compiled(a, b, c, config=RunConfig(device_id=1))  # specify device
     """
-    _backend_core.set_backend_type(backend_type)
+    effective_backend_type = _backend_type_for_platform(platform, backend_type)
+    _backend_core.set_backend_type(effective_backend_type)
 
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -207,7 +220,7 @@ def compile(  # noqa: PLR0913
         return DistributedCompiledProgram(
             transformed_program,
             output_dir,
-            backend_type=backend_type,
+            backend_type=effective_backend_type,
             platform=platform,
             distributed_config=distributed_config,
         )
@@ -215,6 +228,6 @@ def compile(  # noqa: PLR0913
     return CompiledProgram(
         program,
         output_dir,
-        backend_type=backend_type,
+        backend_type=effective_backend_type,
         platform=platform,
     )
