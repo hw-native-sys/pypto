@@ -1145,32 +1145,12 @@ static std::string MakeTileLoadCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   std::string tile_buf_type = codegen.GetCurrentResultTileBufTypeString();
 
-  const auto tensor_view_value = tensor_type->tensor_view_.value_or(ir::TensorView{});
-  // Apply the implicit DN last-two-dim swap only when the view is DN AND has
-  // no explicit strides. Explicit strides (e.g. from tensor.transpose) already
-  // describe the physical layout in the IR shape's coordinate system, and the
-  // IR slice's offsets/sizes are in that same system — swapping here would
-  // double-transpose the access pattern.
-  bool dn_swap = tensor_type->tensor_view_.has_value() && tensor_view_value.layout == ir::TensorLayout::DN &&
-                 tensor_view_value.stride.empty();
-
-  // Use valid_shapes (op arg 3) for partition_view sizes so the DMA copy size
-  // matches the logical valid region. When valid_shapes equals the physical
-  // shapes the resulting partition_view is identical to the previous one; when
-  // they differ (e.g. fillpad-on-partial-block), the partition_view becomes
-  // dynamic and tload only fetches the valid region from GM, leaving the
-  // physical padding region in the tile_buf to be written by a downstream
-  // fillpad. For DN layout, swap the last two valid/offset elements so that
-  // the partition coordinates are in the transposed coordinate system used by
-  // make_tensor_view.
-  auto valid_elems = valid_shapes_tuple->elements_;
-  if (dn_swap && valid_elems.size() >= 2) {
-    std::iter_swap(valid_elems.rbegin(), valid_elems.rbegin() + 1);
-  }
-  auto offset_elems = offsets_tuple->elements_;
-  if (dn_swap && offset_elems.size() >= 2) {
-    std::iter_swap(offset_elems.rbegin(), offset_elems.rbegin() + 1);
-  }
+  // RFC #1300 P7: the IR's offsets / shapes / valid_shapes are already in
+  // canonical coordinates (matching the source TensorType's shape). There is
+  // no implicit dn_swap here — ``LowerTransposeLoadParamLayout`` (P6) is
+  // responsible for ensuring all coordinate systems match before codegen.
+  const auto& valid_elems = valid_shapes_tuple->elements_;
+  const auto& offset_elems = offsets_tuple->elements_;
 
   std::string partition_type = MakePartitionTensorViewType(GetDimStrings(valid_elems), dtype_str);
   std::string partition_view =
@@ -1224,11 +1204,10 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   std::string partition_type;
   const size_t tensor_rank = tensor_type->shape_.size();
 
-  const auto tensor_view_value = tensor_type->tensor_view_.value_or(ir::TensorView{});
-  // See EmitTileLoadPTO for the rationale: apply the DN last-two-dim swap
-  // only when there are no explicit strides on the view.
-  bool dn_swap = tensor_type->tensor_view_.has_value() && tensor_view_value.layout == ir::TensorLayout::DN &&
-                 tensor_view_value.stride.empty();
+  // RFC #1300 P7: the IR's offsets / shapes are already in canonical
+  // coordinates (matching the source TensorType's shape). No implicit
+  // dn_swap here — the IR-level lowering passes (P6 + canonical TensorView)
+  // are responsible for ensuring all coordinate systems match before codegen.
 
   // Check if FlattenTileNdTo2D injected an explicit shapes tuple as args[3].
   ir::MakeTuplePtr shapes_tuple;
@@ -1238,14 +1217,8 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
 
   if (shapes_tuple) {
     // N-rank partition path: use the explicit shapes tuple from FlattenTileNdTo2D.
-    auto shape_elems = shapes_tuple->elements_;
-    auto offset_elems = offsets_tuple->elements_;
-    if (dn_swap && shape_elems.size() >= 2) {
-      std::iter_swap(shape_elems.rbegin(), shape_elems.rbegin() + 1);
-    }
-    if (dn_swap && offset_elems.size() >= 2) {
-      std::iter_swap(offset_elems.rbegin(), offset_elems.rbegin() + 1);
-    }
+    const auto& shape_elems = shapes_tuple->elements_;
+    const auto& offset_elems = offsets_tuple->elements_;
     partition_type = MakePartitionTensorViewType(GetDimStrings(shape_elems), dtype_str);
     partition_view = EmitPartitionViewPTO(output_tensor->name_hint_, tensor_view, tensor_view_type,
                                           partition_type, GetExprCodes(offset_elems, codegen),
