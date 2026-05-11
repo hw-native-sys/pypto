@@ -155,9 +155,15 @@ class TaskRelevantVarCollector : public IRVisitor {
         if (needs_tid_.count(rv) && ia && needs_tid_.insert(ia.get()).second) changed = true;
         if (ia && needs_tid_.count(ia.get()) && needs_tid_.insert(rv).second) changed = true;
       }
-      // Through yield: dest <-> source.
+      // Through yield: dest <-> source (bidirectional). The dest→src direction
+      // covers ``deps=[<iter_arg>]`` (deps source is the loop carry; the kernel
+      // LHS it gets yielded from must also need a tid). The src→dest direction
+      // covers ``deps=[<kernel_lhs>]`` (deps source is the kernel LHS within
+      // the loop body; the carry destination it gets yielded to must also need
+      // a tid so the ForStmt mutator allocates the matching iter_arg companion).
       for (auto& [src, dest] : yield_pairs_) {
         if (dest && needs_tid_.count(dest.get()) && src && needs_tid_.insert(src.get()).second) changed = true;
+        if (src && needs_tid_.count(src.get()) && dest && needs_tid_.insert(dest.get()).second) changed = true;
       }
     }
 
@@ -527,19 +533,41 @@ void PreallocateTaskIdVars(const std::unordered_set<const Var*>& needs_tid,
       (*tid_map)[v] = std::make_shared<Var>(v->name_hint_ + "__tid", tid_type, v->span_);
     }
   }
-  // Pass B: allocate IterArg companions with init bound to outer Var's tid
-  // companion (which Pass A already allocated for the placeholder).
-  for (const Var* v : iter_arg_vs) {
-    auto init_it = iter_arg_init.find(v);
-    VarPtr init_tid;
-    if (init_it != iter_arg_init.end() && init_it->second) {
-      auto init_in_map = tid_map->find(init_it->second.get());
-      if (init_in_map != tid_map->end()) {
-        init_tid = init_in_map->second;
+  // Pass B: allocate IterArg companions with init bound to the outer Var's
+  // tid companion. For nested loops the inner IterArg's init points at an
+  // outer IterArg that itself needs a companion (allocated in this Pass B);
+  // iterate to fixed-point so the inner allocation can see the outer one
+  // regardless of which order ``iter_arg_vs`` happened to enumerate them.
+  std::unordered_set<const Var*> pending(iter_arg_vs.begin(), iter_arg_vs.end());
+  bool progressed = true;
+  while (progressed && !pending.empty()) {
+    progressed = false;
+    for (auto it = pending.begin(); it != pending.end();) {
+      const Var* v = *it;
+      auto init_it = iter_arg_init.find(v);
+      VarPtr init_tid;
+      if (init_it != iter_arg_init.end() && init_it->second) {
+        auto init_in_map = tid_map->find(init_it->second.get());
+        if (init_in_map != tid_map->end()) {
+          init_tid = init_in_map->second;
+        } else if (pending.count(init_it->second.get())) {
+          // Outer IterArg still pending — try again in the next sweep.
+          ++it;
+          continue;
+        }
       }
+      auto tid_type = std::make_shared<ScalarType>(DataType::TASK_ID);
+      (*tid_map)[v] = std::make_shared<IterArg>(v->name_hint_ + "__tid", tid_type, init_tid, v->span_);
+      it = pending.erase(it);
+      progressed = true;
     }
+  }
+  // Any leftovers genuinely have no init source (cycle or missing entry);
+  // allocate with null init so downstream IRBuilder validation fires a clear
+  // error instead of leaving the entry unallocated.
+  for (const Var* v : pending) {
     auto tid_type = std::make_shared<ScalarType>(DataType::TASK_ID);
-    (*tid_map)[v] = std::make_shared<IterArg>(v->name_hint_ + "__tid", tid_type, init_tid, v->span_);
+    (*tid_map)[v] = std::make_shared<IterArg>(v->name_hint_ + "__tid", tid_type, nullptr, v->span_);
   }
 }
 

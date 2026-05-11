@@ -3035,7 +3035,7 @@ class TestManualScopeCodegen:
                         for j in pl.parallel(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
                             scratch = self.stage1(x, scratch, row, col)
-                            out = self.stage2(scratch, out, row, col)
+                            out = self.stage2(scratch, out, row, col, deps=[scratch])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3049,17 +3049,17 @@ class TestManualScopeCodegen:
         assert code.count("PTO2_SCOPE() {") == 1, code
         assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
 
-        # Both stages capture their task id (so stage2 can ``add_dep`` on
-        # stage1, and any later sibling can ``add_dep`` on either).
+        # stage1's LHS gets a TaskId companion so stage2's ``deps=[scratch]``
+        # can resolve to it. ``LowerManualDepsToTaskId`` synthesises the
+        # ``system.task_id_of`` Assign which lowers to ``task_<n>_outs.task_id()``.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code, code
+        assert "PTO2TaskId scratch__ssa_v5__tid = task_0_outs.task_id();" in code, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code, code
 
         # *** Manual dep correctly established WITHIN each iteration ***
         # stage2 reads what stage1 just wrote to ``scratch``: this dep is
         # required for correctness.
-        assert "params_t1.add_dep(task_0);" in code, code
+        assert "params_t1.add_dep(scratch__ssa_v5__tid);" in code, code
 
         # *** Correct parallelism ACROSS iterations ***
         # The only ``add_dep`` in the manual scope is the one above; there
@@ -3124,7 +3124,7 @@ class TestManualScopeCodegen:
                         for j in pl.range(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
                             scratch = self.stage1(x, scratch, row, col)
-                            out = self.stage2(scratch, out, row, col)
+                            out = self.stage2(scratch, out, row, col, deps=[scratch])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3137,13 +3137,14 @@ class TestManualScopeCodegen:
         assert code.count("PTO2_SCOPE() {") == 1, code
         assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
 
+        # stage1's LHS gets a TaskId companion so stage2's ``deps=[scratch]``
+        # can resolve to it (lowered via ``system.task_id_of``).
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code, code
+        assert "PTO2TaskId scratch__ssa_v5__tid = task_0_outs.task_id();" in code, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code, code
 
         # Manual dep WITHIN each iteration: stage2 follows stage1.
-        assert "params_t1.add_dep(task_0);" in code, code
+        assert "params_t1.add_dep(scratch__ssa_v5__tid);" in code, code
 
         # Cross-iteration parallel: the ONLY add_dep is the intra-iteration one.
         assert code.count("add_dep(") == 1, code
