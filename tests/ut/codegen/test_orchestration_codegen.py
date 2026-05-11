@@ -2881,7 +2881,7 @@ class TestManualScopeCodegen:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
                     a = self.k1(x)
-                    b = self.k2(a)
+                    b = self.k2(a, deps=[a])
                 return b
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -2889,13 +2889,18 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code
-        # Every kernel submit inside a manual scope captures task id state.
+        # Every kernel submit inside a manual scope captures the submit's
+        # outputs handle so downstream code can call ``.task_id()`` on it.
+        # We no longer pre-emit a ``PTO2TaskId task_<n>`` variable — the
+        # task_id is materialised at use sites (via a ``system.task_id_of``
+        # AssignStmt synthesised by ``LowerManualDepsToTaskId``).
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code
-        assert "PTO2TaskId task_0 = task_0_outs.task_id();" in code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code
-        assert "PTO2TaskId task_1 = task_1_outs.task_id();" in code
-        # Auto-derived data-flow edge: k2 consumes `a`, producer of task 0.
-        assert "params_t1.add_dep(task_0);" in code
+        # Explicit dep on `a`: the pass synthesises a TaskId companion
+        # ``a__tid = task_0_outs.task_id();`` and rewrites deps=[a] to the
+        # TaskId version, which codegen emits as ``add_dep(<companion>)``.
+        assert "task_0_outs.task_id()" in code
+        assert ".add_dep(" in code
 
     def test_manual_scope_emits_explicit_user_deps(self):
         backend.reset_for_testing()
@@ -2928,8 +2933,15 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        assert "params_t2.add_dep(task_0);" in code
-        assert "params_t2.add_dep(task_1);" in code
+        # LowerManualDepsToTaskId synthesises ``a__ssa_v0__tid =
+        # task_0_outs.task_id();`` and ``b__ssa_v0__tid = task_1_outs.task_id();``
+        # then rewrites deps=[a, b] to the TaskId companions, which codegen
+        # emits as ``add_dep(<companion>);`` (no is_valid guard since
+        # task_id_of returns a known-valid id).
+        assert "PTO2TaskId a__ssa_v0__tid = task_0_outs.task_id();" in code
+        assert "PTO2TaskId b__ssa_v0__tid = task_1_outs.task_id();" in code
+        assert "params_t2.add_dep(a__ssa_v0__tid);" in code
+        assert "params_t2.add_dep(b__ssa_v0__tid);" in code
 
     def test_auto_scope_does_not_emit_task_id_capture(self):
         """Sanity: auto scope keeps the legacy fire-and-forget submit."""

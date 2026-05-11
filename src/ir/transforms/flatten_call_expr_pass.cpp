@@ -62,6 +62,7 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override;
+  StmtPtr VisitStmt_(const RuntimeScopeStmtPtr& op) override;
 
   // Expression visitors
   ExprPtr VisitExpr_(const CallPtr& op) override;
@@ -350,6 +351,13 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
                                                std::move(new_body), op->span_);
 }
 
+StmtPtr FlattenCallExprMutator::VisitStmt_(const RuntimeScopeStmtPtr& op) {
+  auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
+  if (new_body.get() == op->body_.get()) return op;
+  return std::make_shared<const RuntimeScopeStmt>(op->manual_, op->name_hint_, std::move(new_body),
+                                                  op->span_);
+}
+
 // Expression visitors implementation
 
 ExprPtr FlattenCallExprMutator::VisitExpr_(const CallPtr& op) {
@@ -373,7 +381,7 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const CallPtr& op) {
   }
 
   if (changed) {
-    return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->GetType(), op->span_);
+    return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
   }
   return op;
 }

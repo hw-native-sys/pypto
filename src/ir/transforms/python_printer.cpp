@@ -554,6 +554,30 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         VisitExpr(op->args_[i]);
       }
 
+      // Surface manual_scope dep edges so they show up in IR dumps. The pass
+      // ``LowerManualDepsToTaskId`` rewrites the user-facing
+      // ``kAttrUserManualDepEdges`` (Tensor Vars) into ``kAttrManualDepEdges``
+      // (TaskId Vars). Print whichever is present; both pre- and post-lower
+      // forms round-trip via the parser-recognised ``deps=[...]`` kwarg.
+      const std::vector<VarPtr>* deps_to_print = nullptr;
+      for (const auto& [k, v] : op->attrs_) {
+        if (k != kAttrManualDepEdges && k != kAttrUserManualDepEdges) continue;
+        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+        if (!edges || edges->empty()) continue;
+        deps_to_print = edges;
+        if (k == kAttrManualDepEdges) break;  // prefer resolved over user-supplied
+      }
+      if (deps_to_print) {
+        stream_ << ", deps=[";
+        for (size_t i = 0; i < deps_to_print->size(); ++i) {
+          if (i > 0) stream_ << ", ";
+          if ((*deps_to_print)[i]) {
+            stream_ << GetVarName((*deps_to_print)[i].get());
+          }
+        }
+        stream_ << "]";
+      }
+
       // When ``attrs_["arg_directions"]`` is populated (post DeriveCallDirections),
       // surface the direction vector as a trailing ``attrs={"arg_directions": [...]}``
       // keyword so the parser can recover it on the round-trip. When empty

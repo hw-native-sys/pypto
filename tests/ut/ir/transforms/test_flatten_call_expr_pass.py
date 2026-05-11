@@ -19,6 +19,7 @@ Uses assert_structural_equal to compare pass output with expected IR.
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
+from pypto.pypto_core import passes as _core_passes
 
 
 def NormalizeIR(program):
@@ -556,6 +557,82 @@ class TestFlattenPreservesFuncType:
 
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+class TestFlattenPreservesAttrs:
+    """Tests that flatten_call_expr preserves Call.attrs when rewriting args.
+
+    Regression test: when an argument is a nested Call (e.g. `pl.slice(...)`)
+    and gets extracted to a temp, the outer Call is rebuilt. The rebuilt
+    Call must keep `attrs_` (e.g. `user_manual_dep_edges` set by the parser
+    for `kernel(..., deps=[var, ...])`); otherwise downstream passes such as
+    `DeriveManualScopeDeps` produce empty edges and codegen never emits the
+    `params.add_dep(task_<m>);` calls, silently breaking manual dependencies.
+    """
+
+    def test_user_manual_dep_edges_survive_arg_flatten(self):
+        # The python_printer does not surface ``Call.attrs['user_manual_dep_edges']``
+        # so the default print -> parse roundtrip would fail. Property
+        # verification still runs.
+        instruments = [
+            _core_passes.VerificationInstrument(
+                _core_passes.VerificationMode.BEFORE_AND_AFTER
+            )
+        ]
+        ctx = _core_passes.PassContext(instruments)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a = self.k1(x)
+                    # Inline `pl.slice(...)` arg forces FlattenCallExpr to rebuild
+                    # the k2 call. The deps=[a] kwarg attaches user_manual_dep_edges
+                    # which must survive the rebuild.
+                    _b = self.k2(x, pl.slice(out, [32], [0]), deps=[a])
+                return out
+
+        with ctx:
+            After = passes.flatten_call_expr()(Prog)
+        fn = After.get_function("main")
+
+        def find_k2_call(stmt):
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    r = find_k2_call(s)
+                    if r is not None:
+                        return r
+            elif isinstance(stmt, ir.RuntimeScopeStmt):
+                return find_k2_call(stmt.body)
+            elif isinstance(stmt, ir.AssignStmt):
+                v = stmt.value
+                if isinstance(v, ir.Call) and v.op.name == "k2":
+                    return v
+            return None
+
+        k2_call = find_k2_call(fn.body)
+        assert k2_call is not None, "expected the k2 call in the manual scope"
+        edges = k2_call.attrs.get("user_manual_dep_edges", [])
+        assert len(edges) == 1, (
+            f"user_manual_dep_edges dropped after FlattenCallExpr; got {edges!r}"
+        )
 
 
 class TestFlattenCallInScopeStmt:

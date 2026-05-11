@@ -727,6 +727,36 @@ inline std::vector<std::pair<std::string, std::any>> WithManualDepEdgesAttr(
 }
 
 /**
+ * @brief Attr key for the synthesized TaskId Var paired with a user-defined
+ * kernel ``Call`` inside a ``manual_scope``. Set by
+ * ``LowerManualDepsToTaskId`` (extension of ``DeriveManualScopeDeps``).
+ *
+ * Value type: ``VarPtr`` of ``ScalarType(DataType::TASK_ID)``.
+ *
+ * Codegen consumes this attr when emitting the kernel submit:
+ *   - Emits ``PTO2TaskId <task_id_var_emit_name> = <task>_outs.task_id();``
+ *     immediately after the submit, so that downstream ``add_dep`` references
+ *     to the TaskId Var resolve to a real C++ identifier.
+ */
+inline constexpr const char* kAttrTaskIdVar = "task_id_var";
+
+/**
+ * Build a copy of ``attrs`` with ``kAttrTaskIdVar`` set to ``var``.
+ * Replaces an existing entry if present; otherwise appends.
+ */
+inline std::vector<std::pair<std::string, std::any>> WithTaskIdVarAttr(
+    std::vector<std::pair<std::string, std::any>> attrs, VarPtr var) {
+  for (auto& [k, v] : attrs) {
+    if (k == kAttrTaskIdVar) {
+      v = std::move(var);
+      return attrs;
+    }
+  }
+  attrs.emplace_back(kAttrTaskIdVar, std::move(var));
+  return attrs;
+}
+
+/**
  * @brief Expression to create a tuple from multiple expressions
  *
  * Takes a list of expressions and creates a tuple value.

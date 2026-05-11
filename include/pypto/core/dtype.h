@@ -87,6 +87,14 @@ class DataType {
   static constexpr uint8_t kBrainFloatRangeEnd = 0x4F;
   // 0x43-0x4F reserved for future brain/Hisilicon float types
 
+  // Identifier / handle types: 0x50-0x5F (16 slots reserved).
+  // Opaque 64-bit handles to runtime-managed entities. Not numeric — they
+  // do not participate in arithmetic or casts. Used for synthesized IR Vars
+  // produced by lowering passes (e.g. ``LowerManualDepsToTaskId``).
+  static constexpr uint8_t kIdentifierRangeStart = 0x50;
+  static constexpr uint8_t kTaskIdCode = 0x50;  // PTO2TaskId — manual_scope dep handle
+  static constexpr uint8_t kIdentifierRangeEnd = 0x5F;
+
   // Static constants for all data types
   static const DataType BOOL;       // Boolean (true/false)
   static const DataType INT4;       // 4-bit signed integer
@@ -110,6 +118,10 @@ class DataType {
 
   // Semantic alias for index computations (loop variables, dimensions, offsets, strides)
   static const DataType INDEX;  // Machine-word sized integer for index computations
+
+  // Opaque 64-bit handle to a runtime task in a ``manual_scope``. Synthesized
+  // by ``LowerManualDepsToTaskId``; never written by user code. Not numeric.
+  static const DataType TASK_ID;
 
   // Default dtypes for bare constant literals (used by printer/parser for round-trip)
   static const DataType DEFAULT_CONST_INT;    // Default dtype for ConstInt (= INT64)
@@ -161,6 +173,7 @@ class DataType {
       case kUInt64Code:
       case kInt64Code:
       case kIndexCode:
+      case kTaskIdCode:
         return 64;
       default:
         return 0;
@@ -214,6 +227,8 @@ class DataType {
         return "hf8";
       case kBoolCode:
         return "bool";
+      case kTaskIdCode:
+        return "task_id";
       default:
         return "unknown";
     }
@@ -355,6 +370,7 @@ inline constexpr DataType DataType::BF16 = DataType(kBf16Code);
 inline constexpr DataType DataType::HF4 = DataType(kHf4Code);
 inline constexpr DataType DataType::HF8 = DataType(kHf8Code);
 inline constexpr DataType DataType::INDEX = DataType(kIndexCode);
+inline constexpr DataType DataType::TASK_ID = DataType(kTaskIdCode);
 inline constexpr DataType DataType::DEFAULT_CONST_INT = DataType(kInt64Code);   // = INT64
 inline constexpr DataType DataType::DEFAULT_CONST_FLOAT = DataType(kFp32Code);  // = FP32
 
@@ -392,6 +408,7 @@ inline std::string DataTypeToString(const DataType& dtype) {
   if (dtype == DataType::BF16) return "BF16";
   if (dtype == DataType::HF4) return "HF4";
   if (dtype == DataType::HF8) return "HF8";
+  if (dtype == DataType::TASK_ID) return "TASK_ID";
   return "UnknownType";
 }
 
