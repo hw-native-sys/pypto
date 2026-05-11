@@ -17,7 +17,6 @@
 #include <cstdint>
 #include <functional>
 #include <iomanip>
-#include <ios>
 #include <map>
 #include <memory>
 #include <optional>
@@ -326,35 +325,36 @@ class IRPythonPrinter : public IRVisitor {
   std::string PrintTensorView(const TensorView& tensor_view, const std::vector<ExprPtr>& tensor_shape);
 };
 
-// Helper function to format float literals with decimal point.
+// Helper function to format a float literal so it re-parses as a ``ConstFloat``.
 //
-// For non-integer values we emit the *shortest* decimal that parses back to the
-// exact same ``double`` (``std::to_chars`` with no precision argument). This is
+// Emits the *shortest* decimal that parses back to the exact same ``double``
+// (``std::to_chars`` with no precision argument, locale-independent). This is
 // what makes ``ConstFloat`` (and float kwargs / attrs) round-trip bit-exactly
 // through print → parse: the parser stores ``ConstFloat.value_`` as the FP64
 // value it reads, so the printed text must encode the full ``double`` regardless
-// of the constant's ``dtype_``. The shortest-form output keeps simple values
-// readable — ``0.1`` prints as ``0.1`` (not ``0.10000000000000001``) and the
-// FP32-representable Cody-Waite constants emitted by ``LowerCompositeOps`` print
-// with exactly as many digits as their ``double`` needs (e.g.
-// ``0.31830987334251404``).
+// of the constant's ``dtype_``. Output stays compact — ``0.1`` prints as ``0.1``
+// (not ``0.10000000000000001``), large integers as ``1e+16`` rather than a long
+// run of zeros, and the FP32-representable Cody-Waite constants emitted by
+// ``LowerCompositeOps`` with exactly as many digits as their ``double`` needs
+// (e.g. ``0.31830987334251404``). Output may use exponent notation (``1e+16``,
+// ``1e-07``) — still a valid Python float literal.
 //
-// Integer-valued doubles are formatted as ``X.0`` so they re-parse as floats
-// (a bare ``4`` would parse as ``ConstInt``); ``std::to_chars`` would emit ``4``.
+// ``std::to_chars`` emits a bare integer (``"4"``) for integer-valued doubles
+// without an exponent, which would re-parse as ``ConstInt``; append ``.0`` in
+// that case. The append is skipped for exponent forms (``"1e+16"`` already
+// parses as a Python float) and for non-finite values (``"nan"`` / ``"inf"``
+// have no DSL syntax — emitted verbatim, matching the prior behavior; no IR
+// construction path produces them).
 std::string FormatFloatLiteral(double value) {
-  // Check if the value is an integer (no fractional part)
-  if (value == std::floor(value)) {
-    // For integer values, format as X.0
-    std::ostringstream oss;
-    oss << std::fixed << std::setprecision(1) << value;
-    return oss.str();
-  }
-  // For non-integer values, emit the shortest round-tripping decimal.
   char buf[32];
   auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
   INTERNAL_CHECK(ec == std::errc()) << "Internal error: std::to_chars failed to format float literal "
                                     << value;
-  return std::string(buf, ptr);
+  std::string text(buf, ptr);
+  if (std::isfinite(value) && text.find_first_of(".eE") == std::string::npos) {
+    text += ".0";
+  }
+  return text;
 }
 
 // DataTypeToPythonString removed — now uses DataTypeToString from dtype.h
