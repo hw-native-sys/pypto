@@ -22,7 +22,7 @@ Severity is independent of phase. A `Warning` may run at `PrePipeline`; a `PerfH
 | `Warning` | Likely mistake or pass bug | `LOG_WARN` to stderr, in full | `disabled_diagnostics` set |
 | `PerfHint` | Advisory tuning suggestion | `${ReportInstrument.output_dir}/perf_hints.log` if a report instrument is in the context (always true via `compile()` / `pl.jit`), with stderr getting a one-line `LOG_INFO` summary that points at the file. With no report instrument: each hint printed in full to stderr via `LOG_INFO`. | `disabled_diagnostics` set |
 
-The release default for `PYPTO_LOG_LEVEL` is `INFO`, so the `[perf_hint] N hints …` summary (or, without a report instrument, the full `[perf_hint PH…] …` lines) reaches the console out of the box. Override with `PYPTO_LOG_LEVEL=warn` to mute perf hints on stderr (the file output is independent). The per-hint detail always lands in `perf_hints.log` regardless of log level.
+The release default for `PYPTO_LOG_LEVEL` is `INFO`, so the `[perf_hint] N hints …` summary (or, without a report instrument, the full `[perf_hint PH…] …` lines) reaches the console out of the box. Override with `PYPTO_LOG_LEVEL=warn` to mute perf hints on stderr. When a report instrument is present the per-hint detail still lands in `perf_hints.log` regardless of log level (the file output is independent); without one there is no file, so muting stderr drops perf hints entirely.
 
 ## How a check fires
 

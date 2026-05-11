@@ -22,7 +22,7 @@ Severity 与 phase 解耦：`Warning` 可以在 `PrePipeline` 触发，`PerfHint
 | `Warning` | 疑似用户错误或 pass bug | 完整输出至 stderr（`LOG_WARN`） | `disabled_diagnostics` 集合 |
 | `PerfHint` | 建议性调优提示 | 上下文中存在 `ReportInstrument` 时（经 `compile()` / `pl.jit` 时恒为真）每条 hint 写入 `${ReportInstrument.output_dir}/perf_hints.log`，stderr 仅打印一行指向该文件的 `LOG_INFO` 摘要；若无 `ReportInstrument`，则每条 hint 完整输出至 stderr（`LOG_INFO`）。 | `disabled_diagnostics` 集合 |
 
-`PYPTO_LOG_LEVEL` release 默认值为 `INFO`，因此 `[perf_hint] N hints …` 摘要行（无 `ReportInstrument` 时为完整的 `[perf_hint PH…] …` 行）开箱可见。设置 `PYPTO_LOG_LEVEL=warn` 可在 stderr 上静音性能提示（文件输出独立）。无论日志级别如何，逐条详情始终写入 `perf_hints.log`。
+`PYPTO_LOG_LEVEL` release 默认值为 `INFO`，因此 `[perf_hint] N hints …` 摘要行（无 `ReportInstrument` 时为完整的 `[perf_hint PH…] …` 行）开箱可见。设置 `PYPTO_LOG_LEVEL=warn` 可在 stderr 上静音性能提示。上下文中存在 `ReportInstrument` 时，无论日志级别如何逐条详情仍写入 `perf_hints.log`（文件输出独立）；若无 `ReportInstrument` 则没有该文件，静音 stderr 会彻底丢弃性能提示。
 
 ## 触发流程
 

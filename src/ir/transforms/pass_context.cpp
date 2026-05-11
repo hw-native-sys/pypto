@@ -195,16 +195,23 @@ void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& ph
   const std::string dir = FindReportOutputDir();
   const std::string perf_log_path = dir.empty() ? std::string{} : dir + "/perf_hints.log";
 
+  // Single pre-scan: count perf hints and collect their distinct source sites,
+  // but only when we'll actually write a perf_hints.log to point users at.
   std::size_t perf_hint_count = 0;
-  for (const auto& d : diags) {
-    if (d.severity == DiagnosticSeverity::PerfHint) ++perf_hint_count;
+  std::set<std::string> perf_hint_sites;
+  if (!perf_log_path.empty()) {
+    for (const auto& d : diags) {
+      if (d.severity != DiagnosticSeverity::PerfHint) continue;
+      ++perf_hint_count;
+      if (d.span.is_valid()) perf_hint_sites.insert(d.span.to_string());
+    }
   }
-  const bool summarize_perf_hints = perf_hint_count > 0 && !perf_log_path.empty();
+  const bool summarize_perf_hints = perf_hint_count > 0;  // implies !perf_log_path.empty()
 
   // 1. stderr — every diagnostic, gated by LogLevel; perf hints collapsed to a
   //    summary line when their detail is going to perf_hints.log instead.
   for (const auto& d : diags) {
-    INTERNAL_CHECK(d.severity != DiagnosticSeverity::Error)
+    INTERNAL_CHECK_SPAN(d.severity != DiagnosticSeverity::Error, d.span)
         << "Error severity must not flow through DiagnosticInstrument: " << d.rule_name;
     if (d.severity == DiagnosticSeverity::PerfHint && summarize_perf_hints) continue;
     const std::string line = FormatDiagnosticLine(d, phase_label);
@@ -215,23 +222,16 @@ void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& ph
     }
   }
   if (summarize_perf_hints) {
-    std::set<std::string> sites;
-    for (const auto& d : diags) {
-      if (d.severity == DiagnosticSeverity::PerfHint && d.span.is_valid()) {
-        sites.insert(d.span.to_string());
-      }
-    }
     std::ostringstream summary;
     summary << "[perf_hint] " << perf_hint_count << (perf_hint_count == 1 ? " hint" : " hints");
-    if (!sites.empty()) {
-      summary << " across " << sites.size() << (sites.size() == 1 ? " site" : " sites");
+    if (!perf_hint_sites.empty()) {
+      summary << " across " << perf_hint_sites.size() << (perf_hint_sites.size() == 1 ? " site" : " sites");
     }
     summary << "; see " << perf_log_path;
     LOG_INFO << summary.str();
   }
 
   // 2. File — only PerfHint, only when a ReportInstrument is registered.
-  // (`summarize_perf_hints` is exactly `perf_hint_count > 0 && !perf_log_path.empty()`.)
   if (!summarize_perf_hints) return;
 
   // PassContext is thread-local, but multiple threads can run concurrent
@@ -242,7 +242,13 @@ void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& ph
 
   std::ofstream f(perf_log_path, std::ios::app);
   if (!f.is_open()) {
-    LOG_WARN << "Failed to open " << perf_log_path << " for perf-hint append";
+    // Last resort: the console summary already pointed at this file, but we
+    // can't write it — don't drop the detail; fall back to per-hint stderr.
+    LOG_WARN << "Failed to open " << perf_log_path
+             << " for perf-hint append; emitting hints to stderr instead";
+    for (const auto& d : diags) {
+      if (d.severity == DiagnosticSeverity::PerfHint) LOG_INFO << FormatDiagnosticLine(d, phase_label);
+    }
     return;
   }
   for (const auto& d : diags) {
