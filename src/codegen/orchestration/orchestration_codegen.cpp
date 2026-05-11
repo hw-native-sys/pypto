@@ -684,9 +684,22 @@ class OrchestrationStmtCodegen : public CodegenBase {
         current_return_vars_.push_back(nullptr);
       }
     }
-    current_loop_vars_.push_back(loop_var);
+    // Array-carry slot index = (loop_var - start) / step (0-based ordinal).
+    // For the common ``pl.parallel(N)`` case (start=0, step=1) this reduces
+    // to ``loop_var`` itself; peephole the expression so generated code stays
+    // readable. For non-trivial ranges like ``pl.parallel(2, 10, 2)`` the
+    // raw loop_var (2,4,6,8) would index out of the ``arr[N=4]`` allocation —
+    // see CodeRabbit thread on PR #1330.
+    std::string slot_expr = loop_var;
+    auto start_ci = As<ConstInt>(for_stmt->start_);
+    auto step_ci = As<ConstInt>(for_stmt->step_);
+    bool trivial_range = start_ci && step_ci && start_ci->value_ == 0 && step_ci->value_ == 1;
+    if (!trivial_range) {
+      slot_expr = "((" + loop_var + " - " + start_expr + ") / " + step_expr + ")";
+    }
+    current_loop_slot_exprs_.push_back(slot_expr);
     VisitStmt(for_stmt->body_);
-    current_loop_vars_.pop_back();
+    current_loop_slot_exprs_.pop_back();
     current_return_vars_ = saved;
 
     if (emit_implicit_scope) {
@@ -725,14 +738,29 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // ``Tensor`` has no public default ctor, so ``Tensor x;`` won't compile.
     // The phi declaration for a Tensor return_var must be initialised with a
     // valid Tensor that's already in scope. Try sources in order:
-    //   1. Any function parameter (most common, always present in practice).
+    //   1. The first tensor function parameter (selected by orch arg index,
+    //      not lexical name — picking from ``param_name_set_`` could yield a
+    //      scalar param and emit ``Tensor x = <scalar>;`` which won't compile).
     //   2. A Var yielded by either branch that's already declared at
     //      if-entry (an outer iter_arg, or a prior in-body assignment). This
     //      handles parameterless functions whose branches yield a name
     //      computed before the if.
     std::string tensor_phi_init;
-    if (!param_name_set_.empty()) {
-      tensor_phi_init = GetExternalTensorName(*param_name_set_.begin());
+    if (!param_name_to_orch_index_.empty()) {
+      // param_name_to_orch_index_ is keyed by tensor param name only (scalar
+      // params are excluded from this map). Pick the entry with the smallest
+      // orch index to keep the choice deterministic across parameter order.
+      const std::string* first_tensor_name = nullptr;
+      int min_idx = std::numeric_limits<int>::max();
+      for (const auto& [name, idx] : param_name_to_orch_index_) {
+        if (idx < min_idx) {
+          min_idx = idx;
+          first_tensor_name = &name;
+        }
+      }
+      if (first_tensor_name) {
+        tensor_phi_init = GetExternalTensorName(*first_tensor_name);
+      }
     }
     if (tensor_phi_init.empty()) {
       auto find_in_scope_tensor_var = [&](const StmtPtr& body) -> std::string {
@@ -920,7 +948,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
                 << rv_arr.array_name << "[__yield_i] = " << inner_it->second.array_name << "[__yield_i];\n";
         } else {
           // Scalar → array slot write (Parallel inner yielding a fresh task id
-          // into its slot). The slot index is the current loop's index var.
+          // into its slot). The slot index is the enclosing loop's 0-based
+          // ordinal, so non-trivial parallel ranges still index ``arr[0..N-1]``.
           auto map_it = manual_task_id_map_.find(yield_var.get());
           INTERNAL_CHECK_SPAN(map_it != manual_task_id_map_.end(), yield_stmt->span_)
               << "Internal error: scalar yield to array carry must resolve to a "
@@ -928,10 +957,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
           auto* scalar_name = std::get_if<std::string>(&map_it->second);
           INTERNAL_CHECK_SPAN(scalar_name, yield_stmt->span_)
               << "Internal error: scalar yield to array carry expects string-variant entry";
-          INTERNAL_CHECK_SPAN(!current_loop_vars_.empty(), yield_stmt->span_)
+          INTERNAL_CHECK_SPAN(!current_loop_slot_exprs_.empty(), yield_stmt->span_)
               << "Internal error: scalar yield to array carry requires an enclosing loop var";
-          code_ << Indent() << rv_arr.array_name << "[" << current_loop_vars_.back() << "] = " << *scalar_name
-                << ";\n";
+          code_ << Indent() << rv_arr.array_name << "[" << current_loop_slot_exprs_.back()
+                << "] = " << *scalar_name << ";\n";
         }
         continue;
       }
@@ -2002,10 +2031,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int64_t size;
   };
   std::unordered_map<const Var*, ArrayCarryEntry> array_carry_vars_;
-  /// Stack of currently-active loop variables (C++ identifiers). Pushed when
-  /// entering a ForStmt body and popped on exit. Used by ``YieldStmt`` to emit
-  /// ``arr[<loop_var>] = value`` for Parallel inner array writes.
-  std::vector<std::string> current_loop_vars_;
+  /// Stack of 0-based slot expressions for the enclosing ForStmts. Pushed
+  /// when entering a ForStmt body and popped on exit. Used by ``YieldStmt``
+  /// to emit ``arr[<slot>] = value`` for Parallel inner array writes. The
+  /// expression is ``(loop_var - start) / step``, peephole-simplified to
+  /// just ``loop_var`` when start=0 and step=1.
+  std::vector<std::string> current_loop_slot_exprs_;
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;
   std::unordered_set<const Var*> declared_var_ptrs_;

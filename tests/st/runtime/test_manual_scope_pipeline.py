@@ -342,6 +342,7 @@ def _build_phase_fence_program():
                     for branch in pl.parallel(N_BRANCHES):
                         row = (phase * N_BRANCHES + branch) * TILE_M
                         out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+            return out
 
     return PhaseFenceManualScope
 
@@ -535,6 +536,7 @@ def _build_branch_chain_program():
                     for step in pl.range(N_STEPS):
                         row = step * N_BRANCHES * TILE_M + branch * TILE_M
                         out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+            return out
 
     return BranchChainManualScope
 

@@ -285,10 +285,16 @@ class TaskIdLoweringMutator : public IRMutator {
     auto seq = As<SeqStmts>(base);
     if (!seq || manual_depth_ == 0) return seq;
 
-    // Inject `<lhs>_tid = task_id_of(<lhs>)` AssignStmts after each kernel
-    // Call AssignStmt whose LHS needs a TaskId companion; inject
-    // `<placeholder>_tid = task_invalid()` after each tensor.create assign
-    // whose LHS needs a companion.
+    // Inject TaskId companion definitions after each AssignStmt whose LHS
+    // is in needs_tid_:
+    //   * kernel Call: ``<lhs>__tid = task_id_of(<lhs>)``
+    //   * tensor.create: ``<lhs>__tid = task_invalid()``
+    //   * Var alias ``b = a``: ``b__tid = a__tid`` (forward the producer's
+    //     companion to the alias; without this, a downstream ``deps=[b]``
+    //     gets rewritten to ``b__tid`` which would never be defined).
+    //   * Tuple extract ``b = tuple[i]``: ``b__tid = tuple_var__tid`` (the
+    //     tuple-producing kernel has a single task id; all unpacked elements
+    //     share it).
     std::vector<StmtPtr> new_stmts;
     new_stmts.reserve(seq->stmts_.size() * 2);
     bool changed = false;
@@ -297,33 +303,47 @@ class TaskIdLoweringMutator : public IRMutator {
       auto assign = As<AssignStmt>(stmt);
       if (!assign || !assign->var_) continue;
       if (!needs_tid_.count(assign->var_.get())) continue;
-      auto call = As<Call>(assign->value_);
-      if (!call) continue;
       VarPtr tid_var = LookupOrAllocateTid(assign->var_);
       if (!tid_var) continue;
 
-      if (kernel_lhs_.count(assign->var_.get())) {
-        // user kernel Call: synthesize task_id_of(lhs)
-        auto op_var = std::make_shared<GlobalVar>("system.task_id_of");
-        std::vector<ExprPtr> args = {assign->var_};
-        std::vector<std::pair<std::string, std::any>> kwargs;
-        std::vector<std::pair<std::string, std::any>> attrs;
-        auto tid_call =
-            std::make_shared<Call>(op_var, std::move(args), std::move(kwargs), std::move(attrs),
-                                   std::make_shared<ScalarType>(DataType::TASK_ID), assign->span_);
-        new_stmts.push_back(std::make_shared<AssignStmt>(tid_var, tid_call, assign->span_));
-        changed = true;
-      } else if (IsBuiltinOp(call->op_->name_) && call->op_->name_ == "tensor.create") {
-        // Placeholder tensor.create: synthesize task_invalid()
-        auto op_var = std::make_shared<GlobalVar>("system.task_invalid");
-        std::vector<ExprPtr> args;
-        std::vector<std::pair<std::string, std::any>> kwargs;
-        std::vector<std::pair<std::string, std::any>> attrs;
-        auto tid_call =
-            std::make_shared<Call>(op_var, std::move(args), std::move(kwargs), std::move(attrs),
-                                   std::make_shared<ScalarType>(DataType::TASK_ID), assign->span_);
-        new_stmts.push_back(std::make_shared<AssignStmt>(tid_var, tid_call, assign->span_));
-        changed = true;
+      if (auto call = As<Call>(assign->value_)) {
+        if (kernel_lhs_.count(assign->var_.get())) {
+          // user kernel Call: synthesize task_id_of(lhs)
+          auto op_var = std::make_shared<GlobalVar>("system.task_id_of");
+          std::vector<ExprPtr> args = {assign->var_};
+          std::vector<std::pair<std::string, std::any>> kwargs;
+          std::vector<std::pair<std::string, std::any>> attrs;
+          auto tid_call =
+              std::make_shared<Call>(op_var, std::move(args), std::move(kwargs), std::move(attrs),
+                                     std::make_shared<ScalarType>(DataType::TASK_ID), assign->span_);
+          new_stmts.push_back(std::make_shared<AssignStmt>(tid_var, tid_call, assign->span_));
+          changed = true;
+        } else if (IsBuiltinOp(call->op_->name_) && call->op_->name_ == "tensor.create") {
+          // Placeholder tensor.create: synthesize task_invalid()
+          auto op_var = std::make_shared<GlobalVar>("system.task_invalid");
+          std::vector<ExprPtr> args;
+          std::vector<std::pair<std::string, std::any>> kwargs;
+          std::vector<std::pair<std::string, std::any>> attrs;
+          auto tid_call =
+              std::make_shared<Call>(op_var, std::move(args), std::move(kwargs), std::move(attrs),
+                                     std::make_shared<ScalarType>(DataType::TASK_ID), assign->span_);
+          new_stmts.push_back(std::make_shared<AssignStmt>(tid_var, tid_call, assign->span_));
+          changed = true;
+        }
+      } else if (auto rhs_var = AsVarLike(assign->value_)) {
+        // Plain Var alias: forward the source's tid companion.
+        if (auto rhs_tid = LookupOrAllocateTid(rhs_var)) {
+          new_stmts.push_back(std::make_shared<AssignStmt>(tid_var, rhs_tid, assign->span_));
+          changed = true;
+        }
+      } else if (auto get_item = As<TupleGetItemExpr>(assign->value_)) {
+        // Tuple extract: forward the tuple-producing call's tid companion.
+        if (auto tuple_var = AsVarLike(get_item->tuple_)) {
+          if (auto tuple_tid = LookupOrAllocateTid(tuple_var)) {
+            new_stmts.push_back(std::make_shared<AssignStmt>(tid_var, tuple_tid, assign->span_));
+            changed = true;
+          }
+        }
       }
     }
     if (!changed) return seq;
