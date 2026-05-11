@@ -3149,6 +3149,56 @@ class TestManualScopeCodegen:
         # Cross-iteration parallel: the ONLY add_dep is the intra-iteration one.
         assert code.count("add_dep(") == 1, code
 
+    def test_manual_scope_parallel_dynamic_trip_count_rejected(self):
+        """``pl.parallel(<dynamic>)`` carrying a manual_scope dep must error.
+
+        Array-carry codegen needs a const trip count to allocate a fixed-size
+        ``PTO2TaskId[N]`` fence array. With a dynamic trip count we cannot
+        emit correct multi-deps lowering; silently falling back to a scalar
+        ``last-dispatched`` fence would be wrong. The codegen surfaces this
+        as a clear user-facing CHECK.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ROWS, COLS = 128, 128
+        TILE_R, TILE_C = 32, 32
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(x, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                n_branches: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                with pl.manual_scope():
+                    for i in pl.range(4):
+                        row: pl.Scalar[pl.INDEX] = i * TILE_R
+                        for j in pl.parallel(n_branches):
+                            col: pl.Scalar[pl.INDEX] = j * TILE_C
+                            out = self.kern(x, out, row, col, deps=[out])
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        with pytest.raises(Exception, match="statically-known trip count"):
+            _generate_orch_code(transformed)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

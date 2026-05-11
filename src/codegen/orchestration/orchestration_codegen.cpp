@@ -515,26 +515,40 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
-    // For ``ForKind::Parallel`` with TaskId iter_args: each iteration is
-    // independent (no carry across parallel iters). Two lowerings are used:
-    //   * Array carry (Parallel with const trip count, or Sequential whose
-    //     yield flows from an inner array-carry loop): allocate
-    //     ``PTO2TaskId arr[N]`` and have yields write per-slot. Downstream
-    //     deps see ``add_dep`` for every slot — the runtime fence then waits
-    //     for ALL parallel iters, not just the last-dispatched one.
-    //   * Scalar carry (Sequential linear chain or unsupported Parallel):
-    //     existing single-carry-name lowering, where the last-dispatched
-    //     task becomes the fence.
-    bool is_parallel_for = (for_stmt->kind_ == ForKind::Parallel);
-    std::vector<std::pair<std::string, std::string>> parallel_iter_local_inits;
+    // For TaskId iter_args inside a manual scope we always lower via array
+    // carry: a Parallel ForStmt produces ``PTO2TaskId arr[N]`` with yields
+    // writing per-slot, and downstream ``add_dep`` iterates every slot. A
+    // Sequential ForStmt whose yield value is an inner Parallel rv is also
+    // array-carry of the same size. Scalar (single-name) carry would only
+    // fence the last-dispatched task — which is unsafe under MANUAL scope.
 
-    // Per-iter-arg array-carry size (0 means scalar carry, existing path).
+    // Per-iter-arg array-carry size (0 means non-TaskId scalar carry).
     std::vector<int64_t> array_sizes(for_stmt->iter_args_.size(), 0);
     if (in_manual_scope_depth_ > 0) {
       for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
         if (is_rebind[i]) {
           array_sizes[i] = ResolveArrayCarrySize(for_stmt, i);
         }
+      }
+    }
+
+    // A Parallel ForStmt with a TaskId iter_arg REQUIRES a const trip count
+    // so we can allocate a ``PTO2TaskId[N]`` backing store. Without it we
+    // would silently fall back to last-dispatched fence semantics — wrong
+    // under MANUAL scope. Surface the constraint as a clear user-facing
+    // error rather than emitting incorrect code.
+    if (for_stmt->kind_ == ForKind::Parallel && in_manual_scope_depth_ > 0) {
+      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+        if (!is_rebind[i]) continue;
+        auto sty = As<ScalarType>(for_stmt->iter_args_[i]->GetType());
+        if (!sty || sty->dtype_ != DataType::TASK_ID) continue;
+        CHECK(array_sizes[i] > 0)
+            << "manual_scope: pl.parallel loops carrying a manual_scope dep "
+            << "(via ``deps=[...]``) must have a statically-known trip count. "
+            << "The runtime fence requires a PTO2TaskId[N] array of fixed N. "
+            << "Either make the parallel loop's trip count a Python int "
+            << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
+            << "loop inside a const-bounded scope.";
       }
     }
 
@@ -550,15 +564,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // tensor in the emitted code.
       init_var_name = GetExternalTensorName(init_var_name);
 
-      // Is this a TaskId iter_arg inside a manual scope?
-      bool is_task_id_carry = false;
-      if (in_manual_scope_depth_ > 0 && is_rebind[i]) {
-        if (auto sty = As<ScalarType>(iter_arg->GetType())) {
-          if (sty->dtype_ == DataType::TASK_ID) is_task_id_carry = true;
-        }
-      }
-
-      if (is_task_id_carry && array_sizes[i] > 0) {
+      if (array_sizes[i] > 0) {
         // ARRAY CARRY PATH — allocate ``PTO2TaskId <name>[N]`` and init it.
         // Initialisation rule: if the iter_arg's init value is itself an
         // array-carry Var, copy slot-by-slot; otherwise broadcast the scalar
@@ -582,7 +588,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
         // Register rv as array-carry (yields target into this array).
         RegisterArrayCarry(return_var.get(), rv_array_name, N);
-        if (is_parallel_for) {
+        if (for_stmt->kind_ == ForKind::Parallel) {
           // Parallel iter_arg: per-iter "value" is the init (same for all iters)
           // — used as the deps source. If init is an array, alias to it; if
           // init is scalar, register the iter_arg's slot map to that scalar
@@ -603,6 +609,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
           RegisterArrayCarry(iter_arg.get(), rv_array_name, N);
         }
       } else if (is_rebind[i]) {
+        // Scalar (single-name) carry path — only fires for non-TaskId
+        // iter_args (e.g. Tensor) or Sequential TaskId iter_args whose
+        // yield value isn't an inner array. Parallel TaskId iter_args are
+        // guaranteed to use the array-carry path above (the const-trip-count
+        // CHECK above would have fired otherwise).
+        //
         // Pick a fresh, distinct name for the carry. We can't reuse
         // ReserveVarEmitName(return_var) because the lineage analyzer has
         // already populated emit_name_map_[return_var] with the init's param
@@ -614,26 +626,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         code_ << Indent() << GetCppType(return_var->GetType()) << " " << carry_name << " = " << init_var_name
               << ";\n";
         emit_name_map_[return_var.get()] = carry_name;
-
-        if (is_parallel_for && is_task_id_carry) {
-          // Parallel iter_arg of TaskId (scalar fallback when const trip count
-          // could not be resolved). The body still gets a per-iter local that
-          // resets to ``init_var_name``; downstream sees the LAST iter's yield
-          // as the fence — semantically imprecise for true multi-dispatch but
-          // safe when the loop reduces to a single iteration.
-          std::string iter_local_name = ReserveSyntheticEmitName(iter_arg->name_hint_);
-          emit_name_map_[iter_arg.get()] = iter_local_name;
-          manual_task_id_map_[iter_arg.get()] = iter_local_name;
+        emit_name_map_[iter_arg.get()] = carry_name;
+        // Sequential TaskId carry: register both endpoints in the task-id
+        // map so EmitManualDeps and yield writes can find the carry name.
+        auto sty = As<ScalarType>(iter_arg->GetType());
+        if (in_manual_scope_depth_ > 0 && sty && sty->dtype_ == DataType::TASK_ID) {
+          manual_task_id_map_[iter_arg.get()] = carry_name;
           manual_task_id_map_[return_var.get()] = carry_name;
-          parallel_iter_local_inits.emplace_back(iter_local_name, init_var_name);
-        } else {
-          // Sequential ForStmt: iter_arg and return_var share the same carry,
-          // updated in place by yields.
-          emit_name_map_[iter_arg.get()] = carry_name;
-          if (is_task_id_carry) {
-            manual_task_id_map_[iter_arg.get()] = carry_name;
-            manual_task_id_map_[return_var.get()] = carry_name;
-          }
         }
       } else {
         // Trivial yield: preserve the legacy aliasing — both names route to
@@ -648,11 +647,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
 
-    // Parallel iter_arg per-iter local resets (emitted at body entry so each
-    // iteration sees a fresh init independent of sibling iterations' yields).
-    for (const auto& [local_name, init_name] : parallel_iter_local_inits) {
-      code_ << Indent() << "PTO2TaskId " << local_name << " = " << init_name << ";\n";
-    }
     // Inside a MANUAL scope, the runtime forbids nested AUTO scope, so we
     // omit the implicit ``PTO2_SCOPE()`` wrapper around the loop body.
     bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
