@@ -574,10 +574,8 @@ class TestFlattenPreservesAttrs:
         # The python_printer does not surface ``Call.attrs['user_manual_dep_edges']``
         # so the default print -> parse roundtrip would fail. Property
         # verification still runs.
-        instruments = [
-            _core_passes.VerificationInstrument(
-                _core_passes.VerificationMode.BEFORE_AND_AFTER
-            )
+        instruments: list[_core_passes.PassInstrument] = [
+            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
         ]
         ctx = _core_passes.PassContext(instruments)
 
@@ -612,6 +610,7 @@ class TestFlattenPreservesAttrs:
         with ctx:
             After = passes.flatten_call_expr()(Prog)
         fn = After.get_function("main")
+        assert fn is not None, "main function must exist after flatten_call_expr"
 
         def find_k2_call(stmt):
             if isinstance(stmt, ir.SeqStmts):
@@ -630,9 +629,7 @@ class TestFlattenPreservesAttrs:
         k2_call = find_k2_call(fn.body)
         assert k2_call is not None, "expected the k2 call in the manual scope"
         edges = k2_call.attrs.get("user_manual_dep_edges", [])
-        assert len(edges) == 1, (
-            f"user_manual_dep_edges dropped after FlattenCallExpr; got {edges!r}"
-        )
+        assert len(edges) == 1, f"user_manual_dep_edges dropped after FlattenCallExpr; got {edges!r}"
 
 
 class TestFlattenCallInScopeStmt:

@@ -326,13 +326,9 @@ def _build_phase_fence_program():
             bias: pl.Scalar[pl.FP32],
             out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
-            tile: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(
-                data, [row_offset, 0], [TILE_M, BIG_N]
-            )
+            tile: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(data, [row_offset, 0], [TILE_M, BIG_N])
             result: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.add(tile, bias)
-            ret: pl.Tensor[[BIG_M, BIG_N], pl.FP32] = pl.store(
-                result, [row_offset, 0], out
-            )
+            ret: pl.Tensor[[BIG_M, BIG_N], pl.FP32] = pl.store(result, [row_offset, 0], out)
             return ret
 
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -366,8 +362,12 @@ class _PhaseFenceManualScopePTO(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("data", [_PHASE_FENCE_BIG_M, _PHASE_FENCE_BIG_N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [_PHASE_FENCE_BIG_M, _PHASE_FENCE_BIG_N], DataType.FP32, init_value=0.0, is_output=True),
+            TensorSpec(
+                "data", [_PHASE_FENCE_BIG_M, _PHASE_FENCE_BIG_N], DataType.FP32, init_value=torch.randn
+            ),
+            TensorSpec(
+                "out", [_PHASE_FENCE_BIG_M, _PHASE_FENCE_BIG_N], DataType.FP32, init_value=0.0, is_output=True
+            ),
         ]
 
     def get_program(self) -> Any:
@@ -381,7 +381,7 @@ class _PhaseFenceManualScopePTO(PTOTestCase):
         out.zero_()
         for i in range(_PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES):
             r0 = i * _PHASE_FENCE_TILE_M
-            out[r0:r0 + _PHASE_FENCE_TILE_M, :] = data[r0:r0 + _PHASE_FENCE_TILE_M, :] + 1.0
+            out[r0 : r0 + _PHASE_FENCE_TILE_M, :] = data[r0 : r0 + _PHASE_FENCE_TILE_M, :] + 1.0
 
 
 class TestPhaseFenceManualScope:
@@ -442,7 +442,7 @@ class TestPhaseFenceSwimlane:
             pytest.skip(f"need ≥ {expected} tasks for phase fence check, got {len(tasks)}")
         tasks = sorted(tasks, key=lambda t: t["start_time_us"])[:expected]
         phases = [
-            tasks[i * _PHASE_FENCE_N_BRANCHES:(i + 1) * _PHASE_FENCE_N_BRANCHES]
+            tasks[i * _PHASE_FENCE_N_BRANCHES : (i + 1) * _PHASE_FENCE_N_BRANCHES]
             for i in range(_PHASE_FENCE_N_PHASES)
         ]
         for i in range(_PHASE_FENCE_N_PHASES - 1):
@@ -519,13 +519,9 @@ def _build_branch_chain_program():
             bias: pl.Scalar[pl.FP32],
             out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
-            tile: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(
-                data, [row_offset, 0], [TILE_M, BIG_N]
-            )
+            tile: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(data, [row_offset, 0], [TILE_M, BIG_N])
             result: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.add(tile, bias)
-            ret: pl.Tensor[[BIG_M, BIG_N], pl.FP32] = pl.store(
-                result, [row_offset, 0], out
-            )
+            ret: pl.Tensor[[BIG_M, BIG_N], pl.FP32] = pl.store(result, [row_offset, 0], out)
             return ret
 
         @pl.function(type=pl.FunctionType.Orchestration)
@@ -559,8 +555,16 @@ class _BranchChainManualScopePTO(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("data", [_BRANCH_CHAIN_BIG_M, _BRANCH_CHAIN_BIG_N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [_BRANCH_CHAIN_BIG_M, _BRANCH_CHAIN_BIG_N], DataType.FP32, init_value=0.0, is_output=True),
+            TensorSpec(
+                "data", [_BRANCH_CHAIN_BIG_M, _BRANCH_CHAIN_BIG_N], DataType.FP32, init_value=torch.randn
+            ),
+            TensorSpec(
+                "out",
+                [_BRANCH_CHAIN_BIG_M, _BRANCH_CHAIN_BIG_N],
+                DataType.FP32,
+                init_value=0.0,
+                is_output=True,
+            ),
         ]
 
     def get_program(self) -> Any:
@@ -576,7 +580,7 @@ class _BranchChainManualScopePTO(PTOTestCase):
         for branch in range(_BRANCH_CHAIN_N_BRANCHES):
             for step in range(_BRANCH_CHAIN_N_STEPS):
                 r0 = step * _BRANCH_CHAIN_N_BRANCHES * _BRANCH_CHAIN_TILE_M + branch * _BRANCH_CHAIN_TILE_M
-                out[r0:r0 + _BRANCH_CHAIN_TILE_M, :] = data[r0:r0 + _BRANCH_CHAIN_TILE_M, :] + 1.0
+                out[r0 : r0 + _BRANCH_CHAIN_TILE_M, :] = data[r0 : r0 + _BRANCH_CHAIN_TILE_M, :] + 1.0
 
 
 class TestBranchChainManualScope:
@@ -630,7 +634,7 @@ class TestBranchChainSwimlane:
             pytest.skip(f"need ≥ {expected} tasks for chain check, got {len(tasks)}")
         tasks = sorted(tasks, key=lambda t: t["task_id"])[:expected]
         for b in range(_BRANCH_CHAIN_N_BRANCHES):
-            branch_tasks = tasks[b * _BRANCH_CHAIN_N_STEPS:(b + 1) * _BRANCH_CHAIN_N_STEPS]
+            branch_tasks = tasks[b * _BRANCH_CHAIN_N_STEPS : (b + 1) * _BRANCH_CHAIN_N_STEPS]
             for s in range(_BRANCH_CHAIN_N_STEPS - 1):
                 prev_end = branch_tasks[s]["end_time_us"]
                 next_start = branch_tasks[s + 1]["start_time_us"]
@@ -649,8 +653,7 @@ class TestBranchChainSwimlane:
         tasks = branch_chain_swimlane_data["tasks"]
         for t in tasks:
             assert t["fanout_count"] <= 1, (
-                f"task fanout_count = {t['fanout_count']}, expected ≤ 1 "
-                "(per-branch linear chain only)"
+                f"task fanout_count = {t['fanout_count']}, expected ≤ 1 (per-branch linear chain only)"
             )
 
     def test_branches_dispatch_to_distinct_cores(self, branch_chain_swimlane_data: dict):

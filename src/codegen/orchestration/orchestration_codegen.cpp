@@ -83,6 +83,14 @@ namespace {
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 
+// Runtime cap on per-task explicit dependencies. Mirrors
+// ``PTO2_MAX_EXPLICIT_DEPS`` in
+// ``runtime/src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/runtime/pto_types.h``
+// — exceeding this at codegen time would generate ``add_dep`` calls beyond
+// the per-task storage and trip the runtime's own size check. Bounding the
+// array-carry expansion here gives a clear codegen-time error instead.
+constexpr int64_t kMaxExplicitDepsPerTask = 16;
+
 int GetGMPipeSlotCount(int dir_mask) {
   const int bidirectional = core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C;
   if (dir_mask == bidirectional) {
@@ -535,20 +543,29 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // A Parallel ForStmt with a TaskId iter_arg REQUIRES a const trip count
     // so we can allocate a ``PTO2TaskId[N]`` backing store. Without it we
     // would silently fall back to last-dispatched fence semantics — wrong
-    // under MANUAL scope. Surface the constraint as a clear user-facing
-    // error rather than emitting incorrect code.
+    // under MANUAL scope. Also bound the trip count by the runtime's
+    // per-task dep cap: an array of size N fans out into N ``add_dep`` calls
+    // on every downstream task, and exceeding ``PTO2_MAX_EXPLICIT_DEPS``
+    // overflows the runtime's fixed-size dep store. Surface both as clear
+    // user-facing errors instead of emitting incorrect code.
     if (for_stmt->kind_ == ForKind::Parallel && in_manual_scope_depth_ > 0) {
       for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
         if (!is_rebind[i]) continue;
         auto sty = As<ScalarType>(for_stmt->iter_args_[i]->GetType());
         if (!sty || sty->dtype_ != DataType::TASK_ID) continue;
-        CHECK(array_sizes[i] > 0)
-            << "manual_scope: pl.parallel loops carrying a manual_scope dep "
-            << "(via ``deps=[...]``) must have a statically-known trip count. "
-            << "The runtime fence requires a PTO2TaskId[N] array of fixed N. "
-            << "Either make the parallel loop's trip count a Python int "
-            << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
-            << "loop inside a const-bounded scope.";
+        CHECK(array_sizes[i] > 0) << "manual_scope: pl.parallel loops carrying a manual_scope dep "
+                                  << "(via ``deps=[...]``) must have a statically-known trip count. "
+                                  << "The runtime fence requires a PTO2TaskId[N] array of fixed N. "
+                                  << "Either make the parallel loop's trip count a Python int "
+                                  << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
+                                  << "loop inside a const-bounded scope.";
+        CHECK(array_sizes[i] <= kMaxExplicitDepsPerTask)
+            << "manual_scope: pl.parallel trip count " << array_sizes[i]
+            << " exceeds runtime cap PTO2_MAX_EXPLICIT_DEPS=" << kMaxExplicitDepsPerTask
+            << ". Each downstream task would receive " << array_sizes[i]
+            << " add_dep entries (one per parallel iter), overflowing the "
+            << "fixed-size per-task dep store. Shrink the parallel loop or "
+            << "split the dependency into multiple manual scopes.";
       }
     }
 
@@ -705,22 +722,50 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitStmt_(const IfStmtPtr& if_stmt) override {
     std::string cond_expr = GenerateExprString(if_stmt->condition_);
 
-    // Cache a function-param Tensor name (e.g. ``ext_out``) for Tensor
-    // phi return_var initialisation. ``Tensor`` has no public default ctor,
-    // so ``Tensor x;`` won't compile; we emit ``Tensor x = ext_<param>;``
-    // as a placeholder init that branch yields overwrite. The chosen param
-    // is arbitrary — only its presence as a valid in-scope Tensor matters.
-    std::string tensor_param_init;
+    // ``Tensor`` has no public default ctor, so ``Tensor x;`` won't compile.
+    // The phi declaration for a Tensor return_var must be initialised with a
+    // valid Tensor that's already in scope. Try sources in order:
+    //   1. Any function parameter (most common, always present in practice).
+    //   2. A Var yielded by either branch that's already declared at
+    //      if-entry (an outer iter_arg, or a prior in-body assignment). This
+    //      handles parameterless functions whose branches yield a name
+    //      computed before the if.
+    std::string tensor_phi_init;
     if (!param_name_set_.empty()) {
-      tensor_param_init = GetExternalTensorName(*param_name_set_.begin());
+      tensor_phi_init = GetExternalTensorName(*param_name_set_.begin());
+    }
+    if (tensor_phi_init.empty()) {
+      auto find_in_scope_tensor_var = [&](const StmtPtr& body) -> std::string {
+        auto y = transform_utils::GetLastYieldStmt(body);
+        if (!y) return {};
+        for (const auto& v : y->value_) {
+          auto var = AsVarLike(v);
+          if (!var) continue;
+          if (!As<TensorType>(var->GetType())) continue;
+          auto it = emit_name_map_.find(var.get());
+          if (it == emit_name_map_.end()) continue;
+          return GetExternalTensorName(it->second);
+        }
+        return {};
+      };
+      tensor_phi_init = find_in_scope_tensor_var(if_stmt->then_body_);
+      if (tensor_phi_init.empty() && if_stmt->else_body_.has_value()) {
+        tensor_phi_init = find_in_scope_tensor_var(*if_stmt->else_body_);
+      }
     }
 
     for (const auto& rv : if_stmt->return_vars_) {
       const std::string emit_name = ReserveVarEmitName(rv.get());
       const std::string cpp_type = GetCppType(rv->GetType());
-      if (cpp_type == "Tensor" && !tensor_param_init.empty()) {
+      if (cpp_type == "Tensor") {
+        INTERNAL_CHECK_SPAN(!tensor_phi_init.empty(), if_stmt->span_)
+            << "Internal error: IfStmt return_var '" << rv->name_hint_
+            << "' is a Tensor but no in-scope Tensor was found to use as the "
+            << "phi placeholder (``Tensor`` has a private default ctor). "
+            << "Expected either a function parameter or a branch yield value "
+            << "to resolve to a Var already declared at if-entry.";
         // Phi placeholder init — overwritten by branch yields.
-        code_ << Indent() << cpp_type << " " << emit_name << " = " << tensor_param_init << ";\n";
+        code_ << Indent() << cpp_type << " " << emit_name << " = " << tensor_phi_init << ";\n";
       } else {
         code_ << Indent() << cpp_type << " " << emit_name << ";\n";
       }
@@ -769,8 +814,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         INTERNAL_CHECK_SPAN(idx, assign->span_)
             << "Internal error: system.task_id_of producer '" << producer->name_hint_
             << "' is not a kernel-Call LHS (variant holds non-int)";
-        code_ << Indent() << "PTO2TaskId " << var_name << " = task_" << *idx
-              << "_outs.task_id();\n";
+        code_ << Indent() << "PTO2TaskId " << var_name << " = task_" << *idx << "_outs.task_id();\n";
         // Register so downstream EmitManualDeps emits ``add_dep(<var_name>);``
         // (string variant — but no is_valid guard since this id is known
         // valid; the EmitManualDeps string branch unconditionally guards,
@@ -872,9 +916,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
           INTERNAL_CHECK_SPAN(inner_it->second.size == rv_arr.size, yield_stmt->span_)
               << "Internal error: array-carry yield size mismatch (rv=" << rv_arr.size
               << ", yield=" << inner_it->second.size << ")";
-          code_ << Indent() << "for (int64_t __yield_i = 0; __yield_i < " << rv_arr.size
-                << "; ++__yield_i) " << rv_arr.array_name << "[__yield_i] = "
-                << inner_it->second.array_name << "[__yield_i];\n";
+          code_ << Indent() << "for (int64_t __yield_i = 0; __yield_i < " << rv_arr.size << "; ++__yield_i) "
+                << rv_arr.array_name << "[__yield_i] = " << inner_it->second.array_name << "[__yield_i];\n";
         } else {
           // Scalar → array slot write (Parallel inner yielding a fresh task id
           // into its slot). The slot index is the current loop's index var.
@@ -887,8 +930,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
               << "Internal error: scalar yield to array carry expects string-variant entry";
           INTERNAL_CHECK_SPAN(!current_loop_vars_.empty(), yield_stmt->span_)
               << "Internal error: scalar yield to array carry requires an enclosing loop var";
-          code_ << Indent() << rv_arr.array_name << "[" << current_loop_vars_.back() << "] = "
-                << *scalar_name << ";\n";
+          code_ << Indent() << rv_arr.array_name << "[" << current_loop_vars_.back() << "] = " << *scalar_name
+                << ";\n";
         }
         continue;
       }

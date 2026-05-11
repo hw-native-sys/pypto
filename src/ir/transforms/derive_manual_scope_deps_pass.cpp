@@ -122,15 +122,16 @@ class ManualDepResolveMutator : public IRMutator {
 // ---------------------------------------------------------------------------
 class TaskRelevantVarCollector : public IRVisitor {
  public:
-  std::unordered_set<const Var*> needs_tid_;     // Vars that need TaskId companion
-  std::unordered_set<const Var*> kernel_lhs_;    // Vars produced by user kernel Calls
-  std::unordered_set<const Var*> has_def_;       // Vars that have any AssignStmt def in the body
-  std::unordered_map<const Var*, VarPtr> import_vars_;  // Vars in needs_tid_ with NO def (e.g. function params)
+  std::unordered_set<const Var*> needs_tid_;   // Vars that need TaskId companion
+  std::unordered_set<const Var*> kernel_lhs_;  // Vars produced by user kernel Calls
+  std::unordered_set<const Var*> has_def_;     // Vars that have any AssignStmt def in the body
+  std::unordered_map<const Var*, VarPtr>
+      import_vars_;  // Vars in needs_tid_ with NO def (e.g. function params)
 
   // Maps for closure analysis.
-  std::unordered_map<const Var*, VarPtr> alias_;          // var -> aliased var (Var-to-Var copy / tuple_get)
-  std::unordered_map<const Var*, VarPtr> iter_arg_init_;  // for-iter_arg -> init_value Var
-  std::unordered_map<const Var*, VarPtr> rv_to_iter_arg_; // for-return_var -> for-iter_arg
+  std::unordered_map<const Var*, VarPtr> alias_;           // var -> aliased var (Var-to-Var copy / tuple_get)
+  std::unordered_map<const Var*, VarPtr> iter_arg_init_;   // for-iter_arg -> init_value Var
+  std::unordered_map<const Var*, VarPtr> rv_to_iter_arg_;  // for-return_var -> for-iter_arg
   // For each YieldStmt, the destination return_vars (from enclosing scope).
   // We capture pairs (yield_value_var -> destination_return_var) in `yield_pairs_`.
   std::vector<std::pair<VarPtr, VarPtr>> yield_pairs_;
@@ -162,8 +163,10 @@ class TaskRelevantVarCollector : public IRVisitor {
       // the loop body; the carry destination it gets yielded to must also need
       // a tid so the ForStmt mutator allocates the matching iter_arg companion).
       for (auto& [src, dest] : yield_pairs_) {
-        if (dest && needs_tid_.count(dest.get()) && src && needs_tid_.insert(src.get()).second) changed = true;
-        if (src && needs_tid_.count(src.get()) && dest && needs_tid_.insert(dest.get()).second) changed = true;
+        if (dest && needs_tid_.count(dest.get()) && src && needs_tid_.insert(src.get()).second)
+          changed = true;
+        if (src && needs_tid_.count(src.get()) && dest && needs_tid_.insert(dest.get()).second)
+          changed = true;
       }
     }
 
@@ -305,10 +308,9 @@ class TaskIdLoweringMutator : public IRMutator {
         std::vector<ExprPtr> args = {assign->var_};
         std::vector<std::pair<std::string, std::any>> kwargs;
         std::vector<std::pair<std::string, std::any>> attrs;
-        auto tid_call = std::make_shared<Call>(op_var, std::move(args), std::move(kwargs),
-                                               std::move(attrs),
-                                               std::make_shared<ScalarType>(DataType::TASK_ID),
-                                               assign->span_);
+        auto tid_call =
+            std::make_shared<Call>(op_var, std::move(args), std::move(kwargs), std::move(attrs),
+                                   std::make_shared<ScalarType>(DataType::TASK_ID), assign->span_);
         new_stmts.push_back(std::make_shared<AssignStmt>(tid_var, tid_call, assign->span_));
         changed = true;
       } else if (IsBuiltinOp(call->op_->name_) && call->op_->name_ == "tensor.create") {
@@ -317,10 +319,9 @@ class TaskIdLoweringMutator : public IRMutator {
         std::vector<ExprPtr> args;
         std::vector<std::pair<std::string, std::any>> kwargs;
         std::vector<std::pair<std::string, std::any>> attrs;
-        auto tid_call = std::make_shared<Call>(op_var, std::move(args), std::move(kwargs),
-                                               std::move(attrs),
-                                               std::make_shared<ScalarType>(DataType::TASK_ID),
-                                               assign->span_);
+        auto tid_call =
+            std::make_shared<Call>(op_var, std::move(args), std::move(kwargs), std::move(attrs),
+                                   std::make_shared<ScalarType>(DataType::TASK_ID), assign->span_);
         new_stmts.push_back(std::make_shared<AssignStmt>(tid_var, tid_call, assign->span_));
         changed = true;
       }
@@ -399,10 +400,10 @@ class TaskIdLoweringMutator : public IRMutator {
     }
 
     if (!changed) return for_stmt;
-    return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_,
-                                     for_stmt->step_, std::move(new_iter_args), for_stmt->body_,
-                                     std::move(new_return_vars), for_stmt->span_, for_stmt->kind_,
-                                     for_stmt->chunk_config_, for_stmt->attrs_);
+    return std::make_shared<ForStmt>(for_stmt->loop_var_, for_stmt->start_, for_stmt->stop_, for_stmt->step_,
+                                     std::move(new_iter_args), for_stmt->body_, std::move(new_return_vars),
+                                     for_stmt->span_, for_stmt->kind_, for_stmt->chunk_config_,
+                                     for_stmt->attrs_);
   }
 
   StmtPtr VisitStmt_(const IfStmtPtr& op) override {
@@ -503,8 +504,8 @@ class TaskIdLoweringMutator : public IRMutator {
     if (!v) return nullptr;
     auto it = tid_map_->find(v.get());
     if (it != tid_map_->end()) return it->second;
-    auto tid = std::make_shared<Var>(v->name_hint_ + "__tid",
-                                     std::make_shared<ScalarType>(DataType::TASK_ID), v->span_);
+    auto tid = std::make_shared<Var>(v->name_hint_ + "__tid", std::make_shared<ScalarType>(DataType::TASK_ID),
+                                     v->span_);
     (*tid_map_)[v.get()] = tid;
     return tid;
   }
@@ -598,10 +599,10 @@ StmtPtr LowerOneFunction(const StmtPtr& body) {
     auto tid_it = tid_map.find(raw_v);
     if (tid_it == tid_map.end()) continue;
     auto op_var = std::make_shared<GlobalVar>("system.task_invalid");
-    auto tid_call = std::make_shared<Call>(
-        op_var, std::vector<ExprPtr>{}, std::vector<std::pair<std::string, std::any>>{},
-        std::vector<std::pair<std::string, std::any>>{},
-        std::make_shared<ScalarType>(DataType::TASK_ID), var->span_);
+    auto tid_call = std::make_shared<Call>(op_var, std::vector<ExprPtr>{},
+                                           std::vector<std::pair<std::string, std::any>>{},
+                                           std::vector<std::pair<std::string, std::any>>{},
+                                           std::make_shared<ScalarType>(DataType::TASK_ID), var->span_);
     import_inits.push_back(std::make_shared<AssignStmt>(tid_it->second, tid_call, var->span_));
   }
   if (!import_inits.empty()) {
