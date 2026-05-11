@@ -385,7 +385,109 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 
 编排文件在生成的文件映射中命名为 `orchestration/<func_name>.cpp`。
 
+## Manual Scope 与 TaskId 降级
+
+`with pl.manual_scope():` 区域被降级为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
+代码块，区域内 runtime 的 auto OverlapMap 关闭。orchestration codegen 对
+每条必需依赖都显式发出 `params.add_dep(<task_id>);`，源数据来自
+[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md) pass 之后
+的 IR。
+
+### TaskId 的来源
+
+pass 之后，每个 kernel `Call` 会携带 `attrs["manual_dep_edges"]`——一个
+`vector<VarPtr>`，元素类型为 `Scalar[TASK_ID]`。每个条目在 codegen 时通过
+`manual_task_id_map_` 解析为以下三种来源之一：
+
+| Producer 种类 | codegen 发出的 C++ |
+| ------------- | ------------------ |
+| Kernel Call LHS（pass 合成 `system.task_id_of(producer)`） | `PTO2TaskId <lhs>__tid = task_<n>_outs.task_id();` |
+| 函数参数种子（pass 在函数 body 入口合成 `system.task_invalid()`） | `PTO2TaskId <param>__tid = PTO2TaskId::invalid();` |
+| 循环 carry iter_arg（pass 追加的 TaskId 配套） | for 循环中穿行的命名变量——标量或数组，见下 |
+
+`add_dep` 在 source 是 iter_arg carry 时会被 `if (<task_id>.is_valid())`
+包裹（首轮迭代种子可能仍是 invalid 哨兵）；对直接 producer 配套则无条件发出。
+
+### `pl.parallel` TaskId iter_arg 的 array carry
+
+承载 TaskId 配套的 `pl.parallel(N)` ForStmt 被降级为**大小为 N 的数组 carry**，
+而不是"last-write wins"的标量。pass 在 IR 中保留 iter_arg 为
+`Scalar[TASK_ID]`；codegen 识别这一形态（Parallel + TaskId iter_arg）后：
+
+1. 在 iter_arg 声明处分配定长数组：`PTO2TaskId arr[N];`，初始化时
+   广播标量 init（init 为标量时）或按槽位拷贝（init 本身是数组时——
+   例如 case1 内层 `pl.parallel` 的 init 来自外层 `pl.range` 的数组 carry）。
+2. 每个 parallel iter 体内把新产生的 task id 写入一个槽位：
+   `arr[(loop_var - start) / step] = <task_id>;`。当 `start == 0 && step == 1`
+   （常见形式）时，槽位表达式被 peephole 化简为 `arr[loop_var]`。
+3. 对每个 `manual_dep_edges` 引用该 iter_arg 的下游消费者，把单条 dep
+   展开为 N 条带守卫的 `add_dep`：
+   ```cpp
+   for each k in [0..N):
+       if (arr[k].is_valid()) { params.add_dep(arr[k]); }
+   ```
+
+`pl.range`（Sequential）循环，若其 yield 是内层 `pl.parallel` array carry
+的 rv，会继承同一个 N：它自身的 iter_arg 也成为大小 N 的数组 carry，
+外层 yield 时按槽位拷贝。这种结构上的传播就是 case1（外层 SEQ × 内层 PARALLEL）
+等拓扑中"多 iter fence 语义"的来源。
+
+**codegen 入口检查的约束（带用户友好 CHECK 消息）：**
+
+- `pl.parallel` 的 trip count 必须是 Python 字面量（编译期常量）。
+  动态 trip count 在 codegen 时被拒绝，提示 "statically-known trip count"。
+- trip count 必须满足 `N <= kMaxExplicitDepsPerTask = 16`。该常量
+  对齐 runtime
+  `runtime/src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/runtime/pto_types.h`
+  中的 `PTO2_MAX_EXPLICIT_DEPS`；超出会溢出 runtime 的定长 per-task
+  dep store。
+
+### 示例
+
+源 DSL（case1 形态）：
+
+```python
+with pl.manual_scope():
+    for phase in pl.range(N_PHASES):
+        for branch in pl.parallel(N_BRANCHES):
+            row = (phase * N_BRANCHES + branch) * TILE_M
+            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+```
+
+生成 C++（骨架）：
+
+```cpp
+PTO2TaskId out__ssa_v0__tid = PTO2TaskId::invalid();           // import-var 种子
+PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+    PTO2TaskId out__rv_v2__tid[N_BRANCHES];                    // 外层 rv = 数组
+    for (int64_t i = 0; i < N_BRANCHES; ++i)
+        out__rv_v2__tid[i] = out__ssa_v0__tid;                 // 标量 init 广播
+    for (int64_t phase = 0; phase < N_PHASES; phase += 1) {
+        PTO2TaskId out__rv_v4__tid[N_BRANCHES];                // 内层 rv = 数组
+        for (int64_t i = 0; i < N_BRANCHES; ++i)
+            out__rv_v4__tid[i] = out__rv_v2__tid[i];           // 按槽位拷贝
+        for (int64_t branch = 0; branch < N_BRANCHES; branch += 1) {
+            int64_t row = ...;
+            Arg params_t0; /* ... */
+            for (int64_t k = 0; k < N_BRANCHES; ++k) {         // 多依赖 fanout
+                if (out__rv_v2__tid[k].is_valid())
+                    params_t0.add_dep(out__rv_v2__tid[k]);
+            }
+            TaskOutputTensors task_0_outs = rt_submit_aiv_task(0, params_t0);
+            PTO2TaskId out__ssa_v5__tid = task_0_outs.task_id();
+            out__rv_v4__tid[branch] = out__ssa_v5__tid;        // 槽位 yield
+        }
+        for (int64_t i = 0; i < N_BRANCHES; ++i)
+            out__rv_v2__tid[i] = out__rv_v4__tid[i];           // 外层 yield (拷贝)
+    }
+}
+```
+
+phase `N+1` 中的每个 task 都会等待 phase `N` 的**全部** `N_BRANCHES` 个 task。
+
 ## 参见
 
 - [PTO 代码生成](00-pto_codegen.md) — PTO 后端的 MLIR 生成
 - [Pass 管理器](../passes/00-pass_manager.md) — 代码生成前应用的 IR 优化 Pass
+- [DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md) — 产生本节消费的降级后 IR
+- [Python syntax: 手工依赖原语](../language/00-python_syntax.md#手工依赖原语) — 表层语法及语义

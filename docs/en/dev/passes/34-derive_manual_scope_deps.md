@@ -1,22 +1,17 @@
 # DeriveManualScopeDeps Pass
 
-Resolves task-dependency edges for kernel `Call`s inside `with pl.manual_scope():` regions and writes them to `Call.attrs["manual_dep_edges"]` for codegen.
+Lowers user-declared `deps=[...]` edges in `with pl.manual_scope():` regions into a TaskId-based dependency graph that the orchestration codegen can emit as `params.add_dep(<task_id>)` calls.
 
 ## Overview
 
 PyPTO has two scope flavours for orchestrator dependency tracking:
 
-- **Auto scope** (the default `PTO2_SCOPE()` region): the runtime auto-derives task dependencies from buffer read/write overlap (OverlapMap).
-- **Manual scope** (`with pl.manual_scope():` → `RuntimeScopeStmt(manual=true)`): the user takes ownership of ordering. The runtime skips OverlapMap inside this region, and codegen must emit explicit `params.add_dep(task_<m>);` calls instead.
+- **Auto scope** (default `PTO2_SCOPE()`): the runtime auto-tracks dependencies from buffer read/write overlap (OverlapMap).
+- **Manual scope** (`with pl.manual_scope():` → `RuntimeScopeStmt(manual=true)`): the user takes full ownership of ordering. The runtime skips OverlapMap, and **every required edge must be declared by the user via `kernel(..., deps=[var, ...])`**. The pass does not derive any edge from data flow on its own — the previous auto-dataflow inference path was removed because in practice it produced false positives whenever a buffer was reused in-place across unrelated kernels.
 
-`DeriveManualScopeDeps` is the pass that bridges DSL intent and runtime semantics. For every kernel `Call` inside a manual scope, it computes the union of:
+The pass name kept by Python (`passes.derive_manual_scope_deps()`) and by the pipeline manager is `DeriveManualScopeDeps`; the C++ implementation is the `LowerManualDepsToTaskId` lowering. The two names refer to the same pass slot — the pass name is preserved for binding-API compatibility.
 
-1. **User-supplied edges** — any vars passed via the DSL `kernel(..., deps=[var, ...])` kwarg, surfaced by the parser as `Call.attrs["user_manual_dep_edges"]`.
-2. **Data-flow edges** — every tensor argument whose `ArgDirection` is not `NoDep` and whose `Var` resolves to a producer (the LHS of a prior kernel `AssignStmt`) in the same manual scope.
-
-The resolved set is written to `Call.attrs["manual_dep_edges"]` (`std::vector<VarPtr>`) and read by the orchestration codegen to emit `params_t<n>.add_dep(task_<m>);` per edge. The list is capped at 16 to mirror the runtime's `PTO2_MAX_EXPLICIT_DEPS`; exceeding the cap raises an internal error pinned to the offending call site.
-
-**When to use**: Run after `DeriveCallDirections` (the data-flow analysis depends on resolved per-arg directions to honor `NoDep` slots) and before the final `Simplify`. In the `Default` strategy it's the 31st pipeline pass, between `DeriveCallDirections` (slot 30) and the trailing `Simplify` (utility slot 91).
+**When to use**: Run after `DeriveCallDirections` (which resolves per-arg `ArgDirection` and produces `CallDirectionsResolved`) and before the trailing `Simplify`. In the `Default` strategy it is the 33rd pipeline pass.
 
 ## Properties
 
@@ -24,7 +19,7 @@ The resolved set is written to `Call.attrs["manual_dep_edges"]` (`std::vector<Va
 | -------- | -------- | ----------- |
 | `CallDirectionsResolved` | — | — |
 
-The pass does not (yet) declare a verifiable post-condition; it is structurally idempotent — running it twice writes the same `manual_dep_edges` set.
+No verifiable post-condition is declared. The pass is structurally idempotent on already-lowered IR (the second run finds the same `kAttrUserManualDepEdges` entries, resolves the same closure, and re-allocates the same TaskId companions by pointer identity from the previously-built `tid_map_`).
 
 ## API
 
@@ -32,97 +27,133 @@ The pass does not (yet) declare a verifiable post-condition; it is structurally 
 | --- | ------ | ----- |
 | `pass::DeriveManualScopeDeps()` | `passes.derive_manual_scope_deps()` | Program-level |
 
-**Factory function**:
-
 ```cpp
 Pass DeriveManualScopeDeps();
 ```
 
-**Python usage**:
-
 ```python
 from pypto.pypto_core import passes
-
 pass_obj = passes.derive_manual_scope_deps()
-program_with_edges = pass_obj(program)
+program_after = pass_obj(program)
 ```
 
 ## Algorithm
 
-The pass is a `ProgramPass` that runs a `ManualDepMutator` on each function body.
+`LowerOneFunction` runs four ordered sub-passes per function body whose IR contains a manual scope.
 
-### 1. Manual-scope tracking
+### Stage 1 — `ManualDepResolveMutator`
 
-The mutator carries an integer `manual_depth_` counter incremented on entry to a `RuntimeScopeStmt(manual=true)` and decremented on exit. Outside a manual scope (`manual_depth_ == 0`) the mutator is a no-op for `AssignStmt` / `EvalStmt` visits.
+For every kernel `Call` inside a manual scope, copy `Call.attrs["user_manual_dep_edges"]` (the Tensor-Var edges written by the parser when the DSL passed `deps=[var, ...]`) into `Call.attrs["manual_dep_edges"]`. No auto-derivation runs. The per-call edge count is checked against `kManualDepEdgeLimit = 16` (mirrors runtime `PTO2_MAX_EXPLICIT_DEPS`); an internal error is raised on the offending call when exceeded, with the call's span attached.
 
-When a manual scope is entered, the producer-Var map (see step 2) is **saved and cleared**, then restored on exit. This isolates each scope: a producer in scope A cannot be referenced as a manual dep edge from scope B.
+### Stage 2 — `TaskRelevantVarCollector` (closure analysis)
 
-### 2. Producer-Var map
+Starting from the Tensor Vars named in every `kAttrManualDepEdges` set, propagate the "needs-a-TaskId-companion" property through:
 
-Inside a manual scope, every `AssignStmt` whose RHS is a non-builtin kernel `Call` registers its LHS `Var*` in `producer_map_`. Builtin ops (`tensor.*`, `tile.*`, `system.*`) never become producers because they don't submit runtime tasks.
+- **Var aliases** (`b = a` AssignStmts and `b = tuple[i]` TupleGetItem extracts).
+- **`ForStmt.iter_args` ↔ `init_value`** (a TaskId carry must exist for every iter_arg whose init flows from a tagged Var, and vice versa).
+- **`ForStmt.return_vars` ↔ `iter_args`** (the rv produced by a TaskId-carrying iter_arg is itself a TaskId carry).
+- **`YieldStmt` source ↔ destination** (bidirectional — both directions are needed: `deps=[<iter_arg>]` flows dest→src, while `deps=[<kernel_lhs>]` flows src→dest to the carry destination).
 
-### 3. Edge resolution per call
+The fixed-point closure builds three sets: `needs_tid_` (every Var needing a companion), `kernel_lhs_` (Vars that are LHS of a user kernel Call — they get the `system.task_id_of` synthesis path), and `import_vars_` (Vars in `needs_tid_` that have no AssignStmt def, typically function parameters used as iter_arg init values).
 
-For each kernel `Call` (whether RHS of `AssignStmt` or expression of `EvalStmt`) inside a manual scope, the helper `ResolveManualDepsForCall` collects edges in two phases, deduplicating by `Var*`:
+### Stage 3 — `PreallocateTaskIdVars`
 
-1. **User-supplied** — scan `Call.attrs["user_manual_dep_edges"]` (parser-set when the DSL passes `deps=[var]`), preserving order.
-2. **Data-flow** — for each positional arg, if its `ArgDirection` is not `NoDep` and `AsVarLike(arg)` resolves to a `Var*` in `producer_map_`, append that producer.
+Allocate one TaskId companion per Var in `needs_tid_`:
 
-The result is written back as `Call.attrs["manual_dep_edges"]` (a fresh `std::vector<VarPtr>`). The cap check uses `INTERNAL_CHECK_SPAN(deps.size() <= 16, call->span_)` so the diagnostic carries the source location.
+- Plain `Var` (non-IterArg, e.g. a kernel LHS or function param) → a fresh `Var` named `<name_hint>__tid` with type `ScalarType(DataType::TASK_ID)`.
+- `IterArg` → a fresh `IterArg` with the same name suffix; its init value is wired to the outer Var's companion (looked up in the partial `tid_map_`). For nested loops this lookup needs the outer companion to exist first, so the IterArg allocation pass sweeps to fixed-point: iter_args whose init companion is not yet allocated are re-tried until the chain converges.
 
-### 4. Var-typed attrs survive remap
+The map `tid_map_: const Var* → VarPtr` is the single source of identity for companions; every other stage looks up through it to avoid pointer-identity drift.
 
-Because the edge attrs hold `VarPtr` references that must stay in sync with their definition sites, the base `IRMutator::VisitExpr_(Call)` and `IRVisitor::VisitExpr_(Call)` were extended (in the same change) to walk Vars in `kAttrManualDepEdges` / `kAttrUserManualDepEdges` through the standard `var_remap_` / use-site visit paths. `ConvertToSSA` does the same with its own `cur_` map.
+### Stage 4 — `TaskIdLoweringMutator` (IR mutation)
+
+A single IRMutator pass rewrites the function body to install the TaskId infrastructure:
+
+- After each kernel `Call` AssignStmt whose LHS is in `needs_tid_`, inject `<lhs>__tid = system.task_id_of(<lhs>)`.
+- After each `tensor.create` AssignStmt whose LHS is in `needs_tid_` (a placeholder buffer with no prior task), inject `<lhs>__tid = system.task_invalid()`.
+- After each plain Var-alias AssignStmt (`b = a`), inject `b__tid = a__tid`.
+- After each TupleGetItem AssignStmt (`b = tuple[i]`), inject `b__tid = tuple_var__tid` (all unpacked elements share the tuple-producing call's task id).
+- On every kernel `Call`, rewrite the Tensor Vars in `kAttrManualDepEdges` to their TaskId companions, and attach `kAttrTaskIdVar` pointing at the LHS's companion (so a later sibling can resolve `deps=[lhs]` through this attr without re-running the closure).
+- On every `ForStmt` inside a manual scope, append a TaskId iter_arg and return-var companion for each existing iter_arg in `needs_tid_`. Yield-value lists are extended symmetrically.
+- For `import_vars_` (function parameters used as TaskId iter_arg seeds), prepend `<param>__tid = system.task_invalid()` AssignStmts at function-body entry so the companion has an SSA definition the codegen can reference.
+
+The kernel-Call rewrite places **the post-lowering form** in `kAttrManualDepEdges` (TaskId Vars). The codegen consumes this attr; the original Tensor-Var form in `kAttrUserManualDepEdges` is preserved for round-trip printing.
 
 ## Examples
 
-### Auto-derived edges from data flow
+### Single dep edge
 
 ```python
 @pl.function(type=pl.FunctionType.Orchestration)
-def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+def main(self, x: pl.Tensor[[64], pl.FP32],
+         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
     with pl.manual_scope():
-        a = self.k1(x)
-        b = self.k2(a)        # k2 reads `a` -> auto edge: task_0
-    return b
+        scratch = self.stage1(x, scratch)
+        out = self.stage2(scratch, out, deps=[scratch])
+    return out
 ```
 
-After the pass, the call to `k2` carries `attrs["manual_dep_edges"] = [a]`. Codegen emits:
+After the pass:
 
-```cpp
-PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
-    Arg params_t0;
-    params_t0.add_input(ext_x);
-    TaskOutputTensors task_0_outs = rt_submit_aiv_task(0, params_t0);
-    PTO2TaskId task_0 = task_0_outs.task_id();
-
-    Arg params_t1;
-    params_t1.add_input(/*alias of a*/);
-    params_t1.add_dep(task_0);          // <-- from manual_dep_edges
-    TaskOutputTensors task_1_outs = rt_submit_aiv_task(1, params_t1);
-    PTO2TaskId task_1 = task_1_outs.task_id();
-}
+```python
+scratch__ssa_v0__tid: pl.Scalar[pl.TASK_ID] = self.system.task_invalid()  # import var seed
+with pl.manual_scope():
+    scratch__ssa_v5 = self.stage1(x, scratch)
+    scratch__ssa_v5__tid: pl.Scalar[pl.TASK_ID] = self.system.task_id_of(scratch__ssa_v5)
+    out__ssa_v7 = self.stage2(scratch__ssa_v5, out, deps=[scratch__ssa_v5__tid])
 ```
 
-### Explicit user deps
+Codegen emits `params_t1.add_dep(scratch__ssa_v5__tid);` from the rewritten dep edge.
 
-`deps=[var, ...]` adds edges that aren't visible from data flow alone:
+### Multiple deps + loop carry (case1 shape)
+
+```python
+with pl.manual_scope():
+    for phase in pl.range(N_PHASES):
+        for branch in pl.parallel(N_BRANCHES):
+            row = (phase * N_BRANCHES + branch) * TILE_M
+            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+```
+
+`out` is rebound on every iteration, so both ForStmts have a TaskId iter_arg added (carrying the previous-iteration task id). After the pass:
+
+```python
+for phase, (out__iter_v1, out__iter_v1__tid) in pl.range(4, init_values=(out, out__ssa_v0__tid)):
+    for branch, (out__iter_v3, out__iter_v3__tid) in pl.parallel(4, init_values=(out__iter_v1, out__iter_v1__tid)):
+        out__ssa_v5 = self.kernel_stripe(..., deps=[out__iter_v3__tid])
+        out__ssa_v5__tid = self.system.task_id_of(out__ssa_v5)
+        out__rv_v4, out__rv_v4__tid = pl.yield_(out__ssa_v5, out__ssa_v5__tid)
+    out__rv_v2, out__rv_v2__tid = pl.yield_(out__rv_v4, out__rv_v4__tid)
+```
+
+The orchestration codegen treats the `pl.parallel` TaskId iter_arg as **array carry of size `N_BRANCHES`** when the trip count is statically known: it allocates `PTO2TaskId arr[N_BRANCHES]`, per-iteration yields write one slot, and downstream consumers get one `add_dep` per slot. This guarantees a phase-fence on **all** parallel iters, not just the last-dispatched one. The size cap is the same `PTO2_MAX_EXPLICIT_DEPS = 16`; a const trip count beyond that fails at codegen time with a clear error. A non-const trip count under `pl.parallel` carrying a manual dep is rejected at codegen with a "statically-known trip count" message.
+
+### Var aliases and tuple unpacking
 
 ```python
 with pl.manual_scope():
     a = self.k1(x)
-    b = self.k2(x)
-    c = self.k3(x, deps=[a, b])    # c reads only x, but ordering needs a,b
+    c = a                          # plain Var alias
+    p, q = self.kpair(x)           # tuple unpack
+    d = self.k2(x, deps=[c, p])    # deps reference an alias and an unpacked element
 ```
 
-After the pass, `c`'s call carries `manual_dep_edges = [a, b]`; codegen emits both `params_t2.add_dep(task_0)` and `params_t2.add_dep(task_1)`.
+The pass synthesises:
 
-### Suppressing an auto edge with `pl.no_dep`
-
-A `pl.no_dep(arg)` marker (Phase 2) sets the per-arg direction to `NoDep` at parse time; this pass excludes such args from the data-flow scan, so the producer behind that arg does not become a manual dep edge.
+```python
+a__tid    = self.system.task_id_of(a)
+c__tid    = a__tid                  # alias forwards the producer's task id
+kpair_tmp = self.kpair(x)           # tuple value
+kpair_tmp__tid = self.system.task_id_of(kpair_tmp)
+p__tid    = kpair_tmp__tid          # tuple extracts share the producer's task id
+q__tid    = kpair_tmp__tid
+d = self.k2(x, deps=[c__tid, p__tid])
+```
 
 ## See also
 
-- [DeriveCallDirections (slot 30)](30-derive_call_directions.md) — required predecessor; resolves `NoDep` from `pl.no_dep(...)` markers.
-- [IR hierarchy: ScopeStmt](../ir/01-hierarchy.md#scopestmt-details) — `RuntimeScopeStmt` and the auto/manual flag.
-- [Python syntax: scope context managers](../language/00-python_syntax.md#scope-context-managers) — `with pl.manual_scope():` surface form.
+- [DeriveCallDirections (slot 32)](32-derive_call_directions.md) — required predecessor; resolves per-arg `ArgDirection`.
+- [System ops: `task_invalid` / `task_id_of`](../ir/05-operators.md#syncop-synchronization-operations) — the two builtins synthesised by this pass.
+- [DataType: `TASK_ID`](../ir/02-types.md#scalartype) — opaque 64-bit handle used for companions.
+- [Orchestration codegen: manual scope + array carry](../codegen/01-orchestration_codegen.md) — how the post-lowering IR is emitted.
+- [Python syntax: manual scope and deps](../language/00-python_syntax.md#manual-dependency-primitives) — surface-form semantics.

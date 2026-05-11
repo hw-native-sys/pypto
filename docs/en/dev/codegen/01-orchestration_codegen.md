@@ -386,7 +386,116 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 
 The orchestration file is named `orchestration/<func_name>.cpp` in the generated file map.
 
+## Manual Scope and TaskId Lowering
+
+`with pl.manual_scope():` regions lower to a `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
+block where the runtime's auto OverlapMap is disabled. The orchestration
+codegen materialises every required dependency edge as an explicit
+`params.add_dep(<task_id>);` call, sourced from the post-[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
+IR.
+
+### TaskId sourcing
+
+After the pass, every kernel `Call` carries `attrs["manual_dep_edges"]` —
+a `vector<VarPtr>` of `Scalar[TASK_ID]` variables. Each entry resolves at
+codegen time through `manual_task_id_map_` to one of three forms:
+
+| Producer kind | C++ source emitted by codegen |
+| ------------- | ----------------------------- |
+| Kernel Call LHS (`system.task_id_of(producer)` synthesised by the pass) | `PTO2TaskId <lhs>__tid = task_<n>_outs.task_id();` |
+| Function-param seed (`system.task_invalid()` synthesised at body entry) | `PTO2TaskId <param>__tid = PTO2TaskId::invalid();` |
+| Loop-carry iter_arg (TaskId companion appended by the pass) | A named variable threaded through the for-loop, either scalar or array — see below |
+
+`add_dep` is wrapped in `if (<task_id>.is_valid())` when the source is an
+iter_arg carry (first-iteration seed may still be the invalid sentinel) and
+emitted unconditionally for direct producer companions.
+
+### Array carry for `pl.parallel` TaskId iter_args
+
+A `pl.parallel(N)` ForStmt whose iter_arg threads a TaskId companion is
+lowered as an **array carry of size N**, not a scalar last-write-wins
+variable. The pass leaves the iter_arg as `Scalar[TASK_ID]` in the IR; the
+codegen detects this shape (Parallel kind + TaskId iter_arg) and:
+
+1. Allocates a fixed-size backing store at the iter_arg's declaration site:
+   `PTO2TaskId arr[N];`, initialised by broadcasting the loop's init value
+   (scalar) or by slot-by-slot copy (when init is itself an array — e.g. the
+   inner `pl.parallel` of `case1` reads its init from the outer
+   `pl.range`'s array carry).
+2. In each parallel iteration's body, writes the freshly produced task id
+   into one slot: `arr[(loop_var - start) / step] = <task_id>;`. The slot
+   expression peephole-simplifies to `arr[loop_var]` when `start == 0` and
+   `step == 1` (the common form).
+3. On every downstream consumer whose `manual_dep_edges` references this
+   iter_arg, expands the single dep entry into N guarded `add_dep` calls,
+   one per slot:
+   ```cpp
+   for each k in [0..N):
+       if (arr[k].is_valid()) { params.add_dep(arr[k]); }
+   ```
+
+A `pl.range` (Sequential) loop whose yield value is the rv of an inner
+`pl.parallel` array-carry inherits the same array size: its own iter_arg
+becomes an array carry of the same N, slot-by-slot copied on outer yield.
+This propagation is the structural source of the multi-iter fence semantics
+in topologies like case1 (outer SEQ × inner PARALLEL).
+
+**Constraints checked at codegen entry (with user-facing CHECK messages):**
+
+- The `pl.parallel` trip count must be a Python literal (statically known).
+  A dynamic trip count is rejected at codegen with a "statically-known trip
+  count" message.
+- The trip count must satisfy `N <= kMaxExplicitDepsPerTask = 16`. The
+  constant mirrors runtime `PTO2_MAX_EXPLICIT_DEPS` from
+  `runtime/src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/runtime/pto_types.h`;
+  exceeding it would overflow the runtime's fixed-size per-task dep store.
+
+### Example
+
+Source DSL (case1 shape):
+
+```python
+with pl.manual_scope():
+    for phase in pl.range(N_PHASES):
+        for branch in pl.parallel(N_BRANCHES):
+            row = (phase * N_BRANCHES + branch) * TILE_M
+            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+```
+
+Generated C++ (skeleton):
+
+```cpp
+PTO2TaskId out__ssa_v0__tid = PTO2TaskId::invalid();           // import-var seed
+PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
+    PTO2TaskId out__rv_v2__tid[N_BRANCHES];                    // outer rv = array
+    for (int64_t i = 0; i < N_BRANCHES; ++i)
+        out__rv_v2__tid[i] = out__ssa_v0__tid;                 // broadcast scalar init
+    for (int64_t phase = 0; phase < N_PHASES; phase += 1) {
+        PTO2TaskId out__rv_v4__tid[N_BRANCHES];                // inner rv = array
+        for (int64_t i = 0; i < N_BRANCHES; ++i)
+            out__rv_v4__tid[i] = out__rv_v2__tid[i];           // copy slot-by-slot
+        for (int64_t branch = 0; branch < N_BRANCHES; branch += 1) {
+            int64_t row = ...;
+            Arg params_t0; /* ... */
+            for (int64_t k = 0; k < N_BRANCHES; ++k) {         // multi-deps fanout
+                if (out__rv_v2__tid[k].is_valid())
+                    params_t0.add_dep(out__rv_v2__tid[k]);
+            }
+            TaskOutputTensors task_0_outs = rt_submit_aiv_task(0, params_t0);
+            PTO2TaskId out__ssa_v5__tid = task_0_outs.task_id();
+            out__rv_v4__tid[branch] = out__ssa_v5__tid;        // slot yield
+        }
+        for (int64_t i = 0; i < N_BRANCHES; ++i)
+            out__rv_v2__tid[i] = out__rv_v4__tid[i];           // outer yield (copy)
+    }
+}
+```
+
+Every task in phase `N+1` waits for **all** `N_BRANCHES` tasks of phase `N`.
+
 ## See Also
 
 - [PTO Codegen](00-pto_codegen.md) — MLIR generation for PTO backend
 - [Pass Manager](../passes/00-pass_manager.md) — IR optimization passes applied before codegen
+- [DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md) — the pass that produces the post-lowering IR consumed here
+- [Python syntax: manual dependency primitives](../language/00-python_syntax.md#manual-dependency-primitives) — the user-facing surface form

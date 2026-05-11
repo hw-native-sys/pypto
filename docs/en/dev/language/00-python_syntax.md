@@ -313,28 +313,64 @@ user opt out and manage ordering explicitly:
 
 | Surface | Granularity | Effect |
 | ------- | ----------- | ------ |
-| `pl.no_dep(arg)` | per-call argument | At a kernel call site, the wrapped argument's `ArgDirection` becomes `NoDep`. Auto-tracking ignores that slot for this submission only. |
-| `with pl.manual_scope():` | per-region | Lowers to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; codegen instead emits explicit `params.add_dep(task_<m>);` calls. |
-| `kernel(..., deps=[var, ...])` | per-call (manual_scope only) | Adds explicit task-id edges to the call's `manual_dep_edges` set, on top of any auto-derived data-flow edges. Each entry must be a tensor `Var` produced by a prior `self.kernel(...)` in the same `manual_scope`. |
+| `pl.no_dep(arg)` | per-call argument | At a kernel call site, the wrapped argument's `ArgDirection` becomes `NoDep`. Auto-tracking ignores that slot for this submission only. **Auto scope only** — has no semantic effect inside `pl.manual_scope`. |
+| `with pl.manual_scope():` | per-region | Lowers to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; the user must declare **every** required ordering edge explicitly via `deps=[...]`. |
+| `kernel(..., deps=[var, ...])` | per-call (manual_scope only) | Declares explicit task-id edges. Each entry must be a tensor `Var` produced by a prior `self.kernel(...)` in the same `manual_scope`, an iter_arg/return-var carrying such a producer through a loop, or a function parameter passed in as an initial seed. |
+
+Manual scope is **declare-only**: omitting a `deps=[scratch]` on `stage2` will not be backfilled by the pass, even if `stage2` reads what `stage1` wrote. Auto-derivation from data flow was removed because it produced false edges whenever a buffer was reused in-place across unrelated kernels.
 
 ```python
 @pl.function(type=pl.FunctionType.Orchestration)
-def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+def main(self, x: pl.Tensor[[64], pl.FP32],
+         scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
     with pl.manual_scope():
-        a = self.k1(x)              # task_0
-        b = self.k2(x)              # task_1, no auto edge to task_0 (uses x, not a)
-        c = self.k3(a, deps=[b])    # task_2, auto edge a -> 0; user edge -> 1
-    return c
+        scratch = self.stage1(x, scratch)
+        out     = self.stage2(scratch, out, deps=[scratch])   # required: stage2 reads scratch
+    return out
 ```
 
-Inside `with pl.manual_scope():`, the [DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
-pass resolves the union of user `deps=[...]` entries and data-flow producers
-(NoDep-aware) and writes them to the IR for codegen. The list is capped at 16
-edges per call to mirror the runtime's `PTO2_MAX_EXPLICIT_DEPS`.
+Inside `with pl.manual_scope():`, the
+[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
+pass (the public name for the underlying `LowerManualDepsToTaskId` lowering)
+resolves each `deps=[var, ...]` entry to a TaskId companion of the producer,
+attaches it to the call's `manual_dep_edges` attr, and threads matching TaskId
+iter_args / return-vars / yields through every enclosing `pl.range` /
+`pl.parallel`. The list is capped at 16 edges per call to mirror the runtime's
+`PTO2_MAX_EXPLICIT_DEPS`.
 
-`pl.no_dep(arg)` works in both auto and manual scopes — in auto scope it
-suppresses the OverlapMap entry for that argument; in manual scope it also
-suppresses the data-flow edge that would otherwise be derived from `arg`.
+`pl.no_dep(arg)` is an auto-scope primitive; inside `pl.manual_scope` it has
+no effect since the pass never inspects per-arg directions for dependency
+resolution.
+
+#### `pl.parallel` under manual scope: array-carry fence
+
+When a manual-dep edge is carried through a `pl.parallel` loop (i.e. the
+loop's iter_arg holds the TaskId being depended on), the orchestration codegen
+treats the corresponding TaskId iter_arg as **an array of size equal to the
+parallel loop's trip count**. Each parallel iteration writes its own slot,
+and downstream consumers depend on **every** slot (not just the
+last-dispatched task). This guarantees the user-declared fence semantics
+even when iters finish out of dispatch order.
+
+Requirements for the array-carry path:
+
+- The `pl.parallel` trip count must be a Python literal (statically known).
+  A dynamic trip count under `pl.parallel` carrying a manual dep is rejected
+  at codegen with a "statically-known trip count" message.
+- The trip count must not exceed `PTO2_MAX_EXPLICIT_DEPS = 16` (the runtime's
+  per-task explicit-dep cap); larger counts are rejected at codegen.
+
+```python
+with pl.manual_scope():
+    for phase in pl.range(N_PHASES):
+        for branch in pl.parallel(N_BRANCHES):           # const N_BRANCHES <= 16
+            row = (phase * N_BRANCHES + branch) * TILE_M
+            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+```
+
+Each task in phase `N+1` waits for all `N_BRANCHES` tasks of phase `N`,
+not just the last one.
 
 ### Yield Statement
 

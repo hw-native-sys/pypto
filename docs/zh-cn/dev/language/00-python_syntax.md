@@ -311,28 +311,62 @@ for (x,) in pl.while_(init_values=(x_init,)):
 
 | 表层语法 | 粒度 | 作用 |
 | -------- | ---- | ---- |
-| `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`。该次提交对该槽位不进入自动跟踪。 |
-| `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；codegen 改为发出显式 `params.add_dep(task_<m>);`。 |
-| `kernel(..., deps=[var, ...])` | per-call（仅 manual_scope 内） | 在数据流自动推导出的边之上，向调用的 `manual_dep_edges` 集合追加显式 task-id 边。每个条目必须是同一 `manual_scope` 内由先前 `self.kernel(...)` 产生的 tensor `Var`。 |
+| `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`。该次提交对该槽位不进入自动跟踪。**仅 auto scope 生效**——在 `pl.manual_scope` 内没有语义。 |
+| `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；用户必须通过 `deps=[...]` **显式声明每一条**需要的排序边。 |
+| `kernel(..., deps=[var, ...])` | per-call（仅 manual_scope 内） | 声明显式 task-id 边。每个条目必须是：同一 `manual_scope` 内由先前 `self.kernel(...)` 产生的 tensor `Var`，或在循环中承载该 producer 的 iter_arg / return_var，或作为初始种子传入的函数参数。 |
+
+Manual scope 是**只看声明**的：即使 `stage2` 读取了 `stage1` 写过的 buffer，
+若用户没写 `deps=[scratch]`，pass 也不会替你补上。之前的数据流自动推导
+已被移除，因为当不同 kernel 在同一块 buffer 上原地复用时它会产生大量伪边。
 
 ```python
 @pl.function(type=pl.FunctionType.Orchestration)
-def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+def main(self, x: pl.Tensor[[64], pl.FP32],
+         scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
     with pl.manual_scope():
-        a = self.k1(x)              # task_0
-        b = self.k2(x)              # task_1，对 task_0 没有自动边（用 x，不用 a）
-        c = self.k3(a, deps=[b])    # task_2，自动边 a -> 0；用户边 -> 1
-    return c
+        scratch = self.stage1(x, scratch)
+        out     = self.stage2(scratch, out, deps=[scratch])   # 必需：stage2 读 scratch
+    return out
 ```
 
-`with pl.manual_scope():` 内由 [DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
-pass 把用户 `deps=[...]` 与数据流 producer（NoDep 感知）的并集解析后写入
-IR 供 codegen 使用。每个 call 上限 16 条边，对齐 runtime 的
-`PTO2_MAX_EXPLICIT_DEPS`。
+`with pl.manual_scope():` 内由
+[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
+pass（底层实现为 `LowerManualDepsToTaskId` lowering，对外保留旧 pass 名）
+把每个 `deps=[var, ...]` 解析为 producer 的 TaskId 配套、写入 call 的
+`manual_dep_edges`，并为每个外层 `pl.range` / `pl.parallel` 同步追加
+TaskId iter_arg / return_var / yield 项。每个 call 上限 16 条边，对齐
+runtime `PTO2_MAX_EXPLICIT_DEPS`。
 
-`pl.no_dep(arg)` 在 auto / manual 两种 scope 下都生效——auto scope 抑制
-该参数的 OverlapMap 入口；manual scope 同时抑制本会从 `arg` 推导出的
-数据流边。
+`pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用——
+pass 不再以 per-arg direction 做依赖解析。
+
+#### Manual scope 下的 `pl.parallel`：array-carry fence
+
+当 manual-dep 边穿过一个 `pl.parallel` 循环（即循环 iter_arg 承载被依赖的
+TaskId）时，orchestration codegen 把对应的 TaskId iter_arg 视作**大小等于
+parallel 循环 trip count 的数组**。每次 parallel 迭代写入自己的槽位；
+下游消费者对**每个**槽位都生成 `add_dep`（不是只对"最后被发射"的那个
+task）。这就保证用户声明的 fence 语义即便在迭代乱序完成时也是正确的。
+
+走 array-carry 路径的前提：
+
+- `pl.parallel` 的 trip count 必须是 Python 字面量（编译期常量）。
+  trip count 是动态值的情况下 codegen 会拒绝，提示 "statically-known
+  trip count"。
+- trip count 不得超过 `PTO2_MAX_EXPLICIT_DEPS = 16`（runtime 单 task
+  显式依赖上限）；超出会在 codegen 时报错。
+
+```python
+with pl.manual_scope():
+    for phase in pl.range(N_PHASES):
+        for branch in pl.parallel(N_BRANCHES):           # 常量 N_BRANCHES <= 16
+            row = (phase * N_BRANCHES + branch) * TILE_M
+            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+```
+
+phase `N+1` 中的每个 task 都会等待 phase `N` 的全部 `N_BRANCHES` 个
+task，而非只等最后那个。
 
 ### Yield 语句
 
