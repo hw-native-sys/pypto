@@ -236,10 +236,8 @@ static TypePtr DeduceTensorGatherCompareType(const std::vector<ExprPtr>& args,
   CHECK(input_type) << "The operator " << op_name << " requires input to be a TensorType, but got "
                     << args[0]->GetType()->TypeName();
   CHECK(input_type->dtype_ == DataType::FP16 || input_type->dtype_ == DataType::FP32 ||
-        input_type->dtype_ == DataType::INT16 || input_type->dtype_ == DataType::INT32 ||
-        input_type->dtype_ == DataType::UINT16 || input_type->dtype_ == DataType::UINT32)
-      << "The operator " << op_name
-      << " requires input dtype in {FP16, FP32, INT16, INT32, UINT16, UINT32}, but got "
+        input_type->dtype_ == DataType::INT16 || input_type->dtype_ == DataType::INT32)
+      << "The operator " << op_name << " requires input dtype in {FP16, FP32, INT16, INT32}, but got "
       << input_type->dtype_.ToString();
   CHECK(input_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D input, but got rank " << input_type->shape_.size();
@@ -301,8 +299,8 @@ REGISTER_OP("tensor.gather_compare")
         "Compare-form gather (tensor-level, maps to tile.gather_compare). For each row of "
         "the 2D input, scan against the scalar kvalue threshold under the chosen cmp_mode "
         "and write the matching indices to dst and the per-row match count to cdst.")
-    .add_argument("input", "Input tensor (TensorType, 2D; FP16/FP32/INT16/INT32/UINT16/UINT32)")
-    .add_argument("kvalue", "Scalar threshold (ScalarType, UINT16 or UINT32; applied per row)")
+    .add_argument("input", "Input tensor (TensorType, 2D; FP16/FP32/INT16/INT32)")
+    .add_argument("kvalue", "Scalar threshold (ScalarType; dtype must match input; applied per row)")
     .set_attr<int>("cmp_mode")
     .set_attr<int>("offset")
     .set_attr<int>("out_cols")

@@ -1386,7 +1386,8 @@ def gather(  # noqa: PLR0913
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
         output_dtype: (mask form, keyword-only) Optional output dtype with the same
             bit width as ``input.dtype``.
-        kvalue: (compare form, keyword-only) Scalar threshold (UINT16/UINT32).
+        kvalue: (compare form, keyword-only) Scalar threshold (ScalarType; dtype must
+            match ``input``, which must be one of FP16/FP32/INT16/INT32).
         cmp_mode: (compare form, keyword-only) ``"eq"``/``"ne"``/``"lt"``/``"le"``/
             ``"gt"``/``"ge"`` or int 0..5.
         out_cols: (compare form, keyword-only) Output column count per row (positive int).

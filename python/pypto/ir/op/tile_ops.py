@@ -2455,8 +2455,8 @@ def gather_compare(
     desugared by the parser into ``_tuple = call; d = _tuple[0]; c = _tuple[1]``.
 
     Args:
-        src: Source tile (FP16/FP32/INT16/INT32/UINT16/UINT32, 2D).
-        kvalue: Scalar threshold (ScalarType, UINT16 or UINT32; applied to every row).
+        src: Source tile (FP16/FP32/INT16/INT32, 2D).
+        kvalue: Scalar threshold (ScalarType; dtype must match ``src``; applied to every row).
         tmp: Workspace tile (UINT8) sized for the codegen kernel.
         cmp_mode: Compare mode — one of ``"eq"`` / ``"ne"`` / ``"lt"`` /
             ``"le"`` / ``"gt"`` / ``"ge"`` or int ``0..5``.

@@ -1251,7 +1251,7 @@ void OpConversionRegistry::RegisterGatherOps() {
   // tensor.gather_compare → tile.gather_compare
   // Bridges input tensor into a Vec tile, synthesizes the UINT8 tmp workspace
   // tile, and emits a single tuple-typed `tile.gather_compare` call. kvalue is
-  // a scalar threshold and passes through unchanged. The dst (gathered values)
+  // a scalar threshold and passes through unchanged. The dst (gathered indices)
   // and cdst (per-row match counts) tile types are deduced into the call's
   // TupleType output; downstream init_memref allocates the backing buffers
   // from that TupleType.

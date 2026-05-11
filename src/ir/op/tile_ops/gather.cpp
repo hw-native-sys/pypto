@@ -209,9 +209,9 @@ REGISTER_OP("tile.gather_mask")
 // ============================================================================
 //
 // Args (3 inputs):
-//   src    : source tile (FP16/FP32/INT16/INT32/UINT16/UINT32)
-//   kvalue : scalar threshold (ScalarType, UINT16 or UINT32 — applied to
-//            every row of src)
+//   src    : source tile (FP16/FP32/INT16/INT32)
+//   kvalue : scalar threshold (ScalarType, dtype must match src — applied
+//            to every row of src)
 //   tmp    : workspace tile (UINT8, sized by codegen kernel)
 //
 // Attrs:
@@ -247,10 +247,8 @@ static TypePtr DeduceTileGatherCompareType(const std::vector<ExprPtr>& args,
   CHECK(src_type) << "The operator " << op_name << " requires src to be a TileType, but got "
                   << args[0]->GetType()->TypeName();
   CHECK(src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::FP32 ||
-        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32 ||
-        src_type->dtype_ == DataType::UINT16 || src_type->dtype_ == DataType::UINT32)
-      << "The operator " << op_name
-      << " requires src dtype in {FP16, FP32, INT16, INT32, UINT16, UINT32}, but got "
+        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32)
+      << "The operator " << op_name << " requires src dtype in {FP16, FP32, INT16, INT32}, but got "
       << src_type->dtype_.ToString();
   CHECK(src_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D src, but got rank " << src_type->shape_.size();
@@ -330,8 +328,8 @@ REGISTER_OP("tile.gather_compare")
         "Compare-form gather: scan src per-row against kvalue, produce gathered indices "
         "tile (dst) and per-row match count tile (cdst). Maps to pto.tgather compare-form. "
         "Returns TupleType{dst, cdst}.")
-    .add_argument("src", "Source tile (FP16/FP32/INT16/INT32/UINT16/UINT32, 2D)")
-    .add_argument("kvalue", "Scalar threshold (ScalarType, UINT16 or UINT32; applied per row)")
+    .add_argument("src", "Source tile (FP16/FP32/INT16/INT32, 2D)")
+    .add_argument("kvalue", "Scalar threshold (ScalarType; dtype must match src; applied per row)")
     .add_argument("tmp", "Workspace tile (UINT8)")
     .set_attr<int>("cmp_mode")
     .set_attr<int>("offset")

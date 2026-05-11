@@ -1964,8 +1964,8 @@ def gather_compare(
     below only runs in interactive Python contexts.
 
     Args:
-        src: Source tile (FP16/FP32/INT16/INT32/UINT16/UINT32, 2D).
-        kvalue: Scalar threshold (UINT16 or UINT32; applied to every row).
+        src: Source tile (FP16/FP32/INT16/INT32, 2D).
+        kvalue: Scalar threshold (dtype must match ``src``; applied to every row).
         tmp: Workspace tile (UINT8) sized for the codegen kernel.
         cmp_mode: ``"eq"`` / ``"ne"`` / ``"lt"`` / ``"le"`` / ``"gt"`` /
             ``"ge"`` or int ``0..5``. Defaults to ``"eq"``.

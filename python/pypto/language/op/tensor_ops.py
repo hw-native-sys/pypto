@@ -1168,14 +1168,14 @@ def gather(
         ``[rows, 1] count_dtype``.
 
     Args:
-        input: Source tensor (FP16/FP32/INT16/INT32, plus UINT16/UINT32 for compare form).
+        input: Source tensor (FP16/FP32/INT16/INT32).
         dim: (index form) Axis to gather along; only ``-1`` / ``rank - 1`` accepted in MVP.
         index: (index form) Index tensor (INT32) with same rank as input.
         mask_pattern: (mask form, keyword-only) Mask pattern selector (1-7).
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111.
         output_dtype: (mask form, keyword-only) Optional output dtype with the same
             bit width as ``input.dtype`` (e.g. FP32 → UINT32 for sort32 index bits).
-        kvalue: (compare form, keyword-only) Scalar threshold (UINT16/UINT32).
+        kvalue: (compare form, keyword-only) Scalar threshold (dtype must match ``input``).
         cmp_mode: (compare form, keyword-only) ``"eq"``/``"ne"``/``"lt"``/``"le"``/
             ``"gt"``/``"ge"`` or int 0..5.
         out_cols: (compare form, keyword-only) Output column count per row.
