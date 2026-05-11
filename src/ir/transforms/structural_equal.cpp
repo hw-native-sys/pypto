@@ -1220,6 +1220,30 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       if (!EqualType(lhs_tuple->types_[i], rhs_tuple->types_[i])) return false;
     }
     return true;
+  } else if (auto lhs_sa = As<ArrayType>(lhs)) {
+    auto rhs_sa = As<ArrayType>(rhs);
+    if (!rhs_sa) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("Type cast failed for ArrayType", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (lhs_sa->dtype_ != rhs_sa->dtype_) {
+      if constexpr (AssertMode) {
+        std::ostringstream msg;
+        msg << "ArrayType dtype mismatch (" << lhs_sa->dtype_.ToString()
+            << " != " << rhs_sa->dtype_.ToString() << ")";
+        ThrowMismatch(msg.str(), IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    if (!Equal(lhs_sa->extent(), rhs_sa->extent())) {
+      if constexpr (AssertMode) {
+        ThrowMismatch("ArrayType extent mismatch", IRNodePtr(), IRNodePtr(), "", "");
+      }
+      return false;
+    }
+    return true;
   } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs) || IsA<PtrType>(lhs)) {
     return true;  // Singleton type, both being same type kind is sufficient
   }

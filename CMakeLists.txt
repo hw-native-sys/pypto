@@ -119,6 +119,7 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/gather.cpp
     src/ir/op/tensor_ops/transform.cpp
     src/ir/op/tensor_ops/unary.cpp
+    src/ir/op/array_ops/memory.cpp
     src/ir/op/testing.cpp
     src/ir/op/type_inference.cpp
 
@@ -209,6 +210,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/type_check_pass.cpp
     src/ir/verifier/verify_structured_ctrl_flow_pass.cpp
     src/ir/verifier/verify_out_param_pass.cpp
+    src/ir/verifier/verify_array_not_escaped.cpp
     src/ir/verifier/verify_inout_use.cpp
     src/ir/verifier/verify_pipeline_loop_valid.cpp
     src/ir/verifier/verify_pipeline_resolved.cpp
@@ -238,6 +240,7 @@ set(PYPTO_SOURCES
     src/codegen/pto/pto_type_utils.cpp
     src/codegen/distributed/distributed_codegen.cpp
     src/codegen/tensor_op_codegen.cpp
+    src/codegen/array_op_codegen.cpp
 
     # Backend
     src/backend/910B/backend_910b.cpp

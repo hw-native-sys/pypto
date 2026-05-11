@@ -77,6 +77,7 @@ from .dsl_api import (
     while_,
     yield_,
 )
+from .op import array_ops as array
 from .op import system_ops as system
 from .op import tensor_ops as tensor
 from .op import tile_ops as tile
@@ -184,7 +185,7 @@ from .optimizations import auto_chunk, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .scope import manual_scope
-from .typing import DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
+from .typing import Array, DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
 Mem = MemorySpace
@@ -234,6 +235,7 @@ __all__ = [
     "Tensor",
     "Tile",
     "Scalar",
+    "Array",
     "Tuple",
     "DynVar",
     "InOut",
@@ -260,6 +262,7 @@ __all__ = [
     "split",
     "auto_chunk",
     "adir",
+    "array",
     "tile",
     "system",
     "tensor",

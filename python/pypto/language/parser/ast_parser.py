@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
+from pypto.language.op import array_ops as _dsl_array
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
 from pypto.language.op import tile_ops as _dsl_tile
@@ -1088,6 +1089,10 @@ class ASTParser:
         base_expr = self.parse_expression(target.value)
         base_type = base_expr.type
 
+        if isinstance(base_type, ir.ArrayType):
+            self._parse_array_subscript_assignment(target, base_expr, var_name, value_node, span)
+            return
+
         if isinstance(base_type, ir.TensorType):
             kind_name = "tensor"
             assemble_op = ir_op.tensor.assemble
@@ -1096,9 +1101,9 @@ class ASTParser:
             assemble_op = ir_op.tile.assemble
         else:
             raise ParserTypeError(
-                f"Subscript-write requires a Tensor or Tile target, got {type(base_type).__name__}",
+                f"Subscript-write requires a Tensor, Tile, or Array target, got {type(base_type).__name__}",
                 span=span,
-                hint="Subscript-write 'dst[...] = src' is only supported for Tensor and Tile",
+                hint="Subscript-write 'dst[...] = src' is only supported for Tensor, Tile, and Array",
             )
 
         indices = self._normalize_subscript_indices(target, span)
@@ -1135,6 +1140,39 @@ class ASTParser:
 
         assemble_call = assemble_op(base_expr, source_expr, offsets, span=span)
         var = self._assign_or_let(var_name, assemble_call, span)
+        self.scope_manager.define_var(var_name, var, span=span)
+
+    def _parse_array_subscript_assignment(
+        self,
+        target: ast.Subscript,
+        base_expr: ir.Expr,
+        var_name: str,
+        value_node: ast.expr,
+        span: ir.Span,
+    ) -> None:
+        """Desugar ``arr[i] = value`` for an Array target.
+
+        Lowers to ``arr = array.update_element(arr, i, value)`` — SSA-functional
+        update. Like the Tensor/Tile sugar, this rebinds ``arr`` and is therefore
+        only valid before SSA conversion.
+        """
+        index_node = target.slice
+        if isinstance(index_node, ast.Tuple):
+            raise ParserTypeError(
+                "Array subscript-write requires a single index (rank-1 in v1)",
+                span=span,
+                hint="Use arr[i] = v, not arr[i, j] = v",
+            )
+        index_expr = self.parse_expression(index_node)
+        value_expr = self.parse_expression(value_node)
+        # Bare int literals come back as ConstInt(INDEX); the update_element
+        # deducer requires the value dtype to match the array's element dtype.
+        # Retag the literal so users can write `arr[i] = 7` without explicit casts.
+        array_type = base_expr.type
+        if isinstance(value_expr, ir.ConstInt) and isinstance(array_type, ir.ArrayType):
+            value_expr = ir.ConstInt(value_expr.value, array_type.dtype, value_expr.span)
+        update_call = ir.create_op_call("array.update_element", [base_expr, index_expr, value_expr], {}, span)
+        var = self._assign_or_let(var_name, update_call, span)
         self.scope_manager.define_var(var_name, var, span=span)
 
     def _build_assemble_offsets_and_extents(
@@ -3566,12 +3604,17 @@ class ASTParser:
             op_name = attrs[2]
             return self._parse_system_op(op_name, call)
 
+        # pl.array.{operation} (3-segment)
+        if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "array":
+            op_name = attrs[2]
+            return self._parse_array_op(op_name, call)
+
         # pl.const(value, dtype) — typed constant literal
         if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] == "const":
             return self._parse_typed_constant(call)
 
         # pl.{operation} (2-segment, unified dispatch or promoted ops)
-        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "tile", "system"):
+        if len(attrs) >= 2 and attrs[0] == "pl" and attrs[1] not in ("tensor", "tile", "system", "array"):
             op_name = attrs[1]
             return self._parse_unified_op(op_name, call)
 
@@ -4275,6 +4318,10 @@ class ASTParser:
         """Parse system operation."""
         return self._dispatch_op(_dsl_system, "pl.system", op_name, call)
 
+    def _parse_array_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse array operation (create / get_element / update_element)."""
+        return self._dispatch_op(_dsl_array, "pl.array", op_name, call)
+
     # Maps iterator type name to ForKind enum value.
     _ITERATOR_TO_KIND = {
         "range": ir.ForKind.Sequential,
@@ -4414,12 +4461,26 @@ class ASTParser:
             return self._parse_tensor_subscript(subscript, value_expr, value_type, span)
         if isinstance(value_type, ir.TileType):
             return self._parse_tile_subscript(subscript, value_expr, value_type, span)
+        if isinstance(value_type, ir.ArrayType):
+            return self._parse_array_subscript(subscript, value_expr, span)
 
         raise ParserTypeError(
-            f"Subscript requires Tuple, Tensor, or Tile type, got {type(value_type).__name__}",
+            f"Subscript requires Tuple, Tensor, Tile, or Array type, got {type(value_type).__name__}",
             span=span,
-            hint="Subscript syntax is supported for Tuple, Tensor, and Tile types",
+            hint="Subscript syntax is supported for Tuple, Tensor, Tile, and Array types",
         )
+
+    def _parse_array_subscript(self, subscript: ast.Subscript, value_expr: ir.Expr, span: ir.Span) -> ir.Expr:
+        """Parse array subscript: ``arr[i]`` -> array.get_element."""
+        index_node = subscript.slice
+        if isinstance(index_node, ast.Tuple):
+            raise ParserTypeError(
+                "Array subscript requires a single index (rank-1 in v1)",
+                span=span,
+                hint="Use arr[i], not arr[i, j]",
+            )
+        index_expr = self.parse_expression(index_node)
+        return ir.create_op_call("array.get_element", [value_expr, index_expr], {}, span)
 
     def _parse_tuple_subscript(self, subscript: ast.Subscript, value_expr: ir.Expr, span: ir.Span) -> ir.Expr:
         """Parse tuple subscript: ``t[0]`` -> TupleGetItemExpr."""

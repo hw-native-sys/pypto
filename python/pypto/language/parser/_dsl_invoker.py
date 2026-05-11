@@ -31,7 +31,7 @@ from collections.abc import Callable
 from typing import Any
 
 from pypto.ir.utils import use_parser_span
-from pypto.language.typing import Scalar, Tensor, Tile
+from pypto.language.typing import Array, Scalar, Tensor, Tile
 from pypto.pypto_core import ir
 
 
@@ -70,6 +70,8 @@ def _wrap_arg(arg: Any) -> Any:
         return Tensor(expr=arg)
     if isinstance(t, ir.TileType):
         return Tile(expr=arg)
+    if isinstance(t, ir.ArrayType):
+        return Array(expr=arg)
     if isinstance(t, ir.ScalarType):
         return Scalar(expr=arg)
     return arg
@@ -77,7 +79,7 @@ def _wrap_arg(arg: Any) -> Any:
 
 def _unwrap_result(value: Any) -> Any:
     """Unwrap a DSL return value to an ``ir.Expr`` for the parser to consume."""
-    if isinstance(value, (Tensor, Tile, Scalar)):
+    if isinstance(value, (Tensor, Tile, Scalar, Array)):
         return value.unwrap()
     return value
 

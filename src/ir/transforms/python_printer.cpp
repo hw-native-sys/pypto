@@ -433,6 +433,18 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return oss.str();
   }
 
+  if (auto array_type = As<ArrayType>(type)) {
+    std::ostringstream oss;
+    // Subscript-style: pl.Array[N, dtype]. Use PrintShapeDims (which routes through
+    // PrintExprForType into a temp stream) so the recursive printing doesn't reset
+    // the main stream_ buffer.
+    oss << prefix_ << ".Array[";
+    PrintShapeDims(oss, array_type->shape_);
+    oss << ", " << prefix_ << "." << DataTypeToString(array_type->dtype_);
+    oss << "]";
+    return oss.str();
+  }
+
   if (auto tile_type = As<TileType>(type)) {
     std::ostringstream oss;
     // Subscript-style: pl.Tile[[shape], dtype]

@@ -733,6 +733,25 @@ class TileType(ShapedType):
         directly.
         """
 
+class ArrayType(ShapedType):
+    """On-core array type (lives on scalar register file / C stack).
+
+    Homogeneous, 1-D, fixed extent, integer dtype. Cannot cross function
+    boundaries — see the ArrayNotEscapedVerifier for the rule.
+    """
+
+    @overload
+    def __init__(self, dtype: DataType, extent: Expr) -> None:
+        """Create an ArrayType from a dtype and a ConstInt extent."""
+
+    @overload
+    def __init__(self, dtype: DataType, extent: int) -> None:
+        """Create an ArrayType from a dtype and an int extent."""
+
+    @property
+    def extent(self) -> Expr:
+        """Number of elements (always a ConstInt)."""
+
 class TupleType(Type):
     """Tuple type representation (contains multiple types)."""
 
@@ -1019,6 +1038,9 @@ class MemorySpace(enum.Enum):
 
     Bias = ...
     """Bias buffer."""
+
+    ScalarLocal = ...
+    """On-core scalar register file / C stack (ArrayType)."""
 
 Mem = MemorySpace
 """Short alias for MemorySpace (e.g., Mem.Vec instead of MemorySpace.Vec)."""

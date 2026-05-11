@@ -79,6 +79,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "OrchestrationReferencesResolved";
     case IRProperty::TensorViewCanonical:
       return "TensorViewCanonical";
+    case IRProperty::ArrayNotEscaped:
+      return "ArrayNotEscaped";
     default:
       return "Unknown";
   }
@@ -145,10 +147,10 @@ VerificationLevel GetDefaultVerificationLevel() {
 }
 
 const IRPropertySet& GetStructuralProperties() {
-  static const IRPropertySet props{IRProperty::TypeChecked,         IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks,   IRProperty::UseAfterDef,
-                                   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
-                                   IRProperty::InOutUseValid,       IRProperty::PipelineLoopValid};
+  static const IRPropertySet props{
+      IRProperty::TypeChecked,   IRProperty::BreakContinueValid,  IRProperty::NoRedundantBlocks,
+      IRProperty::UseAfterDef,   IRProperty::OutParamNotShadowed, IRProperty::NoNestedInCore,
+      IRProperty::InOutUseValid, IRProperty::PipelineLoopValid,   IRProperty::ArrayNotEscaped};
   return props;
 }
 
@@ -161,7 +163,8 @@ const IRPropertySet& GetDefaultVerifyProperties() {
                                    IRProperty::UseAfterDef,
                                    IRProperty::OutParamNotShadowed,
                                    IRProperty::NoNestedInCore,
-                                   IRProperty::TileTypeCoherence};
+                                   IRProperty::TileTypeCoherence,
+                                   IRProperty::ArrayNotEscaped};
   return props;
 }
 

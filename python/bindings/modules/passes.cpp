@@ -87,7 +87,9 @@ void BindPass(nb::module_& m) {
       .value("OrchestrationReferencesResolved", IRProperty::OrchestrationReferencesResolved,
              "Every non-builtin Call in an Orchestration function targets a Function in the Program")
       .value("TensorViewCanonical", IRProperty::TensorViewCanonical,
-             "Every TensorType.tensor_view_ is canonical per RFC #1300 §2.2");
+             "Every TensorType.tensor_view_ is canonical per RFC #1300 §2.2")
+      .value("ArrayNotEscaped", IRProperty::ArrayNotEscaped,
+             "ArrayType never appears as a function parameter or return type");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

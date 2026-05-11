@@ -218,5 +218,34 @@ std::optional<MemorySpace> TileType::ValidateMemorySpace(const std::optional<Mem
                                                          std::optional<MemorySpace> memory_space) {
   return ValidateTileMemorySpaceConsistency(memref, memory_space);
 }
+
+namespace {
+
+void ValidateArrayDType(DataType dtype) {
+  CHECK(dtype.IsInt() || dtype == DataType::BOOL)
+      << "ArrayType element dtype must be an integer or BOOL, got " << dtype.ToString();
+}
+
+void ValidateArrayExtent(const ExprPtr& extent) {
+  CHECK(extent != nullptr) << "ArrayType extent must not be null";
+  auto c = As<ConstInt>(extent);
+  CHECK(c != nullptr) << "ArrayType extent must be a compile-time ConstInt";
+  CHECK(c->value_ > 0) << "ArrayType extent must be positive, got " << c->value_;
+}
+
+}  // namespace
+
+ArrayType::ArrayType(DataType dtype, ExprPtr extent)
+    : ShapedType(dtype, std::vector<ExprPtr>{std::move(extent)}) {
+  ValidateArrayDType(dtype_);
+  ValidateArrayExtent(shape_.at(0));
+}
+
+ArrayType::ArrayType(DataType dtype, int64_t extent)
+    : ShapedType(dtype, std::vector<int64_t>{extent}, std::nullopt) {
+  ValidateArrayDType(dtype_);
+  ValidateArrayExtent(shape_.at(0));
+}
+
 }  // namespace ir
 }  // namespace pypto

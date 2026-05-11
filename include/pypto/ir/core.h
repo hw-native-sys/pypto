@@ -111,6 +111,7 @@ enum class ObjectKind {
   TensorType,
   DistributedTensorType,
   TileType,
+  ArrayType,
   TupleType,
 
   // Other IR node kinds

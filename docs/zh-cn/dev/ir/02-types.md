@@ -192,6 +192,47 @@ TileView：它由 tile shape 以及（如果存在）tile memory space 推导得
 像 `pl.TileView()` 这样的冗余显式默认写法，会与省略写法被视为语义等价，
 并且在 printer 输出时可能统一成规范形式。
 
+### ArrayType
+
+片上定长同构 1-D 数组,存放于标量寄存器堆 / C 栈(memory space `ScalarLocal`)。
+区别于 `TensorType`(GM/DDR 指针)和 `TileType`(向量/cube 单元状态)。
+
+```python
+arr_type = ir.ArrayType(DataType.INT32, 16)       # 16 个 INT32 元素
+# DSL 注解形式:
+arr: pl.Array[16, pl.INT32]
+```
+
+**v1 约束:**
+
+- 元素 dtype 必须是整型(`INT8/16/32/64`、`UINT8/16/32/64`)或 `BOOL`
+- 仅支持 rank-1;extent 必须是编译期 `ConstInt`
+- 不携带 `MemRef` —— codegen 直接落到 C 栈数组 `dtype name[N]`(无 STL 依赖)
+- 不能跨函数边界(由 `ArrayNotEscaped` 验证器强制)
+
+**操作:**
+
+| Op | 语义 | 下降 |
+| -- | ---- | ---- |
+| `array.create(N, dtype)` | 分配栈数组 | `dtype arr[N] = {0};` |
+| `array.get_element(arr, i)` → `Scalar` | 读元素 `i` | `dtype v = arr[i];` |
+| `array.update_element(arr, i, v)` → `Array` | 函数式更新(SSA-pure) | `arr[i] = v;`(原地;codegen 把 LHS 别名到入参) |
+
+`array.update_element` 是 `tensor.assemble` 的 SSA-functional 等价物:返回一个新的
+`ArrayType` SSA 值,表示"原数组中第 i 个元素被替换为 v"。codegen 把结果 Var
+别名到入参数组的存储,emit 原地写入 —— 不复制。
+
+**DSL 下标糖:**
+
+```python
+arr = pl.array.create(8, pl.INT32)
+arr[i] = v          # desugar 成: arr = pl.array.update_element(arr, i, v)
+x = arr[i]          # desugar 成: x = pl.array.get_element(arr, i)
+```
+
+`arr[i] = v` 时 parser 把左边变量重绑定,后续读取看到更新后的数组 —— 与
+Tensor/Tile 下标写入糖一致。
+
 ### TupleType
 
 异构类型元组。
@@ -279,6 +320,8 @@ class MyProgram:
 | `Left` | 左矩阵操作数缓冲区 |
 | `Right` | 右矩阵操作数缓冲区 |
 | `Acc` | 累加器缓冲区 |
+| `Bias` | Bias 缓冲区 |
+| `ScalarLocal` | 片上标量寄存器堆 / C 栈(用于 `ArrayType`) |
 
 ## Python 使用示例
 

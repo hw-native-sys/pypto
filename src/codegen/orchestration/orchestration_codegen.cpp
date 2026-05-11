@@ -857,6 +857,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
         } else {
           GenerateTensorOpCode(call, var_name, assign->var_);
         }
+      } else if (IsArrayOp(op_name)) {
+        // ArrayType ops emit C-stack array operations. ``array.update_element``
+        // is SSA-functional: the LHS Var refers to the post-update array. At
+        // codegen time we alias the LHS to the input array's emit name so the
+        // emitted write lands on the same storage.
+        if (op_name == "array.update_element") {
+          HandleArrayUpdateElementAssign(assign, call);
+        }
+        GenerateTensorOpCode(call, var_name, assign->var_);
       } else if (!IsBuiltinOp(op_name)) {
         std::string result_key;
         if (As<TupleType>(call->GetType())) {
@@ -980,7 +989,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitStmt_(const EvalStmtPtr& eval) override {
     if (auto call = As<Call>(eval->expr_)) {
       const std::string& op_name = call->op_->name_;
-      if (IsTensorOp(op_name)) {
+      if (IsTensorOp(op_name) || IsArrayOp(op_name)) {
         GenerateTensorOpCode(call, "", nullptr);
       } else if (!IsBuiltinOp(op_name)) {
         GenerateFunctionCallCode(call, "");
@@ -1005,6 +1014,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // legal (C++ rejects ``auto x;`` without init). Yield/Assign downstream
     // will rebind it.
     if (As<TensorType>(type)) return "Tensor";
+    // ArrayType has split declaration syntax (``dtype name[N]``) — there's no
+    // single "type expression" that names a C array. Callers that need to
+    // emit a Var of ArrayType always go through array.create's op codegen,
+    // which emits the declaration directly. If this branch ever fires, the
+    // catch-all ``auto X = Y;`` path would produce invalid C — treat it as a
+    // missed dispatch and surface it loudly.
+    INTERNAL_CHECK(!As<ArrayType>(type))
+        << "GetCppType called for ArrayType — array vars must be declared via "
+           "array.create's op codegen, not the catch-all AssignStmt path";
     return "auto";
   }
 
@@ -1869,6 +1887,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string target_name = GenerateExprString(call->args_[0]);
     target_name = GetExternalTensorName(target_name);
     emit_name_map_[assign->var_.get()] = target_name;
+  }
+
+  void HandleArrayUpdateElementAssign(const AssignStmtPtr& assign, const CallPtr& call) {
+    // array.update_element(array, index, value) -> ArrayType.
+    // The SSA-functional return value shares storage with the first arg; alias
+    // the LHS so subsequent references resolve to the same C variable.
+    INTERNAL_CHECK_SPAN(call->args_.size() == 3, call->span_)
+        << "Internal error: array.update_element expects 3 arguments";
+    std::string array_name = GenerateExprString(call->args_[0]);
+    emit_name_map_[assign->var_.get()] = array_name;
   }
 
   std::string ReserveVarEmitName(const Var* var) {

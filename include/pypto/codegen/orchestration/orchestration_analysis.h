@@ -35,6 +35,11 @@ namespace codegen {
 std::string GetSSABaseName(const std::string& name);
 bool IsBuiltinOp(const std::string& op_name);
 bool IsTensorOp(const std::string& op_name);
+
+/// True for ops starting with ``array.`` (create / get_element / update_element).
+/// ArrayType ops are handled by the orchestration codegen similarly to tensor ops,
+/// but emit C-stack array operations instead of GM/DDR pointer operations.
+bool IsArrayOp(const std::string& op_name);
 std::string FormatConstIntValue(const ir::ConstIntPtr& c, const std::string& cpp_type);
 std::string FormatConstFloatValue(const ir::ConstFloatPtr& c, const std::string& cpp_type);
 int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,

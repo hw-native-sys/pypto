@@ -436,6 +436,11 @@ class IRSerializer::Impl {
       if (tile_type->memory_space_.has_value()) {
         type_map["memory_space"] = msgpack::object(static_cast<uint8_t>(*tile_type->memory_space_), zone);
       }
+    } else if (auto array_type = As<ArrayType>(type)) {
+      type_map["dtype"] = msgpack::object(array_type->dtype_.Code(), zone);
+      std::vector<msgpack::object> shape_vec;
+      shape_vec.push_back(SerializeNode(array_type->shape_.at(0), zone));
+      type_map["shape"] = msgpack::object(shape_vec, zone);
     } else if (auto tuple_type = As<TupleType>(type)) {
       std::vector<msgpack::object> types_vec;
       for (const auto& t : tuple_type->types_) {

@@ -198,6 +198,49 @@ memory space. Redundant explicit defaults such as `pl.TileView()` are treated
 as semantically equivalent to the omitted form and may print back in canonical
 syntax.
 
+### ArrayType
+
+On-core fixed-size homogeneous 1-D array. Lives on the scalar register file /
+C stack (memory space `ScalarLocal`). Distinct from `TensorType` (GM/DDR
+pointer) and `TileType` (vector/cube hardware state).
+
+```python
+arr_type = ir.ArrayType(DataType.INT32, 16)       # 16 INT32 elements
+# DSL annotation form:
+arr: pl.Array[16, pl.INT32]
+```
+
+**v1 constraints:**
+
+- Element dtype must be integer (`INT8/16/32/64`, `UINT8/16/32/64`) or `BOOL`.
+- Shape is rank-1 only; extent must be a compile-time `ConstInt`.
+- No `MemRef` — codegen lowers to a bare C stack array `dtype name[N]`.
+- Cannot cross function boundaries (enforced by `ArrayNotEscaped` verifier).
+
+**Operations:**
+
+| Op | Semantics | Lowering |
+| -- | --------- | -------- |
+| `array.create(N, dtype)` | Allocate stack-local array | `dtype arr[N] = {0};` |
+| `array.get_element(arr, i)` → `Scalar` | Read element `i` | `dtype v = arr[i];` |
+| `array.update_element(arr, i, v)` → `Array` | Functional update (SSA-pure) | `arr[i] = v;` (in-place; codegen aliases LHS to input) |
+
+`array.update_element` is the SSA-functional equivalent of `tensor.assemble`:
+it returns a new SSA value of `ArrayType` representing "the array with element
+i replaced by v". Codegen aliases the result Var to the input array's storage,
+emitting in-place writes — no copy.
+
+**DSL indexing sugar:**
+
+```python
+arr = pl.array.create(8, pl.INT32)
+arr[i] = v          # desugars to: arr = pl.array.update_element(arr, i, v)
+x = arr[i]          # desugars to: x = pl.array.get_element(arr, i)
+```
+
+The parser rebinds the LHS variable on `arr[i] = v` so subsequent reads see the
+updated array — same idiom as the Tensor/Tile subscript-write sugar.
+
 ### TupleType
 
 Heterogeneous tuple of types.
@@ -286,6 +329,8 @@ must also provide the tile memory space as a separate `pl.Mem.*` argument.
 | `Left` | Left matrix operand buffer |
 | `Right` | Right matrix operand buffer |
 | `Acc` | Accumulator buffer |
+| `Bias` | Bias buffer |
+| `ScalarLocal` | On-core scalar register file / C stack (`ArrayType`) |
 
 > **Note:** `pl.Mem` and `ir.Mem` are short aliases for `pl.MemorySpace` and `ir.MemorySpace` respectively. Both forms are accepted; the short form is preferred in new code.
 

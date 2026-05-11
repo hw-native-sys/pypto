@@ -104,6 +104,7 @@ _TYPE_KIND_NAMES: dict[type, str] = {
     ir.TensorType: "Tensor",
     ir.TileType: "Tile",
     ir.ScalarType: "Scalar",
+    ir.ArrayType: "Array",
 }
 
 
@@ -273,7 +274,7 @@ class TypeResolver:
         Returns:
             Type name string if recognized, None otherwise
         """
-        valid = ("Tensor", "Tile", "Scalar", "Tuple", "DistributedTensor")
+        valid = ("Tensor", "Tile", "Scalar", "Array", "Tuple", "DistributedTensor")
         if isinstance(node, ast.Attribute) and node.attr in valid:
             return node.attr
         if isinstance(node, ast.Name) and node.id in valid:
@@ -355,6 +356,26 @@ class TypeResolver:
         if type_name == "Scalar":
             dtype = self.resolve_dtype(slice_value)
             return ir.ScalarType(dtype)
+
+        if type_name == "Array":
+            # pl.Array[N, dtype] — N is an int literal, dtype is a DataType ref.
+            if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) != 2:
+                raise ParserTypeError(
+                    f"Array subscript requires [extent, dtype], got: {ast.unparse(slice_value)}",
+                    span=self._get_span(slice_value),
+                    hint="Use pl.Array[N, pl.INT32]",
+                )
+            extent_node, dtype_node = slice_value.elts
+            success, extent_value = self.expr_evaluator.try_eval_expr(extent_node)
+            if not success or not isinstance(extent_value, int) or isinstance(extent_value, bool):
+                raise ParserTypeError(
+                    f"Array extent must be an int literal or compile-time constant, "
+                    f"got: {ast.unparse(extent_node)}",
+                    span=self._get_span(extent_node),
+                    hint="Use a positive integer literal for the extent",
+                )
+            dtype = self.resolve_dtype(dtype_node)
+            return ir.ArrayType(dtype, extent_value)
 
         if type_name == "Tuple":
             return self._resolve_tuple_subscript_type(subscript_node)

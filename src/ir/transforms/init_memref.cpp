@@ -162,6 +162,13 @@ class InitMemRefMutator : public IRMutator {
     auto var_expr = std::static_pointer_cast<const Expr>(var);
     TypePtr new_type = var_expr->GetType();
 
+    // ArrayType lives on the on-core scalar register file / C stack and never
+    // needs a runtime MemRef — codegen lowers it to a stack array directly.
+    // Leave the var untouched so the original ArrayType (no memref_) propagates.
+    if (std::dynamic_pointer_cast<const ArrayType>(var_expr->GetType())) {
+      return var;
+    }
+
     if (auto shaped_type = std::dynamic_pointer_cast<const ShapedType>(var_expr->GetType())) {
       // Resolve memory space once, pass to both CreateMemRef and CloneType
       auto memory_space = ResolveTileMemorySpace(var_expr->GetType(), /*default_to_ddr=*/true);

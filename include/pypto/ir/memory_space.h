@@ -28,15 +28,17 @@ namespace ir {
  * - Right: Right matrix operand buffer
  * - Acc: Accumulator buffer
  * - Bias: Bias buffer
+ * - ScalarLocal: On-core scalar register file / C stack (for ArrayType)
  */
 enum class MemorySpace {
-  DDR,    ///< DDR memory (off-chip)
-  Vec,    ///< Vector/unified buffer (on-chip)
-  Mat,    ///< Matrix/L1 buffer
-  Left,   ///< Left matrix operand buffer
-  Right,  ///< Right matrix operand buffer
-  Acc,    ///< Accumulator buffer
-  Bias    ///< Bias buffer
+  DDR,          ///< DDR memory (off-chip)
+  Vec,          ///< Vector/unified buffer (on-chip)
+  Mat,          ///< Matrix/L1 buffer
+  Left,         ///< Left matrix operand buffer
+  Right,        ///< Right matrix operand buffer
+  Acc,          ///< Accumulator buffer
+  Bias,         ///< Bias buffer
+  ScalarLocal,  ///< On-core scalar register file / C stack (for ArrayType)
 };
 
 /**

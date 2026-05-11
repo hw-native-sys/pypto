@@ -44,10 +44,13 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 std::string GetSSABaseName(const std::string& name) { return auto_name::GetCompatibleBaseName(name); }
 
 bool IsBuiltinOp(const std::string& op_name) {
-  return op_name.find("tile.") == 0 || op_name.find("tensor.") == 0 || op_name.find("system.") == 0;
+  return op_name.find("tile.") == 0 || op_name.find("tensor.") == 0 || op_name.find("system.") == 0 ||
+         op_name.find("array.") == 0;
 }
 
 bool IsTensorOp(const std::string& op_name) { return op_name.find("tensor.") == 0; }
+
+bool IsArrayOp(const std::string& op_name) { return op_name.find("array.") == 0; }
 
 std::string FormatConstIntValue(const ConstIntPtr& c, const std::string& cpp_type) {
   int64_t v = c->value_;

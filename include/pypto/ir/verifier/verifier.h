@@ -224,6 +224,19 @@ PropertyVerifierPtr CreateStructuredCtrlFlowPropertyVerifier();
 PropertyVerifierPtr CreateOutParamNotShadowedPropertyVerifier();
 
 /**
+ * @brief Factory function for creating ArrayNotEscaped property verifier
+ *
+ * Verifies that ``ArrayType`` never appears as a function parameter or
+ * return type. ArrayType values live on the on-core scalar register file /
+ * C stack and cannot be passed across function boundaries (the storage
+ * backing them disappears when the function returns). Local create/use
+ * within a function/region is allowed; this verifier only blocks escape.
+ *
+ * @return Shared pointer to ArrayNotEscaped PropertyVerifier
+ */
+PropertyVerifierPtr CreateArrayNotEscapedPropertyVerifier();
+
+/**
  * @brief Factory function for creating NoNestedInCore property verifier
  *
  * Verifies that no ScopeStmt(InCore) is nested inside another ScopeStmt(InCore).

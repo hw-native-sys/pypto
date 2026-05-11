@@ -479,6 +479,20 @@ void BindIR(nb::module_& m) {
       "canonicalization, so callers that need to inspect layout fields should use this.");
   BindFields<TileType>(tile_type_class);
 
+  // ArrayType - on-core fixed-size 1-D homogeneous array (C-stack local)
+  auto array_type_class = nb::class_<ArrayType, ShapedType>(
+      ir, "ArrayType",
+      "On-core array type (lives on scalar register file / C stack). "
+      "Homogeneous, 1-D, fixed extent, integer dtype. Cannot cross function boundaries.");
+  array_type_class.def(nb::init<DataType, ExprPtr>(), nb::arg("dtype"), nb::arg("extent"),
+                       "Create an ArrayType from a dtype and a ConstInt extent");
+  array_type_class.def(nb::init<DataType, int64_t>(), nb::arg("dtype"), nb::arg("extent"),
+                       "Create an ArrayType from a dtype and an int extent");
+  array_type_class.def_prop_ro(
+      "extent", [](const ArrayType& self) { return self.extent(); },
+      "Number of elements (always a ConstInt)");
+  BindFields<ArrayType>(array_type_class);
+
   // TupleType - const shared_ptr
   auto tuple_type_class =
       nb::class_<TupleType, Type>(ir, "TupleType", "Tuple type representation (contains multiple types)");
@@ -502,6 +516,7 @@ void BindIR(nb::module_& m) {
       .value("Right", MemorySpace::Right, "Right matrix operand buffer")
       .value("Acc", MemorySpace::Acc, "Accumulator buffer")
       .value("Bias", MemorySpace::Bias, "Bias buffer")
+      .value("ScalarLocal", MemorySpace::ScalarLocal, "On-core scalar register file / C stack (ArrayType)")
       .export_values();
 
   // Short alias: ir.Mem = ir.MemorySpace

@@ -22,6 +22,7 @@ namespaces remain available for cases where the caller wants to be explicit.
 
 """
 
+from . import array_ops as array
 from . import system_ops as system
 from . import tensor_ops as tensor
 from . import tile_ops as tile
@@ -137,6 +138,7 @@ from .unified_ops import (
 )
 
 __all__ = [
+    "array",
     "tile",
     "system",
     "tensor",

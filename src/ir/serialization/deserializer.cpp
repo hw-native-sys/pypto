@@ -400,6 +400,9 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       }
 
       return std::make_shared<TileType>(shape, DataType(dtype_code), memref, tile_view, memory_space);
+    } else if (type_kind == "ArrayType") {
+      CHECK(shape.size() == 1) << "ArrayType must have rank-1 shape, got " << shape.size();
+      return std::make_shared<ArrayType>(DataType(dtype_code), shape[0]);
     } else if (type_kind == "TupleType") {
       return std::make_shared<TupleType>(types);
     } else if (type_kind == "MemRefType") {

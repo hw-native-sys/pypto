@@ -568,6 +568,62 @@ class TileType : public ShapedType {
 using TileTypePtr = std::shared_ptr<const TileType>;
 
 /**
+ * @brief Array type representation
+ *
+ * Represents a small fixed-size homogeneous 1-D array that lives on the
+ * on-core scalar register file / C stack (memory space ScalarLocal). All
+ * elements share the same scalar dtype. Distinct from TensorType (which
+ * lowers to GM/DDR pointers) and TileType (which is vector or cube hardware
+ * state).
+ *
+ * Writes are SSA-functional: `array.update_element(arr, i, v)` returns a new
+ * SSA value of ArrayType representing "arr with element i set to v" — no
+ * in-place mutation in the IR. Codegen lowers a chain of update_element
+ * Calls back to in-place C-stack mutation when the dataflow allows.
+ *
+ * v1 constraints:
+ *  - Element dtype must be an integer type (signed or unsigned, or BOOL).
+ *  - Shape is exactly rank-1; the single extent must be a compile-time ConstInt.
+ *  - Never carries a MemRef (memref_ is always nullopt) — codegen lowers
+ *    create/get_element/update_element directly to a C-stack array.
+ *
+ * An ArrayType value may be created and used inside any function/region
+ * (orchestration or incore), but cannot cross function boundaries — see the
+ * ArrayNotEscapedVerifier for the rule.
+ */
+class ArrayType : public ShapedType {
+ public:
+  /**
+   * @brief Create an array type with a ConstInt extent.
+   *
+   * @param dtype Element data type (must be integer).
+   * @param extent Number of elements (must be a ConstInt).
+   */
+  ArrayType(DataType dtype, ExprPtr extent);
+
+  /**
+   * @brief Create an array type with a literal int extent.
+   *
+   * @param dtype Element data type (must be integer).
+   * @param extent Number of elements.
+   */
+  ArrayType(DataType dtype, int64_t extent);
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ArrayType; }
+  [[nodiscard]] std::string TypeName() const override { return "ArrayType"; }
+  [[nodiscard]] std::optional<MemorySpace> GetMemorySpace() const override {
+    return MemorySpace::ScalarLocal;
+  }
+
+  /// Single-axis extent. Always a ConstInt — validated in constructor.
+  [[nodiscard]] ExprPtr extent() const { return shape_.at(0); }
+
+  static constexpr auto GetFieldDescriptors() { return ShapedType::GetFieldDescriptors(); }
+};
+
+using ArrayTypePtr = std::shared_ptr<const ArrayType>;
+
+/**
  * @brief Tuple type representation
  *
  * Represents a tuple type containing multiple types.

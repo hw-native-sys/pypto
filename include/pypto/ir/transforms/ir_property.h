@@ -60,6 +60,7 @@ enum class IRProperty : uint64_t {
                                     ///< Function that exists in the Program
   TensorViewCanonical,              ///< TensorView canonicality verified (weak: stride.empty() ok; strict:
                                     ///< requires materialization, RFC #1300 §2.2)
+  ArrayNotEscaped,                  ///< ArrayType never appears as a function parameter or return type
   kCount                            ///< Sentinel (must be last)
 };
 

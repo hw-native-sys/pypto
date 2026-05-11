@@ -110,6 +110,7 @@ DEFINE_KIND_TRAIT(ScalarType, ObjectKind::ScalarType)
 DEFINE_KIND_TRAIT(TensorType, ObjectKind::TensorType)
 DEFINE_KIND_TRAIT(DistributedTensorType, ObjectKind::DistributedTensorType)
 DEFINE_KIND_TRAIT(TileType, ObjectKind::TileType)
+DEFINE_KIND_TRAIT(ArrayType, ObjectKind::ArrayType)
 DEFINE_KIND_TRAIT(TupleType, ObjectKind::TupleType)
 DEFINE_KIND_TRAIT(MemRefType, ObjectKind::MemRefType)
 DEFINE_KIND_TRAIT(PtrType, ObjectKind::PtrType)
@@ -201,16 +202,18 @@ struct KindTrait<Type> {
                                          ObjectKind::TensorType,
                                          ObjectKind::DistributedTensorType,
                                          ObjectKind::TileType,
+                                         ObjectKind::ArrayType,
                                          ObjectKind::TupleType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 
 // ShapedType can be used as both a concrete type and a base class
-// It matches itself, TensorType, DistributedTensorType, and TileType
+// It matches itself, TensorType, DistributedTensorType, TileType, and ArrayType
 template <>
 struct KindTrait<ShapedType> {
   static constexpr ObjectKind kinds[] = {ObjectKind::ShapedType, ObjectKind::TensorType,
-                                         ObjectKind::DistributedTensorType, ObjectKind::TileType};
+                                         ObjectKind::DistributedTensorType, ObjectKind::TileType,
+                                         ObjectKind::ArrayType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 
