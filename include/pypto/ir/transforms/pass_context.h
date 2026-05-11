@@ -39,11 +39,14 @@ class Pass;
 /**
  * @brief Emit a batch of diagnostics from the unified diagnostic channel.
  *
- * Routes Warning severity to LOG_WARN and PerfHint severity to LOG_INFO.
- * If a `ReportInstrument` is in the active context, PerfHint diagnostics are
- * also appended to `${ReportInstrument.output_dir}/perf_hints.log` so build
- * logs persist across runs. Error severity is rejected by INTERNAL_CHECK —
- * errors should be thrown via `VerificationError`, not emitted here.
+ * Warning severity always prints in full via LOG_WARN. PerfHint severity is
+ * appended to `${ReportInstrument.output_dir}/perf_hints.log` when a
+ * `ReportInstrument` is in the active context; in that case the console gets a
+ * single LOG_INFO summary line (`[perf_hint] N hints across M sites; see
+ * <path>`) instead of one line per hint, so build logs stay readable. With no
+ * `ReportInstrument` there is no file, so each PerfHint is printed in full via
+ * LOG_INFO. Error severity is rejected by INTERNAL_CHECK — errors should be
+ * thrown via `VerificationError`, not emitted here.
  *
  * @param diags Diagnostics to emit. May be empty (no-op).
  * @param phase_label Human-readable label for the source phase
@@ -193,10 +196,11 @@ class ReportInstrument : public PassInstrument {
  *
  * Checks declare their phase at registration; this instrument fires each
  * check at every pass boundary and the registry filters by phase. Output is
- * dispatched by `EmitDiagnostics` which routes Warning to `LOG_WARN` and
- * PerfHint to `LOG_INFO`, and additionally appends PerfHint diagnostics to
- * `${ReportInstrument.output_dir}/perf_hints.log` when a `ReportInstrument`
- * is in the active context.
+ * dispatched by `EmitDiagnostics`: Warnings print in full via `LOG_WARN`;
+ * PerfHints are appended to `${ReportInstrument.output_dir}/perf_hints.log`
+ * when a `ReportInstrument` is in the active context, with the console getting
+ * a single `LOG_INFO` summary line in that case (and the full per-hint lines
+ * otherwise).
  *
  * For advanced use outside PassPipeline or fine-grained per-instrument
  * control. PassPipeline::Run runs the registered checks directly without

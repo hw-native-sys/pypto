@@ -19,10 +19,10 @@ Severity 与 phase 解耦：`Warning` 可以在 `PrePipeline` 触发，`PerfHint
 | Severity | 何时使用 | 输出 | 抑制方式 |
 | -------- | -------- | ---- | -------- |
 | `Error` | IR 不合法 | 抛出 `VerificationError` | 不可抑制 |
-| `Warning` | 疑似用户错误或 pass bug | `LOG_WARN` 至 stderr | `disabled_diagnostics` 集合 |
-| `PerfHint` | 建议性调优提示 | `LOG_INFO` 至 stderr（默认 release 日志级别可见），并在上下文中存在 `ReportInstrument` 时附加写入 `${ReportInstrument.output_dir}/perf_hints.log` | `disabled_diagnostics` 集合 |
+| `Warning` | 疑似用户错误或 pass bug | 完整输出至 stderr（`LOG_WARN`） | `disabled_diagnostics` 集合 |
+| `PerfHint` | 建议性调优提示 | 上下文中存在 `ReportInstrument` 时（经 `compile()` / `pl.jit` 时恒为真）每条 hint 写入 `${ReportInstrument.output_dir}/perf_hints.log`，stderr 仅打印一行指向该文件的 `LOG_INFO` 摘要；若无 `ReportInstrument`，则每条 hint 完整输出至 stderr（`LOG_INFO`）。 | `disabled_diagnostics` 集合 |
 
-`PYPTO_LOG_LEVEL` release 默认值为 `INFO`，因此 `[perf_hint ...]` 行开箱可见。设置 `PYPTO_LOG_LEVEL=warn` 可在 stderr 上静音（文件输出独立）。
+`PYPTO_LOG_LEVEL` release 默认值为 `INFO`，因此 `[perf_hint] N hints …` 摘要行（无 `ReportInstrument` 时为完整的 `[perf_hint PH…] …` 行）开箱可见。设置 `PYPTO_LOG_LEVEL=warn` 可在 stderr 上静音性能提示（文件输出独立）。无论日志级别如何，逐条详情始终写入 `perf_hints.log`。
 
 ## 触发流程
 
@@ -36,7 +36,7 @@ PassPipeline::Run(program)
  └─ ctx.RunAfterPipeline(program)         （instrument 钩子）
 ```
 
-`EmitDiagnostics` 将 Warning 路由到 `LOG_WARN`，PerfHint 路由到 `LOG_INFO`，并在上下文中存在 `ReportInstrument` 时把 PerfHint 行附加到 `perf_hints.log`。
+`EmitDiagnostics` 将 Warning 以完整形式经 `LOG_WARN` 输出。对 PerfHint：上下文中存在 `ReportInstrument` 时把每条 hint 附加到 `perf_hints.log`，并向 stderr 输出一行 `LOG_INFO` 摘要（`[perf_hint] N hints across M sites; see <path>`）；否则每条 hint 完整经 `LOG_INFO` 输出。
 
 ## 注册新的检查项
 
@@ -80,25 +80,31 @@ Register(DiagnosticCheck::MyCheck,
 
 ### 第一项检查：`TileInnermostDimGranularity` (PH001)
 
-检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时，对每个 op 发一条 diagnostic，指向用户源代码 span。
+检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时，对每个 op 发一条 diagnostic，指向用户源代码 span。上下文中存在 `ReportInstrument` 时全部写入 `perf_hints.log`，stderr 仅见摘要行；否则每条 hint 输出到 stderr。
 
-示例输出（`examples/kernels/08_assemble.py`，Ascend950）：
+示例：stderr 摘要 + `perf_hints.log` 内容（`examples/kernels/08_assemble.py`，Ascend950）：
 
 ```text
+# stderr：
+[perf_hint] 2 hints across 2 sites; see /tmp/build/perf_hints.log
+
+# /tmp/build/perf_hints.log：
 [perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B; recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B; recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
 ```
 
 ## 用户面 API
 
 ```python
-# 默认：perf hint 在 pipeline 末尾通过 stderr 输出
+# 无 report instrument：每条 perf hint 在 pipeline 末尾完整输出到 stderr
 with passes.PassContext([]):
     pipeline.run(program)
 
-# 同时持久化到磁盘——文件与其他 report 同目录
+# 有 report instrument（compile() / pl.jit 的默认行为）：完整详情写入与其他 report
+# 同目录的 perf_hints.log，stderr 仅得到一行摘要
 with passes.PassContext([passes.ReportInstrument("/tmp/build")]):
     pipeline.run(program)
-# → /tmp/build/perf_hints.log
+# → /tmp/build/perf_hints.log （stderr："[perf_hint] N hints across M sites; see …"）
 
 # 抑制单个 hint
 disabled = passes.DiagnosticCheckSet()

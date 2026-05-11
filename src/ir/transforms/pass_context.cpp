@@ -12,9 +12,11 @@
 #include "pypto/ir/transforms/pass_context.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <fstream>
 #include <ios>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -185,10 +187,26 @@ std::string FindReportOutputDir() {
 void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& phase_label) {
   if (diags.empty()) return;
 
-  // 1. stderr — every diagnostic, gated by LogLevel.
+  // PerfHint detail is persisted to `${ReportInstrument.output_dir}/perf_hints.log`
+  // only when a ReportInstrument is registered. When that file exists we collapse
+  // perf hints to a single console summary that points at it; otherwise (bare
+  // PassPipeline, some tools/tests) we keep printing each hint so they don't go
+  // dark. Regular warnings always print in full.
+  const std::string dir = FindReportOutputDir();
+  const std::string perf_log_path = dir.empty() ? std::string{} : dir + "/perf_hints.log";
+
+  std::size_t perf_hint_count = 0;
+  for (const auto& d : diags) {
+    if (d.severity == DiagnosticSeverity::PerfHint) ++perf_hint_count;
+  }
+  const bool summarize_perf_hints = perf_hint_count > 0 && !perf_log_path.empty();
+
+  // 1. stderr — every diagnostic, gated by LogLevel; perf hints collapsed to a
+  //    summary line when their detail is going to perf_hints.log instead.
   for (const auto& d : diags) {
     INTERNAL_CHECK(d.severity != DiagnosticSeverity::Error)
         << "Error severity must not flow through DiagnosticInstrument: " << d.rule_name;
+    if (d.severity == DiagnosticSeverity::PerfHint && summarize_perf_hints) continue;
     const std::string line = FormatDiagnosticLine(d, phase_label);
     if (d.severity == DiagnosticSeverity::Warning) {
       LOG_WARN << line;
@@ -196,19 +214,25 @@ void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& ph
       LOG_INFO << line;
     }
   }
+  if (summarize_perf_hints) {
+    std::set<std::string> sites;
+    for (const auto& d : diags) {
+      if (d.severity == DiagnosticSeverity::PerfHint && d.span.is_valid()) {
+        sites.insert(d.span.to_string());
+      }
+    }
+    std::ostringstream summary;
+    summary << "[perf_hint] " << perf_hint_count << (perf_hint_count == 1 ? " hint" : " hints");
+    if (!sites.empty()) {
+      summary << " across " << sites.size() << (sites.size() == 1 ? " site" : " sites");
+    }
+    summary << "; see " << perf_log_path;
+    LOG_INFO << summary.str();
+  }
 
   // 2. File — only PerfHint, only when a ReportInstrument is registered.
-  const std::string dir = FindReportOutputDir();
-  if (dir.empty()) return;
-
-  bool has_perf_hint = false;
-  for (const auto& d : diags) {
-    if (d.severity == DiagnosticSeverity::PerfHint) {
-      has_perf_hint = true;
-      break;
-    }
-  }
-  if (!has_perf_hint) return;
+  // (`summarize_perf_hints` is exactly `perf_hint_count > 0 && !perf_log_path.empty()`.)
+  if (!summarize_perf_hints) return;
 
   // PassContext is thread-local, but multiple threads can run concurrent
   // pipelines whose distinct ReportInstruments happen to share an output
@@ -216,10 +240,9 @@ void EmitDiagnostics(const std::vector<Diagnostic>& diags, const std::string& ph
   static std::mutex perf_hints_log_mu;
   std::scoped_lock lock(perf_hints_log_mu);
 
-  const std::string path = dir + "/perf_hints.log";
-  std::ofstream f(path, std::ios::app);
+  std::ofstream f(perf_log_path, std::ios::app);
   if (!f.is_open()) {
-    LOG_WARN << "Failed to open " << path << " for perf-hint append";
+    LOG_WARN << "Failed to open " << perf_log_path << " for perf-hint append";
     return;
   }
   for (const auto& d : diags) {

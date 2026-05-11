@@ -19,10 +19,10 @@ Severity is independent of phase. A `Warning` may run at `PrePipeline`; a `PerfH
 | Severity | When | Output | Suppression |
 | -------- | ---- | ------ | ----------- |
 | `Error` | IR is invalid | `VerificationError` thrown | Cannot be suppressed |
-| `Warning` | Likely mistake or pass bug | `LOG_WARN` to stderr | `disabled_diagnostics` set |
-| `PerfHint` | Advisory tuning suggestion | `LOG_INFO` to stderr (visible at default release log level) **plus** `${ReportInstrument.output_dir}/perf_hints.log` if a report instrument is in the context | `disabled_diagnostics` set |
+| `Warning` | Likely mistake or pass bug | `LOG_WARN` to stderr, in full | `disabled_diagnostics` set |
+| `PerfHint` | Advisory tuning suggestion | `${ReportInstrument.output_dir}/perf_hints.log` if a report instrument is in the context (always true via `compile()` / `pl.jit`), with stderr getting a one-line `LOG_INFO` summary that points at the file. With no report instrument: each hint printed in full to stderr via `LOG_INFO`. | `disabled_diagnostics` set |
 
-The release default for `PYPTO_LOG_LEVEL` is `INFO`, so `[perf_hint ...]` lines reach the console out of the box. Override with `PYPTO_LOG_LEVEL=warn` to mute them on stderr (the file output is independent).
+The release default for `PYPTO_LOG_LEVEL` is `INFO`, so the `[perf_hint] N hints …` summary (or, without a report instrument, the full `[perf_hint PH…] …` lines) reaches the console out of the box. Override with `PYPTO_LOG_LEVEL=warn` to mute perf hints on stderr (the file output is independent). The per-hint detail always lands in `perf_hints.log` regardless of log level.
 
 ## How a check fires
 
@@ -36,7 +36,7 @@ PassPipeline::Run(program)
  └─ ctx.RunAfterPipeline(program)            (instrument hooks)
 ```
 
-`EmitDiagnostics` routes Warning to `LOG_WARN`, PerfHint to `LOG_INFO`, and additionally appends PerfHint lines to `perf_hints.log` when a `ReportInstrument` is in the active context.
+`EmitDiagnostics` prints Warnings in full via `LOG_WARN`. For PerfHints: when a `ReportInstrument` is in the active context it appends every hint to `perf_hints.log` and emits a single `LOG_INFO` summary line (`[perf_hint] N hints across M sites; see <path>`) to stderr; otherwise it prints each hint in full via `LOG_INFO`.
 
 ## Registering a new check
 
@@ -80,25 +80,31 @@ Adding a new backend implements these alongside the existing virtuals; perf-hint
 
 ### First check: `TileInnermostDimGranularity` (PH001)
 
-Inspects every `tile.load` and `tile.store` op. When the innermost-dimension byte size (`shape[-1] * sizeof(dtype)`) is below `GetRecommendedInnermostDimBytes()`, emits one diagnostic per op pointing at the user-source span.
+Inspects every `tile.load` and `tile.store` op. When the innermost-dimension byte size (`shape[-1] * sizeof(dtype)`) is below `GetRecommendedInnermostDimBytes()`, emits one diagnostic per op pointing at the user-source span. With a `ReportInstrument` in the context the full set goes to `perf_hints.log` and the console only sees the summary line; without one, each hint prints to stderr.
 
-Example output (from `examples/kernels/08_assemble.py` on Ascend950):
+Example: console summary plus `perf_hints.log` content (from `examples/kernels/08_assemble.py` on Ascend950):
 
 ```text
+# stderr:
+[perf_hint] 2 hints across 2 sites; see /tmp/build/perf_hints.log
+
+# /tmp/build/perf_hints.log:
 [perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B; recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B; recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
 ```
 
 ## User-facing API
 
 ```python
-# Default: perf hints fire on stderr at end of pipeline.
+# No report instrument: each perf hint prints in full on stderr at end of pipeline.
 with passes.PassContext([]):
     pipeline.run(program)
 
-# Persist perf hints to disk too — file lives next to other reports.
+# With a report instrument (the compile()/pl.jit default): full detail goes to
+# perf_hints.log next to the other reports; stderr just gets the one-line summary.
 with passes.PassContext([passes.ReportInstrument("/tmp/build")]):
     pipeline.run(program)
-# → /tmp/build/perf_hints.log
+# → /tmp/build/perf_hints.log  (stderr: "[perf_hint] N hints across M sites; see …")
 
 # Suppress a specific hint.
 disabled = passes.DiagnosticCheckSet()

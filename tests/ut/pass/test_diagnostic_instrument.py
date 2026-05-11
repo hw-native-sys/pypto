@@ -309,6 +309,37 @@ def test_perf_hint_visible_at_default_log_level(capfd):
         assert re.search(r"\[perf_hint PH001\]", combined), f"perf hint not in output:\n{combined}"
 
 
+def test_perf_hint_console_summarized_with_report_instrument(tmp_path, capfd):
+    """With a ReportInstrument present, the console gets a one-line perf-hint
+    summary while the per-hint detail goes only to perf_hints.log.
+
+    Addresses issue #1305's first ask: stop printing one console line per PH001
+    hit. The summary line (``[perf_hint] N hint(s) ... see <path>``) replaces the
+    individual ``[perf_hint PH001] ... at <string>:...`` lines on stderr; the log
+    file still carries every hint verbatim.
+    """
+    report = passes.ReportInstrument(str(tmp_path))
+    _run_pipeline_with_perf_hint([report])
+
+    # Detail still lands in the log file, one line per hit.
+    log = tmp_path / "perf_hints.log"
+    assert log.exists()
+    assert "[perf_hint PH001]" in log.read_text()
+
+    captured = capfd.readouterr()
+    combined = captured.out + captured.err
+    # Native stderr capture is platform-dependent; only assert when present.
+    if combined:
+        assert re.search(r"\[perf_hint\] \d+ hint", combined), (
+            f"expected a one-line perf-hint summary on the console:\n{combined}"
+        )
+        assert "[perf_hint PH001]" not in combined, (
+            f"per-hint lines should be suppressed on the console when a "
+            f"ReportInstrument is present:\n{combined}"
+        )
+        assert "perf_hints.log" in combined, f"summary should point at the log file:\n{combined}"
+
+
 # ---------------------------------------------------------------------------
 # DiagnosticCheckSet is unhashable (mutable via insert/remove)
 # ---------------------------------------------------------------------------
