@@ -15,7 +15,7 @@
 - InCore / Orchestration 拆分必须已完成（`SplitIncoreOrch`）
 - 语句结构必须已规范化（`NormalizedStmtStructure`）
 
-**使用时机**：紧接 `FlattenTileNdTo2D` 之后运行，先于 `ResolveTransposeLayout` / `ResolveBackendOpLayouts` / `ExpandMixedKernel`。它是 tile memory 成为下游契约的标准时点——尤其是 `ExpandMixedKernel` 的混合 kernel 检测和 `InitMemRef` 的缓冲区分配都直接读取该结果。
+**使用时机**：紧接 `FlattenTileNdTo2D` 之后运行，先于 `LowerTransposeLoadParamLayout` / `ResolveBackendOpLayouts` / `ExpandMixedKernel`。它是 tile memory 成为下游契约的标准时点——尤其是 `ExpandMixedKernel` 的混合 kernel 检测和 `InitMemRef` 的缓冲区分配都直接读取该结果。
 
 ## API
 

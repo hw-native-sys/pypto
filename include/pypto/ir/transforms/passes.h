@@ -426,18 +426,32 @@ Pass AutoTileMatmulL0();
 Pass InferTileMemorySpace();
 
 /**
- * @brief Resolve transpose layout for tile.load with transpose=True
+ * @brief Lower ``tile.load(transpose=True)`` to canonical-form parameter layout (RFC #1300 P6)
  *
- * For each InCore function, detects tile.load(..., transpose=True) whose source
- * is a function parameter and annotates that parameter's TensorType with the DN
- * (column-major) layout. The shape is preserved -- DN is a codegen hint only.
- * Orchestration and Opaque functions are returned unchanged.
+ * For each InCore function, detects ``tile.load(..., transpose=True)`` whose source
+ * is a function parameter and promotes that parameter to canonical-form DN
+ * (RFC #1300 §3.3 + §4.2):
+ *
+ *   - Param TensorType: ``[..., a, b] ND`` → ``[..., b, a] DN`` (trailing-pair swap +
+ *     DN layout tag with empty stride; ``MaterializeTensorStrides`` later fills the
+ *     packed canonical strides).
+ *   - Each ``tile.load(p, offsets, shapes, valid_shapes, ..., transpose=True)`` whose
+ *     source ``p`` is a promoted param is rewritten to: offsets / shapes /
+ *     valid_shapes' trailing pair is swapped to canonical coords, and the
+ *     ``transpose=True`` kwarg is dropped — the DN-source + Mat-target signal
+ *     fully encodes the load's tile-view orientation.
+ *   - Every non-InCore call site that targets a promoted callee is wrapped with
+ *     ``tensor.as_layout(arg, DN)`` so the orch-side ``[..., a, b] ND`` runtime
+ *     tensor bridges to the InCore-side ``[..., b, a] DN`` param type.
+ *
+ * Mixed-use parameters (same param loaded with both ``transpose=True`` and
+ * ``transpose=False``) are rejected with ``pypto::ValueError``.
  *
  * Requirements:
  * - Input IR must have tile ops (run ConvertTensorToTileOps first)
  * - Input IR must have InCore scopes outlined (run OutlineIncoreScopes first)
  */
-Pass ResolveTransposeLayout();
+Pass LowerTransposeLoadParamLayout();
 
 /**
  * @brief Materialize implicit ND/DN strides on every TensorType (RFC #1300 §2.4)

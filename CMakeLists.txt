@@ -165,7 +165,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/pass_context.cpp
     src/ir/transforms/passes.cpp
     src/ir/transforms/resolve_backend_op_layouts_pass.cpp
-    src/ir/transforms/resolve_transpose_layout_pass.cpp
+    src/ir/transforms/lower_transpose_load_param_layout_pass.cpp
     src/ir/transforms/python_printer.cpp
     src/ir/transforms/simplify_pass.cpp
     src/ir/transforms/inject_gm_pipe_buffer_pass.cpp

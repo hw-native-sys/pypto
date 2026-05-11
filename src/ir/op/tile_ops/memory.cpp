@@ -155,12 +155,20 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // Nz/Zn layout: only chosen when target_memory is known. If it is absent,
   // the default-constructed view is kept and InferTileMemorySpace rebuilds it
   // once the memory space is resolved.
+  //
+  // Source-DN equivalence (RFC #1300 §3.3 + P6): a DN-tagged source tensor
+  // describes the same physical bytes as the canonical-pair ND view, so
+  // ``tile.load`` of a DN source produces the same tile layout as
+  // ``transpose=True`` on the equivalent ND source. Treat the two signals
+  // (source layout == DN, transpose kwarg) as an XOR.
+  bool source_is_dn =
+      tensor_type->tensor_view_.has_value() && tensor_type->tensor_view_->layout == TensorLayout::DN;
   TileView tile_view;
   if (target_memory_opt.has_value()) {
     if (*target_memory_opt == MemorySpace::Mat) {
       tile_view.blayout = TileLayout::col_major;
       tile_view.slayout = TileLayout::row_major;
-      if (transpose) {
+      if (transpose != source_is_dn) {
         std::swap(tile_view.blayout, tile_view.slayout);
       }
     } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());

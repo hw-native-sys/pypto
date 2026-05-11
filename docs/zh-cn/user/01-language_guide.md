@@ -558,7 +558,7 @@ output_dir = ir.compile(
 10. **ConvertTensorToTileOps** —— 将张量操作转换为 tile 操作
 11. **FlattenTileNdTo2D** —— 将 ND tile 操作规范化为 2D
 12. **InferTileMemorySpace** —— 推断 tile 内存空间
-13. **ResolveTransposeLayout** —— 修复转置布局处理
+13. **LowerTransposeLoadParamLayout** —— 修复转置布局处理
 14. **ResolveBackendOpLayouts** —— 修复 backend 受限的 tile 布局
 15. **ExpandMixedKernel** —— 在需要时拆分 mixed kernel
 16. **InitMemRef** —— 分配内存空间并插入缓冲区分配

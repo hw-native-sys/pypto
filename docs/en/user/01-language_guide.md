@@ -558,7 +558,7 @@ The `Default` strategy runs these passes in order:
 10. **ConvertTensorToTileOps** — convert tensor operations to tile operations
 11. **FlattenTileNdTo2D** — normalize ND tile ops to 2D
 12. **InferTileMemorySpace** — infer tile memory spaces
-13. **ResolveTransposeLayout** — repair transpose layout handling
+13. **LowerTransposeLoadParamLayout** — repair transpose layout handling
 14. **ResolveBackendOpLayouts** — repair backend-constrained tile layouts
 15. **ExpandMixedKernel** — split mixed kernels when needed
 16. **InitMemRef** — assign memory spaces and insert buffer allocations

@@ -165,22 +165,18 @@ class MaterializeTensorStridesMutator : public IRMutator {
 
     if (!args_changed && !type_changed) return op;
 
-    auto& registry = OpRegistry::GetInstance();
-    if (As<GlobalVar>(op->op_) || !registry.IsRegistered(op->op_->name_)) {
-      // Direct ctor — must supply a result type. Prefer the materialized one
-      // so downstream Vars / Calls see the explicit stride.
-      return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(new_return_type),
-                                    op->span_);
-    }
-    // OpRegistry rebuilds the Call's type via DeduceType. If the deduced type
-    // is bare and the materialized type is more specific (carries explicit
-    // stride), prefer the materialized one — but in practice most ops produce
-    // bare TensorType and the deduction agrees with the input. To avoid
-    // surprising layout regressions we just accept whatever the registry
-    // returns; if it disagrees with the materialized form, the
-    // TensorViewCanonical verifier (strict mode) will surface that as a
-    // diagnostic so we know to add an explicit op rebuild here.
-    return registry.Create(op->op_->name_, new_args, op->kwargs_, op->span_);
+    // Direct ctor — preserve the (materialized) original type rather than
+    // re-deducing via OpRegistry.
+    //
+    // Re-deducing would discard intentional type overrides that earlier passes
+    // applied. Concrete case: FlattenTileNdTo2D rewrites a rank-3 ``tile.load``
+    // result to a rank-2 ``TileType`` while keeping the load's offsets/shapes
+    // args at rank 3 (the source-window expressions). If we routed back
+    // through ``OpRegistry::Create`` here, ``DeduceTileLoadType`` would see
+    // the rank-3 shape args and synthesize a fresh rank-3 ``TileType``,
+    // silently undoing the 2D flattening.
+    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(new_return_type),
+                                  op->span_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {

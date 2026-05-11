@@ -145,7 +145,7 @@ class PassManager:
             ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
             ("AutoTileMatmulL0", lambda: passes.auto_tile_matmul_l0()),
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
-            ("ResolveTransposeLayout", lambda: passes.resolve_transpose_layout()),
+            ("LowerTransposeLoadParamLayout", lambda: passes.lower_transpose_load_param_layout()),
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
             ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
@@ -154,13 +154,13 @@ class PassManager:
             ("NormalizeReturnOrder", lambda: passes.normalize_return_order()),
             ("LowerPipelineLoops", lambda: passes.lower_pipeline_loops()),
             ("CanonicalizeIOOrder", lambda: passes.canonicalize_io_order()),
-            # NOTE (RFC #1300 §2.4): the MaterializeTensorStrides pass is
-            # registered (passes.materialize_tensor_strides()) but is NOT yet
-            # inserted into the default pipeline. It would materialize DN stride
-            # to the canonical (logical-shape) form, which still conflicts with
-            # the legacy "source shape + post-emit swap" path in pto codegen
-            # (`get_shape_source_idx`, `dn_swap`). The pipeline insertion will
-            # land alongside the codegen cleanup in a later phase (P6/P7).
+            # MaterializeTensorStrides fills empty stride slots on every
+            # TensorView with packed canonical strides (RFC #1300 §2.4).
+            # Active in the default pipeline starting at P6 — by this point
+            # LowerTransposeLoadParamLayout has produced canonical-form DN
+            # parameters, so the materialized strides match the IR shape
+            # without going through the legacy `dn_swap` codegen path.
+            ("MaterializeTensorStrides", lambda: passes.materialize_tensor_strides()),
             ("InitMemRef", lambda: passes.init_mem_ref()),
             ("MemoryReuse", lambda: passes.memory_reuse()),
             ("LegalizePTOBufferReuse", lambda: passes.legalize_pto_buffer_reuse()),

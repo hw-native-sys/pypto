@@ -1,10 +1,10 @@
 # ResolveBackendOpLayouts Pass
 
-为后端有 layout 约束的 elementwise tile op 修复 layout：把 `[N, 1]` 的 col-major 向量 reshape 成 `[1, N]` 的 row-major 视图，并通过 `tile.move(..., blayout=row_major)` 修复一般非 row-major tile。该 Pass 在 tile-PTO 阶段运行，位于 `ResolveTransposeLayout` 之后、收尾的 `NormalizeStmtStructure` 之前。
+为后端有 layout 约束的 elementwise tile op 修复 layout：把 `[N, 1]` 的 col-major 向量 reshape 成 `[1, N]` 的 row-major 视图，并通过 `tile.move(..., blayout=row_major)` 修复一般非 row-major tile。该 Pass 在 tile-PTO 阶段运行，位于 `LowerTransposeLoadParamLayout` 之后、收尾的 `NormalizeStmtStructure` 之前。
 
 ## 概述
 
-经过 `FlattenTileNdTo2D` 和 `ResolveTransposeLayout` 之后，所有 tile op 都已是 2-D 形式且带有明确的 layout。多个 PTO elementwise op（在 `src/backend/common/pto_ops_common.cpp` 中注册）要求其 tile 操作数与结果均为 `row_major`。本 Pass 在使用点局部修复这些约束违反：
+经过 `FlattenTileNdTo2D` 和 `LowerTransposeLoadParamLayout` 之后，所有 tile op 都已是 2-D 形式且带有明确的 layout。多个 PTO elementwise op（在 `src/backend/common/pto_ops_common.cpp` 中注册）要求其 tile 操作数与结果均为 `row_major`。本 Pass 在使用点局部修复这些约束违反：
 
 1. 对每个 RHS 是 `Call` 的 `AssignStmt` / `EvalStmt`，调用 `Backend::GetTileLayoutSpec(op_name)` 查询约束。
 2. 若没有注册约束，或者所有受约束的 tile 输入与输出都已经是 `row_major`，则跳过。
@@ -20,7 +20,7 @@
 - 函数必须是 `InCore`；Orchestration / Group 函数被跳过。
 - 必须通过 `BackendConfig::Set(...)` 配置后端，否则本 Pass 为 no-op。
 
-**何时使用**：作为 `Default` tile-PTO pipeline 的一部分，在改变 layout 的若干 Pass（`FlattenTileNdTo2D`、`InferTileMemorySpace`、`ResolveTransposeLayout`）之后、`NormalizeStmtStructure` 之前运行。Pass manager 已经把它放在了正确的位置。
+**何时使用**：作为 `Default` tile-PTO pipeline 的一部分，在改变 layout 的若干 Pass（`FlattenTileNdTo2D`、`InferTileMemorySpace`、`LowerTransposeLoadParamLayout`）之后、`NormalizeStmtStructure` 之前运行。Pass manager 已经把它放在了正确的位置。
 
 ## API
 

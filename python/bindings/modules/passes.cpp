@@ -418,12 +418,16 @@ void BindPass(nb::module_& m) {
              "tiling; M/N tiling and K%k!=0 cases emit a PerfHint and skip.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
-  passes.def("resolve_transpose_layout", &pass::ResolveTransposeLayout,
-             "Create a pass that resolves transpose layout for tile.load with transpose=True\n\n"
+  passes.def("lower_transpose_load_param_layout", &pass::LowerTransposeLoadParamLayout,
+             "Create the LowerTransposeLoadParamLayout pass (RFC #1300 P6).\n\n"
              "For each InCore function, detects tile.load(..., transpose=True) whose source\n"
-             "is a function parameter and annotates that parameter's TensorType with the DN\n"
-             "(column-major) layout. The shape is preserved -- DN is a codegen hint only.\n"
-             "Orchestration and Opaque functions are returned unchanged.");
+             "is a function parameter and promotes the parameter to canonical-form DN:\n"
+             "shape trailing-pair is swapped, the DN layout tag is added, the tile.load\n"
+             "body call's offsets/shapes/valid_shapes are swapped and the transpose=True\n"
+             "kwarg dropped, and every non-InCore call site wraps the promoted argument\n"
+             "in tensor.as_layout(arg, DN) to bridge orch-side ND tensors to InCore DN\n"
+             "params. Mixed-use params (both transpose=True and transpose=False loads on\n"
+             "the same param) are rejected.");
   passes.def("materialize_tensor_strides", &pass::MaterializeTensorStrides,
              "Create the MaterializeTensorStrides pass (RFC #1300 §2.4).\n\n"
              "Walks every TensorType reachable from the program and rewrites any\n"

@@ -180,7 +180,7 @@ TypePtr DeduceTensorTransposeType(const std::vector<ExprPtr>& args,
   //     unchanged because ND/DN only describes the trailing two dims. PTOAS
   //     reads this tag and EmitMakeTensorViews / EmitTileLoadPTO use it to
   //     drive the implicit "swap last two dims" path used by
-  //     tile.load(transpose=True) sources (see ResolveTransposeLayout).
+  //     tile.load(transpose=True) sources (see LowerTransposeLoadParamLayout).
   //
   //  2. Explicit strides. tensor.transpose at orchestration level lowers to
   //     runtime Tensor::transpose, a metadata-only swap of shapes / offsets;

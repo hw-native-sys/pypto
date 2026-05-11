@@ -21,7 +21,7 @@ PyPTO IR 上 `TensorType.tensor_view_` 当前可以处于两种等价形态：
 
 - `TensorViewCanonical` —— `PassPipeline` 在 Pass 之后自动用 registry 中的弱模式 verifier 校验
 
-**未来在默认 pipeline 中的位置**：[`CanonicalizeIOOrder`](25-canonicalize_io_order.md) 与 [`InitMemRef`](27-init_memref.md) 之间。这是 codegen-prep 边界 —— 所有 layout-mutating pass（`ResolveTransposeLayout` / `ResolveBackendOpLayouts` / `ExpandMixedKernel` / `SplitVectorKernel`）已结束，`InitMemRef` 是第一个依赖显式 stride 的消费者。
+**默认 pipeline 中的位置**（自 RFC #1300 P6 起激活）：[`CanonicalizeIOOrder`](25-canonicalize_io_order.md) 与 [`InitMemRef`](27-init_memref.md) 之间。这是 codegen-prep 边界 —— 所有 layout-mutating pass（`LowerTransposeLoadParamLayout` / `ResolveBackendOpLayouts` / `ExpandMixedKernel` / `SplitVectorKernel`）已结束，`InitMemRef` 是第一个依赖显式 stride 的消费者。
 
 ## API
 
@@ -112,6 +112,6 @@ ND 情况下公式退化为标准行主序 packed stride。
 
 - [`CanonicalizeIOOrder`](25-canonicalize_io_order.md) —— 紧邻其前；产生本 Pass 消费的程序状态
 - [`InitMemRef`](27-init_memref.md) —— 第一个依赖显式 stride 的下游消费者
-- [`ResolveTransposeLayout`](17-resolve_transpose_layout.md) —— 当前空 stride DN view 的来源（P6 将由 `LowerTransposeLoadParamLayout` 取代）
+- [`LowerTransposeLoadParamLayout`](18-lower_transpose_load_param_layout.md) —— 空 stride DN view 的主要来源（P6 起在默认 pipeline 中产生 canonical DN 参数）
 - [`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h) —— 工具函数（`BuildLogicalStridesFromLayout` / `CheckCanonicalView` / `CanonicalizeView`）
 - RFC [#1300](https://github.com/hw-native-sys/pypto/issues/1300) —— IR Tensor Layout 自洽表示方案

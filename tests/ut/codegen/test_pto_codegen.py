@@ -1767,11 +1767,18 @@ class TestColumnVectorCodegen:
         assert "layout = #pto.layout<nd>" in row_view
 
 
-def test_pto_codegen_3d_dn_tensor_view_uses_last_dim_stride():
-    """3D DN tensor emits swapped shape and DN strides based on the original last dim.
+def test_pto_codegen_3d_dn_tensor_view_uses_canonical_stride():
+    """3D DN tensor emits the canonical RFC #1300 (shape, stride, layout) triple.
 
-    Regression test for non-square batch transpose cases such as B:[B, N, K] with N != K.
-    The DN stride for the last dimension must be K (the original last dim), not N.
+    For ``[B, K, N] DN`` (RFC §2.3 canonical-form interpretation), packed strides are::
+
+        stride[n-2] = 1
+        stride[n-1] = shape[n-2]       (= K)
+        stride[n-3] = shape[n-2] * shape[n-1]   (= K * N — the per-batch volume)
+
+    After ``MaterializeTensorStrides`` activates in the default pipeline (RFC #1300 P6),
+    the codegen reads ``(shape, stride, layout)`` directly from the materialized
+    TensorView rather than going through the legacy ``dn_swap`` post-emit path.
     """
 
     @pl.program
@@ -1788,16 +1795,19 @@ def test_pto_codegen_3d_dn_tensor_view_uses_last_dim_stride():
     mlir_code = _generate_default_mlir(DN3DProgram)
     lines = _get_mlir_lines(mlir_code)
     b_view = _single_line(lines, "pto.make_tensor_view %arg0")
-    stride_mul_lines = _find_lines(lines, "arith.muli")
 
-    assert "shape = [%c2_index, %c64_index, %c48_index]" in b_view
-    assert "strides = [" in b_view and ", %c1_index, %c64_index]" in b_view, (
-        f"3D DN stride must end with [1, 64] for shape [2, 48, 64]: {b_view}"
+    # Canonical form preserves the user-written logical shape — no swap.
+    assert "shape = [%c2_index, %c48_index, %c64_index]" in b_view, (
+        f"3D DN canonical shape must match the logical IR shape [2, 48, 64]: {b_view}"
     )
-    assert any("%c64_index" in line and "%c48_index" in line for line in stride_mul_lines), (
-        "Expected batch stride to be computed from the original last two dims (64 * 48). "
-        f"Got muli lines: {stride_mul_lines}"
+    # Canonical DN strides: stride[n-2]=1, stride[n-1]=shape[n-2]=48.
+    assert "strides = [" in b_view and ", %c1_index, %c48_index]" in b_view, (
+        f"3D DN canonical stride must end with [1, 48] for shape [2, 48, 64]: {b_view}"
     )
+    # The batch stride (= 3072 = 48 * 64) is materialized as a single constant
+    # ``%c3072_index`` by ``MaterializeTensorStrides``, so it should NOT show up
+    # as an ``arith.muli`` at codegen.
+    assert "%c3072_index" in b_view, f"Batch stride must be the constant 3072 (= 48 * 64): {b_view}"
     assert "layout = #pto.layout<dn>" in b_view
 
 

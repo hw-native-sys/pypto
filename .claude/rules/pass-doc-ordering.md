@@ -30,7 +30,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 15 | `15-flatten_tile_nd_to_2d.md` | 15th pass |
 | 16 | `16-auto_tile_matmul_l0.md` | 16th pass |
 | 17 | `17-infer_tile_memory_space.md` | 17th pass |
-| 18 | `18-resolve_transpose_layout.md` | 18th pass |
+| 18 | `18-lower_transpose_load_param_layout.md` | 18th pass (RFC #1300 P6 — replaces ResolveTransposeLayout) |
 | 19 | `19-resolve_backend_op_layouts.md` | 19th pass |
 | 20 | `20-expand_mixed_kernel.md` | 20th pass |
 | 21 | `21-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
@@ -38,7 +38,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 23 | `23-normalize_return_order.md` | 23rd pass |
 | 24 | `24-lower_pipeline_loops.md` | 24th pass |
 | 25 | `25-canonicalize_io_order.md` | 25th pass |
-| 26 | `26-materialize_tensor_strides.md` | 26th pass (RFC #1300 P3 — registered, not yet wired into Default; activates with P6/P7) |
+| 26 | `26-materialize_tensor_strides.md` | 26th pass (RFC #1300 P3 — wired into Default starting from P6) |
 | 27 | `27-init_memref.md` | 27th pass |
 | 28 | `28-memory_reuse.md` | 28th pass |
 | 29 | `29-legalize_pto_buffer_reuse.md` | 29th pass |

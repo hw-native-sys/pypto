@@ -1,10 +1,10 @@
 # ResolveBackendOpLayouts Pass
 
-Repairs backend-required tile layouts for elementwise ops. `[N, 1]` col-major vectors are reshaped into `[1, N]` row-major views, while general non-row-major tiles are coerced through `tile.move(..., blayout=row_major)`. Runs in the tile-PTO stage between `ResolveTransposeLayout` and the trailing `NormalizeStmtStructure`.
+Repairs backend-required tile layouts for elementwise ops. `[N, 1]` col-major vectors are reshaped into `[1, N]` row-major views, while general non-row-major tiles are coerced through `tile.move(..., blayout=row_major)`. Runs in the tile-PTO stage between `LowerTransposeLoadParamLayout` and the trailing `NormalizeStmtStructure`.
 
 ## Overview
 
-After `FlattenTileNdTo2D` and `ResolveTransposeLayout`, every tile op is in 2-D form with a known layout. Several PTO elementwise ops (registered in `src/backend/common/pto_ops_common.cpp`) require their tile operands and result to be `row_major`. This pass repairs those local violations at the consumer:
+After `FlattenTileNdTo2D` and `LowerTransposeLoadParamLayout`, every tile op is in 2-D form with a known layout. Several PTO elementwise ops (registered in `src/backend/common/pto_ops_common.cpp`) require their tile operands and result to be `row_major`. This pass repairs those local violations at the consumer:
 
 1. For each `AssignStmt` / `EvalStmt` whose RHS is a `Call`, query `Backend::GetTileLayoutSpec(op_name)`.
 2. Skip if no spec is registered, or if all constrained tile inputs and output already use `row_major`.
@@ -20,7 +20,7 @@ The pass is **backend-driven**: the set of constrained ops and their per-input r
 - Function must be `InCore` — Orchestration / Group functions are skipped.
 - A backend must be configured via `BackendConfig::Set(...)`. Otherwise the pass is a no-op.
 
-**When to use**: As part of the `Default` tile-PTO pipeline, after layout-altering passes (`FlattenTileNdTo2D`, `InferTileMemorySpace`, `ResolveTransposeLayout`) and before `NormalizeStmtStructure`. The pass manager already places it in the correct slot.
+**When to use**: As part of the `Default` tile-PTO pipeline, after layout-altering passes (`FlattenTileNdTo2D`, `InferTileMemorySpace`, `LowerTransposeLoadParamLayout`) and before `NormalizeStmtStructure`. The pass manager already places it in the correct slot.
 
 ## API
 

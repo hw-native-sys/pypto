@@ -373,7 +373,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 2. [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md)
 3. [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)
 4. `InferTileMemorySpace`
-5. `ResolveTransposeLayout`
+5. [`LowerTransposeLoadParamLayout`](18-lower_transpose_load_param_layout.md)（RFC #1300 P6 —— 替代 `ResolveTransposeLayout`）
 6. [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md)
 7. `NormalizeStmtStructure`
 8. `ExpandMixedKernel`
@@ -382,7 +382,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 11. `NormalizeReturnOrder`
 12. [`LowerPipelineLoops`](24-lower_pipeline_loops.md)
 13. [`CanonicalizeIOOrder`](25-canonicalize_io_order.md)
-14. [`MaterializeTensorStrides`](26-materialize_tensor_strides.md) —— 已注册但尚未接入默认 pipeline（将随 RFC #1300 P6/P7 的 codegen 清理一起启用）
+14. [`MaterializeTensorStrides`](26-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
 15. `InitMemRef`
 16. `MemoryReuse`
 17. [`LegalizePTOBufferReuse`](29-legalize_pto_buffer_reuse.md)

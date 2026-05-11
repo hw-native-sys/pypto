@@ -15,7 +15,7 @@ After this pass every `TileType` in InCore functions carries a concrete `memory_
 - InCore / Orchestration outlining must be done (`SplitIncoreOrch`)
 - Statement structure must be normalized (`NormalizedStmtStructure`)
 
-**When to use**: Run immediately after `FlattenTileNdTo2D` and before `ResolveTransposeLayout` / `ResolveBackendOpLayouts` / `ExpandMixedKernel`. It is the canonical point at which tile memory becomes a contract that downstream passes (especially `ExpandMixedKernel`'s mixed-kernel detection and `InitMemRef`'s buffer allocation) read.
+**When to use**: Run immediately after `FlattenTileNdTo2D` and before `LowerTransposeLoadParamLayout` / `ResolveBackendOpLayouts` / `ExpandMixedKernel`. It is the canonical point at which tile memory becomes a contract that downstream passes (especially `ExpandMixedKernel`'s mixed-kernel detection and `InitMemRef`'s buffer allocation) read.
 
 ## API
 
