@@ -1,10 +1,10 @@
 # LowerCompositeOps Pass
 
-Decomposes composite tile ops into compositions of primitive arithmetic tile ops, so codegen never has to emit a high-level intrinsic. Today only `tile.sin` / `tile.cos` are handled; new composite ops register their own lowering rule through `CompositeLoweringRegistry` without touching the pass core.
+Decomposes composite tile ops into compositions of primitive arithmetic tile ops, so codegen never has to emit a high-level intrinsic. Today only `tile.sin` / `tile.cos` are handled; new composite ops add a lowering rule to the dispatch table inside the pass file without touching the dispatcher.
 
 ## Overview
 
-`LowerCompositeOps` is a function-level pass that rewrites every `var = Call(...)` `AssignStmt` whose callee has a registered lowering rule. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive recipe: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
+`LowerCompositeOps` is a function-level pass that rewrites every `var = Call(...)` `AssignStmt` whose callee appears in the pass's lowering dispatch table. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive recipe: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
 
 The pass is **FP32-only**. Non-FP32 inputs are rejected at op-construction time by the shared `DeduceTileFP32OnlyType` deducer (see `src/ir/op/tile_ops/unary.cpp:94`), so the lowering pass itself only sees well-typed FP32 operands and never has to fail on dtype.
 
@@ -24,33 +24,27 @@ The empty `PassProperties` contract (`kLowerCompositeOpsProperties` in `include/
 
 ## Architecture
 
-The pass is a thin dispatcher over `CompositeLoweringRegistry`:
+The pass is a single translation unit, `src/ir/transforms/lower_composite_ops_pass.cpp`:
 
 ```text
-include/pypto/ir/transforms/composite_lowering_registry.h
+src/ir/transforms/lower_composite_ops_pass.cpp
   LoweringBuilder           — per-call scratchpad (Bind + primitive op builders)
   CompositeLoweringFn       — (args, span, builder) -> result expr
-  CompositeLoweringRegistry — singleton, dispatches by op name
-
-src/ir/transforms/lower_composite_ops_pass.cpp
+  Lower<Op>Rule             — one rule function per composite op (e.g. LowerSinRule, LowerCosRule)
+  LookupCompositeRule       — file-local op-name → rule dispatch table (kRules)
   LowerCompositeOpsMutator  — walks the function, looks up a rule per Call
-
-src/ir/transforms/composite_ops/<op>_lowering.cpp
-  Rule body + RegisterXxxLoweringRules(registry)
 ```
 
-Adding a new composite op:
+Adding a new composite op (all edits stay in `lower_composite_ops_pass.cpp`):
 
-1. Implement the rule in `src/ir/transforms/composite_ops/<op>_lowering.cpp`. The rule receives the visited arg expressions, a `Span`, and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` for each intermediate temp.
-2. Expose `void Register<Op>LoweringRules(CompositeLoweringRegistry&)`.
-3. Call it from `CompositeLoweringRegistry::CompositeLoweringRegistry()` in `composite_lowering_registry.cpp`.
-4. Add the source to `CMakeLists.txt`.
+1. Write a `Lower<Op>Rule(args, span, builder)` function. It receives the visited arg expressions, a `Span`, and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` for each intermediate temp.
+2. Add a `{"<op>", &Lower<Op>Rule}` row to `kRules` inside `LookupCompositeRule`.
 
-No edits to the dispatch pass are needed.
+No edits to the mutator are needed. When the table grows past a handful of entries — or a rule wants its own translation unit — promote it back to a standalone registry under `src/ir/transforms/composite_ops/`.
 
 ## Algorithm (sin / cos rule)
 
-`LowerSinCos` in `src/ir/transforms/composite_ops/sin_cos_lowering.cpp` is parameterised on `is_cos`. The mutator overrides `VisitStmt_(const AssignStmtPtr&)` (rather than `VisitCall`) because each trig op expands to ~33 statements and each statement needs a fresh temp `Var`. Working at the statement level lets the rule append directly to the surrounding sequence via the builder.
+`LowerSinCos` in `src/ir/transforms/lower_composite_ops_pass.cpp` is parameterised on `is_cos`. The mutator overrides `VisitStmt_(const AssignStmtPtr&)` (rather than `VisitCall`) because each trig op expands to ~33 statements and each statement needs a fresh temp `Var`. Working at the statement level lets the rule append directly to the surrounding sequence via the builder.
 
 ### Range Reduction (Cody-Waite, 4-part π split)
 
@@ -144,7 +138,7 @@ The same polynomial is used for both sin and cos: the cos path differs only in t
 
 ## Constants
 
-All constants are FP32 literals (transcribed from `src/ir/transforms/lower_composite_ops_pass.cpp:46-61`, matching the framework reference at `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h`):
+All constants are FP32 literals (the `k*` literals near the top of `src/ir/transforms/lower_composite_ops_pass.cpp`, matching the framework reference at `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h`):
 
 | Symbol | C++ literal | Role |
 | ------ | ----------- | ---- |
@@ -189,7 +183,7 @@ Running `LowerCompositeOps` twice produces identical IR after the first run: the
 
 The mutator overrides `VisitStmt_(const AssignStmtPtr&)` rather than `VisitCall` because the decomposition splices ~33 statements per trig op into the surrounding sequence. Doing the splice from inside `VisitCall` would require returning multiple expressions, which `IRMutator` does not support; doing it from `VisitStmt_` lets `LowerSinCos` build a `vector<StmtPtr>` and return either a single bound `AssignStmt` or a fresh `SeqStmts`.
 
-Each intermediate result is bound to a fresh `Var` named via `auto_name::BuildName` with the user's target name as the base. The same `temp_id_` counter is shared across all trig ops in a function so distinct ops do not collide on temp names.
+Each intermediate result is bound to a fresh `Var` named via `auto_name::BuildName` with the user's target name as the base. The mutator's `temp_counter_` is shared (by reference, through each `LoweringBuilder`) across all trig ops in a function so distinct ops do not collide on temp names.
 
 The cast modes `RINT` (cos), `ROUND` (sin), `FLOOR` (sign), and `None` (int↔float) come from the tile-op registry's enum (`src/ir/op/tile_ops/unary.cpp`). Choosing the correct mode is load-bearing: `ROUND` for sin's `k` keeps `k` symmetric around zero so the Horner polynomial sees evenly distributed `t`; `RINT` for cos's `k` matches the `+0.5` shift and ensures even `k` corresponds to even multiples of `π/2`.
 

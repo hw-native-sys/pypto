@@ -148,8 +148,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/inline_functions_pass.cpp
     src/ir/transforms/init_memref.cpp
     src/ir/transforms/legalize_pto_buffer_reuse_pass.cpp
-    src/ir/transforms/composite_lowering_registry.cpp
-    src/ir/transforms/composite_ops/sin_cos_lowering.cpp
     src/ir/transforms/lower_composite_ops_pass.cpp
     src/ir/transforms/materialize_tensor_strides_pass.cpp
     src/ir/transforms/ir_property.cpp
