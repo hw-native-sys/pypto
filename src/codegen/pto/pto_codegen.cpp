@@ -591,8 +591,11 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     const size_t rank = tensor_type->shape_.size();
 
     // [M, 1] column-vector legacy path: PTOAS infers DN for that exact shape.
+    // Restricted to rank 2 — the column-vector fallback stride derivation
+    // below only populates two slots, so a rank-3 ``[_, M, 1]`` would leave
+    // ``stride_names[2]`` empty and emit malformed MLIR.
     bool is_column_vector = false;
-    if (rank == 2 || rank == 3) {
+    if (rank == 2) {
       auto last_dim = As<ir::ConstInt>(tensor_type->shape_.back());
       if (last_dim && last_dim->value_ == 1) {
         is_column_vector = true;
