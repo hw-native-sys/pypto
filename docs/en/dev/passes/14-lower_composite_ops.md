@@ -1,10 +1,10 @@
 # LowerCompositeOps Pass
 
-Decomposes `tile.sin` and `tile.cos` calls into compositions of primitive arithmetic tile ops, so codegen never has to emit a native trigonometric intrinsic.
+Decomposes composite tile ops into compositions of primitive arithmetic tile ops, so codegen never has to emit a high-level intrinsic. Today only `tile.sin` / `tile.cos` are handled; new composite ops register their own lowering rule through `CompositeLoweringRegistry` without touching the pass core.
 
 ## Overview
 
-`LowerCompositeOps` is a function-level pass that rewrites every `var = tile.sin(x)` or `var = tile.cos(x)` `AssignStmt` into a `SeqStmts` containing a fixed-shape primitive recipe: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
+`LowerCompositeOps` is a function-level pass that rewrites every `var = Call(...)` `AssignStmt` whose callee has a registered lowering rule. For `tile.sin` / `tile.cos`, the rule emits a fixed-shape primitive recipe: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
 
 The pass is **FP32-only**. Non-FP32 inputs are rejected at op-construction time by the shared `DeduceTileFP32OnlyType` deducer (see `src/ir/op/tile_ops/unary.cpp:94`), so the lowering pass itself only sees well-typed FP32 operands and never has to fail on dtype.
 
@@ -22,9 +22,35 @@ The empty `PassProperties` contract (`kLowerCompositeOpsProperties` in `include/
 
 `LowerCompositeOps` is the **first entry of `tile_pto_passes`** in the `Default` pipeline (see `python/pypto/ir/pass_manager.py`), running immediately after `ConvertTensorToTileOps` (slot 12) and `OptimizeOrchTensors` (slot 13). At this point all tensor-level transcendental calls (`tensor.sin`, `tensor.cos`) have been rewritten to their tile equivalents (`tile.sin`, `tile.cos`) by the conversion registry, and the tile pipeline is about to start tile-shape canonicalisation. Lowering trig before `FlattenTileNdTo2D` keeps the decomposition independent of the 2D-flattening rules — every primitive op in the recipe has well-defined behaviour at any rank.
 
-## Algorithm
+## Architecture
 
-The mutator overrides `VisitStmt_(const AssignStmtPtr&)` (rather than `VisitCall`) because each trig op expands to ~33 statements and each statement needs a fresh temp `Var`. Working at the statement level lets `LowerSinCos` append directly to the surrounding sequence.
+The pass is a thin dispatcher over `CompositeLoweringRegistry`:
+
+```text
+include/pypto/ir/transforms/composite_lowering_registry.h
+  LoweringBuilder           — per-call scratchpad (Bind + primitive op builders)
+  CompositeLoweringFn       — (args, span, builder) -> result expr
+  CompositeLoweringRegistry — singleton, dispatches by op name
+
+src/ir/transforms/lower_composite_ops_pass.cpp
+  LowerCompositeOpsMutator  — walks the function, looks up a rule per Call
+
+src/ir/transforms/composite_ops/<op>_lowering.cpp
+  Rule body + RegisterXxxLoweringRules(registry)
+```
+
+Adding a new composite op:
+
+1. Implement the rule in `src/ir/transforms/composite_ops/<op>_lowering.cpp`. The rule receives the visited arg expressions, a `Span`, and a `LoweringBuilder` whose `Bind` helper appends an `AssignStmt` for each intermediate temp.
+2. Expose `void Register<Op>LoweringRules(CompositeLoweringRegistry&)`.
+3. Call it from `CompositeLoweringRegistry::CompositeLoweringRegistry()` in `composite_lowering_registry.cpp`.
+4. Add the source to `CMakeLists.txt`.
+
+No edits to the dispatch pass are needed.
+
+## Algorithm (sin / cos rule)
+
+`LowerSinCos` in `src/ir/transforms/composite_ops/sin_cos_lowering.cpp` is parameterised on `is_cos`. The mutator overrides `VisitStmt_(const AssignStmtPtr&)` (rather than `VisitCall`) because each trig op expands to ~33 statements and each statement needs a fresh temp `Var`. Working at the statement level lets the rule append directly to the surrounding sequence via the builder.
 
 ### Range Reduction (Cody-Waite, 4-part π split)
 

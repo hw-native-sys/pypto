@@ -1,10 +1,10 @@
 # LowerCompositeOps Pass
 
-把 `tile.sin` 和 `tile.cos` 调用降级 (lower) 为一组基本算术 tile 算子的组合，使代码生成 (codegen) 不再需要发射原生三角函数指令。
+把组合 (composite) tile 算子降级 (lower) 为一组基本算术 tile 算子的组合，使代码生成 (codegen) 不再需要发射高层 (high-level) 指令。当前只支持 `tile.sin` / `tile.cos`；新的组合算子通过 `CompositeLoweringRegistry` 注册降级规则，无需修改 Pass 核心代码。
 
 ## 概览 (Overview)
 
-`LowerCompositeOps` 是函数级 (function-level) Pass，会把每条 `var = tile.sin(x)` 或 `var = tile.cos(x)` 的 `AssignStmt` 改写成一个 `SeqStmts`，里面是固定形态的基本算子序列：先做 Cody-Waite 区间归约 (range reduction，π 拆成 4 段)，再做 9 次奇多项式 Horner 求值。原始目标 `Var` 仍是最终 `AssignStmt` 的 LHS，因此下游对该名字/身份的引用都保持不变。
+`LowerCompositeOps` 是函数级 (function-level) Pass，对每条 `var = Call(...)` 形式的 `AssignStmt`，若其被调对象在注册表中存在降级规则，则将其改写为一个 `SeqStmts`。对 `tile.sin` / `tile.cos`，规则会发射固定形态的基本算子序列：先做 Cody-Waite 区间归约 (range reduction，π 拆成 4 段)，再做 9 次奇多项式 Horner 求值。原始目标 `Var` 仍是最终 `AssignStmt` 的 LHS，因此下游对该名字/身份的引用都保持不变。
 
 该 Pass **仅支持 FP32**。非 FP32 输入会在算子构造时被共享的 `DeduceTileFP32OnlyType` 类型推导器 (deducer) 拒绝（见 `src/ir/op/tile_ops/unary.cpp:94`），因此本降级 Pass 看到的总是良类型的 FP32 操作数，不需要在 dtype 上失败。
 
@@ -22,9 +22,35 @@
 
 `LowerCompositeOps` 是 `Default` 流水线 `tile_pto_passes` 的**第一个 Pass**（见 `python/pypto/ir/pass_manager.py`），紧跟 `ConvertTensorToTileOps`（位置 12）和 `OptimizeOrchTensors`（位置 13）之后。此时所有 tensor 级三角调用 (`tensor.sin`、`tensor.cos`) 已经被转换注册表 (conversion registry) 改写成 tile 等价物 (`tile.sin`、`tile.cos`)，tile 流水线即将开始 tile-shape 规范化 (canonicalisation)。在 `FlattenTileNdTo2D` 之前完成三角函数降级，可以让本 Pass 与 2D 展平规则解耦——展开生成的所有基本算子在任意 rank 下都有定义良好的语义。
 
-## 算法 (Algorithm)
+## 架构 (Architecture)
 
-mutator 重写的是 `VisitStmt_(const AssignStmtPtr&)`，而不是 `VisitCall`，因为每个三角算子要展开成 ~33 条语句，每条都需要新临时 `Var`。在语句级 (statement level) 工作让 `LowerSinCos` 可以直接把语句追加到外围序列里。
+本 Pass 只是 `CompositeLoweringRegistry` 之上的轻量分发器：
+
+```text
+include/pypto/ir/transforms/composite_lowering_registry.h
+  LoweringBuilder           — 单次调用的暂存区 (Bind + 基本算子构造器)
+  CompositeLoweringFn       — (args, span, builder) -> 结果表达式
+  CompositeLoweringRegistry — 单例，按算子名分发
+
+src/ir/transforms/lower_composite_ops_pass.cpp
+  LowerCompositeOpsMutator  — 遍历函数，对每个 Call 查表
+
+src/ir/transforms/composite_ops/<op>_lowering.cpp
+  规则实现 + RegisterXxxLoweringRules(registry)
+```
+
+新增一个组合算子的步骤：
+
+1. 在 `src/ir/transforms/composite_ops/<op>_lowering.cpp` 实现规则。规则接收已 visit 过的参数表达式、`Span` 和一个 `LoweringBuilder`，其 `Bind` 助手会为每个中间临时变量追加一条 `AssignStmt`。
+2. 暴露 `void Register<Op>LoweringRules(CompositeLoweringRegistry&)`。
+3. 在 `composite_lowering_registry.cpp` 的 `CompositeLoweringRegistry::CompositeLoweringRegistry()` 构造函数里调用它。
+4. 把源文件加进 `CMakeLists.txt`。
+
+无需修改分发 Pass。
+
+## 算法 (Algorithm，sin / cos 规则)
+
+`src/ir/transforms/composite_ops/sin_cos_lowering.cpp` 中的 `LowerSinCos` 由 `is_cos` 参数化。mutator 重写的是 `VisitStmt_(const AssignStmtPtr&)`，而不是 `VisitCall`，因为每个三角算子要展开成 ~33 条语句，每条都需要新临时 `Var`。在语句级 (statement level) 工作让规则可以通过 builder 直接把语句追加到外围序列里。
 
 ### 区间归约 (Range Reduction，4 段 π Cody-Waite)
 
