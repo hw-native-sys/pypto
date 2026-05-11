@@ -18,7 +18,7 @@ float_type = ir.ScalarType(DataType.FP32)
 **Supported DataTypes:** INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64, FP16, FP32, FP64, BOOL, INDEX, TASK_ID
 
 > **Note:** `INDEX` is a distinct integer type used for index computations (loop variables, dimensions, offsets, strides). It has its own type code and string representation (`"index"`). While semantically similar to `INT64`, `INDEX != INT64` — they are separate types. Implicit casts between INDEX and INT64 are suppressed in codegen.
-
+>
 > **Note:** `TASK_ID` is an opaque 64-bit handle (type code `0x50`) representing a runtime `PTO2TaskId`. It is **not** a numeric type — no arithmetic is defined on it. Values are produced only by the two builtins [`system.task_invalid`](05-operators.md#syncop-synchronization-operations) (sentinel for "no producer yet") and [`system.task_id_of(producer)`](05-operators.md#syncop-synchronization-operations) (the task id behind a kernel call's LHS). They are synthesised by the [DeriveManualScopeDeps pass](../passes/33-derive_manual_scope_deps.md) during manual-scope lowering and surface only inside `with pl.manual_scope():` regions; the front-end never sees them. Codegen lowers `TASK_ID` to `PTO2TaskId`.
 
 ### TensorType
