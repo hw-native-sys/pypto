@@ -156,10 +156,15 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// Refresh the Call's result type_ so the in-memory IR matches what a
   /// fresh parse would produce (needed for roundtrip structural equality).
   ///
-  /// Also folds ``tensor.as_layout`` chains and identity reinterprets per
-  /// RFC #1300 §3.3:
-  ///   - ``as_layout(as_layout(x, S1, L1), S2, L2)`` → ``as_layout(x, S2, L2)``
-  ///   - ``as_layout(x, x.shape, x.layout)``         → ``x``
+  /// Also drops identity ``tensor.as_layout`` reinterprets per RFC #1300 §3.3:
+  ///   - ``as_layout(x, x.layout)`` → ``x`` (target layout matches source)
+  ///
+  /// Chain folding (``as_layout(as_layout(x, L1), L2)`` → ``as_layout(x, L2)``)
+  /// is intentionally not done at this layer: after SSA conversion the outer
+  /// Call references its inner result via a Var binding, not inline, so a
+  /// naive pointer inspection cannot see across the binding. A dedicated
+  /// SSA-aware chain optimizer can be added if a real pipeline produces such
+  /// chains.
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
     auto call = std::dynamic_pointer_cast<const Call>(base);

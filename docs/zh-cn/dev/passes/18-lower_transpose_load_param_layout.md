@@ -8,7 +8,7 @@
 
 对每个被 `tile.load(p, ..., transpose=True)` 加载的 InCore 参数 `p`：
 
-- `p` 的 TensorType 从 `[..., a, b] ND` 提升为 `[..., b, a] DN` —— 末两维形状互换 + DN 布局标签。新 TensorView 的 stride 为空；`MaterializeTensorStrides`（默认 pipeline 中的下一个 Pass）会把它填为 packed canonical 的 stride。
+- `p` 的 TensorType 从 `[..., a, b] ND` 提升为 `[..., b, a] DN` —— 末两维形状互换 + DN 布局标签。新 TensorView 的 stride 为空；`MaterializeTensorStrides`（在默认 pipeline 中位于 `CanonicalizeIOOrder` 之后运行）会把它填为 packed canonical 的 stride。
 - 每个 `tile.load(p, offsets, shapes, valid_shapes, ..., transpose=True)`（源是已提升的参数）被改写为：三个 tuple 的末两维互换以匹配 canonical 坐标，丢弃 `transpose=True` kwarg。`DeduceTileLoadType` 通过源张量的 DN 布局推导出 Mat tile-view 的 layout —— 这两种信号在 §4.2 canonical pair 下是等价的。
 - 每个目标是已提升 callee 的非 InCore 函数调用站点，会把对应实参用 `tensor.as_layout(arg, DN)` 包一层（RFC #1300 P4）。该桥接 op 是纯元数据 —— 不生成 PTOAS 指令；`make_tensor_view` 直接消费新视图。
 
@@ -19,7 +19,7 @@
 - Tile op 已存在且为 2D（`IncoreTileOps`、`TileOps2D`）
 - 被提升的参数 rank ≥ 2
 
-**使用时机**：在 `Default` 策略中作为第 18 个 Pass 运行（文档编号 18 对应 docs/passes/ 中的执行顺序槽位），位于 `InferTileMemorySpace` 之后、`ResolveBackendOpLayouts` 之前。`FlattenTileNdTo2D` 产生的 2D 形状是前置条件。`MaterializeTensorStrides` 在后续 pipeline 中运行（在 `CanonicalizeIOOrder` 之后）以物化 DN-packed canonical stride。
+**使用时机**：在 `Default` 策略中作为第 18 个 Pass 运行（文档编号 18 对应于 docs/passes/ 中的执行顺序槽位，与 pass_manager.py 中的相对顺序匹配），位于 `InferTileMemorySpace` 之后、`ResolveBackendOpLayouts` 之前。`FlattenTileNdTo2D` 产生的 2D 形状是前置条件。`MaterializeTensorStrides` 在 pipeline 后段运行（在 `CanonicalizeIOOrder` 之后）以物化 DN-packed canonical stride。
 
 ## API
 

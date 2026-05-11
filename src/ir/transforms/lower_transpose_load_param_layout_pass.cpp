@@ -260,47 +260,143 @@ PromotionResult PromoteInCoreFunction(const FunctionPtr& func) {
   return {new_func, promoted_params};
 }
 
-/// Walks every non-InCore function in the program and wraps each argument
-/// passed to a promoted-param slot in ``tensor.as_layout(arg, DN)``.
+/// Walks every non-InCore function in the program and, for each call site
+/// targeting a promoted InCore callee, emits an SSA-form binding for each
+/// promoted-slot arg:
+///
+///   bridged_<param> = tensor.as_layout(<orig_arg>, DN)
+///   <orig_lhs> = <callee>(..., bridged_<param>, ...)
+///
+/// The binding is emitted as a separate ``AssignStmt`` immediately before the
+/// call statement (instead of being inlined inside the call's args), which is
+/// what downstream orchestration codegen expects — it consumes a ``Var`` or a
+/// constant literal per call arg, not a nested ``Call``.
 class CallSiteAsLayoutInjector : public IRMutator {
  public:
   explicit CallSiteAsLayoutInjector(const std::map<std::string, std::map<size_t, VarPtr>>& promotions)
       : promotions_(promotions) {}
 
-  ExprPtr VisitExpr_(const CallPtr& op) override {
-    auto base = IRMutator::VisitExpr_(op);
-    auto call = std::dynamic_pointer_cast<const Call>(base);
-    if (!call) return base;
+  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
+    std::vector<StmtPtr> new_stmts;
+    new_stmts.reserve(op->stmts_.size());
+    bool any_changed = false;
+    for (const auto& stmt : op->stmts_) {
+      // Recurse into nested SeqStmts / control-flow first so inner call sites
+      // get patched too.
+      auto recursed = IRMutator::VisitStmt(stmt);
+      bool inserted = false;
+      auto patched = MaybeInjectBindings(recursed, new_stmts, &inserted);
+      if (inserted || patched.get() != recursed.get() || recursed.get() != stmt.get()) {
+        any_changed = true;
+      }
+      new_stmts.push_back(patched);
+    }
+    if (!any_changed) return op;
+    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
+  }
+
+  // Bare (non-SeqStmts) statement bodies — e.g. ``then_body`` of an ``IfStmt``
+  // that contains a single ``AssignStmt``. Wrap any injected bindings into
+  // a fresh SeqStmts so the resulting body stays a single Stmt.
+  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+    auto recursed = IRMutator::VisitStmt_(op);
+    std::vector<StmtPtr> pre;
+    bool inserted = false;
+    auto patched = MaybeInjectBindings(recursed, pre, &inserted);
+    if (!inserted) return patched;
+    pre.push_back(patched);
+    return SeqStmts::Flatten(std::move(pre), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
+    auto recursed = IRMutator::VisitStmt_(op);
+    std::vector<StmtPtr> pre;
+    bool inserted = false;
+    auto patched = MaybeInjectBindings(recursed, pre, &inserted);
+    if (!inserted) return patched;
+    pre.push_back(patched);
+    return SeqStmts::Flatten(std::move(pre), op->span_);
+  }
+
+  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
+    auto recursed = IRMutator::VisitStmt_(op);
+    std::vector<StmtPtr> pre;
+    bool inserted = false;
+    auto patched = MaybeInjectBindings(recursed, pre, &inserted);
+    if (!inserted) return patched;
+    pre.push_back(patched);
+    return SeqStmts::Flatten(std::move(pre), op->span_);
+  }
+
+ private:
+  /// If ``stmt``'s RHS is a Call to a promoted callee, build the binding
+  /// AssignStmts (one per promoted slot) and emit them into ``pre``;
+  /// rewrite the Call to reference the bound Vars. Returns the (possibly
+  /// rewritten) statement and sets ``*inserted = true`` if any bindings
+  /// were added.
+  StmtPtr MaybeInjectBindings(const StmtPtr& stmt, std::vector<StmtPtr>& pre, bool* inserted) {
+    auto extract_call = [](const StmtPtr& s) -> std::pair<CallPtr, VarPtr> {
+      if (auto assign = As<AssignStmt>(s)) {
+        return {As<Call>(assign->value_), assign->var_};
+      }
+      if (auto eval = As<EvalStmt>(s)) {
+        return {As<Call>(eval->expr_), nullptr};
+      }
+      if (auto ret = As<ReturnStmt>(s)) {
+        if (ret->value_.size() == 1) {
+          return {As<Call>(ret->value_[0]), nullptr};
+        }
+      }
+      return {nullptr, nullptr};
+    };
+
+    auto [call, lhs_var] = extract_call(stmt);
+    if (!call) return stmt;
     auto gv = As<GlobalVar>(call->op_);
-    if (!gv) return base;
+    if (!gv) return stmt;
     auto it = promotions_.find(gv->name_);
-    if (it == promotions_.end() || it->second.empty()) return base;
+    if (it == promotions_.end() || it->second.empty()) return stmt;
     const auto& slots = it->second;
 
     std::vector<ExprPtr> new_args = call->args_;
     bool changed = false;
-    for (const auto& [idx, _new_param_var] : slots) {
+    for (const auto& [idx, new_param_var] : slots) {
       INTERNAL_CHECK_SPAN(idx < new_args.size(), call->span_)
           << "LowerTransposeLoadParamLayout: promoted param index " << idx << " out of range for call to "
           << gv->name_;
       auto arg = new_args[idx];
       auto arg_tensor = As<TensorType>(arg->GetType());
       if (!arg_tensor) continue;
-      // Idempotency: an arg already in DN-canonical form needs no bridge.
+      // Idempotency: an arg already in DN form needs no bridge.
       if (arg_tensor->tensor_view_.has_value() && arg_tensor->tensor_view_->layout == TensorLayout::DN) {
         continue;
       }
+      // Build the bridge: bridged = tensor.as_layout(arg, DN).
       std::vector<std::pair<std::string, std::any>> kwargs = {{"layout", std::any(TensorLayout::DN)}};
-      new_args[idx] = OpRegistry::GetInstance().Create("tensor.as_layout", {arg}, kwargs, arg->span_);
+      auto bridge_call = OpRegistry::GetInstance().Create("tensor.as_layout", {arg}, kwargs, arg->span_);
+      auto bridge_var =
+          std::make_shared<Var>(new_param_var->name_hint_ + "_dn_view", bridge_call->GetType(), arg->span_);
+      pre.push_back(std::make_shared<AssignStmt>(bridge_var, bridge_call, arg->span_));
+      new_args[idx] = bridge_var;
       changed = true;
     }
-    if (!changed) return base;
+    if (!changed) return stmt;
+    *inserted = true;
 
-    return std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, call->attrs_,
-                                  call->GetType(), call->span_);
+    auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, call->attrs_,
+                                           call->GetType(), call->span_);
+    if (auto assign = As<AssignStmt>(stmt)) {
+      return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
+    }
+    if (auto eval = As<EvalStmt>(stmt)) {
+      return std::make_shared<EvalStmt>(new_call, eval->span_);
+    }
+    if (auto ret = As<ReturnStmt>(stmt)) {
+      return std::make_shared<ReturnStmt>(std::vector<ExprPtr>{new_call}, ret->span_);
+    }
+    return stmt;  // unreachable — extract_call only returns non-null for the three above
   }
 
- private:
   const std::map<std::string, std::map<size_t, VarPtr>>& promotions_;
 };
 

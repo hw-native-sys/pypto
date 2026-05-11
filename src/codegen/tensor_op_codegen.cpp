@@ -19,6 +19,7 @@
 
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/orchestration_op_registry.h"
+#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -350,19 +351,18 @@ REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
 
 REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
   // tensor.as_layout(input, layout=...) -> metadata-only layout flip.
-  // The op is internal-only (RFC #1300 §3.3): future passes inject it at
+  // The op is internal-only (RFC #1300 §3.3): passes inject it at
   // orch ↔ InCore bridge sites to flip ND ↔ DN over the same physical buffer.
   //
-  // For cross-layout flips the trailing-two-dim shape swap (RFC §4.2 canonical
-  // pair) lowers to runtime ``Tensor::transpose(N-2, N-1)`` — a zero-copy
-  // metadata swap. The runtime Tensor handle's shapes / raw_shapes / offsets
-  // then line up with the IR's post-flip TensorType, so downstream ops that
-  // read ``result.shape()`` see the right values.
-  //
-  // Identity cases (target layout == src layout) are folded out by the
-  // Simplify pass before reaching codegen, so we always see a substantive
-  // layout flip here. ``DeduceTensorAsLayoutType`` already enforced
-  // ``rank >= 2`` for cross-layout flips.
+  // Two lowerings:
+  //   - identity flip (target layout == source layout): emit a plain
+  //     ``Tensor result = input;`` alias. The Simplify pass usually folds these
+  //     away before reaching codegen, but if an ad-hoc compile path skips
+  //     Simplify the codegen must still produce valid code (not a spurious
+  //     ``.transpose()`` that would runtime-swap trailing dims).
+  //   - cross-layout flip: the trailing-two-dim shape swap (RFC §4.2 canonical
+  //     pair) lowers to runtime ``Tensor::transpose(N-2, N-1)`` — a zero-copy
+  //     metadata swap.
   CHECK(op->args_.size() == 1) << "tensor.as_layout requires 1 arg (input) plus a 'layout' kwarg";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
@@ -371,18 +371,32 @@ REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
   auto input_type = As<TensorType>(op->args_[0]->GetType());
   CHECK(input_type) << "tensor.as_layout input must be TensorType";
 
-  int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
-  INTERNAL_CHECK_SPAN(ndim >= 2, op->span_)
-      << "Internal error: tensor.as_layout reached codegen with rank=" << ndim
-      << "; identity cases (same layout) should have been folded by Simplify, and "
-      << "DeduceTensorAsLayoutType rejects cross-layout flips below rank 2";
+  TensorLayout src_layout =
+      input_type->tensor_view_.has_value() ? input_type->tensor_view_->layout : TensorLayout::ND;
+  TensorLayout target_layout = src_layout;
+  for (const auto& [k, v] : op->kwargs_) {
+    if (k == "layout") {
+      target_layout = AnyCast<TensorLayout>(v, "layout");
+      break;
+    }
+  }
 
   std::string ext_input_name = codegen.GetExternalTensorName(input_name);
   std::string result_var = codegen.GetCurrentResultTarget();
 
   std::ostringstream oss;
-  oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << (ndim - 2) << ", "
-      << (ndim - 1) << ");";
+  if (target_layout == src_layout) {
+    // Identity reinterpret — no shape swap needed (DeduceTensorAsLayoutType
+    // also keeps the shape unchanged in this case). Emit a plain alias.
+    oss << "Tensor " << result_var << " = " << ext_input_name << ";";
+  } else {
+    int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
+    INTERNAL_CHECK_SPAN(ndim >= 2, op->span_)
+        << "Internal error: tensor.as_layout cross-layout flip reached codegen with rank=" << ndim
+        << "; DeduceTensorAsLayoutType is supposed to reject cross-layout flips below rank 2";
+    oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << (ndim - 2) << ", "
+        << (ndim - 1) << ");";
+  }
   return oss.str();
 }
 

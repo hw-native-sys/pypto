@@ -165,8 +165,8 @@ class MaterializeTensorStridesMutator : public IRMutator {
 
     if (!args_changed && !type_changed) return op;
 
-    // Direct ctor — preserve the (materialized) original type rather than
-    // re-deducing via OpRegistry.
+    // Direct ctor — preserve the (materialized) original type and ``attrs_``
+    // rather than re-deducing via OpRegistry.
     //
     // Re-deducing would discard intentional type overrides that earlier passes
     // applied. Concrete case: FlattenTileNdTo2D rewrites a rank-3 ``tile.load``
@@ -174,9 +174,11 @@ class MaterializeTensorStridesMutator : public IRMutator {
     // args at rank 3 (the source-window expressions). If we routed back
     // through ``OpRegistry::Create`` here, ``DeduceTileLoadType`` would see
     // the rank-3 shape args and synthesize a fresh rank-3 ``TileType``,
-    // silently undoing the 2D flattening.
-    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(new_return_type),
-                                  op->span_);
+    // silently undoing the 2D flattening. Forwarding ``op->attrs_`` likewise
+    // preserves call metadata that earlier passes wrote (e.g. arg directions,
+    // manual-dep edges) — re-deduction would drop those.
+    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->attrs_,
+                                  std::move(new_return_type), op->span_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {

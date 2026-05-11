@@ -74,6 +74,14 @@ def _find_calls_to(func, callee_name):
     return calls
 
 
+def _find_assign_rhs(func, var):
+    """Return the RHS expression of the ``AssignStmt`` that defines ``var``."""
+    for stmt in _iter_stmts(func.body):
+        if isinstance(stmt, ir.AssignStmt) and stmt.var is var:
+            return stmt.value
+    raise AssertionError(f"no AssignStmt defines var {var.name_hint}")
+
+
 def _shape_dims(ty):
     """Return ConstInt shape dims as ints (rejects symbolic dims for test fixtures)."""
     tensor_type = _as_tensor_type(ty)
@@ -151,12 +159,16 @@ class TestBTransposePromotesParam:
         orch = _find_function(After, "orchestrator")
         calls = _find_calls_to(orch, "matmul_incore")
         assert len(calls) == 1
+        # `b` is bridged via an SSA AssignStmt: the call arg is a Var bound to
+        # a separately-emitted ``tensor.as_layout(orig_b, DN)`` Call.
         b_arg = calls[0].args[1]
-        assert isinstance(b_arg, ir.Call) and b_arg.op is not None
-        assert b_arg.op.name == "tensor.as_layout", (
-            f"orch must wrap b in tensor.as_layout, got {b_arg.op.name if b_arg.op else None}"
+        assert isinstance(b_arg, ir.Var)
+        b_def_rhs = _find_assign_rhs(orch, b_arg)
+        assert isinstance(b_def_rhs, ir.Call) and b_def_rhs.op is not None
+        assert b_def_rhs.op.name == "tensor.as_layout", (
+            f"orch must wrap b in tensor.as_layout, got {b_def_rhs.op.name if b_def_rhs.op else None}"
         )
-        bridged_t = _as_tensor_type(b_arg.type)
+        bridged_t = _as_tensor_type(b_def_rhs.type)
         assert _shape_dims(bridged_t) == [K, N]
         assert bridged_t.tensor_view is not None
         assert bridged_t.tensor_view.layout == ir.TensorLayout.DN
@@ -247,8 +259,16 @@ class TestATransposePromotesParam:
 
         orch = _find_function(After, "orchestrator")
         call = _find_calls_to(orch, "matmul_incore")[0]
+        # `a` is bridged via tensor.as_layout. After P6's SSA refactor (PR
+        # review fix), the bridge is bound to a fresh Var by a preceding
+        # AssignStmt, so the call arg is a Var, not the inline Call. Look up
+        # the binding's RHS.
         a_arg = call.args[0]
-        assert isinstance(a_arg, ir.Call) and a_arg.op.name == "tensor.as_layout"
+        assert isinstance(a_arg, ir.Var)
+        a_def_rhs = _find_assign_rhs(orch, a_arg)
+        assert isinstance(a_def_rhs, ir.Call) and a_def_rhs.op is not None
+        assert a_def_rhs.op.name == "tensor.as_layout"
+        # `b` is not promoted, so its arg is the raw Var (no bridge).
         assert isinstance(call.args[1], ir.Var)
 
 
@@ -294,8 +314,13 @@ class TestABTransposePromotesBothParams:
 
         orch = _find_function(After, "orchestrator")
         call = _find_calls_to(orch, "matmul_incore")[0]
-        assert isinstance(call.args[0], ir.Call) and call.args[0].op.name == "tensor.as_layout"
-        assert isinstance(call.args[1], ir.Call) and call.args[1].op.name == "tensor.as_layout"
+        # Both promoted args are bridged via SSA AssignStmts.
+        for slot in (0, 1):
+            arg = call.args[slot]
+            assert isinstance(arg, ir.Var)
+            rhs = _find_assign_rhs(orch, arg)
+            assert isinstance(rhs, ir.Call) and rhs.op is not None
+            assert rhs.op.name == "tensor.as_layout"
 
 
 class TestNoOpCases:

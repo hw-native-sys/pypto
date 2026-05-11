@@ -351,6 +351,21 @@ TypePtr DeduceTensorAsLayoutType(const std::vector<ExprPtr>& args,
   }
 
   auto new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
+  // Preserve view-extending metadata (``valid_shape`` / ``pad``) from the
+  // source — both fields describe element-level semantics that are layout-
+  // invariant under the §4.2 canonical pair, so dropping them would silently
+  // make sliced or fill-padded tensors look like fully-valid views.
+  if (src_type->tensor_view_.has_value()) {
+    const auto& src_view = src_type->tensor_view_.value();
+    if (!src_view.valid_shape.empty()) {
+      std::vector<ExprPtr> new_valid_shape = src_view.valid_shape;
+      if (src_layout != new_layout && new_valid_shape.size() >= 2) {
+        std::iter_swap(new_valid_shape.end() - 2, new_valid_shape.end() - 1);
+      }
+      new_view.valid_shape = std::move(new_valid_shape);
+    }
+    new_view.pad = src_view.pad;
+  }
   return std::make_shared<TensorType>(new_shape, src_type->dtype_, src_type->memref_,
                                       std::make_optional(std::move(new_view)));
 }

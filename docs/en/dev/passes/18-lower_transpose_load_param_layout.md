@@ -14,8 +14,9 @@ For each InCore parameter ``p`` loaded via ``tile.load(p, ..., transpose=True)``
 
 - ``p``'s TensorType is promoted from ``[..., a, b] ND`` to ``[..., b, a] DN`` —
   the trailing-pair shape swap plus the DN layout tag. The new TensorView carries
-  an empty stride; ``MaterializeTensorStrides`` (the next default pass) fills it
-  with the packed canonical strides.
+  an empty stride; ``MaterializeTensorStrides`` (which runs later in the default
+  pipeline, after ``CanonicalizeIOOrder``) fills it with the packed canonical
+  strides.
 - Every ``tile.load(p, offsets, shapes, valid_shapes, ..., transpose=True)`` whose
   source is a promoted parameter is rewritten so the three tuples' trailing pair
   is swapped to canonical coords and the ``transpose=True`` kwarg is dropped.
