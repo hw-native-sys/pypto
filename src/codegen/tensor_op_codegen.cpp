@@ -19,7 +19,6 @@
 
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/orchestration_op_registry.h"
-#include "pypto/core/any_cast.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -350,19 +349,25 @@ REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
-  // tensor.as_layout(input, layout=...) -> metadata-only layout flip.
-  // The op is internal-only (RFC #1300 §3.3): passes inject it at
-  // orch ↔ InCore bridge sites to flip ND ↔ DN over the same physical buffer.
+  // tensor.as_layout(input, layout=...) — pure metadata reinterpret over the
+  // same physical buffer (RFC #1300 §3.3). The op is internal-only: passes
+  // inject it at orch ↔ InCore bridge sites so the downstream callee's
+  // IR-declared param type carries the new layout / canonical shape.
   //
-  // Two lowerings:
-  //   - identity flip (target layout == source layout): emit a plain
-  //     ``Tensor result = input;`` alias. The Simplify pass usually folds these
-  //     away before reaching codegen, but if an ad-hoc compile path skips
-  //     Simplify the codegen must still produce valid code (not a spurious
-  //     ``.transpose()`` that would runtime-swap trailing dims).
-  //   - cross-layout flip: the trailing-two-dim shape swap (RFC §4.2 canonical
-  //     pair) lowers to runtime ``Tensor::transpose(N-2, N-1)`` — a zero-copy
-  //     metadata swap.
+  // **Lowering: plain alias** ``Tensor result = input;``.
+  //
+  // We intentionally do NOT lower to ``input.transpose(N-2, N-1)``. The
+  // runtime ``Tensor::transpose`` swaps shape / raw_shape / offsets — that is
+  // correct for ``tensor.transpose`` (which describes a permutation of the
+  // *physical* indexing), but wrong for ``tensor.as_layout`` (which only
+  // relabels how downstream consumers interpret the same physical bytes).
+  // Concretely: a paged-attention orchestration may pass ``kj`` with
+  // offsets ``[block_offset, 0]``; ``.transpose(0, 1)`` would swap those to
+  // ``[0, block_offset]``, shifting the base address by a factor of the raw
+  // shape and silently corrupting the kernel's view. The downstream kernel
+  // already encodes the canonical (shape, stride, layout) triple in its
+  // IR-declared param type, so re-emitting it at runtime is redundant; the
+  // alias preserves the orch-side ``offsets`` exactly.
   CHECK(op->args_.size() == 1) << "tensor.as_layout requires 1 arg (input) plus a 'layout' kwarg";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
@@ -371,32 +376,11 @@ REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
   auto input_type = As<TensorType>(op->args_[0]->GetType());
   CHECK(input_type) << "tensor.as_layout input must be TensorType";
 
-  TensorLayout src_layout =
-      input_type->tensor_view_.has_value() ? input_type->tensor_view_->layout : TensorLayout::ND;
-  TensorLayout target_layout = src_layout;
-  for (const auto& [k, v] : op->kwargs_) {
-    if (k == "layout") {
-      target_layout = AnyCast<TensorLayout>(v, "layout");
-      break;
-    }
-  }
-
   std::string ext_input_name = codegen.GetExternalTensorName(input_name);
   std::string result_var = codegen.GetCurrentResultTarget();
 
   std::ostringstream oss;
-  if (target_layout == src_layout) {
-    // Identity reinterpret — no shape swap needed (DeduceTensorAsLayoutType
-    // also keeps the shape unchanged in this case). Emit a plain alias.
-    oss << "Tensor " << result_var << " = " << ext_input_name << ";";
-  } else {
-    int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
-    INTERNAL_CHECK_SPAN(ndim >= 2, op->span_)
-        << "Internal error: tensor.as_layout cross-layout flip reached codegen with rank=" << ndim
-        << "; DeduceTensorAsLayoutType is supposed to reject cross-layout flips below rank 2";
-    oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << (ndim - 2) << ", "
-        << (ndim - 1) << ");";
-  }
+  oss << "Tensor " << result_var << " = " << ext_input_name << ";";
   return oss.str();
 }
 

@@ -1174,6 +1174,55 @@ class OrchestrationStmtCodegen : public CodegenBase {
             std::move(info.inner_callee)};
   }
 
+  /// Build a "wrapper-internal alias map" — for every AssignStmt in the
+  /// wrapper body whose RHS is a Call to a no-op view op (currently just
+  /// ``tensor.as_layout``), record LHS-var → upstream-var. This lets
+  /// ``BuildWrapperReorderedParams`` chase the inner-call's arg back to a
+  /// wrapper parameter through any orch-side ``tensor.as_layout`` bridge that
+  /// ``LowerTransposeLoadParamLayout`` may have injected.
+  std::unordered_map<const Var*, VarPtr> BuildWrapperAliasMap(const FunctionPtr& wrapper_func) {
+    std::unordered_map<const Var*, VarPtr> alias_map;
+    class AliasCollector : public IRVisitor {
+     public:
+      explicit AliasCollector(std::unordered_map<const Var*, VarPtr>* out) : out_(out) {}
+      void VisitStmt_(const AssignStmtPtr& op) override {
+        if (auto call = As<Call>(op->value_)) {
+          // ``tensor.as_layout`` is the canonical orch-side view alias that
+          // P6 (``LowerTransposeLoadParamLayout``) emits before the kernel
+          // call. Its runtime lowering is a plain ``Tensor x = src;`` alias,
+          // so for arg-routing purposes the LHS is interchangeable with the
+          // RHS's first arg.
+          if (call->op_ && call->op_->name_ == "tensor.as_layout" && !call->args_.empty()) {
+            if (auto src = AsVarLike(call->args_[0])) {
+              (*out_)[op->var_.get()] = src;
+            }
+          }
+        }
+        IRVisitor::VisitStmt_(op);
+      }
+
+     private:
+      std::unordered_map<const Var*, VarPtr>* out_;
+    };
+    if (wrapper_func->body_) {
+      AliasCollector(&alias_map).VisitStmt(wrapper_func->body_);
+    }
+    return alias_map;
+  }
+
+  /// Resolve ``var`` to its ultimate alias source within the wrapper body
+  /// (walking through any ``tensor.as_layout`` bindings). Returns ``var``
+  /// itself if no alias chain applies.
+  VarPtr ResolveAliasChain(VarPtr var, const std::unordered_map<const Var*, VarPtr>& alias_map) {
+    std::unordered_set<const Var*> seen;
+    while (true) {
+      auto it = alias_map.find(var.get());
+      if (it == alias_map.end()) return var;
+      if (!seen.insert(var.get()).second) return var;  // cycle guard
+      var = it->second;
+    }
+  }
+
   /// Build task params for a wrapper function call, reordered to match the
   /// inner callee's parameter order.
   ///
@@ -1188,6 +1237,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (size_t i = 0; i < wrapper_func->params_.size(); ++i) {
       wrapper_param_to_outer_idx[wrapper_func->params_[i].get()] = i;
     }
+    auto alias_map = BuildWrapperAliasMap(wrapper_func);
 
     // Phase-5 invariant: the outer Call must carry explicit arg_directions
     // (populated by DeriveCallDirections). The legacy ParamDirection fallback
@@ -1223,6 +1273,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
 
       auto it = wrapper_param_to_outer_idx.find(inner_arg_var.get());
+      if (it == wrapper_param_to_outer_idx.end()) {
+        // The inner-call arg may be a wrapper-local Var bound by a
+        // ``tensor.as_layout`` AssignStmt (injected by P6 to bridge
+        // orch-side ND tensors to the InCore-side DN param type). Chase
+        // the alias chain back to the upstream wrapper parameter.
+        auto upstream = ResolveAliasChain(inner_arg_var, alias_map);
+        if (upstream.get() != inner_arg_var.get()) {
+          it = wrapper_param_to_outer_idx.find(upstream.get());
+        }
+      }
       if (it == wrapper_param_to_outer_idx.end()) {
         // Some wrapper-expansion paths can leave inner-call scalar ivs that are
         // not part of the user-visible wrapper signature. They should not be
