@@ -15,7 +15,13 @@ import pypto.language as pl
 import pytest
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
-from pypto.jit.decorator import JITFunction, _discover_deps, _rewrite_jit_error, jit
+from pypto.jit.decorator import (
+    JITFunction,
+    _discover_deps,
+    _extract_local_tensor_metas,
+    _rewrite_jit_error,
+    jit,
+)
 from pypto.jit.specializer import TensorMeta
 from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 from pypto.pypto_core import DataType, ir
@@ -437,6 +443,252 @@ class TestMultiFuncIntegration:
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         expected_post_pass = pm.run_passes(Expected)
         ir.assert_structural_equal(got, expected_post_pass)
+
+
+# Module-level @pl.jit.incore kernel reused by the metadata-tracking tests below.
+# Defined at module level (not inside a test method) so it can be imported by
+# the unit test for ``_extract_local_tensor_metas``; the integration tests
+# below redefine their own deps inside the method to keep each test isolated.
+@jit.incore
+def _relu_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    M, N = x.shape
+    t = pl.load(x, [0, 0], [M, N])
+    r = pl.relu(t)
+    pl.store(r, [0, 0], out)
+    return out
+
+
+def _slice_then_dep_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Plain (undecorated) function used only by the _extract_local_tensor_metas unit test."""
+    view = pl.slice(src, [16, 8], [0, 0])
+    buf = pl.create_tensor([16, 8], dtype=pl.FP32)
+    mid = _relu_kernel(view, buf)
+    out = _relu_kernel(mid, out)
+    return out
+
+
+def _runtime_slice_body(src: pl.Tensor, cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Plain (undecorated) function: a pl.slice whose width is a runtime scalar."""
+    valid_len = pl.tensor.read(cfg, [0])
+    view = pl.slice(src, [16, valid_len], [0, 0])
+    out = _relu_kernel(view, out)
+    return out
+
+
+class TestSliceAndDepReturnMetadata:
+    """Regression tests: the JIT specializer must track tensor metadata for
+    ``pl.slice`` views and ``@pl.jit.incore`` return values when they flow into
+    subsequent kernels (KNOWN_ISSUES: "JIT specializer doesn't track pl.slice
+    results or @pl.jit.incore return-value tensor metadata")."""
+
+    def test_extract_local_tensor_metas_slice_and_dep_return(self):
+        """``_extract_local_tensor_metas`` infers metas for pl.slice views,
+        pl.create_tensor locals, and @pl.jit.incore call results."""
+        seed = {
+            "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas = _extract_local_tensor_metas(_slice_then_dep_body, seed_meta=seed)
+        # pl.slice view: shape from the literal list, dtype inherited from src.
+        assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        # pl.create_tensor: unchanged behaviour.
+        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        # @pl.jit.incore call result: inherits the dep's pl.Out param meta,
+        # which here maps to ``buf``.
+        assert metas["mid"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+
+    def test_extract_local_tensor_metas_runtime_slice_uses_parent_dim(self):
+        """A pl.slice dim that isn't a static int falls back to the parent
+        tensor's static dim (the slice is bounded above by its parent)."""
+        seed = {
+            "src": TensorMeta(shape=(32, 64), dtype=DataType.FP16),
+            "cfg": TensorMeta(shape=(1,), dtype=DataType.INT64),
+            "out": TensorMeta(shape=(16, 64), dtype=DataType.FP16),
+        }
+        metas = _extract_local_tensor_metas(_runtime_slice_body, seed_meta=seed)
+        # Runtime-scalar 2nd dim → falls back to src's dim 1 = 64; dtype from src.
+        assert metas["view"] == TensorMeta(shape=(16, 64), dtype=DataType.FP16)
+
+    def test_slice_view_flows_into_incore_dep(self):
+        """A pl.slice view of an entry parameter can be passed into an @pl.jit.incore dep."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def copy_incore(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            M, N = x.shape
+            t = pl.load(x, [0, 0], [M, N])
+            pl.store(t, [0, 0], out)
+            return out
+
+        @jit
+        def slice_entry(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            view = pl.slice(src, [16, 32], [0, 0])
+            out = copy_incore(view, out)
+            return out
+
+        src = torch.randn(32, 32)
+        out = torch.empty(16, 32)
+        slice_entry.compile_for_test(src, out)
+        compiled = list(slice_entry._cache.values())[0]
+        assert isinstance(compiled, CompiledProgram)
+        func_names = [f.name for f in compiled.program.functions.values()]
+        assert "copy_incore" in func_names
+        assert "slice_entry" in func_names
+
+    def test_dep_return_value_flows_into_next_dep(self):
+        """The return value of one @pl.jit.incore dep can feed the next dep."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def relu_incore(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            M, N = x.shape
+            t = pl.load(x, [0, 0], [M, N])
+            r = pl.relu(t)
+            pl.store(r, [0, 0], out)
+            return out
+
+        @jit
+        def chain_entry(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            view = pl.slice(src, [16, 32], [0, 0])
+            buf = pl.create_tensor([16, 32], dtype=pl.FP32)
+            mid = relu_incore(view, buf)
+            out = relu_incore(mid, out)
+            return out
+
+        src = torch.randn(32, 32)
+        out = torch.empty(16, 32)
+        chain_entry.compile_for_test(src, out)
+        compiled = list(chain_entry._cache.values())[0]
+        assert isinstance(compiled, CompiledProgram)
+
+    def test_multi_value_dep_return_flows_into_next_dep(self):
+        """A tuple-returning @pl.jit.incore dep's results inherit their Out params' metas."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def split_incore(
+            x: pl.Tensor, lo: pl.Out[pl.Tensor], hi: pl.Out[pl.Tensor]
+        ) -> tuple[pl.Tensor, pl.Tensor]:
+            M, N = x.shape
+            t = pl.load(x, [0, 0], [M, N])
+            a = pl.relu(t)
+            b = pl.abs(t)
+            pl.store(a, [0, 0], lo)
+            pl.store(b, [0, 0], hi)
+            return lo, hi
+
+        @jit.incore
+        def relu_incore(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            M, N = x.shape
+            t = pl.load(x, [0, 0], [M, N])
+            r = pl.relu(t)
+            pl.store(r, [0, 0], out)
+            return out
+
+        @jit
+        def split_entry(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            view = pl.slice(src, [16, 32], [0, 0])
+            lo_buf = pl.create_tensor([16, 32], dtype=pl.FP32)
+            hi_buf = pl.create_tensor([16, 32], dtype=pl.FP32)
+            a, b = split_incore(view, lo_buf, hi_buf)
+            out = relu_incore(a, out)
+            return out
+
+        src = torch.randn(32, 32)
+        out = torch.empty(16, 32)
+        split_entry.compile_for_test(src, out)
+        compiled = list(split_entry._cache.values())[0]
+        assert isinstance(compiled, CompiledProgram)
+
+    def test_runtime_sized_slice_uses_static_parent_dim(self):
+        """A pl.slice with a runtime-scalar width is advertised to the consuming
+        kernel using the parent tensor's static dim, matching how hand-written
+        @pl.program code annotates kernels that consume narrowed views (see
+        examples/models/04_paged_attention.py)."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def softmax_incore(sij: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            M, N = sij.shape
+            t = pl.load(sij, [0, 0], [M, N], target_memory=pl.MemorySpace.Vec)
+            r = pl.relu(t)
+            pl.store(r, [0, 0], out)
+            return out
+
+        @jit
+        def attn_entry(big: pl.Tensor, cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            valid_len = pl.tensor.read(cfg, [0])
+            sij_valid = pl.slice(big, [16, valid_len], [0, 0])
+            out = softmax_incore(sij_valid, out)
+            return out
+
+        big = torch.randn(16, 128)
+        cfg = torch.zeros(1, dtype=torch.int64)
+        out = torch.empty(16, 128)
+        attn_entry.compile_for_test(big, cfg, out)
+        compiled = list(attn_entry._cache.values())[0]
+        assert isinstance(compiled, CompiledProgram)
+
+    def test_dep_return_then_runtime_slice_then_dep(self):
+        """The paged-attention shape: a dep return value is sliced to a runtime
+        width, and that view feeds the next dep — both inferences must hold."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def fill_incore(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            M, N = x.shape
+            t = pl.load(x, [0, 0], [M, N], target_memory=pl.MemorySpace.Vec)
+            pl.store(t, [0, 0], out)
+            return out
+
+        @jit.incore
+        def softmax_incore(sij: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            M, N = sij.shape
+            t = pl.load(sij, [0, 0], [M, N], target_memory=pl.MemorySpace.Vec)
+            r = pl.relu(t)
+            pl.store(r, [0, 0], out)
+            return out
+
+        @jit
+        def attn_entry(big: pl.Tensor, cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            sij_buf = pl.create_tensor([16, 128], dtype=pl.FP32)
+            sij = fill_incore(big, sij_buf)  # dep return → sij_buf's meta
+            valid_len = pl.tensor.read(cfg, [0])
+            sij_valid = pl.slice(sij, [16, valid_len], [0, 0])  # runtime slice of a dep return
+            out = softmax_incore(sij_valid, out)
+            return out
+
+        big = torch.randn(16, 128)
+        cfg = torch.zeros(1, dtype=torch.int64)
+        out = torch.empty(16, 128)
+        attn_entry.compile_for_test(big, cfg, out)
+        compiled = list(attn_entry._cache.values())[0]
+        assert isinstance(compiled, CompiledProgram)
+
+    def test_unresolvable_create_tensor_dim_still_raises_clear_error(self):
+        """A pl.create_tensor with a non-static dim has no parent to fall back
+        to, so the view is untracked and the existing clear ValueError fires
+        for the downstream dep parameter."""
+        torch = pytest.importorskip("torch")
+
+        @jit.incore
+        def copy_incore(x: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            M, N = x.shape
+            t = pl.load(x, [0, 0], [M, N])
+            pl.store(t, [0, 0], out)
+            return out
+
+        @jit
+        def bad_entry(cfg: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+            n = pl.tensor.read(cfg, [0])
+            buf = pl.create_tensor([16, n], dtype=pl.FP32)
+            out = copy_incore(buf, out)
+            return out
+
+        cfg = torch.zeros(1, dtype=torch.int64)
+        out = torch.empty(16, 32)
+        with pytest.raises(ValueError, match="missing inferred tensor metadata"):
+            bad_entry.compile_for_test(cfg, out)
 
 
 class TestInlineFuncIntegration:

@@ -67,6 +67,7 @@ from .specializer import (
     SpecializeContext,
     Specializer,
     TensorMeta,
+    _classify_params,
     _collect_dynamic_dims,
     build_specialize_context,
 )
@@ -242,33 +243,58 @@ def _get_pl_dtype_map() -> dict[str, Any]:
     return _PL_DTYPE_MAP
 
 
-def _extract_create_tensor_metas(func: Any) -> dict[str, TensorMeta]:
-    """Scan func's AST for ``var = pl.create_tensor([...], dtype=pl.XXX)`` and return TensorMeta per var.
+def _extract_local_tensor_metas(
+    func: Any,
+    seed_meta: dict[str, TensorMeta] | None = None,
+    seed_scalars: dict[str, int | float | bool] | None = None,
+) -> dict[str, TensorMeta]:
+    """Infer ``TensorMeta`` for the local tensor variables in ``func``'s body.
 
-    Each shape element may be either a literal int (``42``) or a
-    ``Name`` referencing an int in ``func.__globals__`` — covering the common
-    case of model code that imports shape constants from a config module.
-    Each dtype must be a ``pl.<name>`` attribute. Anything that cannot be
-    statically resolved is skipped silently.
+    Walks the body in source order, tracking the three ways a local tensor can
+    be produced inside a JIT function:
+
+    1. ``var = pl.create_tensor([static_shape], dtype=pl.XXX)`` — shape from the
+       literal list (literal ints, ``Name`` refs to int globals / seeded
+       scalars, and simple int arithmetic over those), dtype from ``dtype=``.
+    2. ``var = pl.slice(src, [shape], [...])`` — dtype inherited from ``src`` (a
+       parameter or earlier local); each shape dim that is a static int is used
+       as-is, and a non-static dim (e.g. a runtime ``valid_len``) falls back to
+       ``src``'s corresponding static dim, since a slice is bounded above by its
+       parent — matching how hand-written ``@pl.program`` code annotates kernels
+       that consume narrowed views.
+    3. ``v1, ..., vk = jit_dep(args)`` where ``jit_dep`` is an
+       ``@pl.jit.incore`` / ``inline`` / ``opaque`` callee with ``k``
+       ``pl.Out[...]`` parameters — each ``vi`` inherits the meta of the caller
+       argument bound to the i-th ``Out`` parameter (the in-place-output
+       convention every such kernel follows, and the same heuristic
+       :func:`_infer_return_type` uses on the callee side).
+
+    ``seed_meta`` pre-populates the table with the caller's parameter metas so a
+    ``pl.slice`` of a parameter, or a dep call passing a parameter through,
+    resolves; ``seed_scalars`` lets compile-time-specialized scalar parameters
+    appear as shape dimensions. Anything not statically resolvable is skipped
+    silently — the clear ``ValueError`` in ``Specializer._build_params`` then
+    fires for that variable.
     """
     func_def = _get_func_def(func)
-    result: dict[str, TensorMeta] = {}
+    local: dict[str, TensorMeta] = dict(seed_meta or {})
     dtype_map = _get_pl_dtype_map()
     func_globals = getattr(func, "__globals__", {})
+    scalars: dict[str, int | float | bool] = seed_scalars or {}
 
     def _resolve_int(elt: ast.expr) -> int | None:
         """Resolve ``elt`` to a Python int. Returns None if not statically resolvable.
 
-        Handles literal ints, ``Name`` refs to module-level int globals, and
-        simple integer arithmetic (``+``, ``-``, ``*``, ``//``, ``%``, ``**``)
-        over any combination of those — covering shape expressions like
-        ``BATCH * TOTAL_Q_GROUPS * Q_HEAD_PAD`` and ``2 ** N``. Also accepts
-        leading unary ``+`` / ``-``.
+        Handles literal ints, ``Name`` refs to module-level int globals (or a
+        seeded scalar parameter), and simple integer arithmetic (``+``, ``-``,
+        ``*``, ``//``, ``%``, ``**``) over any combination of those — covering
+        shape expressions like ``BATCH * TOTAL_Q_GROUPS * Q_HEAD_PAD`` and
+        ``2 ** N``. Also accepts a leading unary ``+`` / ``-``.
         """
         if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
             return elt.value
         if isinstance(elt, ast.Name):
-            value = func_globals.get(elt.id)
+            value = func_globals.get(elt.id, scalars.get(elt.id))
             if isinstance(value, int) and not isinstance(value, bool):
                 return value
             return None
@@ -303,39 +329,21 @@ def _extract_create_tensor_metas(func: Any) -> dict[str, TensorMeta]:
             return None
         return None
 
-    for node in ast.walk(func_def):
-        # Look for: var = pl.create_tensor([...], dtype=pl.XXX)
-        if not isinstance(node, ast.Assign):
-            continue
-        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
-            continue
-        var_name = node.targets[0].id
-        call = node.value
-        if not isinstance(call, ast.Call):
-            continue
-        fn = call.func
-        if not (
-            isinstance(fn, ast.Attribute) and fn.attr == "create_tensor" and isinstance(fn.value, ast.Name)
-        ):
-            continue
-        # Extract shape: first positional arg must be a list whose elements are
-        # literal ints or globals-resolved ints.
-        if not call.args or not isinstance(call.args[0], ast.List):
-            continue
-        shape_node = call.args[0]
-        resolved_shape: list[int] = []
-        skip = False
-        for elt in shape_node.elts:
+    def _resolve_shape(node: ast.expr | None) -> tuple[int, ...] | None:
+        if not isinstance(node, ast.List):
+            return None
+        dims: list[int] = []
+        for elt in node.elts:
             v = _resolve_int(elt)
             if v is None:
-                skip = True
-                break
-            resolved_shape.append(v)
-        if skip:
-            continue
-        shape = tuple(resolved_shape)
-        # Extract dtype from keyword arg dtype=pl.XXX
-        dtype_val = None
+                return None
+            dims.append(v)
+        return tuple(dims)
+
+    def _create_tensor_meta(call: ast.Call) -> TensorMeta | None:
+        shape = _resolve_shape(call.args[0]) if call.args else None
+        if shape is None:
+            return None
         for kw in call.keywords:
             if (
                 kw.arg == "dtype"
@@ -343,12 +351,105 @@ def _extract_create_tensor_metas(func: Any) -> dict[str, TensorMeta]:
                 and isinstance(kw.value.value, ast.Name)
             ):
                 dtype_val = dtype_map.get(kw.value.attr)
-                break
-        if dtype_val is None:
-            continue
-        result[var_name] = TensorMeta(shape=shape, dtype=dtype_val)
+                if dtype_val is not None:
+                    return TensorMeta(shape=shape, dtype=dtype_val)
+        return None
 
-    return result
+    def _slice_meta(call: ast.Call) -> TensorMeta | None:
+        # pl.slice(tensor, shape, offset, ...) — shape is positional index 1 or kw `shape=`.
+        src = call.args[0] if call.args else None
+        if not isinstance(src, ast.Name) or src.id not in local:
+            return None
+        src_meta = local[src.id]
+        shape_node = (
+            call.args[1]
+            if len(call.args) >= 2
+            else next((kw.value for kw in call.keywords if kw.arg == "shape"), None)
+        )
+        if not isinstance(shape_node, ast.List) or len(shape_node.elts) != len(src_meta.shape):
+            return None
+        dims: list[int] = []
+        for elt, parent_dim in zip(shape_node.elts, src_meta.shape):
+            v = _resolve_int(elt)
+            # A non-static slice dim (e.g. a runtime ``valid_len = pl.min(...)``)
+            # is bounded above by the parent dim — advertise that static bound,
+            # the way hand-written @pl.program code annotates a kernel that
+            # consumes a narrowed view (see examples/models/04_paged_attention.py).
+            dims.append(v if v is not None else parent_dim)
+        return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
+
+    # @pl.jit deps this body calls → (param_names, out_param_names).
+    dep_io: dict[str, tuple[list[str], list[str]]] = {}
+    for dep in _discover_deps(func):
+        try:
+            out_params, _, _ = _classify_params(_get_func_def(dep._func))
+        except OSError:
+            continue
+        dep_io[dep.__name__] = (dep._param_names(), out_params)
+
+    def _arg_name(e: ast.expr) -> str | None:
+        return e.id if isinstance(e, ast.Name) else None
+
+    def _target_names(target: ast.expr) -> list[str]:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, ast.Tuple) and all(isinstance(e, ast.Name) for e in target.elts):
+            return [e.id for e in target.elts if isinstance(e, ast.Name)]
+        return []
+
+    def _record_dep_result_metas(call: ast.Call, dep_name: str, target: ast.expr) -> None:
+        dep_params, out_params = dep_io[dep_name]
+        names = _target_names(target)
+        if not out_params or len(names) != len(out_params):
+            return
+        # Map dep parameter name → caller argument name (positional then keyword).
+        mapping: dict[str, str | None] = {}
+        for i, arg in enumerate(call.args):
+            if i < len(dep_params):
+                mapping[dep_params[i]] = _arg_name(arg)
+        for kw in call.keywords:
+            if kw.arg is not None:
+                mapping[kw.arg] = _arg_name(kw.value)
+        for vname, out_param in zip(names, out_params):
+            caller_arg = mapping.get(out_param)
+            if caller_arg is not None and caller_arg in local:
+                local[vname] = local[caller_arg]
+
+    def _walk(stmts: list[ast.stmt]) -> None:
+        for stmt in stmts:
+            # Descend into nested DSL scopes (for / if / with / while) first so
+            # producers always run before their (same-or-deeper) consumers.
+            for attr in ("body", "orelse", "finalbody"):
+                sub = getattr(stmt, attr, None)
+                if isinstance(sub, list):
+                    _walk(sub)
+            if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+                continue
+            call = stmt.value
+            if not isinstance(call, ast.Call):
+                continue
+            fn = call.func
+            target = stmt.targets[0]
+            if (
+                isinstance(fn, ast.Attribute)
+                and isinstance(fn.value, ast.Name)
+                and isinstance(target, ast.Name)
+            ):
+                if fn.attr == "create_tensor":
+                    meta = _create_tensor_meta(call)
+                    if meta is not None:
+                        local[target.id] = meta
+                    continue
+                if fn.attr == "slice":
+                    meta = _slice_meta(call)
+                    if meta is not None:
+                        local[target.id] = meta
+                    continue
+            if isinstance(fn, ast.Name) and fn.id in dep_io:
+                _record_dep_result_metas(call, fn.id, target)
+
+    _walk(func_def.body)
+    return local
 
 
 def _extract_call_args_for_dep(entry_func: Any, dep_name: str) -> list[tuple[str | None, str | None]] | None:
@@ -577,13 +678,16 @@ def _resolve_dep_call_metadata(
     The caller may be the entry function or another dep (transitive case);
     in either case we look up the (first) ``dep(...)`` call site in
     ``caller_func``'s body and apply the positional-or-keyword mapping.
-    Intermediate tensors created via ``pl.create_tensor`` in the caller are
-    folded into the metadata pool. Falls back to name-based matching when
-    call-site extraction fails.
+    Intermediate tensors produced in the caller — ``pl.create_tensor``,
+    ``pl.slice`` views, and the return values of other ``@pl.jit`` deps — are
+    folded into the metadata pool (see :func:`_extract_local_tensor_metas`).
+    Falls back to name-based matching when call-site extraction fails.
     """
     dep_param_names = dep._param_names()
     call_args = _extract_call_args_for_dep(caller_func, dep.__name__)
-    intermediate_metas = _extract_create_tensor_metas(caller_func)
+    intermediate_metas = _extract_local_tensor_metas(
+        caller_func, seed_meta=caller_tensor_meta, seed_scalars=caller_scalar_values
+    )
     all_tensor_meta = {**intermediate_metas, **caller_tensor_meta}
 
     dep_tensor_meta: dict[str, TensorMeta] = {}
