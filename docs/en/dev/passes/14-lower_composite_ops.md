@@ -1,10 +1,10 @@
-# LowerMathOps Pass
+# LowerCompositeOps Pass
 
 Decomposes `tile.sin` and `tile.cos` calls into compositions of primitive arithmetic tile ops, so codegen never has to emit a native trigonometric intrinsic.
 
 ## Overview
 
-`LowerMathOps` is a function-level pass that rewrites every `var = tile.sin(x)` or `var = tile.cos(x)` `AssignStmt` into a `SeqStmts` containing a fixed-shape primitive recipe: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
+`LowerCompositeOps` is a function-level pass that rewrites every `var = tile.sin(x)` or `var = tile.cos(x)` `AssignStmt` into a `SeqStmts` containing a fixed-shape primitive recipe: Cody-Waite range reduction (4-part π split) followed by a degree-9 odd Horner polynomial. The original target `Var` is preserved as the LHS of the final `AssignStmt`, so downstream uses keep the same name and identity.
 
 The pass is **FP32-only**. Non-FP32 inputs are rejected at op-construction time by the shared `DeduceTileFP32OnlyType` deducer (see `src/ir/op/tile_ops/unary.cpp:94`), so the lowering pass itself only sees well-typed FP32 operands and never has to fail on dtype.
 
@@ -16,11 +16,11 @@ The pass is **structural no-op** on programs that contain no `tile.sin` / `tile.
 
 **Invalidates**: nothing.
 
-The empty `PassProperties` contract (`kLowerMathOpsProperties` in `include/pypto/ir/transforms/pass_properties.h`) reflects that the lowering operates purely within the existing tile-op vocabulary — it neither establishes nor breaks any `IRProperty`.
+The empty `PassProperties` contract (`kLowerCompositeOpsProperties` in `include/pypto/ir/transforms/pass_properties.h`) reflects that the lowering operates purely within the existing tile-op vocabulary — it neither establishes nor breaks any `IRProperty`.
 
 ## When It Runs
 
-`LowerMathOps` is the **first entry of `tile_pto_passes`** in the `Default` pipeline (see `python/pypto/ir/pass_manager.py`), running immediately after `ConvertTensorToTileOps` (slot 12) and `OptimizeOrchTensors` (slot 13). At this point all tensor-level transcendental calls (`tensor.sin`, `tensor.cos`) have been rewritten to their tile equivalents (`tile.sin`, `tile.cos`) by the conversion registry, and the tile pipeline is about to start tile-shape canonicalisation. Lowering trig before `FlattenTileNdTo2D` keeps the decomposition independent of the 2D-flattening rules — every primitive op in the recipe has well-defined behaviour at any rank.
+`LowerCompositeOps` is the **first entry of `tile_pto_passes`** in the `Default` pipeline (see `python/pypto/ir/pass_manager.py`), running immediately after `ConvertTensorToTileOps` (slot 12) and `OptimizeOrchTensors` (slot 13). At this point all tensor-level transcendental calls (`tensor.sin`, `tensor.cos`) have been rewritten to their tile equivalents (`tile.sin`, `tile.cos`) by the conversion registry, and the tile pipeline is about to start tile-shape canonicalisation. Lowering trig before `FlattenTileNdTo2D` keeps the decomposition independent of the 2D-flattening rules — every primitive op in the recipe has well-defined behaviour at any rank.
 
 ## Algorithm
 
@@ -118,7 +118,7 @@ The same polynomial is used for both sin and cos: the cos path differs only in t
 
 ## Constants
 
-All constants are FP32 literals (transcribed from `src/ir/transforms/lower_math_ops_pass.cpp:46-61`, matching the framework reference at `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h`):
+All constants are FP32 literals (transcribed from `src/ir/transforms/lower_composite_ops_pass.cpp:46-61`, matching the framework reference at `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h`):
 
 | Symbol | C++ literal | Role |
 | ------ | ----------- | ---- |
@@ -150,14 +150,14 @@ All constants are FP32 literals (transcribed from `src/ir/transforms/lower_math_
 
 ## Numerical Properties
 
-- **Absolute error**: ≤ ~1e-5 over `|x| ≤ 2π · 1024` (validated against NumPy by `tests/ut/ir/transforms/test_lower_math_ops_numerical.py`). Inside one period, `max abs error` observed is ~1 ulp ≈ 1.19e-7.
+- **Absolute error**: ≤ ~1e-5 over `|x| ≤ 2π · 1024` (validated against NumPy by `tests/ut/ir/transforms/test_lower_composite_ops_numerical.py`). Inside one period, `max abs error` observed is ~1 ulp ≈ 1.19e-7.
 - **Range-reduction breakdown**: beyond `|x| ≈ 2^17`, the FP32 representation of `x` itself loses fractional precision, so range-reduction error dominates regardless of how many π-correction terms are used. The 4-part Cody-Waite split chosen here is the standard CANN/PyPTO recipe and matches the reference implementation's behaviour on every tested `x` magnitude.
 - **dtype**: FP32-only. FP16, BF16, and integer inputs are rejected at op-construction time (well before the pass runs) — see `tests/ut/ir/operators/test_tensor_ops.py` (tensor.sin/cos rejection) and `tests/ut/ir/operators/test_tile_ops.py` (tile.sin/cos rejection) for the rejection cases.
 - **NaN/Inf**: NaN inputs propagate to NaN output (the polynomial preserves NaN). Inf inputs produce indeterminate values because the range-reduction `k = round(x/π)` step overflows; this matches the documented `|x| ≤ 2^17` validity range.
 
 ## Idempotency
 
-Running `LowerMathOps` twice produces identical IR after the first run: the recipe emits only primitive ops (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.cast`) and the mutator only rewrites `tile.sin` / `tile.cos` `Call`s, so the second invocation visits the body and changes nothing. This is verified by `test_sin_lowering_is_idempotent` and `test_cos_lowering_is_idempotent` in `tests/ut/ir/transforms/test_lower_math_ops.py`.
+Running `LowerCompositeOps` twice produces identical IR after the first run: the recipe emits only primitive ops (`tile.muls`, `tile.adds`, `tile.add`, `tile.sub`, `tile.mul`, `tile.cast`) and the mutator only rewrites `tile.sin` / `tile.cos` `Call`s, so the second invocation visits the body and changes nothing. This is verified by `test_sin_lowering_is_idempotent` and `test_cos_lowering_is_idempotent` in `tests/ut/ir/transforms/test_lower_composite_ops.py`.
 
 ## Implementation Notes
 
@@ -173,4 +173,4 @@ The cast modes `RINT` (cos), `ROUND` (sin), `FLOOR` (sign), and `None` (int↔fl
 - **Reference implementation**: `gitcode.com/cann/pypto:framework/src/interface/tileop/vector/unary.h` — the upstream CANN/PyPTO recipe whose constants and op-sequence this pass mirrors verbatim.
 - **Op deducer**: `DeduceTileFP32OnlyType` in `src/ir/op/tile_ops/unary.cpp:94` — enforces FP32-only at op-construction time.
 - **Conversion registry**: `RegisterSimple("tensor.sin", "tile.sin")` and the cos counterpart in `src/ir/transforms/op_conversion_registry.cpp` — the upstream tensor-to-tile rewrite that produces the `tile.sin` / `tile.cos` calls this pass consumes.
-- **Tests**: `tests/ut/ir/transforms/test_lower_math_ops.py` (structural), `tests/ut/ir/transforms/test_lower_math_ops_numerical.py` (NumPy-reference numerical).
+- **Tests**: `tests/ut/ir/transforms/test_lower_composite_ops.py` (structural), `tests/ut/ir/transforms/test_lower_composite_ops_numerical.py` (NumPy-reference numerical).

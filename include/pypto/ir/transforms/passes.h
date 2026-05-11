@@ -524,18 +524,24 @@ Pass RunVerifier(const IRPropertySet& properties);
 Pass Simplify();
 
 /**
- * @brief Decompose ``tile.sin`` / ``tile.cos`` into primitive tile ops
- *        (``tile.muls``, ``tile.adds``, ``tile.add``, ``tile.sub``,
- *        ``tile.mul``, ``tile.cast``) using Cody-Waite range reduction with
- *        a 4-part π split and a degree-9 odd Horner polynomial in t².
+ * @brief Decompose composite tile ops into primitive tile ops.
  *
- * FP32-only — non-FP32 inputs are rejected at op-construction time by the
- * op deducer, never reaching this pass.
+ * Lowering rules are registered through ``CompositeLoweringRegistry``. Today
+ * the only composite ops handled are ``tile.sin`` / ``tile.cos``, which lower
+ * to ``tile.muls``, ``tile.adds``, ``tile.add``, ``tile.sub``, ``tile.mul``,
+ * and ``tile.cast`` using Cody-Waite range reduction with a 4-part π split
+ * and a degree-9 odd Horner polynomial in t². Future composite ops (softmax,
+ * gelu, layernorm, ...) can be added by registering new lowerings without
+ * touching the pass core.
  *
- * Idempotent: running the pass twice yields the same IR after the first run,
- * since no ``tile.sin`` / ``tile.cos`` remains.
+ * FP32-only for the trig rules — non-FP32 inputs are rejected at
+ * op-construction time by the op deducer, never reaching this pass.
+ *
+ * Idempotent: every lowering rule must emit only primitive ops that are not
+ * themselves registered with the registry, so running the pass twice yields
+ * the same IR after the first run.
  */
-Pass LowerMathOps();
+Pass LowerCompositeOps();
 
 /**
  * @brief Create a pass that flattens nested call expressions

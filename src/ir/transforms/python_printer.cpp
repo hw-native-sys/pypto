@@ -337,7 +337,7 @@ class IRPythonPrinter : public IRVisitor {
 // round-trip contract; fixing the parser side closes the loop. PyPTO's default
 // ConstFloat dtype is FP32, so this is the relevant precision for the vast
 // majority of constants the printer sees (e.g. Cody-Waite reduction constants
-// emitted by LowerMathOps). The default ``float_format`` (general / %g-style)
+// emitted by LowerCompositeOps). The default ``float_format`` (general / %g-style)
 // strips trailing zeros, so simple values like ``0.5`` still print as ``0.5``
 // rather than ``0.500000000``.
 std::string FormatFloatLiteral(double value) {

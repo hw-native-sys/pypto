@@ -71,7 +71,7 @@ struct PassProperties {
 | OutlineIncoreScopes | TypeChecked, SSAForm | SplitIncoreOrch | — |
 | OutlineClusterScopes | TypeChecked, SSAForm | ClusterOutlined | — |
 | ConvertTensorToTileOps | SplitIncoreOrch | IncoreTileOps | — |
-| LowerMathOps | — | — | — |
+| LowerCompositeOps | — | — | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
 | AutoTileMatmulL0 | SSAForm, IncoreTileOps, TileOps2D | SSAForm, IncoreTileOps, TileOps2D | — |
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
@@ -369,7 +369,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 
 `Default` 和 `DebugTileOptimization` 共享的 PTO tile 阶段顺序为：
 
-1. [`LowerMathOps`](14-lower_math_ops.md)
+1. [`LowerCompositeOps`](14-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md)
 3. [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)
 4. `InferTileMemorySpace`

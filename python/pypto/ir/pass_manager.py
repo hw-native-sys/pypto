@@ -141,7 +141,7 @@ class PassManager:
             ("OptimizeOrchTensors", lambda: passes.optimize_orch_tensors()),
         ]
         tile_pto_passes: list[PassSpec] = [
-            ("LowerMathOps", lambda: passes.lower_math_ops()),
+            ("LowerCompositeOps", lambda: passes.lower_composite_ops()),
             ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
             ("AutoTileMatmulL0", lambda: passes.auto_tile_matmul_l0()),
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),

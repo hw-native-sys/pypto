@@ -7,13 +7,13 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Tests for the LowerMathOps pass.
+"""Tests for the LowerCompositeOps pass.
 
-The LowerMathOps pass decomposes ``tile.sin`` / ``tile.cos`` into primitive
-arithmetic tile ops (Cody-Waite range reduction + degree-9 odd Horner
-polynomial). The decomposition uses only ``tile.muls``, ``tile.adds``,
-``tile.add``, ``tile.sub``, ``tile.mul`` and ``tile.cast`` — no sin/cos
-remain after the pass.
+The LowerCompositeOps pass decomposes composite tile ops into primitive
+arithmetic tile ops. Today it covers ``tile.sin`` / ``tile.cos`` (Cody-Waite
+range reduction + degree-9 odd Horner polynomial). The decomposition uses
+only ``tile.muls``, ``tile.adds``, ``tile.add``, ``tile.sub``, ``tile.mul``
+and ``tile.cast`` — no sin/cos remain after the pass.
 """
 
 import pypto.language as pl
@@ -28,7 +28,7 @@ def pass_verification_context():
 
     The parser stores ``ConstFloat.value_`` as a Python ``float`` (FP64) without
     snapping to the IR's ``FP32`` dtype, so the FP32-representable Cody-Waite
-    constants emitted by ``LowerMathOps`` (e.g. ``1/pi`` = ``0.31830988732818603515625``)
+    constants emitted by ``LowerCompositeOps`` (e.g. ``1/pi`` = ``0.31830988732818603515625``)
     cannot round-trip bit-exactly through print → parse → ``assert_structural_equal``.
     The C++ field-based equality compares the raw ``double`` values, which differ
     after the lossy text trip even though both represent the same FP32 number.
@@ -74,14 +74,14 @@ def _collect_op_names(prog) -> list[str]:
     return collector.op_names
 
 
-def test_lower_math_ops_pass_factory_exists():
+def test_lower_composite_ops_pass_factory_exists():
     """The factory returns a Pass instance with the expected name."""
-    p = passes.lower_math_ops()
+    p = passes.lower_composite_ops()
     assert p is not None
-    assert p.get_name() == "LowerMathOps"
+    assert p.get_name() == "LowerCompositeOps"
 
 
-def test_lower_math_ops_noop_on_no_trig():
+def test_lower_composite_ops_noop_on_no_trig():
     """Pass must leave programs without sin/cos unchanged."""
 
     @pl.program
@@ -103,7 +103,7 @@ def test_lower_math_ops_noop_on_no_trig():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    After = passes.lower_math_ops()(Before)
+    After = passes.lower_composite_ops()(Before)
     ir.assert_structural_equal(After, Before)
 
 
@@ -129,7 +129,7 @@ def test_sin_is_decomposed_to_primitives():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    after = passes.lower_math_ops()(Prog)
+    after = passes.lower_composite_ops()(Prog)
     op_names = set(_collect_op_names(after))
 
     # The lowering must remove tile.sin entirely.
@@ -170,7 +170,7 @@ def test_cos_is_decomposed_to_primitives():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    after = passes.lower_math_ops()(Prog)
+    after = passes.lower_composite_ops()(Prog)
     op_names = set(_collect_op_names(after))
 
     assert "tile.cos" not in op_names
@@ -203,8 +203,8 @@ def test_sin_lowering_is_idempotent():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    once = passes.lower_math_ops()(Prog)
-    twice = passes.lower_math_ops()(once)
+    once = passes.lower_composite_ops()(Prog)
+    twice = passes.lower_composite_ops()(once)
     ir.assert_structural_equal(twice, once)
 
 
@@ -230,8 +230,8 @@ def test_cos_lowering_is_idempotent():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    once = passes.lower_math_ops()(Prog)
-    twice = passes.lower_math_ops()(once)
+    once = passes.lower_composite_ops()(Prog)
+    twice = passes.lower_composite_ops()(once)
     ir.assert_structural_equal(twice, once)
 
 
@@ -259,7 +259,7 @@ def test_both_sin_and_cos_in_same_function():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    after = passes.lower_math_ops()(Prog)
+    after = passes.lower_composite_ops()(Prog)
     op_names = set(_collect_op_names(after))
 
     # Both sin and cos must be removed by the lowering.
@@ -293,7 +293,7 @@ def test_sin_in_return_stmt_is_decomposed():
     func = ir.Function("trig_return", [x_param], [tile_type], body, span, ir.FunctionType.InCore)
     prog = ir.Program([func], "test_program", span)
 
-    after = passes.lower_math_ops()(prog)
+    after = passes.lower_composite_ops()(prog)
     op_names = set(_collect_op_names(after))
 
     # The trig op embedded directly in ReturnStmt must be lowered.
@@ -314,7 +314,7 @@ def test_cos_in_return_stmt_is_decomposed():
     func = ir.Function("trig_return", [x_param], [tile_type], body, span, ir.FunctionType.InCore)
     prog = ir.Program([func], "test_program", span)
 
-    after = passes.lower_math_ops()(prog)
+    after = passes.lower_composite_ops()(prog)
     op_names = set(_collect_op_names(after))
 
     assert "tile.cos" not in op_names

@@ -68,20 +68,25 @@ constexpr int kCastModeRound = 2;
 constexpr int kCastModeFloor = 3;
 
 // ============================================================================
-// LowerMathOpsMutator
+// LowerCompositeOpsMutator
 //
 // Walks a function body, replaces every ``var = tile.sin(x)`` or
 // ``var = tile.cos(x)`` AssignStmt with a SeqStmts containing the primitive
 // decomposition (Cody-Waite range reduction + degree-9 odd Horner polynomial).
 // All other statements pass through to the base IRMutator, so the pass is a
-// structural no-op on programs that contain no sin/cos.
+// structural no-op on programs that contain no composite ops.
+//
+// Today the only composite ops handled are ``tile.sin`` / ``tile.cos``. The
+// pass is structured to host future composite-op lowerings (softmax, gelu,
+// layernorm, ...) — see ``CompositeLoweringRegistry`` for the registration
+// scheme.
 //
 // The lowering is idempotent: the resulting SeqStmts only contains primitive
 // tile ops (tile.muls, tile.adds, tile.add, tile.sub, tile.mul, tile.cast),
 // none of which the mutator rewrites. Running the pass twice yields the same
 // IR.
 // ============================================================================
-class LowerMathOpsMutator : public IRMutator {
+class LowerCompositeOpsMutator : public IRMutator {
  public:
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
     auto call = As<Call>(op->value_);
@@ -113,7 +118,7 @@ class LowerMathOpsMutator : public IRMutator {
     return std::make_shared<SeqStmts>(std::move(stmts), op->span_);
   }
 
-  // In SSA form (which LowerMathOps assumes), every Call is bound to an
+  // In SSA form (which LowerCompositeOps assumes), every Call is bound to an
   // AssignStmt and ReturnStmt::value_ holds only Vars — the override above is
   // the sole rewrite site. Standalone / pre-SSA invocations of the pass can
   // still surface a tile.sin / tile.cos Call directly inside ReturnStmt::value_
@@ -315,8 +320,8 @@ class LowerMathOpsMutator : public IRMutator {
   size_t temp_id_ = 0;
 };
 
-FunctionPtr TransformLowerMathOps(const FunctionPtr& func) {
-  LowerMathOpsMutator mutator;
+FunctionPtr TransformLowerCompositeOps(const FunctionPtr& func) {
+  LowerCompositeOpsMutator mutator;
   return mutator.VisitFunction(func);
 }
 
@@ -324,8 +329,8 @@ FunctionPtr TransformLowerMathOps(const FunctionPtr& func) {
 
 namespace pass {
 
-Pass LowerMathOps() {
-  return CreateFunctionPass(TransformLowerMathOps, "LowerMathOps", kLowerMathOpsProperties);
+Pass LowerCompositeOps() {
+  return CreateFunctionPass(TransformLowerCompositeOps, "LowerCompositeOps", kLowerCompositeOpsProperties);
 }
 
 }  // namespace pass

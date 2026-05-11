@@ -26,7 +26,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 11 | `11-outline_cluster_scopes.md` | 11th pass |
 | 12 | `12-convert_tensor_to_tile_ops.md` | 12th pass |
 | 13 | `13-optimize_orch_tensors.md` | 13th pass |
-| 14 | `14-lower_math_ops.md` | 14th pass (first tile_pto pass) |
+| 14 | `14-lower_composite_ops.md` | 14th pass (first tile_pto pass) |
 | 15 | `15-flatten_tile_nd_to_2d.md` | 15th pass |
 | 16 | `16-auto_tile_matmul_l0.md` | 16th pass |
 | 17 | `17-infer_tile_memory_space.md` | 17th pass |

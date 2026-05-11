@@ -7,10 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Numerical validation of the FP32 sin/cos recipe used by LowerMathOps.
+"""Numerical validation of the FP32 sin/cos recipe used by LowerCompositeOps.
 
 This test file mirrors the exact mathematical recipe implemented in
-``src/ir/transforms/lower_math_ops_pass.cpp`` (Cody-Waite range reduction +
+``src/ir/transforms/lower_composite_ops_pass.cpp`` (Cody-Waite range reduction +
 degree-9 odd Horner polynomial) in pure NumPy, then compares the result
 against ``numpy.sin`` / ``numpy.cos`` over the validated input range
 ``|x| <= 2*pi*1024``.
@@ -27,7 +27,7 @@ import pytest
 
 # ============================================================================
 # FP32 constants. These MUST match the values in
-# src/ir/transforms/lower_math_ops_pass.cpp digit-for-digit.
+# src/ir/transforms/lower_composite_ops_pass.cpp digit-for-digit.
 # ============================================================================
 PI_INV = np.float32(0.31830988732818603515625)
 PI_V2 = np.float32(3.140625)
@@ -48,7 +48,7 @@ R3 = np.float32(-1.666665792e-1)
 
 
 def lowered_sin(x: np.ndarray) -> np.ndarray:
-    """Pure-Python mirror of the sin lowering in lower_math_ops_pass.cpp."""
+    """Pure-Python mirror of the sin lowering in lower_composite_ops_pass.cpp."""
     x = x.astype(np.float32)
 
     # Range reduction: k = round(x / pi)
@@ -84,7 +84,7 @@ def lowered_sin(x: np.ndarray) -> np.ndarray:
 
 
 def lowered_cos(x: np.ndarray) -> np.ndarray:
-    """Pure-Python mirror of the cos lowering in lower_math_ops_pass.cpp.
+    """Pure-Python mirror of the cos lowering in lower_composite_ops_pass.cpp.
 
     Differs from sin in three places:
       1. k = rint(x * PI_INV + 0.5) (RINT mode = banker's rounding to even)

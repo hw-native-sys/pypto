@@ -479,16 +479,20 @@ def split_vector_kernel() -> Pass:
 def simplify() -> Pass:
     """Create a pass that simplifies expressions and statements using algebraic rules and bound analysis."""
 
-def lower_math_ops() -> Pass:
-    """Lower ``tile.sin`` / ``tile.cos`` to compositions of primitive arithmetic tile ops.
+def lower_composite_ops() -> Pass:
+    """Decompose composite tile ops into primitive arithmetic tile ops.
 
-    Decomposes trig ops using Cody-Waite range reduction (4-part π split) and a
-    degree-9 odd Horner polynomial in t², emitting only:
-    ``tile.muls``, ``tile.adds``, ``tile.add``, ``tile.sub``, ``tile.mul``, ``tile.cast``.
+    Lowering rules are registered through the composite-lowering registry; today
+    the only composite ops handled are ``tile.sin`` / ``tile.cos`` (Cody-Waite
+    range reduction with a 4-part π split and a degree-9 odd Horner polynomial
+    in t²). The trig rules emit only ``tile.muls``, ``tile.adds``, ``tile.add``,
+    ``tile.sub``, ``tile.mul``, ``tile.cast``.
 
-    FP32-only. Non-FP32 inputs are rejected at op-construction time.
+    FP32-only for the trig rules. Non-FP32 inputs are rejected at
+    op-construction time.
 
-    Idempotent: running twice yields the same IR after the first run.
+    Idempotent: every registered rule emits only primitives, so running the
+    pass twice yields the same IR after the first run.
     """
 
 def derive_call_directions() -> Pass:
@@ -704,7 +708,7 @@ __all__ = [
     "inject_gm_pipe_buffer",
     "split_vector_kernel",
     "simplify",
-    "lower_math_ops",
+    "lower_composite_ops",
     "flatten_call_expr",
     "inline_functions",
     "normalize_stmt_structure",
