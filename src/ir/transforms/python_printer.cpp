@@ -567,8 +567,12 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         deps_to_print = edges;
         if (k == kAttrManualDepEdges) break;  // prefer resolved over user-supplied
       }
+      // Zero-arg self.fn() needs no leading comma before the first kwarg, so
+      // gate every kwarg separator on a shared flag rather than hard-coding
+      // ", " — otherwise self.fn(, deps=[...]) breaks the round-trip.
+      bool need_kwarg_comma = !op->args_.empty();
       if (deps_to_print) {
-        stream_ << ", deps=[";
+        stream_ << (need_kwarg_comma ? ", " : "") << "deps=[";
         for (size_t i = 0; i < deps_to_print->size(); ++i) {
           if (i > 0) stream_ << ", ";
           if ((*deps_to_print)[i]) {
@@ -576,6 +580,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
           }
         }
         stream_ << "]";
+        need_kwarg_comma = true;
       }
 
       // When ``attrs_["arg_directions"]`` is populated (post DeriveCallDirections),
@@ -589,12 +594,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         INTERNAL_CHECK_SPAN(call_arg_directions.size() == op->args_.size(), op->span_)
             << "Call arg_directions size (" << call_arg_directions.size() << ") must match args size ("
             << op->args_.size() << ")";
-        stream_ << ", attrs={\"arg_directions\": [";
+        stream_ << (need_kwarg_comma ? ", " : "") << "attrs={\"arg_directions\": [";
         for (size_t i = 0; i < call_arg_directions.size(); ++i) {
           if (i > 0) stream_ << ", ";
           stream_ << prefix_ << ".adir." << ArgDirectionToDslName(call_arg_directions[i]);
         }
         stream_ << "]}";
+        need_kwarg_comma = true;
       }
 
       stream_ << ")";

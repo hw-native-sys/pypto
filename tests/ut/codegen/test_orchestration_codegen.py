@@ -3199,6 +3199,55 @@ class TestManualScopeCodegen:
         with pytest.raises(Exception, match="statically-known trip count"):
             _generate_orch_code(transformed)
 
+    def test_manual_scope_parallel_exceeds_explicit_dep_cap_rejected(self):
+        """``pl.parallel(N)`` with ``N > kMaxExplicitDepsPerTask`` must error.
+
+        Each downstream task receives one ``add_dep`` per parallel slot, so a
+        trip count above ``PTO2_MAX_EXPLICIT_DEPS=16`` overflows the runtime's
+        fixed-size per-task dep store. Codegen surfaces this as a user-facing
+        CHECK rather than emitting code that would fail at runtime.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ROWS, COLS = 128, 128
+        TILE_R, TILE_C = 32, 32
+        OVER_CAP = 17  # one past kMaxExplicitDepsPerTask = 16
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(x, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                with pl.manual_scope():
+                    for i in pl.range(4):
+                        row: pl.Scalar[pl.INDEX] = i * TILE_R
+                        for j in pl.parallel(OVER_CAP):
+                            col: pl.Scalar[pl.INDEX] = j * TILE_C
+                            out = self.kern(x, out, row, col, deps=[out])
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        with pytest.raises(Exception, match="PTO2_MAX_EXPLICIT_DEPS"):
+            _generate_orch_code(transformed)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

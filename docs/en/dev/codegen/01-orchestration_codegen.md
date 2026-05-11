@@ -429,6 +429,7 @@ codegen detects this shape (Parallel kind + TaskId iter_arg) and:
 3. On every downstream consumer whose `manual_dep_edges` references this
    iter_arg, expands the single dep entry into N guarded `add_dep` calls,
    one per slot:
+
    ```cpp
    for each k in [0..N):
        if (arr[k].is_valid()) { params.add_dep(arr[k]); }
