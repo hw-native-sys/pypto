@@ -78,9 +78,31 @@ def _wrap_arg(arg: Any) -> Any:
 
 
 def _unwrap_result(value: Any) -> Any:
-    """Unwrap a DSL return value to an ``ir.Expr`` for the parser to consume."""
+    """Unwrap a DSL return value to an ``ir.Expr`` for the parser to consume.
+
+    Multi-output DSL wrappers (e.g. ``pl.tile.gather_compare``) return a
+    ``tuple`` of DSL objects whose underlying expressions are
+    ``TupleGetItemExpr(call, 0)``, ``TupleGetItemExpr(call, 1)``, ... all
+    referencing the same tuple-typed Call. The parser's tuple-unpacking path
+    expects the bare Call so it can rebind ``_tuple_tmp`` and re-emit the
+    ``TupleGetItemExpr``s; here we recover that Call.
+    """
     if isinstance(value, (Tensor, Tile, Scalar, Array)):
         return value.unwrap()
+    if isinstance(value, tuple) and value and all(isinstance(v, (Tensor, Tile, Scalar)) for v in value):
+        unwrapped = [v.unwrap() for v in value]
+        common_call: ir.Expr | None = None
+        for i, expr in enumerate(unwrapped):
+            if not isinstance(expr, ir.TupleGetItemExpr) or expr.index != i:
+                common_call = None
+                break
+            if common_call is None:
+                common_call = expr.tuple
+            elif common_call is not expr.tuple:
+                common_call = None
+                break
+        if common_call is not None:
+            return common_call
     return value
 
 

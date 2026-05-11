@@ -124,13 +124,15 @@ __all__ = [
     "tpop_from_aiv",
     "sort32",
     "gather",
+    "gather_mask",
+    "gather_compare",
     "mscatter",
     "MaskPattern",
     "mrgsort",
 ]
 
 from pypto.ir.op import tile_ops as _ir_ops
-from pypto.ir.utils import _get_span_or_capture
+from pypto.ir.utils import _get_span_or_capture, _normalize_expr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TileLayout
@@ -1879,67 +1881,118 @@ def sort32(src: Tile, idx: Tile) -> Tile:
     return Tile(expr=call_expr)
 
 
-@overload
-def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile: ...
+def gather(src: Tile, indices: Tile, tmp: Tile) -> Tile:
+    """Gather elements from src tile by per-element indices (index form).
 
-
-@overload
-def gather(src: Tile, *, mask_pattern: int, output_dtype: int | DataType | None = None) -> Tile: ...
-
-
-def gather(
-    src: Tile,
-    indices: Tile | None = None,
-    tmp: Tile | None = None,
-    *,
-    mask_pattern: int | None = None,
-    output_dtype: int | DataType | None = None,
-) -> Tile:
-    """Gather elements from src tile, using either indices or a fixed mask pattern.
-
-    Index form: dst[i, j] = src[indices[i, j]]. Requires indices and tmp workspace.
-    Mask form: selects elements by a hardware mask pattern. No indices or tmp needed.
+    Computes ``dst[i, j] = src[indices[i, j]]``. Maps to PTOAS ``pto.tgather``
+    index form. For the hardware mask-pattern variant, use :func:`gather_mask`.
 
     Args:
         src: Source tile (FP16, FP32, INT16, or INT32)
-        indices: Index tile (INT32). Required for index form.
-        tmp: Temporary workspace tile (INT32). Required for index form.
-        mask_pattern: Mask pattern selector (1-7), keyword-only. Use for mask form.
-            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
-        output_dtype: Optional output dtype for mask form only. When provided, the result
-            tile has this dtype instead of src's dtype (bit reinterpretation, no conversion).
-            Hardware requires sizeof(dst_dtype) == sizeof(src_dtype). Example: use
-            output_dtype=pl.UINT32 to extract sort32 index bits from FP32 memory.
+        indices: Index tile (INT32) — selects which elements of ``src`` to gather
+        tmp: Temporary workspace tile (INT32) required by the hardware
 
     Returns:
-        Tile with gathered elements
-
-    Examples:
-        # Index form
-        out = gather(src, indices, tmp)
-
-        # Mask form (same dtype)
-        out = gather(src, mask_pattern=1)
-
-        # Mask form with cross-type output (FP32 bits → UINT32)
-        out = gather(src, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+        Tile with gathered elements (same dtype as ``src``)
     """
-    if mask_pattern is not None:
-        if indices is not None or tmp is not None:
-            raise ValueError(
-                "gather() mask form (mask_pattern=...) and index form (indices, tmp) "
-                "are mutually exclusive; do not pass indices or tmp with mask_pattern"
-            )
-        call_expr = _ir_ops.gather(src.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
-        return Tile(expr=call_expr)
-    if output_dtype is not None:
-        raise ValueError("output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>")
-    if indices is None or tmp is None:
-        raise ValueError(
-            "gather() requires either (indices, tmp) for index form, or mask_pattern=<int> for mask form"
-        )
     call_expr = _ir_ops.gather(src.unwrap(), indices.unwrap(), tmp.unwrap())
     return Tile(expr=call_expr)
+
+
+def gather_mask(
+    src: Tile,
+    mask_pattern: int,
+    *,
+    output_dtype: int | DataType | None = None,
+) -> Tile:
+    """Gather elements from src tile by a fixed hardware mask pattern (mask form).
+
+    Selects elements according to a stride/mask pattern baked into the hardware.
+    For the per-element indices variant, use :func:`gather`.
+
+    Args:
+        src: Source tile (FP16, FP32, INT16, or INT32)
+        mask_pattern: Mask pattern selector (1-7), see :class:`MaskPattern`.
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        output_dtype: Optional output dtype. When provided, the result tile has
+            this dtype instead of ``src``'s dtype (bit reinterpretation, no
+            conversion). Hardware requires ``sizeof(dst_dtype) == sizeof(src_dtype)``.
+            Example: ``output_dtype=pl.UINT32`` to extract sort32 index bits from
+            FP32 memory.
+
+    Returns:
+        Tile with mask-selected elements
+
+    Examples:
+        # Same dtype
+        out = gather_mask(src, mask_pattern=pl.tile.MaskPattern.P0101)
+
+        # Cross-type output (FP32 bits → UINT32)
+        out = gather_mask(src, pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+    """
+    call_expr = _ir_ops.gather_mask(src.unwrap(), mask_pattern, output_dtype=output_dtype)
+    return Tile(expr=call_expr)
+
+
+def gather_compare(
+    src: Tile,
+    kvalue: int | Scalar | Expr,
+    tmp: Tile,
+    *,
+    cmp_mode: str | int = "eq",
+    offset: int = 0,
+    out_cols: int,
+    count_dtype: int | DataType | None = None,
+) -> tuple[Tile, Tile]:
+    """Compare-form gather (tile-level): produce (dst, cdst) — gathered indices
+    and per-row match counts.
+
+    Maps to PTOAS ``pto.tgather`` compare-form. Hardware DPS allocation of
+    dst/cdst is handled downstream — only the three inputs (src, kvalue, tmp)
+    appear at this surface.
+
+    DSL form (inside ``@pl.function``)::
+
+        dst, cdst = pl.tile.gather_compare(src, kvalue, tmp,
+                                            cmp_mode="eq", offset=0,
+                                            out_cols=K)
+
+    The ``a, b = call(...)`` Python tuple unpack is desugared by the parser
+    into ``_tuple = call; a = _tuple[0]; b = _tuple[1]``. The parser
+    consumes the underlying tuple-typed :class:`ir.Call` returned by
+    :func:`pypto.ir.op.tile_ops.gather_compare`; the ``(Tile, Tile)`` split
+    below only runs in interactive Python contexts.
+
+    Args:
+        src: Source tile (FP16/FP32/INT16/INT32/UINT16/UINT32, 2D).
+        kvalue: Scalar threshold (UINT16 or UINT32; applied to every row).
+        tmp: Workspace tile (UINT8) sized for the codegen kernel.
+        cmp_mode: ``"eq"`` / ``"ne"`` / ``"lt"`` / ``"le"`` / ``"gt"`` /
+            ``"ge"`` or int ``0..5``. Defaults to ``"eq"``.
+        offset: Starting index offset (default 0).
+        out_cols: Output column count per row for ``dst`` (positive int, required).
+        count_dtype: Per-row count dtype, INT32 or UINT32; defaults to INT32.
+
+    Returns:
+        ``(dst, cdst)`` where ``dst`` is a Tile ``[rows, out_cols]`` of INT32
+        gathered indices and ``cdst`` is a Tile ``[rows, 1]`` of ``count_dtype``
+        per-row match counts.
+    """
+    kv_expr = kvalue.unwrap() if isinstance(kvalue, Scalar) else _normalize_expr(kvalue)
+    call_expr = _ir_ops.gather_compare(
+        src.unwrap(),
+        kv_expr,
+        tmp.unwrap(),
+        cmp_mode=cmp_mode,
+        offset=offset,
+        out_cols=out_cols,
+        count_dtype=count_dtype,
+    )
+    span = call_expr.span
+    return (
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+        Tile(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+    )
 
 
 def mscatter(src: Tile, idx: Tile, output_tensor: Tensor) -> Tensor:

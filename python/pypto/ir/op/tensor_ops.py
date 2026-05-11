@@ -18,6 +18,7 @@ from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PadValue, Scal
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 from ._pad_value import normalize_pad_value
+from .tile_ops import resolve_gather_compare_cmp_mode
 
 
 def create(
@@ -1339,59 +1340,102 @@ def mrgsort_format2(*args: Expr, exhausted: bool = False, span: Span | None = No
 # ============================================================================
 
 
-def gather(
+def gather(  # noqa: PLR0913
     input: Expr,
     dim: int | None = None,
     index: Expr | None = None,
     *,
     mask_pattern: int | None = None,
     output_dtype: int | DataType | None = None,
+    kvalue: Expr | None = None,
+    cmp_mode: str | int | None = None,
+    out_cols: int | None = None,
+    offset: int = 0,
+    count_dtype: int | DataType | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Gather elements of ``input`` (tensor-level) — index form or mask-pattern form.
+    """Gather elements of ``input`` (tensor-level) — index / mask / compare form.
 
-    Index form (``dim`` + ``index``): output[b, k] = input[b, index[b, k]].
+    The tensor layer keeps a single unified ``gather`` entry point. Based on
+    the arguments, it lowers to one of three C++ ops:
+
+    Index form (``dim`` + ``index``) → ``tensor.gather``::
+
+        output[b, k] = input[b, index[b, k]]
+
         MVP limitation: only rank-2 inputs with ``dim == -1`` (or ``rank - 1``).
         ``index`` must be an INT32 tensor whose shape matches ``input`` on every
         axis except ``dim``; output shape == ``index.shape``, dtype == ``input.dtype``.
 
-    Mask form (``mask_pattern=<int>``): selects columns of each row by a fixed
-        hardware mask. Last-dim shrinks by 2 (P0101/P1010) or 4 (P0001..P1000),
-        or stays the same for P1111. Optional ``output_dtype`` keyword reinterprets
-        result bits to a same-bit-width dtype (e.g. FP32 → UINT32).
+    Mask form (``mask_pattern=<int>``) → ``tensor.gather_mask``: selects columns
+        of each row by a fixed hardware mask. Last-dim shrinks by 2 (P0101/P1010)
+        or 4 (P0001..P1000), or stays the same for P1111. Optional ``output_dtype``
+        keyword reinterprets result bits to a same-bit-width dtype (e.g. FP32 →
+        UINT32).
+
+    Compare form (``kvalue`` + ``cmp_mode`` + ``out_cols``) → ``tensor.gather_compare``:
+        per-row threshold compare. Returns a tuple-typed Call ``(dst, cdst)`` with
+        ``dst : [rows, out_cols] INT32`` (gathered indices) and ``cdst : [rows]
+        count_dtype`` (per-row match count).
 
     Args:
-        input: Source tensor (TensorType, FP16/FP32/INT16/INT32).
+        input: Source tensor (TensorType).
         dim: (index form) Axis along which to gather. Only ``-1`` / ``rank - 1`` accepted in MVP.
         index: (index form) Index tensor (TensorType, INT32) with the same rank as ``input``.
         mask_pattern: (mask form, keyword-only) Mask pattern selector in [1, 7].
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
         output_dtype: (mask form, keyword-only) Optional output dtype with the same
             bit width as ``input.dtype``.
+        kvalue: (compare form, keyword-only) Scalar threshold (UINT16/UINT32).
+        cmp_mode: (compare form, keyword-only) ``"eq"``/``"ne"``/``"lt"``/``"le"``/
+            ``"gt"``/``"ge"`` or int 0..5.
+        out_cols: (compare form, keyword-only) Output column count per row (positive int).
+        offset: (compare form, keyword-only) Starting index offset (default 0).
+        count_dtype: (compare form, keyword-only) Per-row count dtype, INT32 or UINT32.
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:
         Call expression with the appropriate result type for the chosen form.
+        Compare form returns a TupleType-result Call.
     """
     actual_span = _get_span_or_capture(span)
-    if mask_pattern is not None:
-        if dim is not None or index is not None:
-            raise ValueError(
-                "gather() mask form (mask_pattern=...) and index form (dim, index) "
-                "are mutually exclusive; do not pass dim or index with mask_pattern"
-            )
+    is_index = dim is not None or index is not None
+    is_mask = mask_pattern is not None
+    is_compare = kvalue is not None or cmp_mode is not None or out_cols is not None
+    if int(is_index) + int(is_mask) + int(is_compare) > 1:
+        raise ValueError(
+            "gather() index form (dim, index), mask form (mask_pattern=...) and "
+            "compare form (kvalue=..., cmp_mode=..., out_cols=...) are mutually "
+            "exclusive; do not mix kwargs from different forms"
+        )
+    if is_mask:
         kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
         if output_dtype is not None:
             kwargs["output_dtype"] = output_dtype
         return _ir_core.create_op_call("tensor.gather_mask", [input], kwargs, actual_span)
-    if dim is None or index is None:
+    if is_compare:
+        if kvalue is None or cmp_mode is None or out_cols is None:
+            raise ValueError("gather() compare form requires kvalue, cmp_mode and out_cols all set")
+        if output_dtype is not None:
+            raise ValueError("gather() output_dtype is only valid for the mask form; use mask_pattern=<int>")
+        cmp_kwargs: dict[str, Any] = {
+            "cmp_mode": resolve_gather_compare_cmp_mode(cmp_mode),
+            "offset": offset,
+            "out_cols": out_cols,
+        }
+        if count_dtype is not None:
+            cmp_kwargs["count_dtype"] = count_dtype
+        return _ir_core.create_op_call("tensor.gather_compare", [input, kvalue], cmp_kwargs, actual_span)
+    if not is_index:
         raise ValueError(
-            "gather() requires either (dim, index) for index form, or mask_pattern=<int> for mask form"
+            "gather() requires (dim, index) for index form, mask_pattern=<int> for mask form, "
+            "or (kvalue=..., cmp_mode=..., out_cols=...) for compare form"
         )
+    if dim is None or index is None:
+        raise ValueError("gather() index form requires both dim and index")
     if output_dtype is not None:
         raise ValueError("gather() output_dtype is only valid for the mask form; use mask_pattern=<int>")
-    kwargs = {"dim": dim}
-    return _ir_core.create_op_call("tensor.gather", [input, index], kwargs, actual_span)
+    return _ir_core.create_op_call("tensor.gather", [input, index], {"dim": dim}, actual_span)
 
 
 def gather_mask(
@@ -1400,9 +1444,41 @@ def gather_mask(
     output_dtype: int | DataType | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Gather elements of ``input`` (tensor-level) by mask pattern. Used by the parser
-    for roundtrip fidelity.
+    """Parser-roundtrip entry for the mask form (printed op name ``tensor.gather_mask``).
 
-    Prefer ``gather(input, mask_pattern=...)`` in user code.
+    The tensor DSL layer only exposes the unified ``gather``; this IR-builder
+    function exists so that round-trip parsing of printed ``pl.tensor.gather_mask(...)``
+    calls (which never happen in user code, but can appear in pass dumps) still
+    works via ``_dispatch_ir_builder_op``. Prefer ``gather(input, mask_pattern=...)``
+    in user code.
     """
     return gather(input, mask_pattern=mask_pattern, output_dtype=output_dtype, span=span)
+
+
+def gather_compare(
+    input: Expr,
+    kvalue: Expr,
+    *,
+    cmp_mode: str | int,
+    offset: int = 0,
+    out_cols: int,
+    count_dtype: int | DataType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Parser-roundtrip entry for the compare form (printed op name ``tensor.gather_compare``).
+
+    The tensor DSL layer only exposes the unified ``gather``; this IR-builder
+    function exists so that round-trip parsing of printed ``pl.tensor.gather_compare(...)``
+    calls (which never happen in user code, but can appear in pass dumps) still
+    works via ``_dispatch_ir_builder_op``. Prefer
+    ``gather(input, kvalue=..., cmp_mode=..., out_cols=...)`` in user code.
+    """
+    return gather(
+        input,
+        kvalue=kvalue,
+        cmp_mode=cmp_mode,
+        offset=offset,
+        out_cols=out_cols,
+        count_dtype=count_dtype,
+        span=span,
+    )

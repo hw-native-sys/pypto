@@ -16,6 +16,8 @@
  * This file implements gather operators:
  * - tile.gather: index-based element gathering (pto.tgather index form)
  * - tile.gather_mask: mask-pattern element selection (pto.tgather mask form)
+ * - tile.gather_compare: compare-form element gathering, two outputs
+ *   (pto.tgather compare form, returns TupleType{dst, cdst})
  */
 
 #include <any>
@@ -200,6 +202,150 @@ REGISTER_OP("tile.gather_mask")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileGatherMaskType(args, kwargs, "tile.gather_mask");
+    });
+
+// ============================================================================
+// Gather Compare: compare-form of pto.tgather with two destination outputs.
+// ============================================================================
+//
+// Args (3 inputs):
+//   src    : source tile (FP16/FP32/INT16/INT32/UINT16/UINT32)
+//   kvalue : scalar threshold (ScalarType, UINT16 or UINT32 — applied to
+//            every row of src)
+//   tmp    : workspace tile (UINT8, sized by codegen kernel)
+//
+// Attrs:
+//   cmp_mode    : int in [0, 5] matching {eq, ne, lt, le, gt, ge}
+//   offset      : int starting index offset
+//   out_cols    : int — output column count per row for dst
+//   count_dtype : DataType — INT32 or UINT32 (defaults to INT32 in caller)
+//
+// Output: TupleType{ TileType_dst, TileType_cdst } (2 outputs)
+//   dst  shape  = [rows, out_cols], dtype = INT32 (gathered indices)
+//   cdst shape  = [rows, 1], dtype = count_dtype (per-row match count)
+//
+// `cdst` is kept 2D (`[rows, 1]`) to match the existing reduction-output
+// convention (`tile.row_sum`/`tile.row_max` also emit `[rows, 1]`) and to
+// satisfy the PTO `tile.store` codegen requirement that tile valid_shape
+// be 2D.
+//
+// The DPS buffers backing dst/cdst are allocated by the downstream
+// init_memref / memory_reuse passes from the deduced TupleType, so this
+// op stays purely 3-input-2-output at the IR/DSL surface.
+//
+// The DSL form `d, c = pl.tile.gather_compare(src, kvalue, tmp, ...)` is
+// unpacked by the parser into `tmp_tuple = call; d = tmp_tuple[0];
+// c = tmp_tuple[1]`, so callers receive a (Tile, Tile) pair.
+
+static TypePtr DeduceTileGatherCompareType(const std::vector<ExprPtr>& args,
+                                           const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                           const std::string& op_name) {
+  CHECK(args.size() == 3) << "The operator " << op_name
+                          << " requires 3 arguments (src, kvalue, tmp), but got " << args.size();
+
+  auto src_type = As<TileType>(args[0]->GetType());
+  CHECK(src_type) << "The operator " << op_name << " requires src to be a TileType, but got "
+                  << args[0]->GetType()->TypeName();
+  CHECK(src_type->dtype_ == DataType::FP16 || src_type->dtype_ == DataType::FP32 ||
+        src_type->dtype_ == DataType::INT16 || src_type->dtype_ == DataType::INT32 ||
+        src_type->dtype_ == DataType::UINT16 || src_type->dtype_ == DataType::UINT32)
+      << "The operator " << op_name
+      << " requires src dtype in {FP16, FP32, INT16, INT32, UINT16, UINT32}, but got "
+      << src_type->dtype_.ToString();
+  CHECK(src_type->shape_.size() == 2)
+      << "The operator " << op_name << " requires 2D src, but got rank " << src_type->shape_.size();
+
+  auto kv_type = As<ScalarType>(args[1]->GetType());
+  CHECK(kv_type) << "The operator " << op_name << " requires kvalue to be a ScalarType, but got "
+                 << args[1]->GetType()->TypeName();
+  CHECK(kv_type->dtype_ == src_type->dtype_)
+      << "The operator " << op_name << " requires kvalue dtype equal to src dtype "
+      << src_type->dtype_.ToString() << " , but got " << kv_type->dtype_.ToString();
+
+  auto tmp_type = As<TileType>(args[2]->GetType());
+  CHECK(tmp_type) << "The operator " << op_name << " requires tmp to be a TileType, but got "
+                  << args[2]->GetType()->TypeName();
+
+  int cmp_mode = -1;
+  bool cmp_mode_seen = false;
+  int out_cols = -1;
+  bool out_cols_seen = false;
+  DataType count_dtype = DataType::INT32;
+  for (const auto& [key, value] : kwargs) {
+    if (key == "cmp_mode") {
+      cmp_mode = AnyCast<int>(value, "kwarg key: cmp_mode");
+      cmp_mode_seen = true;
+    } else if (key == "out_cols") {
+      out_cols = AnyCast<int>(value, "kwarg key: out_cols");
+      out_cols_seen = true;
+    } else if (key == "count_dtype") {
+      if (value.type() == typeid(DataType)) {
+        count_dtype = AnyCast<DataType>(value, "kwarg key: count_dtype");
+      } else {
+        count_dtype = static_cast<DataType>(AnyCast<int>(value, "kwarg key: count_dtype"));
+      }
+    }
+  }
+  CHECK(cmp_mode_seen) << "The operator " << op_name << " requires a 'cmp_mode' keyword argument";
+  CHECK(cmp_mode >= 0 && cmp_mode <= 5)
+      << "The operator " << op_name << " requires cmp_mode in [0, 5] (eq/ne/lt/le/gt/ge), but got "
+      << cmp_mode;
+  CHECK(out_cols_seen) << "The operator " << op_name << " requires an 'out_cols' keyword argument";
+  CHECK(out_cols > 0) << "The operator " << op_name << " requires out_cols > 0, but got " << out_cols;
+  CHECK(count_dtype == DataType::INT32 || count_dtype == DataType::UINT32)
+      << "The operator " << op_name << " requires count_dtype to be INT32 or UINT32, but got "
+      << count_dtype.ToString();
+
+  // Deduce dst/cdst tile types from src.shape[0] (rows) + attrs.
+  const ExprPtr& rows_expr = src_type->shape_[0];
+  auto out_cols_expr = std::make_shared<ConstInt>(out_cols, DataType::INDEX, Span::unknown());
+
+  TileView dst_view;
+  dst_view.valid_shape = {rows_expr, out_cols_expr};
+  InheritTileViewLayout(dst_view, src_type);
+  std::vector<ExprPtr> dst_shape = {rows_expr, out_cols_expr};
+  auto dst_type = std::make_shared<TileType>(dst_shape, DataType::INT32, std::nullopt, dst_view);
+
+  // cdst is shaped as [1, rows] (one count per src-row, laid out as a single
+  // row of `rows` int32s) — required by the PTOAS pto.tgather verifier
+  // (cdst must use row_major blayout) AND the PTO TileConfig 32-byte
+  // alignment static_assert (row_major + cols*sizeof(int) % 32 == 0).
+  // The compare-form ISA writes `cdstPtr + i` for i in [0, srcValidRow),
+  // so the rows-many counts must be physically contiguous, which the
+  // [1, rows] row_major layout provides.
+  auto one_expr = std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown());
+  TileView cdst_view;
+  cdst_view.valid_shape = {one_expr, rows_expr};
+  cdst_view.blayout = TileLayout::row_major;
+  std::vector<ExprPtr> cdst_shape = {one_expr, rows_expr};
+  auto cdst_type = std::make_shared<TileType>(cdst_shape, count_dtype, std::nullopt, cdst_view);
+
+  std::vector<TypePtr> elements{dst_type, cdst_type};
+  return std::make_shared<TupleType>(std::move(elements));
+}
+
+REGISTER_OP("tile.gather_compare")
+    .set_op_category("TileOp")
+    .set_description(
+        "Compare-form gather: scan src per-row against kvalue, produce gathered indices "
+        "tile (dst) and per-row match count tile (cdst). Maps to pto.tgather compare-form. "
+        "Returns TupleType{dst, cdst}.")
+    .add_argument("src", "Source tile (FP16/FP32/INT16/INT32/UINT16/UINT32, 2D)")
+    .add_argument("kvalue", "Scalar threshold (ScalarType, UINT16 or UINT32; applied per row)")
+    .add_argument("tmp", "Workspace tile (UINT8)")
+    .set_attr<int>("cmp_mode")
+    .set_attr<int>("offset")
+    .set_attr<int>("out_cols")
+    .set_attr<DataType>("count_dtype")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(2, MemorySpace::Vec)
+    // Output is a TupleType{TileType_dst, TileType_cdst}. set_output_memory applies
+    // Vec to every TileType element inside the TupleType.
+    .set_output_memory(MemorySpace::Vec)
+    .not_inplace_safe()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileGatherCompareType(args, kwargs, "tile.gather_compare");
     });
 
 }  // namespace ir

@@ -22,6 +22,7 @@
 #include "pypto/backend/common/pto_ops_common.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -40,8 +41,10 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
@@ -868,6 +871,72 @@ static std::string MakeGatherMaskCodegenPTO(const CallPtr& op, codegen::CodegenB
     oss << " : " << dst_type;
   }
   oss << ")";
+
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper for tile.gather_compare (TGATHER compare-form, two outputs):
+//   pto.tgather ins(src, kvalue, tmp {cmpMode = #pto<cmp eq>, offset = N : i32}
+//                   : src_ty, kv_ty, tmp_ty)
+//               outs(dst, cdst : dst_ty, cdst_ty)
+//
+// Op surface: 3 inputs / TupleType{dst_TileType, cdst_TileType} output. DPS
+// dst/cdst buffers are bound by downstream `<element> = tuple_var[i]`
+// AssignStmts (parser desugaring of `dst, cdst = ...`). Because the framework
+// only pre-binds `fs_.current_result_*` for TileType LHS, multi-output ops
+// must resolve their own DPS targets — done via ResolveTupleResultElements.
+static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "tile.gather_compare requires 3 arguments (src, kvalue, tmp), but got "
+                               << op->args_.size();
+
+  ir::VarPtr tuple_var = codegen.GetCurrentResultVar();
+  INTERNAL_CHECK_SPAN(tuple_var, op->span_)
+      << "Internal error: tile.gather_compare codegen requires current_result_var";
+
+  auto element_vars = codegen.ResolveTupleResultElements(tuple_var, /*arity=*/2);
+  INTERNAL_CHECK_SPAN(element_vars[0] && element_vars[1], op->span_)
+      << "Internal error: tile.gather_compare expects two TupleGetItemExpr consumers (dst, cdst), got "
+      << (element_vars[0] ? "dst-yes" : "dst-no") << "/" << (element_vars[1] ? "cdst-yes" : "cdst-no");
+
+  // Eagerly emit alloc_tile for dst/cdst; the later `dst = tuple_var[i]`
+  // AssignStmts skip re-emission via fs_.emitted_tile_alloc_vars.
+  std::array<std::shared_ptr<const ir::TileType>, 2> elem_types;
+  for (size_t i = 0; i < 2; ++i) {
+    elem_types[i] = ir::GetTileTypeWithMemRef(element_vars[i]->GetType());
+    INTERNAL_CHECK_SPAN(elem_types[i], element_vars[i]->span_)
+        << "Internal error: tile.gather_compare element var " << i
+        << " must have TileType with MemRef set by InitMemRef";
+    codegen.EmitAllocTileForVar(element_vars[i], elem_types[i]);
+  }
+
+  int cmp_mode = op->GetKwarg<int>("cmp_mode");
+  CHECK(cmp_mode >= 0 && cmp_mode < 6) << "tile.gather_compare cmp_mode out of range: " << cmp_mode;
+  static constexpr const char* kCmpNames[] = {"eq", "ne", "lt", "le", "gt", "ge"};
+  int offset = op->GetKwarg<int>("offset", 0);
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string kvalue = codegen.GetExprAsCode(op->args_[1]);
+  std::string tmp = codegen.GetExprAsCode(op->args_[2]);
+  std::string src_ty = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string kv_ty = codegen.GetExprTypeAnnotation(op->args_[1]);
+  std::string tmp_ty = codegen.GetExprTypeAnnotation(op->args_[2]);
+  std::string dst = codegen.GetVarName(element_vars[0]);
+  std::string cdst = codegen.GetVarName(element_vars[1]);
+  std::string dst_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[0]);
+  std::string cdst_ty = codegen.GetTileBufTypeStringFromTileType(elem_types[1]);
+
+  std::ostringstream oss;
+  oss << "pto.tgather ins(" << src << ", " << kvalue << ", " << tmp;
+  if (!src_ty.empty() || !kv_ty.empty() || !tmp_ty.empty()) {
+    oss << " : " << src_ty << ", " << kv_ty << ", " << tmp_ty;
+  }
+  oss << ") outs(" << dst << ", " << cdst;
+  if (!dst_ty.empty() || !cdst_ty.empty()) {
+    oss << " : " << dst_ty << ", " << cdst_ty;
+  }
+  oss << ") {cmpMode = #pto<cmp " << kCmpNames[cmp_mode] << ">, offset = " << offset << " : i32}";
 
   codegen.Emit(oss.str());
   return "";
@@ -2334,6 +2403,12 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   // tile.gather_mask (TGATHER mask form): only src operand + maskPattern attribute
   reg("tile.gather_mask", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGatherMaskCodegenPTO(op, codegen);
+  });
+  // tile.gather_compare (TGATHER compare form, two outputs):
+  // 3-input op returning TupleType{dst, cdst}; outs() bound to downstream
+  // TupleGetItemExpr consumers (parser desugars `dst, cdst = ...`).
+  reg("tile.gather_compare", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGatherCompareCodegenPTO(op, codegen);
   });
   // tile.scatter_update: update input rows at scatter indices with src rows
   reg("tile.scatter_update", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

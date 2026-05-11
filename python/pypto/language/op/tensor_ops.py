@@ -78,6 +78,7 @@ __all__ = [
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
+from pypto.ir.utils import _normalize_expr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TensorLayout
@@ -1119,6 +1120,18 @@ def gather(input: Tensor, dim: int, index: Tensor) -> Tensor: ...
 def gather(input: Tensor, *, mask_pattern: int, output_dtype: int | DataType | None = None) -> Tensor: ...
 
 
+@overload
+def gather(
+    input: Tensor,
+    *,
+    kvalue: int | Scalar | Expr,
+    cmp_mode: str | int,
+    out_cols: int,
+    offset: int = 0,
+    count_dtype: int | DataType | None = None,
+) -> tuple[Tensor, Tensor]: ...
+
+
 def gather(
     input: Tensor,
     dim: int | None = None,
@@ -1126,52 +1139,101 @@ def gather(
     *,
     mask_pattern: int | None = None,
     output_dtype: int | DataType | None = None,
-) -> Tensor:
-    """Gather elements of ``input`` (tensor-level) — index form or mask-pattern form.
+    kvalue: int | Scalar | Expr | None = None,
+    cmp_mode: str | int | None = None,
+    out_cols: int | None = None,
+    offset: int = 0,
+    count_dtype: int | DataType | None = None,
+) -> Tensor | tuple[Tensor, Tensor]:
+    """Gather elements of ``input`` (tensor-level) — index / mask / compare form.
 
-    Index form (``dim`` + ``index``):
-        ``output[b, k] = input[b, index[b, k]]``
+    The tensor layer exposes a single unified ``gather``. Based on the arguments
+    you pass, it lowers to one of three tile-level ops:
+
+    Index form (``dim`` + ``index``) → :func:`pl.tile.gather`::
+
+        output[b, k] = input[b, index[b, k]]
+
         MVP: only rank-2 inputs with ``dim == -1`` (or ``rank - 1``).
         ``index`` must be an INT32 tensor whose shape matches ``input`` on every
         axis except ``dim``.
 
-    Mask form (``mask_pattern=<int>``):
-        Selects columns of each row by a fixed hardware mask pattern (lowered
-        directly to ``tile.gather_mask``). Last-dim shrinks by 2 (P0101/P1010)
-        or 4 (P0001..P1000), or stays the same for P1111.
+    Mask form (``mask_pattern=<int>``) → :func:`pl.tile.gather_mask`:
+        Selects columns of each row by a fixed hardware mask pattern. Last-dim
+        shrinks by 2 (P0101/P1010) or 4 (P0001..P1000), or stays the same for P1111.
+
+    Compare form (``kvalue`` + ``cmp_mode`` + ``out_cols``) → :func:`pl.tile.gather_compare`:
+        Scalar threshold compare (applied to every row). Returns ``(dst, cdst)`` —
+        gathered indices ``[rows, out_cols] INT32`` and per-row match counts
+        ``[rows, 1] count_dtype``.
 
     Args:
-        input: Source tensor (FP16/FP32/INT16/INT32).
+        input: Source tensor (FP16/FP32/INT16/INT32, plus UINT16/UINT32 for compare form).
         dim: (index form) Axis to gather along; only ``-1`` / ``rank - 1`` accepted in MVP.
         index: (index form) Index tensor (INT32) with same rank as input.
         mask_pattern: (mask form, keyword-only) Mask pattern selector (1-7).
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111.
         output_dtype: (mask form, keyword-only) Optional output dtype with the same
             bit width as ``input.dtype`` (e.g. FP32 → UINT32 for sort32 index bits).
+        kvalue: (compare form, keyword-only) Scalar threshold (UINT16/UINT32).
+        cmp_mode: (compare form, keyword-only) ``"eq"``/``"ne"``/``"lt"``/``"le"``/
+            ``"gt"``/``"ge"`` or int 0..5.
+        out_cols: (compare form, keyword-only) Output column count per row.
+        offset: (compare form, keyword-only) Starting index offset (default 0).
+        count_dtype: (compare form, keyword-only) Per-row count dtype, INT32 or UINT32
+            (defaults to INT32).
 
     Returns:
-        Tensor of shape ``index.shape`` (index form) or shape with shrunk last dim
-        (mask form), and dtype ``input.dtype`` (or ``output_dtype`` if provided).
+        Tensor (index/mask form) or ``(dst, cdst)`` tuple (compare form).
 
     Examples:
         out = gather(input, dim=-1, index=idx)
         out = gather(input, mask_pattern=1)
         out = gather(input, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+        dst, cdst = gather(input, kvalue=kv, cmp_mode="eq", out_cols=8)
     """
-    if mask_pattern is not None:
-        if dim is not None or index is not None:
-            raise ValueError(
-                "gather() mask form (mask_pattern=...) and index form (dim, index) "
-                "are mutually exclusive; do not pass dim or index with mask_pattern"
-            )
+    is_index = dim is not None or index is not None
+    is_mask = mask_pattern is not None
+    is_compare = kvalue is not None or cmp_mode is not None or out_cols is not None
+    if int(is_index) + int(is_mask) + int(is_compare) > 1:
+        raise ValueError(
+            "gather() index form (dim, index), mask form (mask_pattern=...) and "
+            "compare form (kvalue=..., cmp_mode=..., out_cols=...) are mutually "
+            "exclusive; do not mix kwargs from different forms"
+        )
+    if is_mask:
         call_expr = _ir_ops.gather(input.unwrap(), mask_pattern=mask_pattern, output_dtype=output_dtype)
         return Tensor(expr=call_expr)
+    if is_compare:
+        if kvalue is None or cmp_mode is None or out_cols is None:
+            raise ValueError("gather() compare form requires kvalue, cmp_mode and out_cols all set")
+        if output_dtype is not None:
+            raise ValueError(
+                "output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>"
+            )
+        kv_expr = kvalue.unwrap() if isinstance(kvalue, Scalar) else _normalize_expr(kvalue)
+        call_expr = _ir_ops.gather(
+            input.unwrap(),
+            kvalue=kv_expr,
+            cmp_mode=cmp_mode,
+            out_cols=out_cols,
+            offset=offset,
+            count_dtype=count_dtype,
+        )
+        span = call_expr.span
+        return (
+            Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 0, span)),
+            Tensor(expr=_ir_core.TupleGetItemExpr(call_expr, 1, span)),
+        )
     if output_dtype is not None:
         raise ValueError("output_dtype is only valid for the mask form of gather(); use mask_pattern=<int>")
-    if dim is None or index is None:
+    if not is_index:
         raise ValueError(
-            "gather() requires either (dim, index) for index form, or mask_pattern=<int> for mask form"
+            "gather() requires (dim, index) for index form, mask_pattern=<int> for mask form, "
+            "or (kvalue=..., cmp_mode=..., out_cols=...) for compare form"
         )
+    if dim is None or index is None:
+        raise ValueError("gather() index form requires both dim and index")
     call_expr = _ir_ops.gather(input.unwrap(), dim, index.unwrap())
     return Tensor(expr=call_expr)
 

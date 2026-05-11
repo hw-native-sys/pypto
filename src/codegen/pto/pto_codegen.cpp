@@ -145,6 +145,34 @@ bool ShouldAliasScatterUpdateResultToInput(const AssignStmtPtr& stmt) {
 
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
+// Collects `<var> = TupleGetItemExpr(tuple_var, i)` AssignStmts. IRVisitor
+// auto-recurses through all statement kinds (Seq/For/If/While/Scope/Inline/...),
+// so this stays correct regardless of where the tuple-returning call is nested.
+class TupleConsumerCollector : public ir::IRVisitor {
+ public:
+  explicit TupleConsumerCollector(const ir::Var* tuple_var, size_t arity)
+      : tuple_var_(tuple_var), elements_(arity, nullptr) {}
+
+  const std::vector<ir::VarPtr>& elements() const { return elements_; }
+
+ protected:
+  void VisitStmt_(const ir::AssignStmtPtr& op) override {
+    if (auto tge = As<ir::TupleGetItemExpr>(op->value_)) {
+      if (auto base = As<ir::Var>(tge->tuple_)) {
+        if (base.get() == tuple_var_ && tge->index_ >= 0 &&
+            static_cast<size_t>(tge->index_) < elements_.size()) {
+          elements_[tge->index_] = op->var_;
+        }
+      }
+    }
+    ir::IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  const ir::Var* tuple_var_;
+  std::vector<ir::VarPtr> elements_;
+};
+
 }  // namespace
 
 // Visitor to collect all MemRef objects from TileType variables
@@ -1152,6 +1180,16 @@ void PTOCodegen::VisitExpr_(const CallPtr& op) {
 std::string PTOCodegen::GetCurrentResultTarget() const { return fs_.current_result_buf; }
 
 ir::VarPtr PTOCodegen::GetCurrentResultVar() const { return fs_.current_result_var; }
+
+std::vector<ir::VarPtr> PTOCodegen::ResolveTupleResultElements(const ir::VarPtr& tuple_var,
+                                                               size_t arity) const {
+  INTERNAL_CHECK(tuple_var) << "Internal error: ResolveTupleResultElements requires non-null tuple_var";
+  INTERNAL_CHECK(fs_.current_function)
+      << "Internal error: ResolveTupleResultElements requires current_function";
+  TupleConsumerCollector collector(tuple_var.get(), arity);
+  collector.VisitStmt(fs_.current_function->body_);
+  return collector.elements();
+}
 
 void PTOCodegen::Emit(const std::string& line) { stream_ << GetIndent() << line << "\n"; }
 

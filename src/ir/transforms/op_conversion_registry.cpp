@@ -1247,6 +1247,56 @@ void OpConversionRegistry::RegisterGatherOps() {
           return ConversionResult{std::move(prologue), out_2d};
         }
       });
+
+  // tensor.gather_compare → tile.gather_compare
+  // Bridges input tensor into a Vec tile, synthesizes the UINT8 tmp workspace
+  // tile, and emits a single tuple-typed `tile.gather_compare` call. kvalue is
+  // a scalar threshold and passes through unchanged. The dst (gathered values)
+  // and cdst (per-row match counts) tile types are deduced into the call's
+  // TupleType output; downstream init_memref allocates the backing buffers
+  // from that TupleType.
+  std::unordered_map<size_t, InputSpaceReq> gc_input_reqs = {
+      {0, {MemorySpace::Vec, std::nullopt}},
+  };
+  RegisterCustom(
+      "tensor.gather_compare",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 2) << "tensor.gather_compare conversion expects 2 args (input, kvalue), got "
+                                << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+
+        auto src_tile = As<TileType>(args[0]->GetType());
+        CHECK(src_tile) << "tensor.gather_compare conversion: input must be Vec tile after bridge, got "
+                        << args[0]->GetType()->TypeName();
+        CHECK(src_tile->shape_.size() == 2)
+            << "tensor.gather_compare conversion: input must be 2D, got rank " << src_tile->shape_.size();
+
+        std::vector<StmtPtr> prologue;
+
+        // Synthesize tmp: UINT8 workspace shaped like src (1 byte per element).
+        // Final size requirement is enforced by the codegen kernel.
+        auto tmp_shape_tuple = std::make_shared<MakeTuple>(src_tile->shape_, span);
+        std::vector<std::pair<std::string, std::any>> tmp_create_kwargs = {
+            {"dtype", DataType(DataType::UINT8)}, {"target_memory", MemorySpace::Vec}};
+        auto tmp_create = op_reg.Create("tile.create", {tmp_shape_tuple}, tmp_create_kwargs, span);
+        auto tmp_var = std::make_shared<Var>("gc_tmp", tmp_create->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(tmp_var, tmp_create, span));
+
+        // Forward only kwargs the tile op understands (cmp_mode, offset, out_cols, count_dtype).
+        std::vector<std::pair<std::string, std::any>> tile_kwargs;
+        tile_kwargs.reserve(kwargs.size());
+        for (const auto& [k, v] : kwargs) {
+          if (k == "cmp_mode" || k == "offset" || k == "out_cols" || k == "count_dtype") {
+            tile_kwargs.emplace_back(k, v);
+          }
+        }
+
+        std::vector<ExprPtr> tile_args = {args[0], args[1], tmp_var};
+        auto tile_call = op_reg.Create("tile.gather_compare", tile_args, tile_kwargs, span);
+        return ConversionResult{std::move(prologue), tile_call};
+      },
+      std::move(gc_input_reqs));
 }
 
 // ============================================================================

@@ -7,9 +7,16 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""End-to-end tests for ``pl.tensor.gather`` (issue #676) — torch-style semantics.
+"""End-to-end tests for ``pl.tensor.gather`` — all three forms.
 
-Covers the generalized contract beyond the original MVP (rank-2 + dim=-1):
+The tensor layer exposes a single unified ``pl.tensor.gather`` that dispatches
+to one of three tile-level ops based on the kwargs passed:
+
+Index form  (``dim`` + ``index``)                       → ``tile.gather``
+Mask form   (``mask_pattern=<int>``)                    → ``tile.gather_mask``
+Compare form (``kvalue`` + ``cmp_mode`` + ``out_cols``) → ``tile.gather_compare``
+
+Index form (torch-style semantics, validated against ``torch.gather``):
 
 1. Rank-2 + dim=-1 (baseline / regression).
 2. Rank-2 + dim=-1 with ``index.shape[0] < input.shape[0]`` (smaller index leading).
@@ -17,7 +24,15 @@ Covers the generalized contract beyond the original MVP (rank-2 + dim=-1):
 4. Rank-3 + dim=1 (middle axis — flat-index gather).
 5. Rank-3 + dim=-3 (negative-dim normalization on the first axis).
 
-All cases are validated against a torch ``gather`` reference.
+Mask form (hardware mask-pattern column selection):
+
+6. P0101 — select even columns of each row.
+7. P1010 + ``output_dtype=UINT32`` — select odd columns and bit-reinterpret.
+
+Compare form (per-row threshold compare; returns ``(dst, cdst)``):
+
+8. ``cmp_mode='eq'`` with INT32 ``count_dtype`` (default).
+9. ``cmp_mode='gt'`` with ``count_dtype=UINT32``.
 """
 
 from typing import Any
@@ -35,6 +50,53 @@ from pypto.ir.pass_manager import OptimizationStrategy
 def _rand_indices(low: int, high: int, shape: tuple[int, ...]) -> torch.Tensor:
     """Random INT32 indices uniformly in [low, high)."""
     return torch.randint(low, high, shape, dtype=torch.int32)
+
+
+def _make_gather_mask_src_8x16() -> torch.Tensor:
+    """Deterministic ``[8, 16]`` FP32 source for mask gather tests.
+
+    Distinct values per element so that even/odd column selection produces
+    a unique, easily verified output.
+    """
+    return (torch.arange(8 * 16, dtype=torch.float32).reshape(8, 16) - 64.0) / 8.0
+
+
+def _make_gather_compare_src_eq() -> torch.Tensor:
+    """``[16, 64]`` INT32-buffered UINT32 with exactly 8 ``eq`` matches per row.
+
+    For row ``r``::
+
+        src[r, j] = 100             if j % 8 == 0   # 8 matches
+                    101             otherwise
+
+    With ``kvalue = 100`` and ``cmp_mode='eq'``, matches occur at
+    ``j = 0, 8, 16, 24, 32, 40, 48, 56`` — exactly ``out_cols=8`` per row.
+    """
+    out = torch.zeros(16, 64, dtype=torch.int32)
+    out[:, :] = 101
+    out[:, 0::8] = 100
+    return out
+
+
+def _make_gather_compare_kvalue_eq() -> torch.Tensor:
+    """``[1]`` INT32-buffered UINT32 scalar carrier: ``kvalue = 100``."""
+    return torch.tensor([100], dtype=torch.int32)
+
+
+def _make_gather_compare_src_gt() -> torch.Tensor:
+    """``[16, 64]`` FP16 with exactly 8 ``gt`` matches per row.
+
+    All zeros except ``src[r, 56:64] = 100``. With ``kvalue = 50`` and
+    ``cmp_mode='gt'``, matches occur at ``j = 56..63`` — exactly ``out_cols=8``.
+    """
+    out = torch.zeros(16, 64, dtype=torch.float16)
+    out[:, 56:64] = 100
+    return out
+
+
+def _make_gather_compare_kvalue_gt() -> torch.Tensor:
+    """``[1]`` FP16 scalar carrier: ``kvalue = 50``."""
+    return torch.tensor([50], dtype=torch.float16)
 
 
 # --- Programs ---
@@ -135,6 +197,106 @@ class GatherRank3NegFirstDimProgram:
             out = pl.tensor.gather(inp, dim=-3, index=idx)
             output = pl.assemble(output, out, [0, 0, 0])
         return output
+
+
+@pl.program
+class GatherMaskP0101Program:
+    """Mask-form gather (P0101): select even-position columns of each row.
+
+    ``src [8, 16] FP32`` → ``output [8, 8] FP32`` (cols shrink by 2).
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[8, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[8, 8], pl.FP32]],
+    ) -> pl.Tensor[[8, 8], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, mask_pattern=pl.tile.MaskPattern.P0101)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class GatherMaskOutputDtypeProgram:
+    """Mask-form gather (P1010) with ``output_dtype=UINT32``.
+
+    Selects odd-position columns of each row, then bit-reinterprets the FP32
+    payload as UINT32 (same bit width) — the same pattern sort32 uses to
+    extract packed index bits stored in float slots.
+
+    ``src [8, 16] FP32`` → ``output [8, 8] UINT32``.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[8, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[8, 8], pl.UINT32]],
+    ) -> pl.Tensor[[8, 8], pl.UINT32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.gather(inp, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class GatherCompareEqProgram:
+    """Compare-form gather (``cmp_mode='eq'``): scalar equality match.
+
+    For each row ``r``, scan ``src[r, :]`` against the scalar ``kvalue``.
+    Indices where ``src[r, j] == kvalue`` are written to ``dst`` (up to
+    ``out_cols``), and the count of matches is written to ``cdst``.
+
+    ``src       [16, 64] UINT32``
+    ``kv_buf    [1]      UINT32`` — carries the scalar kvalue
+    →
+    ``dst    [16, 8]  INT32``  — gathered indices
+    ``cdst   [16, 1]  INT32``  — per-row match count
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[16, 64], pl.INT32],
+        kv_buf: pl.Tensor[[1], pl.INT32],
+        out_dst: pl.Out[pl.Tensor[[16, 8], pl.INT32]],
+        out_cdst: pl.Out[pl.Tensor[[1, 16], pl.INT32]],
+    ) -> tuple[pl.Tensor[[16, 8], pl.INT32], pl.Tensor[[1, 16], pl.INT32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            kvalue: pl.Scalar[pl.INT32] = pl.tensor.read(kv_buf, [0])
+            dst, cdst = pl.tensor.gather(src, kvalue=kvalue, cmp_mode="eq", out_cols=8)
+            out_dst = pl.assemble(out_dst, dst, [0, 0])
+            out_cdst = pl.assemble(out_cdst, cdst, [0, 0])
+        return out_dst, out_cdst
+
+
+@pl.program
+class GatherCompareGtUInt32CountProgram:
+    """Compare-form gather (``cmp_mode='gt'``) with ``count_dtype=UINT32``.
+
+    ``src       [16, 64] UINT32``
+    ``kv_buf    [1]      UINT32`` — carries the scalar kvalue
+    →
+    ``dst    [16, 8]  INT32``   — gathered indices
+    ``cdst   [16, 1]  UINT32``  — per-row match count
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[16, 64], pl.FP16],
+        kv_buf: pl.Tensor[[1], pl.FP16],
+        out_dst: pl.Out[pl.Tensor[[16, 8], pl.INT32]],
+        out_cdst: pl.Out[pl.Tensor[[1, 16], pl.INT32]],
+    ) -> tuple[pl.Tensor[[16, 8], pl.INT32], pl.Tensor[[1, 16], pl.INT32]]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            kvalue: pl.Scalar[pl.FP16] = pl.tensor.read(kv_buf, [0])
+            dst, cdst = pl.tensor.gather(src, kvalue=kvalue, cmp_mode="gt", out_cols=8, count_dtype=pl.INT32)
+            out_dst = pl.assemble(out_dst, dst, [0, 0])
+            out_cdst = pl.assemble(out_cdst, cdst, [0, 0])
+        return out_dst, out_cdst
 
 
 # --- Test cases ---
@@ -279,12 +441,105 @@ class GatherRank3NegFirstDimTestCase(_GatherBaseTestCase):
         tensors["output"][:] = torch.gather(inp, dim=0, index=idx)
 
 
+class GatherMaskP0101TestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_mask_p0101"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [8, 16], DataType.FP32, init_value=_make_gather_mask_src_8x16),
+            TensorSpec("output", [8, 8], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherMaskP0101Program
+
+    def compute_expected(self, tensors, params=None):
+        # P0101 selects positions 0, 2, 4, ..., 14 of each row.
+        tensors["output"][:] = tensors["inp"][:, 0::2]
+
+
+class GatherMaskOutputDtypeTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_mask_output_dtype_uint32"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [8, 16], DataType.FP32, init_value=_make_gather_mask_src_8x16),
+            TensorSpec("output", [8, 8], DataType.UINT32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherMaskOutputDtypeProgram
+
+    def compute_expected(self, tensors, params=None):
+        # P1010 selects positions 1, 3, 5, ..., 15 of each row.
+        # output_dtype=UINT32 → FP32 bits are reinterpreted (no value conversion).
+        odd_cols_fp32 = tensors["inp"][:, 1::2].contiguous()
+        tensors["output"][:] = odd_cols_fp32.view(torch.int32)
+
+
+class GatherCompareEqTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_compare_eq"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("src", [16, 64], DataType.INT32, init_value=_make_gather_compare_src_eq),
+            TensorSpec(
+                "kv_buf",
+                [1],
+                DataType.INT32,
+                init_value=_make_gather_compare_kvalue_eq,
+            ),
+            TensorSpec("out_dst", [16, 8], DataType.INT32, is_output=True),
+            TensorSpec("out_cdst", [1, 16], DataType.INT32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherCompareEqProgram
+
+    def compute_expected(self, tensors, params=None):
+        # Data is constructed so each row has exactly 8 matches at
+        # j = 0, 8, 16, 24, 32, 40, 48, 56 — all dst positions are well-defined.
+        match_positions = torch.tensor([0, 8, 16, 24, 32, 40, 48, 56], dtype=torch.int32)
+        tensors["out_dst"][:] = match_positions.unsqueeze(0).expand(16, -1).contiguous()
+        tensors["out_cdst"][:] = 8
+
+
+class GatherCompareGtUInt32CountTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_compare_gt_uint32_count"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("src", [16, 64], DataType.FP16, init_value=_make_gather_compare_src_gt),
+            TensorSpec(
+                "kv_buf",
+                [1],
+                DataType.FP16,
+                init_value=_make_gather_compare_kvalue_gt,
+            ),
+            TensorSpec("out_dst", [16, 8], DataType.INT32, is_output=True),
+            TensorSpec("out_cdst", [1, 16], DataType.INT32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherCompareGtUInt32CountProgram
+
+    def compute_expected(self, tensors, params=None):
+        # Data is constructed so each row has exactly 8 src entries > kvalue
+        # at j = 56..63 — all dst positions are well-defined.
+        match_positions = torch.arange(56, 64, dtype=torch.int32)
+        tensors["out_dst"][:] = match_positions.unsqueeze(0).expand(16, -1).contiguous()
+        tensors["out_cdst"][:] = 8
+
+
 # --- Tests ---
 
 
-class TestGather:
-    """Verify ``pl.tensor.gather`` against a torch reference for the
-    generalized rank/dim contract introduced by issue #676."""
+class TestGatherIndex:
+    # --- Index form ---
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank2_last_dim(self, test_runner, platform):
@@ -309,6 +564,34 @@ class TestGather:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank3_neg_first_dim(self, test_runner, platform):
         result = test_runner.run(GatherRank3NegFirstDimTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+class TestGatherMask:
+    # --- Mask form ---
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_mask_p0101(self, test_runner, platform):
+        result = test_runner.run(GatherMaskP0101TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_mask_output_dtype_uint32(self, test_runner, platform):
+        result = test_runner.run(GatherMaskOutputDtypeTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+class TestGatherCompare:
+    # --- Compare form ---
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_compare_eq(self, test_runner, platform):
+        result = test_runner.run(GatherCompareEqTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_compare_gt_uint32_count(self, test_runner, platform):
+        result = test_runner.run(GatherCompareGtUInt32CountTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

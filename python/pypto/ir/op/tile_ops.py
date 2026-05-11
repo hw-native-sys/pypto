@@ -2353,66 +2353,127 @@ def sort32(src: Expr, idx: Expr, span: Span | None = None) -> Call:
 
 def gather(
     src: Expr,
-    indices: Expr | None = None,
-    tmp: Expr | None = None,
-    *,
-    mask_pattern: int | None = None,
-    output_dtype: int | DataType | None = None,
+    indices: Expr,
+    tmp: Expr,
     span: Span | None = None,
 ) -> Call:
-    """Gather elements from src, using either indices or a fixed mask pattern.
+    """Gather elements from src by per-element indices (index form).
 
-    Index form: dst[i, j] = src[indices[i, j]]. Requires indices and tmp workspace.
-    Mask form: selects elements by a hardware mask pattern.
+    Computes ``dst[i, j] = src[indices[i, j]]``. Maps to PTOAS ``pto.tgather`` index form.
 
     Args:
         src: Source tile (FP16, FP32, INT16, or INT32)
-        indices: Index tile (INT32). Required for index form.
-        tmp: Temporary workspace tile (INT32). Required for index form.
-        mask_pattern: Mask pattern selector (1-7), keyword-only. Use for mask form.
-            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
-        output_dtype: Optional output dtype for mask form (keyword-only). When provided,
-            the result tile has this dtype instead of src's dtype. The hardware only
-            requires sizeof(dst_dtype) == sizeof(src_dtype). Useful for extracting
-            UINT32 index bits from FP32 sort32 output (bit reinterpretation).
+        indices: Index tile (INT32)
+        tmp: Temporary workspace tile (INT32)
         span: Optional source span
 
     Returns:
         Call expression returning gathered tile
     """
     actual_span = _get_span_or_capture(span)
-    if mask_pattern is not None:
-        if indices is not None or tmp is not None:
-            raise ValueError(
-                "gather() mask form (mask_pattern=...) and index form (indices, tmp) "
-                "are mutually exclusive; do not pass indices or tmp with mask_pattern"
-            )
-        kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
-        if output_dtype is not None:
-            kwargs["output_dtype"] = output_dtype  # int | DataType, C++ handles both
-        return _ir_core.create_op_call("tile.gather_mask", [src], kwargs, actual_span)
-    if indices is None or tmp is None:
-        raise ValueError(
-            "gather() requires either (indices, tmp) for index form, or mask_pattern=<int> for mask form"
-        )
     return _ir_core.create_op_call("tile.gather", [src, indices, tmp], {}, actual_span)
 
 
-def gather_mask(src: Expr, mask_pattern: int, span: Span | None = None) -> Call:
-    """Gather elements from src using a fixed mask pattern.
+def gather_mask(
+    src: Expr,
+    mask_pattern: int,
+    *,
+    output_dtype: int | DataType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Gather elements from src using a fixed hardware mask pattern (mask form).
 
-    .. deprecated::
-        Use ``gather(src, mask_pattern=<value>)`` instead.
+    Maps to PTOAS ``pto.tgather`` mask form.
 
     Args:
         src: Source tile (FP16, FP32, INT16, or INT32)
-        mask_pattern: Mask pattern selector (1-7)
+        mask_pattern: Mask pattern selector (1-7).
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        output_dtype: Optional output dtype (keyword-only). When provided, the result
+            tile has this dtype instead of src's dtype. The hardware only requires
+            sizeof(dst_dtype) == sizeof(src_dtype). Useful for extracting UINT32 index
+            bits from FP32 sort32 output (bit reinterpretation).
         span: Optional source span
 
     Returns:
         Call expression returning gathered tile
     """
-    return gather(src, mask_pattern=mask_pattern, span=span)
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
+    if output_dtype is not None:
+        kwargs["output_dtype"] = output_dtype
+    return _ir_core.create_op_call("tile.gather_mask", [src], kwargs, actual_span)
+
+
+# Compare modes accepted by tile.gather_compare / tensor.gather_compare.
+# Maps to PTOAS pto.tgather cmpMode: eq/ne/lt/le/gt/ge.
+_GATHER_COMPARE_CMP_MODES = ("eq", "ne", "lt", "le", "gt", "ge")
+
+
+def resolve_gather_compare_cmp_mode(cmp_mode: str | int) -> int:
+    """Normalize a gather_compare cmp_mode to its integer enum value.
+
+    Accepts either a string in ``{"eq", "ne", "lt", "le", "gt", "ge"}`` or
+    an int in ``[0, 5]``. Raises ``ValueError`` on anything else.
+    """
+    if isinstance(cmp_mode, str):
+        try:
+            return _GATHER_COMPARE_CMP_MODES.index(cmp_mode)
+        except ValueError as e:
+            raise ValueError(
+                f"Invalid cmp_mode {cmp_mode!r}: expected one of {list(_GATHER_COMPARE_CMP_MODES)} or int 0-5"
+            ) from e
+    if isinstance(cmp_mode, int) and not isinstance(cmp_mode, bool):
+        if 0 <= cmp_mode < len(_GATHER_COMPARE_CMP_MODES):
+            return cmp_mode
+        raise ValueError(
+            f"Invalid cmp_mode {cmp_mode}: int must be in [0, {len(_GATHER_COMPARE_CMP_MODES) - 1}]"
+        )
+    raise ValueError(f"Invalid cmp_mode {cmp_mode!r}: expected str or int 0-5")
+
+
+def gather_compare(
+    src: Expr,
+    kvalue: Expr,
+    tmp: Expr,
+    *,
+    cmp_mode: str | int,
+    offset: int = 0,
+    out_cols: int,
+    count_dtype: int | DataType | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Compare-form gather (tile-level): scan ``src`` per-row against ``kvalue``.
+
+    Maps to PTOAS ``pto.tgather`` compare-form. Returns a single
+    :class:`Call` whose result type is a ``TupleType{dst, cdst}``::
+
+        dst  : TileType, [rows, out_cols], INT32  — gathered indices
+        cdst : TileType, [rows],           count_dtype — per-row match count
+
+    The DSL form ``d, c = pl.tile.gather_compare(src, kvalue, tmp, ...)`` is
+    desugared by the parser into ``_tuple = call; d = _tuple[0]; c = _tuple[1]``.
+
+    Args:
+        src: Source tile (FP16/FP32/INT16/INT32/UINT16/UINT32, 2D).
+        kvalue: Scalar threshold (ScalarType, UINT16 or UINT32; applied to every row).
+        tmp: Workspace tile (UINT8) sized for the codegen kernel.
+        cmp_mode: Compare mode — one of ``"eq"`` / ``"ne"`` / ``"lt"`` /
+            ``"le"`` / ``"gt"`` / ``"ge"`` or int ``0..5``.
+        offset: Starting index offset (default 0).
+        out_cols: Output column count per row for ``dst`` (positive int).
+        count_dtype: Per-row count dtype, INT32 or UINT32; defaults to INT32.
+        span: Optional source span (auto-captured if omitted).
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {
+        "cmp_mode": resolve_gather_compare_cmp_mode(cmp_mode),
+        "offset": offset,
+        "out_cols": out_cols,
+    }
+    if count_dtype is not None:
+        kwargs["count_dtype"] = count_dtype
+    return _ir_core.create_op_call("tile.gather_compare", [src, kvalue, tmp], kwargs, actual_span)
 
 
 # ============================================================================

@@ -2162,7 +2162,7 @@ class TestConvertGatherOp:
             out_shape=[8, 32],
             out_dtype=DataType.FP32,
             tensor_op=lambda ins: tensor_ops.gather(ins[0], mask_pattern=1),
-            tile_op=lambda ts: tile_ops.gather(ts[0], mask_pattern=1),
+            tile_op=lambda ts: tile_ops.gather_mask(ts[0], mask_pattern=1),
         )
         _assert_convert_equal(before, expected)
 

@@ -259,6 +259,37 @@ class PTOCodegen : public CodegenBase {
                               const std::string& valid_col_ssa = "");
 
   /**
+   * @brief Emit alloc_tile for a tile variable before its first use
+   *
+   * Idempotent: a Var is only allocated once per function (tracked via
+   * `fs_.emitted_tile_alloc_vars`). Multi-output op codegen (e.g. tile.gather_compare)
+   * uses this to eagerly allocate DPS dst/cdst tiles bound by downstream
+   * `dst = tuple_var[i]` AssignStmts before they are visited.
+   */
+  void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
+
+  /**
+   * @brief Resolve the DPS element vars of a tuple-returning op call
+   *
+   * Multi-output ops (e.g. tile.gather_compare) return a TupleType. The parser
+   * desugars `a, b = call(...)` into:
+   *   _tuple_tmp = call(...)
+   *   a = _tuple_tmp[0]
+   *   b = _tuple_tmp[1]
+   *
+   * Since the dst element Vars do not appear in the Call's args, codegen must
+   * scan the current function body for these `<var> = tuple_var[i]` AssignStmts
+   * to recover the SSA names of the DPS outputs.
+   *
+   * @param tuple_var The tuple-result Var (typically GetCurrentResultVar()).
+   * @param arity     Number of expected tuple elements.
+   * @return Vector of length `arity`; entry i is the Var bound to
+   *         `tuple_var[i]`, or nullptr if no such consumer exists.
+   */
+  [[nodiscard]] std::vector<ir::VarPtr> ResolveTupleResultElements(const ir::VarPtr& tuple_var,
+                                                                   size_t arity) const;
+
+  /**
    * @brief Override the current result buffer name
    *
    * Allows codegen lambdas to redirect the result to a newly allocated buffer.
@@ -412,11 +443,6 @@ class PTOCodegen : public CodegenBase {
    * @brief Emit make_tensor_view for all tensor parameters
    */
   void EmitMakeTensorViews(const ir::FunctionPtr& func);
-
-  /**
-   * @brief Emit alloc_tile for a tile variable before its first use
-   */
-  void EmitAllocTileForVar(const ir::VarPtr& tile_var, const std::shared_ptr<const ir::TileType>& tile_type);
 
   /**
    * @brief Bundle of fields needed to emit a `pto.alloc_tile` op.

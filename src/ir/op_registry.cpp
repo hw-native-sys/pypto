@@ -136,29 +136,63 @@ CallPtr OpRegistry::Create(const std::string& op_name, const std::vector<ExprPtr
   // Apply OpMemorySpaceSpec to TileType results that lack memory_space.
   // This ensures the deduced type carries memory_space even when individual
   // type deduction functions omit it (fixes issue #553).
+  //
+  // Single-output ops: patch the result TileType directly.
+  // Tuple-output ops (e.g. tile.gather_compare): patch each TileType element
+  // that lacks a memory_space. Heterogeneous-output ops should set
+  // memory_space_ inside f_deduce_type rather than relying on this fallback.
   const auto& mem_spec = entry.GetMemorySpec();
   if (mem_spec.has_value() && mem_spec->deduce_output_memory) {
-    auto tile_type = As<TileType>(result_type);
-    if (tile_type && !tile_type->memory_space_.has_value()) {
+    auto resolve_memory_space = [&]() -> std::optional<MemorySpace> {
       auto resolved = mem_spec->deduce_output_memory(kwargs);
-      std::optional<MemorySpace> output_space;
       if (resolved.has_value()) {
-        // Fixed or kwarg-derived memory space
-        output_space = resolved;
-      } else {
-        // Inherit from first tile-typed input
-        for (const auto& arg : args) {
-          if (auto input_tile = As<TileType>(arg->GetType())) {
-            if (input_tile->memory_space_.has_value()) {
-              output_space = input_tile->memory_space_;
-              break;
-            }
+        return resolved;
+      }
+      // Inherit from first tile-typed input
+      for (const auto& arg : args) {
+        if (auto input_tile = As<TileType>(arg->GetType())) {
+          if (input_tile->memory_space_.has_value()) {
+            return input_tile->memory_space_;
           }
         }
       }
-      if (output_space.has_value()) {
-        result_type = std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
-                                                 tile_type->tile_view_, output_space);
+      return std::nullopt;
+    };
+    auto apply_memory_space = [](const TileTypePtr& tile_type, MemorySpace space) {
+      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
+                                        tile_type->tile_view_, space);
+    };
+
+    if (auto tile_type = As<TileType>(result_type)) {
+      // Single-output case: result is a TileType.
+      if (!tile_type->memory_space_.has_value()) {
+        if (auto space = resolve_memory_space(); space.has_value()) {
+          result_type = apply_memory_space(tile_type, *space);
+        }
+      }
+    } else if (auto tuple_type = As<TupleType>(result_type)) {
+      // Multi-output case: result is a TupleType. Patch every TileType
+      // element that is missing a memory_space.
+      bool any_missing = false;
+      for (const auto& elem_ty : tuple_type->types_) {
+        if (auto elem_tile = As<TileType>(elem_ty); elem_tile && !elem_tile->memory_space_.has_value()) {
+          any_missing = true;
+          break;
+        }
+      }
+      if (any_missing) {
+        if (auto space = resolve_memory_space(); space.has_value()) {
+          std::vector<TypePtr> new_elems;
+          new_elems.reserve(tuple_type->types_.size());
+          for (const auto& elem_ty : tuple_type->types_) {
+            if (auto elem_tile = As<TileType>(elem_ty); elem_tile && !elem_tile->memory_space_.has_value()) {
+              new_elems.push_back(apply_memory_space(elem_tile, *space));
+            } else {
+              new_elems.push_back(elem_ty);
+            }
+          }
+          result_type = std::make_shared<TupleType>(std::move(new_elems));
+        }
       }
     }
   }

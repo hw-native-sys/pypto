@@ -2478,7 +2478,7 @@ class TestTopDownRetargeter:
                     block_len = 1 << (6 + i * 2)
                     merged: pl.Tile[[1, 4096], pl.FP32] = pl.tile.mrgsort(tile_iter, block_len=block_len)
                     result = pl.yield_(merged)
-                vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather(
+                vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather_mask(
                     result, mask_pattern=pl.tile.MaskPattern.P0101
                 )
                 out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, [0, 0], val_output)
@@ -2525,8 +2525,8 @@ class TestTopDownRetargeter:
                     result: pl.Tile[[1, 4096], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
                         pl.yield_(merged_mv)
                     )
-                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_3, 0, 8192), pl.Mem.Vec] = pl.tile.gather(
-                    result, mask_pattern=pl.tile.MaskPattern.P0101
+                vals: pl.Tile[[1, 2048], pl.FP32, pl.MemRef(mem_vec_3, 0, 8192), pl.Mem.Vec] = (
+                    pl.tile.gather_mask(result, mask_pattern=pl.tile.MaskPattern.P0101)
                 )
                 out_val: pl.Tensor[[1, 2048], pl.FP32, pl.MemRef("mem_ddr_2", 0, 8192)] = pl.tile.store(
                     vals, [0, 0], val_output

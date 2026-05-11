@@ -149,7 +149,7 @@ class Sort32GatherMaskFP32Program:
         # P0101 selects every other element (stride=2): columns 0,2,4,...
         # sort32 layout is [val0, idx0, val1, idx1, ...], so P0101 extracts values.
         # Output shape: [8, 64/2] = [8, 32]
-        gathered: pl.Tile[[8, 32], pl.FP32] = pl.tile.gather(
+        gathered: pl.Tile[[8, 32], pl.FP32] = pl.tile.gather_mask(
             sorted_tile, mask_pattern=pl.tile.MaskPattern.P0101
         )
         out: pl.Tensor[[8, 32], pl.FP32] = pl.store(gathered, offsets=[0, 0], output_tensor=output)
@@ -189,10 +189,10 @@ class MrgSort1FP32Program:
         # Merge the 4 sorted 64-col runs into one sorted sequence (block_len=64, repeatTimes=1)
         merged: pl.Tile[[1, 256], pl.FP32] = pl.tile.mrgsort(sorted_tile, block_len=64)
         # Extract sorted values (even positions, FP32)
-        vals: pl.Tile[[1, 128], pl.FP32] = pl.tile.gather(merged, mask_pattern=pl.tile.MaskPattern.P0101)
+        vals: pl.Tile[[1, 128], pl.FP32] = pl.tile.gather_mask(merged, mask_pattern=pl.tile.MaskPattern.P0101)
         # Extract indices (odd positions): bit-reinterpret FP32 → UINT32 in one step.
         # Hardware TGATHER mask form requires sizeof(dst) == sizeof(src), not same type.
-        idx: pl.Tile[[1, 128], pl.UINT32] = pl.tile.gather(
+        idx: pl.Tile[[1, 128], pl.UINT32] = pl.tile.gather_mask(
             merged, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
         )
         out_val: pl.Tensor[[1, 128], pl.FP32] = pl.store(vals, offsets=[0, 0], output_tensor=val_output)
@@ -313,9 +313,11 @@ class MrgSort1DynFP32Program:
             merged: pl.Tile[[1, 4096], pl.FP32] = pl.tile.mrgsort(tile_iter, block_len=block_len)
             result = pl.yield_(merged)
         # Extract sorted values (even positions, FP32)
-        vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather(result, mask_pattern=pl.tile.MaskPattern.P0101)
+        vals: pl.Tile[[1, 2048], pl.FP32] = pl.tile.gather_mask(
+            result, mask_pattern=pl.tile.MaskPattern.P0101
+        )
         # Extract indices (odd positions): bit-reinterpret FP32 → UINT32
-        idx: pl.Tile[[1, 2048], pl.UINT32] = pl.tile.gather(
+        idx: pl.Tile[[1, 2048], pl.UINT32] = pl.tile.gather_mask(
             result, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32
         )
         out_val: pl.Tensor[[1, 2048], pl.FP32] = pl.store(vals, offsets=[0, 0], output_tensor=val_output)
