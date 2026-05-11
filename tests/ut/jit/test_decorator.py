@@ -475,6 +475,16 @@ def _runtime_slice_body(src: pl.Tensor, cfg: pl.Tensor, out: pl.Out[pl.Tensor]) 
     return out
 
 
+def _annotated_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Plain (undecorated) function: pl.slice / pl.create_tensor / dep-call locals
+    written with annotated assignments (``v: T = ...``), the common DSL style."""
+    view: pl.Tensor = pl.slice(src, [16, 8], [0, 0])
+    buf: pl.Tensor = pl.create_tensor([16, 8], dtype=pl.FP32)
+    mid: pl.Tensor = _relu_kernel(view, buf)
+    out = _relu_kernel(mid, out)
+    return out
+
+
 class TestSliceAndDepReturnMetadata:
     """Regression tests: the JIT specializer must track tensor metadata for
     ``pl.slice`` views and ``@pl.jit.incore`` return values when they flow into
@@ -508,6 +518,17 @@ class TestSliceAndDepReturnMetadata:
         metas = _extract_local_tensor_metas(_runtime_slice_body, seed_meta=seed)
         # Runtime-scalar 2nd dim → falls back to src's dim 1 = 64; dtype from src.
         assert metas["view"] == TensorMeta(shape=(16, 64), dtype=DataType.FP16)
+
+    def test_extract_local_tensor_metas_annotated_assignments(self):
+        """Annotated assignments (``v: T = ...``) are tracked just like plain ones."""
+        seed = {
+            "src": TensorMeta(shape=(32, 32), dtype=DataType.FP32),
+            "out": TensorMeta(shape=(16, 8), dtype=DataType.FP32),
+        }
+        metas = _extract_local_tensor_metas(_annotated_slice_body, seed_meta=seed)
+        assert metas["view"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        assert metas["buf"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
+        assert metas["mid"] == TensorMeta(shape=(16, 8), dtype=DataType.FP32)
 
     def test_slice_view_flows_into_incore_dep(self):
         """A pl.slice view of an entry parameter can be passed into an @pl.jit.incore dep."""

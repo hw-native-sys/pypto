@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import functools
 import inspect
 import os
 import re
@@ -180,8 +181,15 @@ def _extract_tensor_meta(tensor: Any) -> TensorMeta:
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=512)
 def _get_func_def(func: Any) -> ast.FunctionDef:
     """Parse func source and return its FunctionDef node.
+
+    Memoised on ``func`` identity: ``inspect.getsource`` + ``ast.parse`` are
+    expensive and called repeatedly per JIT invocation (dep discovery, call-site
+    extraction, dynamic-dim scan, local-meta inference) for the same functions.
+    The returned node is shared across callers, so callers MUST treat it as
+    read-only — every in-tree consumer only walks/reads it.
 
     Raises:
         OSError: If the source code cannot be retrieved (e.g. interactive REPL,
@@ -369,7 +377,7 @@ def _extract_local_tensor_metas(
         if not isinstance(shape_node, ast.List) or len(shape_node.elts) != len(src_meta.shape):
             return None
         dims: list[int] = []
-        for elt, parent_dim in zip(shape_node.elts, src_meta.shape):
+        for elt, parent_dim in zip(shape_node.elts, src_meta.shape, strict=True):
             v = _resolve_int(elt)
             # A non-static slice dim (e.g. a runtime ``valid_len = pl.min(...)``)
             # is bounded above by the parent dim — advertise that static bound,
@@ -410,7 +418,7 @@ def _extract_local_tensor_metas(
         for kw in call.keywords:
             if kw.arg is not None:
                 mapping[kw.arg] = _arg_name(kw.value)
-        for vname, out_param in zip(names, out_params):
+        for vname, out_param in zip(names, out_params, strict=True):
             caller_arg = mapping.get(out_param)
             if caller_arg is not None and caller_arg in local:
                 local[vname] = local[caller_arg]
@@ -423,13 +431,18 @@ def _extract_local_tensor_metas(
                 sub = getattr(stmt, attr, None)
                 if isinstance(sub, list):
                     _walk(sub)
-            if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            # Single-target ``v = ...`` and annotated ``v: T = ...`` both bind a
+            # name we want to track (the latter is the common DSL style).
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                target: ast.expr = stmt.targets[0]
+            elif isinstance(stmt, ast.AnnAssign):
+                target = stmt.target
+            else:
                 continue
             call = stmt.value
-            if not isinstance(call, ast.Call):
+            if not isinstance(call, ast.Call):  # AnnAssign.value may be None
                 continue
             fn = call.func
-            target = stmt.targets[0]
             if (
                 isinstance(fn, ast.Attribute)
                 and isinstance(fn.value, ast.Name)
