@@ -11,19 +11,20 @@
 
 #include <algorithm>
 #include <any>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iomanip>
 #include <ios>
-#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
@@ -327,19 +328,19 @@ class IRPythonPrinter : public IRVisitor {
 
 // Helper function to format float literals with decimal point.
 //
-// For non-integer values we emit ``max_digits10`` for ``float`` (= 9 digits)
-// — the minimum precision required for an FP32 value to round-trip bit-exactly
-// through print → parse, *provided the parser FP32-snaps* ``ConstFloat.value_``
-// on read. The current parser does NOT snap (it stores the parsed double as-is
-// — see KNOWN_ISSUES.md / the ConstFloat ingest path), so an FP32-truncated
-// value re-parsed by a non-snapping reader can still differ in the lowest bits
-// from the original. The 9-digit emission is the print-side half of the
-// round-trip contract; fixing the parser side closes the loop. PyPTO's default
-// ConstFloat dtype is FP32, so this is the relevant precision for the vast
-// majority of constants the printer sees (e.g. Cody-Waite reduction constants
-// emitted by LowerCompositeOps). The default ``float_format`` (general / %g-style)
-// strips trailing zeros, so simple values like ``0.5`` still print as ``0.5``
-// rather than ``0.500000000``.
+// For non-integer values we emit the *shortest* decimal that parses back to the
+// exact same ``double`` (``std::to_chars`` with no precision argument). This is
+// what makes ``ConstFloat`` (and float kwargs / attrs) round-trip bit-exactly
+// through print → parse: the parser stores ``ConstFloat.value_`` as the FP64
+// value it reads, so the printed text must encode the full ``double`` regardless
+// of the constant's ``dtype_``. The shortest-form output keeps simple values
+// readable — ``0.1`` prints as ``0.1`` (not ``0.10000000000000001``) and the
+// FP32-representable Cody-Waite constants emitted by ``LowerCompositeOps`` print
+// with exactly as many digits as their ``double`` needs (e.g.
+// ``0.31830987334251404``).
+//
+// Integer-valued doubles are formatted as ``X.0`` so they re-parse as floats
+// (a bare ``4`` would parse as ``ConstInt``); ``std::to_chars`` would emit ``4``.
 std::string FormatFloatLiteral(double value) {
   // Check if the value is an integer (no fractional part)
   if (value == std::floor(value)) {
@@ -347,13 +348,13 @@ std::string FormatFloatLiteral(double value) {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(1) << value;
     return oss.str();
-  } else {
-    // For non-integer values, use enough precision to round-trip an FP32
-    // value bit-exactly through print → parse → implicit float-cast.
-    std::ostringstream oss;
-    oss << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
-    return oss.str();
   }
+  // For non-integer values, emit the shortest round-tripping decimal.
+  char buf[32];
+  auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
+  INTERNAL_CHECK(ec == std::errc()) << "Internal error: std::to_chars failed to format float literal "
+                                    << value;
+  return std::string(buf, ptr);
 }
 
 // DataTypeToPythonString removed — now uses DataTypeToString from dtype.h

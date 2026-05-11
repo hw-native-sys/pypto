@@ -19,29 +19,6 @@ and ``tile.cast`` — no sin/cos remain after the pass.
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
-from pypto.pypto_core import passes as _core_passes
-
-
-@pytest.fixture(autouse=True)
-def pass_verification_context():
-    """Override the global roundtrip-verification fixture for this module.
-
-    The parser stores ``ConstFloat.value_`` as a Python ``float`` (FP64) without
-    snapping to the IR's ``FP32`` dtype, so the FP32-representable Cody-Waite
-    constants emitted by ``LowerCompositeOps`` (e.g. ``1/pi`` = ``0.31830988732818603515625``)
-    cannot round-trip bit-exactly through print → parse → ``assert_structural_equal``.
-    The C++ field-based equality compares the raw ``double`` values, which differ
-    after the lossy text trip even though both represent the same FP32 number.
-
-    Falling back to ``BEFORE_AND_AFTER`` keeps property verification on while
-    skipping the roundtrip check that depends on a print/parse-side fix.
-    """
-    instruments: list[_core_passes.PassInstrument] = [
-        _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
-    ]
-    with _core_passes.PassContext(instruments):
-        yield
-
 
 # Primitive tile ops the decomposition is allowed to emit (besides framework
 # infrastructure ops like tile.load / tile.store / tile.move that wrap the
