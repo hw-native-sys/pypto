@@ -401,6 +401,13 @@ REGISTER_OP("tensor.as_layout")
         "consumes the new view directly. Internal-only; passes (e.g. "
         "LowerTransposeLoadParamLayout) inject this at orch ↔ InCore call sites.")
     .add_argument("input", "Input tensor (TensorType, packed canonical or bare)")
+    // Inherit the input's MemRef: ``tensor.as_layout`` is a metadata-only
+    // reinterpret of the same physical buffer, so its result must alias the
+    // input's allocation. Without this, ``InitMemRef`` would mint a fresh
+    // MemRef and allocate a separate buffer that the runtime alias
+    // (``Tensor result = input;``) never writes to, leading to silent
+    // memory corruption / wrong reads downstream.
+    .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorAsLayoutType(args, kwargs);
