@@ -53,7 +53,7 @@ class TestTileGatherCompareTypes:
         text = str(prog)
         assert "tile.gather_compare" in text
         # dst tile must carry INT32 regardless of src dtype.
-        assert "i32" in text
+        assert "pl.INT32" in text
 
     @pytest.mark.parametrize("src_dtype", _INVALID_SRC_DTYPES)
     def test_invalid_src_dtype_raises(self, src_dtype):
