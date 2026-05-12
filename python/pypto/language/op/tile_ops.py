@@ -124,6 +124,7 @@ __all__ = [
     "tpop_from_aiv",
     "comm_notify",
     "comm_wait",
+    "comm_test",
     "sort32",
     "gather",
     "gather_mask",
@@ -142,6 +143,7 @@ from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TileLayout
 from ..typing import IntLike, Scalar, Tensor, Tile
 from .system_ops import (  # noqa: F401
     comm_notify,
+    comm_test,
     comm_wait,
     tpop_from_aic,
     tpop_from_aiv,

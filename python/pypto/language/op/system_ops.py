@@ -50,6 +50,7 @@ __all__ = [
     "tfree_to_aiv",
     "comm_notify",
     "comm_wait",
+    "comm_test",
 ]
 
 
@@ -218,3 +219,36 @@ def comm_wait(
     else:
         cmp_expr = ConstInt(int(cmp_value), DataType.INT32, Span.unknown())
     return _ir_tile_ops.comm_wait(signal.unwrap(), cmp_expr, cmp=cmp, span=span)
+
+
+def comm_test(
+    signal: Tensor,
+    cmp_value: int | Scalar | Expr,
+    *,
+    cmp: str,
+    span: Span | None = None,
+) -> Scalar:
+    """Non-blocking poll of a local INT32 signal slot, returning a BOOL Scalar.
+
+    Lowers to ``pto::comm::TTEST`` via PTOAS ``pto.comm.ttest``. Same operand
+    shape as :func:`comm_wait`, but does not block — the result is
+    ``pl.Scalar[pl.BOOL]`` and equals ``signal <cmp> cmp_value``.
+
+    Args:
+        signal: Local signal tensor (1-element INT32) to poll.
+        cmp_value: INT32 scalar comparison value (Python int, Scalar, or Expr).
+        cmp: Comparison predicate, one of ``"eq"`` | ``"ne"`` | ``"gt"`` |
+            ``"ge"`` | ``"lt"`` | ``"le"``.
+        span: Optional source span.
+
+    Returns:
+        ``pl.Scalar[pl.BOOL]`` wrapping the ``tile.comm_test`` IR call (PTO ``... -> i1``).
+    """
+    if isinstance(cmp_value, Scalar):
+        cmp_expr: Expr = cmp_value.unwrap()
+    elif isinstance(cmp_value, Expr):
+        cmp_expr = cmp_value
+    else:
+        cmp_expr = ConstInt(int(cmp_value), DataType.INT32, Span.unknown())
+    call = _ir_tile_ops.comm_test(signal.unwrap(), cmp_expr, cmp=cmp, span=span)
+    return Scalar(DataType.BOOL, call)

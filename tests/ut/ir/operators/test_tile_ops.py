@@ -2938,5 +2938,58 @@ class TestTileCommWaitOp:
         assert "ge" in ir_str
 
 
+class TestTileCommTestOp:
+    """Tests for tile.comm_test (non-blocking cross-rank signal poll, pto::comm::TTEST).
+
+    Same operand shape as tile.comm_wait but does not block — returns a BOOL
+    Scalar equal to ``signal <cmp> cmp_value``.
+    """
+
+    @staticmethod
+    def _make_signal_var(span):
+        dim1 = ir.ConstInt(1, DataType.INT32, span)
+        signal_type = ir.TensorType([dim1], DataType.INT32)
+        return ir.Var("signal", signal_type, span)
+
+    def test_tile_comm_test_eq(self):
+        span = ir.Span.unknown()
+        signal = self._make_signal_var(span)
+        cmp_value = ir.ConstInt(1, DataType.INT32, span)
+
+        call = tile.comm_test(signal, cmp_value, cmp="eq")
+
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.comm_test"
+        assert len(call.args) == 2
+        assert call.args[0] is signal
+        assert "tile.comm_test" in str(call)
+        assert 'cmp="eq"' in str(call) or "cmp='eq'" in str(call)
+
+    def test_tile_comm_test_returns_bool_scalar(self):
+        """DSL wrapper returns pl.Scalar[pl.BOOL]."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                signal_buf: pl.Tensor[[1], pl.INT32],
+            ) -> pl.Tensor[[1], pl.INT32]:
+                ok = pl.tile.comm_test(signal_buf, 1, cmp="eq")  # noqa: F841
+                return signal_buf
+
+        ir_str = str(Program)
+        assert "tile.comm_test" in ir_str
+        assert "eq" in ir_str
+
+    def test_tile_comm_test_rejects_invalid_cmp(self):
+        span = ir.Span.unknown()
+        signal = self._make_signal_var(span)
+        cmp_value = ir.ConstInt(1, DataType.INT32, span)
+
+        with pytest.raises(ValueError, match=r"eq.*ne.*gt.*ge.*lt.*le"):
+            tile.comm_test(signal, cmp_value, cmp="bogus")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

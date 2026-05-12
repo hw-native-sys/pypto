@@ -117,5 +117,22 @@ REGISTER_OP("tile.comm_wait")
     .no_memory_spec()
     .f_deduce_type(DeduceUnknownType);
 
+// Non-blocking poll of the local signal slot: returns a BOOL result equal to
+// `signal <cmp> cmp_value`. Same operand shape as tile.comm_wait, but does not
+// block; codegen lowers this to `pto::comm::TTEST` via PTOAS `pto.comm.ttest`,
+// which produces an MLIR `i1`.
+REGISTER_OP("tile.comm_test")
+    .set_description(
+        "Non-blocking poll: return BOOL = (local INT32 signal slot <cmp> cmp_value); does not block")
+    .set_op_category("CrossCoreOp")
+    .set_core_affinity(core_affinity::CoreAffinity::VECTOR)
+    .add_argument("signal", "Local signal tensor (1-element INT32, GM) to poll")
+    .add_argument("cmp_value", "INT32 scalar comparison value")
+    .set_attr<std::string>("cmp")  // "eq" | "ne" | "gt" | "ge" | "lt" | "le"
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&) {
+      return std::static_pointer_cast<const Type>(std::make_shared<ScalarType>(DataType::BOOL));
+    });
+
 }  // namespace ir
 }  // namespace pypto

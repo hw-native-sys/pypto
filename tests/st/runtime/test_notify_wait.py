@@ -9,28 +9,13 @@
 
 """On-board ST for ``pl.tile.comm_notify`` + ``pl.tile.comm_wait``.
 
-Single-rank loopback that mirrors the two real usage patterns from simpler's
-``examples/workers/l3/ep_dispatch_combine`` (commit c65dda3):
+Single-rank loopback exercises three codegen paths:
 
-1. ``count_exchange`` — atomic-add a count into a remote rank's slot.
-   Models ``dispatch.cpp``'s ``TNOTIFY(pub_counts_local + idx, v,
-   NotifyOp::AtomicAdd)`` where a producer rank publishes its per-expert
-   element count into the consumer rank's slot.
-
-2. ``done_barrier`` — atomic-add 1 into a remote rank's done slot, then
-   spin-wait on the local slot until it reaches the expected value.
-   Models the cross-rank "I'm done" barrier in both ``dispatch.cpp`` and
-   ``combine.cpp``:
-
-       for peer != my_rank:
-           TNOTIFY(remote_done_sig[my_rank], 1, NotifyOp::AtomicAdd)
-       for src != my_rank:
-           TWAIT(local_done_sig[src], 1, WaitCmp::GE)
-
-Single-rank loopback uses the same slot for both notify and wait, so the
-"remote" and "local" views collapse — this exercises the codegen and runtime
-paths for ``pto.comm.tnotify`` / ``pto.comm.twait`` without binding a real
-HCCL window.
+1. ``count_exchange`` — notify-only: atomic-add 5 into a slot pre-set to 3,
+   expect 8.
+2. ``wait_only`` — wait-only: pre-set the slot to 7, ``comm_wait ge 1``
+   must return immediately without touching the slot.
+3. ``done_barrier`` — notify + wait combined: atomic-add 1, then wait ge 1.
 """
 
 from typing import Any
@@ -65,7 +50,32 @@ class CountExchangeProgram:
         self,
         signal: pl.Out[pl.Tensor[[1], pl.INT32]],
     ) -> pl.Tensor[[1], pl.INT32]:
-        return self.kernel(signal)
+        signal = self.kernel(signal)
+        return signal
+
+
+@pl.program
+class WaitOnlyProgram:
+    """Wait-only: slot pre-set to 7; ``comm_wait ge 1`` returns immediately.
+
+    Isolates the ``pto.comm.twait`` codegen path with no notify in the kernel.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
+    ) -> pl.Tensor[[1], pl.INT32]:
+        pl.tile.comm_wait(signal, 1, cmp="ge")
+        return signal
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
+    ) -> pl.Tensor[[1], pl.INT32]:
+        signal = self.kernel(signal)
+        return signal
 
 
 @pl.program
@@ -90,7 +100,8 @@ class DoneBarrierProgram:
         self,
         signal: pl.Out[pl.Tensor[[1], pl.INT32]],
     ) -> pl.Tensor[[1], pl.INT32]:
-        return self.kernel(signal)
+        signal = self.kernel(signal)
+        return signal
 
 
 # --- Test cases ---
@@ -136,19 +147,33 @@ class DoneBarrierTestCase(_CommSignalBase):
         tensors["signal"][:] = torch.tensor([1], dtype=torch.int32)
 
 
+class WaitOnlyTestCase(_CommSignalBase):
+    def get_name(self) -> str:
+        return "comm_signal_wait_only"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        # Pre-initialize the slot to 7; wait ge 1 returns immediately, slot unchanged.
+        return [TensorSpec("signal", [1], DataType.INT32, init_value=7, is_output=True)]
+
+    def get_program(self) -> Any:
+        return WaitOnlyProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["signal"][:] = torch.tensor([7], dtype=torch.int32)
+
+
 # --- Tests ---
 
 
 class TestCommNotifyWait:
-    """On-board verification of pl.tile.comm_notify + pl.tile.comm_wait (single-rank loopback).
-
-    Mirrors the two real usage patterns from simpler's ep_dispatch_combine
-    kernels: count exchange (atomic-add) and the done barrier (atomic-add +
-    wait ge).
-    """
+    """On-board verification of pl.tile.comm_notify + pl.tile.comm_wait (single-rank loopback)."""
 
     def test_count_exchange(self, test_runner):
         result = test_runner.run(CountExchangeTestCase())
+        assert result.passed, f"Test failed: {result.error}"
+
+    def test_wait_only(self, test_runner):
+        result = test_runner.run(WaitOnlyTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
     def test_done_barrier(self, test_runner):

@@ -2369,6 +2369,26 @@ def comm_wait(signal: Expr, cmp_value: Expr, *, cmp: str, span: Span | None = No
     return _ir_core.create_op_call("tile.comm_wait", [signal, cmp_value], {"cmp": cmp}, actual_span)
 
 
+def comm_test(signal: Expr, cmp_value: Expr, *, cmp: str, span: Span | None = None) -> Call:
+    """Non-blocking poll of a local INT32 signal slot, returning a BOOL.
+
+    Lowers to ``pto::comm::TTEST`` via PTOAS ``pto.comm.ttest``. Same operand
+    shape as :func:`comm_wait`, but does not block — the result is BOOL and
+    equals ``signal <cmp> cmp_value``.
+
+    Args:
+        signal: Local signal tensor (1-element INT32) to poll
+        cmp_value: INT32 scalar comparison value
+        cmp: Comparison predicate, one of ``"eq"`` | ``"ne"`` | ``"gt"`` |
+            ``"ge"`` | ``"lt"`` | ``"le"``
+        span: Optional source span
+    """
+    if cmp not in _WAIT_CMPS:
+        raise ValueError(f"tile.comm_test: cmp must be one of {_WAIT_CMPS}, got {cmp!r}")
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("tile.comm_test", [signal, cmp_value], {"cmp": cmp}, actual_span)
+
+
 # ============================================================================
 # Sorting Operations
 # ============================================================================

@@ -2027,11 +2027,10 @@ static std::string MakeTileNotifyCodegenPTO(const CallPtr& op, codegen::CodegenB
       EmitCommSignalPartitionView(op->args_[0], signal_type.get(), codegen, op->span_, "tile.comm_notify"));
   std::string val = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
 
-  // PTOAS's TNotifyOp has no custom assemblyFormat — must use generic syntax.
+  // PTOAS custom assembly: pto.comm.tnotify(%sig, %v : <sig_type>, i32) {notifyOp = #pto<notify_op X>}
   std::ostringstream oss;
-  oss << "\"pto.comm.tnotify\"(" << sig_ssa << ", " << val << ") {notifyOp = #pto.notify_op<" << notify_op
-      << ">}"
-      << " : (" << sig_type << ", i32) -> ()";
+  oss << "pto.comm.tnotify(" << sig_ssa << ", " << val << " : " << sig_type << ", i32)"
+      << " {notifyOp = #pto<notify_op " << notify_op << ">}";
   codegen.Emit(oss.str());
   return "";
 }
@@ -2057,10 +2056,46 @@ static std::string MakeTileWaitCodegenPTO(const CallPtr& op, codegen::CodegenBas
       EmitCommSignalPartitionView(op->args_[0], signal_type.get(), codegen, op->span_, "tile.comm_wait"));
   std::string val = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
 
-  // PTOAS's TWaitOp has no custom assemblyFormat — must use generic syntax.
+  // PTOAS custom assembly: pto.comm.twait(%sig, %v : <sig_type>, i32) {cmp = #pto<wait_cmp X>}
   std::ostringstream oss;
-  oss << "\"pto.comm.twait\"(" << sig_ssa << ", " << val << ") {cmp = #pto.wait_cmp<" << cmp << ">}"
-      << " : (" << sig_type << ", i32) -> ()";
+  oss << "pto.comm.twait(" << sig_ssa << ", " << val << " : " << sig_type << ", i32)"
+      << " {cmp = #pto<wait_cmp " << cmp << ">}";
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// tile.comm_test: non-blocking cross-rank signal poll → pto.comm.ttest
+// signal:    1+-dim INT32 Tensor in local rank's HCCL window (lowered to
+//            !pto.partition_tensor_view<Nxi32>)
+// cmp_value: signless integer scalar (ConstInt or i32 SSA)
+// kwarg `cmp`: "eq"|"ne"|"gt"|"ge"|"lt"|"le" → MLIR enum #pto<wait_cmp ...>
+// returns:   i1 (BOOL) — true iff `signal <cmp> cmp_value`
+static std::string MakeTileTestCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+
+  CHECK(op->args_.size() == 2) << "tile.comm_test requires 2 arguments (signal, cmp_value), got "
+                               << op->args_.size();
+
+  const auto cmp = op->GetKwarg<std::string>("cmp");
+  CHECK(cmp == "eq" || cmp == "ne" || cmp == "gt" || cmp == "ge" || cmp == "lt" || cmp == "le")
+      << "tile.comm_test 'cmp' attribute must be one of eq|ne|gt|ge|lt|le, got '" << cmp << "'";
+
+  auto signal_type = CheckCommSignalType(op->args_[0], codegen, op->span_, "tile.comm_test");
+
+  auto [sig_ssa, sig_type] = SplitSSAAndType(
+      EmitCommSignalPartitionView(op->args_[0], signal_type.get(), codegen, op->span_, "tile.comm_test"));
+  std::string val = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
+
+  std::string result_ssa = codegen.GetCurrentResultTarget();
+  if (result_ssa.empty()) {
+    result_ssa = codegen.NewNamedTemp("comm_test");
+  }
+
+  // PTOAS custom assembly:
+  //   %ok = pto.comm.ttest(%sig, %v : <sig_type>, i32) {cmp = #pto<wait_cmp X>} -> i1
+  std::ostringstream oss;
+  oss << result_ssa << " = pto.comm.ttest(" << sig_ssa << ", " << val << " : " << sig_type << ", i32)"
+      << " {cmp = #pto<wait_cmp " << cmp << ">} -> i1";
   codegen.Emit(oss.str());
   return "";
 }
@@ -2626,6 +2661,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.comm_wait", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileWaitCodegenPTO(op, codegen);
+  });
+  reg("tile.comm_test", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeTileTestCodegenPTO(op, codegen);
   });
   reg("system.tfree_to_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTfreeToAicCodegenPTO(op, codegen);

@@ -1762,7 +1762,9 @@ class TestTileCommNotifyPtoCodegen:
         assert "pto.comm.tnotify" in mlir, f"pto.comm.tnotify not emitted:\n{mlir}"
         assert "#pto<notify_op atomic_add>" in mlir, f"notifyOp<atomic_add> missing:\n{mlir}"
         notify_line = next((line for line in mlir.splitlines() if "pto.comm.tnotify" in line), "")
-        assert ", i32) -> ()" in notify_line, f"Expected i32 value type annotation:\n{notify_line}"
+        assert "!pto.partition_tensor_view<1xi32>, i32)" in notify_line, (
+            f"Expected partition_tensor_view + i32 operand-type list:\n{notify_line}"
+        )
 
     def test_tile_comm_notify_rejects_non_int32_signal(self):
         """tile.comm_notify codegen rejects non-INT32 signal tensors."""
@@ -1821,7 +1823,9 @@ class TestTileCommWaitPtoCodegen:
         assert "pto.comm.twait" in mlir, f"pto.comm.twait not emitted:\n{mlir}"
         assert "#pto<wait_cmp ge>" in mlir, f"wait_cmp<ge> attribute missing:\n{mlir}"
         wait_line = next((line for line in mlir.splitlines() if "pto.comm.twait" in line), "")
-        assert ", i32) -> ()" in wait_line, f"Expected i32 value type annotation:\n{wait_line}"
+        assert "!pto.partition_tensor_view<1xi32>, i32)" in wait_line, (
+            f"Expected partition_tensor_view + i32 operand-type list:\n{wait_line}"
+        )
 
     def test_tile_comm_wait_rejects_non_int32_signal(self):
         """tile.comm_wait codegen rejects non-INT32 signal tensors."""
@@ -1837,6 +1841,64 @@ class TestTileCommWaitPtoCodegen:
                 return signal
 
         with pytest.raises(Exception, match=r"tile\.comm_wait signal must be INT32"):
+            self._generate_mlir(Prog)
+
+
+class TestTileCommTestPtoCodegen:
+    """PTO codegen tests for tile.comm_test (non-blocking signal poll, returns BOOL).
+
+    Lowers to ``pto::comm::TTEST`` via PTOAS ``pto.comm.ttest``. Same operand
+    shape as ``tile.comm_wait`` but produces an MLIR ``i1`` result.
+    """
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_comm_test_eq_codegen(self):
+        """pl.tile.comm_test(sig, 1, cmp='eq') emits pto.comm.ttest #pto<wait_cmp eq> -> i1."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_test_eq(
+                self,
+                signal: pl.Tensor[[1], pl.INT32],
+            ) -> pl.Tensor[[1], pl.INT32]:
+                ok = pl.tile.comm_test(signal, 1, cmp="eq")  # noqa: F841
+                return signal
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.comm.ttest" in mlir, f"pto.comm.ttest not emitted:\n{mlir}"
+        assert "#pto<wait_cmp eq>" in mlir, f"wait_cmp<eq> attribute missing:\n{mlir}"
+        test_line = next((line for line in mlir.splitlines() if "pto.comm.ttest" in line), "")
+        assert "!pto.partition_tensor_view<1xi32>, i32)" in test_line, (
+            f"Expected partition_tensor_view + i32 operand-type list:\n{test_line}"
+        )
+        assert "-> i1" in test_line, f"Expected i1 return type:\n{test_line}"
+
+    def test_tile_comm_test_rejects_non_int32_signal(self):
+        """tile.comm_test codegen rejects non-INT32 signal tensors."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_test_bad_dtype(
+                self,
+                signal: pl.Tensor[[1], pl.FP32],
+            ) -> pl.Tensor[[1], pl.FP32]:
+                ok = pl.tile.comm_test(signal, 1, cmp="eq")  # noqa: F841
+                return signal
+
+        with pytest.raises(Exception, match=r"tile\.comm_test signal must be INT32"):
             self._generate_mlir(Prog)
 
 
