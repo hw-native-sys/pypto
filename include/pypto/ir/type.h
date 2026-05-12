@@ -542,6 +542,13 @@ class DistributedTensorType : public TensorType {
   DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, WindowBufferPtr window_buffer)
       : TensorType(std::move(shape), dtype), window_buffer_(std::move(window_buffer)) {}
 
+  /// Full-fields constructor used by deserialization to faithfully restore
+  /// every optional field (memref, tensor_view, window_buffer) in one shot.
+  DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
+                        std::optional<TensorView> tensor_view, std::optional<WindowBufferPtr> window_buffer)
+      : TensorType(std::move(shape), dtype, std::move(memref), std::move(tensor_view)),
+        window_buffer_(std::move(window_buffer)) {}
+
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::DistributedTensorType; }
   [[nodiscard]] std::string TypeName() const override { return "DistributedTensorType"; }
 

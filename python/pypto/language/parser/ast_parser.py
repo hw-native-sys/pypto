@@ -4451,7 +4451,7 @@ class ASTParser:
                 "pld.alloc_window_buffer must appear as the RHS of a simple assignment "
                 "(its result must be bound to a named variable)",
                 span=span,
-                hint="Write 'buf = pld.alloc_window_buffer(N, dtype=pl.FP32)'",
+                hint="Write 'buf = pld.alloc_window_buffer(N)'",
             )
 
         if op_name == "window":
