@@ -48,20 +48,14 @@ idx: pl.Scalar[pl.INDEX]                # index scalar
 
 ### Tensor Layouts
 
-Tensors describe row-major memory; layout is normally **derived** from the
-ops that produce a view. The user-facing toolbox:
-
-| Pattern | Use when | Result |
-| ------- | -------- | ------ |
-| `pl.Tensor[[..], pl.FP32]` (no layout marker) | Default — your source tensor is plain row-major memory | ND |
-| `pl.transpose(t, -2, -1)` | Need a transposed view at use site (e.g. matmul B^T pattern) | DN |
-| `pl.slice(view, ...)` / `pl.reshape(view, ...)` | Sub-view that should inherit a parent's layout | Same family as parent |
+Write your `pl.Tensor[...]` annotations using the **runtime row-major
+shape** without a layout marker. Layout is an IR-internal concern that
+passes derive from the ops actually producing/consuming views; you do
+not need to express it in the type annotation.
 
 ```python
-# ✅ Recommended — write source tensor shape, derive DN at use site:
+# ✅ Recommended — source tensor shape, no layout marker:
 b: pl.Tensor[[N, K], pl.FP32]
-b_t = pl.transpose(b, -2, -1)  # ND → DN view, same physical buffer
-tile_b = pl.load(b_t, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
 ```
 
 ```python
@@ -72,12 +66,19 @@ b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → DeprecationWarning at parse time
 > **Why `pl.Tensor[..., pl.DN]` is deprecated.** Writing the DN
 > layout-only shorthand forces you to mentally hold two coordinate systems
 > at once (the IR-logical post-view shape and the runtime row-major shape).
-> Compose `pl.transpose` instead — the source tensor always uses its
-> runtime shape, and the DN view appears explicitly in the program.
+> Drop the layout marker and write the runtime shape — for matmul B^T,
+> use `pl.load(..., transpose=True)` on the row-major tensor (see "Data
+> Movement" below); for slicing a DN-producing op, the slice inherits
+> the parent's layout automatically.
 
 For NZ (hardware-specific tile layout), use `pl.Tile[..., pl.NZ]` — NZ is
 tile-only, never a TensorType annotation. The `pl.NZ` constant remains
 available for tile annotations and IR-internal use.
+
+If you need to write a DN tensor at the IR level (e.g. when constructing
+fixtures or round-tripping printed IR), prefer
+`pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)` which forces
+explicit stride and avoids the implicit coordinate-flip hazard.
 
 ### Dynamic Shapes
 
@@ -532,34 +533,6 @@ b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
 c_acc = pl.matmul(a_l0a, b_l0b)                     # result → Acc
 out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 ```
-
-### Pattern: Matmul B^T via Transposed View
-
-`pl.load(..., transpose=True)` is **deprecated** (RFC #1300 supplementary 2):
-it mixes a view-reinterpret into a memory-copy op and breaks the
-orthogonality of `pl.slice` / `pl.reshape` / `pl.transpose`.
-
-```python
-# ⚠️ Deprecated (kept working; emits DeprecationWarning):
-b_l1 = pl.load(b, [0, 0], [N, K], target_memory=pl.Mem.Mat, transpose=True)
-```
-
-The end state is `tensor-level transpose view + plain pl.load`:
-
-```python
-# Target form (not yet end-to-end usable — see note below):
-b_t = pl.transpose(b, -2, -1)   # ND → DN view
-b_l1 = pl.load(b_t, [0, 0], [K, N], target_memory=pl.Mem.Mat)
-```
-
-> **Migration status (May 2026).** The target form does not compose in
-> the current pipeline: `tensor.transpose` lowers to `tile.transpose` in
-> `ConvertTensorToTileOps`, which the consumer `pl.load`'s type check
-> rejects (it requires a TensorType source, not a TileType). Until the
-> lowering is updated to keep `tensor.transpose` as a tensor-level view
-> when its consumer is `pl.load`, **continue using `transpose=True` as
-> before** — the deprecation warning is informational only; no rewrite
-> is required yet. Tracking issue: see RFC #1300 follow-up.
 
 ## Compilation
 

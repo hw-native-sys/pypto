@@ -327,53 +327,16 @@ def load(
         transpose: Whether to transpose the tile during load (default: False).
             Only supported when target_memory is MemorySpace.Mat (L1).
 
-            .. deprecated:: RFC #1300 §3.3
-                ``transpose=True`` mixes a view-reinterpret into a memory-copy
-                op and breaks the orthogonality of ``pl.slice`` / ``pl.reshape``
-                / ``pl.transpose``. Compose ``pl.transpose(tensor, -2, -1)``
-                followed by ``pl.load(..., target_memory=pl.MemorySpace.Mat)``
-                on the DN view instead — ``pl.transpose`` is a pure metadata
-                reinterpret and the resulting ``tile.load`` carries the same
-                semantics without the kwarg.
-
     Returns:
         Tile wrapping the load operation
 
     Example:
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
-        >>> # Migrating away from transpose=True (B^T-style load to L1):
-        >>> # ❌ deprecated:
-        >>> # tile = load(tensor, offsets=[0, 0], shapes=[N, K],
-        >>> #             target_memory=pl.MemorySpace.Mat, transpose=True)
-        >>> # ✅ new pattern:
-        >>> tensor_t = transpose(tensor, -2, -1)        # ND → DN view
-        >>> tile = load(tensor_t, offsets=[0, 0], shapes=[K, N],
-        ...             target_memory=pl.MemorySpace.Mat)
+        >>> # 2D load with transpose to L1 (tensor is [N, K], output tile is [K, N])
+        >>> tile = load(tensor, offsets=[0, 0], shapes=[N, K],
+        ...             target_memory=pl.MemorySpace.Mat, transpose=True)
     """
-    if transpose:
-        # NOTE: ``pl.transpose + pl.load`` is RFC #1300 supplementary 2's
-        # end state for this kwarg, but composing them today requires
-        # ``tensor.transpose`` to stay as a tensor-level view through
-        # ``ConvertTensorToTileOps`` (it currently lowers to
-        # ``tile.transpose``, which breaks the downstream ``tile.load``
-        # type check at src/ir/op/tile_ops/memory.cpp). Until that
-        # lowering is updated, the warning surfaces the deprecation
-        # intent without prescribing a migration step that doesn't
-        # compose in the current pipeline.
-        warnings.warn(
-            "pl.load(..., transpose=True) is deprecated (RFC #1300 supplementary 2). "
-            "It mixes a view-reinterpret into a memory-copy op and breaks the "
-            "orthogonality of pl.slice / pl.reshape / pl.transpose. The intended "
-            "end state is a tensor-level transpose view fed into a plain pl.load; "
-            "the compiler does not yet support that composition end-to-end "
-            "(tensor.transpose currently lowers to tile.transpose, blocking the "
-            "tensor → tile.load chain), so this kwarg is kept working for now. "
-            "Avoid introducing new uses; existing uses will be migrated when the "
-            "composition fix lands.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
     if valid_shapes is None:
         valid_shapes = shapes
     call_expr = _ir_ops.load(

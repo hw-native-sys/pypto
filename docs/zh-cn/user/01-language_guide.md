@@ -48,19 +48,11 @@ idx: pl.Scalar[pl.INDEX]                # 索引标量
 
 ### 张量布局（TensorLayout）
 
-Tensor 描述行优先内存，layout 通常由派生 view 的 op **推导**而出。用户面工具箱：
-
-| 写法 | 适用场景 | 结果 |
-| ---- | -------- | ---- |
-| `pl.Tensor[[..], pl.FP32]`（不写 layout） | 默认 —— 源 tensor 是普通行优先内存 | ND |
-| `pl.transpose(t, -2, -1)` | 在使用点派生转置视图（如 matmul B^T） | DN |
-| `pl.slice(view, ...)` / `pl.reshape(view, ...)` | 子视图应该继承父 layout | 同父 layout 家族 |
+`pl.Tensor[...]` annotation 写 **runtime 行优先 shape**，不写 layout 标记。layout 是 IR 内部概念，由派生/消费视图的 op 推导，不需要在 annotation 上表达。
 
 ```python
-# ✅ 推荐 —— 写源 tensor shape，在使用点派生 DN：
+# ✅ 推荐 —— 写源 tensor shape，不写 layout 标记：
 b: pl.Tensor[[N, K], pl.FP32]
-b_t = pl.transpose(b, -2, -1)  # ND → DN 视图，同一片物理 buffer
-tile_b = pl.load(b_t, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
 ```
 
 ```python
@@ -68,9 +60,11 @@ tile_b = pl.load(b_t, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
 b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → 解析期触发 DeprecationWarning
 ```
 
-> **为什么弃用 `pl.Tensor[..., pl.DN]`。** 这个 layout-only 简写迫使用户脑子里同时持有两套坐标系（IR 逻辑后视图 shape 与 runtime 行优先 shape）—— 恰恰是 RFC #1300 想要消除的歧义。改用 `pl.transpose` 组合，源 tensor 永远写 runtime shape，DN 视图在程序里显式出现。
+> **为什么弃用 `pl.Tensor[..., pl.DN]`。** layout-only 简写迫使用户脑子里同时持有两套坐标系（IR 逻辑后视图 shape 与 runtime 行优先 shape）—— 恰恰是 RFC #1300 想要消除的歧义。改用：去掉 layout 标记，写 runtime shape —— matmul B^T 场景用 `pl.load(..., transpose=True)` 加载行优先 tensor（参见下文「数据搬运」）；DN-producing op 之后的 slice 自动继承父 layout。
 
 如需 NZ（硬件 tile layout），写 `pl.Tile[..., pl.NZ]` —— NZ 是 tile-only，不允许作为 TensorType annotation。`pl.NZ` 常量保留用于 tile annotation 和 IR 内部使用。
+
+若需要在 IR 层面写 DN tensor（如测试 fixture 或 round-trip 打印的 IR），用 `pl.TensorView(stride=[...], layout=pl.TensorLayout.DN)` —— 强制写显式 stride，避免隐式坐标翻转的隐患。
 
 ### 动态形状（Dynamic Shapes）
 
@@ -525,25 +519,6 @@ b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
 c_acc = pl.matmul(a_l0a, b_l0b)                     # 结果 → Acc
 out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 ```
-
-### 模式：B^T 矩阵乘法（关于弃用的 transpose=True）
-
-`pl.load(..., transpose=True)` 已**弃用**（RFC #1300 补充 2）：它把 view 重解释混进了内存搬运 op，破坏了 `pl.slice` / `pl.reshape` / `pl.transpose` 的正交性。
-
-```python
-# ⚠️ 已弃用（兼容期保留；触发 DeprecationWarning）：
-b_l1 = pl.load(b, [0, 0], [N, K], target_memory=pl.Mem.Mat, transpose=True)
-```
-
-目标形式是 `tensor 级 transpose 视图 + 普通 pl.load`：
-
-```python
-# 目标写法（当前 pipeline 还无法端到端通过 —— 见下方说明）：
-b_t = pl.transpose(b, -2, -1)   # ND → DN 视图
-b_l1 = pl.load(b_t, [0, 0], [K, N], target_memory=pl.Mem.Mat)
-```
-
-> **迁移状态（2026.5）。** 目标形式当前还不能组合：`tensor.transpose` 在 `ConvertTensorToTileOps` 里会被 lower 为 `tile.transpose`，下游 `pl.load` 的类型检查会拒绝（它要求源是 TensorType，而不是 TileType）。在 lowering 修复之前（让 `tensor.transpose` 在 `pl.load` 消费时保持为 tensor 级视图），**继续按旧写法使用 `transpose=True`** —— DeprecationWarning 只是预告，目前无需改代码。后续 RFC #1300 follow-up issue 会跟踪。
 
 ## 编译
 
