@@ -16,7 +16,9 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
 
@@ -34,7 +36,19 @@ TypePtr DeduceTaskIdScalarType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceBoolScalarType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  (void)args;
+  // ``system.task_is_valid`` is synthesized only by manual_scope lowering
+  // (no user-facing surface), so a malformed Call here is a pass bug —
+  // INTERNAL_CHECK is the right tool. Span comes from args[0] which is
+  // guaranteed non-null by the size check that runs first.
+  INTERNAL_CHECK(args.size() == 1) << "Internal error: system.task_is_valid expects 1 argument, got "
+                                   << args.size();
+  auto arg_type = As<ScalarType>(args[0]->GetType());
+  INTERNAL_CHECK_SPAN(arg_type, args[0]->span_)
+      << "Internal error: system.task_is_valid argument must be a Scalar, got "
+      << args[0]->GetType()->TypeName();
+  INTERNAL_CHECK_SPAN(arg_type->dtype_ == DataType::TASK_ID, args[0]->span_)
+      << "Internal error: system.task_is_valid argument must be Scalar[TASK_ID], got "
+      << arg_type->dtype_.ToString();
   (void)kwargs;
   return std::make_shared<ScalarType>(DataType::BOOL);
 }

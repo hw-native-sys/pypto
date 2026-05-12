@@ -2402,9 +2402,8 @@ class TestTaskIsValidCodegen:
 
         ib = IRBuilder()
         with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
-            orch_f.param("tid", ir.ScalarType(DataType.TASK_ID))
+            tid = orch_f.param("tid", ir.ScalarType(DataType.TASK_ID))
             orch_f.return_type(ir.ScalarType(DataType.BOOL))
-            tid = orch_f.get_result().params[0]
             # b = task_is_valid(tid)
             check = ir.create_op_call("system.task_is_valid", [tid], {}, ir.Span.unknown())
             b = ib.let("b", check)
