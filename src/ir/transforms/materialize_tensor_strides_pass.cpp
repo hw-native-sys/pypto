@@ -28,9 +28,11 @@
  * The pass is idempotent: re-running it on already-canonical IR is a no-op.
  */
 
+#include <any>
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -163,7 +165,44 @@ class MaterializeTensorStridesMutator : public IRMutator {
     auto new_return_type = MaterializeType(op->GetType());
     bool type_changed = new_return_type.get() != op->GetType().get();
 
-    if (!args_changed && !type_changed) return op;
+    // ``manual_dep_edges`` / ``user_manual_dep_edges`` carry VarPtrs that
+    // reference Vars defined elsewhere in the IR. When this pass mints a
+    // fresh Var for a Tensor whose view stride is being materialized, the
+    // attr entries must follow — otherwise they dangle to the pre-pass
+    // pointer and SSAVerify / orchestration codegen fail.
+    std::vector<std::pair<std::string, std::any>> new_attrs;
+    new_attrs.reserve(op->attrs_.size());
+    bool attrs_changed = false;
+    for (const auto& [k, v] : op->attrs_) {
+      if (k == kAttrUserManualDepEdges || k == kAttrManualDepEdges) {
+        if (const auto* edges = std::any_cast<std::vector<VarPtr>>(&v)) {
+          std::vector<VarPtr> new_edges;
+          new_edges.reserve(edges->size());
+          bool any_changed = false;
+          for (const auto& e : *edges) {
+            if (!e) {
+              new_edges.push_back(e);
+              continue;
+            }
+            auto remapped_var = AsVarLike(IRMutator::VisitExpr(e));
+            if (!remapped_var) {
+              new_edges.push_back(e);
+              continue;
+            }
+            if (remapped_var.get() != e.get()) any_changed = true;
+            new_edges.push_back(std::move(remapped_var));
+          }
+          if (any_changed) {
+            attrs_changed = true;
+            new_attrs.emplace_back(k, std::any(std::move(new_edges)));
+            continue;
+          }
+        }
+      }
+      new_attrs.emplace_back(k, v);
+    }
+
+    if (!args_changed && !type_changed && !attrs_changed) return op;
 
     // Direct ctor — preserve the (materialized) original type and ``attrs_``
     // rather than re-deducing via OpRegistry.
@@ -177,7 +216,8 @@ class MaterializeTensorStridesMutator : public IRMutator {
     // silently undoing the 2D flattening. Forwarding ``op->attrs_`` likewise
     // preserves call metadata that earlier passes wrote (e.g. arg directions,
     // manual-dep edges) — re-deduction would drop those.
-    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, op->attrs_,
+    auto attrs_to_use = attrs_changed ? std::move(new_attrs) : op->attrs_;
+    return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(attrs_to_use),
                                   std::move(new_return_type), op->span_);
   }
 
