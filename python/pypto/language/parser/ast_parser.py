@@ -1107,6 +1107,11 @@ class ASTParser:
         )
         dropped = set(drop_dims)
         kept_dims = [d for d in range(len(extents)) if d not in dropped]
+        natural_rank = len(kept_dims)
+        # The tile.slice deducer floors a sub-2D result back to 2D by prepending
+        # unit axes, so a tile rhs obtained by reading an indexed view is 2D even
+        # when the "natural" rank-reduced rank is < 2 — accept that shape here.
+        floored_rank = max(2, natural_rank) if isinstance(base_type, ir.TileType) else natural_rank
 
         source_expr = self.parse_expression(value_node)
         source_type = source_expr.type
@@ -1117,28 +1122,36 @@ class ASTParser:
                 hint=f"The rhs of 'dst[...] = src' must be a {kind_name} of matching shape",
             )
 
-        if len(source_type.shape) != len(kept_dims):
+        src_rank = len(source_type.shape)
+        if src_rank not in (natural_rank, floored_rank):
+            expected = (
+                f"{natural_rank}D" if natural_rank == floored_rank else f"{natural_rank}D or {floored_rank}D"
+            )
             raise ParserTypeError(
-                f"Subscript-write source must be {len(kept_dims)}D to match the rank-reduced "
-                f"{kind_name} window, got {len(source_type.shape)}D",
+                f"Subscript-write source must be {expected} to match the rank-reduced "
+                f"{kind_name} window, got {src_rank}D",
                 span=span,
                 hint="A scalar index removes its axis from the lhs window; the rhs rank must "
-                "match the remaining axes",
+                "match the remaining axes (tiles may also keep leading unit axes to stay 2D)",
             )
 
-        for src_axis, dim_idx in enumerate(kept_dims):
-            requested_const = _fold_const_slice_extent(extents[dim_idx], 0)
+        # Constant extents the source axes must match — with leading unit axes
+        # prepended when the source carries the tile 2D-floor's padding.
+        lead_units = src_rank - natural_rank
+        expected_extents = [1] * lead_units + [extents[d] for d in kept_dims]
+        for src_axis, want in enumerate(expected_extents):
+            requested_const = _fold_const_slice_extent(want, 0)
             source_const = _fold_const_slice_extent(source_type.shape[src_axis], 0)
             if requested_const is not None and source_const is not None and requested_const != source_const:
                 raise ParserTypeError(
-                    f"Subscript-write shape mismatch on axis {dim_idx}: "
-                    f"slice expects {requested_const} elements, source has {source_const}",
+                    f"Subscript-write shape mismatch on source axis {src_axis}: "
+                    f"window expects {requested_const} elements, source has {source_const}",
                     span=span,
-                    hint=f"Make the source's axis-{src_axis} extent match the slice extent, "
-                    f"or adjust the slice bounds",
+                    hint="Make the source's extents match the rank-reduced lhs window, "
+                    "or adjust the slice bounds",
                 )
 
-        if drop_dims:
+        if src_rank != len(extents):
             # Lift the rank-reduced source back to the full-rank target window
             # (unit dims at the dropped positions) so the assemble's source/window
             # ranks match — mirrors the implicit reshape numpy does on a write.

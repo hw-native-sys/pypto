@@ -9,6 +9,7 @@
 
 """Unit tests for subscript syntax on Tensor and Tile types."""
 
+import warnings
 from typing import cast
 
 import pypto.language as pl
@@ -592,7 +593,7 @@ class TestTensorSubscriptWrite:
     def test_tensor_subscript_write_shape_mismatch_static(self):
         """Static shape mismatch on a slice axis must be reported with axis + extents."""
 
-        with pytest.raises(ParserTypeError, match="shape mismatch on axis 0"):
+        with pytest.raises(ParserTypeError, match="shape mismatch on source axis 0"):
 
             @pl.function
             def bad_shape(
@@ -605,7 +606,7 @@ class TestTensorSubscriptWrite:
     def test_tensor_subscript_write_full_axis_shape_mismatch(self):
         """`out[:, :] = src` requires src to fill the target shape exactly."""
 
-        with pytest.raises(ParserTypeError, match="shape mismatch on axis 1"):
+        with pytest.raises(ParserTypeError, match="shape mismatch on source axis 1"):
 
             @pl.function
             def bad_full(
@@ -647,7 +648,7 @@ class TestTensorSubscriptWrite:
     def test_tensor_subscript_write_symbolic_extent_simplifies_mismatch(self):
         """``out[i:i+8, ...] = src`` simplifies to 8 — must reject when src has 16."""
 
-        with pytest.raises(ParserTypeError, match="shape mismatch on axis 0"):
+        with pytest.raises(ParserTypeError, match="shape mismatch on source axis 0"):
 
             @pl.function
             def bad_symbolic(
@@ -704,6 +705,29 @@ class TestTileSubscriptWrite:
         offset_tuple = assemble_stmt.value.args[2]
         assert isinstance(offset_tuple, ir.MakeTuple)
         assert [cast(ir.ConstInt, e).value for e in offset_tuple.elements] == [0, 0]
+
+    def test_tile_subscript_write_rank_reducing_row(self):
+        """t2d[i] = row_tile (a [1, N] tile, the only shape tile indexing produces)
+        is accepted — the tile 2D-floor is taken into account when checking rhs rank."""
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # the t[j] read auto-promotes to [1, N] + warns
+
+            @pl.function
+            def write_row(
+                x: pl.Tensor[[64, 128], pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+                j: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+                row: pl.Tile[[1, 128], pl.FP32] = t[j]  # a [1, 128] view
+                t[i] = row
+                return pl.store(t, [0, 0], x)
+
+        printed = write_row.as_python()
+        # window [1, 128] == rhs shape [1, 128], so no reshape is inserted.
+        assert "tile.assemble" in printed
+        assert "tile.reshape" not in printed
 
 
 if __name__ == "__main__":

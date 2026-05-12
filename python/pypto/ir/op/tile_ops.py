@@ -2034,7 +2034,7 @@ def slice(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
-    drop_dims: list[int] | None = None,
+    drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
     span: Span | None = None,
 ) -> Call:

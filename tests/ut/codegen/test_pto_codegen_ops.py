@@ -15,6 +15,8 @@ each operation type, compiles them through the PassManager and PTOCodegen,
 and verifies the generated orchestration code.
 """
 
+import warnings
+
 import pypto.language as pl
 import pytest
 from pypto import DataType, backend, codegen, ir
@@ -839,6 +841,32 @@ class TestTileSliceCodegen:
         line = subview_lines[0]
         assert "sizes [16, 16]" in line, f"sizes attribute must be [16, 16], got:\n{line}"
         assert "rows=16, cols=16" in line, f"result tile_buf must carry rows=16, cols=16, got:\n{line}"
+
+    def test_tile_slice_codegen_rank_reducing(self):
+        """A rank-reducing tile subscript `t[i]` (→ tile.slice with drop_dims) reaches
+        PTO codegen and emits pto.subview — the result is clamped to 2D [1, N]."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[32, 32], pl.FP32],
+                dst: pl.Tensor[[1, 32], pl.FP32],
+                row: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1, 32], pl.FP32]:
+                src_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(src, [0, 0], [32, 32])
+                row_tile: pl.Tile[[1, 32], pl.FP32] = src_tile[row]
+                return pl.store(row_tile, [0, 0], dst)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mlir = self._generate_mlir(Prog)
+        assert "pto.subview" in mlir, f"rank-reducing tile.slice should generate pto.subview, got:\n{mlir}"
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines and "sizes [1, 32]" in subview_lines[0], (
+            f"subview sizes attribute must be [1, 32], got:\n{subview_lines}"
+        )
 
     def test_tile_slice_codegen_with_valid_shape(self):
         """tile.slice(..., valid_shape=...) emits pto.subview + pto.tmov + pto.set_validshape."""

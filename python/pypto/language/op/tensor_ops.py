@@ -216,7 +216,7 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
-    drop_dims: list[int] | None = None,
+    drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
 ) -> Tensor:
     """Create a slice of a tensor with new shape and optional valid shape.

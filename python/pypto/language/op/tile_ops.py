@@ -1365,7 +1365,7 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
-    drop_dims: list[int] | None = None,
+    drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
 ) -> Tile:
     """Create a slice of a tile with static shape and optional valid shape.

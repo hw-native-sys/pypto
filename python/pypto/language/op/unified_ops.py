@@ -438,7 +438,7 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
-    drop_dims: list[int] | None = None,
+    drop_dims: Sequence[int | _ir_core.Expr] | None = None,
 ) -> T:
     """Slice operation, dispatched by input type.
 
