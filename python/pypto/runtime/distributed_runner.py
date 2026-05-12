@@ -326,10 +326,19 @@ def execute_distributed(  # noqa: PLR0912
         chip_bootstrap_configs=chip_bootstrap_configs,
     )
 
-    # 6. Register SubWorker callables
+    # 6. Register SubWorker callables and ChipCallables. Both must happen
+    # before w.init() so the L3 fork inherits the registry via COW (see
+    # runtime PR #710); the emitted host_orch.py then dispatches via cids
+    # — `orch.submit_sub(sub_ids[name], …)` and
+    # `orch.submit_next_level(callables[name], …)` — both indexing into
+    # name→cid dicts.
     sub_ids: dict[str, int] = {}
     for name, fn in sub_worker_fns.items():
         sub_ids[name] = w.register(fn)
+
+    chip_cids: dict[str, int] = {}
+    for name, chip_callable in chip_callables.items():
+        chip_cids[name] = w.register(chip_callable)
 
     w.init()
 
@@ -345,7 +354,7 @@ def execute_distributed(  # noqa: PLR0912
             _unused_args,
             call_config,
             tensors=tensors,
-            callables=chip_callables,
+            callables=chip_cids,
             sub_ids=sub_ids,
             _keep=_keep,
             contexts=w.chip_contexts,
