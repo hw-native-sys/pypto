@@ -7,11 +7,17 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
-"""Tests for the AOT comm-group manifest pipeline (v2 schema, N1.4).
+"""Tests for the AOT comm-group manifest pipeline (v2 schema).
 
 Compile-time:  Program → ``lift_comm_manifest`` → JSON-safe dict
 On disk:       ``output_dir/orchestration/comm_manifest.json``
 Runtime:       dict → ``_build_chip_bootstrap_configs_from_manifest`` → list[ChipBootstrapConfig]
+
+Post-redesign, ``WindowBuffer`` is dtype-agnostic (mirrors ``MemRef``); the
+manifest carries ``name`` (from ``Var.name_hint``) plus ``nbytes`` (per-rank
+allocation size in bytes). The runtime passes the placeholder string
+``"opaque"`` for ``ChipBufferSpec.dtype`` since simpler does not consume
+that field.
 
 The CollectCommGroups pass that *infers* CommGroups from
 ``pld.alloc_window_buffer`` ops is added in N4. These tests pre-stage the
@@ -29,6 +35,7 @@ from pypto.pypto_core.ir import (
     CommGroup,
     ConstInt,
     Program,
+    PtrType,
     Span,
     Var,
     WindowBuffer,
@@ -61,6 +68,10 @@ def _const(value: int) -> ConstInt:
     return ConstInt(value, DataType.INT64, Span.unknown())
 
 
+def _ptr(name: str) -> Var:
+    return Var(name, PtrType(), Span.unknown())
+
+
 def _trivial_program(groups: list[CommGroup] | None = None) -> Program:
     """Build a minimal Program (optionally with CommGroups) via @pl.program +
     immediate Program(...) reconstruction. Until the CollectCommGroups pass
@@ -91,10 +102,11 @@ def test_lift_no_comm_group_returns_none():
 
 
 def test_lift_const_size_emits_json_safe_manifest():
-    """All-devices group with literal sizes lifts to a JSON-safe v2 manifest."""
+    """All-devices group with literal byte sizes lifts to a JSON-safe v2 manifest."""
     slots = [
-        WindowBuffer("data", _const(256), DataType.FP32),
-        WindowBuffer("signal", _const(2), DataType.INT32),
+        # 256 FP32 elements = 1024 bytes; 2 INT32 elements = 8 bytes.
+        WindowBuffer(_ptr("data"), _const(1024)),
+        WindowBuffer(_ptr("signal"), _const(8)),
     ]
     p = _trivial_program([CommGroup([], slots)])  # empty devices = all
 
@@ -110,17 +122,13 @@ def test_lift_const_size_emits_json_safe_manifest():
     assert g["slots"] == [
         {
             "name": "data",
-            "dtype": "float32",
-            "size": 256,
-            "bits_per_element": 32,
+            "nbytes": 1024,
             "load_from_host": False,
             "store_to_host": False,
         },
         {
             "name": "signal",
-            "dtype": "int32",
-            "size": 2,
-            "bits_per_element": 32,
+            "nbytes": 8,
             "load_from_host": False,
             "store_to_host": False,
         },
@@ -129,7 +137,7 @@ def test_lift_const_size_emits_json_safe_manifest():
 
 def test_lift_explicit_device_list():
     """A group with explicit devices serializes the literal list."""
-    p = _trivial_program([CommGroup([0, 1], [WindowBuffer("data", _const(64), DataType.FP32)])])
+    p = _trivial_program([CommGroup([0, 1], [WindowBuffer(_ptr("data"), _const(64))])])
 
     manifest = _lift(p)
     assert manifest is not None
@@ -139,7 +147,7 @@ def test_lift_explicit_device_list():
 def test_lift_dynamic_size_unsupported_raises():
     """Symbolic ``size`` is rejected at compile time so authors get a clear error."""
     sym = Var("N", _const(0).type, Span.unknown())
-    p = _trivial_program([CommGroup([], [WindowBuffer("signal", sym, DataType.INT32)])])
+    p = _trivial_program([CommGroup([], [WindowBuffer(_ptr("signal"), sym)])])
     with pytest.raises(RuntimeError, match="dynamic WindowBuffer size is not supported"):
         _lift(p)
 
@@ -148,8 +156,8 @@ def test_lift_two_comm_groups_raises():
     """Multi-group programs are not yet supported by the runner."""
     p = _trivial_program(
         [
-            CommGroup([], [WindowBuffer("a", _const(64), DataType.FP32)]),
-            CommGroup([], [WindowBuffer("b", _const(64), DataType.FP32)]),
+            CommGroup([], [WindowBuffer(_ptr("a"), _const(64))]),
+            CommGroup([], [WindowBuffer(_ptr("b"), _const(64))]),
         ]
     )
     with pytest.raises(RuntimeError, match="at most one CommGroup"):
@@ -159,8 +167,8 @@ def test_lift_two_comm_groups_raises():
 def test_lift_load_store_to_host_flags_propagate():
     """``load_from_host`` / ``store_to_host`` bool flags pass through 1:1."""
     slots = [
-        WindowBuffer("lut", _const(64), DataType.FP32, load_from_host=True),
-        WindowBuffer("met", _const(64), DataType.INT32, store_to_host=True),
+        WindowBuffer(_ptr("lut"), _const(64), load_from_host=True),
+        WindowBuffer(_ptr("met"), _const(64), store_to_host=True),
     ]
     p = _trivial_program([CommGroup([], slots)])
 
@@ -189,18 +197,14 @@ def _make_manifest(devices: list[int], slots: list[dict]) -> dict:
 
 def _slot(
     name: str,
-    size: int,
-    dtype: str = "float32",
-    bits: int = 32,
+    nbytes: int,
     *,
     load_from_host: bool = False,
     store_to_host: bool = False,
 ) -> dict:
     return {
         "name": name,
-        "dtype": dtype,
-        "size": size,
-        "bits_per_element": bits,
+        "nbytes": nbytes,
         "load_from_host": load_from_host,
         "store_to_host": store_to_host,
     }
@@ -209,21 +213,21 @@ def _slot(
 def test_build_full_coverage_via_empty_devices():
     """Empty ``devices`` list ⇒ every device in the dc gets a comm config."""
     pytest.importorskip("simpler.task_interface")
-    manifest = _make_manifest([], [_slot("data", 256), _slot("signal", 2, "int32")])
+    manifest = _make_manifest([], [_slot("data", 1024), _slot("signal", 8)])
     cfgs = _build(manifest, [0, 1])
     assert cfgs is not None
     assert len(cfgs) == 2
     assert all(c.comm is not None for c in cfgs)
     assert cfgs[0].comm.rank == 0 and cfgs[1].comm.rank == 1
     assert all(c.comm.nranks == 2 for c in cfgs)
-    assert all(c.comm.window_size == 256 * 4 + 2 * 4 for c in cfgs)
+    assert all(c.comm.window_size == 1024 + 8 for c in cfgs)
     assert [b.name for b in cfgs[0].buffers] == ["data", "signal"]
 
 
 def test_build_explicit_subset_keeps_extras_commless():
     """Devices not in the list get bare ``ChipBootstrapConfig()`` (comm=None)."""
     pytest.importorskip("simpler.task_interface")
-    manifest = _make_manifest([0, 1], [_slot("data", 64)])
+    manifest = _make_manifest([0, 1], [_slot("data", 256)])
     cfgs = _build(manifest, [0, 1, 2, 3])
     assert cfgs is not None
     assert len(cfgs) == 4
@@ -234,7 +238,7 @@ def test_build_explicit_subset_keeps_extras_commless():
 
 def test_build_subset_out_of_range_raises():
     pytest.importorskip("simpler.task_interface")
-    manifest = _make_manifest([3, 4], [_slot("data", 1)])
+    manifest = _make_manifest([3, 4], [_slot("data", 4)])
     with pytest.raises(RuntimeError, match="outside DistributedConfig.device_ids range"):
         _build(manifest, [0, 1])
 
@@ -259,15 +263,14 @@ def test_build_rejects_two_groups():
         _build(manifest, [0, 1])
 
 
-def test_build_subbyte_dtype_byte_calculation():
-    """nbytes rounds up for sub-byte dtypes (e.g. INT4)."""
+def test_build_carries_nbytes_directly():
+    """Manifest now carries ``nbytes`` directly — no dtype-based byte arithmetic."""
     pytest.importorskip("simpler.task_interface")
-    # INT4: 4 bits per element, 7 elements → ceil(7*4/8) = 4 bytes.
-    manifest = _make_manifest([], [_slot("x", 7, "int4", bits=4)])
+    manifest = _make_manifest([], [_slot("x", 7)])
     cfgs = _build(manifest, [0, 1])
     assert cfgs is not None
-    assert cfgs[0].buffers[0].nbytes == 4
-    assert cfgs[0].comm.window_size == 4
+    assert cfgs[0].buffers[0].nbytes == 7
+    assert cfgs[0].comm.window_size == 7
 
 
 def test_build_load_store_host_flags():
@@ -302,7 +305,7 @@ def test_aot_roundtrip_writes_and_loads_manifest(tmp_path):
         emit_comm_manifest,
     )
 
-    p = _trivial_program([CommGroup([], [WindowBuffer("data", _const(64), DataType.FP32)])])
+    p = _trivial_program([CommGroup([], [WindowBuffer(_ptr("data"), _const(64))])])
 
     expected = _lift(p)
     out_path = emit_comm_manifest(p, tmp_path)

@@ -69,9 +69,13 @@ assert isinstance(t, ir.TensorType)            # C++ inheritance preserved
 # As<TensorType>(t) → null; As<DistributedTensorType>(t) → cast.
 ```
 
-Allocation-side metadata (the buffer name, host-staging flags) lives on the
-allocation op (`pld.alloc_window_buffer`, added in a later milestone) and on
-the `ir.WindowBuffer` slot in `program.comm_groups`, not on the type itself.
+Allocation-side metadata (per-rank size, host-staging flags) lives on the
+`ir.WindowBuffer` `Var` subclass that the `pld.alloc_window_buffer` op binds.
+Slices materialised through `pld.window(buf, [shape], dtype=...)` carry an
+optional back-reference (`DistributedTensorType.window_buffer`) to the source
+`WindowBuffer`, so two same-shape / same-dtype slices of different
+allocations stay structurally distinct. User-declared parameter annotations
+like `pld.DistributedTensor[[shape], dtype]` leave this field as `None`.
 Tile types do not have a distributed variant; cross-rank ops always operate
 on `DistributedTensor`.
 

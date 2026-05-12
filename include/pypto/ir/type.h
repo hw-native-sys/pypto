@@ -36,6 +36,9 @@ using ExprPtr = std::shared_ptr<const Expr>;
 class MemRef;
 using MemRefPtr = std::shared_ptr<const MemRef>;
 
+class WindowBuffer;
+using WindowBufferPtr = std::shared_ptr<const WindowBuffer>;
+
 /**
  * @brief Base class for type representations in the IR
  *
@@ -500,32 +503,53 @@ using TensorTypePtr = std::shared_ptr<const TensorType>;
  */
 class DistributedTensorType : public TensorType {
  public:
-  DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype) : TensorType(std::move(shape), dtype) {}
+  /// Optional back-reference to the :class:`WindowBuffer` whose allocation this
+  /// tensor is a view of. Populated by ``pld.window``'s type deducer;
+  /// ``std::nullopt`` for user-declared parameter annotations like
+  /// ``pld.DistributedTensor[[shape], dtype]``. Two DistributedTensorTypes with
+  /// the same shape / dtype but different ``window_buffer_`` values are
+  /// structurally distinct, so passes can tell apart slices of different
+  /// CommGroup window buffers.
+  std::optional<WindowBufferPtr> window_buffer_;
+
+  DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype)
+      : TensorType(std::move(shape), dtype), window_buffer_(std::nullopt) {}
 
   DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, MemRefPtr memref)
-      : TensorType(std::move(shape), dtype, std::move(memref)) {}
+      : TensorType(std::move(shape), dtype, std::move(memref)), window_buffer_(std::nullopt) {}
 
   DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref)
-      : TensorType(std::move(shape), dtype, std::move(memref)) {}
+      : TensorType(std::move(shape), dtype, std::move(memref)), window_buffer_(std::nullopt) {}
 
   DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, std::optional<MemRefPtr> memref,
                         std::optional<TensorView> tensor_view)
-      : TensorType(std::move(shape), dtype, std::move(memref), std::move(tensor_view)) {}
+      : TensorType(std::move(shape), dtype, std::move(memref), std::move(tensor_view)),
+        window_buffer_(std::nullopt) {}
 
   DistributedTensorType(const std::vector<int64_t>& shape, DataType dtype)
-      : TensorType(shape, dtype, std::nullopt) {}
+      : TensorType(shape, dtype, std::nullopt), window_buffer_(std::nullopt) {}
 
   DistributedTensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref)
-      : TensorType(shape, dtype, std::move(memref)) {}
+      : TensorType(shape, dtype, std::move(memref)), window_buffer_(std::nullopt) {}
 
   DistributedTensorType(const std::vector<int64_t>& shape, DataType dtype, std::optional<MemRefPtr> memref,
                         std::optional<TensorView> tensor_view)
-      : TensorType(shape, dtype, std::move(memref), std::move(tensor_view)) {}
+      : TensorType(shape, dtype, std::move(memref), std::move(tensor_view)), window_buffer_(std::nullopt) {}
+
+  /// Construct a DistributedTensorType produced by ``pld.window``: the result
+  /// is paired with the originating :class:`WindowBuffer` so passes can recover
+  /// the comm-group / slot identity later.
+  DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype, WindowBufferPtr window_buffer)
+      : TensorType(std::move(shape), dtype), window_buffer_(std::move(window_buffer)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::DistributedTensorType; }
   [[nodiscard]] std::string TypeName() const override { return "DistributedTensorType"; }
 
-  static constexpr auto GetFieldDescriptors() { return TensorType::GetFieldDescriptors(); }
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(
+        TensorType::GetFieldDescriptors(),
+        std::make_tuple(reflection::UsualField(&DistributedTensorType::window_buffer_, "window_buffer")));
+  }
 };
 
 using DistributedTensorTypePtr = std::shared_ptr<const DistributedTensorType>;
@@ -709,6 +733,32 @@ using PtrTypePtr = std::shared_ptr<const PtrType>;
 inline PtrTypePtr GetPtrType() {
   static const auto ptr_type = std::make_shared<PtrType>();
   return ptr_type;
+}
+
+/**
+ * @brief Singleton marker type for ``pld.alloc_window_buffer`` results.
+ *
+ * Carries no per-instance fields; all allocation metadata (size, host-staging
+ * flags, etc.) lives on the :class:`WindowBuffer` Var subclass that the alloc
+ * op binds. Cross-rank op verifiers dispatch on this marker
+ * (``As<WindowBufferType>``) to reject non-window arguments.
+ */
+class WindowBufferType : public Type {
+ public:
+  WindowBufferType() = default;
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::WindowBufferType; }
+  [[nodiscard]] std::string TypeName() const override { return "WindowBufferType"; }
+
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+
+using WindowBufferTypePtr = std::shared_ptr<const WindowBufferType>;
+
+/// Get the shared singleton WindowBufferType instance.
+inline WindowBufferTypePtr GetWindowBufferType() {
+  static const auto window_buffer_type = std::make_shared<WindowBufferType>();
+  return window_buffer_type;
 }
 
 }  // namespace ir

@@ -542,8 +542,16 @@ class DistributedTensorType(TensorType):
     ``As<DistributedTensorType>`` to dispatch on the distributed variant.
 
     Mirrors :class:`TensorType`'s constructor surface — memref / tensor_view
-    are equally valid on the distributed flavour.
+    are equally valid on the distributed flavour. Additionally carries an
+    optional ``window_buffer`` back-reference (populated by ``pld.window``)
+    so that two same-shape / same-dtype slices of different
+    :class:`WindowBuffer` allocations stay structurally distinct.
     """
+
+    window_buffer: Final[WindowBuffer | None]
+    """Source :class:`WindowBuffer` for slices materialised via ``pld.window``;
+    ``None`` for user-declared parameter annotations such as
+    ``pld.DistributedTensor[[N], pl.FP32]``."""
 
     @overload
     def __init__(self, shape: Sequence[Expr], dtype: DataType) -> None:
@@ -580,6 +588,10 @@ class DistributedTensorType(TensorType):
         tensor_view: TensorView | None,
     ) -> None:
         """Create a distributed tensor type with constant shape, optional memref and tensor_view."""
+
+    @overload
+    def __init__(self, shape: Sequence[Expr], dtype: DataType, window_buffer: WindowBuffer) -> None:
+        """Create a distributed tensor type bound to a specific WindowBuffer (produced by ``pld.window``)."""
 
 class TileView:
     """Tile view: read-only representation of valid shape, stride, start offset,
@@ -1052,6 +1064,20 @@ class PtrType(Type):
     @staticmethod
     def get() -> PtrType:
         """Get the singleton PtrType instance."""
+        ...
+
+class WindowBufferType(Type):
+    """Singleton marker type for ``pld.alloc_window_buffer`` outputs.
+
+    Mirrors :class:`MemRefType`: the type carries no per-instance fields. All
+    allocation metadata (name, size, dtype, host-staging flags) lives on the
+    companion :class:`WindowBuffer` Var subclass.
+    """
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> WindowBufferType:
+        """Get the shared singleton WindowBufferType instance."""
         ...
 
 class MemRef(Var):
@@ -2414,41 +2440,46 @@ class Program(IRNode):
             Program with type information
         """
 
-class WindowBuffer(IRNode):
-    """Per-rank allocation spec for a named CommGroup HCCL window buffer.
+class WindowBuffer(Var):
+    """Per-rank CommGroup HCCL window-buffer allocation, modelled as a specialised Var.
 
-    Maps 1:1 to ``simpler.task_interface.ChipBufferSpec`` at submit-time.
-    Participates in structural equality / hashing via reflection.
+    Mirrors :class:`MemRef`: its SSA-edge type is the singleton
+    :class:`WindowBufferType`; allocation metadata (the underlying Ptr Var,
+    per-rank size in bytes, host-staging flags) lives on the Var subclass
+    itself. The buffer's runtime-unique identifier flows through the
+    inherited :attr:`Var.name_hint` (taken from ``base.name_hint``) — there
+    is no separate ``name`` field, because two structurally-identical
+    allocations should compare equal regardless of the chosen variable name.
+
+    ``WindowBuffer`` instances are constructed by the comm-collection pass;
+    at parse time the :func:`alloc_window_buffer` op's LHS is a plain
+    :class:`Var` of type :class:`PtrType`.
     """
 
-    name: Final[str]
-    """Buffer name (parser-extracted from the alloc-op LHS, globally unique)."""
+    base: Final[Var]
+    """The underlying ``Ptr`` Var produced by ``pld.alloc_window_buffer``.
+    Same role as :attr:`MemRef.base`."""
 
     size: Final[Expr]
-    """Per-rank element count (ConstInt or symbolic Expr). Allocation-only —
-    does not carry a multi-dim shape."""
-
-    dtype: Final[DataType]
-    """Element data type."""
+    """Per-rank allocation size in **bytes** (matches
+    :attr:`tile.alloc`'s size argument and the runtime's
+    ``ChipBufferSpec.nbytes`` field)."""
 
     load_from_host: Final[bool]
-    """``True`` if this slot participates in pre-fork H2D staging. The specific
-    host tensor that supplies the staged data is recorded on the alloc op, not
-    on this allocation spec."""
+    """``True`` if this slot participates in pre-fork H2D staging."""
 
     store_to_host: Final[bool]
     """``True`` if this slot participates in post-task D2H staging."""
 
     def __init__(
         self,
-        name: str,
+        base: Var,
         size: Expr,
-        dtype: DataType,
         load_from_host: bool = False,
         store_to_host: bool = False,
         span: Span = ...,
     ) -> None:
-        """Create a WindowBuffer."""
+        """Create a WindowBuffer wrapping the given Ptr ``base`` Var."""
 
 class CommGroup(IRNode):
     """A communication group inferred for a ``@pl.program``.

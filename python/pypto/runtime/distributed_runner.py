@@ -29,6 +29,11 @@ if TYPE_CHECKING:
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
 
+# Placeholder dtype for ChipBufferSpec: WindowBuffer carries no dtype (matching
+# MemRef), and simpler does not consume this field at runtime.
+_OPAQUE_DTYPE = "opaque"
+
+
 # ---------------------------------------------------------------------------
 # ContinuousTensor → torch.Tensor conversion
 # ---------------------------------------------------------------------------
@@ -163,14 +168,12 @@ def _build_chip_bootstrap_configs_from_manifest(
 
     specs: list[Any] = []
     for slot in group["slots"]:
-        count = int(slot["size"])
-        # Round up to whole bytes — works uniformly for FP4/INT4 sub-byte dtypes.
-        nbytes = (count * int(slot["bits_per_element"]) + 7) // 8
+        nbytes = int(slot["nbytes"])
         specs.append(
             ChipBufferSpec(
                 name=slot["name"],
-                dtype=slot["dtype"],
-                count=count,
+                dtype=_OPAQUE_DTYPE,
+                count=nbytes,
                 nbytes=nbytes,
                 load_from_host=bool(slot.get("load_from_host", False)),
                 store_to_host=bool(slot.get("store_to_host", False)),

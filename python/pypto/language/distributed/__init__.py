@@ -21,6 +21,7 @@ This module is currently a namespace placeholder; concrete entry points
 ``pld.tile.*``, ``pld.system.*``) are added in subsequent milestones (N1.2+).
 """
 
+from .alloc import alloc_window_buffer, window
 from .distributed_tensor import DistributedTensor
 
-__all__ = ["DistributedTensor"]
+__all__ = ["DistributedTensor", "alloc_window_buffer", "window"]

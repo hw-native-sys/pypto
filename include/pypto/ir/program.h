@@ -19,7 +19,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/dtype.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -30,39 +29,34 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Per-rank allocation spec for one named CommGroup HCCL window buffer.
+ * @brief Per-rank CommGroup HCCL window-buffer allocation, modelled as a Var.
  *
- * Maps 1:1 to ``simpler.task_interface.ChipBufferSpec`` at submit-time. Pure
- * allocation metadata: does NOT describe how the buffer is used in code.
- * Code-level use is expressed in the function signature via
- * ``pld.DistributedTensor[[shape], dtype]``; the alloc op
- * (``pld.alloc_window_buffer``, added in N2) materialises one of these slots
- * into the program's :class:`CommGroup`.
+ * A specialised :class:`Var` subclass whose SSA-edge type is the singleton
+ * :class:`WindowBufferType`. The buffer's runtime-unique identifier flows
+ * through the inherited ``Var::name_hint_``; there is no separate ``name_``
+ * field so structural equality does not depend on the chosen variable name.
  *
- * ``size_`` is the **element count** of one rank's slice (a single scalar; this
- * struct is allocation-only and intentionally does not carry a multi-dim
- * shape). ``size_`` may be a ``ConstInt`` (compile-time known) or a symbolic
- * expression referring to the world size.
- *
- * ``load_from_host_`` / ``store_to_host_`` are simple boolean flags marking
- * whether the slot participates in pre-fork H2D / post-task D2H staging. The
- * specific host tensor that supplies / receives the staged data is recorded
- * on the alloc op, not on this allocation spec.
+ * Fields:
+ *   * ``base_`` — :class:`Var` holding the underlying ``Ptr`` allocation
+ *     identity. Multiple ``WindowBuffer`` instances built from the same alloc
+ *     Var share allocation identity through this field.
+ *   * ``size_`` — per-rank allocation size in **bytes**; ``ConstInt`` or
+ *     symbolic :class:`ExprPtr`.
+ *   * ``load_from_host_`` / ``store_to_host_`` — pre-fork H2D / post-task
+ *     D2H staging flags.
  */
-class WindowBuffer : public IRNode {
+class WindowBuffer : public Var {
  public:
-  std::string name_;             ///< Buffer name (parser-extracted from alloc-op LHS)
-  ExprPtr size_;                 ///< Per-rank element count (ConstInt or symbolic Expr)
-  DataType dtype_;               ///< Element data type
-  bool load_from_host_ = false;  ///< Pre-fork H2D copy from a host staging tensor
-  bool store_to_host_ = false;   ///< Post-task D2H copy back into a host staging tensor
+  VarPtr base_;                  ///< Ptr Var from the alloc op (allocation identity)
+  ExprPtr size_;                 ///< Per-rank allocation size in bytes
+  bool load_from_host_ = false;  ///< Pre-fork H2D staging flag
+  bool store_to_host_ = false;   ///< Post-task D2H staging flag
 
-  WindowBuffer(std::string name, ExprPtr size, DataType dtype, bool load_from_host = false,
-               bool store_to_host = false, Span span = Span::unknown())
-      : IRNode(std::move(span)),
-        name_(std::move(name)),
+  WindowBuffer(VarPtr base, ExprPtr size, bool load_from_host = false, bool store_to_host = false,
+               Span span = Span::unknown())
+      : Var(base->name_hint_, GetWindowBufferType(), std::move(span)),
+        base_(std::move(base)),
         size_(std::move(size)),
-        dtype_(dtype),
         load_from_host_(load_from_host),
         store_to_host_(store_to_host) {}
 
@@ -71,15 +65,17 @@ class WindowBuffer : public IRNode {
 
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(
-        IRNode::GetFieldDescriptors(),
-        std::make_tuple(reflection::UsualField(&WindowBuffer::name_, "name"),
+        Var::GetFieldDescriptors(),
+        std::make_tuple(reflection::UsualField(&WindowBuffer::base_, "base"),
                         reflection::UsualField(&WindowBuffer::size_, "size"),
-                        reflection::UsualField(&WindowBuffer::dtype_, "dtype"),
                         reflection::UsualField(&WindowBuffer::load_from_host_, "load_from_host"),
                         reflection::UsualField(&WindowBuffer::store_to_host_, "store_to_host")));
   }
 };
 
+// WindowBufferPtr is forward-declared in include/pypto/ir/type.h so that
+// DistributedTensorType::window_buffer_ can hold it without a circular
+// include.
 using WindowBufferPtr = std::shared_ptr<const WindowBuffer>;
 
 /**

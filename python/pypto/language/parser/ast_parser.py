@@ -15,7 +15,7 @@ import warnings
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
@@ -49,6 +49,25 @@ from .type_resolver import (
 
 if TYPE_CHECKING:
     from .decorator import InlineFunction
+
+
+def _is_pld_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
+    """Return True when ``node`` is the AST for a ``pld.<attr_name>(...)`` call.
+
+    Recognises only the dotted ``pld.<attr>`` form. Aliasing under another
+    name (``from pypto.language.distributed import alloc_window_buffer``) is
+    intentionally not matched — the parser anchors distributed-DSL detection
+    on the ``pld.`` prefix.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == attr_name
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "pld"
+    )
 
 
 def _is_const_int(value: object) -> bool:
@@ -252,6 +271,7 @@ class ASTParser:
         buffer_name_meta: dict[tuple[str, str], dict[str, Any]] | None = None,
         dyn_var_cache: dict[str, ir.Var] | None = None,
         pending_comments: dict[int, list[tuple[int, str]]] | None = None,
+        alloc_window_buffer_names: set[str] | None = None,
     ):
         """Initialize AST parser.
 
@@ -273,6 +293,10 @@ class ASTParser:
             pending_comments: Map from 1-based line number to ``#``-stripped comment lines
                 (produced by :func:`extract_line_comments`). Drained in source order and
                 attached as ``leading_comments`` metadata to the stmt that follows.
+            alloc_window_buffer_names: Optional shared set of buffer names that have already
+                been declared by ``pld.alloc_window_buffer`` within this program. Multiple
+                functions in a ``@pl.program`` share this set so the name-uniqueness check
+                spans the whole program rather than a single function.
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
@@ -329,6 +353,13 @@ class ASTParser:
         # Each entry is (col_offset, text) so the parser can distinguish
         # tail-of-block comments (inside body indent) from outer-scope comments.
         self._pending_comments: dict[int, list[tuple[int, str]]] = pending_comments or {}
+
+        # Names declared by pld.alloc_window_buffer in this program. Globally unique
+        # across all functions in a single @pl.program (the decorator passes a shared
+        # set when constructing per-function parsers).
+        self._alloc_window_buffer_names: set[str] = (
+            alloc_window_buffer_names if alloc_window_buffer_names is not None else set()
+        )
 
         # Cached arithmetic analyzer used to simplify symbolic slice extents at
         # construction time. One instance per parser amortises the sub-analyzer
@@ -979,6 +1010,15 @@ class ASTParser:
         Args:
             stmt: Assign AST node
         """
+        # Intercept ``buf = pld.alloc_window_buffer(...)`` before the generic
+        # path: the alloc op needs the LHS name as a kwarg, and we enforce a
+        # single-Name target + program-global name uniqueness here so the
+        # error surfaces at the original assignment site rather than from
+        # deep inside type deduction.
+        if len(stmt.targets) == 1 and _is_pld_call(stmt.value, "alloc_window_buffer"):
+            self._parse_alloc_window_buffer_assignment(stmt.targets[0], stmt.value)
+            return
+
         # Handle tuple unpacking for yields
         if len(stmt.targets) == 1:
             target = stmt.targets[0]
@@ -1062,6 +1102,74 @@ class ASTParser:
             span=self.span_tracker.get_span(stmt),
             hint="Use simple variable assignments or tuple unpacking with pl.yield_()",
         )
+
+    def _parse_alloc_window_buffer_assignment(self, target: ast.expr, value: ast.Call) -> None:
+        """Parse ``buf = pld.alloc_window_buffer(size)``.
+
+        Takes one positional ``size`` (per-rank byte count) and binds the LHS
+        to a plain ``Var(PtrType)``. The LHS must be a single ``ast.Name``,
+        the chosen name must be program-globally unique, and no user kwargs
+        are accepted (``name`` is parser-injected from the LHS).
+        """
+        span = self.span_tracker.get_span(value)
+
+        if not isinstance(target, ast.Name):
+            raise ParserSyntaxError(
+                "pld.alloc_window_buffer must be assigned to a single variable name "
+                f"(got '{ast.unparse(target)}')",
+                span=span,
+                hint="Use 'buf = pld.alloc_window_buffer(...)' (no tuple unpacking, no subscripts)",
+            )
+
+        name = target.id
+
+        if name in self._alloc_window_buffer_names:
+            raise ParserSyntaxError(
+                f"pld.alloc_window_buffer name '{name}' is already declared in this program",
+                span=span,
+                hint="Each window buffer must have a globally unique name across all functions",
+            )
+
+        if len(value.args) != 1:
+            raise ParserSyntaxError(
+                "pld.alloc_window_buffer takes exactly 1 positional argument (size in bytes); "
+                f"got {len(value.args)}",
+                span=span,
+                hint="Use 'pld.alloc_window_buffer(N)' where N is the per-rank size in bytes",
+            )
+
+        if value.keywords:
+            kw_names = [kw.arg for kw in value.keywords if kw.arg is not None]
+            raise ParserSyntaxError(
+                f"pld.alloc_window_buffer does not accept user-supplied kwargs; got {kw_names}",
+                span=span,
+                hint="Pass only the size as a positional argument; the buffer's name is "
+                "auto-derived from the assignment LHS",
+            )
+
+        size_expr = self._parse_op_positional_arg(value.args[0])
+        if isinstance(size_expr, int):
+            size_expr = ir.ConstInt(int(size_expr), DataType.INT64, span)
+        elif isinstance(size_expr, (list, tuple, ir.MakeTuple)):
+            raise ParserSyntaxError(
+                "pld.alloc_window_buffer size must be a scalar (int / Expr in bytes), not a list/tuple",
+                span=span,
+                hint="The redesigned alloc is pure-allocation — pass a single byte count "
+                "(e.g. 256 * 4). Shape lives on pld.window(buf, [shape], dtype=...) instead.",
+            )
+        elif not isinstance(size_expr, ir.Expr):
+            raise ParserSyntaxError(
+                "pld.alloc_window_buffer size must be an int / Expr in bytes "
+                f"(got {type(size_expr).__name__})",
+                span=span,
+                hint="Use a literal like '1024' or a symbolic expression (pld.world_size() * N, ...)",
+            )
+
+        alloc_call = ir.create_op_call("pld.alloc_window_buffer", [size_expr], {"name": name}, span)
+
+        self._alloc_window_buffer_names.add(name)
+        var = self._assign_or_let(name, alloc_call, span)
+        self.scope_manager.define_var(name, var, span=span)
 
     def _parse_subscript_assignment(self, target: ast.Subscript, value_node: ast.expr) -> None:
         """Desugar ``dst[<slices...>] = src`` to ``dst = pl.assemble(dst, src, offsets)``.
@@ -3589,6 +3697,10 @@ class ASTParser:
         if isinstance(node, ast.Name):
             attrs.insert(0, node.id)
 
+        # pld.{operation} (2-segment) — distributed DSL ops
+        if len(attrs) == 2 and attrs[0] == "pld":
+            return self._parse_pld_op(attrs[1], call)
+
         # pl.tensor.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":
             op_name = attrs[2]
@@ -4321,6 +4433,81 @@ class ASTParser:
     def _parse_array_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse array operation (create / get_element / update_element)."""
         return self._dispatch_op(_dsl_array, "pl.array", op_name, call)
+
+    def _parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse a ``pld.<op>(...)`` distributed-DSL operation.
+
+        Only ``pld.window`` is dispatched as a normal expression here.
+        ``pld.alloc_window_buffer`` is intercepted in
+        :meth:`parse_assignment` (it needs the LHS name) and reaches this
+        method only when it appears outside an assignment — in which case
+        we emit a targeted error rather than silently constructing a
+        nameless alloc op.
+        """
+        span = self.span_tracker.get_span(call)
+
+        if op_name == "alloc_window_buffer":
+            raise ParserSyntaxError(
+                "pld.alloc_window_buffer must appear as the RHS of a simple assignment "
+                "(its result must be bound to a named variable)",
+                span=span,
+                hint="Write 'buf = pld.alloc_window_buffer(N, dtype=pl.FP32)'",
+            )
+
+        if op_name == "window":
+            if len(call.args) != 2:
+                raise ParserSyntaxError(
+                    f"pld.window takes exactly 2 positional arguments (buf, shape); got {len(call.args)}",
+                    span=span,
+                    hint="Use 'pld.window(buf, [shape], dtype=pl.<DT>)'",
+                )
+
+            allowed_kwargs = {"dtype"}
+            for kw in call.keywords:
+                if kw.arg not in allowed_kwargs:
+                    raise ParserSyntaxError(
+                        f"pld.window does not accept kwarg '{kw.arg}'",
+                        span=span,
+                        hint="Only 'dtype' is accepted as a kwarg",
+                    )
+
+            buf_expr = self.parse_expression(call.args[0])
+            if not isinstance(buf_expr, ir.Expr):
+                raise ParserSyntaxError(
+                    "pld.window first argument must be an IR expression",
+                    span=span,
+                )
+            if not isinstance(buf_expr.type, ir.PtrType):
+                raise ParserTypeError(
+                    "pld.window expects a Ptr handle (output of pld.alloc_window_buffer); "
+                    f"got {ir.python_print_type(buf_expr.type)}",
+                    span=span,
+                    hint="Pass a variable assigned from 'pld.alloc_window_buffer(...)'",
+                )
+
+            shape_raw = self._parse_op_positional_arg(call.args[1])
+            if not isinstance(shape_raw, ir.MakeTuple):
+                raise ParserSyntaxError(
+                    f"pld.window shape must be a list/tuple literal (got {type(shape_raw).__name__})",
+                    span=span,
+                    hint="Use a list literal like '[N]' or '[pld.world_size(), N]'",
+                )
+            shape_arg: ir.Expr = shape_raw
+
+            kwargs = self._parse_op_kwargs(call)
+            if "dtype" not in kwargs:
+                raise ParserSyntaxError(
+                    "pld.window requires a 'dtype' kwarg",
+                    span=span,
+                    hint="Use 'pld.window(buf, [shape], dtype=pl.FP32)'",
+                )
+            return ir.create_op_call("pld.window", [buf_expr, shape_arg], kwargs, span)
+
+        raise InvalidOperationError(
+            f"Unknown distributed operation 'pld.{op_name}'",
+            span=span,
+            hint="Available: pld.alloc_window_buffer, pld.window",
+        )
 
     # Maps iterator type name to ForKind enum value.
     _ITERATOR_TO_KIND = {

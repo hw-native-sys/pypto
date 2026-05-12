@@ -68,10 +68,14 @@ assert isinstance(t, ir.TensorType)            # C++ 继承关系保留
 # As<TensorType>(t) → null；As<DistributedTensorType>(t) → 转型成功
 ```
 
-分配侧的元数据（buffer 名字、host staging 标志）挂在 alloc op
-（`pld.alloc_window_buffer`，后续 milestone 引入）和 `program.comm_groups`
-中的 `ir.WindowBuffer` slot 上，**不**在类型本身。Tile 类型没有 distributed
-变体；跨 rank op 始终作用在 `DistributedTensor` 上。
+分配侧的元数据（每 rank 大小、host staging 标志）挂在 `pld.alloc_window_buffer`
+op 所绑定的 `ir.WindowBuffer`（`Var` 子类）上。通过
+`pld.window(buf, [shape], dtype=...)` 物化的切片在
+`DistributedTensorType.window_buffer` 上保留指向源 `WindowBuffer` 的可选反向
+引用，从而让两个 shape/dtype 相同但分配来源不同的切片在结构上保持不同。
+用户在签名中写的 `pld.DistributedTensor[[shape], dtype]` 不填该字段（为
+`None`）。Tile 类型没有 distributed 变体；跨 rank op 始终作用在
+`DistributedTensor` 上。
 
 ### 带 TensorView 的 TensorType
 

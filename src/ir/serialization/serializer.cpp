@@ -447,8 +447,9 @@ class IRSerializer::Impl {
         types_vec.push_back(SerializeType(t, zone));
       }
       type_map["types"] = msgpack::object(types_vec, zone);
-    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type)) {
-      // MemRefType, PtrType, and UnknownType have no additional fields
+    } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type) ||
+               IsA<WindowBufferType>(type)) {
+      // Singleton marker types (no extra fields beyond the type_kind key).
     } else {
       INTERNAL_UNREACHABLE << "Unknown Type subclass: " << type->TypeName();
     }

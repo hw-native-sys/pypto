@@ -109,6 +109,7 @@ set(PYPTO_SOURCES
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/sync_ops/cross_core.cpp
     src/ir/op/sync_ops/task.cpp
+    src/ir/op/distributed/memory.cpp
     src/ir/op/tensor_ops/broadcast.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tensor_ops/matmul.cpp

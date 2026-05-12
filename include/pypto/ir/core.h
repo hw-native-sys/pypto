@@ -113,6 +113,7 @@ enum class ObjectKind {
   TileType,
   ArrayType,
   TupleType,
+  WindowBufferType,
 
   // Other IR node kinds
   Function,

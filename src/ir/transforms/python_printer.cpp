@@ -496,6 +496,13 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return prefix_ + ".Ptr";
   }
 
+  if (As<WindowBufferType>(type)) {
+    // Singleton marker — no per-instance fields. Render as a bare attribute
+    // so it round-trips through the parser via the same path as ``pld.``
+    // namespace lookups.
+    return "pld.WindowBufferType";
+  }
+
   return prefix_ + ".UnknownType";
 }
 

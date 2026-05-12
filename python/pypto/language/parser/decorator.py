@@ -895,6 +895,10 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # ir.Var objects for dynamic dimension variables (issue #618).
             dyn_var_cache: dict[str, ir.Var] = {}
 
+            # Shared set of pld.alloc_window_buffer names so name-uniqueness
+            # checks span every function in the program.
+            alloc_window_buffer_names: set[str] = set()
+
             # Compute per-method line-range boundaries. Each method owns comments from
             # its first-line up to the line just before the next method (or end of
             # class for the last one). This captures tail-of-block comments inside
@@ -948,6 +952,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     buffer_name_meta=buffer_name_meta,
                     dyn_var_cache=dyn_var_cache,
                     pending_comments=method_comments,
+                    alloc_window_buffer_names=alloc_window_buffer_names,
                 )
 
                 try:

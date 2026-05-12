@@ -451,6 +451,21 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
     } else {
       h = hash_combine(h, static_cast<result_type>(0));  // indicate absence
     }
+    // DistributedTensorType-only back-reference to its source WindowBuffer.
+    // Mix in presence + Var identity (HashNode dispatches the WindowBuffer Var
+    // path) so two same-shape / same-dtype DistributedTensorTypes built from
+    // different WindowBuffers hash apart.
+    if (type->GetKind() == ObjectKind::DistributedTensorType) {
+      auto dt = std::static_pointer_cast<const DistributedTensorType>(type);
+      if (dt->window_buffer_.has_value()) {
+        h = hash_combine(h, static_cast<result_type>(1));
+        INTERNAL_CHECK(*dt->window_buffer_)
+            << "structural_hash encountered null window_buffer in DistributedTensorType";
+        h = hash_combine(h, HashNode(*dt->window_buffer_));
+      } else {
+        h = hash_combine(h, static_cast<result_type>(0));
+      }
+    }
   } else if (auto tile_type = As<TileType>(type)) {
     // Hash dtype
     h = hash_combine(h, static_cast<result_type>(std::hash<uint8_t>{}(tile_type->dtype_.Code())));
@@ -505,8 +520,9 @@ StructuralHasher::result_type StructuralHasher::HashType(const TypePtr& type) {
       INTERNAL_CHECK(t) << "structural_hash encountered null type in TupleType";
       h = hash_combine(h, HashType(t));
     }
-  } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type)) {
-    // MemRefType, PtrType, and UnknownType have no fields, only hash type name (already done above)
+  } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type) ||
+             IsA<WindowBufferType>(type)) {
+    // Singleton marker types (no fields beyond the type name hashed above).
   } else {
     INTERNAL_CHECK(false) << "HashType encountered unhandled Type: " << type->TypeName();
   }
@@ -592,7 +608,8 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   };
 
   auto kind = node->GetKind();
-  if (kind == ObjectKind::MemRef || kind == ObjectKind::IterArg || kind == ObjectKind::Var) {
+  if (kind == ObjectKind::MemRef || kind == ObjectKind::IterArg || kind == ObjectKind::Var ||
+      kind == ObjectKind::WindowBuffer) {
     hash_var_identity(static_cast<const Var*>(node.get())->UniqueId());
   }
 

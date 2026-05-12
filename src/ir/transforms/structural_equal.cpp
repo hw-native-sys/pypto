@@ -1082,6 +1082,24 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
         return false;
       }
     }
+    // DistributedTensorType-only field: window_buffer_ back-reference. Both
+    // sides must agree on presence, and the underlying WindowBuffer Vars must
+    // match through the regular Var-equality path (which falls into the Var
+    // identity map / auto-mapping logic — same as MemRef inside ShapedType).
+    if (lhs->GetKind() == ObjectKind::DistributedTensorType) {
+      auto lhs_dt = std::static_pointer_cast<const DistributedTensorType>(lhs);
+      auto rhs_dt = std::static_pointer_cast<const DistributedTensorType>(rhs);
+      if (lhs_dt->window_buffer_.has_value() != rhs_dt->window_buffer_.has_value()) {
+        if constexpr (AssertMode) {
+          ThrowMismatch("DistributedTensorType window_buffer presence mismatch", IRNodePtr(), IRNodePtr(), "",
+                        "");
+        }
+        return false;
+      }
+      if (lhs_dt->window_buffer_.has_value() && !EqualVar(*lhs_dt->window_buffer_, *rhs_dt->window_buffer_)) {
+        return false;
+      }
+    }
     return true;
   } else if (auto lhs_tile = As<TileType>(lhs)) {
     auto rhs_tile = As<TileType>(rhs);
@@ -1244,7 +1262,8 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
       return false;
     }
     return true;
-  } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs) || IsA<PtrType>(lhs)) {
+  } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs) || IsA<PtrType>(lhs) ||
+             IsA<WindowBufferType>(lhs)) {
     return true;  // Singleton type, both being same type kind is sufficient
   }
 

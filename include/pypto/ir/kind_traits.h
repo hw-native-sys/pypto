@@ -114,6 +114,7 @@ DEFINE_KIND_TRAIT(ArrayType, ObjectKind::ArrayType)
 DEFINE_KIND_TRAIT(TupleType, ObjectKind::TupleType)
 DEFINE_KIND_TRAIT(MemRefType, ObjectKind::MemRefType)
 DEFINE_KIND_TRAIT(PtrType, ObjectKind::PtrType)
+DEFINE_KIND_TRAIT(WindowBufferType, ObjectKind::WindowBufferType)
 
 // Other IR node types
 DEFINE_KIND_TRAIT(Function, ObjectKind::Function)
@@ -203,7 +204,8 @@ struct KindTrait<Type> {
                                          ObjectKind::DistributedTensorType,
                                          ObjectKind::TileType,
                                          ObjectKind::ArrayType,
-                                         ObjectKind::TupleType};
+                                         ObjectKind::TupleType,
+                                         ObjectKind::WindowBufferType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 
@@ -278,7 +280,10 @@ std::shared_ptr<const T> As(const std::shared_ptr<const Base>& base) {
  *
  * As<Var>() uses exact ObjectKind matching and won't match IterArg.
  * This utility matches both Var and IterArg (which inherits from Var).
- * MemRef is intentionally excluded — use As<MemRef>() for that.
+ * MemRef and WindowBuffer are intentionally excluded — they are Var
+ * subclasses that carry allocation-source / window-slot semantics rather
+ * than the plain bound-name model AsVarLike's callers assume. Use
+ * As<MemRef>() / As<WindowBuffer>() when you specifically want them.
  */
 inline VarPtr AsVarLike(const ExprPtr& expr) {
   if (!expr) return nullptr;

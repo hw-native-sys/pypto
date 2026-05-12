@@ -27,10 +27,13 @@ v2 schema (CommGroups are pass-inferred, not user-declared):
 * ``devices``: list of physical device ids covered by the group; **empty list
   = all devices** (resolved by the driver against
   ``DistributedConfig.device_ids``).
-* ``slots``: list of allocation specs, each a 1:1 image of
-  ``simpler.task_interface.ChipBufferSpec``. ``load_from_host`` /
-  ``store_to_host`` are bool flags here — the specific host tensor binding
-  lives on the alloc op, not on this allocation spec.
+* ``slots``: list of allocation specs. Each slot carries only ``name`` (the
+  buffer's runtime-unique identifier, taken from the underlying Var's
+  ``name_hint``), ``nbytes`` (per-rank allocation size in bytes — exact mirror
+  of ``ChipBufferSpec.nbytes``), and the host-staging flags.
+  ``WindowBuffer`` is intentionally dtype-agnostic (matching how ``MemRef``
+  carries no dtype): the runtime's ``ChipBufferSpec.dtype`` field is unused
+  and we pass an opaque placeholder.
 """
 
 from __future__ import annotations
@@ -39,40 +42,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ConstInt, Program
 
 # Manifest filename under output_dir/orchestration/. Keep in sync with the
 # runtime loader in pypto.runtime.distributed_runner.
 COMM_MANIFEST_FILENAME = "comm_manifest.json"
 COMM_MANIFEST_VERSION = 2
-
-
-# Maps PyPTO DataType to the dtype-string convention simpler's ChipBufferSpec
-# expects (numpy/torch style, e.g. "float32"). DataType.to_string() returns
-# "fp32" / "bfloat16" which simpler does not understand; this table is the
-# explicit single source of truth.
-_SIMPLER_DTYPE_STR: dict[DataType, str] = {
-    DataType.FP32: "float32",
-    DataType.FP16: "float16",
-    DataType.BF16: "bfloat16",
-    DataType.INT8: "int8",
-    DataType.INT16: "int16",
-    DataType.INT32: "int32",
-    DataType.INT64: "int64",
-    DataType.UINT8: "uint8",
-}
-
-
-def _simpler_dtype_str(dtype: DataType) -> str:
-    try:
-        return _SIMPLER_DTYPE_STR[dtype]
-    except KeyError as exc:
-        raise RuntimeError(
-            f"Unsupported WindowBuffer dtype {dtype!r} for ChipBufferSpec; "
-            f"add an entry to _SIMPLER_DTYPE_STR. "
-            f"Known dtypes: {sorted(d.to_string() for d in _SIMPLER_DTYPE_STR)}"
-        ) from exc
 
 
 def lift_comm_manifest(program: Program) -> dict[str, Any] | None:
@@ -83,9 +58,9 @@ def lift_comm_manifest(program: Program) -> dict[str, Any] | None:
     path used by multi_chip_dispatch and parallel_reduce).
 
     Current v2 supports a single CommGroup with literal ``int`` per-slot
-    ``size``. Symbolic sizes raise ``RuntimeError`` at compile time — that's
-    a better failure point than runtime, since the program author can fix it
-    without redeploying.
+    ``size`` (in bytes). Symbolic sizes raise ``RuntimeError`` at compile
+    time — that's a better failure point than runtime, since the program
+    author can fix it without redeploying.
     """
     comm_groups = list(program.comm_groups)
     if not comm_groups:
@@ -103,14 +78,15 @@ def lift_comm_manifest(program: Program) -> dict[str, Any] | None:
         if size_const is None:
             raise RuntimeError(
                 f"dynamic WindowBuffer size is not supported yet "
-                f"(slot {slot.name!r}); declare size as a literal int"
+                f"(slot {slot.name_hint!r}); declare size as a literal int (bytes)"
             )
         slots_data.append(
             {
-                "name": slot.name,
-                "dtype": _simpler_dtype_str(slot.dtype),
-                "size": int(size_const.value),
-                "bits_per_element": slot.dtype.get_bit(),
+                # The buffer's runtime-unique identifier flows through the
+                # inherited Var.name_hint (no separate name field on
+                # WindowBuffer — mirrors MemRef).
+                "name": slot.name_hint,
+                "nbytes": int(size_const.value),
                 "load_from_host": bool(slot.load_from_host),
                 "store_to_host": bool(slot.store_to_host),
             }

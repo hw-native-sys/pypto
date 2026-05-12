@@ -918,13 +918,14 @@ static IRNodePtr DeserializeProgram(const msgpack::object& fields_obj, msgpack::
 static IRNodePtr DeserializeWindowBuffer(const msgpack::object& fields_obj, msgpack::zone& zone,
                                          DeserializerContext& ctx) {
   auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-  std::string name = GET_FIELD(std::string, "name");
+  // ``name_hint`` is the inherited Var field carrying the runtime-unique
+  // identifier (mirrors MemRef). The base Ptr Var that this WindowBuffer
+  // wraps is reconstructed from the ``base`` field below.
+  auto base = std::static_pointer_cast<const Var>(ctx.DeserializeNode(GET_FIELD_OBJ("base"), zone));
   auto size = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(GET_FIELD_OBJ("size"), zone));
-  uint8_t dtype_code = GET_FIELD(uint8_t, "dtype");
   bool load_from_host = GET_FIELD(bool, "load_from_host");
   bool store_to_host = GET_FIELD(bool, "store_to_host");
-  return std::make_shared<WindowBuffer>(std::move(name), size, DataType(dtype_code), load_from_host,
-                                        store_to_host, span);
+  return std::make_shared<WindowBuffer>(base, size, load_from_host, store_to_host, span);
 }
 
 // Deserialize CommGroup

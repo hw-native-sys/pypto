@@ -454,6 +454,11 @@ void BindIR(nb::module_& m) {
       nb::init<const std::vector<int64_t>&, DataType, std::optional<MemRefPtr>, std::optional<TensorView>>(),
       nb::arg("shape"), nb::arg("dtype"), nb::arg("memref") = nb::none(), nb::arg("tensor_view") = nb::none(),
       "Create a distributed tensor type with constant shape, optional memref and tensor_view");
+  dist_tensor_type_class.def(
+      nb::init<std::vector<ExprPtr>, DataType, WindowBufferPtr>(), nb::arg("shape"), nb::arg("dtype"),
+      nb::arg("window_buffer"),
+      "Create a distributed tensor type produced by pld.window; window_buffer is the back-"
+      "reference to the source WindowBuffer allocation.");
   BindFields<DistributedTensorType>(dist_tensor_type_class);
 
   // TileType - const shared_ptr
@@ -506,6 +511,18 @@ void BindIR(nb::module_& m) {
   ptr_type_class.def(nb::init<>(), "Create a Ptr type");
   ptr_type_class.def_static("get", &GetPtrType, "Get the singleton PtrType instance");
   BindFields<PtrType>(ptr_type_class);
+
+  // WindowBufferType - singleton marker type for pld.alloc_window_buffer outputs.
+  // Mirrors MemRefType: no per-instance fields. The WindowBuffer Var subclass
+  // (bindings below) carries the allocation metadata.
+  auto window_buffer_type_class = nb::class_<WindowBufferType, Type>(
+      ir, "WindowBufferType",
+      "Singleton marker type for pld.alloc_window_buffer outputs. The companion WindowBuffer "
+      "Var subclass carries the allocation metadata (name, size, dtype, host flags).");
+  window_buffer_type_class.def(nb::init<>(), "Create the singleton WindowBufferType instance.");
+  window_buffer_type_class.def_static("get", &GetWindowBufferType,
+                                      "Get the shared singleton WindowBufferType instance.");
+  BindFields<WindowBufferType>(window_buffer_type_class);
 
   // MemorySpace enum
   nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
@@ -1487,18 +1504,23 @@ void BindIR(nb::module_& m) {
                        "List of CommGroups declared on the program. CommGroups participate "
                        "in structural equality / hashing through reflection.");
 
-  // CommGroup / WindowBuffer — IRNode-typed host-side metadata attached to a Program.
-  auto window_buffer_class = nb::class_<WindowBuffer, IRNode>(
+  // WindowBuffer — a specialised Var subclass that carries CommGroup window-buffer
+  // allocation metadata. Mirrors MemRef's Var-subclass shape; the inherited
+  // ``name_hint`` is mirrored from ``name_`` (UsualField, unique-id role).
+  auto window_buffer_class = nb::class_<WindowBuffer, Var>(
       ir, "WindowBuffer",
-      "Per-rank allocation spec for a named CommGroup HCCL window buffer. "
-      "Maps 1:1 to simpler.task_interface.ChipBufferSpec at submit-time. "
-      "size_ is the per-rank element count; load_from_host_ / store_to_host_ "
-      "are bool flags marking host-staging participation (the actual host "
-      "tensor binding is recorded on the alloc op, not here).");
-  window_buffer_class.def(nb::init<std::string, ExprPtr, DataType, bool, bool, Span>(), nb::arg("name"),
-                          nb::arg("size"), nb::arg("dtype"), nb::arg("load_from_host") = false,
-                          nb::arg("store_to_host") = false, nb::arg("span") = Span::unknown(),
-                          "Create a WindowBuffer.");
+      "Per-rank CommGroup window-buffer allocation, modelled as a specialised Var. "
+      "Its SSA-edge type is the singleton WindowBufferType; the allocation metadata "
+      "(name, size, dtype, host-staging flags) lives on the Var subclass directly — "
+      "the exact mirror of how MemRef carries (base, byte_offset, size) under MemRefType. "
+      "Constructed by the comm-collection pass; the alloc op's LHS at parse time is a "
+      "plain Var(PtrType).");
+  window_buffer_class.def(nb::init<VarPtr, ExprPtr, bool, bool, Span>(), nb::arg("base"), nb::arg("size"),
+                          nb::arg("load_from_host") = false, nb::arg("store_to_host") = false,
+                          nb::arg("span") = Span::unknown(),
+                          "Create a WindowBuffer wrapping the given Ptr Var. The buffer's "
+                          "runtime-unique identifier flows through the inherited "
+                          "Var.name_hint (taken from base.name_hint).");
   BindFields<WindowBuffer>(window_buffer_class);
 
   auto comm_group_class =
