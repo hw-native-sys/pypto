@@ -229,21 +229,22 @@ class TestIterArgEquality:
         assert array_type.dtype == DataType.TASK_ID
 
     def test_iter_arg_array_type_structural_equal(self):
-        """Two IterArgs with the same ArrayType + the same init Var compare equal.
+        """Two structurally-equivalent IterArgs with ArrayType + shared init Var compare equal.
 
-        Var identity is part of structural equality (Vars carry SSA names),
-        so the init expression must be the *same* Var instance — mirroring
-        the ConstInt-sharing pattern used by ``test_iter_arg_equal_when_*``
-        above. This test pins that IterArg's structural equality handles
-        ArrayType-typed iter_args without rejecting them at the type-system
-        layer.
+        IterArg is a Var subclass with SSA identity, so plain
+        ``structural_equal`` on two distinct IterArg instances always
+        returns False — use ``assert_structural_equal`` with
+        ``enable_auto_mapping=True`` to allow SSA renaming, mirroring
+        ``test_iter_arg_structural_equal`` above. This test pins that
+        IterArg's structural equality handles ArrayType-typed iter_args
+        without rejecting them at the type-system layer.
         """
         span = ir.Span.unknown()
         array_ty = ir.ArrayType(DataType.INT32, 4)
         init = ir.Var("arr_init", array_ty, span)
         ia = ir.IterArg("arr_iter", array_ty, init, span)
         ib_iter = ir.IterArg("arr_iter", array_ty, init, span)
-        assert ir.structural_equal(ia, ib_iter)
+        ir.assert_structural_equal(ia, ib_iter, enable_auto_mapping=True)
 
 
 if __name__ == "__main__":
