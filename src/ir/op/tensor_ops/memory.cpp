@@ -34,6 +34,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -142,9 +143,14 @@ TypePtr DeduceTensorCreateType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tensor.slice requires 3 arguments (input, shape, offset) with optional 4th (valid_shape)
-  CHECK(args.size() == 3 || args.size() == 4)
-      << "tensor.slice requires 3 or 4 arguments (input, shape, offset[, valid_shape]), but got "
+  // tensor.slice: (input, shape, offset[, valid_shape[, drop_dims]]).
+  //   - valid_shape (4th arg): an empty MakeTuple means "no valid_shape".
+  //   - drop_dims (5th arg): a MakeTuple of ConstInt listing axes to erase from
+  //     the result type (numpy-style rank reduction); each listed axis must be a
+  //     static unit dim of `shape`. An empty / absent operand drops nothing, so
+  //     the 3- and 4-arg forms behave exactly as before.
+  CHECK(args.size() >= 3 && args.size() <= 5)
+      << "tensor.slice requires 3-5 arguments (input, shape, offset[, valid_shape[, drop_dims]]), but got "
       << args.size();
 
   // First argument must be TensorType
@@ -182,22 +188,28 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
         << scalar_type->dtype_.ToString();
   }
 
-  // Extract shape dimensions
+  // Extract the full (pre-reduction) shape dimensions.
   // If args[1] is MakeTuple, extract elements directly to preserve constants
   // Otherwise use TupleGetItemExpr for runtime tuples
-  std::vector<ExprPtr> new_shape;
-  new_shape.reserve(shape_tuple_type->types_.size());
+  std::vector<ExprPtr> full_shape;
+  full_shape.reserve(shape_tuple_type->types_.size());
 
   if (auto make_tuple = As<MakeTuple>(args[1])) {
     // MakeTuple: extract elements directly to preserve ConstInt
-    new_shape = make_tuple->elements_;
+    full_shape = make_tuple->elements_;
   } else {
     // Runtime tuple: use TupleGetItemExpr
     for (size_t i = 0; i < shape_tuple_type->types_.size(); ++i) {
-      new_shape.emplace_back(
+      full_shape.emplace_back(
           std::make_shared<TupleGetItemExpr>(args[1], static_cast<int>(i), args[1]->span_));
     }
   }
+
+  // Optional drop_dims (5th arg): axes erased from the result type. Validated
+  // against the full pre-reduction shape (each must be a static unit dim).
+  const ExprPtr drop_dims_arg = args.size() == 5 ? args[4] : nullptr;
+  const std::vector<int64_t> drop_dims = ParseSliceDropDims(drop_dims_arg, full_shape, "tensor.slice");
+  const std::vector<ExprPtr> new_shape = ApplyDropDims(full_shape, drop_dims);
 
   // Read optional pad_value kwarg (default PadValue::null = no padding).
   PadValue pad_value = PadValue::null;
@@ -212,12 +224,31 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
     break;
   }
 
-  // View preserves dtype but has new shape (which can have different rank than input).
-  // If valid_shape is provided as 4th argument or pad_value is set, build a TensorView.
-  if (args.size() == 4) {
+  // valid_shape (4th arg): an empty MakeTuple means "no valid_shape" — that form
+  // exists so callers can pass drop_dims (5th arg) without a custom valid_shape.
+  bool has_valid_shape = false;
+  std::vector<ExprPtr> valid_shape;
+  if (args.size() >= 4) {
     auto valid_shape_tuple = As<MakeTuple>(args[3]);
     CHECK(valid_shape_tuple) << "tensor.slice valid_shape (4th argument) must be a MakeTuple";
-    TensorView tensor_view({}, TensorLayout::ND, valid_shape_tuple->elements_, pad_value);
+    if (!valid_shape_tuple->elements_.empty()) {
+      has_valid_shape = true;
+      if (drop_dims.empty()) {
+        valid_shape = valid_shape_tuple->elements_;
+      } else {
+        // valid_shape is given over the full (pre-reduction) rank; drop the same axes.
+        CHECK(valid_shape_tuple->elements_.size() == full_shape.size())
+            << "tensor.slice valid_shape rank " << valid_shape_tuple->elements_.size()
+            << " must match shape rank " << full_shape.size() << " when drop_dims is set";
+        valid_shape = ApplyDropDims(valid_shape_tuple->elements_, drop_dims);
+      }
+    }
+  }
+
+  // View preserves dtype but has new shape (which can have different rank than input).
+  // If valid_shape is provided or pad_value is set, build a TensorView.
+  if (has_valid_shape) {
+    TensorView tensor_view({}, TensorLayout::ND, valid_shape, pad_value);
     return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
                                         std::make_optional(std::move(tensor_view)));
   }
@@ -373,6 +404,8 @@ REGISTER_OP("tensor.slice")
     .add_argument("input", "Input tensor (TensorType)")
     .add_argument("shape", "New shape dimensions (TupleType of ScalarType(INT64))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
+    .add_argument("valid_shape", "Optional logical valid shape; an empty tuple means none")
+    .add_argument("drop_dims", "Optional axes (MakeTuple of ConstInt) erased from the result type")
     .set_output_memory_inherit_input()
     .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

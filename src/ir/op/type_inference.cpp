@@ -274,6 +274,60 @@ std::string FormatShape(const std::vector<ExprPtr>& shape) {
 }
 
 // ============================================================================
+// Slice rank-reduction (drop_dims) helpers
+// ============================================================================
+
+std::vector<int64_t> ParseSliceDropDims(const ExprPtr& drop_dims_arg, const std::vector<ExprPtr>& full_shape,
+                                        const std::string& op_name) {
+  if (!drop_dims_arg) {
+    return {};
+  }
+  auto tuple = As<MakeTuple>(drop_dims_arg);
+  CHECK(tuple) << op_name << " drop_dims must be a MakeTuple of compile-time int constants";
+
+  std::vector<int64_t> axes;
+  axes.reserve(tuple->elements_.size());
+  std::vector<bool> seen(full_shape.size(), false);
+  for (size_t i = 0; i < tuple->elements_.size(); ++i) {
+    auto const_int = As<ConstInt>(tuple->elements_[i]);
+    CHECK(const_int) << op_name << " drop_dims element " << i << " must be a compile-time int constant";
+    int64_t axis = const_int->value_;
+    CHECK(axis >= 0 && axis < static_cast<int64_t>(full_shape.size()))
+        << op_name << " drop_dims index " << axis << " out of range for rank " << full_shape.size();
+    CHECK(!seen[static_cast<size_t>(axis)]) << op_name << " drop_dims index " << axis << " is repeated";
+    seen[static_cast<size_t>(axis)] = true;
+    auto dim = GetConstantDimension(full_shape[static_cast<size_t>(axis)]);
+    CHECK(dim.has_value() && *dim == 1)
+        << op_name << " drop_dims index " << axis
+        << " must select a static unit dimension (rank reduction only erases size-1 dims), but dim " << axis
+        << " is " << (dim.has_value() ? std::to_string(*dim) : std::string("dynamic"));
+    axes.push_back(axis);
+  }
+  std::sort(axes.begin(), axes.end());
+  return axes;
+}
+
+std::vector<ExprPtr> ApplyDropDims(const std::vector<ExprPtr>& shape, const std::vector<int64_t>& drop_dims) {
+  if (drop_dims.empty()) {
+    return shape;
+  }
+  std::vector<bool> drop(shape.size(), false);
+  for (int64_t d : drop_dims) {
+    if (d >= 0 && d < static_cast<int64_t>(shape.size())) {
+      drop[static_cast<size_t>(d)] = true;
+    }
+  }
+  std::vector<ExprPtr> result;
+  result.reserve(shape.size() - drop_dims.size());
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (!drop[i]) {
+      result.push_back(shape[i]);
+    }
+  }
+  return result;
+}
+
+// ============================================================================
 // Cross-function call return type deduction
 // ============================================================================
 

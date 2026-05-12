@@ -35,6 +35,7 @@
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -118,9 +119,15 @@ void ValidateIndexTupleElements(const TupleTypePtr& tuple_type, const std::strin
 
 TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tile.slice requires 3 arguments (input, shape, offset) with optional 4th (valid_shape)
-  CHECK(args.size() == 3 || args.size() == 4)
-      << "tile.slice requires 3 or 4 arguments (input, shape, offset[, valid_shape]), but got "
+  // tile.slice: (input, shape, offset[, valid_shape[, drop_dims]]).
+  //   - valid_shape (4th arg): an empty MakeTuple means "no valid_shape".
+  //   - drop_dims (5th arg): a MakeTuple of ConstInt listing axes to erase from
+  //     the result type (numpy-style rank reduction); each listed axis must be a
+  //     static unit dim of `shape`. An empty / absent operand drops nothing.
+  // Tile floor: tiles are physically 2D, so if rank reduction would take the
+  // result below 2D it is clamped back to 2D by prepending unit axes.
+  CHECK(args.size() >= 3 && args.size() <= 5)
+      << "tile.slice requires 3-5 arguments (input, shape, offset[, valid_shape[, drop_dims]]), but got "
       << args.size();
 
   // First argument must be TileType
@@ -162,24 +169,51 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
   }
 
   std::vector<ExprPtr> valid_shape = new_shape;
-  if (args.size() == 4) {
+  if (args.size() >= 4) {
     auto valid_shape_tuple_type = As<TupleType>(args[3]->GetType());
     CHECK(valid_shape_tuple_type) << "tile.slice requires valid_shape to be TupleType, but got "
                                   << args[3]->GetType()->TypeName();
-    ValidateIndexTupleElements(valid_shape_tuple_type, "tile.slice", "valid_shape");
-    CHECK(valid_shape_tuple_type->types_.size() == shape_tuple_type->types_.size())
-        << "tile.slice requires valid_shape and shape to have the same rank, but got valid_shape rank "
-        << valid_shape_tuple_type->types_.size() << " and shape rank " << shape_tuple_type->types_.size();
+    // An empty tuple is the explicit "no valid_shape" form (so callers can pass
+    // drop_dims as the 5th arg without supplying a custom valid_shape).
+    if (!valid_shape_tuple_type->types_.empty()) {
+      ValidateIndexTupleElements(valid_shape_tuple_type, "tile.slice", "valid_shape");
+      CHECK(valid_shape_tuple_type->types_.size() == shape_tuple_type->types_.size())
+          << "tile.slice requires valid_shape and shape to have the same rank, but got valid_shape rank "
+          << valid_shape_tuple_type->types_.size() << " and shape rank " << shape_tuple_type->types_.size();
 
-    valid_shape.clear();
-    valid_shape.reserve(valid_shape_tuple_type->types_.size());
-    if (auto valid_shape_tuple = As<MakeTuple>(args[3])) {
-      valid_shape = valid_shape_tuple->elements_;
-    } else {
-      for (size_t i = 0; i < valid_shape_tuple_type->types_.size(); ++i) {
-        valid_shape.emplace_back(
-            std::make_shared<TupleGetItemExpr>(args[3], static_cast<int>(i), args[3]->span_));
+      valid_shape.clear();
+      valid_shape.reserve(valid_shape_tuple_type->types_.size());
+      if (auto valid_shape_tuple = As<MakeTuple>(args[3])) {
+        valid_shape = valid_shape_tuple->elements_;
+      } else {
+        for (size_t i = 0; i < valid_shape_tuple_type->types_.size(); ++i) {
+          valid_shape.emplace_back(
+              std::make_shared<TupleGetItemExpr>(args[3], static_cast<int>(i), args[3]->span_));
+        }
       }
+    }
+  }
+
+  // Optional drop_dims (5th arg): axes erased from the result type, validated
+  // against the full pre-reduction shape. Apply to both the static shape and the
+  // valid_shape, then clamp back up to 2D (tiles are physically 2D) by prepending
+  // unit axes if the natural result would be < 2D.
+  const ExprPtr drop_dims_arg = args.size() == 5 ? args[4] : nullptr;
+  const std::vector<int64_t> drop_dims = ParseSliceDropDims(drop_dims_arg, new_shape, "tile.slice");
+  if (!drop_dims.empty()) {
+    new_shape = ApplyDropDims(new_shape, drop_dims);
+    valid_shape = ApplyDropDims(valid_shape, drop_dims);
+    if (new_shape.size() < 2) {
+      // Reuse the dtype of an existing static shape element for the synthetic unit axes.
+      auto first_dim = As<ConstInt>(shape_tuple->elements_[0]);
+      const DataType dim_dtype = first_dim->dtype();
+      const size_t pad = 2 - new_shape.size();
+      std::vector<ExprPtr> unit_axes(pad);
+      for (size_t i = 0; i < pad; ++i) {
+        unit_axes[i] = std::make_shared<ConstInt>(1, dim_dtype, args[1]->span_);
+      }
+      new_shape.insert(new_shape.begin(), unit_axes.begin(), unit_axes.end());
+      valid_shape.insert(valid_shape.begin(), unit_axes.begin(), unit_axes.end());
     }
   }
 
@@ -331,7 +365,12 @@ REGISTER_OP("tile.slice")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("shape", "Static shape dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64/UINT64/INDEX))")
-    .add_argument("valid_shape", "Optional logical valid shape (TupleType of ScalarType(INT64/UINT64/INDEX))")
+    .add_argument("valid_shape",
+                  "Optional logical valid shape (TupleType of ScalarType(INT64/UINT64/INDEX)); "
+                  "an empty tuple means none")
+    .add_argument("drop_dims",
+                  "Optional axes (MakeTuple of ConstInt) erased from the result type; the result is "
+                  "clamped to 2D if reduction would take it below 2D")
     .set_output_memory_inherit_input()
     .set_attr<PadValue>("pad_value")
     .f_deduce_type([](const std::vector<ExprPtr>& args,

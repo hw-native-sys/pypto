@@ -2034,6 +2034,7 @@ def slice(
     shape: Sequence[int | Expr] | _ir_core.MakeTuple,
     offset: Sequence[int | Expr] | _ir_core.MakeTuple,
     valid_shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    drop_dims: list[int] | None = None,
     pad_value: PadValue | int | float | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -2041,10 +2042,17 @@ def slice(
 
     Args:
         tile: Input tile expression
-        shape: Static shape dimensions, or a MakeTuple
+        shape: Static shape dimensions, or a MakeTuple. Always full-rank — a
+            scalar-indexed axis contributes a unit dim here and is listed in
+            ``drop_dims`` to be erased from the result type.
         offset: Offset dimensions for the slice, or a MakeTuple
         valid_shape: Valid shape dimensions, or a MakeTuple. When omitted, shape
             is reused as the valid shape.
+        drop_dims: Optional axes to erase from the result type (numpy-style rank
+            reduction). Each listed axis must be a static unit dim of ``shape``.
+            Because tiles are physically 2D, the result is clamped back to 2D
+            (unit axes prepended) if reduction would take it below 2D.
+            ``None`` / ``[]`` is fully backward compatible (drops nothing).
         pad_value: Optional padding mode for out-of-valid-shape elements.
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (normalized
@@ -2063,15 +2071,28 @@ def slice(
     offset_tuple = _to_make_tuple(offset, actual_span)
     args = [tile, shape_tuple, offset_tuple]
 
+    valid_shape_tuple = None
     if valid_shape is not None:
         valid_shape_tuple = _to_make_tuple(valid_shape, actual_span)
-        if len(valid_shape_tuple.elements) != len(shape_tuple.elements):
+        # An empty tuple is the explicit "no valid_shape" form (used when only
+        # drop_dims is supplied) — skip the rank check for it.
+        if len(valid_shape_tuple.elements) not in (0, len(shape_tuple.elements)):
             raise ValueError(
                 f"valid_shape and shape must have same number of dimensions, "
                 "got "
                 f"{len(valid_shape_tuple.elements)} valid_shape dims and "
                 f"{len(shape_tuple.elements)} shape dims"
             )
+
+    if drop_dims:
+        # drop_dims is the 5th positional operand, so valid_shape (the 4th) must
+        # be present; an empty MakeTuple stands in for "no valid_shape".
+        args.append(valid_shape_tuple if valid_shape_tuple is not None else _to_make_tuple([], actual_span))
+        # `drop_dims` may be ints (direct API) or ConstInt exprs (text parser);
+        # _to_make_tuple normalizes either form. Non-ConstInt exprs are rejected
+        # by the deducer with a clear message.
+        args.append(_to_make_tuple(list(drop_dims), actual_span))
+    elif valid_shape_tuple is not None:
         args.append(valid_shape_tuple)
 
     kwargs: dict[str, Any] = {}

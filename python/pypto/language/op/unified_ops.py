@@ -438,12 +438,18 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
+    drop_dims: list[int] | None = None,
 ) -> T:
-    """Slice operation, dispatched by input type."""
+    """Slice operation, dispatched by input type.
+
+    ``drop_dims`` lists axes to erase from the result type (numpy-style rank
+    reduction); each must be a static unit dim of ``shape``. ``None`` / ``[]``
+    drops nothing.
+    """
     if isinstance(input, Tensor):
-        return _tensor.slice(input, shape, offset, valid_shape)
+        return _tensor.slice(input, shape, offset, valid_shape, drop_dims)
     if isinstance(input, Tile):
-        return _tile.slice(input, shape, offset, valid_shape)
+        return _tile.slice(input, shape, offset, valid_shape, drop_dims)
     raise TypeError(f"pl.slice: expected Tensor or Tile, got {type(input).__name__}")
 
 

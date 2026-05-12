@@ -227,6 +227,31 @@ std::vector<TypePtr> DeduceCallReturnType(const std::vector<VarPtr>& callee_para
                                           const std::vector<ExprPtr>& args,
                                           const std::vector<TypePtr>& return_types);
 
+/**
+ * @brief Parse and validate the optional ``drop_dims`` operand of a slice op.
+ *
+ * ``tensor.slice`` / ``tile.slice`` accept an optional trailing positional
+ * argument listing axes to remove from the result type (numpy-style rank
+ * reduction). The operand is a ``MakeTuple`` of ``ConstInt``; an empty tuple,
+ * or a null operand, means "drop nothing". Every listed axis must be in
+ * ``[0, full_shape.size())``, appear at most once, and select a statically
+ * unit-sized dimension of ``full_shape`` — rank reduction only erases unit dims.
+ *
+ * @param drop_dims_arg The drop_dims operand, or nullptr if the op has no such argument.
+ * @param full_shape The full (pre-reduction) slice shape.
+ * @param op_name Operator name for error messages (e.g. "tensor.slice").
+ * @return The validated axes in ascending order; empty when nothing is dropped.
+ */
+std::vector<int64_t> ParseSliceDropDims(const ExprPtr& drop_dims_arg, const std::vector<ExprPtr>& full_shape,
+                                        const std::string& op_name);
+
+/**
+ * @brief Remove the axes in ``drop_dims`` (ascending, validated) from ``shape``.
+ *
+ * Returns ``shape`` unchanged when ``drop_dims`` is empty.
+ */
+std::vector<ExprPtr> ApplyDropDims(const std::vector<ExprPtr>& shape, const std::vector<int64_t>& drop_dims);
+
 }  // namespace ir
 }  // namespace pypto
 

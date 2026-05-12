@@ -1361,6 +1361,82 @@ def test_tensor_slice_with_valid_shape():
     assert len(result_type.tensor_view.valid_shape) == 2
 
 
+def test_tensor_slice_drop_dims_rank_reduces():
+    """tensor.slice drop_dims erases the listed unit axes from the result type."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([64, 64, 64, 64], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.slice(tensor_var, [1, 1, 64, 64], [3, 5, 0, 0], drop_dims=[0, 1])
+
+    assert call.op.name == "tensor.slice"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [64, 64]
+    # shape / offset stay full-rank; drop_dims is the 5th operand (empty valid_shape 4th).
+    assert len(call.args) == 5
+
+
+def test_tensor_slice_drop_dims_drops_valid_shape_axes():
+    """drop_dims removes the same axes from a supplied valid_shape."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64, 64], DataType.FP32), span)
+
+    call = ir.op.tensor.slice(tensor_var, [1, 8, 64], [2, 0, 0], valid_shape=[1, 4, 64], drop_dims=[0])
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [8, 64]
+    assert result_type.tensor_view is not None
+    assert [d.value for d in result_type.tensor_view.valid_shape if isinstance(d, ir.ConstInt)] == [4, 64]
+
+
+def test_tensor_slice_drop_dims_rejects_non_unit_dim():
+    """drop_dims may only erase statically size-1 dimensions."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+    with pytest.raises(ValueError, match="static unit dimension"):
+        ir.op.tensor.slice(tensor_var, [8, 64], [0, 0], drop_dims=[0])
+
+
+def test_tensor_slice_drop_dims_rejects_out_of_range():
+    """drop_dims indices must be within the slice rank."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+    with pytest.raises(ValueError, match="out of range"):
+        ir.op.tensor.slice(tensor_var, [1, 64], [0, 0], drop_dims=[2])
+
+
+def test_tensor_slice_empty_drop_dims_is_backward_compatible():
+    """drop_dims=None / [] keeps the legacy 3-arg result type (no tensor_view)."""
+    span = ir.Span.unknown()
+    tensor_var = ir.Var("t", ir.TensorType([64, 64], DataType.FP32), span)
+    call_none = ir.op.tensor.slice(tensor_var, [8, 16], [0, 0])
+    call_empty = ir.op.tensor.slice(tensor_var, [8, 16], [0, 0], drop_dims=[])
+    for call in (call_none, call_empty):
+        assert len(call.args) == 3
+        result_type = call.type
+        assert isinstance(result_type, ir.TensorType)
+        assert result_type.tensor_view is None
+        assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [8, 16]
+
+
+def test_tensor_slice_drop_dims_print_parse_roundtrip():
+    """A drop_dims slice survives python_print -> pl.parse -> python_print."""
+    src = (
+        "import pypto.language as pl\n\n"
+        "@pl.program\n"
+        "class P:\n"
+        "    @pl.function\n"
+        "    def main(self, x: pl.Tensor[[64, 64, 64, 64], pl.FP32]) -> pl.Tensor[[64, 64], pl.FP32]:\n"
+        "        y: pl.Tensor[[64, 64], pl.FP32] = "
+        "pl.tensor.slice(x, [1, 1, 64, 64], [3, 5, 0, 0], drop_dims=[0, 1])\n"
+        "        return y\n"
+    )
+    prog = pl.parse(src)
+    reparsed = pl.parse(ir.python_print(prog))
+    ir.assert_structural_equal(reparsed, prog)
+
+
 def _make_slice_tensor_var():
     """Build a [16, 32] FP16 tensor Var for slice pad_value tests."""
     span = ir.Span.unknown()

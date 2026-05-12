@@ -1090,6 +1090,63 @@ class TestTileSliceReshapeOps:
         with pytest.raises(ValueError, match="compile-time constant"):
             tile.slice(tile_var, [8, valid_n], [0, 0])
 
+    def test_tile_slice_drop_dims_rank_reduces(self):
+        """tile.slice drop_dims erases the listed unit axes from the result type."""
+        span = ir.Span.unknown()
+        tile_var = ir.Var("tile", ir.TileType([64, 64, 64, 64], DataType.FP16), span)
+
+        call = tile.slice(tile_var, [1, 64, 64, 64], [3, 0, 0, 0], drop_dims=[0])
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [64, 64, 64]
+        # shape / offset stay full-rank; drop_dims is the 5th operand.
+        assert len(call.args) == 5
+
+    def test_tile_slice_drop_dims_clamps_to_2d(self):
+        """A natural sub-2D result is clamped back to 2D by prepending unit axes."""
+        span = ir.Span.unknown()
+        tile_var = ir.Var("tile", ir.TileType([64, 64, 64, 64], DataType.FP16), span)
+
+        call = tile.slice(tile_var, [1, 1, 1, 64], [1, 2, 3, 0], drop_dims=[0, 1, 2])
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [1, 64]
+
+    def test_tile_slice_drop_dims_rejects_non_unit_dim(self):
+        """tile.slice drop_dims may only erase statically size-1 dimensions."""
+        span = ir.Span.unknown()
+        tile_var = ir.Var("tile", ir.TileType([64, 64], DataType.FP16), span)
+        with pytest.raises(ValueError, match="static unit dimension"):
+            tile.slice(tile_var, [8, 64], [0, 0], drop_dims=[0])
+
+    def test_tile_slice_empty_drop_dims_is_backward_compatible(self):
+        """drop_dims=None / [] keeps the legacy 3-arg behavior."""
+        span = ir.Span.unknown()
+        tile_var = ir.Var("tile", ir.TileType([16, 32], DataType.FP16), span)
+        call_none = tile.slice(tile_var, [8, 16], [0, 0])
+        call_empty = tile.slice(tile_var, [8, 16], [0, 0], drop_dims=[])
+        for call in (call_none, call_empty):
+            assert len(call.args) == 3
+            result_type = call.type
+            assert isinstance(result_type, ir.TileType)
+            assert [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)] == [8, 16]
+
+    def test_tile_slice_drop_dims_print_parse_roundtrip(self):
+        """A drop_dims tile slice survives python_print -> pl.parse -> python_print."""
+        src = (
+            "import pypto.language as pl\n\n"
+            "@pl.program\n"
+            "class Q:\n"
+            "    @pl.function\n"
+            "    def main(self, x: pl.Tile[[64, 64, 64, 64], pl.FP16]) -> pl.Tile[[1, 64], pl.FP16]:\n"
+            "        y: pl.Tile[[1, 64], pl.FP16] = "
+            "pl.tile.slice(x, [1, 1, 1, 64], [1, 2, 3, 0], drop_dims=[0, 1, 2])\n"
+            "        return y\n"
+        )
+        prog = pl.parse(src)
+        reparsed = pl.parse(ir.python_print(prog))
+        ir.assert_structural_equal(reparsed, prog)
+
     @staticmethod
     def _make_slice_tile_var():
         """Build a [16, 32] FP16 tile Var for slice pad_value tests."""
