@@ -850,6 +850,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
         manual_task_id_map_[assign->var_.get()] = var_name;
         return;
       }
+      if (op_name == "system.task_is_valid") {
+        // ``b = task_is_valid(t)`` lowers to ``bool b = <t>.is_valid();``.
+        // The argument is any Scalar[TASK_ID] expression — a Var holding a
+        // companion id, or an ``array.get_element`` call on a TASK_ID array
+        // carry. ``GenerateExprString`` handles both.
+        INTERNAL_CHECK_SPAN(call->args_.size() == 1, assign->span_)
+            << "Internal error: system.task_is_valid expects exactly 1 argument";
+        std::string arg_expr = GenerateExprString(call->args_[0]);
+        code_ << Indent() << "bool " << var_name << " = " << arg_expr << ".is_valid();\n";
+        return;
+      }
 
       if (IsTensorOp(op_name)) {
         if (op_name == "tensor.assemble") {

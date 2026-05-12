@@ -131,5 +131,62 @@ class P:
     assert "arr[i] = i;" in code
 
 
+# ----------------------------------------------------------------------------
+# ForStmt with explicit ArrayType iter_arg — phase-fence carry shape.
+#
+# Phase-fence lowering will produce ForStmts with explicit ArrayType iter_args
+# (the per-slot TaskId carry that fans out to N add_dep calls on every
+# downstream task). The DSL parser does NOT currently promote ``arr`` into a
+# loop-carried iter_arg when only ``arr[k] = ...`` writes happen inside the
+# loop body — those go through the LHS-alias path of update_element, so the
+# array stays in scope without crossing an iter_arg boundary. The phase-fence
+# pass produces the iter_arg form deliberately. This test hand-builds that
+# IR shape to exercise the codegen path that pass output will hit.
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    reason="ForStmt with ArrayType iter_arg not yet supported in orchestration codegen — "
+    "the scalar-carry path at orchestration_codegen.cpp:643 calls GetCppType on the "
+    "iter_arg type and that helper fires INTERNAL_CHECK for ArrayType (orchestration_codegen.cpp:1034). "
+    "Phase-fence lowering will require this; track via the ExpandManualPhaseFence work.",
+    strict=True,
+    raises=Exception,
+)
+def test_for_stmt_with_array_type_iter_arg_codegen():
+    """Hand-built IR: ForStmt whose iter_arg is an ArrayType[INT64, 4].
+
+    Each iteration calls ``array.update_element`` and yields the result as
+    the next iter's carry value. Codegen must emit a single C-stack array
+    declaration (e.g. ``int64_t arr[4] = {0};``) and in-place writes through
+    that same name — *not* a value-copy of the array (which is invalid C for
+    raw arrays).
+    """
+    from pypto.ir.builder import IRBuilder  # noqa: PLC0415
+    from pypto.ir.op import array as ir_array  # noqa: PLC0415
+    from pypto.pypto_core import DataType  # noqa: PLC0415
+
+    ib = IRBuilder()
+    with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+        orch_f.param("x", ir.TensorType([16], DataType.INT64))
+        orch_f.return_type(ir.TensorType([16], DataType.INT64))
+        x = orch_f.get_result().params[0]
+
+        arr0 = ib.let("arr0", ir_array.create(4, DataType.INT64))
+        k = ib.var("k", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(k, 0, 4, 1) as loop:
+            arr_iter = loop.iter_arg("arr_iter", arr0)
+            loop.return_var("arr_final")
+            updated = ib.let("upd", ir_array.update_element(arr_iter, k, k))
+            ib.emit(ir.YieldStmt([updated], ir.Span.unknown()))
+        ib.return_stmt(x)
+    orch_func = orch_f.get_result()
+    program = ir.Program([orch_func], "test_array_iter_arg", ir.Span.unknown())
+
+    code = codegen.generate_orchestration(program, orch_func).code
+    assert "int64_t arr0[4] = {0};" in code, code
+    assert "arr0[k] = k;" in code, code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

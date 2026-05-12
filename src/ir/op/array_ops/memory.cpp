@@ -58,8 +58,11 @@ TypePtr DeduceArrayCreateType(const std::vector<ExprPtr>& args,
     }
   }
   CHECK(found_dtype) << "array.create requires 'dtype' kwarg";
-  CHECK(dtype.IsInt() || dtype == DataType::BOOL)
-      << "array.create dtype must be integer or BOOL (v1 restriction), got " << dtype.ToString();
+  // TASK_ID is admitted alongside integer / BOOL: it is an opaque 64-bit
+  // scalar used as a fence companion in manual_scope lowering, and lowers to
+  // the same on-core C-stack array as integer dtypes.
+  CHECK(dtype.IsInt() || dtype == DataType::BOOL || dtype == DataType::TASK_ID)
+      << "array.create dtype must be integer, BOOL, or TASK_ID, got " << dtype.ToString();
 
   auto extent_const = As<ConstInt>(args[0]);
   CHECK(extent_const) << "array.create extent must be a compile-time ConstInt, got " << args[0]->TypeName();

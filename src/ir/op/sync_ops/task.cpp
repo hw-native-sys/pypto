@@ -32,6 +32,13 @@ TypePtr DeduceTaskIdScalarType(const std::vector<ExprPtr>& args,
   return std::make_shared<ScalarType>(DataType::TASK_ID);
 }
 
+TypePtr DeduceBoolScalarType(const std::vector<ExprPtr>& args,
+                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  (void)args;
+  (void)kwargs;
+  return std::make_shared<ScalarType>(DataType::BOOL);
+}
+
 }  // namespace
 
 // system.task_invalid — produces an invalid PTO2TaskId sentinel.
@@ -60,6 +67,22 @@ REGISTER_OP("system.task_id_of")
     .set_op_category("TaskOp")
     .add_argument("producer", "Var produced by the kernel Call whose TaskId is wanted")
     .f_deduce_type(DeduceTaskIdScalarType);
+
+// system.task_is_valid — boolean predicate over a Scalar[TASK_ID]. Returns
+// true when the task id refers to a real dispatched task and false for the
+// sentinel produced by ``system.task_invalid()``.
+//
+// Used by manual_scope phase-fence lowering to guard each ``add_dep`` on an
+// array-carry slot: a first-iteration init slot still holds the invalid
+// sentinel, and the runtime must not see an edge to it. The IR-explicit
+// guard makes the codegen a thin emitter — see ``ExpandManualPhaseFence``.
+//
+// Codegen lowers ``b = task_is_valid(t)`` to ``bool b = t.is_valid();``.
+REGISTER_OP("system.task_is_valid")
+    .set_description("Predicate: returns true when the Scalar[TASK_ID] refers to a real task")
+    .set_op_category("TaskOp")
+    .add_argument("task_id", "Scalar[TASK_ID] to test")
+    .f_deduce_type(DeduceBoolScalarType);
 
 }  // namespace ir
 }  // namespace pypto

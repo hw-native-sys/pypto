@@ -2386,6 +2386,36 @@ class TestTensorReadWriteOffsetCodegen:
         )
 
 
+class TestTaskIsValidCodegen:
+    """``system.task_is_valid`` lowers to ``<expr>.is_valid()`` in C++.
+
+    The op is synthesized by the upcoming phase-fence lowering pass as the
+    guard on each per-slot ``add_dep`` for manual_scope array-carry TaskIds.
+    Codegen is hand-tested here on minimal IR rather than waiting for the
+    end-to-end pass, so the emitter contract is pinned independently of the
+    pass implementation.
+    """
+
+    def test_task_is_valid_emits_dot_is_valid(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ib = IRBuilder()
+        with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+            orch_f.param("tid", ir.ScalarType(DataType.TASK_ID))
+            orch_f.return_type(ir.ScalarType(DataType.BOOL))
+            tid = orch_f.get_result().params[0]
+            # b = task_is_valid(tid)
+            check = ir.create_op_call("system.task_is_valid", [tid], {}, ir.Span.unknown())
+            b = ib.let("b", check)
+            ib.return_stmt(b)
+        orch_func = orch_f.get_result()
+        program = ir.Program([orch_func], "test_task_is_valid", ir.Span.unknown())
+
+        code = codegen.generate_orchestration(program, orch_func).code
+        assert "bool b = tid.is_valid();" in code, code
+
+
 class TestUnregisteredOpError:
     """Test that unregistered/misplaced ops in Orchestration functions raise errors."""
 

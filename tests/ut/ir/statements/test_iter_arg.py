@@ -196,6 +196,49 @@ class TestIterArgEquality:
 
         assert not ir.structural_equal(iter_arg, base_var)
 
+    def test_iter_arg_with_array_type_int_dtype(self):
+        """IterArg carrying an ArrayType — the IR-level construction path
+        must not reject ArrayType-typed iter_args. Phase-fence lowering will
+        synthesize ForStmts with ArrayType iter_args (the per-slot fence
+        carry); this test pins the type-system pre-condition.
+        """
+        span = ir.Span.unknown()
+        array_ty = ir.ArrayType(DataType.INT32, 4)
+        # In real IR this would be a Var produced by ``array.create``; for the
+        # construction test a placeholder Var with matching type is sufficient.
+        init_value = ir.Var("arr_init", array_ty, span)
+        iter_arg = ir.IterArg("arr_iter", array_ty, init_value, span)
+
+        assert isinstance(iter_arg.type, ir.ArrayType)
+        array_type = cast(ir.ArrayType, iter_arg.type)
+        assert array_type.dtype == DataType.INT32
+        assert iter_arg.initValue is init_value
+
+    def test_iter_arg_with_array_type_task_id_dtype(self):
+        """ArrayType[TASK_ID] iter_arg — the target shape for the phase-fence
+        lowering pass. Validates the type system accepts the full combination
+        end-to-end (ArrayType.dtype allows TASK_ID; IterArg accepts ArrayType).
+        """
+        span = ir.Span.unknown()
+        array_ty = ir.ArrayType(DataType.TASK_ID, 4)
+        init_value = ir.Var("arr_init", array_ty, span)
+        iter_arg = ir.IterArg("arr_iter", array_ty, init_value, span)
+
+        assert isinstance(iter_arg.type, ir.ArrayType)
+        array_type = cast(ir.ArrayType, iter_arg.type)
+        assert array_type.dtype == DataType.TASK_ID
+
+    def test_iter_arg_array_type_structural_equal(self):
+        """Two IterArgs with structurally-equal ArrayType + init compare equal."""
+        span = ir.Span.unknown()
+        a_ty = ir.ArrayType(DataType.INT32, 4)
+        init_a = ir.Var("arr_init", a_ty, span)
+        b_ty = ir.ArrayType(DataType.INT32, 4)
+        init_b = ir.Var("arr_init", b_ty, span)
+        ia = ir.IterArg("arr_iter", a_ty, init_a, span)
+        ib_iter = ir.IterArg("arr_iter", b_ty, init_b, span)
+        assert ir.structural_equal(ia, ib_iter)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

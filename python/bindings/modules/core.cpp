@@ -48,6 +48,9 @@ void BindCore(nb::module_& m) {
       .def_ro_static(
           "INDEX", &DataType::INDEX,
           "Machine-word sized integer type for index computations (loop variables, dimensions, valid shapes)")
+      .def_ro_static("TASK_ID", &DataType::TASK_ID,
+                     "Opaque 64-bit task identifier (PTO2TaskId) used as a fence companion in "
+                     "manual_scope lowering; synthesized only by LowerManualDepsToTaskId.")
       .def_ro_static("DEFAULT_CONST_INT", &DataType::DEFAULT_CONST_INT,
                      "Default dtype for bare integer constant literals (= INT64)")
       .def_ro_static("DEFAULT_CONST_FLOAT", &DataType::DEFAULT_CONST_FLOAT,

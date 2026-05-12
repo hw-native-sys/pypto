@@ -62,6 +62,17 @@ def test_array_type_accepts_all_integer_dtypes():
         assert t.dtype == dt
 
 
+def test_array_type_accepts_task_id_dtype():
+    """TASK_ID is admitted as an opaque 64-bit scalar — used as the fence
+    companion in manual_scope lowering. Same on-core C-stack layout as the
+    integer dtypes (PTO2TaskId is a 64-bit POD).
+    """
+    t = ir.ArrayType(DataType.TASK_ID, 4)
+    assert t.dtype == DataType.TASK_ID
+    assert _extent(t) == 4
+    assert t.memory_space == ir.MemorySpace.ScalarLocal
+
+
 def test_array_type_rejects_non_integer_dtype():
     for dt in (DataType.FP16, DataType.FP32, DataType.BF16):
         with pytest.raises(ValueError, match="ArrayType element dtype must be"):

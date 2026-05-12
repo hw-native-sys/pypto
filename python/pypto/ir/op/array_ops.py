@@ -34,7 +34,7 @@ def create(extent: int | Expr, dtype: DataType, span: Span | None = None) -> Cal
         extent: Number of elements. Accepts a Python int (auto-wrapped into a
             ``ConstInt(INDEX)``) or a ``ConstInt`` expression already produced
             by the parser. Must be a compile-time constant.
-        dtype: Element data type (must be integer or BOOL).
+        dtype: Element data type (must be integer, BOOL, or TASK_ID).
         span: Optional source span for debugging (auto-captured if not provided).
 
     Returns:

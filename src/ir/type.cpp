@@ -222,8 +222,11 @@ std::optional<MemorySpace> TileType::ValidateMemorySpace(const std::optional<Mem
 namespace {
 
 void ValidateArrayDType(DataType dtype) {
-  CHECK(dtype.IsInt() || dtype == DataType::BOOL)
-      << "ArrayType element dtype must be an integer or BOOL, got " << dtype.ToString();
+  // TASK_ID is admitted as an opaque 64-bit scalar — used as a fence companion
+  // in manual_scope lowering. Same on-core C-stack lowering as integer dtypes
+  // (PTO2TaskId is a 64-bit POD).
+  CHECK(dtype.IsInt() || dtype == DataType::BOOL || dtype == DataType::TASK_ID)
+      << "ArrayType element dtype must be integer, BOOL, or TASK_ID, got " << dtype.ToString();
 }
 
 void ValidateArrayExtent(const ExprPtr& extent) {
