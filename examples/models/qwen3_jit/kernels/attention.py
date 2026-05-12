@@ -53,10 +53,12 @@ def rope_kv_cache_update(
         ctx_len = pl.read(seq_lens, [b])
         pos = ctx_len - 1
 
-        cos_lo = rope_cos[pos, 0:HALF_DIM]
-        cos_hi = rope_cos[pos, HALF_DIM:HEAD_DIM]
-        sin_lo = rope_sin[pos, 0:HALF_DIM]
-        sin_hi = rope_sin[pos, HALF_DIM:HEAD_DIM]
+        # Keep the row dim explicit: `rope_cos[pos, ...]` now rank-reduces to 1D
+        # under numpy-style indexing, but col_expand_mul needs a 2D [1, N] operand.
+        cos_lo = rope_cos[pos : pos + 1, 0:HALF_DIM]
+        cos_hi = rope_cos[pos : pos + 1, HALF_DIM:HEAD_DIM]
+        sin_lo = rope_sin[pos : pos + 1, 0:HALF_DIM]
+        sin_hi = rope_sin[pos : pos + 1, HALF_DIM:HEAD_DIM]
 
         with pl.at(level=pl.Level.CORE_GROUP, name_hint="rope_kv_cache"):
             for ki in pl.range(NUM_KV_HEADS):

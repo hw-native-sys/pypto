@@ -4397,12 +4397,16 @@ class ASTParser:
         return self._parse_sequence_literal(tuple_node)
 
     def parse_subscript(self, subscript: ast.Subscript) -> ir.Expr:
-        """Parse subscript expression: tuple[0], tensor[0:16, :], tile[0:16, :].
+        """Parse a subscript expression: ``tuple[0]``, ``tensor[i, j]``, ``tile[i:j]``, ...
 
         Supports:
         - TupleType: ``t[0]`` -> TupleGetItemExpr
-        - TensorType: ``A[0:16, :]`` -> tensor.slice, ``A[i, j]`` -> tensor.read
-        - TileType: ``A[0:16, :]`` -> tile.slice, ``A[i, j]`` -> tile.read
+        - TensorType / TileType: numpy-style indexing — a scalar index removes its
+          dim, a slice keeps it, missing trailing indices are implicit ``:``.
+          ``A[i, j]`` on a 2D operand (all-scalar, full-rank) -> scalar read;
+          everything else (``A[i]``, ``A[i, j]`` on a >2D operand, ``A[i:i+8, j]``,
+          chained ``A[i][j]``) -> a ``tensor.slice`` / ``tile.slice`` view carrying
+          ``drop_dims``. Tiles are clamped to a 2D minimum (see _parse_tile_subscript).
         """
         span = self.span_tracker.get_span(subscript)
         value_expr = self.parse_expression(subscript.value)
@@ -4585,15 +4589,23 @@ class ASTParser:
         full_shape: list[ir.Expr],
         span: ir.Span,
         kind_name: str,
-    ) -> tuple[list[int | ir.Expr], list[int | ir.Expr]]:
-        """Convert mixed subscript indices into slice shape/offset args."""
+    ) -> tuple[list[int | ir.Expr], list[int | ir.Expr], list[int]]:
+        """Convert mixed/partial subscript indices into slice shape/offset/drop_dims args.
+
+        ``shape``/``offset`` are always full-rank: a scalar index ``i`` at dim
+        ``d`` contributes ``shape[d] = 1, offset[d] = i`` and adds ``d`` to
+        ``drop_dims`` (numpy-style rank reduction); a slice keeps its dim; dims
+        not covered by ``indices`` become implicit ``:`` and are not dropped.
+        """
         shape_exprs: list[int | ir.Expr] = []
         offset_exprs: list[int | ir.Expr] = []
+        drop_dims: list[int] = []
 
         for dim_idx, idx in enumerate(indices):
             if not isinstance(idx, ast.Slice):
                 offset_exprs.append(self.parse_expression(idx))
                 shape_exprs.append(1)
+                drop_dims.append(dim_idx)
                 continue
 
             if idx.step is not None:
@@ -4616,15 +4628,27 @@ class ASTParser:
             upper_expr = full_shape[dim_idx] if idx.upper is None else self.parse_expression(idx.upper)
             shape_exprs.append(self._build_slice_shape_expr(upper_expr, lower_expr))
 
-        return shape_exprs, offset_exprs
+        # Dims past the supplied indices are implicit ``:`` (kept, full extent).
+        for dim_idx in range(len(indices), len(full_shape)):
+            offset_exprs.append(0)
+            shape_exprs.append(full_shape[dim_idx])
+
+        return shape_exprs, offset_exprs, drop_dims
 
     def _build_tile_subscript_slice_args(
         self,
         indices: list[ast.expr],
         tile_type: ir.TileType,
         span: ir.Span,
-    ) -> tuple[list[int | ir.Expr], list[int | ir.Expr], list[int | ir.Expr] | None]:
-        """Convert tile subscripts into static shape/offset args plus optional valid_shape."""
+    ) -> tuple[list[int | ir.Expr], list[int | ir.Expr], list[int | ir.Expr] | None, list[int]]:
+        """Convert tile subscripts into static shape/offset args plus optional valid_shape.
+
+        Same rank-reducing rules as :meth:`_build_subscript_slice_args`: a scalar
+        index at dim ``d`` contributes a unit dim and adds ``d`` to ``drop_dims``;
+        a slice keeps its dim; dims past ``indices`` are implicit ``:``. The
+        ``tile.slice`` deducer clamps the result back to 2D if rank reduction
+        would take it below 2D.
+        """
         static_shape = list(tile_type.shape)
         tile_view = tile_type.tile_view
         logical_shape = (
@@ -4636,6 +4660,7 @@ class ASTParser:
         shape_exprs: list[int | ir.Expr] = []
         offset_exprs: list[int | ir.Expr] = []
         valid_shape_exprs: list[int | ir.Expr] = []
+        drop_dims: list[int] = []
         needs_valid_shape = False
 
         for dim_idx, idx in enumerate(indices):
@@ -4644,6 +4669,7 @@ class ASTParser:
                 offset_exprs.append(index_expr)
                 shape_exprs.append(1)
                 valid_shape_exprs.append(1)
+                drop_dims.append(dim_idx)
                 continue
 
             if idx.step is not None:
@@ -4682,7 +4708,16 @@ class ASTParser:
             valid_shape_exprs.append(valid_extent)
             needs_valid_shape = needs_valid_shape or not self._slice_extents_match(alloc_extent, valid_extent)
 
-        return shape_exprs, offset_exprs, valid_shape_exprs if needs_valid_shape else None
+        # Dims past the supplied indices are implicit ``:`` (kept, full extent).
+        for dim_idx in range(len(indices), len(static_shape)):
+            offset_exprs.append(0)
+            shape_exprs.append(static_shape[dim_idx])
+            valid_shape_exprs.append(logical_shape[dim_idx])
+            needs_valid_shape = needs_valid_shape or not self._slice_extents_match(
+                static_shape[dim_idx], logical_shape[dim_idx]
+            )
+
+        return shape_exprs, offset_exprs, valid_shape_exprs if needs_valid_shape else None, drop_dims
 
     def _parse_tensor_subscript(
         self,
@@ -4691,27 +4726,34 @@ class ASTParser:
         tensor_type: ir.TensorType,
         span: ir.Span,
     ) -> ir.Expr:
-        """Parse tensor subscript: A[0:16, :] -> tensor.slice, A[i, j] -> tensor.read."""
+        """Parse a tensor subscript with numpy-style rank-reducing / partial / chained indexing.
+
+        Each scalar index removes its dim; a slice keeps it; missing trailing
+        indices are implicit ``:``. ``A[i, j]`` on a 2D tensor (all-scalar,
+        full-rank) reads a scalar via ``tensor.read``; everything else (``A[i]``,
+        ``A[i, j]`` on a >2D tensor, ``A[i:i+8, j]``, ``A[i][j]``, ...) is a
+        ``tensor.slice`` view, carrying ``drop_dims`` for the scalar-indexed axes.
+        """
         indices = self._normalize_subscript_indices(subscript, span)
         rank = len(tensor_type.shape)
-        if len(indices) != rank:
+        if len(indices) > rank:
             raise ParserTypeError(
-                f"Tensor subscript requires {rank} indices, got {len(indices)}",
+                f"Tensor subscript has {len(indices)} indices but the tensor is {rank}D",
                 span=span,
-                hint=f"Provide exactly {rank} indices for a {rank}D tensor",
+                hint=f"Provide at most {rank} indices for a {rank}D tensor",
             )
 
         has_slice = any(isinstance(idx, ast.Slice) for idx in indices)
 
-        if not has_slice:
-            # All integer indices -> tensor.read(tensor, [i, j])
+        if not has_slice and len(indices) == rank:
+            # All-scalar, full-rank -> scalar element read.
             idx_exprs: list[int | ir.Expr] = [self.parse_expression(idx) for idx in indices]
             return ir_op.tensor.read(value_expr, idx_exprs, span=span)
 
-        shape_exprs, offset_exprs = self._build_subscript_slice_args(
+        shape_exprs, offset_exprs, drop_dims = self._build_subscript_slice_args(
             indices, list(tensor_type.shape), span, "tensor"
         )
-        return ir_op.tensor.slice(value_expr, shape_exprs, offset_exprs, span=span)
+        return ir_op.tensor.slice(value_expr, shape_exprs, offset_exprs, drop_dims=drop_dims, span=span)
 
     def _parse_tile_subscript(
         self,
@@ -4720,27 +4762,53 @@ class ASTParser:
         tile_type: ir.TileType,
         span: ir.Span,
     ) -> ir.Expr:
-        """Parse tile subscript: A[0:16, :] -> tile.slice, A[i, j] -> tile.read."""
+        """Parse a tile subscript with numpy-style rank-reducing / partial / chained indexing.
+
+        Same rules as :meth:`_parse_tensor_subscript`, plus a tile-only floor:
+        tiles are physically 2D, so a result that would naturally be < 2D is
+        auto-promoted to 2D (unit axes prepended) with a non-fatal warning.
+        """
         indices = self._normalize_subscript_indices(subscript, span)
         rank = len(tile_type.shape)
-        if len(indices) != rank:
+        if len(indices) > rank:
             raise ParserTypeError(
-                f"Tile subscript requires {rank} indices, got {len(indices)}",
+                f"Tile subscript has {len(indices)} indices but the tile is {rank}D",
                 span=span,
-                hint=f"Provide exactly {rank} indices for a {rank}D tile",
+                hint=f"Provide at most {rank} indices for a {rank}D tile",
             )
 
         has_slice = any(isinstance(idx, ast.Slice) for idx in indices)
 
-        if not has_slice:
-            # All integer indices -> tile.read(tile, [i, j])
+        if not has_slice and len(indices) == rank:
+            # All-scalar, full-rank -> scalar element read.
             idx_exprs: list[int | ir.Expr] = [self.parse_expression(idx) for idx in indices]
             return ir_op.tile.read(value_expr, idx_exprs, span=span)
 
-        shape_exprs, offset_exprs, valid_shape_exprs = self._build_tile_subscript_slice_args(
+        shape_exprs, offset_exprs, valid_shape_exprs, drop_dims = self._build_tile_subscript_slice_args(
             indices, tile_type, span
         )
-        return ir_op.tile.slice(value_expr, shape_exprs, offset_exprs, valid_shape_exprs, span=span)
+        natural_rank = rank - len(drop_dims)
+        if drop_dims and natural_rank < 2:
+            kept = [shape_exprs[i] for i in range(rank) if i not in set(drop_dims)]
+            promoted = [1] * (2 - len(kept)) + list(kept)
+            promoted_repr = "[" + ", ".join(self._render_dim_for_msg(d) for d in promoted) + "]"
+            warnings.warn(
+                f"tile subscript reduces to {natural_rank}D; auto-promoting to 2D shape {promoted_repr} "
+                f"— use an explicit tile.reshape if you want a different layout",
+                UserWarning,
+                stacklevel=2,
+            )
+        return ir_op.tile.slice(
+            value_expr, shape_exprs, offset_exprs, valid_shape_exprs, drop_dims=drop_dims, span=span
+        )
+
+    @staticmethod
+    def _render_dim_for_msg(dim: int | ir.Expr) -> str:
+        """Render a shape dim for a warning/error message (constant value, else ``?``)."""
+        if isinstance(dim, int):
+            return str(dim)
+        value = _const_int_value(dim) if isinstance(dim, ir.Expr) else None
+        return str(value) if value is not None else "?"
 
     def _resolve_yield_var_type(self, annotation: ast.expr | None) -> ir.Type:
         """Resolve type annotation for a yield variable.
