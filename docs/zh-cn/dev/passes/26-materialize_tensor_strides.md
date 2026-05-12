@@ -19,7 +19,7 @@ PyPTO IR 上 `TensorType.tensor_view_` 当前可以处于两种等价形态：
 
 **Produces**：
 
-- `TensorViewCanonical` —— `PassPipeline` 在 Pass 之后自动用 registry 中的弱模式 verifier 校验
+- `TensorViewCanonical` —— `PassPipeline` 在 Pass 之后自动用 registry 中的**严格模式** verifier 校验（拒绝 `view.has_value() && stride.empty()` —— 正是本 Pass 负责消除的状态）
 
 **默认 pipeline 中的位置**（自 RFC #1300 P6 起激活）：[`CanonicalizeIOOrder`](25-canonicalize_io_order.md) 与 [`InitMemRef`](27-init_memref.md) 之间。这是 codegen-prep 边界 —— 所有 layout-mutating pass（`LowerTransposeLoadParamLayout` / `ResolveBackendOpLayouts` / `ExpandMixedKernel` / `SplitVectorKernel`）已结束，`InitMemRef` 是第一个依赖显式 stride 的消费者。
 
@@ -106,7 +106,7 @@ ND 情况下公式退化为标准行主序 packed stride。
 
 ## 与 verifier 的协同
 
-由于 Pass 声明 `produced = {... ∪ TensorViewCanonical}`，`PassPipeline` 在 Pass 完成后自动调用 registry 中的 `TensorViewCanonical` verifier；非法 IR（如 `TensorType` 上挂 NZ）会立即作为 `pypto::ValueError` 抛出。registry 默认是**弱模式** verifier（接受 `stride.empty()`）；**严格模式** verifier 通过 `passes.verify_tensor_view_canonical(program, require_materialized=True)` 显式调用，它就是 P6/P7 将启用的 codegen 入口契约。
+由于 Pass 声明 `produced = {... ∪ TensorViewCanonical}`，`PassPipeline` 在 Pass 完成后自动调用 registry 中的 `TensorViewCanonical` verifier。registry 默认是**严格模式** verifier（RFC #1300 §2.4 codegen 入口契约）：它拒绝 `view.has_value() && stride.empty()` —— 因为本 Pass 就是负责物化这些 stride 的。裸 `TensorType`（`!view.has_value()`）仍然接受 —— 隐式 ND-packed 自然 canonical。同一 verifier 也可通过 `passes.verify_tensor_view_canonical(program, require_materialized=True)` 显式调用；传 `require_materialized=False` 切换到弱模式（用于物化之前的解析期 / 前期 pass 窗口）。
 
 ## 相关
 

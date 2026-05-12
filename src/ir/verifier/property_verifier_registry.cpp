@@ -67,11 +67,17 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   Register(IRProperty::InlineFunctionsEliminated, CreateInlineFunctionsEliminatedPropertyVerifier);
   Register(IRProperty::OrchestrationReferencesResolved,
            CreateOrchestrationReferencesResolvedPropertyVerifier);
-  // TensorViewCanonical (RFC #1300): the registry returns the weak-mode
-  // verifier (stride.empty() accepted as implicitly packed canonical).
-  // P3's MaterializeTensorStrides constructs the strict variant directly.
+  // TensorViewCanonical (RFC #1300 §2.4): strict mode — every TensorView
+  // reaching the codegen-entry boundary must carry explicit stride. The
+  // registry default fires immediately after ``MaterializeTensorStrides``
+  // (its produced property), turning the "codegen entry has explicit
+  // stride" contract from convention into a verified invariant. Bare
+  // TensorTypes (``!view.has_value()``) are still accepted as implicitly
+  // ND-packed — the check only flags ``view.has_value() && stride.empty()``,
+  // which is the state ``MaterializeTensorStrides`` is responsible for
+  // eliminating.
   Register(IRProperty::TensorViewCanonical,
-           []() { return CreateTensorViewCanonicalPropertyVerifier(/*require_materialized=*/false); });
+           []() { return CreateTensorViewCanonicalPropertyVerifier(/*require_materialized=*/true); });
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

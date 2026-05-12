@@ -211,11 +211,30 @@ def test_symbolic_dn_relaxed_passes():
 # ============================================================================
 
 
-def test_registry_returns_weak_verifier():
-    """The registry's TensorViewCanonical entry uses weak mode by default —
-    so empty stride is accepted (mirrors weak mode of verify_tensor_view_canonical)."""
+def test_registry_returns_strict_verifier():
+    """The registry's TensorViewCanonical entry uses strict mode (RFC #1300
+    §2.4 — codegen-entry contract). MaterializeTensorStrides produces this
+    property, so the auto-verify after it enforces explicit stride. Empty
+    stride on an explicit TensorView is rejected (the state
+    MaterializeTensorStrides is responsible for eliminating)."""
     view = ir.TensorView([], ir.TensorLayout.DN)
     t = ir.TensorType(_shape(4, 8), DataType.FP32, None, view)
+    program = _program_with_param_type(t)
+
+    props = _passes.IRPropertySet()
+    props.insert(_passes.IRProperty.TensorViewCanonical)
+    diags = _passes.PropertyVerifierRegistry.verify(props, program)
+    assert len(diags) >= 1
+    assert any("stride is empty" in d.message for d in diags), (
+        f"expected 'stride is empty' diagnostic, got: {[d.message for d in diags]}"
+    )
+
+
+def test_registry_accepts_bare_tensor_type():
+    """Bare TensorTypes (``!view.has_value()``) are implicitly ND-packed and
+    accepted by both weak and strict modes — only ``view.has_value() &&
+    stride.empty()`` is flagged."""
+    t = ir.TensorType(_shape(4, 8), DataType.FP32)
     program = _program_with_param_type(t)
 
     props = _passes.IRPropertySet()

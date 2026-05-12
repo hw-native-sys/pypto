@@ -19,7 +19,7 @@ Codegen needs one machine-readable contract, so `MaterializeTensorStrides` walks
 
 **Produces**:
 
-- `TensorViewCanonical` — `PassPipeline` auto-verifies after the pass (using the registry's weak-mode verifier)
+- `TensorViewCanonical` — `PassPipeline` auto-verifies after the pass using the registry's **strict-mode** verifier (empty stride on a present `TensorView` is rejected — that is the state this pass is responsible for eliminating)
 
 **Position in the default pipeline** (active since RFC #1300 P6): between [`CanonicalizeIOOrder`](25-canonicalize_io_order.md) and [`InitMemRef`](27-init_memref.md). This is the codegen-prep boundary — every layout-mutating pass (`LowerTransposeLoadParamLayout`, `ResolveBackendOpLayouts`, `ExpandMixedKernel`, `SplitVectorKernel`) has finished, and `InitMemRef` is the first consumer that needs explicit stride.
 
@@ -106,7 +106,7 @@ See `BuildLogicalStridesFromLayout` in [`tensor_view_semantics.h`](../../../../i
 
 ## Verifier interaction
 
-Because the pass declares `produced = {... ∪ TensorViewCanonical}`, `PassPipeline` automatically runs the registry's `TensorViewCanonical` verifier after the pass, surfacing invalid IR (e.g. NZ-on-`TensorType`) immediately as `pypto::ValueError`. The registry default is the **weak-mode** verifier (which accepts `stride.empty()` as implicitly packed canonical); the **strict-mode** verifier — which requires materialization — is reachable directly via `passes.verify_tensor_view_canonical(program, require_materialized=True)` and is the codegen-entry contract that P6/P7 will enforce.
+Because the pass declares `produced = {... ∪ TensorViewCanonical}`, `PassPipeline` automatically runs the registry's `TensorViewCanonical` verifier after the pass. The registry default is the **strict-mode** verifier (RFC #1300 §2.4 codegen-entry contract): it rejects `view.has_value() && stride.empty()` since this pass is responsible for materializing those slots. Bare `TensorType` (`!view.has_value()`) is still accepted — implicit ND-packed is canonical by construction. The same verifier is callable directly via `passes.verify_tensor_view_canonical(program, require_materialized=True)`; pass `require_materialized=False` for the weak mode used during the parse-time / early-pass window before materialization runs.
 
 ## Related
 
