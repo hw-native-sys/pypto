@@ -590,12 +590,15 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     std::string tensor_view = fs_.tensor_to_view.at(GetVarKey(param));
     const size_t rank = tensor_type->shape_.size();
 
-    // [M, 1] column-vector legacy path: PTOAS infers DN for that exact shape.
-    // Restricted to rank 2 — the column-vector fallback stride derivation
-    // below only populates two slots, so a rank-3 ``[_, M, 1]`` would leave
-    // ``stride_names[2]`` empty and emit malformed MLIR.
+    // ``[..., M, 1]`` column-vector legacy path: PTOAS infers DN for any
+    // shape whose innermost dim is constant 1, so the codegen forces DN to
+    // match what ``tile.load`` produces (memory.cpp DeduceTileLoadType emits
+    // a ColMajor BLayout tile whenever the load shape ends with a constant 1
+    // — see test_tensor_expand_clone[broadcast_dim=2] where input
+    // ``[B, N, 1]`` is loaded into a ColMajor tile and PTOAS TLoad enforces
+    // ``tile.BLayout == tensor.Layout``).
     bool is_column_vector = false;
-    if (rank == 2) {
+    if (rank >= 2) {
       auto last_dim = As<ir::ConstInt>(tensor_type->shape_.back());
       if (last_dim && last_dim->value_ == 1) {
         is_column_vector = true;
@@ -658,9 +661,23 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
         stride_names[j] = get_stride_mlir(strides[j]);
       }
     } else if (is_column_vector) {
-      // Forced-DN ``[M, 1]`` → strides ``[1, M]``.
-      stride_names[0] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
-      stride_names[1] = shape_dim_names[0];
+      // Forced-DN ``[..., M, 1]`` legacy stride pattern (PTOAS column-vector
+      // convention): trailing pair degenerates to ``stride[rank-2]=1`` and
+      // ``stride[rank-1]=shape[rank-1]=1``; outer dims walk row-major over the
+      // ``M`` extent (``stride[rank-3]=shape[rank-2]``, ``stride[k-1]=stride[k]*shape[k]``).
+      // For rank 2 this collapses to the legacy ``[1, shape[0]]``.
+      stride_names[rank - 2] = GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX);
+      if (rank == 2) {
+        stride_names[rank - 1] = shape_dim_names[0];
+      } else {
+        // rank >= 3: stride[rank-1] = shape[rank-1] (= 1), stride[rank-3] = shape[rank-2].
+        stride_names[rank - 1] = shape_dim_names[rank - 1];
+        stride_names[rank - 3] = shape_dim_names[rank - 2];
+        for (int j = static_cast<int>(rank) - 4; j >= 0; --j) {
+          size_t dim = static_cast<size_t>(j);
+          stride_names[dim] = emit_stride_mul(stride_names[dim + 1], dim + 1, dim);
+        }
+      }
     } else if (layout == ir::TensorLayout::DN) {
       CHECK(rank >= 2) << "EmitMakeTensorViews: DN layout requires rank >= 2, got " << rank;
       // RFC §2.3 canonical DN: stride[-2]=1, stride[-1]=shape[-2], outer
