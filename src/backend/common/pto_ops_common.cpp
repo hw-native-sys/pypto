@@ -2134,6 +2134,91 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tensor.write", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTensorWriteCodegenPTO(op, codegen);
   });
+  // ``tensor.as_layout`` (RFC #1300 §3.3): pure metadata reinterpret over the
+  // same physical buffer. In InCore code, ``LowerTransposeLoadParamLayout``
+  // prepends ``b_dn = tensor.as_layout(b, DN)`` at the top of the body for
+  // each ``tile.load(transpose=True)``-loaded param, then rewrites the body
+  // to use ``b_dn`` (a Var with TensorType ``[..., b, a] DN`` and explicit
+  // canonical strides) in place of the original param ``b``.
+  //
+  // Codegen lowers this to a fresh ``pto.make_tensor_view`` bound to the
+  // input's underlying buffer (the function parameter SSA), using the LHS's
+  // own ``(shape, stride, layout)`` from its TensorType. Downstream
+  // ``tile.load`` lookups via ``GetOrCreateTensorView`` find the LHS through
+  // the ``RegisterTensorView`` call below.
+  reg("tensor.as_layout", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 1) << "tensor.as_layout requires 1 arg (input)";
+    auto input_var = AsVarLike(op->args_[0]);
+    CHECK(input_var) << "tensor.as_layout input must be a Var/IterArg";
+
+    auto lhs_var = codegen.GetCurrentResultVar();
+    INTERNAL_CHECK_SPAN(static_cast<bool>(lhs_var), op->span_)
+        << "Internal error: tensor.as_layout result var must be set by VisitStmt_(AssignStmt)";
+    auto lhs_type = As<ir::TensorType>(lhs_var->GetType());
+    CHECK(lhs_type) << "tensor.as_layout output must be TensorType, got " << lhs_var->GetType()->TypeName();
+    INTERNAL_CHECK_SPAN(lhs_type->tensor_view_.has_value(), op->span_)
+        << "Internal error: tensor.as_layout output must have an explicit TensorView "
+           "(set by DeduceTensorAsLayoutType + CanonicalizeView)";
+
+    const size_t rank = lhs_type->shape_.size();
+    const auto& view = lhs_type->tensor_view_.value();
+    INTERNAL_CHECK_SPAN(view.stride.size() == rank, op->span_)
+        << "Internal error: tensor.as_layout output stride rank " << view.stride.size()
+        << " does not match shape rank " << rank;
+
+    // The result SSA name (auto-allocated by VisitStmt_(AssignStmt) for the
+    // backend-dispatched RHS Call) doubles as the tensor_view SSA name —
+    // register it in tensor_to_view so downstream tile.load lookups resolve.
+    std::string result_buf = codegen.GetCurrentResultTarget();
+    INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_) << "Internal error: result buf must be set";
+    codegen.RegisterTensorView(lhs_var, result_buf);
+
+    // Materialize shape and stride SSA names.
+    auto emit_dim = [&](const ir::ExprPtr& dim) -> std::string {
+      if (auto c = As<ir::ConstInt>(dim)) {
+        return codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
+      }
+      return codegen.EmitCastToIndex(dim, codegen.GetExprAsCode(dim));
+    };
+    std::vector<std::string> shape_dim_names(rank);
+    for (size_t j = 0; j < rank; ++j) shape_dim_names[j] = emit_dim(lhs_type->shape_[j]);
+    std::vector<std::string> stride_names(rank);
+    for (size_t j = 0; j < rank; ++j) stride_names[j] = emit_dim(view.stride[j]);
+
+    std::string layout_str = "nd";
+    switch (view.layout) {
+      case ir::TensorLayout::DN:
+        layout_str = "dn";
+        break;
+      case ir::TensorLayout::NZ:
+        layout_str = "nz";
+        break;
+      case ir::TensorLayout::ND:
+        break;
+    }
+
+    std::ostringstream oss;
+    oss << result_buf << " = pto.make_tensor_view " << codegen.GetVarName(input_var) << ", shape = [";
+    for (size_t j = 0; j < rank; ++j) {
+      if (j > 0) oss << ", ";
+      oss << shape_dim_names[j];
+    }
+    oss << "], strides = [";
+    for (size_t j = 0; j < rank; ++j) {
+      if (j > 0) oss << ", ";
+      oss << stride_names[j];
+    }
+    oss << "] {layout = #pto.layout<" << layout_str << ">}";
+    oss << ": !pto.tensor_view<";
+    for (size_t j = 0; j < rank; ++j) {
+      if (j > 0) oss << "x";
+      oss << "?";
+    }
+    oss << "x" << codegen.GetTypeString(lhs_type->dtype_) << ">";
+    return oss.str();
+  });
+
   reg("tile.load", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileLoadCodegenPTO(op, codegen);
   });

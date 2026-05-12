@@ -85,24 +85,6 @@ class TransposeLoadScanner : public IRVisitor {
   std::unordered_set<size_t> non_transposed_uses_;
 };
 
-/// Build the canonical TensorType for an InCore parameter that is loaded via
-/// ``tile.load(transpose=True)`` (RFC #1300 §3.3 + §4.2):
-///   src ``[..., a, b] ND`` ≡ canonical ``[..., b, a] DN``
-///
-/// The new TensorView carries an empty stride; ``MaterializeTensorStrides``
-/// (P6-b) fills it with the packed canonical strides later in the pipeline.
-TensorTypePtr PromoteToCanonicalDN(const TensorTypePtr& src) {
-  CHECK(src->shape_.size() >= 2)
-      << "LowerTransposeLoadParamLayout: parameter must have rank >= 2 to apply DN "
-         "canonical form, got "
-      << src->shape_.size();
-  std::vector<ExprPtr> new_shape = src->shape_;
-  std::iter_swap(new_shape.end() - 2, new_shape.end() - 1);
-  TensorView dn_view(std::vector<ExprPtr>{}, TensorLayout::DN);
-  return std::make_shared<TensorType>(new_shape, src->dtype_, src->memref_,
-                                      std::make_optional(std::move(dn_view)));
-}
-
 /// Swap the last two elements of a ``MakeTuple`` (offsets / shapes /
 /// valid_shapes argument of ``tile.load``).
 MakeTuplePtr SwapTrailingPair(const MakeTuplePtr& tuple) {
@@ -116,19 +98,16 @@ MakeTuplePtr SwapTrailingPair(const MakeTuplePtr& tuple) {
   return std::make_shared<MakeTuple>(std::move(new_elements), tuple->span_);
 }
 
-/// Rewrite tile.load calls whose first arg is one of the promoted parameters
-/// so that:
+/// Rewrite tile.load calls whose first arg is one of the body-local
+/// ``b_dn = tensor.as_layout(b, DN)`` bindings (one per promoted param), so:
 ///   - offsets / shapes / valid_shapes are swapped to canonical coords;
 ///   - the ``transpose=True`` kwarg is dropped (DN source + Mat target now
 ///     drives the tile-view swap inside ``DeduceTileLoadType``).
 /// All other Calls are passed through unchanged.
 class TileLoadBodyRewriter : public IRMutator {
  public:
-  explicit TileLoadBodyRewriter(const std::unordered_map<const Var*, VarPtr>& param_subs) {
-    for (const auto& [old_ptr, new_var] : param_subs) {
-      promoted_param_set_.insert(new_var.get());
-    }
-  }
+  explicit TileLoadBodyRewriter(const std::unordered_set<const Var*>& dn_view_vars)
+      : dn_view_vars_(dn_view_vars) {}
 
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
@@ -137,14 +116,14 @@ class TileLoadBodyRewriter : public IRMutator {
     if (call->args_.empty()) return base;
 
     auto src_var = As<Var>(call->args_[0]);
-    if (!src_var || promoted_param_set_.find(src_var.get()) == promoted_param_set_.end()) {
+    if (!src_var || dn_view_vars_.find(src_var.get()) == dn_view_vars_.end()) {
       return base;
     }
     if (!call->GetKwarg<bool>("transpose", false)) return base;
 
     // tile.load(tensor, offsets, shapes, valid_shapes, ...) — swap the trailing
     // pair of all three tuples so the load is expressed in canonical (DN
-    // logical) coordinates that match the promoted parameter's new shape.
+    // logical) coordinates that match the body-local ``b_dn`` view's shape.
     INTERNAL_CHECK_SPAN(call->args_.size() == 4, call->span_)
         << "LowerTransposeLoadParamLayout: expected tile.load to have 4 args, got " << call->args_.size();
     auto offsets = As<MakeTuple>(call->args_[1]);
@@ -179,226 +158,111 @@ class TileLoadBodyRewriter : public IRMutator {
   }
 
  private:
-  std::unordered_set<const Var*> promoted_param_set_;
+  const std::unordered_set<const Var*>& dn_view_vars_;
 };
 
-/// Result of promoting a single InCore function.
-struct PromotionResult {
-  FunctionPtr func;
-  std::map<size_t, VarPtr> promoted_params;  // param index → new param Var
-};
-
-/// Promote an InCore function. Returns the rewritten Function (or the
-/// original if no rewrite was needed) and the map of promoted param slots.
-/// Throws if any promoted parameter is also loaded without `transpose=True`
+/// Rewrite an InCore function: keep params unchanged; prepend
+/// ``b_dn = tensor.as_layout(b, layout=DN)`` AssignStmts at the top of the
+/// body for every param ``b`` loaded with ``transpose=True``; substitute body
+/// uses of ``b`` with ``b_dn``; rewrite each transposed tile.load to swap the
+/// trailing pair of offsets/shapes/valid_shapes and drop ``transpose=True``.
+///
+/// Returns the rewritten Function (or the original if no rewrite was needed).
+/// Throws if any promoted parameter is also loaded without ``transpose=True``
 /// in the same body (mixed use would corrupt non-transpose loads).
-PromotionResult PromoteInCoreFunction(const FunctionPtr& func) {
+FunctionPtr LowerInCoreFunction(const FunctionPtr& func) {
   TransposeLoadScanner scanner(func->params_);
   scanner.VisitStmt(func->body_);
   const auto& promoted = scanner.GetPromoted();
   const auto& non_transposed = scanner.GetNonTransposedUses();
   if (promoted.empty()) {
-    return {func, {}};
+    return func;
   }
 
-  std::unordered_map<const Var*, VarPtr> substitutions;
-  std::vector<VarPtr> new_params = func->params_;
-  std::map<size_t, VarPtr> promoted_params;
+  // Build, in deterministic param-index order:
+  //   - the prepend AssignStmts (one per promoted param), each of the form
+  //     ``b_dn = tensor.as_layout(b, layout=DN)``;
+  //   - the substitution map ``b -> b_dn`` used to rewrite body uses;
+  //   - the set of body-local ``b_dn`` Vars used by ``TileLoadBodyRewriter``
+  //     to recognize which tile.loads need the trailing-pair swap.
+  std::vector<size_t> sorted_promoted(promoted.begin(), promoted.end());
+  std::sort(sorted_promoted.begin(), sorted_promoted.end());
 
-  for (size_t idx : promoted) {
-    // Mixed-use rejection: a param promoted from `[a, b]` ND → `[b, a]` DN
-    // would invalidate every non-transpose `tile.load(p, ...)` that still
-    // expects the original coordinate system.
+  std::vector<StmtPtr> prepend;
+  std::unordered_map<const Var*, VarPtr> substitutions;
+  std::unordered_set<const Var*> dn_view_vars;
+
+  for (size_t idx : sorted_promoted) {
+    // Mixed-use rejection: a body-local DN view derived from ``b`` only
+    // makes sense if every load of ``b`` agrees on ``transpose=True``.
     CHECK(non_transposed.find(idx) == non_transposed.end())
         << "LowerTransposeLoadParamLayout: parameter at index " << idx
         << " is loaded both with transpose=True and transpose=False — only one "
            "mode is supported per InCore parameter. Split the parameter or unify "
            "the load direction.";
 
-    const auto& old_param = func->params_[idx];
-    auto old_tensor_type = As<TensorType>(old_param->GetType());
-    CHECK(old_tensor_type) << "LowerTransposeLoadParamLayout: promoted parameter at index " << idx
-                           << " must be TensorType";
+    const auto& param = func->params_[idx];
+    auto param_tensor_type = As<TensorType>(param->GetType());
+    CHECK(param_tensor_type) << "LowerTransposeLoadParamLayout: promoted parameter at index " << idx
+                             << " must be TensorType";
 
     // Reject the (DN view + explicit physical stride) combination — these
     // came from `tensor.transpose` and would compose with the load-side
     // transpose to produce a double-encoded transpose.
-    if (old_tensor_type->tensor_view_.has_value()) {
-      const auto& view = old_tensor_type->tensor_view_.value();
+    if (param_tensor_type->tensor_view_.has_value()) {
+      const auto& view = param_tensor_type->tensor_view_.value();
       CHECK(!(view.layout == TensorLayout::DN && !view.stride.empty()))
           << "LowerTransposeLoadParamLayout: tile.load(transpose=True) on a "
              "tensor.transpose result is not supported (the DN tag and explicit "
              "physical strides would compose as a double transpose). Drop one of "
              "the two transpose layers in the source program.";
-      // Param already promoted in a prior round (idempotent): skip.
+      // Param already DN-tagged at the boundary (user-written
+      // ``pl.Tensor[..., pl.DN]``): the load-side ``transpose=True`` is the
+      // user-intended signal that the on-chip tile flips back to row-major
+      // Mat orientation. ``DeduceTileLoadType`` already handles this via
+      // the (source_is_dn XOR transpose) tile-view logic — adding a bridge
+      // and dropping ``transpose=True`` would shift the XOR result and
+      // produce the wrong TileType. Skip this param.
       if (view.layout == TensorLayout::DN) continue;
     }
 
-    auto new_tensor_type = PromoteToCanonicalDN(old_tensor_type);
-    auto new_var = std::make_shared<Var>(old_param->name_hint_, new_tensor_type, old_param->span_);
-    new_params[idx] = new_var;
-    substitutions[old_param.get()] = new_var;
-    promoted_params.emplace(idx, new_var);
+    // Build ``b_dn = tensor.as_layout(b, layout=DN)``. Routing through the
+    // OpRegistry::Create path makes ``DeduceTensorAsLayoutType`` compute
+    // the post-flip type and inherit ``b``'s MemRef.
+    std::vector<std::pair<std::string, std::any>> kwargs = {{"layout", std::any(TensorLayout::DN)}};
+    auto bridge_call = OpRegistry::GetInstance().Create("tensor.as_layout", {param}, kwargs, param->span_);
+    auto bridge_var =
+        std::make_shared<Var>(param->name_hint_ + "_dn_view", bridge_call->GetType(), param->span_);
+    prepend.push_back(std::make_shared<AssignStmt>(bridge_var, bridge_call, param->span_));
+    substitutions[param.get()] = bridge_var;
+    dn_view_vars.insert(bridge_var.get());
   }
 
-  if (substitutions.empty()) {
-    return {func, {}};
+  if (prepend.empty()) {
+    return func;
   }
 
-  // 1) Substitute param Vars in the body.
+  // Substitute body uses of each promoted param ``b`` with the body-local
+  // ``b_dn``. ``Substitute`` walks the entire body — the prepend stmts are
+  // built using the original ``param`` Vars *before* substitution, so they
+  // are not affected.
   auto subbed_body = Substitute(func->body_, substitutions);
 
-  // 2) Rewrite each `tile.load(promoted_param, ..., transpose=True)` in the
-  //    body — swap offsets / shapes / valid_shapes trailing pair, drop the
-  //    transpose kwarg.
-  TileLoadBodyRewriter body_rewriter(substitutions);
-  auto new_body = body_rewriter.VisitStmt(subbed_body);
+  // Rewrite each ``tile.load(b_dn, ..., transpose=True)`` to canonical
+  // (DN-coord) form: swap offsets/shapes/valid_shapes trailing pair, drop
+  // ``transpose=True``.
+  TileLoadBodyRewriter body_rewriter(dn_view_vars);
+  auto rewritten_body = body_rewriter.VisitStmt(subbed_body);
+
+  // Concatenate: new body = SeqStmts([prepend stmts..., rewritten original body]).
+  std::vector<StmtPtr> new_body_stmts = std::move(prepend);
+  new_body_stmts.push_back(rewritten_body);
+  auto new_body = SeqStmts::Flatten(std::move(new_body_stmts), func->body_->span_);
 
   auto new_func = MutableCopy(func);
-  new_func->params_ = new_params;
   new_func->body_ = new_body;
-  return {new_func, promoted_params};
+  return new_func;
 }
-
-/// Walks every non-InCore function in the program and, for each call site
-/// targeting a promoted InCore callee, emits an SSA-form binding for each
-/// promoted-slot arg:
-///
-///   bridged_<param> = tensor.as_layout(<orig_arg>, DN)
-///   <orig_lhs> = <callee>(..., bridged_<param>, ...)
-///
-/// The binding is emitted as a separate ``AssignStmt`` immediately before the
-/// call statement (instead of being inlined inside the call's args), which is
-/// what downstream orchestration codegen expects — it consumes a ``Var`` or a
-/// constant literal per call arg, not a nested ``Call``.
-class CallSiteAsLayoutInjector : public IRMutator {
- public:
-  explicit CallSiteAsLayoutInjector(const std::map<std::string, std::map<size_t, VarPtr>>& promotions)
-      : promotions_(promotions) {}
-
-  StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
-    std::vector<StmtPtr> new_stmts;
-    new_stmts.reserve(op->stmts_.size());
-    bool any_changed = false;
-    for (const auto& stmt : op->stmts_) {
-      // Recurse into nested SeqStmts / control-flow first so inner call sites
-      // get patched too.
-      auto recursed = IRMutator::VisitStmt(stmt);
-      bool inserted = false;
-      auto patched = MaybeInjectBindings(recursed, new_stmts, &inserted);
-      if (inserted || patched.get() != recursed.get() || recursed.get() != stmt.get()) {
-        any_changed = true;
-      }
-      new_stmts.push_back(patched);
-    }
-    if (!any_changed) return op;
-    return SeqStmts::Flatten(std::move(new_stmts), op->span_);
-  }
-
-  // Bare (non-SeqStmts) statement bodies — e.g. ``then_body`` of an ``IfStmt``
-  // that contains a single ``AssignStmt``. Wrap any injected bindings into
-  // a fresh SeqStmts so the resulting body stays a single Stmt.
-  StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
-    auto recursed = IRMutator::VisitStmt_(op);
-    std::vector<StmtPtr> pre;
-    bool inserted = false;
-    auto patched = MaybeInjectBindings(recursed, pre, &inserted);
-    if (!inserted) return patched;
-    pre.push_back(patched);
-    return SeqStmts::Flatten(std::move(pre), op->span_);
-  }
-
-  StmtPtr VisitStmt_(const EvalStmtPtr& op) override {
-    auto recursed = IRMutator::VisitStmt_(op);
-    std::vector<StmtPtr> pre;
-    bool inserted = false;
-    auto patched = MaybeInjectBindings(recursed, pre, &inserted);
-    if (!inserted) return patched;
-    pre.push_back(patched);
-    return SeqStmts::Flatten(std::move(pre), op->span_);
-  }
-
-  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override {
-    auto recursed = IRMutator::VisitStmt_(op);
-    std::vector<StmtPtr> pre;
-    bool inserted = false;
-    auto patched = MaybeInjectBindings(recursed, pre, &inserted);
-    if (!inserted) return patched;
-    pre.push_back(patched);
-    return SeqStmts::Flatten(std::move(pre), op->span_);
-  }
-
- private:
-  /// If ``stmt``'s RHS is a Call to a promoted callee, build the binding
-  /// AssignStmts (one per promoted slot) and emit them into ``pre``;
-  /// rewrite the Call to reference the bound Vars. Returns the (possibly
-  /// rewritten) statement and sets ``*inserted = true`` if any bindings
-  /// were added.
-  StmtPtr MaybeInjectBindings(const StmtPtr& stmt, std::vector<StmtPtr>& pre, bool* inserted) {
-    auto extract_call = [](const StmtPtr& s) -> std::pair<CallPtr, VarPtr> {
-      if (auto assign = As<AssignStmt>(s)) {
-        return {As<Call>(assign->value_), assign->var_};
-      }
-      if (auto eval = As<EvalStmt>(s)) {
-        return {As<Call>(eval->expr_), nullptr};
-      }
-      if (auto ret = As<ReturnStmt>(s)) {
-        if (ret->value_.size() == 1) {
-          return {As<Call>(ret->value_[0]), nullptr};
-        }
-      }
-      return {nullptr, nullptr};
-    };
-
-    auto [call, lhs_var] = extract_call(stmt);
-    if (!call) return stmt;
-    auto gv = As<GlobalVar>(call->op_);
-    if (!gv) return stmt;
-    auto it = promotions_.find(gv->name_);
-    if (it == promotions_.end() || it->second.empty()) return stmt;
-    const auto& slots = it->second;
-
-    std::vector<ExprPtr> new_args = call->args_;
-    bool changed = false;
-    for (const auto& [idx, new_param_var] : slots) {
-      INTERNAL_CHECK_SPAN(idx < new_args.size(), call->span_)
-          << "LowerTransposeLoadParamLayout: promoted param index " << idx << " out of range for call to "
-          << gv->name_;
-      auto arg = new_args[idx];
-      auto arg_tensor = As<TensorType>(arg->GetType());
-      if (!arg_tensor) continue;
-      // Idempotency: an arg already in DN form needs no bridge.
-      if (arg_tensor->tensor_view_.has_value() && arg_tensor->tensor_view_->layout == TensorLayout::DN) {
-        continue;
-      }
-      // Build the bridge: bridged = tensor.as_layout(arg, DN).
-      std::vector<std::pair<std::string, std::any>> kwargs = {{"layout", std::any(TensorLayout::DN)}};
-      auto bridge_call = OpRegistry::GetInstance().Create("tensor.as_layout", {arg}, kwargs, arg->span_);
-      auto bridge_var =
-          std::make_shared<Var>(new_param_var->name_hint_ + "_dn_view", bridge_call->GetType(), arg->span_);
-      pre.push_back(std::make_shared<AssignStmt>(bridge_var, bridge_call, arg->span_));
-      new_args[idx] = bridge_var;
-      changed = true;
-    }
-    if (!changed) return stmt;
-    *inserted = true;
-
-    auto new_call = std::make_shared<Call>(call->op_, std::move(new_args), call->kwargs_, call->attrs_,
-                                           call->GetType(), call->span_);
-    if (auto assign = As<AssignStmt>(stmt)) {
-      return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
-    }
-    if (auto eval = As<EvalStmt>(stmt)) {
-      return std::make_shared<EvalStmt>(new_call, eval->span_);
-    }
-    if (auto ret = As<ReturnStmt>(stmt)) {
-      return std::make_shared<ReturnStmt>(std::vector<ExprPtr>{new_call}, ret->span_);
-    }
-    return stmt;  // unreachable — extract_call only returns non-null for the three above
-  }
-
-  const std::map<std::string, std::map<size_t, VarPtr>>& promotions_;
-};
 
 }  // namespace
 
@@ -406,11 +270,12 @@ namespace pass {
 
 Pass LowerTransposeLoadParamLayout() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    // Phase 1: rewrite InCore functions and collect promotion info keyed by
-    // callee name (callers reference InCore functions through Call->op_'s
-    // GlobalVar, which is matched on name_).
+    // Rewrite each InCore function: prepend ``b_dn = tensor.as_layout(b, DN)``
+    // for every ``transpose=True``-loaded param ``b`` and substitute body uses
+    // accordingly. Non-InCore functions (orch callers) are left untouched —
+    // they pass their original ND args straight through; the layout
+    // reinterpret is now owned by the InCore body it serves.
     std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
-    std::map<std::string, std::map<size_t, VarPtr>> promotions_by_callee_name;
     bool modified = false;
 
     for (const auto& [gvar, func] : program->functions_) {
@@ -418,32 +283,9 @@ Pass LowerTransposeLoadParamLayout() {
         new_functions[gvar] = func;
         continue;
       }
-      auto result = PromoteInCoreFunction(func);
-      new_functions[gvar] = result.func;
-      if (result.func.get() != func.get()) modified = true;
-      if (!result.promoted_params.empty()) {
-        promotions_by_callee_name[gvar->name_] = std::move(result.promoted_params);
-      }
-    }
-
-    if (promotions_by_callee_name.empty()) {
-      return modified ? std::make_shared<Program>(std::move(new_functions), program->name_, program->span_)
-                      : program;
-    }
-
-    // Phase 2: walk non-InCore functions and inject `tensor.as_layout` at
-    // each call site that targets a promoted callee.
-    CallSiteAsLayoutInjector injector(promotions_by_callee_name);
-    for (auto& [gvar, func] : new_functions) {
-      if (IsInCoreType(func->func_type_)) continue;
-      if (!func->body_) continue;
-      auto new_body = injector.VisitStmt(func->body_);
-      if (new_body.get() != func->body_.get()) {
-        auto new_func = MutableCopy(func);
-        new_func->body_ = new_body;
-        new_functions[gvar] = new_func;
-        modified = true;
-      }
+      auto new_func = LowerInCoreFunction(func);
+      new_functions[gvar] = new_func;
+      if (new_func.get() != func.get()) modified = true;
     }
 
     if (!modified) return program;
