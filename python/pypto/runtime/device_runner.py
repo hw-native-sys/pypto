@@ -558,7 +558,11 @@ def execute_on_device(
             return
         worker = Worker(level=level, device_id=device_id, platform=platform, runtime=runtime_name)
         worker.init()
-        worker.run(chip_callable, orch_args, cfg)
+        # Simpler's L2 ABI now dispatches by callable id (see runtime PR #710);
+        # register the callable, run it, then close — close() runs finalize()
+        # so explicit unregister is unnecessary here.
+        cid = worker.register(chip_callable)
+        worker.run(cid, orch_args, cfg)
         worker.close()
 
 

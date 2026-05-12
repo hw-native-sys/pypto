@@ -120,6 +120,12 @@ class Worker:
             runtime=runtime,
         )
         self._initialized = False
+        # Maps id(chip_callable) -> cid returned by simpler Worker.register().
+        # Simpler's L2 ABI now requires every ChipCallable to be registered
+        # before dispatch (see runtime PR #710); we cache per-callable cids
+        # so repeated runs of the same compiled program inside one
+        # `with Worker:` block re-use the same registration.
+        self._cid_cache: dict[int, int] = {}
 
         if auto_init is None:
             auto_init = level == 2
@@ -141,6 +147,12 @@ class Worker:
         """Release device state. Idempotent. The Worker may be re-``init()``'d."""
         if not self._initialized:
             return
+        # Drop per-cid host-side state before tearing down the device so
+        # the underlying ChipWorker.finalize() doesn't observe stale
+        # registrations on a re-init().
+        for cid in self._cid_cache.values():
+            self._impl.unregister_callable(cid)
+        self._cid_cache.clear()
         self._impl.close()
         self._initialized = False
 
@@ -325,7 +337,12 @@ class Worker:
     def _run_chip(self, chip_callable: Any, orch_args: Any, cfg: Any) -> None:
         if not self._initialized:
             raise RuntimeError("Worker is not initialized; call init() or use `with worker:`")
-        self._impl.run(chip_callable, orch_args, cfg)
+        key = id(chip_callable)
+        cid = self._cid_cache.get(key)
+        if cid is None:
+            cid = self._impl.register(chip_callable)
+            self._cid_cache[key] = cid
+        self._impl.run(cid, orch_args, cfg)
 
     # ------------------------------------------------------------------
     # Context manager — publishes ``self`` on the active stack
