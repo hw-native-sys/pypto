@@ -265,7 +265,7 @@ with ib.function("tensor_example") as f:
 | **Element-wise** | `tile.add/sub/mul/div` | Tile-Tile operations |
 | - | `tile.adds/subs/muls/divs` | Tile-Scalar operations |
 | **Unary** | `tile.sqrt` | Element-wise square root |
-| **Transform** | `tile.slice` | Extract a sub-tile with static shape and optional dynamic valid_shape |
+| **Transform** | `tile.slice` | Extract a sub-tile with static shape, optional dynamic valid_shape, and optional `drop_dims` (numpy-style rank reduction over static unit axes; result clamped to a 2D minimum) |
 | - | `tile.extract` | Extract a sub-tile from `src` at `(index_row, index_col)` — ISA TEXTRACT Variant 1 (Mat→Left/Right, Acc→Mat) |
 | - | `tile.reshape` | Reshape tile to new dimensions (element count must match) |
 | - | `tile.transpose` | Swap two axes of a tile |

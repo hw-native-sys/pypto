@@ -119,6 +119,28 @@ def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32])
     ...
 ```
 
+### Subscript Indexing
+
+`Tensor` and `Tile` subscripts use numpy/torch-style semantics:
+
+- A **scalar** index removes its dimension; a **slice** keeps it.
+- Fewer indices than `rank` implies trailing `:` — `C[i]` on a 4D tensor is `C[i, :, :, :]`.
+- Chained indexing composes — `C[i][j]` is two rank-reducing views.
+- An **all-scalar, full-rank** index reads a scalar (`A[i, j]` on a 2D tensor → `tensor.read` / `tile.read`).
+
+```python
+C[i, j, k, l]   # all scalar, full rank   -> scalar
+C[i, j]         # partial, all scalar      -> 64×64 view (dims 0,1 dropped)
+C[i]            # partial                  -> 64×64×64 view (dim 0 dropped)
+C[i][j]         # chained                  -> works (C[i] is 3D, then [j])
+C[i:i+8, j]     # mixed slice + scalar     -> 8×64×64 view (dim 1 dropped)
+C[i:i+8, :, :, :]  # all slices            -> 8×64×64×64 view
+```
+
+Restrictions (v1): no slice `step`, tile slice lower bounds must be static-foldable, no ellipsis / `None` / negative / advanced indexing. **Tiles are physically 2D**, so a tile result that would naturally be `< 2D` is auto-promoted to 2D (`[N]` → `[1, N]`) with a non-fatal warning — pass an explicit `pl.tile.reshape` if you want a different layout.
+
+Mechanism: a non-trivial subscript lowers to `tensor.slice` / `tile.slice` with full-rank `shape`/`offset` plus a `drop_dims` list of the scalar-indexed axes (see the IR operator docs). The same rules apply on the assignment LHS — `C[i, j] = rhs` reshapes `rhs` back to the full-rank window before `tensor.assemble` (chained writes `C[i][j] = rhs` are not yet supported).
+
 ### Binary Operations
 
 | Python Operator | PyPTO IR | Category |

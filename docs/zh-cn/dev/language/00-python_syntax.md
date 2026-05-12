@@ -118,6 +118,28 @@ def func(t: pl.Tensor[[128, 128], pl.FP32], out: pl.Tensor[[128, 128], pl.FP32])
     ...
 ```
 
+### 下标索引 (Subscript Indexing)
+
+`Tensor` 和 `Tile` 的下标采用 numpy/torch 风格的语义:
+
+- **标量** 索引会移除该维度; **切片 (slice)** 会保留该维度。
+- 索引个数少于 `rank` 时, 末尾自动补 `:` —— 4D 张量上的 `C[i]` 等价于 `C[i, :, :, :]`。
+- 链式索引可组合 —— `C[i][j]` 是两次降秩视图。
+- **全标量且满秩** 的索引读取一个标量 (2D 张量上的 `A[i, j]` → `tensor.read` / `tile.read`)。
+
+```python
+C[i, j, k, l]   # all scalar, full rank   -> scalar
+C[i, j]         # partial, all scalar      -> 64×64 view (dims 0,1 dropped)
+C[i]            # partial                  -> 64×64×64 view (dim 0 dropped)
+C[i][j]         # chained                  -> works (C[i] is 3D, then [j])
+C[i:i+8, j]     # mixed slice + scalar     -> 8×64×64 view (dim 1 dropped)
+C[i:i+8, :, :, :]  # all slices            -> 8×64×64×64 view
+```
+
+v1 限制: 不支持切片 `step`、tile 切片的下界必须可静态折叠、不支持 ellipsis / `None` / 负索引 / 高级索引。**Tile 物理上是 2D 的**, 所以自然结果 `< 2D` 的 tile 会被自动提升到 2D (`[N]` → `[1, N]`) 并发出非致命警告 —— 若需要不同的布局, 请显式使用 `pl.tile.reshape`。
+
+实现机制: 非平凡的下标会下降为 `tensor.slice` / `tile.slice`, 其 `shape`/`offset` 保持满秩, 并附带一个 `drop_dims` 列表记录被标量索引的轴 (详见 IR 算子文档)。赋值左侧 (LHS) 遵循相同规则 —— `C[i, j] = rhs` 会在 `tensor.assemble` 之前把 `rhs` reshape 回满秩窗口 (尚不支持链式写入 `C[i][j] = rhs`)。
+
 ### 二元操作
 
 | Python 操作符 | PyPTO IR | 类别 |
