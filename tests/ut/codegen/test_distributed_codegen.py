@@ -482,7 +482,6 @@ class TestDistributedCodegen:
         alloc_block = code[alloc_idx:host_idx]
         assert "    pass" in alloc_block
 
-
     def test_tuple_return_pl_tuple(self):
         """Tuple-return worker (pl.Tuple) populates per-element tensors aliases."""
 
