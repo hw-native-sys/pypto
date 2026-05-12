@@ -502,18 +502,64 @@ class TestTensorSubscriptWrite:
                 out[0:16:2, :] = src
                 return out
 
-    def test_tensor_subscript_write_wrong_rank(self):
-        """A[0:16] = src on a 2D tensor must reject (rank mismatch)."""
+    def test_tensor_subscript_write_too_many_indices(self):
+        """A[i, j, k] = src on a 2D tensor must reject (more indices than rank)."""
 
-        with pytest.raises(ParserTypeError, match="2 indices"):
+        with pytest.raises(ParserTypeError, match="3 indices but the tensor is 2D"):
 
             @pl.function
-            def bad_rank(
+            def too_many(
                 out: pl.Tensor[[64, 128], pl.FP32],
-                src: pl.Tensor[[16, 128], pl.FP32],
+                src: pl.Tensor[[1, 128], pl.FP32],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
-                out[0:16] = src
+                out[0, 0, 0] = src
                 return out
+
+    def test_tensor_subscript_write_partial(self):
+        """A[0:16] = src on a 2D tensor writes rows 0..16 (trailing axis implicit ':')."""
+
+        @pl.function
+        def partial_write(
+            out: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tensor[[16, 128], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            out[0:16] = src
+            return out
+
+        printed = partial_write.as_python()
+        assert "tensor.assemble" in printed
+
+    def test_tensor_subscript_write_rank_reducing(self):
+        """C[i, j] = rhs2d on a 4D tensor lowers the rhs into a [1, 1, 64, 64] window."""
+
+        @pl.function
+        def reduce_write(
+            C: pl.Tensor[[64, 64, 64, 64], pl.FP32],
+            rhs: pl.Tensor[[64, 64], pl.FP32],
+            i: pl.Scalar[pl.INDEX],
+            j: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 64, 64, 64], pl.FP32]:
+            C[i, j] = rhs
+            return C
+
+        printed = reduce_write.as_python()
+        assert "tensor.assemble" in printed
+        assert "tensor.reshape" in printed  # rhs lifted to the full-rank window
+
+    def test_tensor_subscript_write_rank_reducing_bad_source_rank(self):
+        """C[i, j] = rhs with the wrong rhs rank is rejected."""
+
+        with pytest.raises(ParserTypeError, match="must be 2D to match"):
+
+            @pl.function
+            def bad_src(
+                C: pl.Tensor[[64, 64, 64, 64], pl.FP32],
+                rhs: pl.Tensor[[64, 64, 64], pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+                j: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64, 64, 64, 64], pl.FP32]:
+                C[i, j] = rhs
+                return C
 
     def test_tensor_subscript_write_element_form_unsupported(self):
         """A[i, j] = scalar must be rejected for now (no element-write op wiring)."""

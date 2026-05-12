@@ -1102,7 +1102,11 @@ class ASTParser:
             )
 
         indices = self._normalize_subscript_indices(target, span)
-        offsets, extents = self._build_assemble_offsets_and_extents(indices, base_type.shape, span, kind_name)
+        offsets, extents, drop_dims = self._build_assemble_offsets_and_extents(
+            indices, base_type.shape, span, kind_name
+        )
+        dropped = set(drop_dims)
+        kept_dims = [d for d in range(len(extents)) if d not in dropped]
 
         source_expr = self.parse_expression(value_node)
         source_type = source_expr.type
@@ -1113,25 +1117,33 @@ class ASTParser:
                 hint=f"The rhs of 'dst[...] = src' must be a {kind_name} of matching shape",
             )
 
-        if len(source_type.shape) != len(base_type.shape):
+        if len(source_type.shape) != len(kept_dims):
             raise ParserTypeError(
-                f"Subscript-write source must be {len(base_type.shape)}D to match "
-                f"the {kind_name} target, got {len(source_type.shape)}D",
+                f"Subscript-write source must be {len(kept_dims)}D to match the rank-reduced "
+                f"{kind_name} window, got {len(source_type.shape)}D",
                 span=span,
-                hint="The lhs and rhs of 'dst[...] = src' must have the same rank",
+                hint="A scalar index removes its axis from the lhs window; the rhs rank must "
+                "match the remaining axes",
             )
 
-        for dim_idx, (requested, src_extent) in enumerate(zip(extents, source_type.shape)):
-            requested_const = _fold_const_slice_extent(requested, 0)
-            source_const = _fold_const_slice_extent(src_extent, 0)
+        for src_axis, dim_idx in enumerate(kept_dims):
+            requested_const = _fold_const_slice_extent(extents[dim_idx], 0)
+            source_const = _fold_const_slice_extent(source_type.shape[src_axis], 0)
             if requested_const is not None and source_const is not None and requested_const != source_const:
                 raise ParserTypeError(
                     f"Subscript-write shape mismatch on axis {dim_idx}: "
                     f"slice expects {requested_const} elements, source has {source_const}",
                     span=span,
-                    hint=f"Make the source's axis-{dim_idx} extent match the slice extent, "
+                    hint=f"Make the source's axis-{src_axis} extent match the slice extent, "
                     f"or adjust the slice bounds",
                 )
+
+        if drop_dims:
+            # Lift the rank-reduced source back to the full-rank target window
+            # (unit dims at the dropped positions) so the assemble's source/window
+            # ranks match — mirrors the implicit reshape numpy does on a write.
+            reshape_op = ir_op.tensor.reshape if kind_name == "tensor" else ir_op.tile.reshape
+            source_expr = reshape_op(source_expr, list(extents), span=span)
 
         assemble_call = assemble_op(base_expr, source_expr, offsets, span=span)
         var = self._assign_or_let(var_name, assemble_call, span)
@@ -1143,40 +1155,41 @@ class ASTParser:
         target_shape: Sequence[ir.Expr],
         span: ir.Span,
         kind_name: str,
-    ) -> tuple[list[int | ir.Expr], list[int | ir.Expr]]:
-        """Parse a subscript-write index list once into per-axis offsets and extents.
+    ) -> tuple[list[int | ir.Expr], list[int | ir.Expr], list[int]]:
+        """Parse a subscript-write index list into per-axis offsets/extents plus drop_dims.
 
-        For ``a[lower:upper]`` the offset is ``lower`` (defaulting to 0) and the
-        extent is ``upper - lower`` (defaulting to the full target axis when
-        ``upper`` is omitted). For ``a[i]`` the offset is ``i`` and the extent
-        is 1. Extents are folded through the arithmetic simplifier so symbolic
-        bounds like ``i:i+16`` collapse to a constant when possible — this is
-        the same path used by the slice-read sugar.
-
-        All-integer indexing is rejected (no element-write op wiring today),
-        as is ``step``.
+        Same numpy-style rules as the read path: ``a[lower:upper]`` writes the
+        ``lower``..``upper`` window of that axis (offset ``lower``, extent
+        ``upper - lower``, defaulting to the full axis); ``a[i]`` writes a
+        unit-extent window at offset ``i`` and adds that axis to ``drop_dims``
+        (the source is rank-reduced over those axes); dims past ``indices`` are
+        implicit ``:``. ``offsets``/``extents`` are always full-rank. An
+        all-scalar *full-rank* index (a true element write) and ``step`` are
+        still rejected.
         """
-        if len(indices) != len(target_shape):
+        rank = len(target_shape)
+        if len(indices) > rank:
             raise ParserTypeError(
-                f"{kind_name.capitalize()} subscript-write requires {len(target_shape)} indices, "
-                f"got {len(indices)}",
+                f"{kind_name.capitalize()} subscript-write has {len(indices)} indices but the "
+                f"{kind_name} is {rank}D",
                 span=span,
-                hint=f"Provide exactly {len(target_shape)} indices for a {len(target_shape)}D {kind_name}",
+                hint=f"Provide at most {rank} indices for a {rank}D {kind_name}",
             )
-
-        if not any(isinstance(idx, ast.Slice) for idx in indices):
+        if len(indices) == rank and not any(isinstance(idx, ast.Slice) for idx in indices):
             raise UnsupportedFeatureError(
                 f"Element-write 'dst[i, j] = scalar' is not supported for {kind_name} targets",
                 span=span,
-                hint="Use slice indices, e.g. 'dst[i:i+1, j:j+1] = tile_1x1'",
+                hint="Use slice indices (e.g. 'dst[i:i+1, j:j+1] = tile_1x1') or index fewer axes",
             )
 
         offsets: list[int | ir.Expr] = []
         extents: list[int | ir.Expr] = []
+        drop_dims: list[int] = []
         for dim_idx, idx in enumerate(indices):
             if not isinstance(idx, ast.Slice):
                 offsets.append(self.parse_expression(idx))
                 extents.append(1)
+                drop_dims.append(dim_idx)
                 continue
             if idx.step is not None:
                 raise UnsupportedFeatureError(
@@ -1190,7 +1203,10 @@ class ASTParser:
             )
             offsets.append(lower)
             extents.append(self._build_slice_shape_expr(upper, lower))
-        return offsets, extents
+        for dim_idx in range(len(indices), rank):
+            offsets.append(0)
+            extents.append(target_shape[dim_idx])
+        return offsets, extents, drop_dims
 
     def parse_yield_assignment(self, target: ast.Tuple, value: ast.Call) -> None:
         """Parse yield assignment: (a, b) = pl.yield_(x, y).
