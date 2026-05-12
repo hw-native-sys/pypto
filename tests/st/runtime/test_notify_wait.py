@@ -7,23 +7,30 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""On-board ST for ``pl.tile.notify`` + ``pl.tile.wait``.
+"""On-board ST for ``pl.tile.comm_notify`` + ``pl.tile.comm_wait``.
 
-Single-rank loopback: the signal tensor passed as a kernel argument is a
-1-element INT32 GM tensor.  Within one kernel we ``notify`` it (write or
-atomic-add) and immediately ``wait`` on the same slot.  The kernel returns
-the signal as an output, which the harness reads back and validates.
+Single-rank loopback that mirrors the two real usage patterns from simpler's
+``examples/workers/l3/ep_dispatch_combine`` (commit c65dda3):
 
-This validates the codegen + runtime path for ``pto.comm.tnotify`` and
-``pto.comm.twait`` without needing real cross-rank HCCL window binding.
+1. ``count_exchange`` — atomic-add a count into a remote rank's slot.
+   Models ``dispatch.cpp``'s ``TNOTIFY(pub_counts_local + idx, v,
+   NotifyOp::AtomicAdd)`` where a producer rank publishes its per-expert
+   element count into the consumer rank's slot.
 
-Cases:
-  notify_set_wait_eq      — set 7;  wait eq 7
-  notify_add_wait_ge      — init 3 + atomic_add 4 = 7;  wait ge 5
-  notify_set_wait_gt      — set 10; wait gt 5
-  notify_set_wait_lt      — set 1;  wait lt 5
-  notify_set_wait_le      — set 2;  wait le 5
-  notify_set_wait_ne      — set 9;  wait ne 5
+2. ``done_barrier`` — atomic-add 1 into a remote rank's done slot, then
+   spin-wait on the local slot until it reaches the expected value.
+   Models the cross-rank "I'm done" barrier in both ``dispatch.cpp`` and
+   ``combine.cpp``:
+
+       for peer != my_rank:
+           TNOTIFY(remote_done_sig[my_rank], 1, NotifyOp::AtomicAdd)
+       for src != my_rank:
+           TWAIT(local_done_sig[src], 1, WaitCmp::GE)
+
+Single-rank loopback uses the same slot for both notify and wait, so the
+"remote" and "local" views collapse — this exercises the codegen and runtime
+paths for ``pto.comm.tnotify`` / ``pto.comm.twait`` without binding a real
+HCCL window.
 """
 
 from typing import Any
@@ -39,16 +46,18 @@ from pypto.ir.pass_manager import OptimizationStrategy
 
 
 @pl.program
-class NotifySetWaitEqProgram:
-    """notify(set, 7) → wait(eq, 7)."""
+class CountExchangeProgram:
+    """Pattern 1: atomic-add a count into a remote rank's slot.
+
+    Slot pre-initialized to 3; kernel adds 5; expected final value 8.
+    """
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
         self,
         signal: pl.Out[pl.Tensor[[1], pl.INT32]],
     ) -> pl.Tensor[[1], pl.INT32]:
-        pl.tile.notify(signal, 7, op="set")
-        pl.tile.wait(signal, 7, cmp="eq")
+        pl.tile.comm_notify(signal, 5, op="atomic_add")
         return signal
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -60,100 +69,20 @@ class NotifySetWaitEqProgram:
 
 
 @pl.program
-class NotifyAddWaitGeProgram:
-    """notify(atomic_add, 4) on a slot pre-initialized to 3 → 7; wait(ge, 5)."""
+class DoneBarrierProgram:
+    """Pattern 2: notify(atomic_add, 1) → wait(ge, 1) — the done barrier.
+
+    Slot pre-initialized to 0; kernel adds 1 then spin-waits on ge 1.
+    Expected final value 1.
+    """
 
     @pl.function(type=pl.FunctionType.InCore)
     def kernel(
         self,
         signal: pl.Out[pl.Tensor[[1], pl.INT32]],
     ) -> pl.Tensor[[1], pl.INT32]:
-        pl.tile.notify(signal, 4, op="atomic_add")
-        pl.tile.wait(signal, 5, cmp="ge")
-        return signal
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        return self.kernel(signal)
-
-
-@pl.program
-class NotifySetWaitGtProgram:
-    """notify(set, 10) → wait(gt, 5)."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        pl.tile.notify(signal, 10, op="set")
-        pl.tile.wait(signal, 5, cmp="gt")
-        return signal
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        return self.kernel(signal)
-
-
-@pl.program
-class NotifySetWaitLtProgram:
-    """notify(set, 1) → wait(lt, 5)."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        pl.tile.notify(signal, 1, op="set")
-        pl.tile.wait(signal, 5, cmp="lt")
-        return signal
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        return self.kernel(signal)
-
-
-@pl.program
-class NotifySetWaitLeProgram:
-    """notify(set, 2) → wait(le, 5)."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        pl.tile.notify(signal, 2, op="set")
-        pl.tile.wait(signal, 5, cmp="le")
-        return signal
-
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
-        self,
-        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        return self.kernel(signal)
-
-
-@pl.program
-class NotifySetWaitNeProgram:
-    """notify(set, 9) → wait(ne, 5)."""
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
-        self,
-        signal: pl.Out[pl.Tensor[[1], pl.INT32]],
-    ) -> pl.Tensor[[1], pl.INT32]:
-        pl.tile.notify(signal, 9, op="set")
-        pl.tile.wait(signal, 5, cmp="ne")
+        pl.tile.comm_notify(signal, 1, op="atomic_add")
+        pl.tile.comm_wait(signal, 1, cmp="ge")
         return signal
 
     @pl.function(type=pl.FunctionType.Orchestration)
@@ -167,7 +96,7 @@ class NotifySetWaitNeProgram:
 # --- Test cases ---
 
 
-class _NotifyWaitBase(PTOTestCase):
+class _CommSignalBase(PTOTestCase):
     __test__ = False
 
     def get_strategy(self) -> OptimizationStrategy:
@@ -177,119 +106,53 @@ class _NotifyWaitBase(PTOTestCase):
         return BackendType.Ascend910B
 
 
-class NotifySetWaitEqTestCase(_NotifyWaitBase):
+class CountExchangeTestCase(_CommSignalBase):
     def get_name(self) -> str:
-        return "notify_set_wait_eq"
+        return "comm_signal_count_exchange"
 
     def define_tensors(self) -> list[TensorSpec]:
-        return [TensorSpec("signal", [1], DataType.INT32, init_value=0, is_output=True)]
-
-    def get_program(self) -> Any:
-        return NotifySetWaitEqProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["signal"][:] = torch.tensor([7], dtype=torch.int32)
-
-
-class NotifyAddWaitGeTestCase(_NotifyWaitBase):
-    def get_name(self) -> str:
-        return "notify_add_wait_ge"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        # Pre-initialize the slot to 3; atomic_add 4 → 7.
+        # Pre-initialize the slot to 3; atomic_add 5 → 8.
         return [TensorSpec("signal", [1], DataType.INT32, init_value=3, is_output=True)]
 
     def get_program(self) -> Any:
-        return NotifyAddWaitGeProgram
+        return CountExchangeProgram
 
     def compute_expected(self, tensors, params=None):
-        tensors["signal"][:] = torch.tensor([7], dtype=torch.int32)
+        tensors["signal"][:] = torch.tensor([8], dtype=torch.int32)
 
 
-class NotifySetWaitGtTestCase(_NotifyWaitBase):
+class DoneBarrierTestCase(_CommSignalBase):
     def get_name(self) -> str:
-        return "notify_set_wait_gt"
+        return "comm_signal_done_barrier"
 
     def define_tensors(self) -> list[TensorSpec]:
+        # Pre-initialize the slot to 0; atomic_add 1 → 1; wait ge 1 returns immediately.
         return [TensorSpec("signal", [1], DataType.INT32, init_value=0, is_output=True)]
 
     def get_program(self) -> Any:
-        return NotifySetWaitGtProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["signal"][:] = torch.tensor([10], dtype=torch.int32)
-
-
-class NotifySetWaitLtTestCase(_NotifyWaitBase):
-    def get_name(self) -> str:
-        return "notify_set_wait_lt"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [TensorSpec("signal", [1], DataType.INT32, init_value=0, is_output=True)]
-
-    def get_program(self) -> Any:
-        return NotifySetWaitLtProgram
+        return DoneBarrierProgram
 
     def compute_expected(self, tensors, params=None):
         tensors["signal"][:] = torch.tensor([1], dtype=torch.int32)
 
 
-class NotifySetWaitLeTestCase(_NotifyWaitBase):
-    def get_name(self) -> str:
-        return "notify_set_wait_le"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [TensorSpec("signal", [1], DataType.INT32, init_value=0, is_output=True)]
-
-    def get_program(self) -> Any:
-        return NotifySetWaitLeProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["signal"][:] = torch.tensor([2], dtype=torch.int32)
-
-
-class NotifySetWaitNeTestCase(_NotifyWaitBase):
-    def get_name(self) -> str:
-        return "notify_set_wait_ne"
-
-    def define_tensors(self) -> list[TensorSpec]:
-        return [TensorSpec("signal", [1], DataType.INT32, init_value=0, is_output=True)]
-
-    def get_program(self) -> Any:
-        return NotifySetWaitNeProgram
-
-    def compute_expected(self, tensors, params=None):
-        tensors["signal"][:] = torch.tensor([9], dtype=torch.int32)
-
-
 # --- Tests ---
 
 
-class TestNotifyWait:
-    """On-board verification of pl.tile.notify + pl.tile.wait (single-rank loopback)."""
+class TestCommNotifyWait:
+    """On-board verification of pl.tile.comm_notify + pl.tile.comm_wait (single-rank loopback).
 
-    def test_notify_set_wait_eq(self, test_runner):
-        result = test_runner.run(NotifySetWaitEqTestCase())
+    Mirrors the two real usage patterns from simpler's ep_dispatch_combine
+    kernels: count exchange (atomic-add) and the done barrier (atomic-add +
+    wait ge).
+    """
+
+    def test_count_exchange(self, test_runner):
+        result = test_runner.run(CountExchangeTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
-    def test_notify_add_wait_ge(self, test_runner):
-        result = test_runner.run(NotifyAddWaitGeTestCase())
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_notify_set_wait_gt(self, test_runner):
-        result = test_runner.run(NotifySetWaitGtTestCase())
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_notify_set_wait_lt(self, test_runner):
-        result = test_runner.run(NotifySetWaitLtTestCase())
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_notify_set_wait_le(self, test_runner):
-        result = test_runner.run(NotifySetWaitLeTestCase())
-        assert result.passed, f"Test failed: {result.error}"
-
-    def test_notify_set_wait_ne(self, test_runner):
-        result = test_runner.run(NotifySetWaitNeTestCase())
+    def test_done_barrier(self, test_runner):
+        result = test_runner.run(DoneBarrierTestCase())
         assert result.passed, f"Test failed: {result.error}"
 
 

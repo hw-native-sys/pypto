@@ -2326,7 +2326,7 @@ def tpop_from_aiv(
 _NOTIFY_OPS = ("atomic_add", "set")
 
 
-def notify(signal: Expr, value: Expr, *, op: str, span: Span | None = None) -> Call:
+def comm_notify(signal: Expr, value: Expr, *, op: str, span: Span | None = None) -> Call:
     """Send a flag notification to a remote rank's signal slot.
 
     Lowers to ``pto::comm::TNOTIFY`` via PTOAS ``pto.comm.tnotify``. The
@@ -2341,20 +2341,20 @@ def notify(signal: Expr, value: Expr, *, op: str, span: Span | None = None) -> C
         span: Optional source span
     """
     if op not in _NOTIFY_OPS:
-        raise ValueError(f"tile.notify: op must be one of {_NOTIFY_OPS}, got {op!r}")
+        raise ValueError(f"tile.comm_notify: op must be one of {_NOTIFY_OPS}, got {op!r}")
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("tile.notify", [signal, value], {"op": op}, actual_span)
+    return _ir_core.create_op_call("tile.comm_notify", [signal, value], {"op": op}, actual_span)
 
 
 _WAIT_CMPS = ("eq", "ne", "gt", "ge", "lt", "le")
 
 
-def wait(signal: Expr, cmp_value: Expr, *, cmp: str, span: Span | None = None) -> Call:
+def comm_wait(signal: Expr, cmp_value: Expr, *, cmp: str, span: Span | None = None) -> Call:
     """Block until a local INT32 signal slot satisfies a comparison.
 
     Lowers to ``pto::comm::TWAIT`` via PTOAS ``pto.comm.twait``. The signal
     is a 1-element INT32 Tensor (GM) in the local rank's window — the slot
-    peers ``tile.notify`` into.
+    peers ``tile.comm_notify`` into.
 
     Args:
         signal: Local signal tensor (1-element INT32) to poll
@@ -2364,9 +2364,9 @@ def wait(signal: Expr, cmp_value: Expr, *, cmp: str, span: Span | None = None) -
         span: Optional source span
     """
     if cmp not in _WAIT_CMPS:
-        raise ValueError(f"tile.wait: cmp must be one of {_WAIT_CMPS}, got {cmp!r}")
+        raise ValueError(f"tile.comm_wait: cmp must be one of {_WAIT_CMPS}, got {cmp!r}")
     actual_span = _get_span_or_capture(span, frame_offset=1)
-    return _ir_core.create_op_call("tile.wait", [signal, cmp_value], {"cmp": cmp}, actual_span)
+    return _ir_core.create_op_call("tile.comm_wait", [signal, cmp_value], {"cmp": cmp}, actual_span)
 
 
 # ============================================================================

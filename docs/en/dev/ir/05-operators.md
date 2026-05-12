@@ -410,17 +410,19 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 
 | Operation | Args | Description | Kwargs |
 | --------- | ---- | ----------- | ------ |
-| `tile.notify` | 2 (signal, value) | Write or atomic-add an INT32 value into a remote rank's signal slot | `op` (`"atomic_add"` or `"set"`) |
-| `tile.wait` | 2 (signal, cmp_value) | Block until a local INT32 signal slot satisfies the given comparison | `cmp` (`"eq"`, `"ne"`, `"gt"`, `"ge"`, `"lt"`, `"le"`) |
+| `tile.comm_notify` | 2 (signal, value) | Write or atomic-add an INT32 value into a remote rank's signal slot | `op` (`"atomic_add"` or `"set"`) |
+| `tile.comm_wait` | 2 (signal, cmp_value) | Block until a local INT32 signal slot satisfies the given comparison | `cmp` (`"eq"`, `"ne"`, `"gt"`, `"ge"`, `"lt"`, `"le"`) |
 
-For both ops, `signal` is a 1-element INT32 tensor that views a GM signal slot. `tile.notify` targets a remote rank's slot (typically obtained via `pl.import_peer_buffer`); `tile.wait` polls the local rank's slot. The integer operand (`value` / `cmp_value`) is a Python int, `Scalar`, or `Expr`. They lower to `pto::comm::TNOTIFY` / `pto::comm::TWAIT` on the AIV side.
+For both ops, `signal` is a 1-element INT32 tensor that views a GM signal slot. `tile.comm_notify` targets a remote rank's slot (typically obtained via `pl.import_peer_buffer`); `tile.comm_wait` polls the local rank's slot. The integer operand (`value` / `cmp_value`) is a Python int, `Scalar`, or `Expr`. They lower to `pto::comm::TNOTIFY` / `pto::comm::TWAIT` on the AIV side.
+
+**Pipeline ordering note.** The cross-rank done-barrier pattern (see simpler's `ep_dispatch_combine` kernels) relies on payload writes becoming visible to the peer **before** the done signal is sent. PyPTO inserts the required pipe synchronization automatically, but callers should ensure no late writes to the payload region remain in-flight after `comm_notify`.
 
 ```python
 import pypto.language as pl
 
 # inside an InCore function on AIV side:
-pl.tile.notify(remote_signal, 1, op="atomic_add")  # producer side
-pl.tile.wait(local_signal, 1, cmp="ge")             # consumer side
+pl.tile.comm_notify(remote_signal, 1, op="atomic_add")  # producer side
+pl.tile.comm_wait(local_signal, 1, cmp="ge")             # consumer side
 ```
 
 ## File Organization

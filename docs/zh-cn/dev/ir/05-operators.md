@@ -404,17 +404,19 @@ class CrossCoreExample:
 
 | 操作 | 参数 | 说明 | Kwargs |
 | ---- | ---- | ---- | ------ |
-| `tile.notify` | 2 (signal, value) | 向远端 rank 信号槽写入或原子加 INT32 值 | `op`（`"atomic_add"` 或 `"set"`） |
-| `tile.wait` | 2 (signal, cmp_value) | 阻塞直至本地 INT32 信号槽满足给定比较 | `cmp`（`"eq"`、`"ne"`、`"gt"`、`"ge"`、`"lt"`、`"le"`） |
+| `tile.comm_notify` | 2 (signal, value) | 向远端 rank 信号槽写入或原子加 INT32 值 | `op`（`"atomic_add"` 或 `"set"`） |
+| `tile.comm_wait` | 2 (signal, cmp_value) | 阻塞直至本地 INT32 信号槽满足给定比较 | `cmp`（`"eq"`、`"ne"`、`"gt"`、`"ge"`、`"lt"`、`"le"`） |
 
-两者的 `signal` 都是一个 1 元素 INT32 tensor，视图指向 GM 中的信号槽：`tile.notify` 写远端 rank 的槽（通常通过 `pl.import_peer_buffer` 获取），`tile.wait` 轮询本地 rank 的槽。整数操作数（`value` / `cmp_value`）可以是 Python `int`、`Scalar` 或 `Expr`。在 AIV 侧分别 lowering 为 `pto::comm::TNOTIFY` / `pto::comm::TWAIT`。
+两者的 `signal` 都是一个 1 元素 INT32 tensor，视图指向 GM 中的信号槽：`tile.comm_notify` 写远端 rank 的槽（通常通过 `pl.import_peer_buffer` 获取），`tile.comm_wait` 轮询本地 rank 的槽。整数操作数（`value` / `cmp_value`）可以是 Python `int`、`Scalar` 或 `Expr`。在 AIV 侧分别 lowering 为 `pto::comm::TNOTIFY` / `pto::comm::TWAIT`。
+
+**流水排序说明。** 跨 rank done-barrier 模式（参见 simpler 的 `ep_dispatch_combine` kernel）依赖于 payload 写入对 peer 可见之后才发出 done 信号。PyPTO 会自动插入所需的 pipe 同步，但调用者应确保 `comm_notify` 之后没有遗留的 payload 写操作仍在飞行中。
 
 ```python
 import pypto.language as pl
 
 # 在 AIV 侧 InCore 函数内部：
-pl.tile.notify(remote_signal, 1, op="atomic_add")  # 生产者
-pl.tile.wait(local_signal, 1, cmp="ge")             # 消费者
+pl.tile.comm_notify(remote_signal, 1, op="atomic_add")  # 生产者
+pl.tile.comm_wait(local_signal, 1, cmp="ge")             # 消费者
 ```
 
 ## 文件组织

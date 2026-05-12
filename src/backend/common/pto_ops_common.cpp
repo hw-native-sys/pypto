@@ -1939,74 +1939,128 @@ static std::string GetPipeBufOperandI32SSA(codegen::PTOCodegen& codegen, const i
   return codegen.GetExprAsCode(expr);
 }
 
-// tile.notify: cross-rank signal write/atomic-add → pto.comm.tnotify
-// signal: 1-element INT32 Tensor viewing remote rank's HCCL signal slot
+// Lower a comm-op signal Var to a !pto.partition_tensor_view<NxT> covering the
+// full ranked tensor (offsets=[0,...], sizes=[shape...]). PTOAS requires the
+// signal operand of pto.comm.tnotify / pto.comm.twait to be a partition view,
+// not a !pto.ptr<T> or a raw !pto.tensor_view. The lowering chain is:
+//   %arg : !pto.ptr<T>
+//   → pto.make_tensor_view → !pto.tensor_view<NxT>       (GetOrCreateTensorView)
+//   → pto.partition_view   → !pto.partition_tensor_view<NxT>
+static std::string EmitCommSignalPartitionView(const ir::ExprPtr& signal_arg,
+                                               const ir::TensorType* signal_type,
+                                               codegen::PTOCodegen& codegen, const ir::Span& span,
+                                               const char* op_name) {
+  auto signal_var = ir::AsVarLike(signal_arg);
+  INTERNAL_CHECK_SPAN(signal_var, span) << op_name << " signal must be a Var or IterArg (kernel-arg tensor)";
+
+  std::string tensor_view = codegen.GetOrCreateTensorView(signal_var);
+  std::string tensor_view_type = codegen.GetTensorViewTypeString(signal_type);
+  std::string dtype_str = codegen.GetTypeString(signal_type->dtype_);
+
+  // Build offsets=[%c0, ...] and sizes=[shape...] in index dtype so partition_view
+  // covers the entire signal region (typically rank-1, length 1 for HCCL slots).
+  std::vector<std::string> offset_codes;
+  std::vector<std::string> size_codes;
+  std::vector<std::string> dim_strings;
+  offset_codes.reserve(signal_type->shape_.size());
+  size_codes.reserve(signal_type->shape_.size());
+  dim_strings.reserve(signal_type->shape_.size());
+  for (const auto& dim_expr : signal_type->shape_) {
+    offset_codes.push_back(codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX));
+    if (auto c = ir::As<ir::ConstInt>(dim_expr)) {
+      size_codes.push_back(codegen.GetOrEmitConstant(c->value_, DataType::INDEX));
+      dim_strings.push_back(std::to_string(c->value_));
+    } else {
+      size_codes.push_back(codegen.GetExprAsCode(dim_expr));
+      dim_strings.emplace_back("?");
+    }
+  }
+  std::string partition_type = MakePartitionTensorViewType(dim_strings, dtype_str);
+  return EmitPartitionViewPTO(signal_var->name_hint_, tensor_view, tensor_view_type, partition_type,
+                              offset_codes, size_codes, codegen) +
+         " : " + partition_type;
+}
+
+// Helper: split "ssa : type" into separate {ssa, type} components. EmitCommSignalPartitionView
+// returns a packed "ssa : type" so we keep the partition_type string in lock-step with the
+// SSA name it was emitted for.
+static std::pair<std::string, std::string> SplitSSAAndType(const std::string& ssa_with_type) {
+  auto pos = ssa_with_type.rfind(" : ");
+  INTERNAL_CHECK(pos != std::string::npos) << "Expected 'ssa : type' format, got '" << ssa_with_type << "'";
+  return {ssa_with_type.substr(0, pos), ssa_with_type.substr(pos + 3)};
+}
+
+// Validate signal tensor type for comm.tnotify / comm.twait. PTOAS spec
+// (PTO_IR_manual.md §pto.comm.tnotify) requires GM-shaped INT32, rank >= 1.
+static ir::TensorTypePtr CheckCommSignalType(const ir::ExprPtr& signal_arg, codegen::PTOCodegen& codegen,
+                                             const ir::Span& span, const char* op_name) {
+  auto signal_tensor_type = As<ir::TensorType>(signal_arg->GetType());
+  INTERNAL_CHECK_SPAN(signal_tensor_type, span)
+      << op_name
+      << " signal must be a TensorType (GM signal slot) — PTOAS requires !pto.partition_tensor_view<Nxi32>";
+  CHECK(!signal_tensor_type->shape_.empty())
+      << op_name << " signal must be a ranked tensor (rank >= 1), got rank-0 (scalar)";
+  CHECK(signal_tensor_type->dtype_ == DataType::INT32)
+      << op_name << " signal must be INT32, got element type "
+      << codegen.GetTypeString(signal_tensor_type->dtype_);
+  return signal_tensor_type;
+}
+
+// tile.comm_notify: cross-rank signal write/atomic-add → pto.comm.tnotify
+// signal: 1+-dim INT32 Tensor viewing remote rank's HCCL signal slot (lowered
+//         to !pto.partition_tensor_view<Nxi32>)
 // value:  signless integer scalar (ConstInt or i32 SSA)
 // kwarg `op`: "atomic_add" | "set" → MLIR enum #pto.notify_op<...>
 static std::string MakeTileNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
-  CHECK(op->args_.size() == 2) << "tile.notify requires 2 arguments (signal, value), got "
+  CHECK(op->args_.size() == 2) << "tile.comm_notify requires 2 arguments (signal, value), got "
                                << op->args_.size();
 
   const auto notify_op = op->GetKwarg<std::string>("op");
   CHECK(notify_op == "atomic_add" || notify_op == "set")
-      << "tile.notify 'op' attribute must be 'atomic_add' or 'set', got '" << notify_op << "'";
+      << "tile.comm_notify 'op' attribute must be 'atomic_add' or 'set', got '" << notify_op << "'";
 
-  auto signal_tensor_type = As<ir::TensorType>(op->args_[0]->GetType());
-  INTERNAL_CHECK_SPAN(signal_tensor_type, op->span_)
-      << "tile.notify signal must be a TensorType (GM signal-window view)";
-  CHECK(signal_tensor_type->dtype_ == DataType::INT32)
-      << "tile.notify signal must be INT32, got element type "
-      << codegen.GetTypeString(signal_tensor_type->dtype_);
+  auto signal_type = CheckCommSignalType(op->args_[0], codegen, op->span_, "tile.comm_notify");
 
-  std::string sig = codegen.GetExprAsCode(op->args_[0]);
-  std::string sig_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-  if (sig_type.empty()) {
-    sig_type = "!pto.ptr<" + codegen.GetTypeString(signal_tensor_type->dtype_) + ">";
-  }
-
-  // value is a signless integer scalar; reuse the i32 SSA/ConstInt lifter from pipe-buffer ops.
+  auto [sig_ssa, sig_type] = SplitSSAAndType(
+      EmitCommSignalPartitionView(op->args_[0], signal_type.get(), codegen, op->span_, "tile.comm_notify"));
   std::string val = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
 
+  // PTOAS's TNotifyOp has no custom assemblyFormat — must use generic syntax.
   std::ostringstream oss;
-  oss << "pto.comm.tnotify " << sig << ", " << val << " {notifyOp = #pto.notify_op<" << notify_op << ">}"
-      << " : " << sig_type << ", i32";
+  oss << "\"pto.comm.tnotify\"(" << sig_ssa << ", " << val << ") {notifyOp = #pto.notify_op<" << notify_op
+      << ">}"
+      << " : (" << sig_type << ", i32) -> ()";
   codegen.Emit(oss.str());
   return "";
 }
 
-// tile.wait: cross-rank signal poll → pto.comm.twait
-// signal:    1-element INT32 Tensor in local rank's HCCL window
+// tile.comm_wait: cross-rank signal poll → pto.comm.twait
+// signal:    1+-dim INT32 Tensor in local rank's HCCL window (lowered to
+//            !pto.partition_tensor_view<Nxi32>)
 // cmp_value: signless integer scalar (ConstInt or i32 SSA)
 // kwarg `cmp`: "eq"|"ne"|"gt"|"ge"|"lt"|"le" → MLIR enum #pto.wait_cmp<...>
 static std::string MakeTileWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
-  CHECK(op->args_.size() == 2) << "tile.wait requires 2 arguments (signal, cmp_value), got "
+  CHECK(op->args_.size() == 2) << "tile.comm_wait requires 2 arguments (signal, cmp_value), got "
                                << op->args_.size();
 
   const auto cmp = op->GetKwarg<std::string>("cmp");
   CHECK(cmp == "eq" || cmp == "ne" || cmp == "gt" || cmp == "ge" || cmp == "lt" || cmp == "le")
-      << "tile.wait 'cmp' attribute must be one of eq|ne|gt|ge|lt|le, got '" << cmp << "'";
+      << "tile.comm_wait 'cmp' attribute must be one of eq|ne|gt|ge|lt|le, got '" << cmp << "'";
 
-  auto signal_tensor_type = As<ir::TensorType>(op->args_[0]->GetType());
-  INTERNAL_CHECK_SPAN(signal_tensor_type, op->span_)
-      << "tile.wait signal must be a TensorType (GM signal-window view)";
-  CHECK(signal_tensor_type->dtype_ == DataType::INT32) << "tile.wait signal must be INT32, got element type "
-                                                       << codegen.GetTypeString(signal_tensor_type->dtype_);
+  auto signal_type = CheckCommSignalType(op->args_[0], codegen, op->span_, "tile.comm_wait");
 
-  std::string sig = codegen.GetExprAsCode(op->args_[0]);
-  std::string sig_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-  if (sig_type.empty()) {
-    sig_type = "!pto.ptr<" + codegen.GetTypeString(signal_tensor_type->dtype_) + ">";
-  }
-
+  auto [sig_ssa, sig_type] = SplitSSAAndType(
+      EmitCommSignalPartitionView(op->args_[0], signal_type.get(), codegen, op->span_, "tile.comm_wait"));
   std::string val = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
 
+  // PTOAS's TWaitOp has no custom assemblyFormat — must use generic syntax.
   std::ostringstream oss;
-  oss << "pto.comm.twait " << sig << ", " << val << " {cmp = #pto.wait_cmp<" << cmp << ">}"
-      << " : " << sig_type << ", i32";
+  oss << "\"pto.comm.twait\"(" << sig_ssa << ", " << val << ") {cmp = #pto.wait_cmp<" << cmp << ">}"
+      << " : (" << sig_type << ", i32) -> ()";
   codegen.Emit(oss.str());
   return "";
 }
@@ -2567,10 +2621,10 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.tpop_from_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTpopFromAicCodegenPTO(op, codegen);
   });
-  reg("tile.notify", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+  reg("tile.comm_notify", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileNotifyCodegenPTO(op, codegen);
   });
-  reg("tile.wait", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+  reg("tile.comm_wait", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileWaitCodegenPTO(op, codegen);
   });
   reg("system.tfree_to_aic", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

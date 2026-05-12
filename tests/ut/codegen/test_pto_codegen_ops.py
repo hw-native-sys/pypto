@@ -1721,8 +1721,13 @@ class TestTileMoveAccNoopElision:
         )
 
 
-class TestTileNotifyPtoCodegen:
-    """PTO codegen tests for tile.notify (cross-rank signal write/atomic-add)."""
+class TestTileCommNotifyPtoCodegen:
+    """PTO codegen tests for tile.comm_notify (cross-rank signal write/atomic-add).
+
+    Exercises the single notify shape simpler actually uses in real kernels
+    (``examples/workers/l3/ep_dispatch_combine``): ``op="atomic_add"`` —
+    used both for count exchange and the done-barrier pattern.
+    """
 
     def _generate_mlir(self, program_cls) -> str:
         backend.reset_for_testing()
@@ -1736,27 +1741,12 @@ class TestTileNotifyPtoCodegen:
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
         return codegen_instance.generate(single)
 
-    def test_tile_notify_set_codegen(self):
-        """pl.tile.notify(sig, v, op="set") emits pto.comm.tnotify with notifyOp = #pto.notify_op<set>."""
+    def test_tile_comm_notify_atomic_add_codegen(self):
+        """pl.tile.comm_notify(sig, v, op='atomic_add') emits #pto<notify_op atomic_add>.
 
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel_notify_set(
-                self,
-                signal: pl.Tensor[[1], pl.INT32],
-            ) -> pl.Tensor[[1], pl.INT32]:
-                pl.tile.notify(signal, 1, op="set")
-                return signal
-
-        mlir = self._generate_mlir(Prog)
-        assert "pto.comm.tnotify" in mlir, f"pto.comm.tnotify not emitted:\n{mlir}"
-        assert "#pto.notify_op<set>" in mlir, f"notifyOp<set> attribute missing:\n{mlir}"
-        notify_line = next((line for line in mlir.splitlines() if "pto.comm.tnotify" in line), "")
-        assert ", i32" in notify_line, f"Expected i32 value type annotation:\n{notify_line}"
-
-    def test_tile_notify_atomic_add_codegen(self):
-        """pl.tile.notify(sig, v, op='atomic_add') emits #pto.notify_op<atomic_add>."""
+        Mirrors simpler's TNOTIFY(sig, v, NotifyOp::AtomicAdd) shape used both
+        for cross-rank count exchange and done-barrier signaling.
+        """
 
         @pl.program
         class Prog:
@@ -1765,15 +1755,17 @@ class TestTileNotifyPtoCodegen:
                 self,
                 signal: pl.Tensor[[1], pl.INT32],
             ) -> pl.Tensor[[1], pl.INT32]:
-                pl.tile.notify(signal, 7, op="atomic_add")
+                pl.tile.comm_notify(signal, 1, op="atomic_add")
                 return signal
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.comm.tnotify" in mlir
-        assert "#pto.notify_op<atomic_add>" in mlir, f"notifyOp<atomic_add> missing:\n{mlir}"
+        assert "pto.comm.tnotify" in mlir, f"pto.comm.tnotify not emitted:\n{mlir}"
+        assert "#pto<notify_op atomic_add>" in mlir, f"notifyOp<atomic_add> missing:\n{mlir}"
+        notify_line = next((line for line in mlir.splitlines() if "pto.comm.tnotify" in line), "")
+        assert ", i32) -> ()" in notify_line, f"Expected i32 value type annotation:\n{notify_line}"
 
-    def test_tile_notify_rejects_non_int32_signal(self):
-        """tile.notify codegen rejects non-INT32 signal tensors."""
+    def test_tile_comm_notify_rejects_non_int32_signal(self):
+        """tile.comm_notify codegen rejects non-INT32 signal tensors."""
 
         @pl.program
         class Prog:
@@ -1782,15 +1774,20 @@ class TestTileNotifyPtoCodegen:
                 self,
                 signal: pl.Tensor[[1], pl.FP32],
             ) -> pl.Tensor[[1], pl.FP32]:
-                pl.tile.notify(signal, 1, op="set")
+                pl.tile.comm_notify(signal, 1, op="atomic_add")
                 return signal
 
-        with pytest.raises(Exception, match=r"tile\.notify signal must be INT32"):
+        with pytest.raises(Exception, match=r"tile\.comm_notify signal must be INT32"):
             self._generate_mlir(Prog)
 
 
-class TestTileWaitPtoCodegen:
-    """PTO codegen tests for tile.wait (cross-rank signal poll)."""
+class TestTileCommWaitPtoCodegen:
+    """PTO codegen tests for tile.comm_wait (cross-rank signal poll).
+
+    Exercises the single wait shape simpler actually uses in real kernels:
+    ``cmp="ge"`` paired with ``comm_notify(..., op="atomic_add")`` — the
+    cross-rank done-barrier pattern.
+    """
 
     def _generate_mlir(self, program_cls) -> str:
         backend.reset_for_testing()
@@ -1804,28 +1801,30 @@ class TestTileWaitPtoCodegen:
         single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
         return codegen_instance.generate(single)
 
-    @pytest.mark.parametrize("cmp", ["eq", "ne", "gt", "ge", "lt", "le"])
-    def test_tile_wait_all_cmps_codegen(self, cmp):
-        """pl.tile.wait emits pto.comm.twait with cmp = #pto.wait_cmp<...>."""
+    def test_tile_comm_wait_ge_codegen(self):
+        """pl.tile.comm_wait(sig, 1, cmp='ge') emits pto.comm.twait #pto<wait_cmp ge>.
+
+        Mirrors simpler's TWAIT(sig, 1, WaitCmp::GE) — the done-barrier shape.
+        """
 
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
-            def kernel_wait(
+            def kernel_wait_ge(
                 self,
                 signal: pl.Tensor[[1], pl.INT32],
             ) -> pl.Tensor[[1], pl.INT32]:
-                pl.tile.wait(signal, 1, cmp=cmp)
+                pl.tile.comm_wait(signal, 1, cmp="ge")
                 return signal
 
         mlir = self._generate_mlir(Prog)
         assert "pto.comm.twait" in mlir, f"pto.comm.twait not emitted:\n{mlir}"
-        assert f"#pto.wait_cmp<{cmp}>" in mlir, f"wait_cmp<{cmp}> attribute missing:\n{mlir}"
+        assert "#pto<wait_cmp ge>" in mlir, f"wait_cmp<ge> attribute missing:\n{mlir}"
         wait_line = next((line for line in mlir.splitlines() if "pto.comm.twait" in line), "")
-        assert ", i32" in wait_line, f"Expected i32 value type annotation:\n{wait_line}"
+        assert ", i32) -> ()" in wait_line, f"Expected i32 value type annotation:\n{wait_line}"
 
-    def test_tile_wait_rejects_non_int32_signal(self):
-        """tile.wait codegen rejects non-INT32 signal tensors."""
+    def test_tile_comm_wait_rejects_non_int32_signal(self):
+        """tile.comm_wait codegen rejects non-INT32 signal tensors."""
 
         @pl.program
         class Prog:
@@ -1834,10 +1833,10 @@ class TestTileWaitPtoCodegen:
                 self,
                 signal: pl.Tensor[[1], pl.FP32],
             ) -> pl.Tensor[[1], pl.FP32]:
-                pl.tile.wait(signal, 1, cmp="ge")
+                pl.tile.comm_wait(signal, 1, cmp="ge")
                 return signal
 
-        with pytest.raises(Exception, match=r"tile\.wait signal must be INT32"):
+        with pytest.raises(Exception, match=r"tile\.comm_wait signal must be INT32"):
             self._generate_mlir(Prog)
 
 

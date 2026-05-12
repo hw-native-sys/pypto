@@ -48,8 +48,8 @@ __all__ = [
     "import_peer_buffer",
     "tfree_to_aic",
     "tfree_to_aiv",
-    "notify",
-    "wait",
+    "comm_notify",
+    "comm_wait",
 ]
 
 
@@ -148,7 +148,7 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
     return Scalar(DataType.INT32, call)
 
 
-def notify(
+def comm_notify(
     signal: Tensor,
     value: int | Scalar | Expr,
     *,
@@ -162,6 +162,14 @@ def notify(
     rank's signal location in its HCCL window — typically obtained via
     :func:`import_peer_buffer`.
 
+    Note:
+        The cross-rank done-barrier pattern used in production (see the
+        ``dispatch.cpp`` / ``combine.cpp`` examples) relies on payload writes
+        becoming visible to the peer **before** the done signal is sent.
+        PyPTO inserts the required pipe synchronization automatically, but
+        callers should ensure no late writes to the payload region remain
+        in-flight after ``comm_notify``.
+
     Args:
         signal: Destination signal tensor (1-element INT32) in remote rank's window.
         value: INT32 scalar value to write or atomic-add (Python int, Scalar, or Expr).
@@ -169,7 +177,7 @@ def notify(
         span: Optional source span.
 
     Returns:
-        The IR ``Call`` for ``tile.notify`` (used for its side effect; no return value).
+        The IR ``Call`` for ``tile.comm_notify`` (used for its side effect; no return value).
     """
     if isinstance(value, Scalar):
         value_expr: Expr = value.unwrap()
@@ -177,10 +185,10 @@ def notify(
         value_expr = value
     else:
         value_expr = ConstInt(int(value), DataType.INT32, Span.unknown())
-    return _ir_tile_ops.notify(signal.unwrap(), value_expr, op=op, span=span)
+    return _ir_tile_ops.comm_notify(signal.unwrap(), value_expr, op=op, span=span)
 
 
-def wait(
+def comm_wait(
     signal: Tensor,
     cmp_value: int | Scalar | Expr,
     *,
@@ -191,7 +199,7 @@ def wait(
 
     Lowers to ``pto::comm::TWAIT`` via PTOAS ``pto.comm.twait``. The signal
     is a 1-element INT32 ``pl.Tensor`` (GM) in the local rank's window — the
-    slot peers ``pl.tile.notify`` into.
+    slot peers ``pl.tile.comm_notify`` into.
 
     Args:
         signal: Local signal tensor (1-element INT32) to poll.
@@ -201,7 +209,7 @@ def wait(
         span: Optional source span.
 
     Returns:
-        The IR ``Call`` for ``tile.wait`` (used for its side effect; no return value).
+        The IR ``Call`` for ``tile.comm_wait`` (used for its side effect; no return value).
     """
     if isinstance(cmp_value, Scalar):
         cmp_expr: Expr = cmp_value.unwrap()
@@ -209,4 +217,4 @@ def wait(
         cmp_expr = cmp_value
     else:
         cmp_expr = ConstInt(int(cmp_value), DataType.INT32, Span.unknown())
-    return _ir_tile_ops.wait(signal.unwrap(), cmp_expr, cmp=cmp, span=span)
+    return _ir_tile_ops.comm_wait(signal.unwrap(), cmp_expr, cmp=cmp, span=span)
