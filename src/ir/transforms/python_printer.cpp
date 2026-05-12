@@ -11,19 +11,19 @@
 
 #include <algorithm>
 #include <any>
-#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iomanip>
+#include <limits>
+#include <locale>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
-#include <system_error>
 #include <typeindex>
 #include <typeinfo>
 #include <unordered_map>
@@ -327,30 +327,26 @@ class IRPythonPrinter : public IRVisitor {
 
 // Helper function to format a float literal so it re-parses as a ``ConstFloat``.
 //
-// Emits the *shortest* decimal that parses back to the exact same ``double``
-// (``std::to_chars`` with no precision argument, locale-independent). This is
-// what makes ``ConstFloat`` (and float kwargs / attrs) round-trip bit-exactly
+// Emits enough significant digits to parse back to the exact same ``double``.
+// This makes ``ConstFloat`` (and float kwargs / attrs) round-trip bit-exactly
 // through print → parse: the parser stores ``ConstFloat.value_`` as the FP64
 // value it reads, so the printed text must encode the full ``double`` regardless
-// of the constant's ``dtype_``. Output stays compact — ``0.1`` prints as ``0.1``
-// (not ``0.10000000000000001``), large integers as ``1e+16`` rather than a long
-// run of zeros, and the FP32-representable Cody-Waite constants emitted by
-// ``LowerCompositeOps`` with exactly as many digits as their ``double`` needs
-// (e.g. ``0.31830987334251404``). Output may use exponent notation (``1e+16``,
-// ``1e-07``) — still a valid Python float literal.
+// of the constant's ``dtype_``. Use iostreams rather than floating-point
+// ``std::to_chars`` because GCC 10's libstdc++ does not provide that overload.
+// Output may use exponent notation (``1e+16``, ``1e-07``) — still a valid Python
+// float literal.
 //
-// ``std::to_chars`` emits a bare integer (``"4"``) for integer-valued doubles
-// without an exponent, which would re-parse as ``ConstInt``; append ``.0`` in
-// that case. The append is skipped for exponent forms (``"1e+16"`` already
-// parses as a Python float) and for non-finite values (``"nan"`` / ``"inf"``
-// have no DSL syntax — emitted verbatim, matching the prior behavior; no IR
-// construction path produces them).
+// The default float format emits a bare integer (``"4"``) for integer-valued
+// doubles without an exponent, which would re-parse as ``ConstInt``; append
+// ``.0`` in that case. The append is skipped for exponent forms (``"1e+16"``
+// already parses as a Python float) and for non-finite values (``"nan"`` /
+// ``"inf"`` have no DSL syntax — emitted verbatim, matching the prior behavior;
+// no IR construction path produces them).
 std::string FormatFloatLiteral(double value) {
-  char buf[32];
-  auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), value);
-  INTERNAL_CHECK(ec == std::errc()) << "Internal error: std::to_chars failed to format float literal "
-                                    << value;
-  std::string text(buf, ptr);
+  std::ostringstream os;
+  os.imbue(std::locale::classic());
+  os << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+  std::string text = os.str();
   if (std::isfinite(value) && text.find_first_of(".eE") == std::string::npos) {
     text += ".0";
   }
@@ -614,7 +610,6 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
           stream_ << prefix_ << ".adir." << ArgDirectionToDslName(call_arg_directions[i]);
         }
         stream_ << "]}";
-        need_kwarg_comma = true;
       }
 
       stream_ << ")";
