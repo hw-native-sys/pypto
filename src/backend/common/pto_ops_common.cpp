@@ -2920,11 +2920,29 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg_spmd_block_op("tile.get_block_idx", &codegen::PTOCodegen::GetSpmdBlockIdxArgSSA);
   reg_spmd_block_op("tile.get_block_num", &codegen::PTOCodegen::GetSpmdBlockNumArgSSA);
 
-  // tile.move → pto.tmov with no-op elision.
-  // When MemoryReuse inserts a tile.move between two MemRefs that end up at the
-  // same physical address after AllocateMemoryAddr (e.g. acc→acc at the same Acc
-  // offset), the move is a no-op. Elide it to avoid emitting pto.tmov with
-  // unsupported same-space address pairs (fixes #1310).
+  // tile.move → pto.tmov with no-op elision (fixes #1310, #1352).
+  //
+  // Two cases are elided:
+  //
+  // Case 1 — same space, same physical address (original fix, #1310):
+  //   When MemoryReuse inserts a tile.move between two MemRefs that end up at
+  //   the same physical address after AllocateMemoryAddr, the move is a
+  //   structural no-op. Emitting pto.tmov would generate an unsupported
+  //   same-space same-address pair on some targets.
+  //
+  // Case 2 — acc→acc at different addresses (#1352):
+  //   Ascend 910B has no hardware path to copy data between disjoint
+  //   accumulator (L0C) addresses; ptoas rejects any such pto.tmov with
+  //   "expects a supported tmov address-space pair for this target".
+  //   These moves are always semantic no-ops in the IR: they arise when
+  //   MemoryReuse fails to unify MemRef bases across nested pipelined
+  //   matmul_acc loops (YieldFixupMutator inserts them as fixups, but
+  //   AllocateMemoryAddr then assigns different physical addresses to the
+  //   un-unified bases). Eliding them unconditionally matches hardware
+  //   semantics and avoids the ptoas error.
+  //
+  // In both cases the destination SSA value is aliased to the source so that
+  // downstream uses see the correct (already-written) buffer.
   reg("tile.move", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
     CHECK(op->args_.size() == 1) << "tile.move requires 1 argument, got " << op->args_.size();
@@ -2940,12 +2958,14 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
         if (src_space.has_value() && dst_space.has_value() && *src_space == *dst_space) {
           auto src_offset = As<ir::ConstInt>((*src_tile->memref_)->byte_offset_);
           auto dst_offset = As<ir::ConstInt>((*dst_tile->memref_)->byte_offset_);
-          if (src_offset && dst_offset && src_offset->value_ == dst_offset->value_) {
+          bool same_address = src_offset && dst_offset && src_offset->value_ == dst_offset->value_;
+          bool both_acc = (*src_space == ir::MemorySpace::Acc);
+          if (same_address || both_acc) {
             // Alias the destination to the source SSA value so downstream
             // references use the source's defined buffer, not the destination's
             // alloc_tile (which would be unwritten after eliding the tmov).
             codegen.SetCurrentResultBuf(codegen.GetExprAsCode(op->args_[0]));
-            return std::string("");  // no-op: same space, same address
+            return std::string("");
           }
         }
       }
