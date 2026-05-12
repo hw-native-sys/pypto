@@ -1767,20 +1767,19 @@ class TestTileCommNotifyPtoCodegen:
         )
 
     def test_tile_comm_notify_rejects_non_int32_signal(self):
-        """tile.comm_notify codegen rejects non-INT32 signal tensors."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel_notify_bad_dtype(
-                self,
-                signal: pl.Tensor[[1], pl.FP32],
-            ) -> pl.Tensor[[1], pl.FP32]:
-                pl.tile.comm_notify(signal, 1, op="atomic_add")
-                return signal
+        """tile.comm_notify rejects non-INT32 signal tensors at IR construction."""
 
         with pytest.raises(Exception, match=r"tile\.comm_notify signal must be INT32"):
-            self._generate_mlir(Prog)
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel_notify_bad_dtype(
+                    self,
+                    signal: pl.Tensor[[1], pl.FP32],
+                ) -> pl.Tensor[[1], pl.FP32]:
+                    pl.tile.comm_notify(signal, 1, op="atomic_add")
+                    return signal
 
 
 class TestTileCommWaitPtoCodegen:
@@ -1828,20 +1827,19 @@ class TestTileCommWaitPtoCodegen:
         )
 
     def test_tile_comm_wait_rejects_non_int32_signal(self):
-        """tile.comm_wait codegen rejects non-INT32 signal tensors."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel_wait_bad_dtype(
-                self,
-                signal: pl.Tensor[[1], pl.FP32],
-            ) -> pl.Tensor[[1], pl.FP32]:
-                pl.tile.comm_wait(signal, 1, cmp="ge")
-                return signal
+        """tile.comm_wait rejects non-INT32 signal tensors at IR construction."""
 
         with pytest.raises(Exception, match=r"tile\.comm_wait signal must be INT32"):
-            self._generate_mlir(Prog)
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel_wait_bad_dtype(
+                    self,
+                    signal: pl.Tensor[[1], pl.FP32],
+                ) -> pl.Tensor[[1], pl.FP32]:
+                    pl.tile.comm_wait(signal, 1, cmp="ge")
+                    return signal
 
 
 class TestTileCommTestPtoCodegen:
@@ -1886,20 +1884,19 @@ class TestTileCommTestPtoCodegen:
         assert "-> i1" in test_line, f"Expected i1 return type:\n{test_line}"
 
     def test_tile_comm_test_rejects_non_int32_signal(self):
-        """tile.comm_test codegen rejects non-INT32 signal tensors."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel_test_bad_dtype(
-                self,
-                signal: pl.Tensor[[1], pl.FP32],
-            ) -> pl.Tensor[[1], pl.FP32]:
-                ok = pl.tile.comm_test(signal, 1, cmp="eq")  # noqa: F841
-                return signal
+        """tile.comm_test rejects non-INT32 signal tensors at IR construction."""
 
         with pytest.raises(Exception, match=r"tile\.comm_test signal must be INT32"):
-            self._generate_mlir(Prog)
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel_test_bad_dtype(
+                    self,
+                    signal: pl.Tensor[[1], pl.FP32],
+                ) -> pl.Tensor[[1], pl.FP32]:
+                    ok = pl.tile.comm_test(signal, 1, cmp="eq")  # noqa: F841
+                    return signal
 
 
 if __name__ == "__main__":

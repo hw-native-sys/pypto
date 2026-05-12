@@ -1991,7 +1991,8 @@ static std::pair<std::string, std::string> SplitSSAAndType(const std::string& ss
 }
 
 // Validate signal tensor type for comm.tnotify / comm.twait. PTOAS spec
-// (PTO_IR_manual.md §pto.comm.tnotify) requires GM-shaped INT32, rank >= 1.
+// (PTO_IR_manual.md §pto.comm.tnotify) requires GM-shaped INT32, rank >= 1,
+// addressing a single signal slot.
 static ir::TensorTypePtr CheckCommSignalType(const ir::ExprPtr& signal_arg, codegen::PTOCodegen& codegen,
                                              const ir::Span& span, const char* op_name) {
   auto signal_tensor_type = As<ir::TensorType>(signal_arg->GetType());
@@ -2003,6 +2004,27 @@ static ir::TensorTypePtr CheckCommSignalType(const ir::ExprPtr& signal_arg, code
   CHECK(signal_tensor_type->dtype_ == DataType::INT32)
       << op_name << " signal must be INT32, got element type "
       << codegen.GetTypeString(signal_tensor_type->dtype_);
+
+  // Enforce the single-slot contract documented in PTO_IR_manual.md: when every
+  // shape dim is a ConstInt, their product must be exactly 1. Dynamic dims are
+  // tolerated (could be 1 at runtime), but a statically-known extent > 1 is
+  // rejected here so malformed inputs fail before PTOAS emission instead of
+  // silently lowering to a partition view that spans the wrong region.
+  bool all_static = true;
+  int64_t prod = 1;
+  for (const auto& dim_expr : signal_tensor_type->shape_) {
+    auto c = As<ir::ConstInt>(dim_expr);
+    if (!c) {
+      all_static = false;
+      continue;
+    }
+    CHECK(c->value_ == 1) << op_name << " signal must address exactly one INT32 slot, got static dim "
+                          << c->value_;
+    prod *= c->value_;
+  }
+  if (all_static) {
+    CHECK(prod == 1) << op_name << " signal must address exactly one INT32 slot, got element count " << prod;
+  }
   return signal_tensor_type;
 }
 

@@ -149,6 +149,28 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
     return Scalar(DataType.INT32, call)
 
 
+def _value_to_int32_expr(value: int | Scalar | Expr, arg_name: str) -> Expr:
+    """Coerce an ``int | Scalar | Expr`` argument to an INT32 ``Expr``.
+
+    Frontend callers can pass any of the three forms; the IR binding expects a
+    single ``Expr`` whose ScalarType dtype is ``INT32``. The DSL parser turns
+    literal Python ints into ``ConstInt`` with ``DataType.INDEX`` by default,
+    so an integer constant arriving here is rewrapped as ``INT32`` to satisfy
+    the IR-level contract of ``tile.comm_notify`` / ``tile.comm_wait`` /
+    ``tile.comm_test``. Non-constant ``Expr`` and ``Scalar`` values are
+    passed through unchanged.
+    """
+    if isinstance(value, Scalar):
+        return value.unwrap()
+    if isinstance(value, ConstInt):
+        return ConstInt(int(value.value), DataType.INT32, value.span or Span.unknown())
+    if isinstance(value, Expr):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return ConstInt(value, DataType.INT32, Span.unknown())
+    raise TypeError(f"Argument '{arg_name}' must be int, pl.Scalar, or pl.Expr, got {type(value).__name__}")
+
+
 def comm_notify(
     signal: Tensor,
     value: int | Scalar | Expr,
@@ -180,13 +202,7 @@ def comm_notify(
     Returns:
         The IR ``Call`` for ``tile.comm_notify`` (used for its side effect; no return value).
     """
-    if isinstance(value, Scalar):
-        value_expr: Expr = value.unwrap()
-    elif isinstance(value, Expr):
-        value_expr = value
-    else:
-        value_expr = ConstInt(int(value), DataType.INT32, Span.unknown())
-    return _ir_tile_ops.comm_notify(signal.unwrap(), value_expr, op=op, span=span)
+    return _ir_tile_ops.comm_notify(signal.unwrap(), _value_to_int32_expr(value, "value"), op=op, span=span)
 
 
 def comm_wait(
@@ -212,13 +228,9 @@ def comm_wait(
     Returns:
         The IR ``Call`` for ``tile.comm_wait`` (used for its side effect; no return value).
     """
-    if isinstance(cmp_value, Scalar):
-        cmp_expr: Expr = cmp_value.unwrap()
-    elif isinstance(cmp_value, Expr):
-        cmp_expr = cmp_value
-    else:
-        cmp_expr = ConstInt(int(cmp_value), DataType.INT32, Span.unknown())
-    return _ir_tile_ops.comm_wait(signal.unwrap(), cmp_expr, cmp=cmp, span=span)
+    return _ir_tile_ops.comm_wait(
+        signal.unwrap(), _value_to_int32_expr(cmp_value, "cmp_value"), cmp=cmp, span=span
+    )
 
 
 def comm_test(
@@ -244,11 +256,7 @@ def comm_test(
     Returns:
         ``pl.Scalar[pl.BOOL]`` wrapping the ``tile.comm_test`` IR call (PTO ``... -> i1``).
     """
-    if isinstance(cmp_value, Scalar):
-        cmp_expr: Expr = cmp_value.unwrap()
-    elif isinstance(cmp_value, Expr):
-        cmp_expr = cmp_value
-    else:
-        cmp_expr = ConstInt(int(cmp_value), DataType.INT32, Span.unknown())
-    call = _ir_tile_ops.comm_test(signal.unwrap(), cmp_expr, cmp=cmp, span=span)
+    call = _ir_tile_ops.comm_test(
+        signal.unwrap(), _value_to_int32_expr(cmp_value, "cmp_value"), cmp=cmp, span=span
+    )
     return Scalar(DataType.BOOL, call)

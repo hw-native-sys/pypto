@@ -14,8 +14,11 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/type.h"
 
@@ -27,6 +30,64 @@ namespace {
 TypePtr DeduceUnknownType(const std::vector<ExprPtr>& args,
                           const std::vector<std::pair<std::string, std::any>>& kwargs) {
   return GetUnknownType();
+}
+
+// Shared validation for the (signal: 1-element INT32 tensor, value: INT32 scalar)
+// operand contract of tile.comm_notify / tile.comm_wait / tile.comm_test.
+void CheckCommSignalArgs(const std::vector<ExprPtr>& args, const char* op_name, const char* value_arg_name) {
+  CHECK(args.size() == 2) << op_name << " requires 2 arguments (signal, " << value_arg_name << "), got "
+                          << args.size();
+  auto sig_ty = As<TensorType>(args[0]->GetType());
+  CHECK(sig_ty) << op_name << " signal must be a TensorType, got " << args[0]->GetType()->TypeName();
+  CHECK(sig_ty->dtype_ == DataType::INT32)
+      << op_name << " signal must be INT32, got " << DataTypeToString(sig_ty->dtype_);
+  CHECK(!sig_ty->shape_.empty()) << op_name << " signal must be rank >= 1, got rank-0 tensor";
+
+  // Enforce the single-slot contract: when every shape dim is a ConstInt,
+  // their product must equal 1. Dynamic dims are allowed (could be 1 at
+  // runtime) but a statically-known non-singleton extent is rejected here so
+  // the error surfaces at IR construction instead of late during PTO lowering.
+  bool all_static = true;
+  int64_t prod = 1;
+  for (const auto& d : sig_ty->shape_) {
+    auto c = As<ConstInt>(d);
+    if (!c) {
+      all_static = false;
+      continue;
+    }
+    CHECK(c->value_ >= 1) << op_name << " signal shape dim must be positive, got " << c->value_;
+    CHECK(c->value_ == 1) << op_name << " signal must hold exactly one INT32 slot, got static dim "
+                          << c->value_;
+    prod *= c->value_;
+  }
+  if (all_static) {
+    CHECK(prod == 1) << op_name << " signal must hold exactly one INT32 slot, got element count " << prod;
+  }
+
+  auto val_ty = As<ScalarType>(args[1]->GetType());
+  CHECK(val_ty) << op_name << " " << value_arg_name << " must be a ScalarType, got "
+                << args[1]->GetType()->TypeName();
+  CHECK(val_ty->dtype_ == DataType::INT32)
+      << op_name << " " << value_arg_name << " must be INT32 scalar, got "
+      << DataTypeToString(val_ty->dtype_);
+}
+
+TypePtr DeduceTileCommNotifyType(const std::vector<ExprPtr>& args,
+                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CheckCommSignalArgs(args, "tile.comm_notify", "value");
+  return GetUnknownType();
+}
+
+TypePtr DeduceTileCommWaitType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CheckCommSignalArgs(args, "tile.comm_wait", "cmp_value");
+  return GetUnknownType();
+}
+
+TypePtr DeduceTileCommTestType(const std::vector<ExprPtr>& args,
+                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CheckCommSignalArgs(args, "tile.comm_test", "cmp_value");
+  return std::static_pointer_cast<const Type>(std::make_shared<ScalarType>(DataType::BOOL));
 }
 
 }  // namespace
@@ -101,7 +162,7 @@ REGISTER_OP("tile.comm_notify")
     .add_argument("value", "INT32 scalar value to write or atomic-add")
     .set_attr<std::string>("op")  // "atomic_add" | "set"
     .no_memory_spec()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type(DeduceTileCommNotifyType);
 
 // Block until the local rank's signal slot satisfies `signal <cmp> cmp_value`.
 // The signal operand is a 1-element INT32 Tensor in local-rank GM (the slot
@@ -115,7 +176,7 @@ REGISTER_OP("tile.comm_wait")
     .add_argument("cmp_value", "INT32 scalar comparison value")
     .set_attr<std::string>("cmp")  // "eq" | "ne" | "gt" | "ge" | "lt" | "le"
     .no_memory_spec()
-    .f_deduce_type(DeduceUnknownType);
+    .f_deduce_type(DeduceTileCommWaitType);
 
 // Non-blocking poll of the local signal slot: returns a BOOL result equal to
 // `signal <cmp> cmp_value`. Same operand shape as tile.comm_wait, but does not
@@ -130,9 +191,7 @@ REGISTER_OP("tile.comm_test")
     .add_argument("cmp_value", "INT32 scalar comparison value")
     .set_attr<std::string>("cmp")  // "eq" | "ne" | "gt" | "ge" | "lt" | "le"
     .no_memory_spec()
-    .f_deduce_type([](const std::vector<ExprPtr>&, const std::vector<std::pair<std::string, std::any>>&) {
-      return std::static_pointer_cast<const Type>(std::make_shared<ScalarType>(DataType::BOOL));
-    });
+    .f_deduce_type(DeduceTileCommTestType);
 
 }  // namespace ir
 }  // namespace pypto
