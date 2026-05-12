@@ -909,7 +909,20 @@ void OpConversionRegistry::RegisterSortOps() {
 // We always add a trailing tile.reshape so Phase 3 (RewriteReturnedAssemble-
 // LoopToStore) does not fire; we want the full-tile store path instead.
 //
-// Four cases (by rank and norm_dim):
+// Supported (rank, norm_dim) routes:
+//
+//   Case 1  rank==2, dim==1 (last):    nested-loop single-row gather
+//   Case 2  rank==3, dim==2 (last):    nested-loop single-row gather
+//   Case 3  rank==3, dim==0 (first):   emit_flat_index_gather
+//   Case 4  rank==3, dim==1 (middle):  emit_flat_index_gather
+//   Case 5  rank==2, dim==0 (first):   emit_flat_index_gather
+//   Case 6  rank>=4, any dim:          emit_flat_index_gather
+//
+// Cases 1–2 use dedicated nested-loop lowerings (described below).  Cases 3–6
+// share the generalized `emit_flat_index_gather` helper, which collapses every
+// non-gather/non-last axis into the outer loop variable and emits a single-row
+// gather per output row.  See the helper-local block comment near the
+// definition of `emit_flat_index_gather` for the per-iteration formula.
 //
 // Case 1  rank==2, dim==1 (last):
 //   Loop over I0 rows: load [1,S1] and [1,K], single-row gather.
@@ -920,22 +933,6 @@ void OpConversionRegistry::RegisterSortOps() {
 //   Load [1,1,S2]→reshape[1,S2]; Load [1,1,K]→reshape[1,K]; gather [1,K].
 //   Inner acc [I1,K]; reshape→[1,I1*K]; outer acc [I0,I1*K].
 //   Final reshape [I0,I1*K]→[I0*I1,K]; tile.store at [0,0,0].
-//
-// Case 3  rank==3, dim==0 (first):
-//   Flat-index gather: for each output row r = i0*I1+i1:
-//     inp_flat = inp[:, i1, :].flatten()  → [1, S0*I2]
-//     idx_row  = idx[i0, i1, :]           → [1, I2]
-//     flat_idx = idx_row * I2 + [0..I2-1] → [1, I2]
-//     out_row  = gather(inp_flat, flat_idx) → [1, I2]
-//   Accumulator [I0*I1, I2]; reshape→[I0*I1,I2]; tile.store at [0,0,0].
-//
-// Case 4  rank==3, dim==1 (middle):
-//   Flat-index gather: for each output row r = i0*I1+i1:
-//     inp_flat = inp[i0, :, :].flatten()  → [1, S1*I2]
-//     idx_row  = idx[i0, i1, :]           → [1, I2]
-//     flat_idx = idx_row * I2 + [0..I2-1] → [1, I2]
-//     out_row  = gather(inp_flat, flat_idx) → [1, I2]
-//   Accumulator [I0*I1, I2]; reshape→[I0*I1,I2]; tile.store at [0,0,0].
 // ============================================================================
 
 void OpConversionRegistry::RegisterGatherOps() {

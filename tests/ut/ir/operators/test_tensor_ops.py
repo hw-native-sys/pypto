@@ -2480,6 +2480,26 @@ def test_tensor_gather_rejects_non_int32_index():
         ir.op.tensor.gather(inp, dim=-1, index=idx)
 
 
+def test_tensor_gather_accepts_int16_index():
+    """tensor.gather accepts INT16 indices (widened contract)."""
+    inp, idx = _make_gather_inputs(idx_dtype=DataType.INT16)
+    call = ir.op.tensor.gather(inp, dim=-1, index=idx)
+    assert call.op.name == "tensor.gather"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_gather_accepts_int8_input():
+    """tensor.gather accepts INT8 src dtype and preserves it on the output."""
+    inp, idx = _make_gather_inputs(src_dtype=DataType.INT8, idx_dtype=DataType.INT32)
+    call = ir.op.tensor.gather(inp, dim=-1, index=idx)
+    assert call.op.name == "tensor.gather"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.INT8
+
+
 def test_tensor_gather_rejects_unsupported_input_dtype():
     inp, idx = _make_gather_inputs(src_dtype=DataType.UINT32)
     with pytest.raises(Exception, match=r"FP16, FP32, INT8, INT16, or INT32"):
