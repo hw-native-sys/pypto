@@ -221,10 +221,11 @@ REGISTER_OP("tensor.gather_mask")
 //        defaults to INT32).
 // Output: TupleType{ TensorType_dst, TensorType_cdst }
 //   dst  shape  = [rows, out_cols], dtype = INT32 (gathered indices)
-//   cdst shape  = [rows, 1], dtype = count_dtype
+//   cdst shape  = [1, rows], dtype = count_dtype
 //
-// cdst is kept 2-D ([rows, 1]) to mirror the tile-level convention used by
-// row_sum / row_max (and required by the PTO tile.store codegen).
+// cdst is kept 2-D ([1, rows]) to mirror the tile-level convention (see
+// tile_ops/gather.cpp) and to satisfy the PTO tile.store codegen requirement
+// that tile valid_shape be 2D and physically contiguous.
 
 static TypePtr DeduceTensorGatherCompareType(const std::vector<ExprPtr>& args,
                                              const std::vector<std::pair<std::string, std::any>>& kwargs,

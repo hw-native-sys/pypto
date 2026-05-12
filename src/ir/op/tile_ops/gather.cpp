@@ -222,12 +222,14 @@ REGISTER_OP("tile.gather_mask")
 //
 // Output: TupleType{ TileType_dst, TileType_cdst } (2 outputs)
 //   dst  shape  = [rows, out_cols], dtype = INT32 (gathered indices)
-//   cdst shape  = [rows, 1], dtype = count_dtype (per-row match count)
+//   cdst shape  = [1, rows], dtype = count_dtype (per-row match count)
 //
-// `cdst` is kept 2D (`[rows, 1]`) to match the existing reduction-output
-// convention (`tile.row_sum`/`tile.row_max` also emit `[rows, 1]`) and to
-// satisfy the PTO `tile.store` codegen requirement that tile valid_shape
-// be 2D.
+// `cdst` is kept 2D (`[1, rows]`) so that the rows-many counts are
+// physically contiguous (row_major + cols * sizeof(count_dtype) % 32 == 0),
+// which is required by the PTOAS pto.tgather verifier and the PTO TileConfig
+// 32-byte alignment static_assert. The compare-form ISA writes
+// `cdstPtr + i` for i in [0, srcValidRow), and the [1, rows] row_major
+// layout provides exactly that contiguity.
 //
 // The DPS buffers backing dst/cdst are allocated by the downstream
 // init_memref / memory_reuse passes from the deduced TupleType, so this

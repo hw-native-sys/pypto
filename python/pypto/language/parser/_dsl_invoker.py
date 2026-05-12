@@ -90,7 +90,7 @@ def _unwrap_result(value: Any) -> Any:
     if isinstance(value, (Tensor, Tile, Scalar, Array)):
         return value.unwrap()
     if isinstance(value, tuple) and value and all(isinstance(v, (Tensor, Tile, Scalar)) for v in value):
-        unwrapped = [v.unwrap() for v in value]
+        unwrapped = tuple(v.unwrap() for v in value)
         common_call: ir.Expr | None = None
         for i, expr in enumerate(unwrapped):
             if not isinstance(expr, ir.TupleGetItemExpr) or expr.index != i:
@@ -103,6 +103,7 @@ def _unwrap_result(value: Any) -> Any:
                 break
         if common_call is not None:
             return common_call
+        return unwrapped
     return value
 
 

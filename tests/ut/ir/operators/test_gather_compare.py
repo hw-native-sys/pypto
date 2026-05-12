@@ -96,11 +96,11 @@ class TestTileGatherCompareCmpMode:
         assert "tile.gather_compare" in str(prog)
 
     def test_invalid_cmp_mode_string(self):
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="cmp_mode"):
             _build_program(cmp_mode="bogus")
 
     def test_invalid_cmp_mode_int(self):
-        with pytest.raises(Exception):
+        with pytest.raises(Exception, match="cmp_mode"):
             _build_program(cmp_mode=99)
 
 

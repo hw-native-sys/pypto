@@ -1975,7 +1975,7 @@ def gather_compare(
 
     Returns:
         ``(dst, cdst)`` where ``dst`` is a Tile ``[rows, out_cols]`` of INT32
-        gathered indices and ``cdst`` is a Tile ``[rows, 1]`` of ``count_dtype``
+        gathered indices and ``cdst`` is a Tile ``[1, rows]`` of ``count_dtype``
         per-row match counts.
     """
     kv_expr = kvalue.unwrap() if isinstance(kvalue, Scalar) else _normalize_expr(kvalue)

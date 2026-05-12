@@ -1375,7 +1375,7 @@ def gather(  # noqa: PLR0913
 
     Compare form (``kvalue`` + ``cmp_mode`` + ``out_cols``) → ``tensor.gather_compare``:
         per-row threshold compare. Returns a tuple-typed Call ``(dst, cdst)`` with
-        ``dst : [rows, out_cols] INT32`` (gathered indices) and ``cdst : [rows]
+        ``dst : [rows, out_cols] INT32`` (gathered indices) and ``cdst : [1, rows]
         count_dtype`` (per-row match count).
 
     Args:
@@ -1408,6 +1408,11 @@ def gather(  # noqa: PLR0913
             "gather() index form (dim, index), mask form (mask_pattern=...) and "
             "compare form (kvalue=..., cmp_mode=..., out_cols=...) are mutually "
             "exclusive; do not mix kwargs from different forms"
+        )
+    if (offset != 0 or count_dtype is not None) and not is_compare:
+        raise ValueError(
+            "gather() offset/count_dtype are only valid for the compare form; "
+            "use kvalue=..., cmp_mode=..., out_cols=..."
         )
     if is_mask:
         kwargs: dict[str, Any] = {"mask_pattern": mask_pattern}
