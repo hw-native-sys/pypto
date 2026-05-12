@@ -66,7 +66,7 @@ The pass is **idempotent**: re-running on already-materialized IR is a no-op, si
 
 ## Example
 
-**Before** — InCore param with empty-stride DN view (e.g. produced by a future `LowerTransposeLoadParamLayout` rewrite):
+**Before** — InCore param with empty-stride DN view (user-written `pl.Tensor[..., pl.DN]` without an explicit stride hint):
 
 ```python
 @pl.function(type=pl.FunctionType.InCore)

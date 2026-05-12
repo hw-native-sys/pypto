@@ -421,12 +421,15 @@ void BindPass(nb::module_& m) {
   passes.def("lower_transpose_load_param_layout", &pass::LowerTransposeLoadParamLayout,
              "Create the LowerTransposeLoadParamLayout pass (RFC #1300 P6).\n\n"
              "For each InCore function, detects tile.load(..., transpose=True) whose source\n"
-             "is a function parameter and promotes the parameter to canonical-form DN:\n"
-             "shape trailing-pair is swapped, the DN layout tag is added, the tile.load\n"
-             "body call's offsets/shapes/valid_shapes are swapped and the transpose=True\n"
-             "kwarg dropped, and every non-InCore call site wraps the promoted argument\n"
-             "in tensor.as_layout(arg, DN) to bridge orch-side ND tensors to InCore DN\n"
-             "params. Mixed-use params (both transpose=True and transpose=False loads on\n"
+             "is a function parameter `p` and rewrites the body to encode the transpose\n"
+             "intent as an explicit `tensor.as_layout` view:\n"
+             "  - prepends `p_dn = tensor.as_layout(p, layout=DN)` to the InCore body\n"
+             "    (`p_dn` carries the canonical `[..., b, a] DN` view);\n"
+             "  - substitutes body uses of `p` with `p_dn`;\n"
+             "  - swaps the trailing pair of offsets/shapes/valid_shapes on the matching\n"
+             "    tile.load calls and drops `transpose=True`.\n"
+             "Parameter signatures are left unchanged. Non-InCore (orch) functions are\n"
+             "untouched. Mixed-use params (both transpose=True and transpose=False loads on\n"
              "the same param) are rejected.");
   passes.def("materialize_tensor_strides", &pass::MaterializeTensorStrides,
              "Create the MaterializeTensorStrides pass (RFC #1300 §2.4).\n\n"

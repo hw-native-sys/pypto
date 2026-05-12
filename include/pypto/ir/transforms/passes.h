@@ -426,23 +426,25 @@ Pass AutoTileMatmulL0();
 Pass InferTileMemorySpace();
 
 /**
- * @brief Lower ``tile.load(transpose=True)`` to canonical-form parameter layout (RFC #1300 P6)
+ * @brief Lower ``tile.load(transpose=True)`` to a body-local DN view (RFC #1300 P6)
  *
  * For each InCore function, detects ``tile.load(..., transpose=True)`` whose source
- * is a function parameter and promotes that parameter to canonical-form DN
+ * is a function parameter ``p`` and rewrites the body so the transpose intent is
+ * encoded as an explicit ``tensor.as_layout`` view at the top of the body
  * (RFC #1300 §3.3 + §4.2):
  *
- *   - Param TensorType: ``[..., a, b] ND`` → ``[..., b, a] DN`` (trailing-pair swap +
- *     DN layout tag with empty stride; ``MaterializeTensorStrides`` later fills the
- *     packed canonical strides).
- *   - Each ``tile.load(p, offsets, shapes, valid_shapes, ..., transpose=True)`` whose
- *     source ``p`` is a promoted param is rewritten to: offsets / shapes /
- *     valid_shapes' trailing pair is swapped to canonical coords, and the
- *     ``transpose=True`` kwarg is dropped — the DN-source + Mat-target signal
- *     fully encodes the load's tile-view orientation.
- *   - Every non-InCore call site that targets a promoted callee is wrapped with
- *     ``tensor.as_layout(arg, DN)`` so the orch-side ``[..., a, b] ND`` runtime
- *     tensor bridges to the InCore-side ``[..., b, a] DN`` param type.
+ *   - Prepends ``p_dn = tensor.as_layout(p, layout=DN)`` to the InCore body.
+ *     ``p_dn`` carries the canonical ``[..., b, a] DN`` view; ``p``'s parameter
+ *     signature is left unchanged.
+ *   - Substitutes body uses of ``p`` with ``p_dn``.
+ *   - Rewrites each ``tile.load(p_dn, offsets, shapes, valid_shapes, ..., transpose=True)``
+ *     to swap the trailing pair of offsets / shapes / valid_shapes into canonical
+ *     coords and drop the ``transpose=True`` kwarg — the DN-source + Mat-target
+ *     signal on ``p_dn`` now fully encodes the load's tile-view orientation.
+ *
+ * Non-InCore (orch) functions are left untouched: the orch caller continues to
+ * pass its original row-major ND tensor straight through to the kernel, which
+ * keeps the cross-function type boundary trivial.
  *
  * Mixed-use parameters (same param loaded with both ``transpose=True`` and
  * ``transpose=False``) are rejected with ``pypto::ValueError``.

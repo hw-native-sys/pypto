@@ -9,12 +9,15 @@
 
 """Unit tests for LowerTransposeLoadParamLayout pass (RFC #1300 P6).
 
-The pass promotes each InCore parameter loaded via ``tile.load(transpose=True)``
-to canonical-form DN (RFC §3.3 + §4.2): the trailing shape pair is swapped,
-the layout tag becomes DN, the body's ``tile.load`` call swaps its
-``offsets`` / ``shapes`` / ``valid_shapes`` trailing pair and drops the
-``transpose=True`` kwarg, and every non-InCore call site bridges its arg
-through ``tensor.as_layout(arg, DN)``.
+The pass leaves InCore parameter signatures untouched and instead prepends a
+``b_dn = tensor.as_layout(b, layout=DN)`` AssignStmt at the top of the InCore
+body for each param ``b`` loaded via ``tile.load(transpose=True)``. Body uses
+of ``b`` are substituted with ``b_dn`` (which has the canonical
+``[..., b_dim, a_dim] DN`` view per RFC §3.3 + §4.2), and the matching
+``tile.load`` calls have their ``offsets`` / ``shapes`` / ``valid_shapes``
+trailing pair swapped while ``transpose=True`` is flipped to
+``transpose=False``. Non-InCore (orch) call sites are not touched — they pass
+their original ND args straight through to the kernel.
 
 ``tensor.as_layout`` is internal-only and not exposed via ``pypto.language``,
 so we cannot write the post-pass IR as ``@pl.program``. Instead we drive the
@@ -74,14 +77,6 @@ def _find_calls_to(func, callee_name):
     return calls
 
 
-def _find_assign_rhs(func, var):
-    """Return the RHS expression of the ``AssignStmt`` that defines ``var``."""
-    for stmt in _iter_stmts(func.body):
-        if isinstance(stmt, ir.AssignStmt) and stmt.var is var:
-            return stmt.value
-    raise AssertionError(f"no AssignStmt defines var {var.name_hint}")
-
-
 def _shape_dims(ty):
     """Return ConstInt shape dims as ints (rejects symbolic dims for test fixtures)."""
     tensor_type = _as_tensor_type(ty)
@@ -95,6 +90,49 @@ def _shape_dims(ty):
 def _transpose_kwarg(call):
     """Return the value of the ``transpose`` kwarg, or ``None`` if absent."""
     return call.kwargs.get("transpose")
+
+
+def _find_as_layout_binding(func, input_var):
+    """Find the body-prepended ``b_dn = tensor.as_layout(input_var, ...)``
+    AssignStmt and return ``(lhs_var, rhs_call)``. Asserts that exactly one
+    such binding exists in the body.
+    """
+    matches = []
+    for stmt in _iter_stmts(func.body):
+        if not isinstance(stmt, ir.AssignStmt):
+            continue
+        rhs = stmt.value
+        if not isinstance(rhs, ir.Call) or rhs.op is None:
+            continue
+        if rhs.op.name != "tensor.as_layout":
+            continue
+        if not rhs.args or not isinstance(rhs.args[0], ir.Var):
+            continue
+        if rhs.args[0] is input_var:
+            matches.append((stmt.var, rhs))
+    assert len(matches) == 1, (
+        f"expected exactly one tensor.as_layout binding for {input_var.name_hint}, found {len(matches)}"
+    )
+    return matches[0]
+
+
+def _has_as_layout_for(func, input_var):
+    """Return True iff ``func.body`` contains a tensor.as_layout binding whose
+    first arg is ``input_var``."""
+    for stmt in _iter_stmts(func.body):
+        if not isinstance(stmt, ir.AssignStmt):
+            continue
+        rhs = stmt.value
+        if (
+            isinstance(rhs, ir.Call)
+            and rhs.op is not None
+            and rhs.op.name == "tensor.as_layout"
+            and rhs.args
+            and isinstance(rhs.args[0], ir.Var)
+            and rhs.args[0] is input_var
+        ):
+            return True
+    return False
 
 
 class TestBTransposePromotesParam:
@@ -131,47 +169,61 @@ class TestBTransposePromotesParam:
         After = passes.lower_transpose_load_param_layout()(Before)
 
         incore = _find_function(After, "matmul_incore")
-        b_type = _as_tensor_type(incore.params[1].type)
-        assert _shape_dims(b_type) == [K, N], f"b param shape: {_shape_dims(b_type)}"
-        assert b_type.tensor_view is not None
-        assert b_type.tensor_view.layout == ir.TensorLayout.DN
+
+        # Param signatures are untouched — ``b`` is still ``[N, K] ND``.
+        b_param = incore.params[1]
+        b_type = _as_tensor_type(b_param.type)
+        assert _shape_dims(b_type) == [N, K], f"b param shape: {_shape_dims(b_type)}"
+        assert b_type.tensor_view is None
 
         a_type = _as_tensor_type(incore.params[0].type)
         assert _shape_dims(a_type) == [M, K]
         assert a_type.tensor_view is None
 
+        # The body has a prepended ``b_dn = tensor.as_layout(b, DN)`` binding
+        # whose result carries the canonical ``[K, N] DN`` view.
+        b_dn_var, b_dn_call = _find_as_layout_binding(incore, b_param)
+        b_dn_type = _as_tensor_type(b_dn_var.type)
+        assert _shape_dims(b_dn_type) == [K, N], f"b_dn shape: {_shape_dims(b_dn_type)}"
+        assert b_dn_type.tensor_view is not None
+        assert b_dn_type.tensor_view.layout == ir.TensorLayout.DN
+        # ``layout`` kwarg on the as_layout call should be DN.
+        assert b_dn_call.kwargs.get("layout") == ir.TensorLayout.DN
+
+        # ``tile.load`` on the promoted slot now reads from ``b_dn``, has its
+        # trailing pair swapped, and carries ``transpose=False``.
         loads_by_src = {}
         for ld in _find_tile_loads(incore):
             assert isinstance(ld.args[0], ir.Var)
             loads_by_src[ld.args[0].name_hint] = ld
 
-        load_b = loads_by_src["b"]
+        # The tile.load(b, transpose=True) was rewritten to load from b_dn.
+        assert b_dn_var.name_hint in loads_by_src, (
+            f"tile.load must read from the as_layout LHS, not raw param. "
+            f"loaded srcs: {list(loads_by_src.keys())}"
+        )
+        load_b = loads_by_src[b_dn_var.name_hint]
         shapes_arg = load_b.args[2]
         assert isinstance(shapes_arg, ir.MakeTuple)
         shape_vals = [el.value for el in shapes_arg.elements if isinstance(el, ir.ConstInt)]
-        assert shape_vals == [K, N], f"tile.load(b) shapes: {shape_vals}"
-        assert _transpose_kwarg(load_b) is False, "tile.load(b) transpose kwarg must be False after P6"
+        assert shape_vals == [K, N], f"tile.load(b_dn) shapes: {shape_vals}"
+        assert _transpose_kwarg(load_b) is False, "tile.load(b_dn) transpose kwarg must be False after P6"
 
         load_a = loads_by_src["a"]
         shape_vals_a = [el.value for el in load_a.args[2].elements if isinstance(el, ir.ConstInt)]
         assert shape_vals_a == [M, K]
 
+        # Orch is untouched — its call site passes ``b`` (a wrapper param)
+        # directly without any tensor.as_layout bridge.
         orch = _find_function(After, "orchestrator")
         calls = _find_calls_to(orch, "matmul_incore")
         assert len(calls) == 1
-        # `b` is bridged via an SSA AssignStmt: the call arg is a Var bound to
-        # a separately-emitted ``tensor.as_layout(orig_b, DN)`` Call.
         b_arg = calls[0].args[1]
         assert isinstance(b_arg, ir.Var)
-        b_def_rhs = _find_assign_rhs(orch, b_arg)
-        assert isinstance(b_def_rhs, ir.Call) and b_def_rhs.op is not None
-        assert b_def_rhs.op.name == "tensor.as_layout", (
-            f"orch must wrap b in tensor.as_layout, got {b_def_rhs.op.name if b_def_rhs.op else None}"
+        assert b_arg is orch.params[1], "orch call arg must be the orch's own param (no bridge)"
+        assert not _has_as_layout_for(orch, orch.params[1]), (
+            "no tensor.as_layout bridge should be emitted in orch under the InCore-side design"
         )
-        bridged_t = _as_tensor_type(b_def_rhs.type)
-        assert _shape_dims(bridged_t) == [K, N]
-        assert bridged_t.tensor_view is not None
-        assert bridged_t.tensor_view.layout == ir.TensorLayout.DN
 
     def test_btranspose_non_square(self):
         M, K, N = 128, 64, 32
@@ -203,10 +255,17 @@ class TestBTransposePromotesParam:
 
         After = passes.lower_transpose_load_param_layout()(Before)
         incore = _find_function(After, "matmul_incore")
-        b_type = _as_tensor_type(incore.params[1].type)
-        assert _shape_dims(b_type) == [K, N]
-        assert b_type.tensor_view is not None
-        assert b_type.tensor_view.layout == ir.TensorLayout.DN
+        b_param = incore.params[1]
+        b_type = _as_tensor_type(b_param.type)
+        # Param is untouched.
+        assert _shape_dims(b_type) == [N, K]
+        assert b_type.tensor_view is None
+        # Body prepends b_dn = as_layout(b, DN); LHS carries [K, N] DN.
+        b_dn_var, _ = _find_as_layout_binding(incore, b_param)
+        b_dn_type = _as_tensor_type(b_dn_var.type)
+        assert _shape_dims(b_dn_type) == [K, N]
+        assert b_dn_type.tensor_view is not None
+        assert b_dn_type.tensor_view.layout == ir.TensorLayout.DN
 
 
 class TestATransposePromotesParam:
@@ -242,34 +301,40 @@ class TestATransposePromotesParam:
 
         After = passes.lower_transpose_load_param_layout()(Before)
         incore = _find_function(After, "matmul_incore")
-        a_t = _as_tensor_type(incore.params[0].type)
-        assert _shape_dims(a_t) == [M, K]
-        assert a_t.tensor_view is not None
-        assert a_t.tensor_view.layout == ir.TensorLayout.DN
+        a_param = incore.params[0]
+        a_t = _as_tensor_type(a_param.type)
+        # Param is untouched.
+        assert _shape_dims(a_t) == [K, M]
+        assert a_t.tensor_view is None
+        # Body prepends a_dn = as_layout(a, DN); LHS carries [M, K] DN.
+        a_dn_var, _ = _find_as_layout_binding(incore, a_param)
+        a_dn_type = _as_tensor_type(a_dn_var.type)
+        assert _shape_dims(a_dn_type) == [M, K]
+        assert a_dn_type.tensor_view is not None
+        assert a_dn_type.tensor_view.layout == ir.TensorLayout.DN
 
-        b_t = _as_tensor_type(incore.params[1].type)
+        # ``b`` is not promoted (no transpose=True load), so no binding for it.
+        b_param = incore.params[1]
+        b_t = _as_tensor_type(b_param.type)
         assert _shape_dims(b_t) == [K, N]
         assert b_t.tensor_view is None
+        assert not _has_as_layout_for(incore, b_param)
 
+        # ``tile.load`` reads from a_dn (the binding's LHS), not from raw ``a``.
         loads = {ld.args[0].name_hint: ld for ld in _find_tile_loads(incore)}
-        load_a = loads["a"]
+        assert a_dn_var.name_hint in loads, f"expected load from a_dn, got srcs: {list(loads)}"
+        load_a = loads[a_dn_var.name_hint]
         shape_vals = [el.value for el in load_a.args[2].elements if isinstance(el, ir.ConstInt)]
         assert shape_vals == [M, K]
         assert _transpose_kwarg(load_a) is False
 
+        # Orch is untouched — call args are direct refs to wrapper params,
+        # no tensor.as_layout bridges injected.
         orch = _find_function(After, "orchestrator")
         call = _find_calls_to(orch, "matmul_incore")[0]
-        # `a` is bridged via tensor.as_layout. After P6's SSA refactor (PR
-        # review fix), the bridge is bound to a fresh Var by a preceding
-        # AssignStmt, so the call arg is a Var, not the inline Call. Look up
-        # the binding's RHS.
-        a_arg = call.args[0]
-        assert isinstance(a_arg, ir.Var)
-        a_def_rhs = _find_assign_rhs(orch, a_arg)
-        assert isinstance(a_def_rhs, ir.Call) and a_def_rhs.op is not None
-        assert a_def_rhs.op.name == "tensor.as_layout"
-        # `b` is not promoted, so its arg is the raw Var (no bridge).
-        assert isinstance(call.args[1], ir.Var)
+        assert call.args[0] is orch.params[0]
+        assert call.args[1] is orch.params[1]
+        assert not _has_as_layout_for(orch, orch.params[0])
 
 
 class TestABTransposePromotesBothParams:
@@ -305,22 +370,31 @@ class TestABTransposePromotesBothParams:
 
         After = passes.lower_transpose_load_param_layout()(Before)
         incore = _find_function(After, "matmul_incore")
-        a_t = _as_tensor_type(incore.params[0].type)
-        b_t = _as_tensor_type(incore.params[1].type)
-        assert _shape_dims(a_t) == [M, K]
-        assert a_t.tensor_view is not None and a_t.tensor_view.layout == ir.TensorLayout.DN
-        assert _shape_dims(b_t) == [K, N]
-        assert b_t.tensor_view is not None and b_t.tensor_view.layout == ir.TensorLayout.DN
+        a_param = incore.params[0]
+        b_param = incore.params[1]
+        # Both params are untouched.
+        a_t = _as_tensor_type(a_param.type)
+        b_t = _as_tensor_type(b_param.type)
+        assert _shape_dims(a_t) == [K, M]
+        assert a_t.tensor_view is None
+        assert _shape_dims(b_t) == [N, K]
+        assert b_t.tensor_view is None
+        # Body prepends one as_layout binding per promoted param.
+        a_dn_var, _ = _find_as_layout_binding(incore, a_param)
+        b_dn_var, _ = _find_as_layout_binding(incore, b_param)
+        a_dn_t = _as_tensor_type(a_dn_var.type)
+        b_dn_t = _as_tensor_type(b_dn_var.type)
+        assert _shape_dims(a_dn_t) == [M, K]
+        assert a_dn_t.tensor_view is not None and a_dn_t.tensor_view.layout == ir.TensorLayout.DN
+        assert _shape_dims(b_dn_t) == [K, N]
+        assert b_dn_t.tensor_view is not None and b_dn_t.tensor_view.layout == ir.TensorLayout.DN
 
+        # Orch is untouched — no bridges injected.
         orch = _find_function(After, "orchestrator")
         call = _find_calls_to(orch, "matmul_incore")[0]
-        # Both promoted args are bridged via SSA AssignStmts.
         for slot in (0, 1):
-            arg = call.args[slot]
-            assert isinstance(arg, ir.Var)
-            rhs = _find_assign_rhs(orch, arg)
-            assert isinstance(rhs, ir.Call) and rhs.op is not None
-            assert rhs.op.name == "tensor.as_layout"
+            assert call.args[slot] is orch.params[slot]
+            assert not _has_as_layout_for(orch, orch.params[slot])
 
 
 class TestNoOpCases:
@@ -467,13 +541,25 @@ class TestPartialLoadPromotion:
 
         After = passes.lower_transpose_load_param_layout()(Before)
         incore = _find_function(After, "kernel")
-        kc_t = _as_tensor_type(incore.params[1].type)
+        kc_param = incore.params[1]
+        kc_t = _as_tensor_type(kc_param.type)
+        # Param is untouched.
         assert _shape_dims(kc_t) == [128, 128]
-        assert kc_t.tensor_view is not None
-        assert kc_t.tensor_view.layout == ir.TensorLayout.DN
+        assert kc_t.tensor_view is None
+        # Body prepends key_cache_dn = as_layout(key_cache, DN). Shape stays
+        # [128, 128] (square) but layout is DN — the trailing-pair swap on the
+        # full TensorType shape happens to be identity here.
+        kc_dn_var, _ = _find_as_layout_binding(incore, kc_param)
+        kc_dn_t = _as_tensor_type(kc_dn_var.type)
+        assert _shape_dims(kc_dn_t) == [128, 128]
+        assert kc_dn_t.tensor_view is not None
+        assert kc_dn_t.tensor_view.layout == ir.TensorLayout.DN
 
+        # tile.load reads from the binding's LHS, with swapped load window
+        # ([64, 128] -> [128, 64]) and transpose=False.
         loads = {ld.args[0].name_hint: ld for ld in _find_tile_loads(incore)}
-        load_k = loads["key_cache"]
+        assert kc_dn_var.name_hint in loads
+        load_k = loads[kc_dn_var.name_hint]
         shape_vals = [el.value for el in load_k.args[2].elements if isinstance(el, ir.ConstInt)]
         assert shape_vals == [128, 64]
         assert _transpose_kwarg(load_k) is False

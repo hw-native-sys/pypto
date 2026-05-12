@@ -448,14 +448,18 @@ def lower_transpose_load_param_layout() -> Pass:
     """Create the LowerTransposeLoadParamLayout pass (RFC #1300 P6).
 
     For each InCore function, detects ``tile.load(..., transpose=True)`` whose
-    source is a function parameter and promotes the parameter to canonical-form
-    DN: shape trailing-pair is swapped, the DN layout tag is added, body
-    ``tile.load`` calls have offsets/shapes/valid_shapes' trailing pair swapped
-    and the ``transpose=True`` kwarg dropped, and every non-InCore call site
-    wraps the promoted argument in ``tensor.as_layout(arg, DN)`` to bridge
-    orch-side ND tensors to InCore DN params. Mixed-use parameters (both
-    ``transpose=True`` and ``transpose=False`` loads on the same param) are
-    rejected.
+    source is a function parameter ``p`` and rewrites the body to encode the
+    transpose intent as an explicit ``tensor.as_layout`` view:
+
+    - prepends ``p_dn = tensor.as_layout(p, layout=DN)`` to the InCore body
+      (``p_dn`` carries the canonical ``[..., b, a] DN`` view);
+    - substitutes body uses of ``p`` with ``p_dn``;
+    - swaps the trailing pair of offsets/shapes/valid_shapes on the matching
+      ``tile.load`` calls and drops ``transpose=True``.
+
+    Parameter signatures are left unchanged. Non-InCore (orch) functions are
+    untouched. Mixed-use parameters (both ``transpose=True`` and
+    ``transpose=False`` loads on the same param) are rejected.
     """
 
 def materialize_tensor_strides() -> Pass:
