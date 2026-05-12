@@ -327,16 +327,42 @@ def load(
         transpose: Whether to transpose the tile during load (default: False).
             Only supported when target_memory is MemorySpace.Mat (L1).
 
+            .. deprecated:: RFC #1300 §3.3
+                ``transpose=True`` mixes a view-reinterpret into a memory-copy
+                op and breaks the orthogonality of ``pl.slice`` / ``pl.reshape``
+                / ``pl.transpose``. Compose ``pl.transpose(tensor, -2, -1)``
+                followed by ``pl.load(..., target_memory=pl.MemorySpace.Mat)``
+                on the DN view instead — ``pl.transpose`` is a pure metadata
+                reinterpret and the resulting ``tile.load`` carries the same
+                semantics without the kwarg.
+
     Returns:
         Tile wrapping the load operation
 
     Example:
         >>> # 2D load
         >>> tile = load(tensor, offsets=[0, 0], shapes=[32, 32])
-        >>> # 2D load with transpose to L1 (tensor is [N, K], output tile is [K, N])
-        >>> tile = load(tensor, offsets=[0, 0], shapes=[N, K],
-        ...             target_memory=pl.MemorySpace.Mat, transpose=True)
+        >>> # Migrating away from transpose=True (B^T-style load to L1):
+        >>> # ❌ deprecated:
+        >>> # tile = load(tensor, offsets=[0, 0], shapes=[N, K],
+        >>> #             target_memory=pl.MemorySpace.Mat, transpose=True)
+        >>> # ✅ new pattern:
+        >>> tensor_t = transpose(tensor, -2, -1)        # ND → DN view
+        >>> tile = load(tensor_t, offsets=[0, 0], shapes=[K, N],
+        ...             target_memory=pl.MemorySpace.Mat)
     """
+    if transpose:
+        warnings.warn(
+            "pl.load(..., transpose=True) is deprecated (RFC #1300 supplementary 2). "
+            "Mixing a view-reinterpret into a memory-copy op breaks the orthogonality "
+            "of pl.slice / pl.reshape / pl.transpose. Migrate to "
+            "`pl.transpose(tensor, -2, -1)` followed by `pl.load(...)` on the resulting "
+            "DN view (no `transpose=True` kwarg). The new form is equivalent end-to-end: "
+            "pl.transpose is a pure metadata reinterpret, and the DN-tagged tile.load "
+            "produces the same TileType per RFC §4.2 canonical pair.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     if valid_shapes is None:
         valid_shapes = shapes
     call_expr = _ir_ops.load(

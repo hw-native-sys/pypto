@@ -48,18 +48,36 @@ idx: pl.Scalar[pl.INDEX]                # index scalar
 
 ### Tensor Layouts
 
-Layouts control the physical memory arrangement of Tensors:
+Tensors describe row-major memory; layout is normally **derived** from the
+ops that produce a view. The user-facing toolbox:
 
-| Layout | Description |
-| ------ | ----------- |
-| `pl.ND` | N-Dimensional (default, row-major) |
-| `pl.DN` | DN layout |
-| `pl.NZ` | NZ fractal format (hardware-specific tiling) |
+| Pattern | Use when | Result |
+| ------- | -------- | ------ |
+| `pl.Tensor[[..], pl.FP32]` (no layout marker) | Default — your source tensor is plain row-major memory | ND |
+| `pl.transpose(t, -2, -1)` | Need a transposed view at use site (e.g. matmul B^T pattern) | DN |
+| `pl.slice(view, ...)` / `pl.reshape(view, ...)` | Sub-view that should inherit a parent's layout | Same family as parent |
 
 ```python
-# Specify layout as third type parameter
-a: pl.Tensor[[64, 128], pl.FP16, pl.NZ]
+# ✅ Recommended — write source tensor shape, derive DN at use site:
+b: pl.Tensor[[N, K], pl.FP32]
+b_t = pl.transpose(b, -2, -1)  # ND → DN view, same physical buffer
+tile_b = pl.load(b_t, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
 ```
+
+```python
+# ⚠️ Deprecated (RFC #1300 supplementary 1):
+b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → DeprecationWarning at parse time
+```
+
+> **Why `pl.Tensor[..., pl.DN]` is deprecated.** Writing the DN
+> layout-only shorthand forces you to mentally hold two coordinate systems
+> at once (the IR-logical post-view shape and the runtime row-major shape).
+> Compose `pl.transpose` instead — the source tensor always uses its
+> runtime shape, and the DN view appears explicitly in the program.
+
+For NZ (hardware-specific tile layout), use `pl.Tile[..., pl.NZ]` — NZ is
+tile-only, never a TensorType annotation. The `pl.NZ` constant remains
+available for tile annotations and IR-internal use.
 
 ### Dynamic Shapes
 
@@ -514,6 +532,43 @@ b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
 c_acc = pl.matmul(a_l0a, b_l0b)                     # result → Acc
 out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 ```
+
+### Pattern: Matmul B^T via Transposed View
+
+For `c = a @ b^T`, derive the transposed view via `pl.transpose` **before**
+the load — do not pass `transpose=True` to `pl.load`:
+
+```python
+# ✅ Recommended (RFC #1300 supplementary 2):
+a_l1 = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+b_t = pl.transpose(b, -2, -1)   # b is [N, K] ND; b_t is [K, N] DN view
+b_l1 = pl.load(b_t, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
+b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
+c_acc = pl.matmul(a_l0a, b_l0b)
+```
+
+```python
+# ⚠️ Deprecated (kept for back-compat; emits DeprecationWarning):
+b_l1 = pl.load(b, [0, 0], [N, K], target_memory=pl.Mem.Mat, transpose=True)
+```
+
+Reusing a transposed view across multiple loads (e.g. K-tiled matmuls)
+is more compact in the new form:
+
+```python
+b_t = pl.transpose(b, -2, -1)                                # one-time view
+for ki in pl.range(0, K, K_TILE):
+    b_i = pl.load(b_t, [ki, 0], [K_TILE, N], target_memory=pl.Mem.Mat)
+    ...
+```
+
+> **Why `transpose=True` is deprecated.** It mixes a view-reinterpret
+> ("treat this tensor as transposed") into a memory-copy op, which breaks
+> the orthogonality of `pl.slice` / `pl.reshape` / `pl.transpose`.
+> `pl.transpose` is itself a pure metadata reinterpret (no allocation, no
+> compute) and produces the same end-to-end semantics — `pl.load` then
+> handles only memory movement.
 
 ## Compilation
 

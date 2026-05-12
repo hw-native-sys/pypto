@@ -10,6 +10,7 @@
 """Type annotation resolution for IR parsing."""
 
 import ast
+import warnings
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -441,6 +442,7 @@ class TypeResolver:
                 tensor_view = self._resolve_tensorview(third)
                 return tensor_ctor(shape, dtype, None, tensor_view)
             layout = self.resolve_layout(third)
+            self._warn_on_user_facing_dn_layout(layout, type_name)
             tensor_view = ir.TensorView([], layout)
             return tensor_ctor(shape, dtype, None, tensor_view)
 
@@ -450,6 +452,7 @@ class TypeResolver:
             tensor_view = self._resolve_tensorview(third)
         else:
             layout = self.resolve_layout(third)
+            self._warn_on_user_facing_dn_layout(layout, type_name)
             tensor_view = ir.TensorView([], layout)
         memref_node = slice_value.elts[3]
         if not self._is_memref_node(memref_node):
@@ -984,6 +987,35 @@ class TypeResolver:
             f"Cannot resolve dtype: {ast.unparse(dtype_node)}",
             span=span,
             hint="Use pl.FP32, pl.INT32, or other supported dtype constants",
+        )
+
+    def _warn_on_user_facing_dn_layout(self, layout: "ir.TensorLayout", type_name: str) -> None:
+        """Emit a ``DeprecationWarning`` when the user writes the layout-only DN
+        shorthand on a tensor type annotation (RFC #1300 supplementary 1).
+
+        Suppressed for ``ir.TensorLayout.ND`` (default, no-op marker) and for
+        explicit ``pl.TensorView(stride=..., layout=DN)`` forms (which carry
+        their own stride and don't rely on the shorthand's implicit coordinate
+        flip). Tile-side layouts are never seen here — Tile annotations route
+        through ``_resolve_tile_annotation_args``.
+        """
+        if layout != ir.TensorLayout.DN:
+            return
+        warnings.warn(
+            f"pl.{type_name}[..., pl.DN] is deprecated (RFC #1300 supplementary 1). "
+            "Writing the DN layout-only shorthand requires the user to mentally hold "
+            "two coordinate systems at once (IR-logical post-view vs. runtime "
+            "row-major), which is exactly the ambiguity RFC #1300 aims to eliminate. "
+            "Three migration patterns cover every DN scenario without writing pl.DN:\n"
+            "  * source tensor shape, no layout marker: pl.Tensor[[N, K], pl.FP32]\n"
+            "  * derive DN at use site: xt = pl.transpose(x, -2, -1)  # ND -> DN\n"
+            "  * inherit DN through slice/reshape from a DN-producing op\n"
+            "If you must express a strided-DN view (e.g. canonical pretty-print "
+            "round-trip), use pl.TensorView(stride=[...], layout=pl.TensorLayout.DN) "
+            "instead — it forces explicit stride and avoids the implicit-coord-flip "
+            "hazard.",
+            DeprecationWarning,
+            stacklevel=4,
         )
 
     def resolve_layout(self, layout_node: ast.expr) -> "ir.TensorLayout":

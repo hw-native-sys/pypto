@@ -48,18 +48,29 @@ idx: pl.Scalar[pl.INDEX]                # 索引标量
 
 ### 张量布局（TensorLayout）
 
-布局控制 Tensor 的物理内存排列：
+Tensor 描述行优先内存，layout 通常由派生 view 的 op **推导**而出。用户面工具箱：
 
-| 布局 | 说明 |
-| ---- | ---- |
-| `pl.ND` | N 维（默认，行优先） |
-| `pl.DN` | DN 布局 |
-| `pl.NZ` | NZ 分形格式（硬件特定分块） |
+| 写法 | 适用场景 | 结果 |
+| ---- | -------- | ---- |
+| `pl.Tensor[[..], pl.FP32]`（不写 layout） | 默认 —— 源 tensor 是普通行优先内存 | ND |
+| `pl.transpose(t, -2, -1)` | 在使用点派生转置视图（如 matmul B^T） | DN |
+| `pl.slice(view, ...)` / `pl.reshape(view, ...)` | 子视图应该继承父 layout | 同父 layout 家族 |
 
 ```python
-# 指定布局作为第三个类型参数
-a: pl.Tensor[[64, 128], pl.FP16, pl.NZ]
+# ✅ 推荐 —— 写源 tensor shape，在使用点派生 DN：
+b: pl.Tensor[[N, K], pl.FP32]
+b_t = pl.transpose(b, -2, -1)  # ND → DN 视图，同一片物理 buffer
+tile_b = pl.load(b_t, [0, 0], [K, N], target_memory=pl.MemorySpace.Mat)
 ```
+
+```python
+# ⚠️ 已弃用（RFC #1300 补充 1）：
+b: pl.Tensor[[K, N], pl.FP32, pl.DN]   # → 解析期触发 DeprecationWarning
+```
+
+> **为什么弃用 `pl.Tensor[..., pl.DN]`。** 这个 layout-only 简写迫使用户脑子里同时持有两套坐标系（IR 逻辑后视图 shape 与 runtime 行优先 shape）—— 恰恰是 RFC #1300 想要消除的歧义。改用 `pl.transpose` 组合，源 tensor 永远写 runtime shape，DN 视图在程序里显式出现。
+
+如需 NZ（硬件 tile layout），写 `pl.Tile[..., pl.NZ]` —— NZ 是 tile-only，不允许作为 TensorType annotation。`pl.NZ` 常量保留用于 tile annotation 和 IR 内部使用。
 
 ### 动态形状（Dynamic Shapes）
 
@@ -514,6 +525,36 @@ b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
 c_acc = pl.matmul(a_l0a, b_l0b)                     # 结果 → Acc
 out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 ```
+
+### 模式：B^T 矩阵乘法（用 transpose 视图代替 transpose=True）
+
+`c = a @ b^T` 应该在 load 之前用 `pl.transpose` 派生转置视图 —— 不要给 `pl.load` 传 `transpose=True`：
+
+```python
+# ✅ 推荐（RFC #1300 补充 2）：
+a_l1 = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
+b_t = pl.transpose(b, -2, -1)   # b 是 [N, K] ND；b_t 是 [K, N] DN 视图
+b_l1 = pl.load(b_t, [0, 0], [K, N], target_memory=pl.Mem.Mat)
+a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
+b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
+c_acc = pl.matmul(a_l0a, b_l0b)
+```
+
+```python
+# ⚠️ 已弃用（兼容期保留；触发 DeprecationWarning）：
+b_l1 = pl.load(b, [0, 0], [N, K], target_memory=pl.Mem.Mat, transpose=True)
+```
+
+转置视图可以跨多次 load 复用（K-tiled 矩阵乘法常见模式），新形式更紧凑：
+
+```python
+b_t = pl.transpose(b, -2, -1)                                # 一次性派生
+for ki in pl.range(0, K, K_TILE):
+    b_i = pl.load(b_t, [ki, 0], [K_TILE, N], target_memory=pl.Mem.Mat)
+    ...
+```
+
+> **为什么弃用 `transpose=True`。** 它把 view 重解释（"把这个 tensor 视为转置后的"）混进了内存搬运 op 里，破坏了 `pl.slice` / `pl.reshape` / `pl.transpose` 的正交性。`pl.transpose` 本身就是纯元数据 reinterpret（不分配、不计算），端到端语义相同 —— 拆开后 `pl.load` 只负责内存搬运。
 
 ## 编译
 
