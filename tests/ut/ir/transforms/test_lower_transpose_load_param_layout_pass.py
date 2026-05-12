@@ -87,6 +87,16 @@ def _shape_dims(ty):
     return out
 
 
+def _const_int_values(exprs):
+    """Return [e.value for e in exprs] asserting each is a ConstInt — narrows
+    the static type so type-checkers don't trip on ``Expr.value``."""
+    out = []
+    for e in exprs:
+        assert isinstance(e, ir.ConstInt), f"expected ConstInt, got {type(e).__name__}"
+        out.append(e.value)
+    return out
+
+
 def _transpose_kwarg(call):
     """Return the value of the ``transpose`` kwarg, or ``None`` if absent."""
     return call.kwargs.get("transpose")
@@ -468,6 +478,88 @@ class TestNoOpCases:
 
         After = passes.lower_transpose_load_param_layout()(Before)
         ir.assert_structural_equal(After, Before)
+
+
+class TestStridedParamFlipsCorrectly:
+    """Regression for #1212 / #1213: when an InCore param's TensorView carries
+    parent-derived strides (a sliced sub-view of a larger tensor — set up here
+    via an explicit ``pl.TensorView(stride=...)`` annotation, the same shape
+    ``SliceInputStridesOptimizer`` produces in the default pipeline), the body-
+    prepended ``tensor.as_layout`` flip must propagate those strides through
+    the §4.2 canonical-pair swap. The output DN view must carry the swapped
+    parent stride, not the slice-shape-derived packed stride — otherwise PTOAS
+    walks rows at the wrong stride and silently miscompiles."""
+
+    def test_strided_nd_param_flips_to_strided_dn(self):
+        """Parent buffer is ``[T, K_parent] ND`` with row stride ``K_parent``;
+        a slice ``[T, K_slice]`` annotated with that parent stride must flip
+        to ``[K_slice, T] DN`` with stride ``[1, K_parent]`` — preserving the
+        parent's row stride at the trailing slot.
+        """
+        T, K_slice, K_parent = 16, 512, 16384
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def matmul_incore(
+                self,
+                a: pl.Tensor[[T, K_slice], pl.FP32],
+                # Slice of a `[T, K_parent]` parent: strided-ND with the
+                # parent's row stride preserved at the outer slot.
+                b_slice: pl.Tensor[  # noqa: E501
+                    [T, K_slice],
+                    pl.FP32,
+                    pl.TensorView(stride=[K_parent, 1], layout=pl.TensorLayout.ND),
+                ],
+                c: pl.Out[pl.Tensor[[T, T], pl.FP32]],
+            ) -> pl.Tensor[[T, T], pl.FP32]:
+                tile_a = pl.load(a, [0, 0], [T, K_slice], target_memory=pl.MemorySpace.Mat)
+                tile_b = pl.load(
+                    b_slice, [0, 0], [T, K_slice], target_memory=pl.MemorySpace.Mat, transpose=True
+                )
+                tile_a_l0 = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
+                tile_b_l0 = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
+                tile_c = pl.matmul(tile_a_l0, tile_b_l0)
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[T, K_slice], pl.FP32],
+                b_slice: pl.Tensor[  # noqa: E501
+                    [T, K_slice],
+                    pl.FP32,
+                    pl.TensorView(stride=[K_parent, 1], layout=pl.TensorLayout.ND),
+                ],
+            ) -> pl.Tensor[[T, T], pl.FP32]:
+                c: pl.Tensor[[T, T], pl.FP32] = pl.create_tensor([T, T], dtype=pl.FP32)
+                c_result = self.matmul_incore(a, b_slice, c)
+                return c_result
+
+        After = passes.lower_transpose_load_param_layout()(Before)
+        incore = _find_function(After, "matmul_incore")
+        b_param = incore.params[1]
+        b_type = _as_tensor_type(b_param.type)
+        # Param is untouched: still [T, K_slice] ND with parent's stride.
+        assert _shape_dims(b_type) == [T, K_slice]
+        assert b_type.tensor_view is not None
+        assert b_type.tensor_view.layout == ir.TensorLayout.ND
+        assert _const_int_values(b_type.tensor_view.stride) == [K_parent, 1]
+
+        # Body prepends b_dn = as_layout(b, DN). Critical: the DN view must
+        # inherit the parent's stride, trailing-pair-swapped — NOT canonical
+        # packed strides derived from the slice's logical shape.
+        b_dn_var, _ = _find_as_layout_binding(incore, b_param)
+        b_dn_type = _as_tensor_type(b_dn_var.type)
+        assert _shape_dims(b_dn_type) == [K_slice, T]
+        assert b_dn_type.tensor_view is not None
+        assert b_dn_type.tensor_view.layout == ir.TensorLayout.DN
+        assert _const_int_values(b_dn_type.tensor_view.stride) == [1, K_parent], (
+            "DN view of a strided-ND parent must carry the parent's row stride "
+            f"({K_parent}) at the trailing slot, not the slice-shape-derived "
+            f"packed stride ({K_slice}). See #1212 / #1213."
+        )
 
 
 class TestMixedUseRejected:

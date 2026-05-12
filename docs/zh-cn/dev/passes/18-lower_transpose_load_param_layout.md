@@ -155,7 +155,12 @@ def orchestrator(self, a, b):
 
 ## 与 `tensor.as_layout`（P4）的交互
 
-本 Pass 是默认 pipeline 中 `tensor.as_layout` 的第一个消费者。该桥接 op 单一职责：翻转 layout 标签，目标 shape 由 §4.2 canonical pair 机械导出，并通过 `CanonicalizeView` 附加 packed canonical strides。codegen 把 `tensor.as_layout` 下沉为一条新的 `pto.make_tensor_view`，绑定到输入 tensor 的底层 SSA buffer 上，使用 LHS 的 `(shape, stride, layout)` 三元组 —— 不发射任何 PTOAS 指令，结果是纯元数据 reinterpret。
+本 Pass 是默认 pipeline 中 `tensor.as_layout` 的第一个消费者。该桥接 op 单一职责：翻转 layout 标签，目标 shape 由 §4.2 canonical pair 机械导出。stride 处理分两种情况（RFC §3.5）：
+
+- **裸 / 空 stride 输入**（多数新建 InCore 参数情形）：输出通过 `CanonicalizeView` 取 packed canonical stride。
+- **显式 stride 输入**（带 strided 视图的参数 —— 例如 `SliceInputStridesOptimizer` 已经为 InCore 参数挂上了父 buffer 的 stride）：输出**继承**输入的 stride 并对末两维做 swap，保证层翻转后父 buffer 的行 stride 仍然指到正确的内存位置。这是 strided-ND ↔ strided-DN canonical pair，也是修复 #1212 / #1213 的关键 —— 这些 case 中 slice 用 logical-shape 推导的 packed stride 会覆盖父 buffer 的实际行 stride，导致 PTOAS 静默错位。
+
+codegen 把 `tensor.as_layout` 下沉为一条新的 `pto.make_tensor_view`，绑定到输入 tensor 的底层 SSA buffer 上，使用 LHS 的 `(shape, stride, layout)` 三元组 —— 不发射任何 PTOAS 指令，结果是纯元数据 reinterpret。
 
 按 RFC §4.2，InCore 侧的 reinterpret 不违反"核内不能创建 tensor"约束：`tensor.as_layout` 不分配任何内存，它只是为输入的现有物理 buffer 换一份描述。
 

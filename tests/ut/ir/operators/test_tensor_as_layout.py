@@ -148,14 +148,37 @@ def test_cross_layout_flip_below_rank_2_rejected():
         ir.op.tensor.as_layout(src, ir.TensorLayout.DN)
 
 
-def test_strided_source_rejected():
-    """Strided sub-views can't ride the canonical pair; reject them so the
-    caller routes through ``tensor.slice`` / ``tensor.reshape`` first."""
-    # Synthesize a strided ND tensor: stride [16, 1] on shape [4, 8] (parent
-    # stride preserved on a 4×8 sub-view of an 8×16 row-major buffer).
+def test_strided_source_flips_inheriting_stride():
+    """Strided sub-views ride the §4.2 canonical pair too: a strided-ND view
+    ``(shape=[4, 8], stride=[16, 1])`` (4×8 sub-view of an 8×16 row-major
+    buffer) flips to a strided-DN view ``(shape=[8, 4], stride=[1, 16])``
+    over the same physical memory. The parent's row stride 16 is preserved
+    through the flip so downstream codegen reads the correct addresses (the
+    bug class behind #1212 / #1213)."""
     src_view = ir.TensorView([_const(16), _const(1)], ir.TensorLayout.ND)
     src = _tensor_var([4, 8], view=src_view, name="strided")
-    with pytest.raises(ValueError, match="strided sub-view"):
+    call = ir.op.tensor.as_layout(src, ir.TensorLayout.DN)
+
+    out = call.type
+    assert isinstance(out, ir.TensorType)
+    # Trailing-pair shape swap.
+    assert _values_of(out.shape) == [8, 4]
+    view = _result_view(call)
+    assert view is not None
+    assert view.layout == ir.TensorLayout.DN
+    # Trailing-pair stride swap — parent row stride (16) now sits at the
+    # outer slot, the inner DN stride is 1.
+    assert _values_of(view.stride) == [1, 16]
+
+
+def test_non_canonical_source_rejected():
+    """Source views that fail the canonical-family invariants (e.g. ND with
+    non-unit innermost stride) are still rejected — they don't describe a
+    well-defined memory pattern."""
+    # ND requires stride[-1] == 1; a stride of [16, 2] violates that.
+    src_view = ir.TensorView([_const(16), _const(2)], ir.TensorLayout.ND)
+    src = _tensor_var([4, 8], view=src_view, name="malformed")
+    with pytest.raises(ValueError, match="not canonical"):
         ir.op.tensor.as_layout(src, ir.TensorLayout.DN)
 
 

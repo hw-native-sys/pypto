@@ -180,10 +180,23 @@ touched — it passes its own row-major ``b`` straight through.
 
 This pass is the first consumer of ``tensor.as_layout`` in the default
 pipeline. The bridging op is single-purpose: it flips the layout tag and
-derives the new shape from §4.2 canonical pair semantics, then attaches the
-packed canonical strides via ``CanonicalizeView``. Codegen lowers
-``tensor.as_layout`` to a fresh ``pto.make_tensor_view`` bound to the input
-tensor's underlying SSA buffer with the LHS's
+derives the new shape from §4.2 canonical pair semantics. Stride handling has
+two cases (RFC §3.5):
+
+- **Bare or empty-stride input** (the common case for fresh InCore params):
+  the output gets packed canonical strides via ``CanonicalizeView``.
+- **Explicit-stride input** (strided sub-views — e.g. when
+  ``SliceInputStridesOptimizer`` has already attached parent-buffer strides
+  to the InCore param): the output **inherits** the input's stride with the
+  trailing pair swapped, preserving the parent buffer's row stride through
+  the layout flip. This is the strided-ND ↔ strided-DN canonical pair and is
+  what keeps PTOAS reading from the correct addresses when an InCore param
+  is a slice of a larger GM tensor (fixes #1212 / #1213 — silent miscompiles
+  where a slice's logical-shape-derived packed strides clobbered the
+  parent's actual row stride).
+
+Codegen lowers ``tensor.as_layout`` to a fresh ``pto.make_tensor_view`` bound
+to the input tensor's underlying SSA buffer with the LHS's
 ``(shape, stride, layout)`` triple — no PTOAS instruction is emitted, the
 result is a pure metadata reinterpret.
 

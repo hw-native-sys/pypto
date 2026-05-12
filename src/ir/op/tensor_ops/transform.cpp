@@ -315,29 +315,22 @@ TypePtr DeduceTensorAsLayoutType(const std::vector<ExprPtr>& args,
   CHECK(new_layout != TensorLayout::NZ)
       << "tensor.as_layout: NZ layout is not allowed on TensorType (NZ is tile-only)";
 
-  // The source must be packed canonical (or bare = implicit ND-packed).
-  // Strided sub-views can't be reinterpreted via the §4.2 canonical pair
-  // because the offset-map equivalence only holds for the packed forms.
+  // The source must be canonical for its declared layout — either packed
+  // (default for the layout) or strided (sub-view that inherits stride from a
+  // packed parent). Both forms participate in the §4.2 canonical pair: the
+  // ND↔DN reinterpret is a trailing-pair swap of *both* shape and stride, so
+  // a strided-ND view ``(shape=[..a, b], stride=[..S, 1])`` maps cleanly to a
+  // strided-DN view ``(shape=[..b, a], stride=[..1, S])`` over the same
+  // physical buffer.
   TensorLayout src_layout =
       src_type->tensor_view_.has_value() ? src_type->tensor_view_->layout : TensorLayout::ND;
   CHECK(src_layout != TensorLayout::NZ)
       << "tensor.as_layout: src has NZ layout (NZ is tile-only and not allowed on TensorType)";
   if (src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
-    auto packed = tensor_view_semantics::BuildLogicalStridesFromLayout(src_type->shape_, src_layout);
-    bool is_packed = packed.size() == src_type->tensor_view_->stride.size();
-    for (size_t i = 0; is_packed && i < packed.size(); ++i) {
-      auto pc = As<ConstInt>(packed[i]);
-      auto sc = As<ConstInt>(src_type->tensor_view_->stride[i]);
-      // Treat ExprPtr-identity as a match for symbolic dims; otherwise demand
-      // ConstInt value equality.
-      bool same = (packed[i].get() == src_type->tensor_view_->stride[i].get()) ||
-                  (pc && sc && pc->value_ == sc->value_);
-      is_packed = is_packed && same;
-    }
-    CHECK(is_packed) << "tensor.as_layout: src is a strided sub-view (stride does not match packed canonical "
-                     << "for layout " << TensorLayoutToString(src_layout)
-                     << "). Strided reinterprets are not "
-                     << "supported; use tensor.slice or tensor.reshape on the packed parent first.";
+    auto canon_check = tensor_view_semantics::CheckCanonicalView(
+        src_type->shape_, src_type->tensor_view_->stride, src_layout, /*relaxed_symbolic=*/true);
+    CHECK(canon_check.ok) << "tensor.as_layout: src view is not canonical for layout "
+                          << TensorLayoutToString(src_layout) << ": " << canon_check.reason;
   }
 
   // Derive the target shape:
@@ -350,7 +343,25 @@ TypePtr DeduceTensorAsLayoutType(const std::vector<ExprPtr>& args,
     std::swap(new_shape[new_shape.size() - 2], new_shape[new_shape.size() - 1]);
   }
 
-  auto new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
+  // Derive the target view's stride. Two cases:
+  //   (a) src carries an explicit stride (packed or strided): inherit and
+  //       trailing-pair-swap it on cross-layout flips. Preserves parent-buffer
+  //       stride info through orch ↔ InCore boundaries (RFC §3.5 + §4.2 — the
+  //       strided-ND ↔ strided-DN canonical pair).
+  //   (b) src is bare or has an empty-stride view: fall back to packed
+  //       canonical for the target layout. ``MaterializeTensorStrides`` would
+  //       fill the same stride later, but emitting it here makes the output
+  //       canonical immediately.
+  TensorView new_view;
+  if (src_type->tensor_view_.has_value() && !src_type->tensor_view_->stride.empty()) {
+    std::vector<ExprPtr> new_stride = src_type->tensor_view_->stride;
+    if (src_layout != new_layout) {
+      std::iter_swap(new_stride.end() - 2, new_stride.end() - 1);
+    }
+    new_view = TensorView(std::move(new_stride), new_layout);
+  } else {
+    new_view = tensor_view_semantics::CanonicalizeView(new_shape, new_layout);
+  }
   // Preserve view-extending metadata (``valid_shape`` / ``pad``) from the
   // source — both fields describe element-level semantics that are layout-
   // invariant under the §4.2 canonical pair, so dropping them would silently
