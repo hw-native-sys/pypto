@@ -158,19 +158,25 @@ def test_for_stmt_with_array_type_iter_arg_codegen():
 
     Each iteration calls ``array.update_element`` and yields the result as
     the next iter's carry value. Codegen must emit a single C-stack array
-    declaration (e.g. ``int64_t arr[4] = {0};``) and in-place writes through
-    that same name — *not* a value-copy of the array (which is invalid C for
-    raw arrays).
+    declaration (e.g. ``int64_t <name>[4] = {0};``) and in-place writes
+    through that same name — *not* a value-copy of the array (which is
+    invalid C for raw arrays).
+
+    The exact emit-name picked by the future codegen patch (init Var,
+    iter_arg, or return_var) is not yet decided, so assertions match the
+    declaration *template* and the indexed-write pattern rather than a
+    specific variable name.
     """
+    import re  # noqa: PLC0415
+
     from pypto.ir.builder import IRBuilder  # noqa: PLC0415
     from pypto.ir.op import array as ir_array  # noqa: PLC0415
     from pypto.pypto_core import DataType  # noqa: PLC0415
 
     ib = IRBuilder()
     with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
-        orch_f.param("x", ir.TensorType([16], DataType.INT64))
+        x = orch_f.param("x", ir.TensorType([16], DataType.INT64))
         orch_f.return_type(ir.TensorType([16], DataType.INT64))
-        x = orch_f.get_result().params[0]
 
         arr0 = ib.let("arr0", ir_array.create(4, DataType.INT64))
         k = ib.var("k", ir.ScalarType(DataType.INDEX))
@@ -184,8 +190,10 @@ def test_for_stmt_with_array_type_iter_arg_codegen():
     program = ir.Program([orch_func], "test_array_iter_arg", ir.Span.unknown())
 
     code = codegen.generate_orchestration(program, orch_func).code
-    assert "int64_t arr0[4] = {0};" in code, code
-    assert "arr0[k] = k;" in code, code
+    # Pattern: one INT64-typed array of extent 4 declared and zero-initialized.
+    assert re.search(r"int64_t\s+\w+\[4\]\s*=\s*\{0\};", code), code
+    # Pattern: an indexed write into that array using the loop var.
+    assert re.search(r"\w+\[k\]\s*=\s*k;", code), code
 
 
 if __name__ == "__main__":
