@@ -535,40 +535,31 @@ out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 
 ### Pattern: Matmul B^T via Transposed View
 
-For `c = a @ b^T`, derive the transposed view via `pl.transpose` **before**
-the load — do not pass `transpose=True` to `pl.load`:
+`pl.load(..., transpose=True)` is **deprecated** (RFC #1300 supplementary 2):
+it mixes a view-reinterpret into a memory-copy op and breaks the
+orthogonality of `pl.slice` / `pl.reshape` / `pl.transpose`.
 
 ```python
-# ✅ Recommended (RFC #1300 supplementary 2):
-a_l1 = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
-b_t = pl.transpose(b, -2, -1)   # b is [N, K] ND; b_t is [K, N] DN view
-b_l1 = pl.load(b_t, [0, 0], [K, N], target_memory=pl.Mem.Mat)
-a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
-b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
-c_acc = pl.matmul(a_l0a, b_l0b)
-```
-
-```python
-# ⚠️ Deprecated (kept for back-compat; emits DeprecationWarning):
+# ⚠️ Deprecated (kept working; emits DeprecationWarning):
 b_l1 = pl.load(b, [0, 0], [N, K], target_memory=pl.Mem.Mat, transpose=True)
 ```
 
-Reusing a transposed view across multiple loads (e.g. K-tiled matmuls)
-is more compact in the new form:
+The end state is `tensor-level transpose view + plain pl.load`:
 
 ```python
-b_t = pl.transpose(b, -2, -1)                                # one-time view
-for ki in pl.range(0, K, K_TILE):
-    b_i = pl.load(b_t, [ki, 0], [K_TILE, N], target_memory=pl.Mem.Mat)
-    ...
+# Target form (not yet end-to-end usable — see note below):
+b_t = pl.transpose(b, -2, -1)   # ND → DN view
+b_l1 = pl.load(b_t, [0, 0], [K, N], target_memory=pl.Mem.Mat)
 ```
 
-> **Why `transpose=True` is deprecated.** It mixes a view-reinterpret
-> ("treat this tensor as transposed") into a memory-copy op, which breaks
-> the orthogonality of `pl.slice` / `pl.reshape` / `pl.transpose`.
-> `pl.transpose` is itself a pure metadata reinterpret (no allocation, no
-> compute) and produces the same end-to-end semantics — `pl.load` then
-> handles only memory movement.
+> **Migration status (May 2026).** The target form does not compose in
+> the current pipeline: `tensor.transpose` lowers to `tile.transpose` in
+> `ConvertTensorToTileOps`, which the consumer `pl.load`'s type check
+> rejects (it requires a TensorType source, not a TileType). Until the
+> lowering is updated to keep `tensor.transpose` as a tensor-level view
+> when its consumer is `pl.load`, **continue using `transpose=True` as
+> before** — the deprecation warning is informational only; no rewrite
+> is required yet. Tracking issue: see RFC #1300 follow-up.
 
 ## Compilation
 

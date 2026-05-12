@@ -526,35 +526,24 @@ c_acc = pl.matmul(a_l0a, b_l0b)                     # 结果 → Acc
 out = pl.store(c_acc, [0, 0], output)      # Acc → DDR
 ```
 
-### 模式：B^T 矩阵乘法（用 transpose 视图代替 transpose=True）
+### 模式：B^T 矩阵乘法（关于弃用的 transpose=True）
 
-`c = a @ b^T` 应该在 load 之前用 `pl.transpose` 派生转置视图 —— 不要给 `pl.load` 传 `transpose=True`：
-
-```python
-# ✅ 推荐（RFC #1300 补充 2）：
-a_l1 = pl.load(a, [0, 0], [M, K], target_memory=pl.Mem.Mat)
-b_t = pl.transpose(b, -2, -1)   # b 是 [N, K] ND；b_t 是 [K, N] DN 视图
-b_l1 = pl.load(b_t, [0, 0], [K, N], target_memory=pl.Mem.Mat)
-a_l0a = pl.move(a_l1, target_memory=pl.Mem.Left)
-b_l0b = pl.move(b_l1, target_memory=pl.Mem.Right)
-c_acc = pl.matmul(a_l0a, b_l0b)
-```
+`pl.load(..., transpose=True)` 已**弃用**（RFC #1300 补充 2）：它把 view 重解释混进了内存搬运 op，破坏了 `pl.slice` / `pl.reshape` / `pl.transpose` 的正交性。
 
 ```python
 # ⚠️ 已弃用（兼容期保留；触发 DeprecationWarning）：
 b_l1 = pl.load(b, [0, 0], [N, K], target_memory=pl.Mem.Mat, transpose=True)
 ```
 
-转置视图可以跨多次 load 复用（K-tiled 矩阵乘法常见模式），新形式更紧凑：
+目标形式是 `tensor 级 transpose 视图 + 普通 pl.load`：
 
 ```python
-b_t = pl.transpose(b, -2, -1)                                # 一次性派生
-for ki in pl.range(0, K, K_TILE):
-    b_i = pl.load(b_t, [ki, 0], [K_TILE, N], target_memory=pl.Mem.Mat)
-    ...
+# 目标写法（当前 pipeline 还无法端到端通过 —— 见下方说明）：
+b_t = pl.transpose(b, -2, -1)   # ND → DN 视图
+b_l1 = pl.load(b_t, [0, 0], [K, N], target_memory=pl.Mem.Mat)
 ```
 
-> **为什么弃用 `transpose=True`。** 它把 view 重解释（"把这个 tensor 视为转置后的"）混进了内存搬运 op 里，破坏了 `pl.slice` / `pl.reshape` / `pl.transpose` 的正交性。`pl.transpose` 本身就是纯元数据 reinterpret（不分配、不计算），端到端语义相同 —— 拆开后 `pl.load` 只负责内存搬运。
+> **迁移状态（2026.5）。** 目标形式当前还不能组合：`tensor.transpose` 在 `ConvertTensorToTileOps` 里会被 lower 为 `tile.transpose`，下游 `pl.load` 的类型检查会拒绝（它要求源是 TensorType，而不是 TileType）。在 lowering 修复之前（让 `tensor.transpose` 在 `pl.load` 消费时保持为 tensor 级视图），**继续按旧写法使用 `transpose=True`** —— DeprecationWarning 只是预告，目前无需改代码。后续 RFC #1300 follow-up issue 会跟踪。
 
 ## 编译
 
