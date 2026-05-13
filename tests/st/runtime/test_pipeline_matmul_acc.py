@@ -54,7 +54,7 @@ This is exactly the access order used in the Qwen3-32B gate_up_silu kernel:
 gate is consumed (cast + silu) between the two pipeline loops, so by the time
 up pipeline overwrites acc@0 the gate value has already been saved.
 
-The output is ``gate_result (BF16) + up_result (BF16)`` stored as BF16.
+The output is ``gate_result (FP32) * up_result (FP32)``, cast and stored as BF16.
 """
 
 from typing import Any
@@ -80,7 +80,7 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
     Computes:
         gate_result[B, N] = x @ wg       (BF16 inputs, FP32 accum)
         up_result[B, N]   = x @ wu       (BF16 inputs, FP32 accum)
-        out[B, N]         = gate_result + up_result   (stored as FP32)
+        out[B, N]         = (gate_result * up_result), cast to BF16
 
     The program uses the exact prolog-then-pipeline pattern from the Qwen3-32B
     gate_up_silu kernel that triggered the acc→acc pto.tmov bug (#1352).
