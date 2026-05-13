@@ -1,6 +1,10 @@
 name: Daily CI
 
 on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
   schedule:
     - cron: '0 22 * * *'  # UTC 22:00 = Shanghai 06:00
   workflow_dispatch:
