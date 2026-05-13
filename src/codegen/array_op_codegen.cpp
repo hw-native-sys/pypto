@@ -56,9 +56,13 @@ REGISTER_ORCHESTRATION_OP(array_create, ("array.create")) {
   CHECK(extent_const) << "array.create extent must be a compile-time ConstInt";
 
   std::string result_var = codegen.GetCurrentResultTarget();
-  std::string cpp_type = array_type->dtype_.ToCTypeString();
+  // TASK_ID is opaque, not numeric — emit ``PTO2TaskId`` rather than letting
+  // ``DataType::ToCTypeString`` fall through to its "unknown" default.
+  std::string cpp_type =
+      array_type->dtype_ == DataType::TASK_ID ? "PTO2TaskId" : array_type->dtype_.ToCTypeString();
 
   // `= {0}` zero-initializes the whole array in C (and is also valid C++).
+  // ``PTO2TaskId`` aggregate-inits to ``invalid()`` under the same syntax.
   // We deliberately avoid `std::array` so the generated code stays on the
   // device CPU's C compiler path with no STL dependency.
   std::ostringstream oss;

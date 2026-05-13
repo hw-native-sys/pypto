@@ -234,6 +234,159 @@ def test_for_stmt_with_task_id_array_iter_arg_codegen():
     code = codegen.generate_orchestration(program, orch_func).code
     decls = re.findall(r"PTO2TaskId\s+(\w+)\[4\]\s*=\s*\{0\};", code)
     assert len(decls) >= 1, code
+    # ``array.create`` op codegen must special-case TASK_ID so the
+    # declaration uses ``PTO2TaskId``, not the ``unknown`` fallback that
+    # ``DataType::TASK_ID.ToCTypeString`` would otherwise return.
+    assert "unknown" not in code, code
+
+
+def test_array_create_task_id_emits_pto2_task_id():
+    """``array.create(N, TASK_ID)`` lowers to ``PTO2TaskId <name>[N] = {0};``.
+
+    Regression for a Phase A gap: PR #1348 added ``DataType::TASK_ID`` to
+    ``ArrayType``'s allowlist but ``array.create``'s codegen handler still
+    routed through ``DataType::ToCTypeString``, which has no TASK_ID case
+    and returned ``"unknown"`` — producing invalid C.
+    """
+    import re  # noqa: PLC0415
+
+    from pypto.ir.builder import IRBuilder  # noqa: PLC0415
+    from pypto.ir.op import array as ir_array  # noqa: PLC0415
+
+    ib = IRBuilder()
+    with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+        x = orch_f.param("x", ir.TensorType([16], DataType.INT64))
+        orch_f.return_type(ir.TensorType([16], DataType.INT64))
+        ib.let("arr", ir_array.create(4, DataType.TASK_ID))
+        ib.return_stmt(x)
+    orch_func = orch_f.get_result()
+    program = ir.Program([orch_func], "test_array_create_task_id", ir.Span.unknown())
+    code = codegen.generate_orchestration(program, orch_func).code
+    assert re.search(r"PTO2TaskId\s+\w+\[4\]\s*=\s*\{0\};", code), code
+    assert "unknown" not in code, code
+
+
+def _build_nested_array_iter_arg_program(
+    dtype: DataType, n_outer: int, n_inner: int
+) -> tuple[ir.Program, ir.Function]:
+    """Build the Phase-B-target shape: outer SEQ x inner PARALLEL, both with ArrayType iter_args.
+
+    The outer iter_arg's init is a freshly allocated array; the *inner* iter_arg's
+    init is the outer iter_arg itself. The inner body writes ``task_invalid()`` /
+    a loop var into slot ``branch``. The outer yields the inner's rv (an
+    ArrayType-typed value).
+
+    Codegen for this shape must:
+
+    * Declare an OUTER carry array distinct from the init (not aliased — each
+      ArrayType iter_arg owns fresh storage, so the alias-closure logic that
+      treats inner_rv ~= outer_iter_arg for tensor buffers must NOT fire here).
+    * Init-copy the outer carry from the init array.
+    * At each outer iter, declare the INNER carry and init-copy slot-by-slot
+      from the OUTER carry (not from the initial array).
+    * At outer yield, slot-by-slot copy the inner carry back into the outer
+      carry so state propagates across iterations.
+    """
+    from pypto.ir.builder import IRBuilder  # noqa: PLC0415
+    from pypto.ir.op import array as ir_array  # noqa: PLC0415
+
+    ib = IRBuilder()
+    with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+        x = orch_f.param("x", ir.TensorType([16], DataType.INT64))
+        orch_f.return_type(ir.TensorType([16], DataType.INT64))
+        arr0 = ib.let("arr0", ir_array.create(n_inner, dtype))
+        phase = ib.var("phase", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(phase, 0, n_outer, 1, kind=ir.ForKind.Sequential) as outer:
+            outer_arr = outer.iter_arg("outer_arr", arr0)
+            outer.return_var("outer_arr_final")
+            branch = ib.var("branch", ir.ScalarType(DataType.INDEX))
+            with ib.for_loop(branch, 0, n_inner, 1, kind=ir.ForKind.Parallel) as inner:
+                inner_arr = inner.iter_arg("inner_arr", outer_arr)
+                inner.return_var("inner_arr_final")
+                if dtype == DataType.TASK_ID:
+                    value = ib.let(
+                        "tid",
+                        ir.create_op_call("system.task_invalid", [], {}, ir.Span.unknown()),
+                    )
+                else:
+                    value = branch
+                updated = ib.let("upd", ir_array.update_element(inner_arr, branch, value))
+                ib.emit(ir.YieldStmt([updated], ir.Span.unknown()))
+            inner_for = inner.get_result()
+            inner_rv = inner_for.return_vars[0]
+            ib.emit(ir.YieldStmt([inner_rv], ir.Span.unknown()))
+        ib.return_stmt(x)
+    orch_func = orch_f.get_result()
+    program = ir.Program([orch_func], "test_nested_array_iter_arg", ir.Span.unknown())
+    return program, orch_func
+
+
+def test_nested_seq_parallel_task_id_array_carry_codegen():
+    """Phase-B-target nested shape: outer SEQ x inner PARALLEL ArrayType[TASK_ID, N] carry.
+
+    Pins the three-fix invariant set: (1) PTO2TaskId, not 'unknown';
+    (2) outer carry exists as a distinct array; (3) inner init-copies from
+    the outer carry; (4) outer yield copies the inner rv back into the
+    outer carry slot-by-slot.
+    """
+    import re  # noqa: PLC0415
+
+    n_outer = 3
+    n_inner = 4
+    program, orch_func = _build_nested_array_iter_arg_program(DataType.TASK_ID, n_outer, n_inner)
+    code = codegen.generate_orchestration(program, orch_func).code
+
+    # No fallback "unknown" dtype anywhere.
+    assert "unknown" not in code, code
+
+    # Three PTO2TaskId arrays of extent N_INNER: the initial, the outer carry,
+    # and the inner carry (declared each outer iter).
+    decls = re.findall(rf"PTO2TaskId\s+(\w+)\[{n_inner}\]\s*=\s*\{{0\}};", code)
+    assert len(decls) >= 3, code
+
+    # Outer carry init copy: copy from the freshly-created initial array into
+    # the outer carry, both PTO2TaskId-typed.
+    init_loop = (
+        rf"for \(int64_t __init_i = 0; __init_i < {n_inner}; \+\+__init_i\)"
+        rf" (\w+)\[__init_i\] = (\w+)\[__init_i\];"
+    )
+    outer_init_copies = re.findall(init_loop, code)
+    assert len(outer_init_copies) >= 2, code  # outer init + inner init
+
+    # Outer yield-back copy: emitted by VisitStmt_(YieldStmtPtr)'s ArrayType
+    # rv branch — distinct from the __init_i loops above (uses __yield_i).
+    yield_loop = (
+        rf"for \(int64_t __yield_i = 0; __yield_i < {n_inner}; \+\+__yield_i\)"
+        rf" (\w+)\[__yield_i\] = (\w+)\[__yield_i\];"
+    )
+    yield_copies = re.findall(yield_loop, code)
+    assert len(yield_copies) >= 1, code
+
+    # Inner body write: ``<inner_carry>[branch] = tid;`` via update_element
+    # LHS-alias.
+    assert re.search(r"\w+\[branch\]\s*=\s*tid;", code), code
+
+    # No "<arr> = <arr>;" self-assignment (would be invalid C for arrays).
+    for name in set(decls):
+        assert f"{name} = {name};" not in code, code
+
+
+def test_nested_seq_parallel_int_array_carry_codegen():
+    """Same nested shape with INT64 dtype — exercises the non-TASK_ID branch
+    of ``array.create``'s codegen plus the same alias-closure and yield
+    fixes."""
+    import re  # noqa: PLC0415
+
+    program, orch_func = _build_nested_array_iter_arg_program(DataType.INT64, 3, 4)
+    code = codegen.generate_orchestration(program, orch_func).code
+    decls = re.findall(r"int64_t\s+\w+\[4\]\s*=\s*\{0\};", code)
+    assert len(decls) >= 3, code
+    yield_loop = (
+        r"for \(int64_t __yield_i = 0; __yield_i < 4; \+\+__yield_i\)"
+        r" (\w+)\[__yield_i\] = (\w+)\[__yield_i\];"
+    )
+    yield_copies = re.findall(yield_loop, code)
+    assert len(yield_copies) >= 1, code
 
 
 if __name__ == "__main__":
