@@ -237,10 +237,10 @@ class TestCrossCoreGroupedTpopTfree:
                     [("a", a), ("b", b), ("output", output)],
                     {"output"},
                 )
-                if test_config.runtime_profiling:
-                    swimlane_dir = work_dir / "swimlane_data"
-                    swimlane_dir.mkdir(parents=True, exist_ok=True)
-                    output_prefix: str | None = str(swimlane_dir)
+                if test_config.any_dfx_enabled():
+                    dfx_dir = work_dir / "dfx_outputs"
+                    dfx_dir.mkdir(parents=True, exist_ok=True)
+                    output_prefix: str | None = str(dfx_dir)
                 else:
                     output_prefix = None
                 execute_on_device(
@@ -252,6 +252,10 @@ class TestCrossCoreGroupedTpopTfree:
                     block_dim=runtime_cfg.get("block_dim", 24),
                     aicpu_thread_num=runtime_cfg.get("aicpu_thread_num", 4),
                     output_prefix=output_prefix,
+                    enable_l2_swimlane=test_config.enable_l2_swimlane,
+                    enable_dump_tensor=test_config.enable_dump_tensor,
+                    enable_pmu=test_config.enable_pmu,
+                    enable_dep_gen=test_config.enable_dep_gen,
                 )
                 validate_golden(
                     outputs,

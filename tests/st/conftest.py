@@ -167,11 +167,39 @@ def pytest_addoption(parser):
         default=None,
         help="Pin the pto-isa clone to a specific git commit (hash or tag). Default: use latest remote HEAD.",
     )
+    # ── DFX (Design For X) toggles ────────────────────────────────────────
+    # Each maps 1:1 to the same-named field on ``RunConfig`` and to the
+    # corresponding ``CallConfig`` member on the runtime side. Names match
+    # ``runtime/conftest.py`` so the two surfaces stay aligned.
     parser.addoption(
-        "--runtime-profiling",
+        "--enable-l2-swimlane",
         action="store_true",
         default=False,
-        help="Enable on-device runtime profiling and generate swimlane.json after execution.",
+        help="Capture per-task L2 perf records into <work_dir>/dfx_outputs/l2_perf_records.json "
+        "and render merged_swimlane_*.json after execution.",
+    )
+    parser.addoption(
+        "--dump-tensor",
+        action="store_true",
+        default=False,
+        help="Dump per-task tensor I/O into <work_dir>/dfx_outputs/tensor_dump/.",
+    )
+    parser.addoption(
+        "--enable-dep-gen",
+        action="store_true",
+        default=False,
+        help="Capture PTO2 dependency edges into <work_dir>/dfx_outputs/deps.json "
+        "and render deps_graph.html.",
+    )
+    parser.addoption(
+        "--enable-pmu",
+        nargs="?",
+        const=2,
+        default=0,
+        type=int,
+        metavar="EVENT_TYPE",
+        help="Enable AICore PMU CSV collection. Bare flag = PIPE_UTILIZATION(2). "
+        "Pass an event type (e.g. 4 = MEMORY) to override.",
     )
 
 
@@ -309,7 +337,10 @@ def test_config(request) -> RunConfig:
         dump_passes=request.config.getoption("--dump-passes"),
         codegen_only=request.config.getoption("--codegen-only"),
         pto_isa_commit=request.config.getoption("--pto-isa-commit"),
-        runtime_profiling=request.config.getoption("--runtime-profiling"),
+        enable_l2_swimlane=request.config.getoption("--enable-l2-swimlane"),
+        enable_dump_tensor=request.config.getoption("--dump-tensor"),
+        enable_pmu=request.config.getoption("--enable-pmu"),
+        enable_dep_gen=request.config.getoption("--enable-dep-gen"),
     )
 
 
@@ -520,7 +551,10 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     dump_passes: bool = session.config.getoption("--dump-passes")
     codegen_only: bool = session.config.getoption("--codegen-only")
     pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
-    runtime_profiling: bool = session.config.getoption("--runtime-profiling")
+    enable_l2_swimlane: bool = session.config.getoption("--enable-l2-swimlane")
+    enable_dump_tensor: bool = session.config.getoption("--dump-tensor")
+    enable_pmu: int = session.config.getoption("--enable-pmu")
+    enable_dep_gen: bool = session.config.getoption("--enable-dep-gen")
 
     # ── determine cache directory ─────────────────────────────────────────────
     save_kernels: bool = session.config.getoption("--save-kernels")
@@ -561,7 +595,10 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         pto_isa_commit=pto_isa_commit,
         compile_workers=max_workers,
         device_pool=device_pool,
-        runtime_profiling=runtime_profiling,
+        enable_l2_swimlane=enable_l2_swimlane,
+        enable_dump_tensor=enable_dump_tensor,
+        enable_pmu=enable_pmu,
+        enable_dep_gen=enable_dep_gen,
     )
     print("[PyPTO] Pipeline scheduled — pytest item loop starting\n")
 

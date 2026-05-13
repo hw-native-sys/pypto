@@ -48,9 +48,9 @@ How to run
 
     # On real hardware, with profiling enabled:
     pytest tests/st/runtime/test_manual_scope_pipeline.py \\
-        --runtime-profiling --platform=a2a3
+        --enable-l2-swimlane --platform=a2a3
 
-    # Without --runtime-profiling, the swimlane assertions skip and only
+    # Without --enable-l2-swimlane, the swimlane assertions skip and only
     # numerical correctness is checked.
 """
 
@@ -182,21 +182,21 @@ class TestManualScopePipeline:
 
 
 # ---------------------------------------------------------------------------
-# Swimlane validation — only when --runtime-profiling is enabled.
+# Swimlane validation — only when --enable-l2-swimlane is enabled.
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def manual_scope_swimlane_file(test_runner) -> Path:
     """Run the pipeline once with profiling and return the swimlane JSON."""
-    if not test_runner.config.runtime_profiling:
-        pytest.skip("pass --runtime-profiling to validate the manual_scope swimlane")
+    if not test_runner.config.enable_l2_swimlane:
+        pytest.skip("pass --enable-l2-swimlane to validate the manual_scope swimlane")
 
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
     result = test_runner.run(_ManualScopePipelinePTO())
     assert result.passed, f"Manual-scope pipeline failed: {result.error}"
 
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
     new_files = after - before
     assert new_files, "No l2_perf_records.json was generated for the manual_scope run"
     return max(new_files, key=lambda p: p.stat().st_mtime)
@@ -396,12 +396,12 @@ class TestPhaseFenceManualScope:
 
 @pytest.fixture(scope="module")
 def phase_fence_swimlane_file(test_runner) -> Path:
-    if not test_runner.config.runtime_profiling:
-        pytest.skip("pass --runtime-profiling to validate the phase-fence swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records.json"))
+    if not test_runner.config.enable_l2_swimlane:
+        pytest.skip("pass --enable-l2-swimlane to validate the phase-fence swimlane")
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
     result = test_runner.run(_PhaseFenceManualScopePTO())
     assert result.passed, f"phase-fence manual_scope failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
     new_files = after - before
     assert new_files, "No l2_perf_records.json generated for the phase-fence run"
     return max(new_files, key=lambda p: p.stat().st_mtime)
@@ -596,12 +596,12 @@ class TestBranchChainManualScope:
 
 @pytest.fixture(scope="module")
 def branch_chain_swimlane_file(test_runner) -> Path:
-    if not test_runner.config.runtime_profiling:
-        pytest.skip("pass --runtime-profiling to validate the branch-chain swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records.json"))
+    if not test_runner.config.enable_l2_swimlane:
+        pytest.skip("pass --enable-l2-swimlane to validate the branch-chain swimlane")
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
     result = test_runner.run(_BranchChainManualScopePTO())
     assert result.passed, f"branch-chain manual_scope failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/swimlane_data/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
     new_files = after - before
     assert new_files, "No l2_perf_records.json generated for the branch-chain run"
     return max(new_files, key=lambda p: p.stat().st_mtime)

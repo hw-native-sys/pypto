@@ -84,8 +84,23 @@ class RunConfig:
             on device.  Useful for validating compilation output.
         pto_isa_commit: If set, pin the pto-isa clone to this specific git
             commit (hash or tag).  ``None`` means use the latest remote HEAD.
-        runtime_profiling: If ``True``, enable runtime profiling and
-            generate ``swimlane.json`` after execution.
+        enable_l2_swimlane: Capture per-task L2 perf records into
+            ``<work_dir>/dfx_outputs/l2_perf_records.json``. After the run
+            ``swimlane_converter`` produces ``merged_swimlane_*.json``.
+            Mirrors runtime's ``--enable-l2-swimlane`` flag.
+        enable_dump_tensor: Dump per-task tensor I/O into
+            ``<work_dir>/dfx_outputs/tensor_dump/``. Inspect with
+            ``python -m simpler_setup.tools.dump_viewer``. Mirrors
+            ``--dump-tensor``.
+        enable_pmu: AICore PMU event type. ``0`` disables collection;
+            ``>0`` enables and selects the event (``2`` = PIPE_UTILIZATION,
+            ``4`` = MEMORY — see ``runtime/docs/dfx/pmu-profiling.md``).
+            Output: ``<work_dir>/dfx_outputs/pmu.csv``. Mirrors
+            ``--enable-pmu N``.
+        enable_dep_gen: Capture PTO2 dependency edges into
+            ``<work_dir>/dfx_outputs/deps.json``. After the run
+            ``deps_to_graph`` renders ``deps_graph.html``. Mirrors
+            ``--enable-dep-gen``.
         compile_profiling: If ``True``, enable compile profiling that records
             per-stage wall-clock timings (parse, passes, codegen).
             Results are written to ``report/pipeline_profile.{txt,json}`` in
@@ -119,7 +134,10 @@ class RunConfig:
     save_kernels_dir: str | None = None
     codegen_only: bool = False
     pto_isa_commit: str | None = None
-    runtime_profiling: bool = False
+    enable_l2_swimlane: bool = False
+    enable_dump_tensor: bool = False
+    enable_pmu: int = 0
+    enable_dep_gen: bool = False
     compile_profiling: bool = False
     diagnostic_phase: DiagnosticPhase | None = None
     disabled_diagnostics: DiagnosticCheckSet | None = None
@@ -144,10 +162,22 @@ class RunConfig:
         if not self.platform.startswith(expected_arch):
             sim_suffix = "sim" if self.platform.endswith("sim") else ""
             self.platform = f"{expected_arch}{sim_suffix}"
-        # Runtime profiling requires kernel artefacts to be retained so
-        # swimlane files can reference kernel_config.py.
-        if self.runtime_profiling and not self.save_kernels:
+        # Any DFX flag requires kernel artefacts to be retained so the
+        # ``<work_dir>/dfx_outputs/`` directory survives the run.
+        if self.any_dfx_enabled() and not self.save_kernels:
             self.save_kernels = True
+
+    def any_dfx_enabled(self) -> bool:
+        """Return ``True`` when at least one DFX flag is enabled.
+
+        DFX (Design For X) covers the four runtime diagnostic sub-features
+        carried on :class:`~simpler.task_interface.CallConfig`:
+        L2 swimlane, tensor dump, PMU and dep_gen. They are independent
+        toggles that share an output directory.
+        """
+        return (
+            self.enable_l2_swimlane or self.enable_dump_tensor or self.enable_pmu > 0 or self.enable_dep_gen
+        )
 
 
 @dataclass
@@ -288,6 +318,34 @@ def run(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _DfxOpts:
+    """Bundle of runtime DFX toggles passed through the execute pipeline.
+
+    Each field maps to the same-named ``CallConfig`` member on the runtime
+    side. ``any()`` answers whether the runtime needs an ``output_prefix``.
+    """
+
+    enable_l2_swimlane: bool = False
+    enable_dump_tensor: bool = False
+    enable_pmu: int = 0
+    enable_dep_gen: bool = False
+
+    def any(self) -> bool:
+        return (
+            self.enable_l2_swimlane or self.enable_dump_tensor or self.enable_pmu > 0 or self.enable_dep_gen
+        )
+
+    @classmethod
+    def from_run_config(cls, cfg: "RunConfig") -> "_DfxOpts":
+        return cls(
+            enable_l2_swimlane=cfg.enable_l2_swimlane,
+            enable_dump_tensor=cfg.enable_dump_tensor,
+            enable_pmu=cfg.enable_pmu,
+            enable_dep_gen=cfg.enable_dep_gen,
+        )
+
+
 def _execute_on_device(
     work_dir: Path,
     golden_path: Path,
@@ -295,7 +353,7 @@ def _execute_on_device(
     runtime_name: str,
     platform: str,
     device_id: int,
-    runtime_profiling: bool = False,
+    dfx: _DfxOpts = _DfxOpts(),
 ) -> None:
     """Load inputs, execute on device, and validate against golden.
 
@@ -312,7 +370,9 @@ def _execute_on_device(
         runtime_name: Runtime name from ``compile_and_assemble``.
         platform: Target execution platform.
         device_id: Hardware device index.
-        runtime_profiling: If ``True``, enable runtime profiling.
+        dfx: Runtime DFX toggles. When any flag is enabled the artefacts
+            land under ``<work_dir>/dfx_outputs/`` and the matching
+            post-run converter is invoked.
     """
     from .device_runner import (  # noqa: PLC0415
         build_orch_args_from_inputs,
@@ -343,10 +403,12 @@ def _execute_on_device(
         golden_module.compute_golden(golden_with_inputs, params)
 
     # Execute
-    swimlane_dir: Path | None = None
-    if runtime_profiling:
-        swimlane_dir = work_dir / "swimlane_data"
-        swimlane_dir.mkdir(parents=True, exist_ok=True)
+    dfx_dir: Path | None = None
+    pre_run_logs: set[Path] = set()
+    device_log_dir: Path | None = None
+    if dfx.any():
+        dfx_dir = work_dir / "dfx_outputs"
+        dfx_dir.mkdir(parents=True, exist_ok=True)
         pre_run_logs, device_log_dir = _snapshot_profiling_state(platform, device_id)
 
     execute_on_device(
@@ -355,17 +417,21 @@ def _execute_on_device(
         platform,
         runtime_name,
         device_id,
-        output_prefix=str(swimlane_dir) if swimlane_dir is not None else None,
+        output_prefix=str(dfx_dir) if dfx_dir is not None else None,
+        enable_l2_swimlane=dfx.enable_l2_swimlane,
+        enable_dump_tensor=dfx.enable_dump_tensor,
+        enable_pmu=dfx.enable_pmu,
+        enable_dep_gen=dfx.enable_dep_gen,
     )
 
-    if runtime_profiling:
-        assert swimlane_dir is not None
-        _collect_swimlane_data(
-            swimlane_dir,
+    if dfx_dir is not None:
+        _collect_dfx_artifacts(
+            dfx_dir,
             platform,
             device_id,
             pre_run_logs,
             device_log_dir,
+            dfx,
         )
 
     # Validate
@@ -378,7 +444,7 @@ def _execute_on_device(
 
 
 # ---------------------------------------------------------------------------
-# Swimlane profiling helpers
+# DFX artefact collection
 # ---------------------------------------------------------------------------
 
 
@@ -402,32 +468,79 @@ def _snapshot_profiling_state(platform: str, device_id: int) -> tuple[set[Path],
     return pre_run_logs, device_log_dir
 
 
-def _collect_swimlane_data(
-    swimlane_dir: Path,
+def _collect_dfx_artifacts(
+    dfx_dir: Path,
     platform: str,
     device_id: int,
     pre_run_logs: set[Path],
     device_log_dir: Path | None,
+    dfx: "_DfxOpts",
 ) -> None:
-    """Collect swimlane profiling data after a profiled device execution.
+    """Dispatch post-run DFX converters per enabled flag.
 
-    The runtime writes ``l2_perf_records.json`` directly into *swimlane_dir*
-    (the ``CallConfig.output_prefix`` we passed at submit). For onboard runs we
-    also pair it with the matching device log and produce merged swimlane JSON
-    via Simpler's swimlane converter.
+    The runtime writes each artefact directly into *dfx_dir* (the
+    ``CallConfig.output_prefix`` passed at submit). Each branch below is
+    independent and skips silently when its artefact is missing — a
+    partial DFX run (e.g. only ``enable_dump_tensor``) must not crash on
+    the swimlane converter looking for ``l2_perf_records.json``.
     """
-    perf_file = swimlane_dir / "l2_perf_records.json"
-    perf_file_arg: Path | None = perf_file if perf_file.exists() else None
+    if dfx.enable_l2_swimlane and (dfx_dir / "l2_perf_records.json").exists():
+        # Onboard runs pair the perf records with the matching device log;
+        # the simulator emits ``l2_perf_records.json`` directly with no
+        # log to pair against.
+        if not platform.endswith("sim"):
+            _generate_swimlane(
+                dfx_dir.parent,
+                device_id,
+                device_log_dir,
+                pre_run_logs,
+                dfx_dir,
+                dfx_dir / "l2_perf_records.json",
+            )
 
-    if not platform.endswith("sim"):
-        _generate_swimlane(
-            swimlane_dir.parent,
-            device_id,
-            device_log_dir,
-            pre_run_logs,
-            swimlane_dir,
-            perf_file_arg,
+    if dfx.enable_dep_gen and (dfx_dir / "deps.json").exists():
+        _convert_deps_to_graph(dfx_dir / "deps.json", dfx_dir / "deps_graph.html")
+
+    if dfx.enable_dump_tensor and (dfx_dir / "tensor_dump" / "tensor_dump.json").exists():
+        # ``dump_viewer`` is interactive; leave the artefact in place and
+        # point the user at the inspection command.
+        print(
+            f"tensor_dump written to {dfx_dir / 'tensor_dump'} — inspect with: "
+            f"python -m simpler_setup.tools.dump_viewer "
+            f"{dfx_dir / 'tensor_dump' / 'tensor_dump.json'}"
         )
+
+    if dfx.enable_pmu > 0 and (dfx_dir / "pmu.csv").exists():
+        print(f"PMU CSV written to: {dfx_dir / 'pmu.csv'}")
+
+
+def _convert_deps_to_graph(deps_json: Path, out_html: Path) -> None:
+    """Render ``deps.json`` to an HTML graph via ``simpler_setup.tools.deps_to_graph``.
+
+    Skips silently when the converter module is unavailable in the active
+    environment (e.g. wheel build without the dev tools). Failures from
+    the subprocess surface as warnings, not exceptions — DFX collection
+    is a best-effort post-run step and must not fail the run.
+    """
+    converter_module = "simpler_setup.tools.deps_to_graph"
+    try:
+        spec = importlib.util.find_spec(converter_module)
+    except ImportError:
+        spec = None
+    if spec is None:
+        print(f"Module {converter_module} not found, skipping deps graph rendering")
+        return
+
+    result = subprocess.run(
+        [sys.executable, "-m", converter_module, str(deps_json), "-o", str(out_html)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"deps_to_graph failed (rc={result.returncode}): {result.stderr.strip()}")
+    else:
+        print(f"Deps graph written to: {out_html}")
 
 
 def _get_device_log_dir(device_id: int) -> Path:
@@ -593,7 +706,7 @@ def execute_compiled(
     platform: str,
     device_id: int,
     pto_isa_commit: str | None = None,
-    runtime_profiling: bool = False,
+    dfx: _DfxOpts = _DfxOpts(),
     level: int = 2,
 ) -> None:
     """Execute a pre-compiled program with user-provided tensors and scalars.
@@ -615,8 +728,9 @@ def execute_compiled(
         platform: Target execution platform.
         device_id: Hardware device index.
         pto_isa_commit: Optional git commit to pin pto-isa clone.
-        runtime_profiling: If ``True``, enable runtime profiling and
-            generate swimlane JSON after execution.
+        dfx: Runtime DFX toggles. When any flag is enabled the artefacts
+            land under ``<work_dir>/dfx_outputs/`` and the matching
+            post-run converter is invoked.
         level: Hierarchy level. Forwarded to :func:`execute_on_device`,
             which currently only supports ``2``.
     """
@@ -686,11 +800,13 @@ def execute_compiled(
         if isinstance(arg, _SimpleCData):
             orch_args.add_scalar(scalar_to_uint64(arg))
 
-    # Snapshot profiling state before execution
-    swimlane_dir: Path | None = None
-    if runtime_profiling:
-        swimlane_dir = work_dir / "swimlane_data"
-        swimlane_dir.mkdir(parents=True, exist_ok=True)
+    # Snapshot DFX state before execution
+    dfx_dir: Path | None = None
+    pre_run_logs: set[Path] = set()
+    device_log_dir: Path | None = None
+    if dfx.any():
+        dfx_dir = work_dir / "dfx_outputs"
+        dfx_dir.mkdir(parents=True, exist_ok=True)
         pre_run_logs, device_log_dir = _snapshot_profiling_state(platform, device_id)
 
     execute_on_device(
@@ -700,10 +816,13 @@ def execute_compiled(
         runtime_name,
         device_id,
         level=level,
-        output_prefix=str(swimlane_dir) if swimlane_dir is not None else None,
+        output_prefix=str(dfx_dir) if dfx_dir is not None else None,
+        enable_l2_swimlane=dfx.enable_l2_swimlane,
+        enable_dump_tensor=dfx.enable_dump_tensor,
+        enable_pmu=dfx.enable_pmu,
+        enable_dep_gen=dfx.enable_dep_gen,
     )
 
-    # Collect swimlane data after execution
-    if runtime_profiling:
-        assert swimlane_dir is not None
-        _collect_swimlane_data(swimlane_dir, platform, device_id, pre_run_logs, device_log_dir)
+    # Collect DFX artefacts after execution (no-op when dfx_dir is None)
+    if dfx_dir is not None:
+        _collect_dfx_artifacts(dfx_dir, platform, device_id, pre_run_logs, device_log_dir, dfx)

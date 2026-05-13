@@ -139,6 +139,9 @@ calls (sub-microsecond on modern hardware).
 
 ## Related
 
-- **Runtime profiling** (`RunConfig(runtime_profiling=True)`) generates
-  hardware-level swimlane traces via Simpler's CodeRunner. This is orthogonal
-  to compile profiling and the two can be enabled independently.
+- **Runtime DFX** (`RunConfig.enable_l2_swimlane`, `enable_dump_tensor`,
+  `enable_pmu`, `enable_dep_gen`) drives Simpler's per-task diagnostic
+  artefacts — swimlane records, tensor I/O dumps, AICore PMU CSVs, and
+  PTO2 dep_gen edges. The four flags are independent, share
+  `<work_dir>/dfx_outputs/` as their output root, and are orthogonal to
+  compile profiling. See [03-runtime-dfx.md](03-runtime-dfx.md).

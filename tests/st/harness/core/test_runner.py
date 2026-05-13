@@ -44,6 +44,7 @@ from pypto.runtime.golden_writer import (
 from pypto.runtime.runner import (
     RunConfig,
     RunResult,
+    _DfxOpts,
     _execute_on_device,
 )
 from pypto.runtime.tensor_spec import TensorSpec as RuntimeTensorSpec
@@ -359,7 +360,7 @@ def _fused_execute_task(
             artifact.runtime_name,
             artifact.resolved_platform,
             device_id,
-            runtime_profiling=_pipeline_ctx.get("runtime_profiling", False),
+            dfx=_pipeline_ctx.get("dfx", _DfxOpts()),
         )
         return RunResult(
             passed=True,
@@ -396,7 +397,7 @@ def _schedule_exec_after_golden(
     return _execute_pool.submit(_fused_execute_task, tc, cache_key, artifact)
 
 
-def start_pipeline(
+def start_pipeline(  # noqa: PLR0913
     *,
     test_cases: "list[PTOTestCase]",
     cache_dir: Path,
@@ -406,7 +407,10 @@ def start_pipeline(
     pto_isa_commit: str | None,
     compile_workers: int,
     device_pool: "queue.Queue[int]",
-    runtime_profiling: bool = False,
+    enable_l2_swimlane: bool = False,
+    enable_dump_tensor: bool = False,
+    enable_pmu: int = 0,
+    enable_dep_gen: bool = False,
 ) -> None:
     """Spin up the compile pipeline and populate :data:`_compile_futures`.
 
@@ -442,7 +446,12 @@ def start_pipeline(
         "dump_passes": dump_passes,
         "codegen_only": codegen_only,
         "pto_isa_commit": pto_isa_commit,
-        "runtime_profiling": runtime_profiling,
+        "dfx": _DfxOpts(
+            enable_l2_swimlane=enable_l2_swimlane,
+            enable_dump_tensor=enable_dump_tensor,
+            enable_pmu=enable_pmu,
+            enable_dep_gen=enable_dep_gen,
+        ),
     }
     n_devices = device_pool.qsize()
     _execute_pool = ThreadPoolExecutor(max_workers=max(1, n_devices), thread_name_prefix="pypto-exec")
@@ -642,7 +651,7 @@ class TestRunner:
                 runtime_name,
                 resolved_platform,
                 self.config.device_id,
-                runtime_profiling=self.config.runtime_profiling,
+                dfx=_DfxOpts.from_run_config(self.config),
             )
 
             return RunResult(

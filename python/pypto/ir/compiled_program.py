@@ -377,7 +377,7 @@ class CompiledProgram:
                     self._validate_device_tensor(arg, info)
                 coerced.append(arg)
 
-        from pypto.runtime.runner import RunConfig, execute_compiled  # noqa: PLC0415
+        from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled  # noqa: PLC0415
 
         if config is None:
             config = RunConfig()
@@ -388,7 +388,7 @@ class CompiledProgram:
             platform=self._platform,
             device_id=config.device_id,
             pto_isa_commit=config.pto_isa_commit,
-            runtime_profiling=config.runtime_profiling,
+            dfx=_DfxOpts.from_run_config(config),
         )
 
         if not return_style:

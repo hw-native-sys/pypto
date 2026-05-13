@@ -486,7 +486,7 @@ def compile_and_assemble(
 # ---------------------------------------------------------------------------
 
 
-def execute_on_device(
+def execute_on_device(  # noqa: PLR0913
     chip_callable: ChipCallable,
     orch_args: ChipStorageTaskArgs,
     platform: str,
@@ -497,6 +497,10 @@ def execute_on_device(
     block_dim: int = 24,
     aicpu_thread_num: int = 4,
     output_prefix: str | None = None,
+    enable_l2_swimlane: bool = False,
+    enable_dump_tensor: bool = False,
+    enable_pmu: int = 0,
+    enable_dep_gen: bool = False,
     runtime_env: dict[str, str] | None = None,
 ) -> None:
     """Execute *chip_callable* on device via Simpler's unified ``Worker``.
@@ -521,17 +525,31 @@ def execute_on_device(
         block_dim: Block dimension for execution.
         aicpu_thread_num: Number of AICPU threads.
         output_prefix: Directory under which the runtime writes diagnostic
-            artifacts (``l2_perf_records.json`` etc.). Passing a non-empty
-            value also enables L2 swimlane profiling; pass ``None`` to run
-            without profiling. Simpler's ``CallConfig::validate()`` rejects
-            an empty prefix whenever any diagnostic flag is enabled, so the
-            two are kept linked at this entry point.
+            artifacts (``l2_perf_records.json`` / ``tensor_dump/`` /
+            ``pmu.csv`` / ``deps.json``). Required whenever any
+            ``enable_*`` DFX flag is set — Simpler's
+            ``CallConfig::validate()`` would otherwise reject the call.
+            Passing it with all flags off creates no artefacts.
+        enable_l2_swimlane: Capture per-task L2 perf records
+            (``l2_perf_records.json``). Mirrors runtime's
+            ``--enable-l2-swimlane`` pytest flag.
+        enable_dump_tensor: Dump per-task tensor I/O into
+            ``<output_prefix>/tensor_dump/``. Mirrors ``--dump-tensor``.
+        enable_pmu: AICore PMU event type. ``0`` disables; ``>0`` selects
+            an event type (``2`` = PIPE_UTILIZATION, ``4`` = MEMORY).
+            Mirrors ``--enable-pmu N``.
+        enable_dep_gen: Capture PTO2 dependency edges (``deps.json``).
+            Mirrors ``--enable-dep-gen``.
         runtime_env: Optional per-example environment variable overrides.
             Applied around the device ``run`` call. When an active
             :class:`pypto.runtime.Worker` is reused, ``init()`` has already
             executed before this call, so env vars that influence device
             initialization will not take effect on the reuse path — pass
             those at ``Worker(...)`` construction instead.
+
+    Raises:
+        ValueError: If ``level != 2`` (L3 not yet exposed), or any DFX flag
+            is enabled without a corresponding ``output_prefix``.
     """
     if level != 2:
         raise ValueError(
@@ -539,15 +557,26 @@ def execute_on_device(
             f"L3 execution is not yet exposed at the pypto user-API layer."
         )
 
-    enable_profiling = bool(output_prefix)
+    any_dfx = enable_l2_swimlane or enable_dump_tensor or enable_pmu > 0 or enable_dep_gen
+    if any_dfx and not output_prefix:
+        raise ValueError(
+            "execute_on_device: output_prefix is required when any DFX flag "
+            "(enable_l2_swimlane / enable_dump_tensor / enable_pmu / enable_dep_gen) "
+            "is enabled — runtime CallConfig::validate() would otherwise reject the call."
+        )
 
     from .worker import Worker as _PyptoWorker  # noqa: PLC0415
 
     cfg = CallConfig()
     cfg.block_dim = block_dim
     cfg.aicpu_thread_num = aicpu_thread_num
-    cfg.enable_l2_swimlane = enable_profiling
-    if enable_profiling:
+    # CallConfig nanobind setters: the three bool fields take `bool`,
+    # ``enable_pmu`` is a raw ``int32_t`` (0 disabled, >0 event type).
+    cfg.enable_l2_swimlane = enable_l2_swimlane
+    cfg.enable_dump_tensor = enable_dump_tensor
+    cfg.enable_pmu = enable_pmu
+    cfg.enable_dep_gen = enable_dep_gen
+    if output_prefix:
         cfg.output_prefix = output_prefix
 
     env = runtime_env or {}
