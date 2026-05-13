@@ -9,6 +9,7 @@
 
 """Unit tests for ``pypto.runtime.runner.RunConfig`` and DFX plumbing."""
 
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -101,6 +102,32 @@ class TestRunConfigDfxFlags:
 
     def test_dfx_opts_any_false_when_all_off(self):
         assert _DfxOpts().any() is False
+
+
+class TestRunConfigRuntimeProfilingDeprecation:
+    """Verify the deprecated ``runtime_profiling`` field still works as an alias."""
+
+    def test_runtime_profiling_aliases_enable_l2_swimlane(self):
+        with pytest.warns(DeprecationWarning, match="runtime_profiling is deprecated"):
+            cfg = RunConfig(platform="a5", runtime_profiling=True)
+        assert cfg.enable_l2_swimlane is True
+        assert cfg.save_kernels is True  # any-DFX auto-enables save_kernels
+
+    def test_runtime_profiling_false_emits_no_warning(self):
+        # An unset/explicit-False deprecated flag must not nag callers that
+        # never touched it.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            cfg = RunConfig(platform="a5", runtime_profiling=False)
+        assert cfg.enable_l2_swimlane is False
+
+    def test_runtime_profiling_does_not_clobber_explicit_enable_l2_swimlane(self):
+        # Both set: result is still True (OR semantics). The new field stays
+        # the source of truth — the deprecated alias only ever turns it ON,
+        # never OFF.
+        with pytest.warns(DeprecationWarning):
+            cfg = RunConfig(platform="a5", runtime_profiling=True, enable_l2_swimlane=True)
+        assert cfg.enable_l2_swimlane is True
 
 
 class TestExecuteOnDeviceDfxValidation:

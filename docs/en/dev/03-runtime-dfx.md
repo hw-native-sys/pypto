@@ -68,6 +68,15 @@ pytest tests/st/runtime/ \
 | pytest entry | [tests/st/conftest.py](../../../tests/st/conftest.py) | `pytest_addoption` |
 | Harness pipeline ctx | [tests/st/harness/core/test_runner.py](../../../tests/st/harness/core/test_runner.py) | `start_pipeline(..., enable_*)` |
 
+## Deprecated aliases
+
+`RunConfig.runtime_profiling` and the pytest flag `--runtime-profiling`
+were the original way to opt into L2 swimlane capture before the four
+DFX features became independently controllable. They are kept as
+aliases for `enable_l2_swimlane` / `--enable-l2-swimlane` so existing
+scripts keep working; both paths emit a `DeprecationWarning` and will
+be removed in a future release. Migrate to the new names.
+
 ## Related
 
 - Simpler's runtime-side reference: `runtime/docs/dfx/{l2-swimlane,
