@@ -130,6 +130,19 @@ class TestRunConfigRuntimeProfilingDeprecation:
         assert cfg.enable_l2_swimlane is True
 
 
+# ``execute_on_device`` lives in ``device_runner`` which eagerly imports the
+# ``simpler`` package (via ``task_interface``). Unit-tests CI runs without
+# ``simpler`` installed, so the import fails at collection time. Mirror the
+# skip pattern from ``test_worker_reuse.py``.
+try:
+    import simpler  # noqa: F401  # pyright: ignore[reportMissingImports]
+except ImportError:
+    _has_simpler = False
+else:
+    _has_simpler = True
+
+
+@pytest.mark.skipif(not _has_simpler, reason="execute_on_device requires the simpler package")
 class TestExecuteOnDeviceDfxValidation:
     """Verify ``execute_on_device`` rejects DFX flags without ``output_prefix``."""
 

@@ -724,7 +724,7 @@ def _add_headers_to_file(cpp_file: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def execute_compiled(
+def execute_compiled(  # noqa: PLR0913
     work_dir: str | Path,
     args: list[torch.Tensor | DeviceTensor | _SimpleCData],
     *,
@@ -732,6 +732,7 @@ def execute_compiled(
     device_id: int,
     pto_isa_commit: str | None = None,
     dfx: _DfxOpts = _DfxOpts(),
+    runtime_profiling: bool = False,
     level: int = 2,
 ) -> None:
     """Execute a pre-compiled program with user-provided tensors and scalars.
@@ -756,10 +757,33 @@ def execute_compiled(
         dfx: Runtime DFX toggles. When any flag is enabled the artefacts
             land under ``<work_dir>/dfx_outputs/`` and the matching
             post-run converter is invoked.
+        runtime_profiling: DEPRECATED alias for
+            ``dfx=_DfxOpts(enable_l2_swimlane=True)``. Kept so external
+            callers (e.g. ``pypto-lib/golden/runner.py``) that still pass
+            ``runtime_profiling=True`` keep working. Emits a
+            ``DeprecationWarning`` and ORs into the swimlane flag. Will
+            be removed in a future release.
         level: Hierarchy level. Forwarded to :func:`execute_on_device`,
             which currently only supports ``2``.
     """
     work_dir = Path(work_dir)
+
+    # Deprecated alias: fold ``runtime_profiling=True`` onto ``dfx``.
+    if runtime_profiling:
+        warnings.warn(
+            "execute_compiled(runtime_profiling=...) is deprecated; pass "
+            "``dfx=_DfxOpts(enable_l2_swimlane=True)`` instead. The two are "
+            "aliased today and runtime_profiling will be removed in a future "
+            "release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        dfx = _DfxOpts(
+            enable_l2_swimlane=True,
+            enable_dump_tensor=dfx.enable_dump_tensor,
+            enable_pmu=dfx.enable_pmu,
+            enable_dep_gen=dfx.enable_dep_gen,
+        )
 
     # Ensure orchestration headers are patched (idempotent)
     _patch_orchestration_headers(work_dir)
