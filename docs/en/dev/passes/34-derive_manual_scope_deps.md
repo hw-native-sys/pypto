@@ -43,7 +43,7 @@ program_after = pass_obj(program)
 
 ### Stage 1 — `ManualDepResolveMutator`
 
-For every kernel `Call` inside a manual scope, copy `Call.attrs["user_manual_dep_edges"]` (the Tensor-Var edges written by the parser when the DSL passed `deps=[var, ...]`) into `Call.attrs["manual_dep_edges"]`. No auto-derivation runs. The per-call edge count is checked against `kManualDepEdgeLimit = 16` (mirrors runtime `PTO2_MAX_EXPLICIT_DEPS`); an internal error is raised on the offending call when exceeded, with the call's span attached.
+For every kernel `Call` inside a manual scope, copy `Call.attrs["user_manual_dep_edges"]` (the Tensor-Var edges written by the parser when the DSL passed `deps=[var, ...]`) into `Call.attrs["manual_dep_edges"]`. No auto-derivation runs. No per-call cap is enforced — codegen sizes the emitted `ArgWithDeps<N>` to the exact dep count, and the runtime's `Arg::set_dependencies(ptr, count)` primitive has no upper bound.
 
 ### Stage 2 — `TaskRelevantVarCollector` (closure analysis)
 
@@ -126,7 +126,7 @@ for phase, (out__iter_v1, out__iter_v1__tid) in pl.range(4, init_values=(out, ou
     out__rv_v2, out__rv_v2__tid = pl.yield_(out__rv_v4, out__rv_v4__tid)
 ```
 
-The orchestration codegen treats the `pl.parallel` TaskId iter_arg as **array carry of size `N_BRANCHES`** when the trip count is statically known: it allocates `PTO2TaskId arr[N_BRANCHES]`, per-iteration yields write one slot, and downstream consumers get one `add_dep` per slot. This guarantees a phase-fence on **all** parallel iters, not just the last-dispatched one. The size cap is the same `PTO2_MAX_EXPLICIT_DEPS = 16`; a const trip count beyond that fails at codegen time with a clear error. A non-const trip count under `pl.parallel` carrying a manual dep is rejected at codegen with a "statically-known trip count" message.
+The orchestration codegen treats the `pl.parallel` TaskId iter_arg as **array carry of size `N_BRANCHES`** when the trip count is statically known: it allocates `PTO2TaskId arr[N_BRANCHES]`, per-iteration yields write one slot, and downstream consumers get one `add_dep` per slot. This guarantees a phase-fence on **all** parallel iters, not just the last-dispatched one. The size cap is the emitted `ArgWithDeps<>` capacity (default 16); a const trip count beyond that fails at codegen time with a clear error. A non-const trip count under `pl.parallel` carrying a manual dep is rejected at codegen with a "statically-known trip count" message.
 
 ### Var aliases and tuple unpacking
 

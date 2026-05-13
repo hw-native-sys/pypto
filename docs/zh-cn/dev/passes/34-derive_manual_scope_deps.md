@@ -43,7 +43,7 @@ program_after = pass_obj(program)
 
 ### 阶段 1 — `ManualDepResolveMutator`
 
-对 manual scope 内的每个 kernel `Call`，把 `Call.attrs["user_manual_dep_edges"]`（parser 在 DSL 传 `deps=[var, ...]` 时写入的 Tensor Var 边）复制到 `Call.attrs["manual_dep_edges"]`。不做任何自动推导。单 call 的边数与 `kManualDepEdgeLimit = 16`（对应 runtime `PTO2_MAX_EXPLICIT_DEPS`）做检查，超限时抛出携带 call span 的 internal error。
+对 manual scope 内的每个 kernel `Call`，把 `Call.attrs["user_manual_dep_edges"]`（parser 在 DSL 传 `deps=[var, ...]` 时写入的 Tensor Var 边）复制到 `Call.attrs["manual_dep_edges"]`。不做任何自动推导。不再对单 call 的边数做上限检查——codegen 会按实际依赖数生成 `ArgWithDeps<N>`，且 runtime 的 `Arg::set_dependencies(ptr, count)` 原语没有上限。
 
 ### 阶段 2 — `TaskRelevantVarCollector`（闭包分析）
 
@@ -126,7 +126,7 @@ for phase, (out__iter_v1, out__iter_v1__tid) in pl.range(4, init_values=(out, ou
     out__rv_v2, out__rv_v2__tid = pl.yield_(out__rv_v4, out__rv_v4__tid)
 ```
 
-orchestration codegen 把 `pl.parallel` 上的 TaskId iter_arg 视作**大小为 `N_BRANCHES` 的数组 carry**（仅当 trip count 为编译期常量时）：分配 `PTO2TaskId arr[N_BRANCHES]`，每个 parallel iter 写入自己的槽位；下游消费者对每个槽各发一次 `add_dep`。这就保证 phase fence 真正等待**全部** parallel iter，而不是只等"最后被发射"的那个 task。大小上限同样是 `PTO2_MAX_EXPLICIT_DEPS = 16`；超过会在 codegen 时报清晰错误。带 manual dep 的 `pl.parallel` 若 trip count 不是常量，codegen 会直接报"statically-known trip count"错误。
+orchestration codegen 把 `pl.parallel` 上的 TaskId iter_arg 视作**大小为 `N_BRANCHES` 的数组 carry**（仅当 trip count 为编译期常量时）：分配 `PTO2TaskId arr[N_BRANCHES]`，每个 parallel iter 写入自己的槽位；下游消费者对每个槽各发一次 `add_dep`。这就保证 phase fence 真正等待**全部** parallel iter，而不是只等"最后被发射"的那个 task。大小上限是 codegen 生成的 `ArgWithDeps<>` 容量（默认 16）；超过会在 codegen 时报清晰错误。带 manual dep 的 `pl.parallel` 若 trip count 不是常量，codegen 会直接报"statically-known trip count"错误。
 
 ### Var 别名与元组解包
 

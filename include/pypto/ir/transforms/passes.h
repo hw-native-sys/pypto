@@ -640,10 +640,6 @@ Pass DeriveCallDirections();
  * ``params.add_dep(task_<emit_name>, ...)`` calls before the
  * ``rt_submit_*_task(...)`` line.
  *
- * Hard caps:
- *   - The runtime forbids more than 16 explicit dep edges per submit
- *     (``PTO2_MAX_EXPLICIT_DEPS``). The pass diagnoses this case as an
- *     error so the user refactors before codegen sees an unrepresentable IR.
  *
  * Requirements:
  *   - DeriveCallDirections must run first (``arg_directions`` populated

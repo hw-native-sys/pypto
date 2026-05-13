@@ -83,13 +83,10 @@ namespace {
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 
-// Runtime cap on per-task explicit dependencies. Mirrors
-// ``PTO2_MAX_EXPLICIT_DEPS`` in
-// ``runtime/src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/runtime/pto_types.h``
-// — exceeding this at codegen time would generate ``add_dep`` calls beyond
-// the per-task storage and trip the runtime's own size check. Bounding the
-// array-carry expansion here gives a clear codegen-time error instead.
-constexpr int64_t kMaxExplicitDepsPerTask = 16;
+// The runtime primitive ``Arg::set_dependencies(ptr, count)`` has no upper
+// bound on the explicit dep count, and codegen emits ``ArgWithDeps<N>`` with
+// N sized to each call's exact dep count, so there is no codegen-time cap on
+// per-task explicit dependencies.
 
 int GetGMPipeSlotCount(int dir_mask) {
   const int bidirectional = core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C;
@@ -554,11 +551,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // A Parallel ForStmt with a TaskId iter_arg REQUIRES a const trip count
     // so we can allocate a ``PTO2TaskId[N]`` backing store. Without it we
     // would silently fall back to last-dispatched fence semantics — wrong
-    // under MANUAL scope. Also bound the trip count by the runtime's
-    // per-task dep cap: an array of size N fans out into N ``add_dep`` calls
-    // on every downstream task, and exceeding ``PTO2_MAX_EXPLICIT_DEPS``
-    // overflows the runtime's fixed-size dep store. Surface both as clear
-    // user-facing errors instead of emitting incorrect code.
+    // under MANUAL scope. Surface this as a clear user-facing error instead
+    // of emitting incorrect code.
     if (for_stmt->kind_ == ForKind::Parallel && in_manual_scope_depth_ > 0) {
       for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
         if (!is_rebind[i]) continue;
@@ -570,13 +564,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
                                   << "Either make the parallel loop's trip count a Python int "
                                   << "(e.g. ``pl.parallel(4)``) or restructure to put the parallel "
                                   << "loop inside a const-bounded scope.";
-        CHECK(array_sizes[i] <= kMaxExplicitDepsPerTask)
-            << "manual_scope: pl.parallel trip count " << array_sizes[i]
-            << " exceeds runtime cap PTO2_MAX_EXPLICIT_DEPS=" << kMaxExplicitDepsPerTask
-            << ". Each downstream task would receive " << array_sizes[i]
-            << " add_dep entries (one per parallel iter), overflowing the "
-            << "fixed-size per-task dep store. Shrink the parallel loop or "
-            << "split the dependency into multiple manual scopes.";
       }
     }
 
@@ -1409,6 +1396,45 @@ class OrchestrationStmtCodegen : public CodegenBase {
     task_counter_++;
   }
 
+  /// Upper bound on the number of ``add_dep`` entries that ``EmitManualDeps``
+  /// would emit for ``call``. Used to size the per-task ``ArgWithDeps<N>``
+  /// wrapper. Returns 0 outside a manual scope (auto scope derives deps from
+  /// data flow at runtime, so codegen emits no ``add_dep`` calls).
+  size_t CountManualDeps(const CallPtr& call) const {
+    if (in_manual_scope_depth_ == 0) return 0;
+    for (const auto& [k, v] : call->attrs_) {
+      if (k != kAttrManualDepEdges) continue;
+      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+      if (edges == nullptr) return 0;
+      size_t total = 0;
+      for (const auto& edge : *edges) {
+        if (!edge) continue;
+        auto it = manual_task_id_map_.find(edge.get());
+        if (it == manual_task_id_map_.end()) continue;
+        if (std::get_if<int>(&it->second)) continue;
+        if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
+          total += names->size();
+        } else {
+          total += 1;
+        }
+      }
+      return total;
+    }
+    return 0;
+  }
+
+  /// Emit the per-task ``Arg`` (or ``ArgWithDeps<N>``) declaration. Sizes
+  /// ``N`` to the exact dep-edge count when in a manual scope; emits plain
+  /// ``Arg`` outside manual scope or when no edges are present.
+  void EmitTaskParamsDecl(const std::string& ind, const std::string& task_var, const CallPtr& call) {
+    const size_t dep_count = CountManualDeps(call);
+    if (dep_count == 0) {
+      code_ << ind << "Arg " << task_var << ";\n";
+    } else {
+      code_ << ind << "ArgWithDeps<" << dep_count << "> " << task_var << ";\n";
+    }
+  }
+
   /// Emit ``params_t<n>.add_dep(task_<m>);`` for every entry resolved by the
   /// ``DeriveManualScopeDeps`` pass. No-op outside a manual scope (auto scope
   /// derives deps from data flow at runtime).
@@ -1691,7 +1717,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string task_var = "params_t" + std::to_string(task_counter_);
     code_ << "\n";
     code_ << ind << "// Task " << task_counter_ << ": " << callee_name << "\n";
-    code_ << ind << "Arg " << task_var << ";\n";
+    EmitTaskParamsDecl(ind, task_var, call);
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
@@ -1723,7 +1749,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string task_var = "params_t" + std::to_string(task_counter_);
     code_ << "\n";
     code_ << ind << "// Spmd " << spmd_func->name_ << ": " << callee_name << "\n";
-    code_ << ind << "Arg " << task_var << ";\n";
+    EmitTaskParamsDecl(ind, task_var, call);
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
@@ -1762,7 +1788,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       std::string task_var = "params_t" + std::to_string(task_counter_);
       code_ << "\n";
       code_ << ind << "// Group " << group_name << ": AIV-only SPMD\n";
-      code_ << ind << "Arg " << task_var << ";\n";
+      EmitTaskParamsDecl(ind, task_var, call);
       for (const auto& p : params) {
         code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
       }
@@ -1804,7 +1830,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     code_ << "\n";
     code_ << ind << "// Group " << group_name << ": MixedKernels (AIC + AIV lanes)\n";
-    code_ << ind << "Arg " << task_var << ";\n";
+    EmitTaskParamsDecl(ind, task_var, call);
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }

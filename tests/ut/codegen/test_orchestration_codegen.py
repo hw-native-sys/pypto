@@ -1119,9 +1119,9 @@ class TestOrchestration:
         in_task0 = False
         in_task1 = False
         for line in lines:
-            if "Arg params_t0" in line:
+            if "params_t0;" in line and "params_t0." not in line:
                 in_task0 = True
-            elif "Arg params_t1" in line:
+            elif "params_t1;" in line and "params_t1." not in line:
                 in_task1 = True
             elif "rt_submit" in line:
                 in_task0 = False
@@ -3228,20 +3228,21 @@ class TestManualScopeCodegen:
         with pytest.raises(Exception, match="statically-known trip count"):
             _generate_orch_code(transformed)
 
-    def test_manual_scope_parallel_exceeds_explicit_dep_cap_rejected(self):
-        """``pl.parallel(N)`` with ``N > kMaxExplicitDepsPerTask`` must error.
+    def test_manual_scope_parallel_array_carry_above_legacy_16_cap(self):
+        """``pl.parallel(N)`` with ``N > 16`` must succeed and size the wrapper.
 
-        Each downstream task receives one ``add_dep`` per parallel slot, so a
-        trip count above ``PTO2_MAX_EXPLICIT_DEPS=16`` overflows the runtime's
-        fixed-size per-task dep store. Codegen surfaces this as a user-facing
-        CHECK rather than emitting code that would fail at runtime.
+        The runtime's ``Arg::set_dependencies(ptr, count)`` primitive has no
+        upper bound on explicit deps, so codegen emits ``ArgWithDeps<N>``
+        sized to the exact dep-edge count. A parallel loop carrying a
+        manual_scope dep across N=17 slots produces a downstream task with
+        17 ``add_dep`` calls wrapped in ``ArgWithDeps<17>``.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
         ROWS, COLS = 128, 128
         TILE_R, TILE_C = 32, 32
-        OVER_CAP = 17  # one past kMaxExplicitDepsPerTask = 16
+        ABOVE_LEGACY_CAP = 17  # past the legacy 16-dep cap that no longer exists
 
         @pl.program
         class Prog:
@@ -3267,15 +3268,17 @@ class TestManualScopeCodegen:
                 with pl.manual_scope():
                     for i in pl.range(4):
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
-                        for j in pl.parallel(OVER_CAP):
+                        for j in pl.parallel(ABOVE_LEGACY_CAP):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
                             out = self.kern(x, out, row, col, deps=[out])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         transformed = pm.run_passes(Prog)
-        with pytest.raises(Exception, match="PTO2_MAX_EXPLICIT_DEPS"):
-            _generate_orch_code(transformed)
+        code = _generate_orch_code(transformed)
+        # Wrapper is sized to the exact dep count (17 slots from the parallel
+        # array carry), proving the legacy 16-cap is gone.
+        assert f"ArgWithDeps<{ABOVE_LEGACY_CAP}>" in code, code
 
 
 if __name__ == "__main__":

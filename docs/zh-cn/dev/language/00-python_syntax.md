@@ -335,8 +335,8 @@ def main(self, x: pl.Tensor[[64], pl.FP32],
 pass（底层实现为 `LowerManualDepsToTaskId` lowering，对外保留旧 pass 名）
 把每个 `deps=[var, ...]` 解析为 producer 的 TaskId 配套、写入 call 的
 `manual_dep_edges`，并为每个外层 `pl.range` / `pl.parallel` 同步追加
-TaskId iter_arg / return_var / yield 项。每个 call 上限 16 条边，对齐
-runtime `PTO2_MAX_EXPLICIT_DEPS`。
+TaskId iter_arg / return_var / yield 项。不再对每 call 边数设上限——
+codegen 按实际依赖数生成 `ArgWithDeps<N>`。
 
 `pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用——
 pass 不再以 per-arg direction 做依赖解析。
@@ -354,13 +354,11 @@ task）。这就保证用户声明的 fence 语义即便在迭代乱序完成时
 - `pl.parallel` 的 trip count 必须是 Python 字面量（编译期常量）。
   trip count 是动态值的情况下 codegen 会拒绝，提示 "statically-known
   trip count"。
-- trip count 不得超过 `PTO2_MAX_EXPLICIT_DEPS = 16`（runtime 单 task
-  显式依赖上限）；超出会在 codegen 时报错。
 
 ```python
 with pl.manual_scope():
     for phase in pl.range(N_PHASES):
-        for branch in pl.parallel(N_BRANCHES):           # 常量 N_BRANCHES <= 16
+        for branch in pl.parallel(N_BRANCHES):           # 编译期常量
             row = (phase * N_BRANCHES + branch) * TILE_M
             out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
 ```

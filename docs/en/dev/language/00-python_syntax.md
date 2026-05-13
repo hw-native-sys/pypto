@@ -336,8 +336,8 @@ pass (the public name for the underlying `LowerManualDepsToTaskId` lowering)
 resolves each `deps=[var, ...]` entry to a TaskId companion of the producer,
 attaches it to the call's `manual_dep_edges` attr, and threads matching TaskId
 iter_args / return-vars / yields through every enclosing `pl.range` /
-`pl.parallel`. The list is capped at 16 edges per call to mirror the runtime's
-`PTO2_MAX_EXPLICIT_DEPS`.
+`pl.parallel`. There is no cap on the number of edges per call — codegen
+sizes the emitted `ArgWithDeps<N>` to the exact dep count.
 
 `pl.no_dep(arg)` is an auto-scope primitive; inside `pl.manual_scope` it has
 no effect since the pass never inspects per-arg directions for dependency
@@ -358,13 +358,11 @@ Requirements for the array-carry path:
 - The `pl.parallel` trip count must be a Python literal (statically known).
   A dynamic trip count under `pl.parallel` carrying a manual dep is rejected
   at codegen with a "statically-known trip count" message.
-- The trip count must not exceed `PTO2_MAX_EXPLICIT_DEPS = 16` (the runtime's
-  per-task explicit-dep cap); larger counts are rejected at codegen.
 
 ```python
 with pl.manual_scope():
     for phase in pl.range(N_PHASES):
-        for branch in pl.parallel(N_BRANCHES):           # const N_BRANCHES <= 16
+        for branch in pl.parallel(N_BRANCHES):           # const trip count
             row = (phase * N_BRANCHES + branch) * TILE_M
             out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
 ```

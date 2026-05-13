@@ -38,8 +38,6 @@ namespace {
 
 using ::pypto::codegen::IsBuiltinOp;
 
-constexpr size_t kManualDepEdgeLimit = 16;
-
 // ---------------------------------------------------------------------------
 // First pass: resolve manual_dep_edges from user_manual_dep_edges (legacy
 // behavior of DeriveManualScopeDeps, minus the auto-dataflow inference which
@@ -100,9 +98,6 @@ class ManualDepResolveMutator : public IRMutator {
       }
       break;
     }
-    INTERNAL_CHECK_SPAN(deps.size() <= kManualDepEdgeLimit, call->span_)
-        << "manual_scope: call has " << deps.size() << " dependency edges, exceeds runtime cap of "
-        << kManualDepEdgeLimit;
     if (deps.empty()) return call;
     auto new_attrs = WithManualDepEdgesAttr(call->attrs_, std::move(deps));
     return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),

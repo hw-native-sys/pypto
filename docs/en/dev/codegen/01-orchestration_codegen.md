@@ -11,7 +11,7 @@ For example, return-to-parameter tracing (mapping callee return values back to `
 The orchestration codegen generates PTO2 runtime C++ code that manages task-graph execution on Ascend hardware. While [PTO codegen](00-pto_codegen.md) produces InCore kernel code (tile-level compute), orchestration codegen produces the host-side code that:
 
 - Wraps device memory pointers (via `ChipStorageTaskArgs`) into `Tensor` objects
-- Builds `Arg` objects and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
+- Builds `Arg` objects (or `ArgWithDeps<N>` when the task carries explicit `add_dep` edges inside a manual scope) and calls `add_input`/`add_output`/`add_inout`/`add_scalar` to classify parameters
 - Submits tasks to AIC (CUBE) or AIV (VECTOR) cores via `rt_submit_*_task`
 - Handles control flow (loops, conditionals) with `PTO2_SCOPE`
 
@@ -446,10 +446,11 @@ in topologies like case1 (outer SEQ × inner PARALLEL).
 - The `pl.parallel` trip count must be a Python literal (statically known).
   A dynamic trip count is rejected at codegen with a "statically-known trip
   count" message.
-- The trip count must satisfy `N <= kMaxExplicitDepsPerTask = 16`. The
-  constant mirrors runtime `PTO2_MAX_EXPLICIT_DEPS` from
-  `runtime/src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/runtime/pto_types.h`;
-  exceeding it would overflow the runtime's fixed-size per-task dep store.
+
+The downstream wrapper is sized to the exact dep count via `ArgWithDeps<N>`
+(see `runtime/src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/orchestration/pto_arg_with_deps.h`),
+so trip counts larger than 16 are not capped — the runtime primitive
+`Arg::set_dependencies(ptr, count)` has no upper bound either.
 
 ### Example
 
