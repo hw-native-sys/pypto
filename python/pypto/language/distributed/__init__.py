@@ -16,12 +16,16 @@ Provides cross-rank concepts that complement the single-device DSL in
 ``device=`` kwarg on dispatch sites; users do not declare ``CommGroup``
 manually.
 
-This module is currently a namespace placeholder; concrete entry points
-(``pld.DistributedTensor``, ``pld.alloc_window_buffer``, ``pld.world_size``,
-``pld.tile.*``, ``pld.system.*``) are added in subsequent milestones (N1.2+).
+Package layout mirrors :mod:`pypto.language`:
+
+* :mod:`pypto.language.distributed.op` — parser-sentinel ops
+  (:func:`alloc_window_buffer`, :func:`window`, :func:`world_size`).
+  Per-file split mirrors the C++ side (``src/ir/op/distributed/``).
+* :mod:`pypto.language.distributed.typing` — DSL type wrappers
+  (:class:`DistributedTensor`).
 """
 
-from .alloc import alloc_window_buffer, window
-from .distributed_tensor import DistributedTensor
+from .op import alloc_window_buffer, window, world_size
+from .typing import DistributedTensor
 
-__all__ = ["DistributedTensor", "alloc_window_buffer", "window"]
+__all__ = ["DistributedTensor", "alloc_window_buffer", "window", "world_size"]

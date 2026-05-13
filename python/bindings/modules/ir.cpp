@@ -873,6 +873,10 @@ void BindIR(nb::module_& m) {
           lst.append(nb::cast(v));
         }
         result[key.c_str()] = lst;
+      } else if (value.type() == typeid(ExprPtr)) {
+        // IR expressions stored in attrs (e.g. attrs["device"] on Orchestration
+        // dispatch calls; attrs["core_num"] on Function attrs for outlined Spmd).
+        result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
       }
     }
     return result;

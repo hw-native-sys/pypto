@@ -41,7 +41,7 @@ from pypto.language.typing import IntLike
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Var
 
-from .distributed_tensor import DistributedTensor
+from ..typing.distributed_tensor import DistributedTensor
 
 
 def alloc_window_buffer(size: IntLike) -> Var:  # noqa: ARG001

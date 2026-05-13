@@ -348,6 +348,9 @@ class ASTParser:
         )
         # Current function name (set during parse_function)
         self._func_name: str = ""
+        # Current function level (set during parse_function). Used by ops with
+        # context constraints (e.g. ``pld.world_size`` is host-only).
+        self._func_level: ir.Level | None = None
 
         # Pending comments keyed by 1-based line number, drained by parse_statement.
         # Each entry is (col_offset, text) so the parser can distinguish
@@ -440,6 +443,7 @@ class ASTParser:
         """
         func_name = func_def.name
         self._func_name = func_name
+        self._func_level = func_level
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
@@ -3567,14 +3571,19 @@ class ASTParser:
                     # surface call-site directions on cross-function calls.
                     # Inside a ``with pl.manual_scope():`` block we additionally
                     # accept ``deps=[var1, var2, ...]`` to attach explicit
-                    # dependency edges (Phase 4); other kwargs still rejected.
+                    # dependency edges (Phase 4). ``device=`` selects the physical
+                    # device for an Orchestration dispatch; permitted only when
+                    # the callee is an Orchestration function. Other kwargs are
+                    # rejected.
+                    func_obj = self.gvar_to_func.get(gvar)
                     allowed_kwargs = {"attrs"}
                     if self._manual_scope_depth > 0:
                         allowed_kwargs.add("deps")
+                    if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
+                        allowed_kwargs.add("device")
                     self._reject_keyword_args(method_name, call, span, allowed=allowed_kwargs)
 
                     # Validate argument count before parsing args to fail fast
-                    func_obj = self.gvar_to_func.get(gvar)
                     if func_obj is not None:
                         self._validate_call_arg_count(method_name, func_obj, len(call.args), span)
 
@@ -3590,6 +3599,9 @@ class ASTParser:
                     user_dep_vars: list[ir.Var] = []
                     if self._manual_scope_depth > 0:
                         user_dep_vars = self._parse_manual_scope_deps_kwarg(method_name, call, span)
+                    # Orchestration dispatch ``device=`` kwarg: resolves to a
+                    # ConstInt or an enclosing-loop induction Var.
+                    device_expr = self._parse_dispatch_device_kwarg(method_name, call, func_obj, span)
                     return_types = func_obj.return_types if func_obj else []
                     if func_obj is not None and return_types:
                         return_types = ir.deduce_call_return_type(
@@ -3605,6 +3617,7 @@ class ASTParser:
                         arg_directions=arg_directions,
                         no_dep_indices=no_dep_indices,
                         user_dep_vars=user_dep_vars,
+                        device_expr=device_expr,
                     )
                 else:
                     raise UndefinedVariableError(
@@ -3769,6 +3782,47 @@ class ASTParser:
             out.append(expr)
         return out
 
+    def _parse_dispatch_device_kwarg(
+        self,
+        method_name: str,
+        call: ast.Call,
+        func_obj: ir.Function | None,
+        span: ir.Span,
+    ) -> ir.Expr | None:
+        """Extract the optional ``device=`` kwarg on a ``self.<orch>(...)`` call.
+
+        ``device=`` selects the physical device for an orchestrator dispatch
+        and is legal only when the callee has :class:`ir.Role.Orchestrator`
+        (i.e. either chip-level ``FunctionType.Orchestration`` or a function
+        declared with ``level=..., role=Role.Orchestrator``; both forms set
+        the same ``role`` field on the IR Function). The parser is
+        intentionally permissive about the value form: any IR expression
+        works. Downstream passes (the comm-collection pass, simplify) inspect
+        the resolved expression and decide:
+
+        * ``ConstInt`` (literal or after simplify-time constant folding) →
+          fixed-device dispatch.
+        * IR Var that is a ``for``-loop induction variable with a known
+          range → device subset / kAll.
+        * Anything else → rejected by the comm-collection pass, with the
+          full def-use chain available for a good error message.
+
+        Returns:
+            The parsed IR expression, or ``None`` when ``device=`` is absent.
+        """
+        device_kw = next((kw for kw in call.keywords if kw.arg == "device"), None)
+        if device_kw is None:
+            return None
+        if func_obj is None or func_obj.role != ir.Role.Orchestrator:
+            raise ParserTypeError(
+                f"'device=' is only supported on calls to Orchestrator functions; "
+                f"'{method_name}' is not an Orchestrator",
+                span=span,
+                hint="Mark the callee with @pl.function(type=pl.FunctionType.Orchestration) "
+                "or @pl.function(level=..., role=pl.Role.Orchestrator)",
+            )
+        return self.parse_expression(device_kw.value)
+
     def _make_call_with_return_type(
         self,
         gvar: ir.GlobalVar,
@@ -3778,6 +3832,7 @@ class ASTParser:
         arg_directions: list[ir.ArgDirection] | None = None,
         no_dep_indices: list[int] | None = None,
         user_dep_vars: list[ir.Var] | None = None,
+        device_expr: ir.Expr | None = None,
     ) -> ir.Expr:
         """Create an ir.Call, attaching the return type, optional call-site directions
         and optional per-arg ``NoDep`` overrides.
@@ -3801,6 +3856,10 @@ class ASTParser:
                 ``deps=[var1, var2]`` kwarg. Stored as
                 ``attrs['user_manual_dep_edges']`` so ``DeriveManualScopeDeps``
                 can merge them with auto-derived data-flow edges.
+            device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
+                on an Orchestration dispatch call. Stored under
+                ``attrs['device']`` so the comm-collection pass can recover
+                per-dispatch device subsets without re-parsing the AST.
         """
         if not return_types:
             return_type: ir.Type = ir.UnknownType()
@@ -3818,6 +3877,9 @@ class ASTParser:
         if user_dep_vars:
             attrs = attrs or {}
             attrs["user_manual_dep_edges"] = list(user_dep_vars)
+        if device_expr is not None:
+            attrs = attrs or {}
+            attrs["device"] = device_expr
 
         if attrs is not None:
             return ir.Call(gvar, args, {}, attrs, return_type, span)
@@ -4437,7 +4499,7 @@ class ASTParser:
     def _parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse a ``pld.<op>(...)`` distributed-DSL operation.
 
-        Only ``pld.window`` is dispatched as a normal expression here.
+        Dispatches to per-op parsers (``pld.window``, ``pld.world_size``).
         ``pld.alloc_window_buffer`` is intercepted in
         :meth:`parse_assignment` (it needs the LHS name) and reaches this
         method only when it appears outside an assignment — in which case
@@ -4453,6 +4515,31 @@ class ASTParser:
                 span=span,
                 hint="Write 'buf = pld.alloc_window_buffer(N)'",
             )
+
+        if op_name == "world_size":
+            if call.args:
+                raise ParserSyntaxError(
+                    f"pld.world_size() takes no positional arguments; got {len(call.args)}",
+                    span=span,
+                    hint="Write 'pld.world_size()'",
+                )
+            if call.keywords:
+                raise ParserSyntaxError(
+                    "pld.world_size() does not accept keyword arguments",
+                    span=span,
+                    hint="Write 'pld.world_size()'",
+                )
+            # Host-only: pld.world_size() is only meaningful inside a host-level
+            # orchestrator. Reject everywhere else with a clear error.
+            if self._func_level != ir.Level.HOST:
+                raise ParserSyntaxError(
+                    "pld.world_size() can only be called inside HOST functions "
+                    f"(current function level: {self._func_level})",
+                    span=span,
+                    hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
+                    "on the enclosing function",
+                )
+            return ir.create_op_call("pld.world_size", [], {}, span)
 
         if op_name == "window":
             if len(call.args) != 2:
@@ -4506,7 +4593,7 @@ class ASTParser:
         raise InvalidOperationError(
             f"Unknown distributed operation 'pld.{op_name}'",
             span=span,
-            hint="Available: pld.alloc_window_buffer, pld.window",
+            hint="Available: pld.alloc_window_buffer, pld.window, pld.world_size",
         )
 
     # Maps iterator type name to ForKind enum value.

@@ -175,5 +175,32 @@ def test_distributed_tensor_type_with_and_without_window_buffer_differ():
     assert not ir.structural_equal(dt_param, dt_bound)
 
 
+# ---------------------------------------------------------------------------
+# pld.world_size op
+# ---------------------------------------------------------------------------
+
+
+def test_world_size_returns_int64_scalar():
+    """``pld.world_size()`` returns a scalar INT64 — the distributed device count."""
+    span = ir.Span.unknown()
+    call = ir.create_op_call("pld.world_size", [], {}, span)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.INT64
+    assert call.args == []
+    assert call.kwargs == {}
+
+
+def test_world_size_rejects_positional_args():
+    span = ir.Span.unknown()
+    with pytest.raises(Exception, match="no positional arguments"):
+        ir.create_op_call("pld.world_size", [ir.ConstInt(0, DataType.INT64, span)], {}, span)
+
+
+def test_world_size_rejects_kwargs():
+    span = ir.Span.unknown()
+    with pytest.raises(Exception, match="no kwargs"):
+        ir.create_op_call("pld.world_size", [], {"foo": 1}, span)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
