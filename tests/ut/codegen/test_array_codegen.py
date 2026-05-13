@@ -224,29 +224,32 @@ def test_for_stmt_with_int_array_iter_arg_codegen():
 def test_for_stmt_with_task_id_array_iter_arg_codegen():
     """ArrayType[TASK_ID, 4] iter_arg — same shape, opaque-handle dtype.
 
-    Phase-fence lowering will materialize this exact form. Codegen must
-    emit ``PTO2TaskId <name>[4] = {0};`` (not a numeric C type) and the
-    in-place slot-write pattern.
+    Phase-fence lowering materialises this exact form. Codegen must emit
+    ``PTO2TaskId <name>[4]`` (not a numeric C type) and the in-place
+    slot-write pattern.
     """
     import re  # noqa: PLC0415
 
     program, orch_func = _build_array_iter_arg_program(DataType.TASK_ID, 4)
     code = codegen.generate_orchestration(program, orch_func).code
-    decls = re.findall(r"PTO2TaskId\s+(\w+)\[4\]\s*=\s*\{0\};", code)
-    assert len(decls) >= 1, code
     # ``array.create`` op codegen must special-case TASK_ID so the
     # declaration uses ``PTO2TaskId``, not the ``unknown`` fallback that
     # ``DataType::TASK_ID.ToCTypeString`` would otherwise return.
+    assert re.search(r"PTO2TaskId\s+\w+\[4\]", code), code
     assert "unknown" not in code, code
 
 
-def test_array_create_task_id_emits_pto2_task_id():
-    """``array.create(N, TASK_ID)`` lowers to ``PTO2TaskId <name>[N] = {0};``.
+def test_array_create_task_id_uses_invalid_sentinel():
+    """``array.create(N, TASK_ID)`` lowers to a ``PTO2TaskId[N]`` declaration
+    plus a per-slot fill with ``PTO2TaskId::invalid()``.
 
-    Regression for a Phase A gap: PR #1348 added ``DataType::TASK_ID`` to
-    ``ArrayType``'s allowlist but ``array.create``'s codegen handler still
-    routed through ``DataType::ToCTypeString``, which has no TASK_ID case
-    and returned ``"unknown"`` — producing invalid C.
+    Critical correctness: ``PTO2TaskId`` is an opaque handle whose
+    "invalid" sentinel is NOT bit-zero. Zero-initialising would silently
+    mark every slot as a real "task id 0" reference, causing the runtime
+    fence to wait on a bogus dep on the first parallel iteration. The
+    legacy codegen explicitly broadcast ``PTO2TaskId::invalid()`` over the
+    array; this regression test pins the same behaviour for the
+    pass-emitted path.
     """
     import re  # noqa: PLC0415
 
@@ -262,7 +265,56 @@ def test_array_create_task_id_emits_pto2_task_id():
     orch_func = orch_f.get_result()
     program = ir.Program([orch_func], "test_array_create_task_id", ir.Span.unknown())
     code = codegen.generate_orchestration(program, orch_func).code
-    assert re.search(r"PTO2TaskId\s+\w+\[4\]\s*=\s*\{0\};", code), code
+    assert re.search(r"PTO2TaskId\s+\w+\[4\];", code), code
+    # Per-slot init with the invalid sentinel — NOT ``= {0};`` (which
+    # would zero-byte-init, valid for integer dtypes but wrong here).
+    assert re.search(r"\w+\[__init_i\]\s*=\s*PTO2TaskId::invalid\(\);", code), code
+    assert "unknown" not in code, code
+
+
+def test_array_create_int_still_uses_zero_init():
+    """Non-TASK_ID dtypes keep the compact ``= {0};`` aggregate-init form
+    (zero is a valid value for integer / BOOL arrays).
+    """
+    import re  # noqa: PLC0415
+
+    from pypto.ir.builder import IRBuilder  # noqa: PLC0415
+    from pypto.ir.op import array as ir_array  # noqa: PLC0415
+
+    ib = IRBuilder()
+    with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+        x = orch_f.param("x", ir.TensorType([16], DataType.INT32))
+        orch_f.return_type(ir.TensorType([16], DataType.INT32))
+        ib.let("arr", ir_array.create(8, DataType.INT32))
+        ib.return_stmt(x)
+    orch_func = orch_f.get_result()
+    program = ir.Program([orch_func], "test_array_create_int", ir.Span.unknown())
+    code = codegen.generate_orchestration(program, orch_func).code
+    assert re.search(r"int32_t\s+\w+\[8\]\s*=\s*\{0\};", code), code
+
+
+def test_array_get_element_task_id_uses_pto2_task_id_type():
+    """``array.get_element`` on a TASK_ID array emits a ``PTO2TaskId`` local,
+    not the ``unknown`` fallback of ``DataType::ToCTypeString``.
+    """
+    import re  # noqa: PLC0415
+
+    from pypto.ir.builder import IRBuilder  # noqa: PLC0415
+    from pypto.ir.op import array as ir_array  # noqa: PLC0415
+
+    ib = IRBuilder()
+    with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+        x = orch_f.param("x", ir.TensorType([16], DataType.INT64))
+        orch_f.return_type(ir.TensorType([16], DataType.INT64))
+        arr = ib.let("arr", ir_array.create(4, DataType.TASK_ID))
+        idx = ir.ConstInt(0, DataType.INT32, ir.Span.unknown())
+        ib.let("v", ir_array.get_element(arr, idx))
+        ib.return_stmt(x)
+    orch_func = orch_f.get_result()
+    program = ir.Program([orch_func], "test_array_get_element_task_id", ir.Span.unknown())
+    code = codegen.generate_orchestration(program, orch_func).code
+    # The local for the get_element result must be ``PTO2TaskId``, not ``unknown``.
+    assert re.search(r"PTO2TaskId\s+v\s*=\s*\w+\[", code), code
     assert "unknown" not in code, code
 
 
@@ -339,10 +391,18 @@ def test_nested_seq_parallel_task_id_array_carry_codegen():
     # No fallback "unknown" dtype anywhere.
     assert "unknown" not in code, code
 
-    # Three PTO2TaskId arrays of extent N_INNER: the initial, the outer carry,
-    # and the inner carry (declared each outer iter).
-    decls = re.findall(rf"PTO2TaskId\s+(\w+)\[{n_inner}\]\s*=\s*\{{0\}};", code)
+    # Three PTO2TaskId arrays of extent N_INNER: the initial (from
+    # ``array.create``, now declared with explicit ``PTO2TaskId::invalid()``
+    # per-slot init), the outer carry, and the inner carry (both declared
+    # by the orchestration codegen's ForStmt iter_arg branch with
+    # ``= {0};`` aggregate init — the immediate slot-by-slot init copy
+    # overwrites the placeholder before any read).
+    decls = re.findall(rf"PTO2TaskId\s+(\w+)\[{n_inner}\]", code)
     assert len(decls) >= 3, code
+    # ``array.create``'s output must use the invalid sentinel — anything
+    # else (notably ``= {0};``) silently produces a "task id 0" reference
+    # and breaks the runtime fence.
+    assert re.search(r"\w+\[__init_i\]\s*=\s*PTO2TaskId::invalid\(\);", code), code
 
     # Outer carry init copy: copy from the freshly-created initial array into
     # the outer carry, both PTO2TaskId-typed.

@@ -58,15 +58,28 @@ REGISTER_ORCHESTRATION_OP(array_create, ("array.create")) {
   std::string result_var = codegen.GetCurrentResultTarget();
   // TASK_ID is opaque, not numeric — emit ``PTO2TaskId`` rather than letting
   // ``DataType::ToCTypeString`` fall through to its "unknown" default.
-  std::string cpp_type =
-      array_type->dtype_ == DataType::TASK_ID ? "PTO2TaskId" : array_type->dtype_.ToCTypeString();
+  const bool is_task_id = array_type->dtype_ == DataType::TASK_ID;
+  std::string cpp_type = is_task_id ? "PTO2TaskId" : array_type->dtype_.ToCTypeString();
+  const int64_t N = extent_const->value_;
 
-  // `= {0}` zero-initializes the whole array in C (and is also valid C++).
-  // ``PTO2TaskId`` aggregate-inits to ``invalid()`` under the same syntax.
-  // We deliberately avoid `std::array` so the generated code stays on the
-  // device CPU's C compiler path with no STL dependency.
   std::ostringstream oss;
-  oss << cpp_type << " " << result_var << "[" << extent_const->value_ << "] = {0};";
+  if (is_task_id) {
+    // ``PTO2TaskId`` is not a plain integer — its "invalid" sentinel is
+    // ``PTO2TaskId::invalid()``, which is NOT bit-zero. Zero-initializing
+    // would silently mark every slot as a real "task id 0" reference,
+    // causing the runtime fence to wait on a bogus dep on the first
+    // iteration. Explicitly fill with the invalid sentinel. The
+    // declaration + broadcast loop emit as one logical line so the
+    // orchestration codegen's single-line indent works correctly.
+    oss << cpp_type << " " << result_var << "[" << N << "]; "
+        << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << result_var
+        << "[__init_i] = PTO2TaskId::invalid();";
+  } else {
+    // Numeric integer / BOOL: ``= {0}`` zero-initializes the whole array.
+    // Avoid ``std::array`` so the generated code stays on the device CPU's
+    // C compiler path with no STL dependency.
+    oss << cpp_type << " " << result_var << "[" << N << "] = {0};";
+  }
   return oss.str();
 }
 
@@ -79,7 +92,9 @@ REGISTER_ORCHESTRATION_OP(array_get_element, ("array.get_element")) {
 
   auto result_type = As<ScalarType>(op->GetType());
   CHECK(result_type) << "array.get_element must return ScalarType";
-  std::string cpp_type = result_type->dtype_.ToCTypeString();
+  // TASK_ID is opaque — same special case as ``array.create``.
+  std::string cpp_type =
+      result_type->dtype_ == DataType::TASK_ID ? "PTO2TaskId" : result_type->dtype_.ToCTypeString();
 
   std::string result_var = codegen.GetCurrentResultTarget();
 
