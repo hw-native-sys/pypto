@@ -430,7 +430,11 @@ def _execute_on_device(
     if dfx.any():
         dfx_dir = work_dir / "dfx_outputs"
         dfx_dir.mkdir(parents=True, exist_ok=True)
-        pre_run_logs, device_log_dir = _snapshot_profiling_state(platform, device_id)
+        # The pre-run log snapshot only feeds the swimlane converter; skip
+        # the device-log glob when swimlane capture is off so a
+        # tensor_dump-only / pmu-only / dep_gen-only run doesn't pay for it.
+        if dfx.enable_l2_swimlane:
+            pre_run_logs, device_log_dir = _snapshot_profiling_state(platform, device_id)
 
     execute_on_device(
         chip_callable,
@@ -828,7 +832,11 @@ def execute_compiled(
     if dfx.any():
         dfx_dir = work_dir / "dfx_outputs"
         dfx_dir.mkdir(parents=True, exist_ok=True)
-        pre_run_logs, device_log_dir = _snapshot_profiling_state(platform, device_id)
+        # The pre-run log snapshot only feeds the swimlane converter; skip
+        # the device-log glob when swimlane capture is off so a
+        # tensor_dump-only / pmu-only / dep_gen-only run doesn't pay for it.
+        if dfx.enable_l2_swimlane:
+            pre_run_logs, device_log_dir = _snapshot_profiling_state(platform, device_id)
 
     execute_on_device(
         chip_callable,
