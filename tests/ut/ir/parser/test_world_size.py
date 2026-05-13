@@ -152,6 +152,21 @@ def test_world_size_rejected_outside_host_function():
                 return x
 
 
+def test_world_size_rejected_in_nested_device_scope_within_host_function():
+    """Even inside a HOST orchestrator, ``pld.world_size()`` must be rejected
+    when nested inside a device-side scope (InCore / AutoInCore / SPMD), since
+    the call is not lowerable there."""
+    with pytest.raises(Exception, match="InCore"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    n = pld.world_size()  # noqa: F841
+                return 0
+
+
 def test_world_size_call_used_as_size_in_alloc():
     """``pld.world_size()`` can flow into ``pld.alloc_window_buffer(size)`` as
     a per-rank byte-size operand."""

@@ -3601,7 +3601,7 @@ class ASTParser:
                         user_dep_vars = self._parse_manual_scope_deps_kwarg(method_name, call, span)
                     # Orchestration dispatch ``device=`` kwarg: resolves to a
                     # ConstInt or an enclosing-loop induction Var.
-                    device_expr = self._parse_dispatch_device_kwarg(method_name, call, func_obj, span)
+                    device_expr = self._parse_dispatch_device_kwarg(call)
                     return_types = func_obj.return_types if func_obj else []
                     if func_obj is not None and return_types:
                         return_types = ir.deduce_call_return_type(
@@ -3784,10 +3784,7 @@ class ASTParser:
 
     def _parse_dispatch_device_kwarg(
         self,
-        method_name: str,
         call: ast.Call,
-        func_obj: ir.Function | None,
-        span: ir.Span,
     ) -> ir.Expr | None:
         """Extract the optional ``device=`` kwarg on a ``self.<orch>(...)`` call.
 
@@ -3795,10 +3792,13 @@ class ASTParser:
         and is legal only when the callee has :class:`ir.Role.Orchestrator`
         (i.e. either chip-level ``FunctionType.Orchestration`` or a function
         declared with ``level=..., role=Role.Orchestrator``; both forms set
-        the same ``role`` field on the IR Function). The parser is
-        intentionally permissive about the value form: any IR expression
-        works. Downstream passes (the comm-collection pass, simplify) inspect
-        the resolved expression and decide:
+        the same ``role`` field on the IR Function). Callee-role validation
+        happens in :meth:`parse_call` via the ``allowed_kwargs`` filter
+        before this method runs, so by the time we reach this point the
+        kwarg is known to be legal. The parser is intentionally permissive
+        about the value form: any IR expression works. Downstream passes
+        (the comm-collection pass, simplify) inspect the resolved expression
+        and decide:
 
         * ``ConstInt`` (literal or after simplify-time constant folding) →
           fixed-device dispatch.
@@ -3813,14 +3813,6 @@ class ASTParser:
         device_kw = next((kw for kw in call.keywords if kw.arg == "device"), None)
         if device_kw is None:
             return None
-        if func_obj is None or func_obj.role != ir.Role.Orchestrator:
-            raise ParserTypeError(
-                f"'device=' is only supported on calls to Orchestrator functions; "
-                f"'{method_name}' is not an Orchestrator",
-                span=span,
-                hint="Mark the callee with @pl.function(type=pl.FunctionType.Orchestration) "
-                "or @pl.function(level=..., role=pl.Role.Orchestrator)",
-            )
         return self.parse_expression(device_kw.value)
 
     def _make_call_with_return_type(
@@ -4530,14 +4522,21 @@ class ASTParser:
                     hint="Write 'pld.world_size()'",
                 )
             # Host-only: pld.world_size() is only meaningful inside a host-level
-            # orchestrator. Reject everywhere else with a clear error.
-            if self._func_level != ir.Level.HOST:
+            # orchestrator AND outside any nested device-side scope (a HOST
+            # function may still open `with pl.at(level=CORE_GROUP):` blocks via
+            # InCore / AutoInCore / Spmd, where the call is not lowerable).
+            in_device_scope = any(
+                self._is_inside_scope(kind)
+                for kind in (ir.ScopeKind.InCore, ir.ScopeKind.AutoInCore, ir.ScopeKind.Spmd)
+            )
+            if self._func_level != ir.Level.HOST or in_device_scope:
                 raise ParserSyntaxError(
-                    "pld.world_size() can only be called inside HOST functions "
-                    f"(current function level: {self._func_level})",
+                    "pld.world_size() can only be called in HOST orchestration context "
+                    "(not inside InCore / AutoInCore / SPMD scopes); "
+                    f"current function level: {self._func_level}",
                     span=span,
                     hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
-                    "on the enclosing function",
+                    "on the enclosing function and call outside any nested device-side scope",
                 )
             return ir.create_op_call("pld.world_size", [], {}, span)
 
