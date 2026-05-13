@@ -163,6 +163,13 @@ def pytest_addoption(parser):
         help="PyPTO C++ log level threshold (default: ERROR)",
     )
     parser.addoption(
+        "--simpler-log-level",
+        action="store",
+        default=None,
+        help="Simpler runtime log level (debug, v0..v9, info, warn, error, null). "
+             "Default: leave simpler at its V5/INFO default.",
+    )
+    parser.addoption(
         "--pto-isa-commit",
         action="store",
         default=None,
@@ -432,6 +439,15 @@ def pytest_configure(config):
     try:
         level_name: str = config.getoption("--pypto-log-level")
         set_log_level(LogLevel[level_name])
+    except (ValueError, KeyError):
+        pass  # option not yet registered (e.g. during --co --help)
+
+    # Set simpler runtime log level (orthogonal to PyPTO C++ logger above).
+    try:
+        simpler_level = config.getoption("--simpler-log-level")
+        if simpler_level is not None:
+            from pypto.runtime import configure_log  # noqa: PLC0415
+            configure_log(simpler_level)
     except (ValueError, KeyError):
         pass  # option not yet registered (e.g. during --co --help)
 
