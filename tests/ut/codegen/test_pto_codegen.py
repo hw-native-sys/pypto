@@ -1711,7 +1711,16 @@ class TestColumnVectorCodegen:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
-                col_vec: pl.Tensor[[16, 1], pl.FP32, pl.DN],
+                # Explicit DN view with the canonical-packed strides for shape
+                # [16, 1] (stride[-2]=1, stride[-1]=shape[-2]=16). Using the
+                # explicit TensorView form (RFC #1300 supplementary 1 escape
+                # hatch) instead of the deprecated pl.Tensor[..., pl.DN]
+                # shorthand. This test specifically verifies the
+                # column-vector DN codegen path, so the DN view is the test
+                # subject — not a load-time alias.
+                col_vec: pl.Tensor[
+                    [16, 1], pl.FP32, pl.TensorView(stride=[1, 16], layout=pl.TensorLayout.DN)
+                ],
                 out: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 v = pl.load(col_vec, [0, 0], [16, 1])
@@ -1786,7 +1795,16 @@ def test_pto_codegen_3d_dn_tensor_view_uses_canonical_stride():
         @pl.function(type=pl.FunctionType.InCore)
         def kernel(
             self,
-            b: pl.Tensor[[2, 48, 64], pl.FP32, pl.DN],
+            # Explicit DN view with canonical-packed strides per RFC §2.3:
+            # shape [B=2, K=48, N=64] → stride[1]=1, stride[2]=K=48,
+            # stride[0]=K*N=3072. Uses the explicit TensorView form (RFC
+            # #1300 supplementary 1 escape hatch); the test subject is the
+            # 3-D DN codegen path, so the DN view is part of the fixture.
+            b: pl.Tensor[
+                [2, 48, 64],
+                pl.FP32,
+                pl.TensorView(stride=[3072, 1, 48], layout=pl.TensorLayout.DN),
+            ],
             out: pl.Out[pl.Tensor[[2, 48, 64], pl.FP32]],
         ) -> pl.Tensor[[2, 48, 64], pl.FP32]:
             tile_b = pl.load(b, [0, 0, 0], [2, 48, 64])

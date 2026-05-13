@@ -1390,12 +1390,16 @@ class TestLayoutResolution:
         "layout_str, expected_layout",
         [
             ("pl.NZ", ir.TensorLayout.NZ),
-            ("pl.DN", ir.TensorLayout.DN),
             ("pl.ND", ir.TensorLayout.ND),
         ],
     )
     def test_resolve_tensor_with_layout(self, layout_str, expected_layout):
-        """Tensor with various layouts creates TensorType with TensorView."""
+        """Tensor with various layouts creates TensorType with TensorView.
+
+        ``pl.DN`` is covered separately by ``test_resolve_tensor_with_dn_layout_warns``
+        — it emits a ``DeprecationWarning`` (RFC #1300 supplementary 1) so we
+        verify that warning explicitly rather than swallowing it here.
+        """
         resolver = _make_resolver()
         node = ast.parse(f"pl.Tensor[[64, 128], pl.FP16, {layout_str}]", mode="eval").body
         result = resolver.resolve_type(node)
@@ -1405,6 +1409,24 @@ class TestLayoutResolution:
         assert result.dtype == DataType.FP16
         assert result.tensor_view is not None
         assert result.tensor_view.layout == expected_layout
+
+    def test_resolve_tensor_with_dn_layout_warns(self):
+        """``pl.Tensor[..., pl.DN]`` shorthand is deprecated (RFC #1300 supp. 1).
+
+        The parser still resolves it to a DN-tagged TensorView for backward
+        compatibility, but emits a ``DeprecationWarning`` pointing users at
+        migration paths (drop the marker, use ``pl.transpose``, or write an
+        explicit ``pl.TensorView(stride=..., layout=DN)``).
+        """
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP16, pl.DN]", mode="eval").body
+
+        with pytest.warns(DeprecationWarning, match="pl.DN"):
+            result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.DN
 
     def test_resolve_tensor_without_layout_backward_compat(self):
         """Tensor without layout has no tensor_view (backward compatible)."""
@@ -1484,13 +1506,13 @@ class TestLayoutResolution:
     def test_resolve_tensor_layout_with_shape_variable(self):
         """Layout works with shape variable from closure."""
         resolver = _make_resolver(closure_vars={"shape": [64, 128]})
-        node = ast.parse("pl.Tensor[shape, pl.FP16, pl.DN]", mode="eval").body
+        node = ast.parse("pl.Tensor[shape, pl.FP16, pl.NZ]", mode="eval").body
         result = resolver.resolve_type(node)
 
         assert isinstance(result, ir.TensorType)
         assert len(result.shape) == 2
         assert result.tensor_view is not None
-        assert result.tensor_view.layout == ir.TensorLayout.DN
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
 
 
 class TestLayoutIntegration:
@@ -1573,12 +1595,11 @@ class TestLayoutIntegration:
         "layout,expected",
         [
             (pl.ND, ir.TensorLayout.ND),
-            (pl.DN, ir.TensorLayout.DN),
             (pl.NZ, ir.TensorLayout.NZ),
         ],
     )
     def test_parametrized_layout(self, layout, expected):
-        """pytest.mark.parametrize with layout."""
+        """pytest.mark.parametrize with layout (non-deprecated layouts only)."""
 
         @pl.function
         def func(
@@ -1591,14 +1612,21 @@ class TestLayoutIntegration:
         assert param_type.tensor_view is not None
         assert param_type.tensor_view.layout == expected
 
-    def test_function_with_dn_layout(self):
-        """@pl.function with DN layout for column-major tensors."""
+    def test_function_with_dn_layout_warns(self):
+        """@pl.function with ``pl.DN`` shorthand emits ``DeprecationWarning``.
 
-        @pl.function
-        def func(
-            x: pl.Tensor[[16, 1], pl.FP16, pl.DN],
-        ) -> pl.Tensor[[16, 1], pl.FP16, pl.DN]:
-            return x
+        Backwards-compatible — the layout still resolves to DN — but the
+        shorthand is deprecated (RFC #1300 supplementary 1). Users should
+        drop the marker, derive DN at use site via ``pl.transpose``, or
+        write an explicit ``pl.TensorView(stride=..., layout=DN)``.
+        """
+        with pytest.warns(DeprecationWarning, match="pl.DN"):
+
+            @pl.function
+            def func(
+                x: pl.Tensor[[16, 1], pl.FP16, pl.DN],
+            ) -> pl.Tensor[[16, 1], pl.FP16, pl.DN]:
+                return x
 
         param_type = func.params[0].type
         assert isinstance(param_type, ir.TensorType)

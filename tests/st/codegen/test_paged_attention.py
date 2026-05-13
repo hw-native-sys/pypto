@@ -88,7 +88,7 @@ class QKMatmulTestCase(PTOTestCase):
             def orchestrator(
                 self,
                 qi: pl.Tensor[[16, 128], pl.BF16],
-                kj_t: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                kj_t: pl.Tensor[[128, 128], pl.BF16],
                 out_sij: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 out_sij = kernel_qk_matmul(qi, kj_t, out_sij)

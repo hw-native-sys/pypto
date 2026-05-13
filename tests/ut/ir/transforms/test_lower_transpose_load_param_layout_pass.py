@@ -441,44 +441,6 @@ class TestNoOpCases:
         After = passes.lower_transpose_load_param_layout()(Before)
         ir.assert_structural_equal(After, Before)
 
-    def test_already_dn_param_idempotent(self):
-        """A param already carrying the DN tag short-circuits — IR unchanged.
-
-        Mirrors the pre-P6 mid-state where the param has been DN-tagged but the
-        body's tile.load still has ``transpose=True`` (idempotent re-run of the
-        legacy pass form). The pass detects ``layout == DN`` on the param,
-        ``continue``s past the promotion, and leaves the body untouched.
-        """
-        M, K, N = 64, 128, 32
-
-        @pl.program
-        class Before:
-            @pl.function(type=pl.FunctionType.InCore)
-            def matmul_incore(
-                self,
-                a: pl.Tensor[[M, K], pl.FP32],
-                b: pl.Tensor[[N, K], pl.FP32, pl.DN],
-                c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
-            ) -> pl.Tensor[[M, N], pl.FP32]:
-                tile_a = pl.load(a, [0, 0], [M, K], target_memory=pl.MemorySpace.Mat)
-                tile_b = pl.load(b, [0, 0], [N, K], target_memory=pl.MemorySpace.Mat, transpose=True)
-                tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
-                tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
-                tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
-                c_store = pl.store(tile_c, [0, 0], c)
-                return c_store
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(
-                self, a: pl.Tensor[[M, K], pl.FP32], b: pl.Tensor[[N, K], pl.FP32, pl.DN]
-            ) -> pl.Tensor[[M, N], pl.FP32]:
-                c: pl.Tensor[[M, N], pl.FP32] = pl.create_tensor([M, N], dtype=pl.FP32)
-                c_result = self.matmul_incore(a, b, c)
-                return c_result
-
-        After = passes.lower_transpose_load_param_layout()(Before)
-        ir.assert_structural_equal(After, Before)
-
 
 class TestStridedParamFlipsCorrectly:
     """Regression for #1212 / #1213: when an InCore param's TensorView carries

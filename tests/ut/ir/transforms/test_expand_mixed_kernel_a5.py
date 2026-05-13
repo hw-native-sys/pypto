@@ -1364,7 +1364,7 @@ class TestVectorOpClassification:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 x_l1 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
@@ -1396,7 +1396,7 @@ class TestVectorOpClassification:
             def main_incore_0_aic(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ):
                 x_l1 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
@@ -1410,7 +1410,7 @@ class TestVectorOpClassification:
             def main_incore_0_aiv(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
@@ -1424,7 +1424,7 @@ class TestVectorOpClassification:
             def main_incore_0(
                 self,
                 x: pl.Tensor[[16, 128], pl.BF16],
-                y: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+                y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 self.main_incore_0_aic(x, y, out_0)

@@ -63,7 +63,7 @@ class PagedAttention:
     def qk_matmul(
         self,
         qi: pl.Tensor[[16, 128], pl.BF16],
-        kj: pl.Tensor[[128, 128], pl.BF16, pl.DN],
+        kj: pl.Tensor[[128, 128], pl.BF16],
         s_ij: pl.Tensor[[16, 128], pl.FP32],
     ) -> pl.Tensor[[16, 128], pl.FP32]:
         q_tile: pl.Tile[[16, 128], pl.BF16] = pl.load(qi, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
