@@ -625,6 +625,32 @@ class OrchestrationStmtCodegen : public CodegenBase {
           // updates via yield).
           RegisterArrayCarry(iter_arg.get(), rv_array_name, N);
         }
+      } else if (auto array_ty = As<ArrayType>(iter_arg->GetType()); array_ty && is_rebind[i]) {
+        // ArrayType iter_arg — declare a fresh C-stack array and route both
+        // the iter_arg and the return_var emit names through it. The loop
+        // body's ``array.update_element`` calls already alias their LHS to
+        // the input array's emit name (see HandleArrayUpdateElementAssign),
+        // so writes land in-place on the carry array. The matching YieldStmt
+        // is skipped via name-equality below — no value copy is needed.
+        //
+        // Distinct from the TaskId array-carry path above: that path is
+        // driven by the *trip count* of the surrounding ForStmt and uses
+        // ``array_carry_vars_`` to fan out add_dep across slots. Here the
+        // size comes from the iter_arg's own ArrayType extent.
+        auto extent_const = As<ConstInt>(array_ty->extent());
+        INTERNAL_CHECK_SPAN(extent_const, for_stmt->span_)
+            << "Internal error: ArrayType iter_arg extent must be ConstInt, got "
+            << array_ty->extent()->TypeName();
+        const int64_t N = extent_const->value_;
+        const std::string cpp_dtype =
+            array_ty->dtype_ == DataType::TASK_ID ? "PTO2TaskId" : array_ty->dtype_.ToCTypeString();
+        std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
+        code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "] = {0};\n";
+        // Init by slot-by-slot copy from the init array.
+        code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
+              << "[__init_i] = " << init_var_name << "[__init_i];\n";
+        emit_name_map_[iter_arg.get()] = carry_name;
+        emit_name_map_[return_var.get()] = carry_name;
       } else if (is_rebind[i]) {
         // Scalar (single-name) carry path — only fires for non-TaskId
         // iter_args (e.g. Tensor) or Sequential TaskId iter_args whose
@@ -991,8 +1017,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // translate it here. Safe for non-params (returns input unchanged).
       value_expr = GetExternalTensorName(value_expr);
       auto yield_var = AsVarLike(yield_stmt->value_[i]);
-      if (rv.get() != yield_var.get()) {
-        code_ << Indent() << GetVarName(rv) << " = " << value_expr << ";\n";
+      std::string lhs_name = GetVarName(rv);
+      // Skip self-assigns. Pointer identity catches the trivial-yield case;
+      // the name-equality check catches ArrayType iter_args where the body's
+      // ``array.update_element`` aliased its LHS back to the iter_arg's emit
+      // name — the carry already holds the post-update value, so emitting
+      // ``carry = carry;`` would be both useless and invalid C for arrays.
+      if (rv.get() != yield_var.get() && lhs_name != value_expr) {
+        code_ << Indent() << lhs_name << " = " << value_expr << ";\n";
       }
     }
   }

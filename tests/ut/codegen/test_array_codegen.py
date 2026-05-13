@@ -18,7 +18,7 @@ mutations land on the same backing storage.
 import pypto.language as pl
 import pytest
 from pypto import codegen, passes
-from pypto.pypto_core import ir
+from pypto.pypto_core import DataType, ir
 
 
 def _generate_orch(src: str) -> str:
@@ -134,66 +134,106 @@ class P:
 # ----------------------------------------------------------------------------
 # ForStmt with explicit ArrayType iter_arg — phase-fence carry shape.
 #
-# Phase-fence lowering will produce ForStmts with explicit ArrayType iter_args
+# Phase-fence lowering produces ForStmts with explicit ArrayType iter_args
 # (the per-slot TaskId carry that fans out to N add_dep calls on every
 # downstream task). The DSL parser does NOT currently promote ``arr`` into a
 # loop-carried iter_arg when only ``arr[k] = ...`` writes happen inside the
 # loop body — those go through the LHS-alias path of update_element, so the
 # array stays in scope without crossing an iter_arg boundary. The phase-fence
-# pass produces the iter_arg form deliberately. This test hand-builds that
-# IR shape to exercise the codegen path that pass output will hit.
+# pass produces the iter_arg form deliberately. These tests hand-build that
+# IR shape to exercise the codegen path the pass will emit.
 # ----------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="ForStmt with ArrayType iter_arg not yet supported in orchestration codegen — "
-    "the scalar-carry path at orchestration_codegen.cpp:643 calls GetCppType on the "
-    "iter_arg type and that helper fires INTERNAL_CHECK for ArrayType (orchestration_codegen.cpp:1034). "
-    "Phase-fence lowering will require this; track via the ExpandManualPhaseFence work.",
-    strict=True,
-    raises=Exception,
-)
-def test_for_stmt_with_array_type_iter_arg_codegen():
-    """Hand-built IR: ForStmt whose iter_arg is an ArrayType[INT64, 4].
+def _build_array_iter_arg_program(dtype: DataType, extent: int) -> tuple[ir.Program, ir.Function]:
+    """Build an orchestration function with an ArrayType[dtype, extent] iter_arg.
 
-    Each iteration calls ``array.update_element`` and yields the result as
-    the next iter's carry value. Codegen must emit a single C-stack array
-    declaration (e.g. ``int64_t <name>[4] = {0};``) and in-place writes
-    through that same name — *not* a value-copy of the array (which is
-    invalid C for raw arrays).
+    Loop body assigns ``arr[k] = <value>`` where ``value`` depends on dtype:
 
-    The exact emit-name picked by the future codegen patch (init Var,
-    iter_arg, or return_var) is not yet decided, so assertions match the
-    declaration *template* and the indexed-write pattern rather than a
-    specific variable name.
+    * Integer dtype: write the loop var ``k`` (INDEX dtype, compatible with int).
+    * TASK_ID dtype: write ``system.task_invalid()`` — the only producer of
+      a Scalar[TASK_ID] available without going through a kernel Call.
     """
-    import re  # noqa: PLC0415
-
     from pypto.ir.builder import IRBuilder  # noqa: PLC0415
     from pypto.ir.op import array as ir_array  # noqa: PLC0415
-    from pypto.pypto_core import DataType  # noqa: PLC0415
 
     ib = IRBuilder()
     with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
         x = orch_f.param("x", ir.TensorType([16], DataType.INT64))
         orch_f.return_type(ir.TensorType([16], DataType.INT64))
 
-        arr0 = ib.let("arr0", ir_array.create(4, DataType.INT64))
+        arr0 = ib.let("arr0", ir_array.create(extent, dtype))
         k = ib.var("k", ir.ScalarType(DataType.INDEX))
-        with ib.for_loop(k, 0, 4, 1) as loop:
+        with ib.for_loop(k, 0, extent, 1) as loop:
             arr_iter = loop.iter_arg("arr_iter", arr0)
             loop.return_var("arr_final")
-            updated = ib.let("upd", ir_array.update_element(arr_iter, k, k))
+            if dtype == DataType.TASK_ID:
+                value = ib.let(
+                    "tid",
+                    ir.create_op_call("system.task_invalid", [], {}, ir.Span.unknown()),
+                )
+            else:
+                value = k
+            updated = ib.let("upd", ir_array.update_element(arr_iter, k, value))
             ib.emit(ir.YieldStmt([updated], ir.Span.unknown()))
         ib.return_stmt(x)
     orch_func = orch_f.get_result()
     program = ir.Program([orch_func], "test_array_iter_arg", ir.Span.unknown())
+    return program, orch_func
 
+
+def test_for_stmt_with_int_array_iter_arg_codegen():
+    """Hand-built IR: ForStmt whose iter_arg is an ArrayType[INT64, 4].
+
+    Each iteration calls ``array.update_element`` and yields the result as
+    the next iter's carry value. Codegen must:
+
+    * Emit a single C-stack array declaration with zero-initialization
+      (``int64_t <name>[4] = {0};``) at the loop prologue.
+    * Slot-by-slot copy from the init array into the carry array.
+    * Route in-place writes through the carry name via the body's
+      ``array.update_element`` LHS-alias mechanism.
+    * Skip the trivial yield self-copy (would be invalid C for raw arrays).
+    """
+    import re  # noqa: PLC0415
+
+    program, orch_func = _build_array_iter_arg_program(DataType.INT64, 4)
     code = codegen.generate_orchestration(program, orch_func).code
-    # Pattern: one INT64-typed array of extent 4 declared and zero-initialized.
-    assert re.search(r"int64_t\s+\w+\[4\]\s*=\s*\{0\};", code), code
-    # Pattern: an indexed write into that array using the loop var.
-    assert re.search(r"\w+\[k\]\s*=\s*k;", code), code
+
+    # Carry array declared exactly once, with zero-init.
+    decls = re.findall(r"int64_t\s+(\w+)\[4\]\s*=\s*\{0\};", code)
+    assert len(decls) >= 1, code
+    carry_names = set(decls)
+
+    # Init copy loop into one of the declared carry arrays.
+    init_loop_matches = re.findall(
+        r"for \(int64_t __init_i = 0; __init_i < 4; \+\+__init_i\) (\w+)\[__init_i\] = (\w+)\[__init_i\];",
+        code,
+    )
+    assert any(lhs in carry_names and rhs != lhs for lhs, rhs in init_loop_matches), code
+
+    # Body write: ``<carry>[k] = k;`` via LHS-alias on update_element.
+    body_writes = re.findall(r"(\w+)\[k\]\s*=\s*k;", code)
+    assert any(name in carry_names for name in body_writes), code
+
+    # No "<carry> = <carry>" self-assign from the yield.
+    for name in carry_names:
+        assert f"{name} = {name};" not in code, code
+
+
+def test_for_stmt_with_task_id_array_iter_arg_codegen():
+    """ArrayType[TASK_ID, 4] iter_arg — same shape, opaque-handle dtype.
+
+    Phase-fence lowering will materialize this exact form. Codegen must
+    emit ``PTO2TaskId <name>[4] = {0};`` (not a numeric C type) and the
+    in-place slot-write pattern.
+    """
+    import re  # noqa: PLC0415
+
+    program, orch_func = _build_array_iter_arg_program(DataType.TASK_ID, 4)
+    code = codegen.generate_orchestration(program, orch_func).code
+    decls = re.findall(r"PTO2TaskId\s+(\w+)\[4\]\s*=\s*\{0\};", code)
+    assert len(decls) >= 1, code
 
 
 if __name__ == "__main__":
