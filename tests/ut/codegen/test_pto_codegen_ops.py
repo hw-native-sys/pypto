@@ -1663,6 +1663,13 @@ class TestTileMoveAccNoopElision:
     """
 
     def _generate_mlir(self, program_cls) -> str:
+        """Generate MLIR for all InCore functions, joined by blank lines.
+
+        Programs that lower to split AIC/AIV kernels (e.g. ``split=UP_DOWN``)
+        produce multiple InCore functions; the bad acc→acc ``pto.tmov`` may
+        appear on the AIC side only.  Codegen each InCore function and
+        concatenate their MLIR so regression assertions cover every variant.
+        """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1671,9 +1678,11 @@ class TestTileMoveAccNoopElision:
         codegen_instance = codegen.PTOCodegen()
         funcs = list(optimized.functions.values())
         assert funcs, "Program has no functions"
-        target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
-        single = ir.Program([target], target.name, optimized.span)
-        return codegen_instance.generate(single)
+        incore = [f for f in funcs if ir.is_incore_type(f.func_type)]
+        targets = incore if incore else [funcs[0]]
+        return "\n\n".join(
+            codegen_instance.generate(ir.Program([f], f.name, optimized.span)) for f in targets
+        )
 
     @staticmethod
     def _has_acc_to_acc_tmov(mlir: str) -> bool:
@@ -1777,7 +1786,7 @@ class TestTileMoveAccNoopElision:
                 w0 = pl.load(w, [0, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
                 x1 = pl.load(x, [0, 128], [16, 128], target_memory=pl.MemorySpace.Mat)
                 w1 = pl.load(w, [128, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
-                acc: pl.Tile[[16, 256], pl.FP32] = pl.matmul(x0, w0, out_dtype=pl.FP32)
+                acc: pl.Tile[[16, 256], pl.FP32] = pl.matmul(x0, w0)
                 acc = pl.matmul_acc(acc, x1, w1)
                 # Pipeline loop with stage=2: LowerPipelineLoops replicates this
                 # body (factor=2), compounding the _l0_c IterArg nesting.

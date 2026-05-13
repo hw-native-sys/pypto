@@ -112,20 +112,20 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
         self.K = k_chunk * num_chunks
 
     def get_name(self) -> str:
-        return (
-            f"pipeline_matmul_acc_gate_up_"
-            f"{self.BATCH}x{self.K}x{self.N}_chunks{self.NUM_CHUNKS}"
-        )
+        return f"pipeline_matmul_acc_gate_up_{self.BATCH}x{self.K}x{self.N}_chunks{self.NUM_CHUNKS}"
 
     def define_tensors(self) -> list[TensorSpec]:
         K = self.K
         return [
-            TensorSpec("x", [self.BATCH, K], DataType.BF16,
-                       init_value=lambda: (torch.rand(self.BATCH, K) - 0.5) * 2),
-            TensorSpec("wg", [K, self.N], DataType.BF16,
-                       init_value=lambda: (torch.rand(K, self.N) - 0.5) / K ** 0.5),
-            TensorSpec("wu", [K, self.N], DataType.BF16,
-                       init_value=lambda: (torch.rand(K, self.N) - 0.5) / K ** 0.5),
+            TensorSpec(
+                "x", [self.BATCH, K], DataType.BF16, init_value=lambda: (torch.rand(self.BATCH, K) - 0.5) * 2
+            ),
+            TensorSpec(
+                "wg", [K, self.N], DataType.BF16, init_value=lambda: (torch.rand(K, self.N) - 0.5) / K**0.5
+            ),
+            TensorSpec(
+                "wu", [K, self.N], DataType.BF16, init_value=lambda: (torch.rand(K, self.N) - 0.5) / K**0.5
+            ),
             TensorSpec("out", [self.BATCH, self.N], DataType.BF16, is_output=True),
         ]
 
@@ -151,12 +151,14 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
                 # concurrent same-shape accumulators expose the MemRef-base
                 # mismatch that triggers the acc→acc pto.tmov bug (#1352).
                 #
-                # out_tile is an InCore (non-DDR) BF16 tile used as an
-                # intermediate buffer, following the model's pattern of
-                # assembling BF16 results into an InCore tile before writing
-                # to DDR.  Storing a BF16 Vec tile directly to a DDR ND tensor
-                # (via TStore NZ→ND) fails with a layout mismatch on A2/A3;
-                # storing to an InCore tile avoids this restriction.
+                # out_tile is a separate DDR BF16 staging tensor used as an
+                # intermediate write target before the final assemble into the
+                # caller-provided ``out``.  Assembling a BF16 Vec tile directly
+                # into the caller's DDR ND tensor (via TStore NZ→ND) fails with
+                # a layout mismatch on A2/A3; routing through a fresh DDR
+                # staging tensor (allocated here via pl.create_tensor) and then
+                # assembling that into ``out`` avoids the restriction.  The
+                # name "out_tile" is historical; this is a Tensor, not a Tile.
                 out_tile = pl.create_tensor([BATCH, N], dtype=pl.BF16)
 
                 with pl.at(
