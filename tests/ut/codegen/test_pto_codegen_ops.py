@@ -1731,6 +1731,69 @@ class TestTileMoveAccNoopElision:
             f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1310):\n{mlir}"
         )
 
+    def test_pipeline_matmul_acc_no_acc_to_acc_tmov(self):
+        """pl.pipeline(stage=2) + matmul_acc must not produce pto.tmov acc→acc.
+
+        When a pl.pipeline loop with stage=2 carries a matmul_acc accumulation
+        and each K tile is large enough to trigger AutoTileMatmulL0, two
+        conditions combine:
+        - LowerPipelineLoops replicates the loop body (factor=2, for stage=2),
+          creating additional IterArg Vars for the pipeline overhead.
+        - AutoTileMatmulL0 rewrites each matmul_acc into an inner K-loop with a
+          fresh IterArg ("l0_c" accumulator), whose MemRef base differs from the
+          outer pipeline loop's acc IterArg base.
+        MemoryReuse fails to unify these bases, so AllocateMemoryAddr assigns
+        different physical addresses (e.g. addr=0 and addr=16384).
+        YieldFixupMutator then inserts tile.move acc→acc between them, forming
+        a round-trip (0→16384→0) that ptoas rejects on Ascend 910B.
+        Codegen must elide all acc→acc tile.move ops unconditionally (#1352).
+
+        Dimensions: K_tile=128, N=256 on 910B.  K_tile=128 exceeds the
+        effective L0B capacity for N=256 (L0B=64KB double-buffered → 32KB;
+        128×256×2=32KB > 32KB-1), so ChooseL0Tile picks K_L0=64, creating the
+        inner K-loop that exposes the MemRef-base mismatch.
+        """
+
+        @pl.program
+        class PipelineAccProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16, 1024], pl.BF16],
+                w: pl.Tensor[[1024, 256], pl.BF16],
+                dst: pl.Tensor[[16, 256], pl.FP32],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                # Prolog: first two K=128 chunks, Mat-resident so that
+                # AutoTileMatmulL0 processes them.  K=128, N=256 on Ascend 910B:
+                # B-tile = 128*256*2 = 64 KB = L0B capacity; with double-
+                # buffering the effective L0B is 32 KB < 64 KB, so ChooseL0Tile
+                # picks K_L0=64 and inserts an inner K-loop around each matmul.
+                # This inner loop introduces a fresh IterArg ("_l0_c" acc) whose
+                # MemRef base may not be unified with the outer accumulator's
+                # base by MemoryReuse, producing acc→acc tile.move.  The
+                # pl.pipeline(stage=2) further replicates the loop body, making
+                # the MemRef-base mismatch more likely (#1352).
+                x0 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                w0 = pl.load(w, [0, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
+                x1 = pl.load(x, [0, 128], [16, 128], target_memory=pl.MemorySpace.Mat)
+                w1 = pl.load(w, [128, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
+                acc: pl.Tile[[16, 256], pl.FP32] = pl.matmul(x0, w0, out_dtype=pl.FP32)
+                acc = pl.matmul_acc(acc, x1, w1)
+                # Pipeline loop with stage=2: LowerPipelineLoops replicates this
+                # body (factor=2), compounding the _l0_c IterArg nesting.
+                for kb in pl.pipeline(2, 8, stage=2):
+                    k0 = kb * 128
+                    xk = pl.load(x, [0, k0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                    wk = pl.load(w, [k0, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
+                    acc = pl.matmul_acc(acc, xk, wk)
+                vec = pl.move(acc, target_memory=pl.MemorySpace.Vec)
+                return pl.store(vec, [0, 0], dst)
+
+        mlir = self._generate_mlir(PipelineAccProg)
+        assert not self._has_acc_to_acc_tmov(mlir), (
+            f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1352):\n{mlir}"
+        )
+
 
 class TestTileStoreAtomicCodegen:
     """Tests for tile.store atomic-add codegen (pto.tstore atomicType attr)."""
