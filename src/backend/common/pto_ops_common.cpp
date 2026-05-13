@@ -1990,41 +1990,17 @@ static std::pair<std::string, std::string> SplitSSAAndType(const std::string& ss
   return {ssa_with_type.substr(0, pos), ssa_with_type.substr(pos + 3)};
 }
 
-// Validate signal tensor type for comm.tnotify / comm.twait. PTOAS spec
-// (PTO_IR_manual.md §pto.comm.tnotify) requires GM-shaped INT32, rank >= 1,
-// addressing a single signal slot.
+// Recover the signal TensorType for codegen. The full operand contract
+// (rank >= 1, INT32, single-slot) is enforced at IR construction by the op's
+// f_deduce_type (see src/ir/op/tile_ops/cross_core.cpp::CheckCommSignalArgs).
+// Any violation reaching codegen is a PyPTO bug, so we only assert here that
+// the type is recoverable for downstream emission.
 static ir::TensorTypePtr CheckCommSignalType(const ir::ExprPtr& signal_arg, codegen::PTOCodegen& codegen,
                                              const ir::Span& span, const char* op_name) {
   auto signal_tensor_type = As<ir::TensorType>(signal_arg->GetType());
   INTERNAL_CHECK_SPAN(signal_tensor_type, span)
       << op_name
-      << " signal must be a TensorType (GM signal slot) — PTOAS requires !pto.partition_tensor_view<Nxi32>";
-  CHECK(!signal_tensor_type->shape_.empty())
-      << op_name << " signal must be a ranked tensor (rank >= 1), got rank-0 (scalar)";
-  CHECK(signal_tensor_type->dtype_ == DataType::INT32)
-      << op_name << " signal must be INT32, got element type "
-      << codegen.GetTypeString(signal_tensor_type->dtype_);
-
-  // Enforce the single-slot contract documented in PTO_IR_manual.md: when every
-  // shape dim is a ConstInt, their product must be exactly 1. Dynamic dims are
-  // tolerated (could be 1 at runtime), but a statically-known extent > 1 is
-  // rejected here so malformed inputs fail before PTOAS emission instead of
-  // silently lowering to a partition view that spans the wrong region.
-  bool all_static = true;
-  int64_t prod = 1;
-  for (const auto& dim_expr : signal_tensor_type->shape_) {
-    auto c = As<ir::ConstInt>(dim_expr);
-    if (!c) {
-      all_static = false;
-      continue;
-    }
-    CHECK(c->value_ == 1) << op_name << " signal must address exactly one INT32 slot, got static dim "
-                          << c->value_;
-    prod *= c->value_;
-  }
-  if (all_static) {
-    CHECK(prod == 1) << op_name << " signal must address exactly one INT32 slot, got element count " << prod;
-  }
+      << " signal must be a TensorType (GM signal slot); IR validator should have rejected this earlier";
   return signal_tensor_type;
 }
 
@@ -2036,11 +2012,11 @@ static ir::TensorTypePtr CheckCommSignalType(const ir::ExprPtr& signal_arg, code
 static std::string MakeTileNotifyCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
-  CHECK(op->args_.size() == 2) << "tile.comm_notify requires 2 arguments (signal, value), got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+      << "tile.comm_notify requires 2 arguments (signal, value), got " << op->args_.size();
 
   const auto notify_op = op->GetKwarg<std::string>("op");
-  CHECK(notify_op == "atomic_add" || notify_op == "set")
+  INTERNAL_CHECK_SPAN(notify_op == "atomic_add" || notify_op == "set", op->span_)
       << "tile.comm_notify 'op' attribute must be 'atomic_add' or 'set', got '" << notify_op << "'";
 
   auto signal_type = CheckCommSignalType(op->args_[0], codegen, op->span_, "tile.comm_notify");
@@ -2065,11 +2041,12 @@ static std::string MakeTileNotifyCodegenPTO(const CallPtr& op, codegen::CodegenB
 static std::string MakeTileWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
-  CHECK(op->args_.size() == 2) << "tile.comm_wait requires 2 arguments (signal, cmp_value), got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+      << "tile.comm_wait requires 2 arguments (signal, cmp_value), got " << op->args_.size();
 
   const auto cmp = op->GetKwarg<std::string>("cmp");
-  CHECK(cmp == "eq" || cmp == "ne" || cmp == "gt" || cmp == "ge" || cmp == "lt" || cmp == "le")
+  INTERNAL_CHECK_SPAN(cmp == "eq" || cmp == "ne" || cmp == "gt" || cmp == "ge" || cmp == "lt" || cmp == "le",
+                      op->span_)
       << "tile.comm_wait 'cmp' attribute must be one of eq|ne|gt|ge|lt|le, got '" << cmp << "'";
 
   auto signal_type = CheckCommSignalType(op->args_[0], codegen, op->span_, "tile.comm_wait");
@@ -2095,11 +2072,12 @@ static std::string MakeTileWaitCodegenPTO(const CallPtr& op, codegen::CodegenBas
 static std::string MakeTileTestCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
 
-  CHECK(op->args_.size() == 2) << "tile.comm_test requires 2 arguments (signal, cmp_value), got "
-                               << op->args_.size();
+  INTERNAL_CHECK_SPAN(op->args_.size() == 2, op->span_)
+      << "tile.comm_test requires 2 arguments (signal, cmp_value), got " << op->args_.size();
 
   const auto cmp = op->GetKwarg<std::string>("cmp");
-  CHECK(cmp == "eq" || cmp == "ne" || cmp == "gt" || cmp == "ge" || cmp == "lt" || cmp == "le")
+  INTERNAL_CHECK_SPAN(cmp == "eq" || cmp == "ne" || cmp == "gt" || cmp == "ge" || cmp == "lt" || cmp == "le",
+                      op->span_)
       << "tile.comm_test 'cmp' attribute must be one of eq|ne|gt|ge|lt|le, got '" << cmp << "'";
 
   auto signal_type = CheckCommSignalType(op->args_[0], codegen, op->span_, "tile.comm_test");
@@ -2109,9 +2087,9 @@ static std::string MakeTileTestCodegenPTO(const CallPtr& op, codegen::CodegenBas
   std::string val = GetPipeBufOperandI32SSA(codegen, op->args_[1]);
 
   std::string result_ssa = codegen.GetCurrentResultTarget();
-  if (result_ssa.empty()) {
-    result_ssa = codegen.NewNamedTemp("comm_test");
-  }
+  INTERNAL_CHECK_SPAN(!result_ssa.empty(), op->span_)
+      << "tile.comm_test result must be bound to a Var (e.g. `ok = pl.tile.comm_test(...)`); "
+      << "discarding the BOOL return value is not supported";
 
   // PTOAS custom assembly:
   //   %ok = pto.comm.ttest(%sig, %v : <sig_type>, i32) {cmp = #pto<wait_cmp X>} -> i1

@@ -75,18 +75,38 @@ void CheckCommSignalArgs(const std::vector<ExprPtr>& args, const char* op_name, 
 TypePtr DeduceTileCommNotifyType(const std::vector<ExprPtr>& args,
                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CheckCommSignalArgs(args, "tile.comm_notify", "value");
+  for (const auto& [k, v] : kwargs) {
+    if (k == "op") {
+      const auto& s = std::any_cast<const std::string&>(v);
+      CHECK(s == "atomic_add" || s == "set")
+          << "tile.comm_notify 'op' attribute must be 'atomic_add' or 'set', got '" << s << "'";
+    }
+  }
   return GetUnknownType();
+}
+
+static void CheckCommCmpKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs,
+                              const char* op_name) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == "cmp") {
+      const auto& s = std::any_cast<const std::string&>(v);
+      CHECK(s == "eq" || s == "ne" || s == "gt" || s == "ge" || s == "lt" || s == "le")
+          << op_name << " 'cmp' attribute must be one of eq|ne|gt|ge|lt|le, got '" << s << "'";
+    }
+  }
 }
 
 TypePtr DeduceTileCommWaitType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CheckCommSignalArgs(args, "tile.comm_wait", "cmp_value");
+  CheckCommCmpKwarg(kwargs, "tile.comm_wait");
   return GetUnknownType();
 }
 
 TypePtr DeduceTileCommTestType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CheckCommSignalArgs(args, "tile.comm_test", "cmp_value");
+  CheckCommCmpKwarg(kwargs, "tile.comm_test");
   return std::static_pointer_cast<const Type>(std::make_shared<ScalarType>(DataType::BOOL));
 }
 

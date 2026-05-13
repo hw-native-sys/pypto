@@ -416,7 +416,7 @@ See [TPUSH/TPOP ISA Reference](../../reference/pto-isa/01-tpush_tpop.md) and [Bu
 
 For all three ops, `signal` is a 1-element INT32 tensor that views a GM signal slot. `tile.comm_notify` targets a remote rank's slot (typically obtained via `pl.import_peer_buffer`); `tile.comm_wait` / `tile.comm_test` poll the local rank's slot. The integer operand (`value` / `cmp_value`) is a Python int, `Scalar`, or `Expr`. They lower to `pto::comm::TNOTIFY` / `pto::comm::TWAIT` / `pto::comm::TTEST` on the AIV side. `tile.comm_test` returns `pl.Scalar[pl.BOOL]` (PTO `i1`); the others have no return value.
 
-**Pipeline ordering note.** The cross-rank done-barrier pattern (see simpler's `ep_dispatch_combine` kernels) relies on payload writes becoming visible to the peer **before** the done signal is sent. PyPTO inserts the required pipe synchronization automatically, but callers should ensure no late writes to the payload region remain in-flight after `comm_notify`.
+**Pipeline ordering note.** Cross-rank communication ops require pipe-level ordering between GM payload writes and signal writes (the cross-rank done-barrier pattern). Consistent with the rest of PyPTO, pipe synchronization is **not** inserted at the IR or codegen layer — it is the responsibility of the downstream PTOAS lowering. PyPTO users do not need to (and cannot) manually insert pipe barriers around `comm_notify` / `comm_wait` / `comm_test`.
 
 ```python
 import pypto.language as pl

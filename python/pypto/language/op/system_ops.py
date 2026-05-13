@@ -186,12 +186,12 @@ def comm_notify(
     :func:`import_peer_buffer`.
 
     Note:
-        The cross-rank done-barrier pattern used in production (see the
-        ``dispatch.cpp`` / ``combine.cpp`` examples) relies on payload writes
-        becoming visible to the peer **before** the done signal is sent.
-        PyPTO inserts the required pipe synchronization automatically, but
-        callers should ensure no late writes to the payload region remain
-        in-flight after ``comm_notify``.
+        Cross-rank communication ops require pipe-level ordering between GM
+        payload writes and signal writes (the cross-rank done-barrier
+        pattern). Consistent with the rest of PyPTO, pipe synchronization is
+        **not** inserted at the IR or codegen layer — it is the
+        responsibility of the downstream PTOAS lowering. Users do not need
+        to (and cannot) manually insert pipe barriers around ``comm_notify``.
 
     Args:
         signal: Destination signal tensor (1-element INT32) in remote rank's window.

@@ -410,7 +410,7 @@ class CrossCoreExample:
 
 三个 op 的 `signal` 都是一个 1 元素 INT32 tensor，视图指向 GM 中的信号槽：`tile.comm_notify` 写远端 rank 的槽（通常通过 `pl.import_peer_buffer` 获取），`tile.comm_wait` / `tile.comm_test` 轮询本地 rank 的槽。整数操作数（`value` / `cmp_value`）可以是 Python `int`、`Scalar` 或 `Expr`。在 AIV 侧分别 lowering 为 `pto::comm::TNOTIFY` / `pto::comm::TWAIT` / `pto::comm::TTEST`。`tile.comm_test` 返回 `pl.Scalar[pl.BOOL]`（PTO `i1`），其余两者无返回值。
 
-**流水排序说明。** 跨 rank done-barrier 模式（参见 simpler 的 `ep_dispatch_combine` kernel）依赖于 payload 写入对 peer 可见之后才发出 done 信号。PyPTO 会自动插入所需的 pipe 同步，但调用者应确保 `comm_notify` 之后没有遗留的 payload 写操作仍在飞行中。
+**流水排序说明。** 跨 rank 通信 op 需要在 GM payload 写与 signal 写之间保证 pipe 级别的顺序（即跨 rank done-barrier 模式）。与 PyPTO 其它部分一致，pipe 同步**不在** IR 或 codegen 层插入，而由下游的 PTOAS 在 lowering 阶段处理。PyPTO 用户无需（也无法）手工在 `comm_notify` / `comm_wait` / `comm_test` 周围插入 pipe-barrier。
 
 ```python
 import pypto.language as pl
