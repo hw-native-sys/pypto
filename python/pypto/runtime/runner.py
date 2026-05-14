@@ -132,6 +132,8 @@ class RunConfig:
             runtime default applies). Set this when running the same
             compiled artifact on devices with different usable core
             counts.
+        aicpu_thread_num: Optional per-invocation override of the AICPU
+            thread count. Same precedence rules as ``block_dim``.
     """
 
     __test__ = False  # Not a pytest test class
@@ -157,6 +159,7 @@ class RunConfig:
     disabled_diagnostics: DiagnosticCheckSet | None = None
     golden_data_dir: str | None = None
     block_dim: int | None = None
+    aicpu_thread_num: int | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):

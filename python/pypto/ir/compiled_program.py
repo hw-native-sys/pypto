@@ -390,6 +390,7 @@ class CompiledProgram:
             pto_isa_commit=config.pto_isa_commit,
             dfx=_DfxOpts.from_run_config(config),
             block_dim=config.block_dim,
+            aicpu_thread_num=config.aicpu_thread_num,
         )
 
         if not return_style:

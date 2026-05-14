@@ -383,7 +383,7 @@ def compile_and_assemble(
     work_dir: Path,
     platform: str,
     pto_isa_commit: str | None = None,
-) -> tuple[ChipCallable, str, dict]:
+) -> tuple[ChipCallable, str, dict[str, Any]]:
     """Compile kernels + orchestration from *work_dir*, assemble ``ChipCallable``.
 
     Reads ``kernel_config.py`` from *work_dir* to discover kernel sources,
