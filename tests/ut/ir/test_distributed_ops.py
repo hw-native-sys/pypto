@@ -202,5 +202,128 @@ def test_world_size_rejects_kwargs():
         ir.create_op_call("pld.world_size", [], {"foo": 1}, span)
 
 
+# ---------------------------------------------------------------------------
+# pld.tile.remote_load op
+# ---------------------------------------------------------------------------
+
+
+def _make_distributed_tensor_var(name: str, shape: list[int], dtype: DataType, span: ir.Span) -> ir.Var:
+    """Build a DistributedTensor-typed Var, mimicking the parser-level binding
+    produced by a ``pld.DistributedTensor[[...], dtype]`` parameter annotation
+    (``window_buffer`` back-reference left None until CollectCommGroups runs)."""
+    shape_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in shape]
+    return ir.Var(name, ir.DistributedTensorType(shape_exprs, dtype), span)
+
+
+def test_remote_load_returns_tile_type_with_target_dtype():
+    """Positive: result is TileType with the requested shape + target's dtype."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    offsets = _make_shape_tuple([0], span)
+    shape = _make_shape_tuple([32], span)
+
+    call = ir.create_op_call(
+        "pld.tile.remote_load",
+        [target, peer, offsets, shape],
+        {},
+        span,
+    )
+    assert isinstance(call.type, ir.TileType)
+    assert call.type.dtype == DataType.FP16
+    assert len(call.type.shape) == 1
+    assert isinstance(call.type.shape[0], ir.ConstInt)
+    assert call.type.shape[0].value == 32
+
+
+def test_remote_load_rejects_plain_tensor_target():
+    """Negative: a plain pl.Tensor target is refused — must be window-bound."""
+    span = ir.Span.unknown()
+    plain = ir.Var(
+        "x",
+        ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32),
+        span,
+    )
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    offsets = _make_shape_tuple([0], span)
+    shape = _make_shape_tuple([32], span)
+
+    with pytest.raises(Exception, match="DistributedTensor"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [plain, peer, offsets, shape],
+            {},
+            span,
+        )
+
+
+def test_remote_load_rejects_non_scalar_peer():
+    """Negative: peer must be a ScalarType expression (rank index)."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
+    bad_peer = _make_shape_tuple([0], span)  # MakeTuple, not a scalar
+    offsets = _make_shape_tuple([0], span)
+    shape = _make_shape_tuple([32], span)
+
+    with pytest.raises(Exception, match="peer must be a scalar"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [target, bad_peer, offsets, shape],
+            {},
+            span,
+        )
+
+
+def test_remote_load_rejects_mismatched_offsets_rank():
+    """Negative: offsets rank must match target tensor rank."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64, 32], DataType.FP32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    bad_offsets = _make_shape_tuple([0], span)  # 1-D, but target is 2-D
+    shape = _make_shape_tuple([32, 16], span)
+
+    with pytest.raises(Exception, match="offsets rank"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [target, peer, bad_offsets, shape],
+            {},
+            span,
+        )
+
+
+def test_remote_load_rejects_mismatched_shape_rank():
+    """Negative: shape rank must match target tensor rank."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64, 32], DataType.FP32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    offsets = _make_shape_tuple([0, 0], span)
+    bad_shape = _make_shape_tuple([16], span)  # 1-D, but target is 2-D
+
+    with pytest.raises(Exception, match="shape rank"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [target, peer, offsets, bad_shape],
+            {},
+            span,
+        )
+
+
+def test_remote_load_rejects_non_make_tuple_offsets():
+    """Negative: offsets must be a MakeTuple."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    bad_offsets = ir.ConstInt(0, DataType.INT64, span)
+    shape = _make_shape_tuple([32], span)
+
+    with pytest.raises(Exception, match="offsets must be a tuple"):
+        ir.create_op_call(
+            "pld.tile.remote_load",
+            [target, peer, bad_offsets, shape],
+            {},
+            span,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

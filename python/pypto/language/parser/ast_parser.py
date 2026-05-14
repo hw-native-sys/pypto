@@ -3743,6 +3743,10 @@ class ASTParser:
         if len(attrs) == 2 and attrs[0] == "pld":
             return self._parse_pld_op(attrs[1], call)
 
+        # pld.tile.{operation} (3-segment) — distributed cross-rank tile ops
+        if len(attrs) == 3 and attrs[0] == "pld" and attrs[1] == "tile":
+            return self._parse_pld_tile_op(attrs[2], call)
+
         # pl.tensor.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":
             op_name = attrs[2]
@@ -4623,6 +4627,97 @@ class ASTParser:
             f"Unknown distributed operation 'pld.{op_name}'",
             span=span,
             hint="Available: pld.alloc_window_buffer, pld.window, pld.world_size",
+        )
+
+    def _parse_pld_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse a ``pld.tile.<op>(...)`` cross-rank tile operation.
+
+        Currently only ``pld.tile.remote_load`` is registered. The DSL surface
+        keeps ``peer`` / ``offsets`` / ``shape`` keyword-only for readability;
+        the IR op takes them positional, matching ``tile.load``.
+        """
+        span = self.span_tracker.get_span(call)
+
+        if op_name == "remote_load":
+            if len(call.args) != 1:
+                raise ParserSyntaxError(
+                    "pld.tile.remote_load takes 1 positional argument (target) and the "
+                    "kwargs 'peer', 'offsets', 'shape'; "
+                    f"got {len(call.args)} positional args",
+                    span=span,
+                    hint="Use 'pld.tile.remote_load(target, peer=..., offsets=[...], shape=[...])'",
+                )
+
+            allowed_kwargs = {"peer", "offsets", "shape"}
+            kw_names = {kw.arg for kw in call.keywords if kw.arg is not None}
+            extra = kw_names - allowed_kwargs
+            if extra:
+                raise ParserSyntaxError(
+                    f"pld.tile.remote_load does not accept kwarg(s) {sorted(extra)}",
+                    span=span,
+                    hint=f"Accepted kwargs: {sorted(allowed_kwargs)}",
+                )
+            missing = allowed_kwargs - kw_names
+            if missing:
+                raise ParserSyntaxError(
+                    f"pld.tile.remote_load missing required kwarg(s) {sorted(missing)}",
+                    span=span,
+                    hint="Pass 'peer', 'offsets', and 'shape' as kwargs",
+                )
+
+            target_expr = self.parse_expression(call.args[0])
+            if not isinstance(target_expr, ir.Expr):
+                raise ParserSyntaxError(
+                    "pld.tile.remote_load target must be an IR expression",
+                    span=span,
+                )
+            if not isinstance(target_expr.type, ir.DistributedTensorType):
+                raise ParserTypeError(
+                    "pld.tile.remote_load expects a DistributedTensor target (window-bound); "
+                    f"got {ir.python_print_type(target_expr.type)}",
+                    span=span,
+                    hint="Pass a parameter annotated as 'pld.DistributedTensor[[...], dtype]' "
+                    "or the result of 'pld.window(...)'",
+                )
+
+            kw_by_name = {kw.arg: kw for kw in call.keywords}
+
+            peer_expr = self.parse_expression(kw_by_name["peer"].value)
+            if not isinstance(peer_expr, ir.Expr):
+                raise ParserSyntaxError(
+                    "pld.tile.remote_load peer must be an IR expression (scalar rank index)",
+                    span=span,
+                )
+
+            offsets_raw = self._parse_op_positional_arg(kw_by_name["offsets"].value)
+            if not isinstance(offsets_raw, ir.MakeTuple):
+                raise ParserSyntaxError(
+                    f"pld.tile.remote_load offsets must be a list/tuple literal "
+                    f"(got {type(offsets_raw).__name__})",
+                    span=span,
+                    hint="Use a list literal like '[0]' or '[i, j]'",
+                )
+
+            shape_raw = self._parse_op_positional_arg(kw_by_name["shape"].value)
+            if not isinstance(shape_raw, ir.MakeTuple):
+                raise ParserSyntaxError(
+                    f"pld.tile.remote_load shape must be a list/tuple literal "
+                    f"(got {type(shape_raw).__name__})",
+                    span=span,
+                    hint="Use a list literal like '[N]' or '[M, N]'",
+                )
+
+            return ir.create_op_call(
+                "pld.tile.remote_load",
+                [target_expr, peer_expr, offsets_raw, shape_raw],
+                {},
+                span,
+            )
+
+        raise InvalidOperationError(
+            f"Unknown distributed tile operation 'pld.tile.{op_name}'",
+            span=span,
+            hint="Available: pld.tile.remote_load",
         )
 
     # Maps iterator type name to ForKind enum value.

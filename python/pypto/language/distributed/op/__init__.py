@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Distributed-DSL op sentinels (``pld.<op>``).
+"""Distributed-DSL op sentinels (``pld.<op>`` and ``pld.tile.<op>``).
 
 Parser sentinels that lift to ``ir.OpExpr(pld.<op>)`` nodes. Files are
 grouped by op category (mirroring ``pypto.language.op``):
@@ -16,9 +16,12 @@ grouped by op category (mirroring ``pypto.language.op``):
   window-buffer allocation and view materialisation).
 * ``system_ops`` — :func:`world_size` today; N6 will add
   ``pld.system.notify`` / ``pld.system.wait`` here as well.
+* ``tile_ops`` — cross-rank tile ops, exposed as the ``tile`` sub-namespace
+  (``pld.tile.remote_load`` ...).
 """
 
+from . import tile_ops as tile
 from .memory_ops import alloc_window_buffer, window
 from .system_ops import world_size
 
-__all__ = ["alloc_window_buffer", "window", "world_size"]
+__all__ = ["alloc_window_buffer", "tile", "window", "world_size"]

@@ -19,13 +19,15 @@ manually.
 Package layout mirrors :mod:`pypto.language`:
 
 * :mod:`pypto.language.distributed.op` — parser-sentinel ops
-  (:func:`alloc_window_buffer`, :func:`window`, :func:`world_size`).
-  Per-file split mirrors the C++ side (``src/ir/op/distributed/``).
+  (:func:`alloc_window_buffer`, :func:`window`, :func:`world_size`, plus
+  the ``tile`` sub-namespace for cross-rank tile ops such as
+  :func:`pld.tile.remote_load`). Per-file split mirrors the C++ side
+  (``src/ir/op/distributed/``).
 * :mod:`pypto.language.distributed.typing` — DSL type wrappers
   (:class:`DistributedTensor`).
 """
 
-from .op import alloc_window_buffer, window, world_size
+from .op import alloc_window_buffer, tile, window, world_size
 from .typing import DistributedTensor
 
-__all__ = ["DistributedTensor", "alloc_window_buffer", "window", "world_size"]
+__all__ = ["DistributedTensor", "alloc_window_buffer", "tile", "window", "world_size"]

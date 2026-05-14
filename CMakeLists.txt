@@ -111,6 +111,7 @@ set(PYPTO_SOURCES
     src/ir/op/sync_ops/task.cpp
     src/ir/op/distributed/memory.cpp
     src/ir/op/distributed/world_size.cpp
+    src/ir/op/distributed/remote_load.cpp
     src/ir/op/tensor_ops/broadcast.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tensor_ops/matmul.cpp
