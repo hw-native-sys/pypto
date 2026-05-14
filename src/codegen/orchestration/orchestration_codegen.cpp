@@ -642,24 +642,40 @@ class OrchestrationStmtCodegen : public CodegenBase {
         const int64_t N = extent_const->value_;
         const bool is_task_id_array = (array_ty->dtype_ == DataType::TASK_ID);
         const std::string cpp_dtype = is_task_id_array ? "PTO2TaskId" : array_ty->dtype_.ToCTypeString();
-        std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
-        // Declare the carry array and fill every slot from the incoming array.
-        // The iter_arg's init value is an ArrayType of the same extent ``N``,
-        // so this slot-by-slot copy fully initialises the carry — no separate
-        // sentinel / zero pre-init is needed.
-        code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "];\n";
-        code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
-              << "[__init_i] = " << init_var_name << "[__init_i];\n";
+
+        // An ArrayType carry is in-place-update semantics: the body's
+        // ``array.update_element`` aliases its LHS back to the carry's emit
+        // name, so every SSA rename of the same logical array can share one
+        // C-stack array. When the iter_arg's init value is itself a backing
+        // array (an ``array.create`` result or an enclosing loop's ArrayType
+        // carry), reuse it directly — no fresh declaration and no
+        // slot-by-slot copy-in are needed, and the matching yield self-copy
+        // is skipped in VisitStmt_(YieldStmtPtr). Otherwise (e.g. an
+        // ArrayType function parameter) fall back to a fresh backing array
+        // initialised by a slot-by-slot copy.
+        std::string carry_name;
+        auto init_var = AsVarLike(iter_arg->initValue_);
+        const ArrayCarryEntry* init_carry = nullptr;
+        if (init_var) {
+          auto it = array_carry_vars_.find(init_var.get());
+          if (it != array_carry_vars_.end() && it->second.size == N) init_carry = &it->second;
+        }
+        if (init_carry) {
+          carry_name = init_carry->array_name;
+        } else {
+          carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
+          code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "];\n";
+          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
+                << "[__init_i] = " << init_var_name << "[__init_i];\n";
+        }
         emit_name_map_[iter_arg.get()] = carry_name;
         emit_name_map_[return_var.get()] = carry_name;
-        // For TaskId arrays, also register the iter_arg / return_var in
-        // ``manual_task_id_map_`` as ``vector<string>`` of per-slot names so
-        // a downstream ``deps=[arr]`` expands into N guarded ``add_dep``
-        // calls (one per slot).
-        if (is_task_id_array && in_manual_scope_depth_ > 0) {
-          RegisterArrayCarry(iter_arg.get(), carry_name, N);
-          RegisterArrayCarry(return_var.get(), carry_name, N);
-        }
+        // Register the iter_arg / return_var as array carries so a nested
+        // ForStmt seeded by either can reuse this same backing array, and a
+        // downstream ``deps=[arr]`` (TaskId arrays) expands into N guarded
+        // per-slot dependency fills.
+        RegisterArrayCarry(iter_arg.get(), carry_name, N);
+        RegisterArrayCarry(return_var.get(), carry_name, N);
       } else if (is_rebind[i]) {
         // Scalar (single-name) carry path — only fires for non-TaskId
         // iter_args (e.g. Tensor) or Sequential TaskId iter_args whose
@@ -892,6 +908,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
           HandleArrayUpdateElementAssign(assign, call);
         }
         GenerateTensorOpCode(call, var_name, assign->var_);
+        // Register an ``array.create`` result as a backing array so a ForStmt
+        // ArrayType iter_arg seeded by it can reuse the same C-stack array
+        // instead of allocating a fresh one and copying in slot-by-slot.
+        if (op_name == "array.create") {
+          if (auto arr_ty = As<ArrayType>(assign->var_->GetType())) {
+            if (auto extent = As<ConstInt>(arr_ty->extent())) {
+              RegisterArrayCarry(assign->var_.get(), var_name, extent->value_);
+            }
+          }
+        }
       } else if (!IsBuiltinOp(op_name)) {
         std::string result_key;
         if (As<TupleType>(call->GetType())) {
