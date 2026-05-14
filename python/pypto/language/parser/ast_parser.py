@@ -1208,7 +1208,10 @@ class ASTParser:
                 hint="Use `out, tid = pl.submit(self.kernel, ...)`.",
             )
         # The result target is either a single Name (single-output kernel) or
-        # a tuple of Names (multi-output kernel).
+        # a flat tuple of Names (multi-output kernel). Nested tuples are
+        # rejected: each kernel output is a single value, so a nested target
+        # would silently pass the arity check and then fail later with an
+        # opaque tuple-index error.
         if isinstance(out_target, ast.Name):
             out_names: list[ast.expr] = [out_target]
         elif isinstance(out_target, ast.Tuple):
@@ -1219,6 +1222,14 @@ class ASTParser:
                 span=span,
                 hint="Use `out, tid = pl.submit(...)` or `(a, b), tid = pl.submit(...)`.",
             )
+        for elt in out_names:
+            if not isinstance(elt, ast.Name):
+                raise ParserSyntaxError(
+                    "pl.submit(...) result target must contain plain variable names only "
+                    f"(no nested tuples), got '{ast.unparse(elt)}'",
+                    span=span,
+                    hint="Use `out, tid = pl.submit(...)` or `(a, b), tid = pl.submit(...)`.",
+                )
         n_outs = len(out_names)
         if not call.args:
             raise ParserSyntaxError(

@@ -1461,10 +1461,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///
   /// The edge list is written directly by the parser from a ``pl.submit(...)``
   /// ``deps=[tid1, tid2]`` kwarg — each entry a ``Scalar[TASK_ID]`` Var, or an
-  /// ``Array[N, TASK_ID]`` that contributes one slot each. Iter-arg / array
-  /// carries are guarded by ``is_valid()`` because an early loop iteration may
-  /// still hold ``PTO2TaskId::invalid()``; plain TaskId bindings are filled
-  /// unconditionally. No-op outside a manual scope or when there are no edges.
+  /// ``Array[N, TASK_ID]`` that contributes one slot each. Every entry is
+  /// guarded by ``is_valid()``: any TaskId may legitimately hold the
+  /// ``PTO2TaskId::invalid()`` sentinel — a ``None`` loop-carry seed, an early
+  /// loop iteration's iter_arg carry, or an unwritten array slot — and an
+  /// invalid id must never reach ``set_dependencies``. The guard is a cheap
+  /// always-true branch for ids known valid. No-op outside a manual scope or
+  /// when there are no edges.
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
     if (in_manual_scope_depth_ == 0) return;
     const size_t dep_capacity = CountManualDeps(call);
@@ -1502,15 +1505,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
           }
         } else {
           const auto& name = std::get<std::string>(it->second);
-          // Iter-arg TaskId carries can be ``PTO2TaskId::invalid()`` on the
-          // first loop iteration; guard with is_valid(). Plain TaskId
-          // bindings are always valid, so fill unconditionally.
-          if (edge->GetKind() == ObjectKind::IterArg) {
-            code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
-                  << "++] = " << name << ";\n";
-          } else {
-            code_ << Indent() << deps_arr << "[" << deps_cnt << "++] = " << name << ";\n";
-          }
+          // Any scalar TaskId may hold the ``PTO2TaskId::invalid()`` sentinel
+          // — an iter_arg carry on the first loop iteration, or a ``None``
+          // (``system.task_invalid``) loop-carry seed. Guard every entry with
+          // ``is_valid()``; the branch is a harmless always-true test for ids
+          // already known valid.
+          code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
+                << "++] = " << name << ";\n";
         }
       }
       code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
@@ -1996,10 +1997,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   /// Emit aliases for a ``pl.submit(...)`` kernel call. Tuple elements
-  /// ``0..N-1`` are the kernel's output tensors — each aliased to the
-  /// corresponding Out/InOut call arg, exactly like an ordinary multi-output
-  /// kernel call. Element ``N`` (the trailing ``Scalar[TASK_ID]``) is the
-  /// producer TaskId: it is bound to ``task_<idx>_outs.task_id()`` and
+  /// ``0..N-1`` are the kernel's results — the Out/InOut-tensor elements are
+  /// aliased to the corresponding call args, exactly like an ordinary
+  /// multi-output kernel call. Element ``N`` (the trailing ``Scalar[TASK_ID]``)
+  /// is the producer TaskId: it is bound to ``task_<idx>_outs.task_id()`` and
   /// registered in ``manual_task_id_map_`` so a downstream ``deps=[tid]``
   /// resolves to the emitted name.
   void GenerateSubmitReturnAliases(const CallPtr& call, int task_idx) {
@@ -2017,8 +2018,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(callee != nullptr, call->span_)
         << "Internal error: submit callee '" << call->op_->name_ << "' not found";
 
-    // Kernel output param positions, in declared order. Tuple element ``i``
-    // (for ``i < n_outs``) corresponds to the kernel's ``i``-th Out/InOut arg.
+    // Kernel output param positions, in declared order.
     auto call_arg_directions = call->GetArgDirections();
     bool has_call_dirs = (call_arg_directions.size() == call->args_.size());
     std::vector<size_t> out_indices;
@@ -2038,6 +2038,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
+    // Map the kernel-result portion (tuple elements ``[0, n_outs)``) onto the
+    // Out/InOut args. Some wrappers (notably SPMD helpers) return auxiliary
+    // scalars *before* the tensor outputs — mirror ``GenerateTupleReturnAliases``
+    // and tail-align: result element ``elem_pos`` is an Out/InOut tensor iff
+    // ``elem_pos >= tuple_out_base``, where ``tuple_out_base`` skips the
+    // leading aux elements. Leading aux scalars carry no runtime output and
+    // are left undeclared (a referenced one would be a codegen bug surfaced
+    // elsewhere, same as the non-submit path).
+    const size_t tuple_out_base = n_outs >= out_indices.size() ? (n_outs - out_indices.size()) : 0;
+
     for (const auto& elem : elements_it->second) {
       if (elem.index < 0) continue;
       size_t elem_pos = static_cast<size_t>(elem.index);
@@ -2050,11 +2060,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         manual_task_id_map_[elem.var] = tid_name;
         continue;
       }
-      // A kernel output tensor: alias element ``i`` to the kernel's i-th
-      // Out/InOut arg.
-      if (elem_pos >= n_outs || elem_pos >= out_indices.size()) continue;
+      // A kernel result element. Skip the trailing TaskId / out-of-range and
+      // the leading aux-scalar elements; the rest tail-align onto out_indices.
+      if (elem_pos >= n_outs || elem_pos < tuple_out_base) continue;
+      size_t out_pos = elem_pos - tuple_out_base;
+      if (out_pos >= out_indices.size()) continue;
       if (!effective_uses_.count(elem.var)) continue;
-      size_t param_idx = out_indices[elem_pos];
+      size_t param_idx = out_indices[out_pos];
       INTERNAL_CHECK_SPAN(param_idx < call->args_.size(), call->span_)
           << "Internal error: submit output element " << elem_pos << " maps to param_idx " << param_idx
           << " out of range for " << call->op_->name_;

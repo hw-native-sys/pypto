@@ -13,7 +13,7 @@ PyPTO 采用**两层方向模型**（在 commit `c53dac0d` 引入）：
 
 `DeriveCallDirections` 就是连接两层的 pass。它遍历每个 `Function` body 中的所有非 builtin `Call`，并将解析后的每参数向量写入 `Call.attrs["arg_directions"]`（保留键 `kAttrArgDirections`，值类型为 `std::vector<ArgDirection>`）。下游消费者——orchestration 代码生成和运行时任务提交层——直接读取 `Call.attrs["arg_directions"]`，而不是从原始参数方向重新计算。
 
-**Manual scope 的依赖边不归本 pass 管。** 在 `with pl.manual_scope():` 区域内，用户声明的 `pl.submit(..., deps=[...])` 边由 **parser 直接**写入 `Call.attrs["manual_dep_edges"]`（一个 `Scalar[TASK_ID]` 变量的 `vector<VarPtr>`）。没有任何 pass 合成或降级它们；`DeriveCallDirections` 只读写 `arg_directions`。
+**Manual scope 的依赖边不归本 pass 管。** 在 `with pl.manual_scope():` 区域内，用户声明的 `pl.submit(..., deps=[...])` 边由 **parser 直接**写入 `Call.attrs["manual_dep_edges"]`（一个 `vector<VarPtr>`，元素为 `Scalar[TASK_ID]` 变量或 `Array[N, TASK_ID]` carry）。没有任何 pass 合成或降级它们；`DeriveCallDirections` 只读写 `arg_directions`。
 
 **何时使用**：在 tile pipeline 稳定后运行（要求 `SplitIncoreOrch`），并在任何观察 `Call.attrs["arg_directions"]` 的消费者之前。在 `Default` 策略中它位于 `FuseCreateAssembleToSlice` 与最后一次 `Simplify` 之间。
 

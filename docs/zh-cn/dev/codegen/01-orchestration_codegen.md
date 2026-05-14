@@ -398,10 +398,15 @@ params_t1.add_input(...);
 // ...
 PTO2TaskId params_t1_deps[K];          // K = 精确的 dep 边数
 uint32_t params_t1_deps_count = 0;
-params_t1_deps[params_t1_deps_count++] = tid;                          // 普通 TaskId 绑定：无条件
-if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;  // iter-arg / 数组槽 carry：is_valid() 守卫
+if (tid.is_valid()) params_t1_deps[params_t1_deps_count++] = tid;      // 每个条目都有 is_valid() 守卫
+if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;
 params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
 ```
+
+每个 dep 槽位都被 `if (task_id.is_valid())` 包裹：任何 TaskId 都可能合法地
+持有 `PTO2TaskId::invalid()` 哨兵——`None` 循环 carry 种子、循环首次迭代的
+iter_arg carry，或未写入的数组槽——invalid id 绝不能进入
+`set_dependencies`。对已知有效的 id，该守卫只是一个恒真的廉价分支。
 
 不再有 `params.add_dep(...)` 调用，也没有 16 条依赖上限——runtime 的
 `Arg::set_dependencies` 原语没有上限，栈数组按精确数量定长。dep 边

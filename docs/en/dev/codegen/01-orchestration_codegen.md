@@ -400,10 +400,16 @@ params_t1.add_input(...);
 // ...
 PTO2TaskId params_t1_deps[K];          // K = exact dep-edge count
 uint32_t params_t1_deps_count = 0;
-params_t1_deps[params_t1_deps_count++] = tid;                          // plain TaskId binding: unconditional
-if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;  // iter-arg / array-slot carry: is_valid()-guarded
+if (tid.is_valid()) params_t1_deps[params_t1_deps_count++] = tid;      // every entry is is_valid()-guarded
+if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;
 params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
 ```
+
+Every dep slot is wrapped in `if (task_id.is_valid())`: any TaskId may
+legitimately hold the `PTO2TaskId::invalid()` sentinel — a `None` loop-carry
+seed, an early loop iteration's iter_arg carry, or an unwritten array slot —
+and an invalid id must never reach `set_dependencies`. The guard is a cheap
+always-true branch for ids known valid.
 
 There is no `params.add_dep(...)` call any more, and there is no 16-dep cap
 — the runtime `Arg::set_dependencies` primitive has no upper bound, and the

@@ -204,6 +204,24 @@ class TestManualScopeParsing:
                         a = pl.submit(self.k1, x)
                     return a
 
+    def test_submit_nested_result_tuple_is_rejected(self):
+        """pl.submit result targets must be plain names — no nested tuples."""
+        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        # Nested tuple in the result target — must error rather
+                        # than silently pass the arity check.
+                        (a, (b, c)), tid = pl.submit(self.k1, x)
+                    return a
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
