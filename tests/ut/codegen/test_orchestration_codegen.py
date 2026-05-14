@@ -2911,7 +2911,8 @@ class TestManualScopeCodegen:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
                     a = self.k1(x)
-                    b = self.k2(a, deps=[a])
+                    a_tid = pl.task_id_of(a)
+                    b = self.k2(a, deps=[a_tid])
                 return b
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -2922,13 +2923,11 @@ class TestManualScopeCodegen:
         # Every kernel submit inside a manual scope captures the submit's
         # outputs handle so downstream code can call ``.task_id()`` on it.
         # We no longer pre-emit a ``PTO2TaskId task_<n>`` variable — the
-        # task_id is materialised at use sites (via a ``system.task_id_of``
-        # AssignStmt synthesised by ``LowerManualDepsToTaskId``).
+        # task_id is materialised by the user via ``pl.task_id_of(...)``.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code
-        # Explicit dep on `a`: the pass synthesises a TaskId companion
-        # ``a__tid = task_0_outs.task_id();`` and rewrites deps=[a] to the
-        # TaskId version, which codegen emits as ``add_dep(<companion>)``.
+        # User-named TaskId binding: ``a_tid = task_0_outs.task_id();``,
+        # threaded into ``ArgWithDeps<N>`` and submitted via ``add_dep`` calls.
         assert "task_0_outs.task_id()" in code
         assert ".add_dep(" in code
 
@@ -2954,24 +2953,27 @@ class TestManualScopeCodegen:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
                     a = self.k1(x)
+                    a_tid = pl.task_id_of(a)
                     b = self.k2(x)
+                    b_tid = pl.task_id_of(b)
                     # Explicit deps even though `c` doesn't consume `a`/`b` data.
-                    c = self.k3(x, deps=[a, b])
+                    c = self.k3(x, deps=[a_tid, b_tid])
                 return c
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        # LowerManualDepsToTaskId synthesises ``a__ssa_v0__tid =
-        # task_0_outs.task_id();`` and ``b__ssa_v0__tid = task_1_outs.task_id();``
-        # then rewrites deps=[a, b] to the TaskId companions, which codegen
-        # emits as ``add_dep(<companion>);`` (no is_valid guard since
-        # task_id_of returns a known-valid id).
-        assert "PTO2TaskId a__ssa_v0__tid = task_0_outs.task_id();" in code
-        assert "PTO2TaskId b__ssa_v0__tid = task_1_outs.task_id();" in code
-        assert "params_t2.add_dep(a__ssa_v0__tid);" in code
-        assert "params_t2.add_dep(b__ssa_v0__tid);" in code
+        # ``pl.task_id_of(...)`` emits ``<user_name> = task_<n>_outs.task_id();``
+        # directly using the user-chosen variable name. Each dep entry is
+        # forwarded into the per-call ``ArgWithDeps<N>`` wrapper as an
+        # ``add_dep`` call (no is_valid guard since task_id_of returns a
+        # known-valid id).
+        assert "PTO2TaskId a_tid = task_0_outs.task_id();" in code
+        assert "PTO2TaskId b_tid = task_1_outs.task_id();" in code
+        assert "ArgWithDeps<2> params_t2;" in code
+        assert "params_t2.add_dep(a_tid);" in code
+        assert "params_t2.add_dep(b_tid);" in code
 
     def test_auto_scope_does_not_emit_task_id_capture(self):
         """Sanity: auto scope keeps the legacy fire-and-forget submit."""
@@ -3065,7 +3067,8 @@ class TestManualScopeCodegen:
                         for j in pl.parallel(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
                             scratch = self.stage1(x, scratch, row, col)
-                            out = self.stage2(scratch, out, row, col, deps=[scratch])
+                            stage1_tid = pl.task_id_of(scratch)
+                            out = self.stage2(scratch, out, row, col, deps=[stage1_tid])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3079,17 +3082,17 @@ class TestManualScopeCodegen:
         assert code.count("PTO2_SCOPE() {") == 1, code
         assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
 
-        # stage1's LHS gets a TaskId companion so stage2's ``deps=[scratch]``
-        # can resolve to it. ``LowerManualDepsToTaskId`` synthesises the
-        # ``system.task_id_of`` Assign which lowers to ``task_<n>_outs.task_id()``.
+        # ``pl.task_id_of(scratch)`` lowers to
+        # ``PTO2TaskId stage1_tid = task_0_outs.task_id();`` using the
+        # user-chosen variable name directly.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId scratch__ssa_v5__tid = task_0_outs.task_id();" in code, code
+        assert "PTO2TaskId stage1_tid = task_0_outs.task_id();" in code, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
 
         # *** Manual dep correctly established WITHIN each iteration ***
         # stage2 reads what stage1 just wrote to ``scratch``: this dep is
         # required for correctness.
-        assert "params_t1.add_dep(scratch__ssa_v5__tid);" in code, code
+        assert "params_t1.add_dep(stage1_tid);" in code, code
 
         # *** Correct parallelism ACROSS iterations ***
         # The only ``add_dep`` in the manual scope is the one above; there
@@ -3154,7 +3157,8 @@ class TestManualScopeCodegen:
                         for j in pl.range(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
                             scratch = self.stage1(x, scratch, row, col)
-                            out = self.stage2(scratch, out, row, col, deps=[scratch])
+                            stage1_tid = pl.task_id_of(scratch)
+                            out = self.stage2(scratch, out, row, col, deps=[stage1_tid])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3167,14 +3171,13 @@ class TestManualScopeCodegen:
         assert code.count("PTO2_SCOPE() {") == 1, code
         assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
 
-        # stage1's LHS gets a TaskId companion so stage2's ``deps=[scratch]``
-        # can resolve to it (lowered via ``system.task_id_of``).
+        # ``pl.task_id_of(scratch)`` lowers to the user-named TaskId binding.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId scratch__ssa_v5__tid = task_0_outs.task_id();" in code, code
+        assert "PTO2TaskId stage1_tid = task_0_outs.task_id();" in code, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
 
         # Manual dep WITHIN each iteration: stage2 follows stage1.
-        assert "params_t1.add_dep(scratch__ssa_v5__tid);" in code, code
+        assert "params_t1.add_dep(stage1_tid);" in code, code
 
         # Cross-iteration parallel: the ONLY add_dep is the intra-iteration one.
         assert code.count("add_dep(") == 1, code
@@ -3217,11 +3220,13 @@ class TestManualScopeCodegen:
                 n_branches: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
                 with pl.manual_scope():
+                    prev_tid = pl.task_id_invalid()
                     for i in pl.range(4):
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(n_branches):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            out = self.kern(x, out, row, col, deps=[out])
+                            out = self.kern(x, out, row, col, deps=[prev_tid])
+                            prev_tid = pl.task_id_of(out)
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3296,10 +3301,8 @@ class TestManualScopeCodegen:
         Expected codegen for the dep chain:
             PTO2TaskId tid = task_0_outs.task_id();   // from pl.task_id_of
             ...
-            PTO2TaskId params_t1_deps[1];
-            uint32_t  params_t1_deps_count = 0;
-            params_t1_deps[params_t1_deps_count++] = tid;
-            params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
+            ArgWithDeps<1> params_t1;
+            params_t1.add_dep(tid);                   // user-named TaskId
 
         Critically: no ``<...>__tid`` synthesized name appears, because the
         dep edge already names the TaskId producer directly.
@@ -3366,8 +3369,7 @@ class TestManualScopeCodegen:
         assert "PTO2TaskId tid = task_0_outs.task_id();" in code, code
         # The dep edge references the user-named TaskId, not a synthesized
         # ``scratch__ssa_v?__tid``.
-        assert "params_t1_deps[params_t1_deps_count++] = tid;" in code, code
-        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
+        assert "params_t1.add_dep(tid);" in code, code
         # Sanity: no ``__tid__tid`` double-suffix leaks into the output.
         assert "__tid__tid" not in code, code
 

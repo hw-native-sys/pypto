@@ -129,7 +129,8 @@ def _build_program():
                     for j in pl.parallel(N):
                         col: pl.Scalar[pl.INDEX] = j * TILE_C
                         scratch = self.stage1(x, scratch, row, col)
-                        out = self.stage2(scratch, out, row, col, deps=[scratch])
+                        stage1_tid = pl.task_id_of(scratch)
+                        out = self.stage2(scratch, out, row, col, deps=[stage1_tid])
             return out
 
     return ManualScopePipelineProgram
@@ -340,10 +341,19 @@ def _build_phase_fence_program():
             out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
             with pl.manual_scope():
+                # Phase fence: every kernel in phase P+1 must wait for ALL
+                # branches in phase P. The TaskId iter_arg lives outside the
+                # phase loop and is rebound inside the inner ``pl.parallel``;
+                # codegen lowers the TaskId carry through a ``pl.parallel``
+                # body as a size-``N_BRANCHES`` array, so each downstream
+                # kernel takes a dep on every slot (one per parallel iter
+                # of the previous phase).
+                prev_tid = pl.task_id_invalid()
                 for phase in pl.range(N_PHASES):
                     for branch in pl.parallel(N_BRANCHES):
                         row = (phase * N_BRANCHES + branch) * TILE_M
-                        out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+                        out = self.kernel_stripe(data, row, 1.0, out, deps=[prev_tid])
+                        prev_tid = pl.task_id_of(out)
             return out
 
     return PhaseFenceManualScope
@@ -535,9 +545,15 @@ def _build_branch_chain_program():
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
             with pl.manual_scope():
                 for branch in pl.parallel(N_BRANCHES):
+                    # Per-branch sequential chain: thread the previous step's
+                    # TaskId through the inner ``pl.range`` iter_arg. The
+                    # first step uses ``task_id_invalid()`` (no producer yet);
+                    # ``set_dependencies`` skips the slot via ``is_valid()``.
+                    prev_tid = pl.task_id_invalid()
                     for step in pl.range(N_STEPS):
                         row = step * N_BRANCHES * TILE_M + branch * TILE_M
-                        out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+                        out = self.kernel_stripe(data, row, 1.0, out, deps=[prev_tid])
+                        prev_tid = pl.task_id_of(out)
             return out
 
     return BranchChainManualScope
