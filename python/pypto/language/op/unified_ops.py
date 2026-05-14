@@ -693,7 +693,7 @@ def cmp(lhs, rhs, cmp_type: int = 0):
         return _tensor.cmp(lhs, rhs, cmp_type=cmp_type)
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.cmp(lhs, rhs, cmp_type=cmp_type)
-    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
+    if isinstance(lhs, Tile) and _is_scalar_like(rhs):
         return _tile.cmps(lhs, rhs, cmp_type=cmp_type)
     _raise_type_dispatch_error("cmp", lhs, rhs)
 
