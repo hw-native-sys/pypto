@@ -188,8 +188,9 @@ def test_for_stmt_with_int_array_iter_arg_codegen():
     Each iteration calls ``array.update_element`` and yields the result as
     the next iter's carry value. Codegen must:
 
-    * Emit a single C-stack array declaration with zero-initialization
-      (``int64_t <name>[4] = {0};``) at the loop prologue.
+    * Emit a single C-stack array declaration (``int64_t <name>[4];``) at the
+      loop prologue. No separate zero/sentinel pre-init is emitted — the
+      slot-by-slot copy below fully initialises every slot.
     * Slot-by-slot copy from the init array into the carry array.
     * Route in-place writes through the carry name via the body's
       ``array.update_element`` LHS-alias mechanism.
@@ -200,17 +201,20 @@ def test_for_stmt_with_int_array_iter_arg_codegen():
     program, orch_func = _build_array_iter_arg_program(DataType.INT64, 4)
     code = codegen.generate_orchestration(program, orch_func).code
 
-    # Carry array declared exactly once, with zero-init.
-    decls = re.findall(r"int64_t\s+(\w+)\[4\]\s*=\s*\{0\};", code)
-    assert len(decls) >= 1, code
-    carry_names = set(decls)
-
-    # Init copy loop into one of the declared carry arrays.
+    # The carry array is the LHS of an ``__init_i`` slot-by-slot copy loop
+    # that copies from a *different* (init) array.
     init_loop_matches = re.findall(
         r"for \(int64_t __init_i = 0; __init_i < 4; \+\+__init_i\) (\w+)\[__init_i\] = (\w+)\[__init_i\];",
         code,
     )
-    assert any(lhs in carry_names and rhs != lhs for lhs, rhs in init_loop_matches), code
+    carry_names = {lhs for lhs, rhs in init_loop_matches if rhs != lhs}
+    assert carry_names, code
+
+    # Each carry array is declared exactly once as a plain (un-pre-initialised)
+    # C-stack array — the init-copy loop above is its only initialiser.
+    for name in carry_names:
+        assert re.search(rf"int64_t\s+{name}\[4\];", code), code
+        assert f"int64_t {name}[4] = {{0}};" not in code, code
 
     # Body write: ``<carry>[k] = k;`` via LHS-alias on update_element.
     body_writes = re.findall(r"(\w+)\[k\]\s*=\s*k;", code)
@@ -439,7 +443,10 @@ def test_nested_seq_parallel_int_array_carry_codegen():
 
     program, orch_func = _build_nested_array_iter_arg_program(DataType.INT64, 3, 4)
     code = codegen.generate_orchestration(program, orch_func).code
-    decls = re.findall(r"int64_t\s+\w+\[4\]\s*=\s*\{0\};", code)
+    # Three INT64 arrays: the ``array.create`` result (zero-initialised) plus
+    # the outer and inner loop carries (declared plain — the slot-by-slot
+    # init-copy is their only initialiser).
+    decls = re.findall(r"int64_t\s+\w+\[4\]", code)
     assert len(decls) >= 3, code
     yield_loop = (
         r"for \(int64_t __yield_i = 0; __yield_i < 4; \+\+__yield_i\)"

@@ -643,19 +643,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
         const bool is_task_id_array = (array_ty->dtype_ == DataType::TASK_ID);
         const std::string cpp_dtype = is_task_id_array ? "PTO2TaskId" : array_ty->dtype_.ToCTypeString();
         std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
-        if (is_task_id_array) {
-          // PTO2TaskId is not a plain integer — zero-init would alias every
-          // slot to the runtime's real task id 0, causing the runtime fence
-          // to wait on a bogus producer. Init explicitly with the invalid
-          // sentinel (matches ``array.create`` codegen).
-          code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "];\n";
-          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
-                << "[__init_i] = PTO2TaskId::invalid();\n";
-        } else {
-          code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "] = {0};\n";
-        }
-        // Init by slot-by-slot copy from the init array (overrides the
-        // sentinel/zero init above with the actual incoming values).
+        // Declare the carry array and fill every slot from the incoming array.
+        // The iter_arg's init value is an ArrayType of the same extent ``N``,
+        // so this slot-by-slot copy fully initialises the carry — no separate
+        // sentinel / zero pre-init is needed.
+        code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "];\n";
         code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
               << "[__init_i] = " << init_var_name << "[__init_i];\n";
         emit_name_map_[iter_arg.get()] = carry_name;
@@ -985,7 +977,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         auto inner_it = array_carry_vars_.find(yield_var.get());
         if (inner_it != array_carry_vars_.end()) {
           // Array → array slot-by-slot copy (Sequential outer receiving an
-          // inner Parallel's array).
+          // inner Parallel's array). When the yield value and the carry
+          // resolve to the *same* backing array, the body's
+          // ``array.update_element`` already wrote it in place — a
+          // slot-by-slot self-copy would be a useless no-op, so skip it.
+          if (inner_it->second.array_name == rv_arr.array_name) {
+            continue;
+          }
           INTERNAL_CHECK_SPAN(inner_it->second.size == rv_arr.size, yield_stmt->span_)
               << "Internal error: array-carry yield size mismatch (rv=" << rv_arr.size
               << ", yield=" << inner_it->second.size << ")";
