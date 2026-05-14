@@ -9,7 +9,7 @@ jobs:
   qwen3-pypto-lib:
     runs-on: [self-hosted, linux, arm64, npu]
     env:
-      ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
       PTOAS_VERSION: v0.36
@@ -21,7 +21,7 @@ jobs:
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
         -v /usr/local/Ascend:/usr/local/Ascend:ro
         -v /dev:/dev
-        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
+        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
         -e DEVICE_ID
 
     steps:
