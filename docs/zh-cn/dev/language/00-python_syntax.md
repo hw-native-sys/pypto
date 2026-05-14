@@ -353,8 +353,8 @@ def main(self, x: pl.Tensor[[64], pl.FP32],
 ```
 
 `with pl.manual_scope():` 内由
-[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
-pass（底层实现为 `LowerManualDepsToTaskId` lowering，对外保留旧 pass 名）
+[DeriveCallDirections](../passes/33-derive_call_directions.md)
+pass 的 manual scope 降级阶段（内部实现为 `LowerManualDepsToTaskId`）
 把每个 `deps=[var, ...]` 解析为 producer 的 TaskId 配套、写入 call 的
 `manual_dep_edges`，并为每个外层 `pl.range` / `pl.parallel` 同步追加
 TaskId iter_arg / return_var / yield 项。不再对每 call 边数设上限——

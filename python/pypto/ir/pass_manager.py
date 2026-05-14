@@ -147,7 +147,6 @@ class PassManager:
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
             ("LowerTransposeLoadParamLayout", lambda: passes.lower_transpose_load_param_layout()),
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
-            ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
             ("InjectGMPipeBuffer", lambda: passes.inject_gm_pipe_buffer()),
             ("SplitVectorKernel", lambda: passes.split_vector_kernel()),
@@ -168,7 +167,6 @@ class PassManager:
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
             ("DeriveCallDirections", lambda: passes.derive_call_directions()),
-            ("DeriveManualScopeDeps", lambda: passes.derive_manual_scope_deps()),
             ("Simplify", lambda: passes.simplify()),
         ]
         cls._strategy_passes = {

@@ -512,29 +512,22 @@ def lower_composite_ops() -> Pass:
     """
 
 def derive_call_directions() -> Pass:
-    """Create a pass that derives per-argument :class:`ir.ArgDirection` for every cross-function ``Call``.
+    """Create a pass that derives per-argument :class:`ir.ArgDirection` and lowers manual-scope dep edges.
 
-    Walks each ``Function``'s body and writes ``Call.attrs['arg_directions']`` based on
-    callee :class:`ir.ParamDirection` and argument origin (function param vs.
-    locally allocated tensor vs. scalar). Establishes the
-    :class:`IRProperty.CallDirectionsResolved` post-condition, which is then
-    auto-verified by the pipeline.
-    """
+    **Phase 1.** Walks each ``Function``'s body and writes
+    ``Call.attrs['arg_directions']`` based on callee :class:`ir.ParamDirection`
+    and argument origin (function param vs. locally allocated tensor vs.
+    scalar). Establishes the :class:`IRProperty.CallDirectionsResolved`
+    post-condition, which is then auto-verified by the pipeline.
 
-def derive_manual_scope_deps() -> Pass:
-    """Create a pass that resolves manual-scope task dependency edges.
-
-    For every kernel ``Call`` inside a ``RuntimeScopeStmt(manual=True)``, writes
-    ``Call.attrs['manual_dep_edges']`` as the union of:
-
-    1. user-supplied edges from ``Call.attrs['user_manual_dep_edges']``
-       (parser-set when the DSL passes ``deps=[var, ...]``);
-    2. data-flow edges: every tensor argument whose ``ArgDirection`` is not
-       ``NoDep`` and whose Var resolves to a producer ``AssignStmt`` earlier in
-       the same manual scope.
-
-    The resolved edge count is capped at 16 (mirroring the runtime's
-    ``PTO2_MAX_EXPLICIT_DEPS``); exceeding the cap raises ``ValueError``.
+    **Phase 2.** Lowers every ``RuntimeScopeStmt(manual=True)`` region:
+    resolves user-supplied ``deps=[var, ...]`` lists from
+    ``Call.attrs['user_manual_dep_edges']`` into
+    ``Call.attrs['manual_dep_edges']``, allocates ``__tid`` TaskId companions
+    for the closure of involved Vars, and synthesises the
+    ``system.task_id_of`` / ``system.task_invalid`` AssignStmts that codegen
+    consumes. The 16-deps-per-submit cap is enforced at orchestration codegen,
+    not in this pass. No-op when no manual scope is present.
     """
 
 def flatten_call_expr() -> Pass:
@@ -729,7 +722,6 @@ __all__ = [
     "inline_functions",
     "normalize_stmt_structure",
     "derive_call_directions",
-    "derive_manual_scope_deps",
     "NestedCallErrorType",
     "UseAfterDefErrorType",
     "DiagnosticSeverity",

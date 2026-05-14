@@ -7,7 +7,13 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for the DeriveManualScopeDeps pass."""
+"""Unit tests for the manual-scope lowering phase of DeriveCallDirections.
+
+Manual-scope dep edge resolution and TaskId companion synthesis were originally
+implemented as a standalone ``DeriveManualScopeDeps`` pass; they are now Phase 2
+of ``DeriveCallDirections``. The tests here therefore drive the merged pass and
+verify that the manual-scope behaviour is preserved.
+"""
 
 import pypto.language as pl
 import pytest
@@ -30,8 +36,17 @@ def pass_verification_context():
         yield
 
 
-class TestDeriveManualScopeDeps:
-    def test_no_manual_scope_is_noop(self):
+class TestManualScopeLoweringNoOp:
+    def test_no_manual_scope_phase2_is_noop(self):
+        """When no manual scope exists, Phase 2 of derive_call_directions is a no-op.
+
+        Verified by idempotence: running the merged pass twice on the same input
+        produces a structurally identical program. After the first run all
+        ``arg_directions`` are populated and ``manual_dep_edges`` would only be
+        written by Phase 2 — which has no manual scope to touch — so the second
+        run returns the same Program.
+        """
+
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -44,10 +59,9 @@ class TestDeriveManualScopeDeps:
                 return a
 
         ssa = passes.convert_to_ssa()(Prog)
-        ddir = passes.derive_call_directions()(ssa)
-        ddep = passes.derive_manual_scope_deps()(ddir)
-        # No manual scope ⇒ pass is a no-op (returns same Program).
-        assert ddep.same_as(ddir)
+        first = passes.derive_call_directions()(ssa)
+        second = passes.derive_call_directions()(first)
+        assert second.same_as(first)
 
 
 class TestManualScopeNesting:

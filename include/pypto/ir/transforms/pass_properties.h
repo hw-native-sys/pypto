@@ -152,12 +152,14 @@ inline const PassProperties kMaterializeTensorStridesProperties{
 
 // -- Resolve backend op layouts pass ------------------------------------------
 
+// The pass self-normalizes statement structure before returning, so
+// NormalizedStmtStructure is preserved across the pass and the pipeline
+// no longer needs a standalone NormalizeStmtStructure call after it.
 inline const PassProperties kResolveBackendOpLayoutsProperties{
     .required = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
                  IRProperty::TileOps2D},
     .produced = {IRProperty::SSAForm, IRProperty::IncoreTileOps, IRProperty::SplitIncoreOrch,
-                 IRProperty::TileOps2D},
-    .invalidated = {IRProperty::NormalizedStmtStructure}};
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
 
 // -- Mixed kernel expansion pass ----------------------------------------------
 
@@ -223,15 +225,13 @@ inline const PassProperties kCanonicalizeIOOrderProperties{
 // PropertyVerifierRegistry), so PassPipeline auto-verifies it whenever this
 // pass produces the property — no separate verify pass is needed.
 
+// DeriveCallDirections also performs manual-scope lowering as Phase 2 (the
+// former DeriveManualScopeDeps pass). Phase 2 reads the arg_directions
+// populated by Phase 1 and writes the per-Call ``manual_dep_edges`` attr
+// inside ``RuntimeScopeStmt(manual=true)`` regions; codegen reads that attr
+// directly, so no separate IRProperty is needed.
 inline const PassProperties kDeriveCallDirectionsProperties{.required = {IRProperty::SplitIncoreOrch},
                                                             .produced = {IRProperty::CallDirectionsResolved}};
-
-/// ``DeriveManualScopeDeps`` consumes ``CallDirectionsResolved`` (so it can
-/// identify NoDep slots) and writes the per-Call ``manual_dep_edges`` attr
-/// inside ``RuntimeScopeStmt(manual=true)`` regions. It does not introduce a
-/// new IRProperty — codegen reads the attr directly.
-inline const PassProperties kDeriveManualScopeDepsProperties{.required = {IRProperty::CallDirectionsResolved},
-                                                             .produced = {}};
 
 // -- No-op tile.reshape folding pass -----------------------------------------
 

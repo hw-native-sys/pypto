@@ -565,9 +565,10 @@ class TestFlattenPreservesAttrs:
     Regression test: when an argument is a nested Call (e.g. `pl.slice(...)`)
     and gets extracted to a temp, the outer Call is rebuilt. The rebuilt
     Call must keep `attrs_` (e.g. `user_manual_dep_edges` set by the parser
-    for `kernel(..., deps=[var, ...])`); otherwise downstream passes such as
-    `DeriveManualScopeDeps` produce empty edges and codegen never emits the
-    `params.add_dep(task_<m>);` calls, silently breaking manual dependencies.
+    for `kernel(..., deps=[var, ...])`); otherwise the manual-scope lowering
+    phase of `DeriveCallDirections` produces empty edges and codegen never
+    emits the `params.add_dep(task_<m>);` calls, silently breaking manual
+    dependencies.
     """
 
     def test_user_manual_dep_edges_survive_arg_flatten(self):

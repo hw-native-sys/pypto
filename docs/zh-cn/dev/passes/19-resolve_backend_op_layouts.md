@@ -1,6 +1,6 @@
 # ResolveBackendOpLayouts Pass
 
-为后端有 layout 约束的 elementwise tile op 修复 layout：把 `[N, 1]` 的 col-major 向量 reshape 成 `[1, N]` 的 row-major 视图，并通过 `tile.move(..., blayout=row_major)` 修复一般非 row-major tile。该 Pass 在 tile-PTO 阶段运行，位于 `LowerTransposeLoadParamLayout` 之后、收尾的 `NormalizeStmtStructure` 之前。
+为后端有 layout 约束的 elementwise tile op 修复 layout：把 `[N, 1]` 的 col-major 向量 reshape 成 `[1, N]` 的 row-major 视图，并通过 `tile.move(..., blayout=row_major)` 修复一般非 row-major tile。该 Pass 在 tile-PTO 阶段运行，位于 `LowerTransposeLoadParamLayout` 之后、`ExpandMixedKernel` 之前；返回前 pass 内部已自动归一化语句结构，因此 `NormalizedStmtStructure` 在该 pass 前后均保持成立。
 
 ## 概述
 
@@ -20,7 +20,7 @@
 - 函数必须是 `InCore`；Orchestration / Group 函数被跳过。
 - 必须通过 `BackendConfig::Set(...)` 配置后端，否则本 Pass 为 no-op。
 
-**何时使用**：作为 `Default` tile-PTO pipeline 的一部分，在改变 layout 的若干 Pass（`FlattenTileNdTo2D`、`InferTileMemorySpace`、`LowerTransposeLoadParamLayout`）之后、`NormalizeStmtStructure` 之前运行。Pass manager 已经把它放在了正确的位置。
+**何时使用**：作为 `Default` tile-PTO pipeline 的一部分，在改变 layout 的若干 Pass（`FlattenTileNdTo2D`、`InferTileMemorySpace`、`LowerTransposeLoadParamLayout`）之后、`ExpandMixedKernel` 之前运行。Pass manager 已经把它放在了正确的位置。
 
 ## API
 
@@ -165,10 +165,10 @@ Pass 源文件中的关键 helper：
 | 属性 | 取值 |
 | ---- | ---- |
 | Required | SSAForm、IncoreTileOps、SplitIncoreOrch、TileOps2D |
-| Produced | SSAForm、IncoreTileOps、SplitIncoreOrch、TileOps2D |
-| Invalidated | NormalizedStmtStructure |
+| Produced | SSAForm、IncoreTileOps、SplitIncoreOrch、TileOps2D、NormalizedStmtStructure |
+| Invalidated | — |
 
-`NormalizedStmtStructure` 被 invalidate 是因为每次修复都会把原本一条语句的 op 包裹成多条 `tile.reshape` 赋值，破坏了规范化的语句结构。默认 pipeline 在本 Pass 之后立刻重新跑 `NormalizeStmtStructure` 以恢复该不变量。
+每次修复都会把原本一条语句的 op 包裹成多条 `tile.reshape` 赋值，临时破坏了规范化的语句结构。为了让 `NormalizedStmtStructure` 在本 pass 前后均保持成立，`ResolveBackendOpLayouts` 在返回前会对自己的输出再调用一次 `NormalizeStmtStructure`，因此该属性被作为 **Produced** 而不是 **Invalidated**。
 
 ## 设计取舍
 

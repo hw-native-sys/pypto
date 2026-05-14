@@ -311,10 +311,10 @@ with ib.function("tile_computation") as f:
 | `system.bar_m` | Matrix barrier | None |
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
-| `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry (synthesised by `DeriveManualScopeDeps` only) | None |
-| `system.task_id_of` | Extract the `PTO2TaskId` of a kernel-Call producer's LHS (synthesised by `DeriveManualScopeDeps` only) | None; sole positional arg is the producer Var |
+| `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry (synthesised by the manual-scope lowering phase of `DeriveCallDirections` only) | None |
+| `system.task_id_of` | Extract the `PTO2TaskId` of a kernel-Call producer's LHS (synthesised by the manual-scope lowering phase of `DeriveCallDirections` only) | None; sole positional arg is the producer Var |
 
-`system.task_invalid` and `system.task_id_of` both return [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). They are not user-callable from the DSL — they appear only after the [DeriveManualScopeDeps pass](../passes/33-derive_manual_scope_deps.md) inserts them while lowering `with pl.manual_scope()` regions. Source: `src/ir/op/sync_ops/task.cpp`.
+`system.task_invalid` and `system.task_id_of` both return [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). They are not user-callable from the DSL — they appear only after the manual-scope lowering phase of the [DeriveCallDirections pass](../passes/33-derive_call_directions.md) inserts them while lowering `with pl.manual_scope()` regions. Source: `src/ir/op/sync_ops/task.cpp`.
 
 **Python Example:**
 

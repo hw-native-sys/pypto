@@ -1,6 +1,6 @@
 # ResolveBackendOpLayouts Pass
 
-Repairs backend-required tile layouts for elementwise ops. `[N, 1]` col-major vectors are reshaped into `[1, N]` row-major views, while general non-row-major tiles are coerced through `tile.move(..., blayout=row_major)`. Runs in the tile-PTO stage between `LowerTransposeLoadParamLayout` and the trailing `NormalizeStmtStructure`.
+Repairs backend-required tile layouts for elementwise ops. `[N, 1]` col-major vectors are reshaped into `[1, N]` row-major views, while general non-row-major tiles are coerced through `tile.move(..., blayout=row_major)`. Runs in the tile-PTO stage between `LowerTransposeLoadParamLayout` and `ExpandMixedKernel`; the pass re-normalizes statement structure internally before returning, so `NormalizedStmtStructure` is preserved across the pass.
 
 ## Overview
 
@@ -20,7 +20,7 @@ The pass is **backend-driven**: the set of constrained ops and their per-input r
 - Function must be `InCore` — Orchestration / Group functions are skipped.
 - A backend must be configured via `BackendConfig::Set(...)`. Otherwise the pass is a no-op.
 
-**When to use**: As part of the `Default` tile-PTO pipeline, after layout-altering passes (`FlattenTileNdTo2D`, `InferTileMemorySpace`, `LowerTransposeLoadParamLayout`) and before `NormalizeStmtStructure`. The pass manager already places it in the correct slot.
+**When to use**: As part of the `Default` tile-PTO pipeline, after layout-altering passes (`FlattenTileNdTo2D`, `InferTileMemorySpace`, `LowerTransposeLoadParamLayout`) and before `ExpandMixedKernel`. The pass manager already places it in the correct slot.
 
 ## API
 
@@ -165,10 +165,10 @@ Key helpers in the pass source:
 | Property | Value |
 | -------- | ----- |
 | Required | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D |
-| Produced | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D |
-| Invalidated | NormalizedStmtStructure |
+| Produced | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, NormalizedStmtStructure |
+| Invalidated | — |
 
-`NormalizedStmtStructure` is invalidated because each repair sequence wraps a previously single-statement op with extra `tile.reshape` assignments, breaking the canonical statement layout. The default pipeline re-runs `NormalizeStmtStructure` immediately after this pass to restore the invariant.
+Each repair sequence temporarily wraps a previously single-statement op with extra `tile.reshape` assignments, which would break the canonical statement layout. To keep `NormalizedStmtStructure` intact across the pass, `ResolveBackendOpLayouts` invokes `NormalizeStmtStructure` on its own output before returning, so the property is **produced** rather than invalidated.
 
 ## Design Decisions
 

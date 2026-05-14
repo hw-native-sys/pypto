@@ -352,9 +352,9 @@ def main(self, x: pl.Tensor[[64], pl.FP32],
     return out
 ```
 
-Inside `with pl.manual_scope():`, the
-[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
-pass (the public name for the underlying `LowerManualDepsToTaskId` lowering)
+Inside `with pl.manual_scope():`, the manual-scope lowering phase of
+[DeriveCallDirections](../passes/33-derive_call_directions.md)
+(implemented internally by `LowerManualDepsToTaskId`)
 resolves each `deps=[var, ...]` entry to a TaskId companion of the producer,
 attaches it to the call's `manual_dep_edges` attr, and threads matching TaskId
 iter_args / return-vars / yields through every enclosing `pl.range` /

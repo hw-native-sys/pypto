@@ -1436,8 +1436,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   /// Emit ``params_t<n>.add_dep(task_<m>);`` for every entry resolved by the
-  /// ``DeriveManualScopeDeps`` pass. No-op outside a manual scope (auto scope
-  /// derives deps from data flow at runtime).
+  /// manual-scope lowering phase of ``DeriveCallDirections``. No-op outside a
+  /// manual scope (auto scope derives deps from data flow at runtime).
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
     if (in_manual_scope_depth_ == 0) return;
     for (const auto& [k, v] : call->attrs_) {

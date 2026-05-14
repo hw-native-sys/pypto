@@ -3875,8 +3875,9 @@ class ASTParser:
                 each indicated slot to ``ArgDirection.NoDep``.
             user_dep_vars: Optional list of tensor Vars from a manual_scope
                 ``deps=[var1, var2]`` kwarg. Stored as
-                ``attrs['user_manual_dep_edges']`` so ``DeriveManualScopeDeps``
-                can merge them with auto-derived data-flow edges.
+                ``attrs['user_manual_dep_edges']`` so the manual-scope lowering
+                phase of ``DeriveCallDirections`` can resolve them into
+                ``attrs['manual_dep_edges']``.
             device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
                 on an Orchestration dispatch call. Stored under
                 ``attrs['device']`` so the comm-collection pass can recover

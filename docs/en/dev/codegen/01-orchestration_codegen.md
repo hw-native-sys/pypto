@@ -391,8 +391,8 @@ The orchestration file is named `orchestration/<func_name>.cpp` in the generated
 `with pl.manual_scope():` regions lower to a `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
 block where the runtime's auto OverlapMap is disabled. The orchestration
 codegen materialises every required dependency edge as an explicit
-`params.add_dep(<task_id>);` call, sourced from the post-[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
-IR.
+`params.add_dep(<task_id>);` call, sourced from the IR produced by the
+manual-scope lowering phase of [DeriveCallDirections](../passes/33-derive_call_directions.md).
 
 ### TaskId sourcing
 
@@ -499,5 +499,5 @@ Every task in phase `N+1` waits for **all** `N_BRANCHES` tasks of phase `N`.
 
 - [PTO Codegen](00-pto_codegen.md) — MLIR generation for PTO backend
 - [Pass Manager](../passes/00-pass_manager.md) — IR optimization passes applied before codegen
-- [DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md) — the pass that produces the post-lowering IR consumed here
+- [DeriveCallDirections (Phase 2: manual-scope lowering)](../passes/33-derive_call_directions.md) — the pass that produces the post-lowering IR consumed here
 - [Python syntax: manual dependency primitives](../language/00-python_syntax.md#manual-dependency-primitives) — the user-facing surface form

@@ -74,7 +74,7 @@ struct PassProperties {
 | LowerCompositeOps | — | — | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
 | AutoTileMatmulL0 | SSAForm, IncoreTileOps, TileOps2D | SSAForm, IncoreTileOps, TileOps2D | — |
-| ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | NormalizedStmtStructure |
+| ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, NormalizedStmtStructure | — |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
 | NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
 | InitMemRef | TypeChecked, SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D | HasMemRefs | SSAForm |
@@ -83,7 +83,6 @@ struct PassProperties {
 | FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | FuseCreateAssembleToSlice | — | — | — |
 | DeriveCallDirections | SplitIncoreOrch | CallDirectionsResolved | — |
-| DeriveManualScopeDeps | CallDirectionsResolved | — | — |
 | Simplify | — | — | — |
 
 > **注意**：VerifySSA 和 TypeCheck 是**属性验证器 (PropertyVerifier)**（验证规则），不是 Pass。它们通过 `VerificationInstrument` 或 `run_verifier()` 工具函数运行——参见[验证器](99-verifier.md)。
@@ -374,24 +373,22 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 3. [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)
 4. `InferTileMemorySpace`
 5. [`LowerTransposeLoadParamLayout`](18-lower_transpose_load_param_layout.md)（RFC #1300 P6 —— 替代 `ResolveTransposeLayout`）
-6. [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md)
-7. `NormalizeStmtStructure`
-8. `ExpandMixedKernel`
-9. [`InjectGMPipeBuffer`](21-inject_gm_pipe_buffer.md)
-10. [`SplitVectorKernel`](22-split_vector_kernel.md)
-11. `NormalizeReturnOrder`
-12. [`LowerPipelineLoops`](24-lower_pipeline_loops.md)
-13. [`CanonicalizeIOOrder`](25-canonicalize_io_order.md)
-14. [`MaterializeTensorStrides`](26-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
-15. `InitMemRef`
-16. `MemoryReuse`
-17. [`LegalizePTOBufferReuse`](29-legalize_pto_buffer_reuse.md)
-18. `AllocateMemoryAddr`
-19. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
-20. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
-21. [`DeriveCallDirections`](33-derive_call_directions.md)
-22. [`DeriveManualScopeDeps`](34-derive_manual_scope_deps.md)
-23. `Simplify`
+6. [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md)（pass 内部已自动归一化语句结构）
+7. `ExpandMixedKernel`
+8. [`InjectGMPipeBuffer`](21-inject_gm_pipe_buffer.md)
+9. [`SplitVectorKernel`](22-split_vector_kernel.md)
+10. `NormalizeReturnOrder`
+11. [`LowerPipelineLoops`](24-lower_pipeline_loops.md)
+12. [`CanonicalizeIOOrder`](25-canonicalize_io_order.md)
+13. [`MaterializeTensorStrides`](26-materialize_tensor_strides.md) —— 自 RFC #1300 P6 起接入默认 pipeline
+14. `InitMemRef`
+15. `MemoryReuse`
+16. [`LegalizePTOBufferReuse`](29-legalize_pto_buffer_reuse.md)
+17. `AllocateMemoryAddr`
+18. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
+19. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
+20. [`DeriveCallDirections`](33-derive_call_directions.md)（Phase 1：推导 arg directions；Phase 2：manual scope 降级——原 `DeriveManualScopeDeps` pass 已并入）
+21. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

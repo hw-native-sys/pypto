@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include "pypto/ir/transforms/utils/lower_manual_deps_to_task_id.h"
+
 #include <any>
 #include <cstddef>
 #include <memory>
@@ -24,24 +26,20 @@
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
-#include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
-#include "pypto/ir/transforms/pass_properties.h"
-#include "pypto/ir/transforms/passes.h"
 
-namespace pypto {
-namespace ir {
+namespace pypto::ir {
 
 namespace {
 
 using ::pypto::codegen::IsBuiltinOp;
 
 // ---------------------------------------------------------------------------
-// First pass: resolve manual_dep_edges from user_manual_dep_edges (legacy
-// behavior of DeriveManualScopeDeps, minus the auto-dataflow inference which
-// was disabled to give callers full control via explicit deps=[]).
+// Stage 1: resolve manual_dep_edges from user_manual_dep_edges (legacy
+// behavior, minus the auto-dataflow inference which was disabled to give
+// callers full control via explicit deps=[]).
 // ---------------------------------------------------------------------------
 class ManualDepResolveMutator : public IRMutator {
  public:
@@ -108,7 +106,7 @@ class ManualDepResolveMutator : public IRMutator {
 };
 
 // ---------------------------------------------------------------------------
-// Second pass: closure analysis to find every Var that needs a TaskId
+// Stage 2: closure analysis to find every Var that needs a TaskId
 // companion. Starts from each Call's resolved manual_dep_edges and propagates
 // upward through:
 //   * ForStmt iter_arg ↔ return_var ↔ init_value
@@ -256,7 +254,7 @@ class TaskRelevantVarCollector : public IRVisitor {
 };
 
 // ---------------------------------------------------------------------------
-// Third pass: rewrite IR to install parallel TaskId infrastructure.
+// Stage 4: rewrite IR to install parallel TaskId infrastructure.
 // ---------------------------------------------------------------------------
 class TaskIdLoweringMutator : public IRMutator {
  public:
@@ -517,6 +515,13 @@ class TaskIdLoweringMutator : public IRMutator {
 
   VarPtr LookupOrAllocateTid(const VarPtr& v) {
     if (!v) return nullptr;
+    // Already a TaskId Scalar (e.g. user wrote ``deps=[pl.task_id_of(out)]``):
+    // use the Var directly. No companion is needed and no rewrite of
+    // ``manual_dep_edges`` should occur — the dep edge already names the
+    // TaskId producer.
+    if (auto sty = As<ScalarType>(v->GetType()); sty && sty->dtype_ == DataType::TASK_ID) {
+      return v;
+    }
     auto it = tid_map_->find(v.get());
     if (it != tid_map_->end()) return it->second;
     auto tid = std::make_shared<Var>(v->name_hint_ + "__tid", std::make_shared<ScalarType>(DataType::TASK_ID),
@@ -539,9 +544,16 @@ void PreallocateTaskIdVars(const std::unordered_set<const Var*>& needs_tid,
                            std::unordered_map<const Var*, VarPtr>* tid_map) {
   // First pass: allocate Var/IterArg shells without binding init.
   // Pass A: allocate plain Var companions for non-IterArg vars.
+  // ScalarType(TASK_ID) Vars are already TaskIds (e.g. user wrote
+  // ``deps=[pl.task_id_of(out)]`` or threaded a TaskId iter_arg); they ARE
+  // their own companion. Skip them here — ``LookupOrAllocateTid`` returns
+  // such Vars unchanged so the dep-edge rewrite is a no-op.
   std::vector<const Var*> iter_arg_vs;
   for (auto* v : needs_tid) {
     if (!v) continue;
+    if (auto sty = As<ScalarType>(v->GetType()); sty && sty->dtype_ == DataType::TASK_ID) {
+      continue;
+    }
     auto tid_type = std::make_shared<ScalarType>(DataType::TASK_ID);
     if (v->GetKind() == ObjectKind::IterArg) {
       iter_arg_vs.push_back(v);
@@ -587,11 +599,24 @@ void PreallocateTaskIdVars(const std::unordered_set<const Var*>& needs_tid,
   }
 }
 
-// Run the full lowering on a function body.
-StmtPtr LowerOneFunction(const StmtPtr& body) {
+}  // namespace
+
+// Implementation outline:
+//   1. ManualDepResolveMutator resolves user_manual_dep_edges → manual_dep_edges.
+//   2. TaskRelevantVarCollector runs a closure analysis to find every Var that
+//      needs a TaskId companion (propagating through ForStmt iter_arg /
+//      return_var, YieldStmt and trivial Var aliases).
+//   3. PreallocateTaskIdVars allocates ``__tid`` companions (Var or IterArg)
+//      for the closure; import Vars (no SSA def) get a leading
+//      ``system.task_invalid()`` AssignStmt prepended at body entry.
+//   4. TaskIdLoweringMutator synthesises ``system.task_id_of`` /
+//      ``system.task_invalid`` AssignStmts after producer Calls, rewrites
+//      manual_dep_edges to point at the TaskId companions, and threads them
+//      through ForStmt / YieldStmt / IfStmt.
+StmtPtr LowerManualDepsToTaskId(const StmtPtr& body) {
   if (!body) return body;
 
-  // Stage 1: resolve user_manual_dep_edges → manual_dep_edges (legacy).
+  // Stage 1: resolve user_manual_dep_edges → manual_dep_edges.
   ManualDepResolveMutator resolver;
   StmtPtr resolved = resolver.VisitStmt(body);
 
@@ -637,30 +662,4 @@ StmtPtr LowerOneFunction(const StmtPtr& body) {
   return lowerer.VisitStmt(resolved);
 }
 
-}  // namespace
-
-namespace pass {
-
-Pass DeriveManualScopeDeps() {
-  auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
-    if (!program) return program;
-    auto new_functions = program->functions_;
-    bool any_changed = false;
-    for (auto& [gvar, func] : new_functions) {
-      if (!func || !func->body_) continue;
-      auto new_body = LowerOneFunction(func->body_);
-      if (new_body.get() == func->body_.get()) continue;
-      func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                        func->return_types_, new_body, func->span_, func->func_type_,
-                                        func->level_, func->role_, func->attrs_);
-      any_changed = true;
-    }
-    if (!any_changed) return program;
-    return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
-  };
-  return CreateProgramPass(pass_func, "DeriveManualScopeDeps", kDeriveManualScopeDepsProperties);
-}
-
-}  // namespace pass
-}  // namespace ir
-}  // namespace pypto
+}  // namespace pypto::ir

@@ -677,9 +677,9 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
  * a ``with pl.manual_scope():`` block via the ``deps=[v1, v2, ...]`` kwarg.
  *
  * Value type: ``std::vector<VarPtr>`` referencing IR Vars produced by prior
- * Call assignments in the same manual scope. ``DeriveManualScopeDeps``
- * merges this list with auto-derived data-flow edges into the resolved
- * ``kAttrManualDepEdges``; codegen only consumes the resolved attr.
+ * Call assignments in the same manual scope. The manual-scope lowering phase
+ * of ``DeriveCallDirections`` resolves this list into ``kAttrManualDepEdges``;
+ * codegen only consumes the resolved attr.
  */
 inline constexpr const char* kAttrUserManualDepEdges = "user_manual_dep_edges";
 
@@ -701,7 +701,8 @@ inline std::vector<std::pair<std::string, std::any>> WithUserManualDepEdgesAttr(
 
 /**
  * @brief Reserved attr key for the resolved set of dep edges that codegen
- * emits as ``params.add_dep(...)`` calls. Populated by ``DeriveManualScopeDeps``.
+ * emits as ``params.add_dep(...)`` calls. Populated by the manual-scope
+ * lowering phase of ``DeriveCallDirections``.
  *
  * Value type: ``std::vector<VarPtr>``, deduplicated by Var identity. Union of:
  *   1. user-specified edges (kAttrUserManualDepEdges, set by parser)
@@ -728,8 +729,8 @@ inline std::vector<std::pair<std::string, std::any>> WithManualDepEdgesAttr(
 
 /**
  * @brief Attr key for the synthesized TaskId Var paired with a user-defined
- * kernel ``Call`` inside a ``manual_scope``. Set by
- * ``LowerManualDepsToTaskId`` (extension of ``DeriveManualScopeDeps``).
+ * kernel ``Call`` inside a ``manual_scope``. Set by the
+ * ``LowerManualDepsToTaskId`` utility (Phase 2 of ``DeriveCallDirections``).
  *
  * Value type: ``VarPtr`` of ``ScalarType(DataType::TASK_ID)``.
  *

@@ -300,9 +300,10 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
   - `OutlineClusterScopes` 将 `ClusterScopeStmt` 提取为 `Function(Group)`，
     将独立的 `SpmdScopeStmt` 提取为 `Function(Spmd)`
   - `OutlineHierarchyScopes` 提取 `HierarchyScopeStmt`
-  - `DeriveManualScopeDeps` 为 `RuntimeScopeStmt(manual=true)` 内每个
-    kernel call 填充 `Call.attrs["manual_dep_edges"]`，让 codegen 能发出
-    显式 `params.add_dep(task_<m>);` 调用。
+  - `DeriveCallDirections`（Phase 2：manual scope 降级）为
+    `RuntimeScopeStmt(manual=true)` 内每个 kernel call 填充
+    `Call.attrs["manual_dep_edges"]`，让 codegen 能发出显式
+    `params.add_dep(task_<m>);` 调用。
 - `RuntimeScopeStmt` 在 `manual=false` 时下沉为 `PTO2_SCOPE()`，在
   `manual=true` 时下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。它由
   `pl.manual_scope()`（manual 模式）和 orchestration codegen 路径

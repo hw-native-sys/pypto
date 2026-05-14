@@ -41,7 +41,6 @@ TENSOR_OPTIMIZATION_PASSES = [
     "InferTileMemorySpace",
     "LowerTransposeLoadParamLayout",
     "ResolveBackendOpLayouts",
-    "NormalizeStmtStructure",
     "ExpandMixedKernel",
     "InjectGMPipeBuffer",
     "SplitVectorKernel",
@@ -56,7 +55,6 @@ TENSOR_OPTIMIZATION_PASSES = [
     "FoldNoOpReshape",
     "FuseCreateAssembleToSlice",
     "DeriveCallDirections",
-    "DeriveManualScopeDeps",
     "Simplify",
 ]
 
@@ -74,7 +72,6 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "InferTileMemorySpace",
     "LowerTransposeLoadParamLayout",
     "ResolveBackendOpLayouts",
-    "NormalizeStmtStructure",
     "ExpandMixedKernel",
     "InjectGMPipeBuffer",
     "SplitVectorKernel",
@@ -89,7 +86,6 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "FoldNoOpReshape",
     "FuseCreateAssembleToSlice",
     "DeriveCallDirections",
-    "DeriveManualScopeDeps",
     "Simplify",
 ]
 

@@ -144,7 +144,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/convert_tensor_to_tile_ops_pass.cpp
     src/ir/transforms/optimize_orch_tensors_pass.cpp
     src/ir/transforms/derive_call_directions_pass.cpp
-    src/ir/transforms/derive_manual_scope_deps_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/ctrl_flow_transform_pass.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp
@@ -186,6 +185,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/dead_code_elimination.cpp
     src/ir/transforms/utils/l0_tile_chooser.cpp
     src/ir/transforms/utils/loop_state_repair.cpp
+    src/ir/transforms/utils/lower_manual_deps_to_task_id.cpp
     src/ir/transforms/utils/tpop_tfree_finalizer.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/op_predicates.cpp

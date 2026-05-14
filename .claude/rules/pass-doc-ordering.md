@@ -45,8 +45,8 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 30 | `30-allocate_memory_addr.md` | 30th pass |
 | 31 | `31-fold_no_op_reshape.md` | 31st pass |
 | 32 | `32-fuse_create_assemble_to_slice.md` | 32nd pass |
-| 33 | `33-derive_call_directions.md` | 33rd pass |
-| 34 | `34-derive_manual_scope_deps.md` | 34th pass |
+| 33 | `33-derive_call_directions.md` | 33rd pass (two-phase: arg directions + manual-scope lowering) |
+| 34 | _(reserved gap — was `DeriveManualScopeDeps`, merged into #33)_ | — |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

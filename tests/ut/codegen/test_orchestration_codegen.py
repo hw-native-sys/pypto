@@ -2882,7 +2882,8 @@ class TestManualScopeCodegen:
     def _no_roundtrip_verification(self):
         """The python_printer doesn't surface ``Call.attrs['manual_dep_edges']``,
         so the pipeline's print -> parse -> assert_structural_equal roundtrip
-        fails after DeriveManualScopeDeps. Property verification still runs.
+        fails after DeriveCallDirections runs its manual-scope lowering phase.
+        Property verification still runs.
         """
         from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
 
