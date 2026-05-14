@@ -65,19 +65,19 @@ The pass is a `ProgramPass`. For each `Function` body it runs three sub-passes.
 
 `CallDirectionMutator` walks every non-builtin `Call`. For Group/Spmd callees the effective per-position directions are recovered via `ComputeGroupEffectiveDirections` (`orchestration_analysis.h`); other callees use their declared `param_directions_`. A `sequential_depth_` counter is incremented on non-`Parallel` `For` and on `While`, driving the *R-seq* promotion below.
 
-For each positional argument the mutator picks a direction by this table:
+For each positional argument the mutator picks a direction by this table. A callee `Out` is resolved by trying three promotion rules in order — R-seq → R-prior → R-enclosing; if none fires it stays `OutputExisting`:
 
-| Callee `ParamDirection` | Argument origin | `sequential_depth > 0`? | Prior writer in scope? | Result |
-| ----------------------- | --------------- | ----------------------- | ---------------------- | ------ |
-| any | non-tensor | — | — | `Scalar` |
-| `In` | tensor | — | — | `Input` |
-| `InOut` | tensor | — | — | `InOut` |
-| `Out` | rooted at param | — | — | `OutputExisting` |
-| `Out` | local buffer | yes (R-seq) | — | `InOut` |
-| `Out` | local buffer | no | yes (R-prior) | `InOut` |
-| `Out` | local buffer | no | no | `OutputExisting` |
+| Callee `ParamDirection` | Argument | `sequential_depth > 0`? | Prior writer in scope? | Enclosing param `InOut`? | Result |
+| ----------------------- | -------- | ----------------------- | ---------------------- | ------------------------ | ------ |
+| any | non-tensor | — | — | — | `Scalar` |
+| `In` | tensor | — | — | — | `Input` |
+| `InOut` | tensor | — | — | — | `InOut` |
+| `Out` | tensor | yes (R-seq) | — | — | `InOut` |
+| `Out` | tensor | no | yes (R-prior) | — | `InOut` |
+| `Out` | tensor | no | no | yes (R-enclosing) | `InOut` |
+| `Out` | tensor | no | no | no | `OutputExisting` |
 
-**R-seq** keeps cross-iteration write-after-write chains correct inside sequential loops: the same buffer slot is written once per iteration, so the runtime must serialize iterations on it. **R-prior** preserves the cross-sibling WAW dependency when an earlier writer-unit in the same scope already touched the same root.
+**R-seq** keeps cross-iteration write-after-write chains correct inside sequential loops: a callee `Out` under any sequential ancestor is promoted to `InOut` **unconditionally**. An earlier "disjoint variable-offset store" exception — which kept such a call as `OutputExisting` when the callee's `tile.store` offset depended on a parameter — was removed: soundly proving that cross-iteration writes are disjoint needs a real dependence analysis (affine offset extraction, stride-vs-tile-extent, offset injectivity, cross-procedural composition), and the cheap syntactic check it used could silently drop real WAW edges. **R-prior** preserves the cross-sibling WAW dependency when an earlier writer-unit in the same scope already touched the same root. **R-enclosing** honours an explicit `pl.InOut` declaration on the enclosing function parameter that the argument is rooted at.
 
 A pre-populated `Call.attrs["arg_directions"]` is treated as authoritative and left untouched (some directions like `NoDep` are not derivable structurally). The `Call` constructor's `ValidateArgDirectionsAttr` only enforces arity when the vector is non-empty; an empty vector can still be attached and will later be rejected by the `CallDirectionsResolved` verifier.
 

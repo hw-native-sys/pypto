@@ -543,14 +543,17 @@ class TestDeriveDirectionMatrix:
         assert len(calls) == 1
         assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
 
-    def test_out_param_variable_offset_store_in_seq_loop_not_promoted(self):
-        """R-seq exception: variable-offset ``tile.store`` keeps ``OutputExisting``.
+    def test_out_param_variable_offset_store_in_seq_loop_promoted(self):
+        """R-seq: a callee Out written via a parameter-dependent ``tile.store``
+        offset is still promoted to ``InOut`` inside a sequential loop.
 
-        When the InCore callee writes to its Out parameter via ``tile.store``
-        with an offset that depends on another function parameter (e.g.
-        ``pl.store(tile, [offset], out)`` where ``offset`` is a param),
-        the writes are position-dependent and disjoint across iterations.
-        R-seq should NOT promote to ``InOut``.
+        An earlier "disjoint variable-offset store" exception kept such a call
+        as ``OutputExisting``, assuming a parameter-keyed offset implies the
+        per-iteration writes are disjoint. That exception was unsound — it never
+        checked offset stride vs. tile extent, offset injectivity, or other
+        write paths to the same buffer — so it was removed. R-seq now promotes
+        unconditionally; any genuinely-disjoint optimization must be
+        reintroduced behind a sound dependence analysis.
         """
 
         @pl.program
@@ -574,119 +577,6 @@ class TestDeriveDirectionMatrix:
             ) -> pl.Tensor[[256], pl.FP32]:
                 for _i in pl.range(4):
                     dst = self.kernel(x, _i * 64, dst)
-                return dst
-
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [
-            ir.ArgDirection.Input,
-            ir.ArgDirection.Scalar,
-            ir.ArgDirection.OutputExisting,
-        ]
-
-    def test_out_param_invariant_offset_in_seq_loop_promoted(self):
-        """R-seq: loop-invariant argument to offset param forces ``InOut``.
-
-        The callee writes via ``tile.store`` with an offset that depends on its
-        ``offset`` parameter, but the caller passes a constant (loop-invariant)
-        to that parameter.  Writes overlap across iterations, so R-seq must
-        promote to ``InOut``.
-        """
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                offset: pl.Scalar[pl.INDEX],
-                out: pl.Out[pl.Tensor[[256], pl.FP32]],
-            ) -> pl.Tensor[[256], pl.FP32]:
-                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                ret: pl.Tensor[[256], pl.FP32] = pl.store(t, [offset], out)
-                return ret
-
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                dst: pl.Tensor[[256], pl.FP32],
-            ) -> pl.Tensor[[256], pl.FP32]:
-                for _i in pl.range(4):
-                    dst = self.kernel(x, 0, dst)
-                return dst
-
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [
-            ir.ArgDirection.Input,
-            ir.ArgDirection.Scalar,
-            ir.ArgDirection.InOut,
-        ]
-
-    def test_out_param_hoisted_variable_offset_store_in_seq_loop_not_promoted(self):
-        """R-seq exception still applies when the offset is hoisted through a scalar SSA temp."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                offset: pl.Scalar[pl.INDEX],
-                out: pl.Out[pl.Tensor[[256], pl.FP32]],
-            ) -> pl.Tensor[[256], pl.FP32]:
-                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                ret: pl.Tensor[[256], pl.FP32] = pl.store(t, [offset], out)
-                return ret
-
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                dst: pl.Tensor[[256], pl.FP32],
-            ) -> pl.Tensor[[256], pl.FP32]:
-                for _i in pl.range(4):
-                    d0: pl.Scalar[pl.INDEX] = _i * 64
-                    dst = self.kernel(x, d0, dst)
-                return dst
-
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [
-            ir.ArgDirection.Input,
-            ir.ArgDirection.Scalar,
-            ir.ArgDirection.OutputExisting,
-        ]
-
-    def test_out_param_hoisted_invariant_offset_store_in_seq_loop_promoted(self):
-        """Hoisting through a scalar temp must not hide loop-invariant overlapping writes."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                offset: pl.Scalar[pl.INDEX],
-                out: pl.Out[pl.Tensor[[256], pl.FP32]],
-            ) -> pl.Tensor[[256], pl.FP32]:
-                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
-                ret: pl.Tensor[[256], pl.FP32] = pl.store(t, [offset], out)
-                return ret
-
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                dst: pl.Tensor[[256], pl.FP32],
-            ) -> pl.Tensor[[256], pl.FP32]:
-                for _i in pl.range(4):
-                    d0: pl.Scalar[pl.INDEX] = 0
-                    dst = self.kernel(x, d0, dst)
                 return dst
 
         out = passes.derive_call_directions()(Prog)
