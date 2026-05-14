@@ -80,6 +80,22 @@ def _is_const_int(value: object) -> bool:
     return isinstance(value, ir.Neg) and isinstance(value.operand, ir.ConstInt)
 
 
+def _is_dep_var_type(type_: ir.Type | None) -> bool:
+    """Return True if ``type_`` is acceptable as a manual_scope ``deps=`` entry.
+
+    Accepts:
+      * ``TensorType`` — legacy path; the producer Call's TaskId companion is
+        resolved by ``DeriveManualScopeDeps``.
+      * ``ScalarType(TASK_ID)`` — explicit path; the user already extracted the
+        TaskId via ``pl.task_id_of(...)`` / ``pl.task_id_invalid()`` / loop iter_arg.
+    """
+    if isinstance(type_, ir.TensorType):
+        return True
+    if isinstance(type_, ir.ScalarType) and type_.dtype == DataType.TASK_ID:
+        return True
+    return False
+
+
 def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
     """Fold a slice extent when both bounds are compile-time constants."""
     upper_value = _const_int_value(upper)
@@ -3782,10 +3798,19 @@ class ASTParser:
         """Extract the optional ``deps=[var1, var2]`` kwarg on a self.kernel(...) call.
 
         Only valid inside a ``with pl.manual_scope():`` block. Each list entry
-        must be a tensor variable produced by a prior ``self.kernel(...)`` call
-        in the same manual scope. The parser cannot fully validate the
-        producer-Var relationship (that's a verifier job); it only enforces
-        that each entry resolves to an ``ir.Var``.
+        must be either:
+
+        * a **tensor variable** produced by a prior ``self.kernel(...)`` call
+          in the same manual scope (legacy path: ``DeriveManualScopeDeps`` will
+          synthesize the TaskId companion); or
+        * a **TaskId scalar** (``pl.Scalar[pl.TASK_ID]``) produced by
+          ``pl.task_id_of(...)`` or ``pl.task_id_invalid()`` or carried through
+          a ``pl.range`` / ``pl.parallel`` iter_arg (explicit path: the user
+          already extracted the TaskId companion).
+
+        The parser cannot fully validate the producer-Var relationship for
+        either path (that's a verifier job); it only enforces that each entry
+        resolves to an ``ir.Var`` of one of the two accepted types.
 
         Returns an empty list when ``deps=`` is absent.
         """
@@ -3794,19 +3819,22 @@ class ASTParser:
             return []
         if not isinstance(deps_kw.value, (ast.List, ast.Tuple)):
             raise ParserTypeError(
-                f"'{method_name}' deps= must be a list/tuple of tensor variables",
+                f"'{method_name}' deps= must be a list/tuple of tensor or TaskId variables",
                 span=span,
-                hint="Use deps=[other_tensor_var] where other_tensor_var was "
-                "assigned by a prior self.kernel(...) call in the same manual_scope.",
+                hint="Use deps=[other_var] where other_var is either a tensor produced by a prior "
+                "self.kernel(...) call, or a pl.Scalar[pl.TASK_ID] from pl.task_id_of(...) / "
+                "pl.task_id_invalid() / a loop iter_arg.",
             )
         out: list[ir.Var] = []
         for elt in deps_kw.value.elts:
             expr = self.parse_expression(elt)
-            if not isinstance(expr, ir.Var) or not isinstance(expr.type, ir.TensorType):
+            if not isinstance(expr, ir.Var) or not _is_dep_var_type(expr.type):
                 raise ParserTypeError(
-                    f"'{method_name}' deps= entries must be tensor variables, got '{ast.unparse(elt)}'",
+                    f"'{method_name}' deps= entries must be tensor variables or TaskId scalars, "
+                    f"got '{ast.unparse(elt)}'",
                     span=span,
-                    hint="Each entry must be a name produced by a prior self.kernel(...) call.",
+                    hint="Each entry must be a tensor produced by a prior self.kernel(...) call, "
+                    "or a pl.Scalar[pl.TASK_ID] from pl.task_id_of(...) / pl.task_id_invalid().",
                 )
             out.append(expr)
         return out

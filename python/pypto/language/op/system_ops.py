@@ -28,7 +28,7 @@ from pypto.ir.op.system_ops import (
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Call, Span
 
-from ..typing import Scalar, Tile
+from ..typing import Scalar, Tensor, Tile
 
 __all__ = [
     "AUTO",
@@ -47,6 +47,8 @@ __all__ = [
     "import_peer_buffer",
     "tfree_to_aic",
     "tfree_to_aiv",
+    "task_id_invalid",
+    "task_id_of",
 ]
 
 
@@ -143,3 +145,53 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
     """
     call = _ir_ops.import_peer_buffer(name=name, peer_func=peer_func, span=span)
     return Scalar(DataType.INT32, call)
+
+
+# ============================================================================
+# Manual-scope TaskId primitives
+# ============================================================================
+
+
+def task_id_invalid(*, span: Span | None = None) -> Scalar:
+    """Construct an invalid ``PTO2TaskId`` sentinel.
+
+    Use as the initial value of a TaskId iter_arg threaded through a
+    ``manual_scope`` loop — downstream ``deps=[tid]`` consumers skip
+    invalid entries via an ``is_valid()`` guard, so the first iteration's
+    "no producer" case is handled without a special-case branch.
+
+    Args:
+        span: Optional source span.
+
+    Returns:
+        ``pl.Scalar[pl.TASK_ID]`` wrapping the ``system.task_invalid`` IR call.
+
+    Example:
+        >>> with pl.manual_scope():
+        ...     for step, (prev_tid,) in pl.range(N, init_values=[pl.task_id_invalid()]):
+        ...         out = self.kernel(..., deps=[prev_tid])
+        ...         pl.yield_(pl.task_id_of(out))
+    """
+    call = _ir_ops.task_invalid(span=span)
+    return Scalar(DataType.TASK_ID, call)
+
+
+def task_id_of(producer: Tensor, *, span: Span | None = None) -> Scalar:
+    """Extract the ``PTO2TaskId`` of the kernel ``Call`` that produced ``producer``.
+
+    Only meaningful inside a ``manual_scope``. ``producer`` must be a tensor
+    variable directly assigned by a prior ``self.kernel(...)`` call in the
+    same manual scope — the parser binds it through the AssignStmt LHS at
+    the kernel submit. Passing a tensor that was not produced by such a
+    Call (e.g. a function parameter or a loop iter_arg) yields an
+    ``Scalar[TASK_ID]`` whose codegen value is unspecified.
+
+    Args:
+        producer: Tensor produced by a prior kernel call.
+        span: Optional source span.
+
+    Returns:
+        ``pl.Scalar[pl.TASK_ID]`` wrapping the ``system.task_id_of`` IR call.
+    """
+    call = _ir_ops.task_id_of(producer.unwrap(), span=span)
+    return Scalar(DataType.TASK_ID, call)

@@ -289,3 +289,38 @@ def tfree_to_aiv(tile: Expr, span: Span | None = None, *, id: int | None = None)
     if id is not None:
         kwargs["id"] = id
     return _ir_core.create_op_call("system.tfree_to_aiv", [tile], kwargs, actual_span)
+
+
+# ============================================================================
+# Manual-scope TaskId primitives
+# ============================================================================
+
+
+def task_invalid(*, span: Span | None = None) -> Call:
+    """Construct an invalid ``PTO2TaskId`` sentinel.
+
+    Returns a ``Call`` of result type ``Scalar[TASK_ID]`` that codegen lowers
+    to ``PTO2TaskId::invalid()`` — the "no producer" sentinel that downstream
+    ``set_dependencies`` calls skip via an ``is_valid()`` guard.
+
+    Args:
+        span: Optional source span (auto-captured if not provided).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.task_invalid", [], {}, actual_span)
+
+
+def task_id_of(producer: Expr, *, span: Span | None = None) -> Call:
+    """Extract the ``PTO2TaskId`` of the kernel ``Call`` that produced ``producer``.
+
+    Only meaningful inside a ``manual_scope``. The argument must be a tensor
+    Var directly assigned by a prior ``self.kernel(...)`` call in the same
+    manual scope — codegen resolves the producer through the AssignStmt LHS
+    binding established at the kernel submit.
+
+    Args:
+        producer: Tensor Var produced by a prior kernel call.
+        span: Optional source span (auto-captured if not provided).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("system.task_id_of", [producer], {}, actual_span)

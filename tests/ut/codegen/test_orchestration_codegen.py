@@ -3267,11 +3267,13 @@ class TestManualScopeCodegen:
                 out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
             ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
                 with pl.manual_scope():
+                    prev_tid = pl.task_id_invalid()
                     for i in pl.range(4):
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(ABOVE_LEGACY_CAP):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            out = self.kern(x, out, row, col, deps=[out])
+                            out = self.kern(x, out, row, col, deps=[prev_tid])
+                            prev_tid = pl.task_id_of(out)
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3280,6 +3282,94 @@ class TestManualScopeCodegen:
         # Wrapper is sized to the exact dep count (17 slots from the parallel
         # array carry), proving the legacy 16-cap is gone.
         assert f"ArgWithDeps<{ABOVE_LEGACY_CAP}>" in code, code
+
+    def test_manual_scope_explicit_task_id_of_dep(self):
+        """User-supplied TaskId Scalar in ``deps=[...]`` short-circuits the
+        per-tensor companion synthesis and emits the user-named TaskId
+        variable directly.
+
+        Pattern:
+            scratch = self.stage1(x, scratch, row, col)
+            tid = pl.task_id_of(scratch)
+            out  = self.stage2(scratch, out, row, col, deps=[tid])
+
+        Expected codegen for the dep chain:
+            PTO2TaskId tid = task_0_outs.task_id();   // from pl.task_id_of
+            ...
+            PTO2TaskId params_t1_deps[1];
+            uint32_t  params_t1_deps_count = 0;
+            params_t1_deps[params_t1_deps_count++] = tid;
+            params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
+
+        Critically: no ``<...>__tid`` synthesized name appears, because the
+        dep edge already names the TaskId producer directly.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        M, N = 4, 4
+        TILE_R, TILE_C = 32, 32
+        ROWS, COLS = M * TILE_R, N * TILE_C
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def stage1(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(x, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], scratch)
+                return ret
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def stage2(
+                self,
+                scratch: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                t: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.load(scratch, [row, col], [TILE_R, TILE_C])
+                r: pl.Tile[[TILE_R, TILE_C], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                with pl.manual_scope():
+                    for i in pl.range(M):
+                        row: pl.Scalar[pl.INDEX] = i * TILE_R
+                        for j in pl.parallel(N):
+                            col: pl.Scalar[pl.INDEX] = j * TILE_C
+                            scratch = self.stage1(x, scratch, row, col)
+                            tid = pl.task_id_of(scratch)
+                            out = self.stage2(scratch, out, row, col, deps=[tid])
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        # The user-named ``tid`` becomes the C++ identifier directly — no
+        # synthesized ``__tid`` companion is allocated for it (because it's
+        # already a TaskId scalar).
+        assert "PTO2TaskId tid = task_0_outs.task_id();" in code, code
+        # The dep edge references the user-named TaskId, not a synthesized
+        # ``scratch__ssa_v?__tid``.
+        assert "params_t1_deps[params_t1_deps_count++] = tid;" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
+        # Sanity: no ``__tid__tid`` double-suffix leaks into the output.
+        assert "__tid__tid" not in code, code
 
 
 if __name__ == "__main__":
