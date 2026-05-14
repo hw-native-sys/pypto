@@ -9,7 +9,7 @@ day-to-day debugging.
 | Subsystem | Source | Sink | Threshold knob |
 | --------- | ------ | ---- | -------------- |
 | PyPTO C++ logger | Compiler core (`src/`, passes, codegen, diagnostics) | stderr | `pypto.set_log_level()` / `PYPTO_LOG_LEVEL` |
-| simpler runtime logger | On-device runtime (`runtime/`, simpler Python + C++) | stderr via Python `logging` | `pypto.runtime.configure_log()` / `PYPTO_RUNTIME_LOG` |
+| PyPTO runtime logger | On-device runtime (`runtime/`, simpler Python + C++) | stderr via Python `logging` | `pypto.runtime.configure_log()` / `PYPTO_RUNTIME_LOG` |
 
 They are deliberately separate: the compile-time logger and the run-time
 logger have different audiences (kernel author vs. integrator) and run in
@@ -59,7 +59,7 @@ Override order: explicit `set_log_level()` wins over `PYPTO_LOG_LEVEL`,
 which wins over the build-time default (`info` in release, `debug`
 otherwise).
 
-## 2. simpler runtime logger (run-time)
+## 2. PyPTO runtime logger (run-time)
 
 Drives the Python logger named `"simpler"` *and* (via a one-shot snapshot
 inside `Worker.init()`) simpler's C++ runtime. Everything emitted while
@@ -78,8 +78,8 @@ print(log_level())                 # → 22  (Python logging int)
 
 ### Levels
 
-simpler uses a finer band than PyPTO's C++ enum. The canonical table
-lives in
+The runtime logger uses a finer band than PyPTO's C++ enum. The canonical
+table lives in
 [runtime/simpler_setup/log_config.py](../../../runtime/simpler_setup/log_config.py)
 and `pypto.runtime.configure_log()` delegates parsing there:
 
@@ -87,7 +87,7 @@ and `pypto.runtime.configure_log()` delegates parsing there:
 | ------- | -------------------- | ----- |
 | `debug` | 10 | full verbosity |
 | `v0` .. `v9` | 15..24 | INFO sub-tiers; `v5` == `info` (20) |
-| `info` | 20 | simpler default |
+| `info` | 20 | runtime default |
 | `warn` / `warning` | 30 | |
 | `error` | 40 | |
 | `null` | 60 | silence everything |
@@ -106,7 +106,7 @@ turned up without dropping back to full `debug`.
 The band mapping used by `sync_pypto=True`
 ([log_config.py:63-81](../../../python/pypto/runtime/log_config.py#L63-L81)):
 
-| simpler threshold | PyPTO `LogLevel` |
+| runtime threshold | PyPTO `LogLevel` |
 | ----------------- | ---------------- |
 | ≤14 | `DEBUG` |
 | 15..24 (`v0..v9`) | `INFO` |
@@ -125,11 +125,11 @@ Python:
 
 | Env var | Effect |
 | ------- | ------ |
-| `PYPTO_RUNTIME_LOG` | Same string accepted by `configure_log(level=...)`. Unset = keep simpler's V5 default. |
+| `PYPTO_RUNTIME_LOG` | Same string accepted by `configure_log(level=...)`. Unset = keep the runtime logger at its V5 default. |
 | `PYPTO_RUNTIME_LOG_SYNC` | When `=1`, flips the default of `sync_pypto` to `True` for the env-var bootstrap. Ignored when `PYPTO_RUNTIME_LOG` is unset. |
 
 ```bash
-# Verbose simpler logs, leave PyPTO C++ untouched
+# Verbose runtime logs, leave PyPTO C++ untouched
 PYPTO_RUNTIME_LOG=v7 python -m my_test
 
 # One knob for both subsystems
@@ -149,14 +149,14 @@ respect them.
 | Option | Default | Drives |
 | ------ | ------- | ------ |
 | `--pypto-log-level` | `ERROR` | PyPTO C++ logger via `set_log_level(LogLevel[name])` |
-| `--simpler-log-level` | unset (keeps `v5`) | simpler runtime logger via `configure_log(level)` — note this **does not** pass `sync_pypto=True` |
+| `--runtime-log-level` | unset (keeps `v5`) | PyPTO runtime logger via `configure_log(level)` — note this **does not** pass `sync_pypto=True` |
 
 ```bash
-# Quiet PyPTO compile chatter, verbose simpler runtime
-pytest tests/st/ --pypto-log-level=ERROR --simpler-log-level=v8
+# Quiet PyPTO compile chatter, verbose runtime logs
+pytest tests/st/ --pypto-log-level=ERROR --runtime-log-level=v8
 
 # Debug both
-pytest tests/st/ --pypto-log-level=DEBUG --simpler-log-level=debug
+pytest tests/st/ --pypto-log-level=DEBUG --runtime-log-level=debug
 ```
 
 ## 4. Decision guide
@@ -167,21 +167,21 @@ pytest tests/st/ --pypto-log-level=DEBUG --simpler-log-level=debug
 | See pass-by-pass tracing | `set_log_level(LogLevel.DEBUG)` |
 | Read perf hints on stderr | leave PyPTO at default `INFO` (or `PYPTO_LOG_LEVEL=info`) — see [passes/92-diagnostics.md](passes/92-diagnostics.md) |
 | Trace a hang at execute time | `configure_log("debug")` or `PYPTO_RUNTIME_LOG=debug` |
-| Bump only one noisy simpler subsystem | `configure_log("v7")` (V0..V9 is finer than `info`/`debug`) |
+| Bump only one noisy runtime subsystem | `configure_log("v7")` (V0..V9 is finer than `info`/`debug`) |
 | One env var to silence everything | `PYPTO_RUNTIME_LOG=null PYPTO_RUNTIME_LOG_SYNC=1 PYPTO_LOG_LEVEL=none` |
 
 ## 5. Common pitfalls
 
-- **`PYPTO_LOG_LEVEL` does not affect simpler runtime logs**, and
+- **`PYPTO_LOG_LEVEL` does not affect runtime logs**, and
   `PYPTO_RUNTIME_LOG` does not affect compiler logs. Use `sync_pypto=True`
   (or set both env vars) if you want one knob.
 - **`configure_log()` re-imports simpler lazily.** In environments where
   simpler is not installed (codegen-only flows), avoid calling it — the
   `pypto.runtime` import itself is safe because the env-var bootstrap
   short-circuits when `PYPTO_RUNTIME_LOG` is unset.
-- **`--simpler-log-level` in `tests/st/` does not sync PyPTO.** Pair it
+- **`--runtime-log-level` in `tests/st/` does not sync PyPTO.** Pair it
   with `--pypto-log-level` if you want both subsystems aligned.
-- **The simpler C++ side reads its threshold once** at `Worker.init()`.
+- **The runtime C++ side reads its threshold once** at `Worker.init()`.
   Calling `configure_log()` *after* the worker is up changes only the
   Python side until the next worker init.
 

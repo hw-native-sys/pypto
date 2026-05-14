@@ -7,11 +7,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Single user-facing knob for simpler runtime log level.
+"""Single user-facing knob for PyPTO runtime log level.
 
-PyPTO's C++ logger and simpler's Python logger are intentionally independent
-subsystems. This module exposes one helper that drives only simpler by default,
-with an opt-in flag to mirror the band onto PyPTO's coarser enum.
+PyPTO's C++ logger and the runtime's Python logger are intentionally independent
+subsystems. This module exposes one helper that drives only the runtime logger
+by default, with an opt-in flag to mirror the band onto PyPTO's coarser enum.
 
 Three entry points:
 
@@ -22,9 +22,10 @@ Three entry points:
 * :func:`current_level` — read back the effective threshold.
 
 Level parsing delegates to :mod:`simpler_setup.log_config` (the canonical
-CLI level table); simpler imports are lazy so ``import pypto.runtime`` still
-works in offline-compile environments where simpler is not installed. The
-imported callables are memoized after first access to keep the hot path cheap.
+CLI level table); the underlying simpler imports are lazy so
+``import pypto.runtime`` still works in offline-compile environments where
+simpler is not installed. The imported callables are memoized after first
+access to keep the hot path cheap.
 """
 
 import os
@@ -57,7 +58,7 @@ def _load_simpler() -> tuple[Callable[[Any], int], Callable[[], Any]]:
             from simpler_setup.log_config import parse_level  # type: ignore[import-not-found] # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001 — surface any partial-install failure as one error
             raise RuntimeError(
-                "simpler runtime logger is unavailable; install simpler to use configure_log()"
+                "PyPTO runtime logger is unavailable; install simpler to use configure_log()"
             ) from exc
         _simpler_cache["parse_level"] = parse_level
         _simpler_cache["get_logger"] = get_logger
@@ -65,7 +66,7 @@ def _load_simpler() -> tuple[Callable[[Any], int], Callable[[], Any]]:
 
 
 def configure_log(level: int | str, *, sync_pypto: bool = False) -> None:
-    """Set simpler's log threshold (and optionally PyPTO's C++ logger too).
+    """Set the PyPTO runtime log threshold (and optionally PyPTO's C++ logger too).
 
     Args:
         level: Python ``logging`` int (e.g. ``20``) or string (``"debug"``,
