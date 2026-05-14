@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """Parser tests for ``pl.task_id_invalid()`` / ``pl.task_id_of(...)`` and the
-loosened ``deps=[...]`` kwarg that now accepts TaskId scalars."""
+``deps=[...]`` kwarg that accepts TaskId scalars."""
 
 import pypto.language as pl
 import pytest
@@ -86,42 +86,9 @@ class TestTaskIdOfParsing:
         assert tid_assign.var.type.dtype == DataType.TASK_ID
 
 
-class TestDepsKwargAcceptsBothShapes:
-    def test_deps_accepts_tensor_var_legacy(self):
-        """Legacy path: ``deps=[tensor_var]`` still works."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return x
-
-            @pl.function(type=pl.FunctionType.InCore)
-            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return x
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.manual_scope():
-                    a = self.k1(x)
-                    b = self.k2(x, deps=[a])
-                return b
-
-        fn = Prog.get_function("main")
-        assert fn is not None
-        scope = _first_runtime_scope(fn.body)
-        assert scope is not None
-        b_assign = _flatten(scope.body)[1]
-        assert isinstance(b_assign, ir.AssignStmt)
-        b_call = b_assign.value
-        assert isinstance(b_call, ir.Call)
-        edges = b_call.attrs.get("user_manual_dep_edges", [])
-        assert len(edges) == 1
-        # Tensor-typed dep var.
-        assert isinstance(edges[0].type, ir.TensorType)
-
+class TestDepsKwargAcceptsTaskIdScalar:
     def test_deps_accepts_task_id_scalar_var(self):
-        """Explicit path: ``deps=[task_id_scalar]`` is accepted."""
+        """``deps=[task_id_scalar]`` is the canonical form."""
 
         @pl.program
         class Prog:
@@ -152,14 +119,36 @@ class TestDepsKwargAcceptsBothShapes:
         assert isinstance(b_assign, ir.AssignStmt)
         b_call = b_assign.value
         assert isinstance(b_call, ir.Call)
-        edges = b_call.attrs.get("user_manual_dep_edges", [])
+        edges = b_call.attrs.get("manual_dep_edges", [])
         assert len(edges) == 1
-        # TaskId-typed dep var (not Tensor).
+        # TaskId-typed dep var.
         assert isinstance(edges[0].type, ir.ScalarType)
         assert edges[0].type.dtype == DataType.TASK_ID
 
+    def test_deps_rejects_tensor_var(self):
+        """Tensor variables are no longer accepted in ``deps=[...]``."""
+        with pytest.raises(Exception):  # noqa: B017 — ParserTypeError
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.InCore)
+                def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        a = self.k1(x)
+                        # Bare tensor — reject (must wrap with pl.task_id_of).
+                        b = self.k2(x, deps=[a])
+                    return b
+
     def test_deps_rejects_non_var_expr(self):
-        """``deps=[some_scalar_int]`` (a non-TaskId, non-Tensor scalar) errors."""
+        """``deps=[some_scalar_int]`` (a non-TaskId scalar) errors."""
         with pytest.raises(Exception):  # noqa: B017 — ParserTypeError
 
             @pl.program

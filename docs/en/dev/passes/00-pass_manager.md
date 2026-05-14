@@ -387,7 +387,7 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 17. `AllocateMemoryAddr`
 18. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
 19. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
-20. [`DeriveCallDirections`](33-derive_call_directions.md) (Phase 1: arg directions; Phase 2: manual-scope lowering — was the separate `DeriveManualScopeDeps` pass before)
+20. [`DeriveCallDirections`](33-derive_call_directions.md)
 21. `Simplify`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage

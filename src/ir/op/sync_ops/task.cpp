@@ -57,10 +57,11 @@ TypePtr DeduceBoolScalarType(const std::vector<ExprPtr>& args,
 
 // system.task_invalid — produces an invalid PTO2TaskId sentinel.
 //
-// Synthesized internally by ``LowerManualDepsToTaskId`` as the initial value
-// for TaskId iter_args carrying manual-scope dep state across loop iterations.
-// At codegen time it lowers to ``PTO2TaskId::invalid()``. Add_dep with an
-// invalid task id is guarded by ``is_valid()`` so the runtime sees no edge
+// User-callable via the ``pl.task_id_invalid()`` DSL wrapper. Typical use
+// is the initial value of a TaskId iter_arg carrying manual-scope dep
+// state across loop iterations. At codegen time it lowers to
+// ``PTO2TaskId::invalid()``; downstream ``set_dependencies`` calls skip
+// invalid entries via an ``is_valid()`` guard so the runtime sees no edge
 // on the first iteration.
 REGISTER_OP("system.task_invalid")
     .set_description("Construct an invalid PTO2TaskId sentinel for manual_scope dep carries")
@@ -69,9 +70,8 @@ REGISTER_OP("system.task_invalid")
     .f_deduce_type(DeduceTaskIdScalarType);
 
 // system.task_id_of — extracts the PTO2TaskId of the kernel Call that produced
-// the given Var. Synthesized internally by ``LowerManualDepsToTaskId`` to
-// give the TaskId companion of a kernel Call LHS its own SSA def in the IR
-// so that subsequent passes / codegen can reference it as a normal Var.
+// the given Var. User-callable via the ``pl.task_id_of(producer)`` DSL
+// wrapper inside ``with pl.manual_scope():`` regions.
 //
 // Codegen lowers ``v_tid = task_id_of(v)`` to
 // ``PTO2TaskId v_tid = task_<n>_outs.task_id();`` where ``task_<n>`` is the

@@ -168,7 +168,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
           idxs.push_back(static_cast<int32_t>(v));
         }
         kwargs.emplace_back(key, std::move(idxs));
-      } else if (key == kAttrManualDepEdges || key == kAttrUserManualDepEdges) {
+      } else if (key == kAttrManualDepEdges) {
         std::vector<VarPtr> vars;
         for (auto elem : seq) {
           if (!nb::isinstance<Var>(elem)) {
@@ -866,7 +866,7 @@ void BindIR(nb::module_& m) {
         }
         result[key.c_str()] = lst;
       } else if (value.type() == typeid(std::vector<VarPtr>)) {
-        // Used by attrs["manual_dep_edges"] / attrs["user_manual_dep_edges"].
+        // Used by attrs["manual_dep_edges"].
         const auto& vars = AnyCast<std::vector<VarPtr>>(value, "converting to Python: " + key);
         nb::list lst;
         for (const auto& v : vars) {

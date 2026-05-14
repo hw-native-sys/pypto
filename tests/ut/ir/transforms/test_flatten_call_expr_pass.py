@@ -562,17 +562,14 @@ class TestFlattenPreservesFuncType:
 class TestFlattenPreservesAttrs:
     """Tests that flatten_call_expr preserves Call.attrs when rewriting args.
 
-    Regression test: when an argument is a nested Call (e.g. `pl.slice(...)`)
-    and gets extracted to a temp, the outer Call is rebuilt. The rebuilt
-    Call must keep `attrs_` (e.g. `user_manual_dep_edges` set by the parser
-    for `kernel(..., deps=[var, ...])`); otherwise the manual-scope lowering
-    phase of `DeriveCallDirections` produces empty edges and codegen never
-    emits the `params.add_dep(task_<m>);` calls, silently breaking manual
+    Call must keep `attrs_` (e.g. `manual_dep_edges` set by the parser for
+    `kernel(..., deps=[tid, ...])`); otherwise codegen never emits the
+    `params.add_dep(<task_id>);` calls, silently breaking manual
     dependencies.
     """
 
-    def test_user_manual_dep_edges_survive_arg_flatten(self):
-        # The python_printer does not surface ``Call.attrs['user_manual_dep_edges']``
+    def test_manual_dep_edges_survive_arg_flatten(self):
+        # The python_printer does not surface ``Call.attrs['manual_dep_edges']``
         # so the default print -> parse roundtrip would fail. Property
         # verification still runs.
         instruments: list[_core_passes.PassInstrument] = [
@@ -602,10 +599,11 @@ class TestFlattenPreservesAttrs:
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
                     a = self.k1(x)
+                    a_tid = pl.task_id_of(a)
                     # Inline `pl.slice(...)` arg forces FlattenCallExpr to rebuild
-                    # the k2 call. The deps=[a] kwarg attaches user_manual_dep_edges
+                    # the k2 call. The deps=[a_tid] kwarg attaches manual_dep_edges
                     # which must survive the rebuild.
-                    _b = self.k2(x, pl.slice(out, [32], [0]), deps=[a])
+                    _b = self.k2(x, pl.slice(out, [32], [0]), deps=[a_tid])
                 return out
 
         with ctx:
@@ -629,8 +627,8 @@ class TestFlattenPreservesAttrs:
 
         k2_call = find_k2_call(fn.body)
         assert k2_call is not None, "expected the k2 call in the manual scope"
-        edges = k2_call.attrs.get("user_manual_dep_edges", [])
-        assert len(edges) == 1, f"user_manual_dep_edges dropped after FlattenCallExpr; got {edges!r}"
+        edges = k2_call.attrs.get("manual_dep_edges", [])
+        assert len(edges) == 1, f"manual_dep_edges dropped after FlattenCallExpr; got {edges!r}"
 
 
 class TestFlattenCallInScopeStmt:

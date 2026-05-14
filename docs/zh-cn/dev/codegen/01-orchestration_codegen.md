@@ -389,13 +389,14 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 
 `with pl.manual_scope():` 区域被降级为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
 代码块，区域内 runtime 的 auto OverlapMap 关闭。orchestration codegen 对
-每条必需依赖都显式发出 `params.add_dep(<task_id>);`，源数据来自
-[DeriveCallDirections](../passes/33-derive_call_directions.md) pass
-的 manual scope 降级阶段产生的 IR。
+每个 kernel call 的每条 dep 边都在 per-task `ArgWithDeps<N>` wrapper 上发出
+一次 `params.add_dep(<task_id>);` 调用（wrapper 的 N 等于 dep 数）。dep 边
+直接来自 parser：parser 把用户的 `deps=[tid1, tid2]` kwarg 写入
+`Call.attrs["manual_dep_edges"]`，每项为 `Scalar[TASK_ID]` 类型的 Var。
 
 ### TaskId 的来源
 
-pass 之后，每个 kernel `Call` 会携带 `attrs["manual_dep_edges"]`——一个
+每个 manual scope 内的 kernel `Call` 会携带 `attrs["manual_dep_edges"]`——一个
 `vector<VarPtr>`，元素类型为 `Scalar[TASK_ID]`。每个条目在 codegen 时通过
 `manual_task_id_map_` 解析为以下三种来源之一：
 
@@ -490,5 +491,4 @@ phase `N+1` 中的每个 task 都会等待 phase `N` 的**全部** `N_BRANCHES` 
 
 - [PTO 代码生成](00-pto_codegen.md) — PTO 后端的 MLIR 生成
 - [Pass 管理器](../passes/00-pass_manager.md) — 代码生成前应用的 IR 优化 Pass
-- [DeriveCallDirections（Phase 2：manual scope 降级）](../passes/33-derive_call_directions.md) — 产生本节消费的降级后 IR
 - [Python syntax: 手工依赖原语](../language/00-python_syntax.md#手工依赖原语) — 表层语法及语义

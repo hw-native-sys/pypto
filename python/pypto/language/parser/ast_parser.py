@@ -83,17 +83,11 @@ def _is_const_int(value: object) -> bool:
 def _is_dep_var_type(type_: ir.Type | None) -> bool:
     """Return True if ``type_`` is acceptable as a manual_scope ``deps=`` entry.
 
-    Accepts:
-      * ``TensorType`` — legacy path; the producer Call's TaskId companion is
-        resolved by ``DeriveManualScopeDeps``.
-      * ``ScalarType(TASK_ID)`` — explicit path; the user already extracted the
-        TaskId via ``pl.task_id_of(...)`` / ``pl.task_id_invalid()`` / loop iter_arg.
+    Only ``ScalarType(TASK_ID)`` is accepted. Users extract a TaskId via
+    ``pl.task_id_of(producer)`` (or ``pl.task_id_invalid()`` for the seed
+    of a loop iter_arg) and pass the resulting scalar in ``deps=[...]``.
     """
-    if isinstance(type_, ir.TensorType):
-        return True
-    if isinstance(type_, ir.ScalarType) and type_.dtype == DataType.TASK_ID:
-        return True
-    return False
+    return isinstance(type_, ir.ScalarType) and type_.dtype == DataType.TASK_ID
 
 
 def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
@@ -3795,22 +3789,15 @@ class ASTParser:
         )
 
     def _parse_manual_scope_deps_kwarg(self, method_name: str, call: ast.Call, span: ir.Span) -> list[ir.Var]:
-        """Extract the optional ``deps=[var1, var2]`` kwarg on a self.kernel(...) call.
+        """Extract the optional ``deps=[tid1, tid2]`` kwarg on a self.kernel(...) call.
 
         Only valid inside a ``with pl.manual_scope():`` block. Each list entry
-        must be either:
-
-        * a **tensor variable** produced by a prior ``self.kernel(...)`` call
-          in the same manual scope (legacy path: ``DeriveManualScopeDeps`` will
-          synthesize the TaskId companion); or
-        * a **TaskId scalar** (``pl.Scalar[pl.TASK_ID]``) produced by
-          ``pl.task_id_of(...)`` or ``pl.task_id_invalid()`` or carried through
-          a ``pl.range`` / ``pl.parallel`` iter_arg (explicit path: the user
-          already extracted the TaskId companion).
-
-        The parser cannot fully validate the producer-Var relationship for
-        either path (that's a verifier job); it only enforces that each entry
-        resolves to an ``ir.Var`` of one of the two accepted types.
+        must be a ``pl.Scalar[pl.TASK_ID]`` variable — typically produced by
+        ``pl.task_id_of(producer_tensor)``, ``pl.task_id_invalid()``, or
+        threaded through a ``pl.range`` / ``pl.parallel`` iter_arg as the
+        TaskId carry. Tensors are not accepted: the user names the producer
+        TaskId directly so the compiler does not need closure analysis to
+        figure out which kernel Call to depend on.
 
         Returns an empty list when ``deps=`` is absent.
         """
@@ -3819,22 +3806,21 @@ class ASTParser:
             return []
         if not isinstance(deps_kw.value, (ast.List, ast.Tuple)):
             raise ParserTypeError(
-                f"'{method_name}' deps= must be a list/tuple of tensor or TaskId variables",
+                f"'{method_name}' deps= must be a list/tuple of TaskId scalars",
                 span=span,
-                hint="Use deps=[other_var] where other_var is either a tensor produced by a prior "
-                "self.kernel(...) call, or a pl.Scalar[pl.TASK_ID] from pl.task_id_of(...) / "
-                "pl.task_id_invalid() / a loop iter_arg.",
+                hint="Use deps=[tid] where tid is a pl.Scalar[pl.TASK_ID] from "
+                "pl.task_id_of(...) / pl.task_id_invalid() / a loop iter_arg.",
             )
         out: list[ir.Var] = []
         for elt in deps_kw.value.elts:
             expr = self.parse_expression(elt)
             if not isinstance(expr, ir.Var) or not _is_dep_var_type(expr.type):
                 raise ParserTypeError(
-                    f"'{method_name}' deps= entries must be tensor variables or TaskId scalars, "
+                    f"'{method_name}' deps= entries must be pl.Scalar[pl.TASK_ID] variables, "
                     f"got '{ast.unparse(elt)}'",
                     span=span,
-                    hint="Each entry must be a tensor produced by a prior self.kernel(...) call, "
-                    "or a pl.Scalar[pl.TASK_ID] from pl.task_id_of(...) / pl.task_id_invalid().",
+                    hint="Extract a TaskId from a producer tensor with pl.task_id_of(producer), "
+                    "or seed an iter_arg with pl.task_id_invalid() and thread it through the loop.",
                 )
             out.append(expr)
         return out
@@ -3901,11 +3887,14 @@ class ASTParser:
                 at the call site. Stored as ``attrs['arg_direction_overrides']`` so
                 ``DeriveCallDirections`` can overwrite the auto-derived direction at
                 each indicated slot to ``ArgDirection.NoDep``.
-            user_dep_vars: Optional list of tensor Vars from a manual_scope
-                ``deps=[var1, var2]`` kwarg. Stored as
-                ``attrs['user_manual_dep_edges']`` so the manual-scope lowering
-                phase of ``DeriveCallDirections`` can resolve them into
-                ``attrs['manual_dep_edges']``.
+            user_dep_vars: Optional list of TaskId Vars from a manual_scope
+                ``deps=[tid1, tid2]`` kwarg. Each entry is a
+                ``Scalar[TASK_ID]`` (from ``pl.task_id_of(...)`` /
+                ``pl.task_id_invalid()`` / a loop iter_arg) or an
+                ``Array[N, TASK_ID]`` (from ``pl.array.create(N, pl.TASK_ID)``).
+                Stored directly as ``attrs['manual_dep_edges']``; codegen
+                emits one ``add_dep`` call per entry (array entries expand to
+                one per slot) on the per-call ``ArgWithDeps<N>`` wrapper.
             device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
                 on an Orchestration dispatch call. Stored under
                 ``attrs['device']`` so the comm-collection pass can recover
@@ -3926,7 +3915,7 @@ class ASTParser:
             attrs["arg_direction_overrides"] = list(no_dep_indices)
         if user_dep_vars:
             attrs = attrs or {}
-            attrs["user_manual_dep_edges"] = list(user_dep_vars)
+            attrs["manual_dep_edges"] = list(user_dep_vars)
         if device_expr is not None:
             attrs = attrs or {}
             attrs["device"] = device_expr

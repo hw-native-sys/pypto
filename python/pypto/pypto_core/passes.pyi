@@ -512,22 +512,13 @@ def lower_composite_ops() -> Pass:
     """
 
 def derive_call_directions() -> Pass:
-    """Create a pass that derives per-argument :class:`ir.ArgDirection` and lowers manual-scope dep edges.
+    """Create a pass that derives per-argument :class:`ir.ArgDirection`.
 
-    **Phase 1.** Walks each ``Function``'s body and writes
-    ``Call.attrs['arg_directions']`` based on callee :class:`ir.ParamDirection`
-    and argument origin (function param vs. locally allocated tensor vs.
-    scalar). Establishes the :class:`IRProperty.CallDirectionsResolved`
-    post-condition, which is then auto-verified by the pipeline.
-
-    **Phase 2.** Lowers every ``RuntimeScopeStmt(manual=True)`` region:
-    resolves user-supplied ``deps=[var, ...]`` lists from
-    ``Call.attrs['user_manual_dep_edges']`` into
-    ``Call.attrs['manual_dep_edges']``, allocates ``__tid`` TaskId companions
-    for the closure of involved Vars, and synthesises the
-    ``system.task_id_of`` / ``system.task_invalid`` AssignStmts that codegen
-    consumes. The 16-deps-per-submit cap is enforced at orchestration codegen,
-    not in this pass. No-op when no manual scope is present.
+    Walks each ``Function``'s body and writes ``Call.attrs['arg_directions']``
+    based on callee :class:`ir.ParamDirection` and argument origin (function
+    param vs. locally allocated tensor vs. scalar). Establishes the
+    :class:`IRProperty.CallDirectionsResolved` post-condition, which is then
+    auto-verified by the pipeline.
     """
 
 def flatten_call_expr() -> Pass:

@@ -335,11 +335,14 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | -------- | ---- | ---- |
 | `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`。该次提交对该槽位不进入自动跟踪。**仅 auto scope 生效**——在 `pl.manual_scope` 内没有语义。 |
 | `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；用户必须通过 `deps=[...]` **显式声明每一条**需要的排序边。 |
-| `kernel(..., deps=[var, ...])` | per-call（仅 manual_scope 内） | 声明显式 task-id 边。每个条目必须是：同一 `manual_scope` 内由先前 `self.kernel(...)` 产生的 tensor `Var`，或在循环中承载该 producer 的 iter_arg / return_var，或作为初始种子传入的函数参数。 |
+| `pl.task_id_of(producer)` | per-call producer | 在 `manual_scope` 内，返回 `pl.Scalar[pl.TASK_ID]`，命名产生 `producer` 的那次 kernel call 的 task id（`producer` 必须是同一 manual scope 内由 `self.kernel(...)` 直接产生的 tensor）。 |
+| `pl.task_id_invalid()` | per-loop 种子 | 返回 `PTO2TaskId::invalid()` 哨兵——用作循环 iter_arg 的初始 TaskId（任何 producer 都还没跑过的状态）。下游 `set_dependencies` 自动跳过 invalid 条目。 |
+| `kernel(..., deps=[tid, ...])` | per-call（仅 manual_scope 内） | 声明显式 task-id 依赖边。每个条目必须是 `pl.Scalar[pl.TASK_ID]`，来自 `pl.task_id_of(...)`、`pl.task_id_invalid()`，或在 `pl.range` / `pl.parallel` iter_arg 中穿行。 |
 
 Manual scope 是**只看声明**的：即使 `stage2` 读取了 `stage1` 写过的 buffer，
-若用户没写 `deps=[scratch]`，pass 也不会替你补上。之前的数据流自动推导
-已被移除，因为当不同 kernel 在同一块 buffer 上原地复用时它会产生大量伪边。
+若用户没写 `deps=[...]`，编译器也不会替你补上。用户通过 TaskId 标量
+显式命名每条任务依赖；编译器不做闭包分析或自动推导。`deps=[...]` 不再
+接受 tensor 变量。
 
 ```python
 @pl.function(type=pl.FunctionType.Orchestration)
@@ -348,20 +351,18 @@ def main(self, x: pl.Tensor[[64], pl.FP32],
          out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
     with pl.manual_scope():
         scratch = self.stage1(x, scratch)
-        out     = self.stage2(scratch, out, deps=[scratch])   # 必需：stage2 读 scratch
+        stage1_tid = pl.task_id_of(scratch)
+        out = self.stage2(scratch, out, deps=[stage1_tid])  # stage2 follows stage1
     return out
 ```
 
-`with pl.manual_scope():` 内由
-[DeriveCallDirections](../passes/33-derive_call_directions.md)
-pass 的 manual scope 降级阶段（内部实现为 `LowerManualDepsToTaskId`）
-把每个 `deps=[var, ...]` 解析为 producer 的 TaskId 配套、写入 call 的
-`manual_dep_edges`，并为每个外层 `pl.range` / `pl.parallel` 同步追加
-TaskId iter_arg / return_var / yield 项。不再对每 call 边数设上限——
-codegen 按实际依赖数生成 `ArgWithDeps<N>`。
+parser 把每个 `deps=[tid, ...]` 直接写入 kernel `Call.attrs["manual_dep_edges"]`；
+codegen 在 per-task `ArgWithDeps<N>` wrapper（N = 实际依赖数）上对每个条目
+发出一次 `params.add_dep(<task_id>);` 调用。runtime 的
+`Arg::set_dependencies(ptr, count)`（`ArgWithDeps` 最终调用的底层 API）
+直接接收调用者持有的任意长度数组，所以单 call 的依赖边数没有硬上限。
 
-`pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用——
-pass 不再以 per-arg direction 做依赖解析。
+`pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用。
 
 #### Manual scope 下的 `pl.parallel`：array-carry fence
 
@@ -379,14 +380,17 @@ task）。这就保证用户声明的 fence 语义即便在迭代乱序完成时
 
 ```python
 with pl.manual_scope():
+    prev_tid = pl.task_id_invalid()                      # 种子：还没有 producer
     for phase in pl.range(N_PHASES):
         for branch in pl.parallel(N_BRANCHES):           # 编译期常量
             row = (phase * N_BRANCHES + branch) * TILE_M
-            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+            out = self.kernel_stripe(data, row, 1.0, out, deps=[prev_tid])
+            prev_tid = pl.task_id_of(out)                # 跨迭代传递 TaskId
 ```
 
-phase `N+1` 中的每个 task 都会等待 phase `N` 的全部 `N_BRANCHES` 个
-task，而非只等最后那个。
+`prev_tid` 在 `pl.parallel` 内被重新绑定，所以 codegen 把 carry 下沉为
+`PTO2TaskId[N_BRANCHES]` 数组。phase `N+1` 中的每个 task 都会等待
+phase `N` 的全部 `N_BRANCHES` 个 task，而非只等最后那个。
 
 ### Yield 语句
 

@@ -174,7 +174,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
     new_attrs.reserve(op->attrs_.size());
     bool attrs_changed = false;
     for (const auto& [k, v] : op->attrs_) {
-      if (k == kAttrUserManualDepEdges || k == kAttrManualDepEdges) {
+      if (k == kAttrManualDepEdges) {
         if (const auto* edges = std::any_cast<std::vector<VarPtr>>(&v)) {
           std::vector<VarPtr> new_edges;
           new_edges.reserve(edges->size());

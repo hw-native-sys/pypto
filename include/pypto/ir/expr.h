@@ -673,41 +673,17 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
 }
 
 /**
- * @brief Reserved attr key for user-supplied explicit dep edges set inside
- * a ``with pl.manual_scope():`` block via the ``deps=[v1, v2, ...]`` kwarg.
+ * @brief Reserved attr key for the set of dep edges that codegen packs into
+ * a stack ``PTO2TaskId[]`` array and emits as a single
+ * ``params.set_dependencies(arr, count)`` call before the kernel submit.
  *
- * Value type: ``std::vector<VarPtr>`` referencing IR Vars produced by prior
- * Call assignments in the same manual scope. The manual-scope lowering phase
- * of ``DeriveCallDirections`` resolves this list into ``kAttrManualDepEdges``;
- * codegen only consumes the resolved attr.
- */
-inline constexpr const char* kAttrUserManualDepEdges = "user_manual_dep_edges";
-
-/**
- * Build a copy of ``attrs`` with ``kAttrUserManualDepEdges`` set to ``vars``.
- * Replaces an existing entry if present; otherwise appends.
- */
-inline std::vector<std::pair<std::string, std::any>> WithUserManualDepEdgesAttr(
-    std::vector<std::pair<std::string, std::any>> attrs, std::vector<VarPtr> vars) {
-  for (auto& [k, v] : attrs) {
-    if (k == kAttrUserManualDepEdges) {
-      v = std::move(vars);
-      return attrs;
-    }
-  }
-  attrs.emplace_back(kAttrUserManualDepEdges, std::move(vars));
-  return attrs;
-}
-
-/**
- * @brief Reserved attr key for the resolved set of dep edges that codegen
- * emits as ``params.add_dep(...)`` calls. Populated by the manual-scope
- * lowering phase of ``DeriveCallDirections``.
- *
- * Value type: ``std::vector<VarPtr>``, deduplicated by Var identity. Union of:
- *   1. user-specified edges (kAttrUserManualDepEdges, set by parser)
- *   2. data-flow-derived edges: tensor args referencing prior-call Vars,
- *      EXCLUDING any arg slot whose ``arg_directions`` is ``NoDep``.
+ * Value type: ``std::vector<VarPtr>`` where every entry is a Var of
+ * ``ScalarType(DataType::TASK_ID)`` or ``ArrayType(..., TASK_ID)``. Written
+ * directly by the parser when the user passes ``deps=[tid1, tid2, ...]`` on a
+ * kernel call inside ``with pl.manual_scope():``. Users obtain each entry via
+ * ``pl.task_id_of(producer)``, ``pl.task_id_invalid()``, ``pl.array.create(N,
+ * pl.TASK_ID)``, or by threading a TaskId iter_arg through a ``pl.range`` /
+ * ``pl.parallel`` loop.
  */
 inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
 
@@ -724,36 +700,6 @@ inline std::vector<std::pair<std::string, std::any>> WithManualDepEdgesAttr(
     }
   }
   attrs.emplace_back(kAttrManualDepEdges, std::move(vars));
-  return attrs;
-}
-
-/**
- * @brief Attr key for the synthesized TaskId Var paired with a user-defined
- * kernel ``Call`` inside a ``manual_scope``. Set by the
- * ``LowerManualDepsToTaskId`` utility (Phase 2 of ``DeriveCallDirections``).
- *
- * Value type: ``VarPtr`` of ``ScalarType(DataType::TASK_ID)``.
- *
- * Codegen consumes this attr when emitting the kernel submit:
- *   - Emits ``PTO2TaskId <task_id_var_emit_name> = <task>_outs.task_id();``
- *     immediately after the submit, so that downstream ``add_dep`` references
- *     to the TaskId Var resolve to a real C++ identifier.
- */
-inline constexpr const char* kAttrTaskIdVar = "task_id_var";
-
-/**
- * Build a copy of ``attrs`` with ``kAttrTaskIdVar`` set to ``var``.
- * Replaces an existing entry if present; otherwise appends.
- */
-inline std::vector<std::pair<std::string, std::any>> WithTaskIdVarAttr(
-    std::vector<std::pair<std::string, std::any>> attrs, VarPtr var) {
-  for (auto& [k, v] : attrs) {
-    if (k == kAttrTaskIdVar) {
-      v = std::move(var);
-      return attrs;
-    }
-  }
-  attrs.emplace_back(kAttrTaskIdVar, std::move(var));
   return attrs;
 }
 

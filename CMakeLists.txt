@@ -185,7 +185,6 @@ set(PYPTO_SOURCES
     src/ir/transforms/utils/dead_code_elimination.cpp
     src/ir/transforms/utils/l0_tile_chooser.cpp
     src/ir/transforms/utils/loop_state_repair.cpp
-    src/ir/transforms/utils/lower_manual_deps_to_task_id.cpp
     src/ir/transforms/utils/tpop_tfree_finalizer.cpp
     src/ir/transforms/utils/normalize_stmt_structure.cpp
     src/ir/transforms/utils/op_predicates.cpp

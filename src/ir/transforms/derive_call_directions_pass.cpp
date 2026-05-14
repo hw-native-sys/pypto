@@ -31,7 +31,6 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
-#include "pypto/ir/transforms/utils/lower_manual_deps_to_task_id.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -708,7 +707,6 @@ Pass DeriveCallDirections() {
 
     // We need a non-const handle to rewrite functions with new bodies.
     auto new_functions = program->functions_;
-    bool any_changed = false;
 
     for (auto& [gvar, func] : new_functions) {
       if (!func || !func->body_) continue;
@@ -735,19 +733,15 @@ Pass DeriveCallDirections() {
       CallDirectionMutator mutator(program, br_collector.buffer_roots, pw_collector.first_writer_roots,
                                    enclosing_param_dir_by_root, scalar_defs_collector.defs(),
                                    scalar_defs_collector.unique_name_defs());
-      auto body_after_dirs = mutator.VisitStmt(func->body_);
-
-      // Reads ArgDirection::NoDep from the arg_directions written above.
-      auto new_body = LowerManualDepsToTaskId(body_after_dirs);
+      auto new_body = mutator.VisitStmt(func->body_);
 
       if (new_body.get() == func->body_.get()) continue;
-      any_changed = true;
       func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
                                         func->return_types_, new_body, func->span_, func->func_type_,
                                         func->level_, func->role_, func->attrs_);
     }
 
-    if (!any_changed) return program;
+    if (new_functions == program->functions_) return program;
     return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
   };
 

@@ -391,14 +391,18 @@ The orchestration file is named `orchestration/<func_name>.cpp` in the generated
 `with pl.manual_scope():` regions lower to a `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
 block where the runtime's auto OverlapMap is disabled. The orchestration
 codegen materialises every required dependency edge as an explicit
-`params.add_dep(<task_id>);` call, sourced from the IR produced by the
-manual-scope lowering phase of [DeriveCallDirections](../passes/33-derive_call_directions.md).
+`params.add_dep(<task_id>);` call on a per-task `ArgWithDeps<N>` wrapper
+sized to the exact dep-edge count. The dep edges come straight from the
+parser: it writes the user's `deps=[tid1, tid2]` kwarg into
+`Call.attrs["manual_dep_edges"]` as a `vector<VarPtr>` of
+`Scalar[TASK_ID]` variables.
 
 ### TaskId sourcing
 
-After the pass, every kernel `Call` carries `attrs["manual_dep_edges"]` —
-a `vector<VarPtr>` of `Scalar[TASK_ID]` variables. Each entry resolves at
-codegen time through `manual_task_id_map_` to one of three forms:
+Every kernel `Call` inside a manual scope carries
+`attrs["manual_dep_edges"]` — a `vector<VarPtr>` of `Scalar[TASK_ID]`
+variables. Each entry resolves at codegen time through
+`manual_task_id_map_` to one of three forms:
 
 | Producer kind | C++ source emitted by codegen |
 | ------------- | ----------------------------- |
@@ -499,5 +503,4 @@ Every task in phase `N+1` waits for **all** `N_BRANCHES` tasks of phase `N`.
 
 - [PTO Codegen](00-pto_codegen.md) — MLIR generation for PTO backend
 - [Pass Manager](../passes/00-pass_manager.md) — IR optimization passes applied before codegen
-- [DeriveCallDirections (Phase 2: manual-scope lowering)](../passes/33-derive_call_directions.md) — the pass that produces the post-lowering IR consumed here
 - [Python syntax: manual dependency primitives](../language/00-python_syntax.md#manual-dependency-primitives) — the user-facing surface form

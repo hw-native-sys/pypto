@@ -387,7 +387,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 17. `AllocateMemoryAddr`
 18. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
 19. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
-20. [`DeriveCallDirections`](33-derive_call_directions.md)（Phase 1：推导 arg directions；Phase 2：manual scope 降级——原 `DeriveManualScopeDeps` pass 已并入）
+20. [`DeriveCallDirections`](33-derive_call_directions.md)
 21. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过

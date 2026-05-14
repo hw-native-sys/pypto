@@ -583,18 +583,17 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         VisitExpr(op->args_[i]);
       }
 
-      // Surface manual_scope dep edges so they show up in IR dumps. The pass
-      // ``LowerManualDepsToTaskId`` rewrites the user-facing
-      // ``kAttrUserManualDepEdges`` (Tensor Vars) into ``kAttrManualDepEdges``
-      // (TaskId Vars). Print whichever is present; both pre- and post-lower
-      // forms round-trip via the parser-recognised ``deps=[...]`` kwarg.
+      // Surface manual_scope dep edges so they show up in IR dumps. The
+      // parser writes ``deps=[tid, ...]`` directly into
+      // ``kAttrManualDepEdges`` (each entry a ``Scalar[TASK_ID]`` Var), and
+      // the printer round-trips it via the same ``deps=[...]`` kwarg.
       const std::vector<VarPtr>* deps_to_print = nullptr;
       for (const auto& [k, v] : op->attrs_) {
-        if (k != kAttrManualDepEdges && k != kAttrUserManualDepEdges) continue;
+        if (k != kAttrManualDepEdges) continue;
         const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
         if (!edges || edges->empty()) continue;
         deps_to_print = edges;
-        if (k == kAttrManualDepEdges) break;  // prefer resolved over user-supplied
+        break;
       }
       // Zero-arg self.fn() needs no leading comma before the first kwarg, so
       // gate every kwarg separator on a shared flag rather than hard-coding

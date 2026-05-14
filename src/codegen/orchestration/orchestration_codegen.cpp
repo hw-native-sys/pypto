@@ -841,7 +841,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (auto call = As<Call>(assign->value_)) {
       const std::string& op_name = call->op_->name_;
 
-      // Special-case TaskId synthesis ops (synthesized by LowerManualDepsToTaskId).
+      // Special-case TaskId ops emitted from the DSL surface
+      // (``pl.task_id_invalid()`` / ``pl.task_id_of(...)``).
       if (op_name == "system.task_invalid") {
         code_ << Indent() << "PTO2TaskId " << var_name << " = PTO2TaskId::invalid();\n";
         return;
@@ -1435,9 +1436,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  /// Emit ``params_t<n>.add_dep(task_<m>);`` for every entry resolved by the
-  /// manual-scope lowering phase of ``DeriveCallDirections``. No-op outside a
-  /// manual scope (auto scope derives deps from data flow at runtime).
+  /// Emit one ``params_t<n>.add_dep(<name>);`` per entry in the kernel
+  /// ``Call.attrs["manual_dep_edges"]`` list. The list is written directly
+  /// by the parser from a ``deps=[tid1, tid2]`` kwarg (each entry a
+  /// ``Scalar[TASK_ID]`` Var, or an ``Array[N, TASK_ID]`` that expands to
+  /// one ``add_dep`` per slot). Iter-arg / array-slot carries take an
+  /// ``is_valid()`` guard because the first iteration may still hold
+  /// ``PTO2TaskId::invalid()``; ``system.task_id_of`` LHS entries are
+  /// always valid so they emit unconditionally. No-op outside a manual scope.
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
     if (in_manual_scope_depth_ == 0) return;
     for (const auto& [k, v] : call->attrs_) {
@@ -1453,16 +1459,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << "' has no producer task in current manual scope";
         if (std::get_if<int>(&it->second)) {
           // Invariant: a ``manual_dep_edges`` entry should never resolve
-          // directly to a kernel-Call LHS (int-variant entry).
-          // ``LowerManualDepsToTaskId`` rewrites every dep edge Var to its
-          // ``system.task_id_of`` LHS (TaskIdType, string-variant entry).
-          // Hitting this branch means the pass was bypassed or the IR
-          // was hand-built without going through it.
+          // directly to a kernel-Call LHS (int-variant entry). The parser
+          // enforces that ``deps=[...]`` only accepts ``Scalar[TASK_ID]``
+          // Vars, so dep edges should always resolve to a TaskId binding
+          // (string variant) or a TaskId iter_arg array (vector variant).
           INTERNAL_CHECK_SPAN(false, call->span_)
               << "Internal error: manual_dep_edge var '" << edge->name_hint_
               << "' resolves to a kernel-Call LHS (int variant). Expected "
-              << "LowerManualDepsToTaskId to have rewritten this edge to a "
-              << "system.task_id_of LHS (TaskIdType, string variant).";
+              << "a Scalar[TASK_ID] Var (string variant).";
         } else if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
           // Array-carry iter_arg: depend on every slot, each guarded by
           // ``is_valid()`` (early-phase slots may still be invalid).
@@ -2126,8 +2130,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// Map from a producer ``Var`` to the task identity to use when it appears
   /// as a ``manual_dep_edge``. Three cases:
   ///   * ``int`` value: kernel-Call LHS, the int is the task counter assigned
-  ///     by ``EmitTaskSubmitAndBind``. Invariant-only: should be rewritten by
-  ///     ``LowerManualDepsToTaskId`` before reaching dep emission.
+  ///     by ``EmitTaskSubmitAndBind``. Invariant-only: parser-built dep edges
+  ///     are always ``Scalar[TASK_ID]`` Vars and resolve through the string
+  ///     branch; the int branch is reserved as a tripwire for hand-built IR.
   ///   * ``std::string`` value: a ``ForStmt`` TaskId iter_arg's emit name OR a
   ///     ``system.task_id_of`` LHS emit name (single PTO2TaskId variable).
   ///   * ``std::vector<std::string>`` value: a ``ForStmt`` TaskId iter_arg that

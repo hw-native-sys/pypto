@@ -19,7 +19,7 @@ float_type = ir.ScalarType(DataType.FP32)
 
 > **注意：** `INDEX` 是用于索引计算（循环变量、维度、偏移量、步长）的独立整数类型。它拥有自己的类型代码和字符串表示（`"index"`）。虽然语义上与 `INT64` 类似，但 `INDEX != INT64` —— 它们是不同的类型。在代码生成中，INDEX 和 INT64 之间的隐式类型转换会被抑制。
 >
-> **注意：** `TASK_ID` 是一个不透明的 64-bit handle（类型代码 `0x50`），表示 runtime 的 `PTO2TaskId`。它**不是**数值类型——上面没有任何算术运算。其值只能由两个 builtin 产生：[`system.task_invalid`](05-operators.md)（"暂无 producer" 的哨兵）和 [`system.task_id_of(producer)`](05-operators.md)（kernel call LHS 背后的 task id）。它们由 [DeriveCallDirections pass](../passes/33-derive_call_directions.md) 的 manual scope 降级阶段合成，仅在 `with pl.manual_scope():` 区域内出现；前端从不暴露。codegen 把 `TASK_ID` 下沉为 `PTO2TaskId`。
+> **注意：** `TASK_ID` 是一个不透明的 64-bit handle（类型代码 `0x50`），表示 runtime 的 `PTO2TaskId`。它**不是**数值类型——上面没有任何算术运算。其值只能由两个 builtin 产生：[`system.task_invalid`](05-operators.md)（"暂无 producer" 的哨兵）和 [`system.task_id_of(producer)`](05-operators.md)（kernel call LHS 背后的 task id）。用户在 `with pl.manual_scope():` 内通过 DSL 包装 `pl.task_id_invalid()` 和 `pl.task_id_of(producer_tensor)` 调用它们，并在 kernel call 的 `deps=[tid1, tid2]` kwarg 中传入。codegen 把 `TASK_ID` 下沉为 `PTO2TaskId`。
 
 ### TensorType
 

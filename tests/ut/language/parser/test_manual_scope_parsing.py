@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Parser tests for ``with pl.manual_scope():`` and the ``deps=[var]`` Call kwarg."""
+"""Parser tests for ``with pl.manual_scope():`` and the ``deps=[tid]`` Call kwarg."""
 
 import pypto.language as pl
 import pytest
@@ -56,7 +56,7 @@ class TestManualScopeParsing:
                     with pl.manual_scope(name="foo"):
                         return x
 
-    def test_deps_kwarg_records_user_manual_dep_edges(self):
+    def test_deps_kwarg_records_manual_dep_edges(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -71,31 +71,38 @@ class TestManualScopeParsing:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
                     a = self.k1(x)
-                    b = self.k2(x, deps=[a])
+                    a_tid = pl.task_id_of(a)
+                    b = self.k2(x, deps=[a_tid])
                 return b
 
         fn = Prog.get_function("main")
         assert fn is not None
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
-        # Walk the scope body and inspect both Calls.
+        # Walk the scope body and inspect the calls. With the explicit-TaskId
+        # API there are three statements: ``a = k1(x)``, ``a_tid = task_id_of(a)``,
+        # and ``b = k2(x, deps=[a_tid])``.
         body = scope.body
         if isinstance(body, ir.SeqStmts):
             stmts = list(body.stmts)
         else:
             stmts = [body]
-        assert len(stmts) == 2
-        a_assign, b_assign = stmts
+        assert len(stmts) == 3
+        a_assign, tid_assign, b_assign = stmts
         assert isinstance(a_assign, ir.AssignStmt)
+        assert isinstance(tid_assign, ir.AssignStmt)
         assert isinstance(b_assign, ir.AssignStmt)
         a_call = a_assign.value
         b_call = b_assign.value
         assert isinstance(a_call, ir.Call)
         assert isinstance(b_call, ir.Call)
-        assert "user_manual_dep_edges" not in a_call.attrs
-        b_user_deps = b_call.attrs.get("user_manual_dep_edges", [])
-        assert len(b_user_deps) == 1
-        assert b_user_deps[0].same_as(a_assign.var)
+        # Producer k1 has no dep edges of its own.
+        assert "manual_dep_edges" not in a_call.attrs
+        # Consumer k2 records one dep edge, naming the TaskId scalar bound by
+        # ``a_tid = pl.task_id_of(a)``.
+        b_deps = b_call.attrs.get("manual_dep_edges", [])
+        assert len(b_deps) == 1
+        assert b_deps[0].same_as(tid_assign.var)
 
     def test_deps_outside_manual_scope_is_rejected(self):
         with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
@@ -109,8 +116,9 @@ class TestManualScopeParsing:
                 @pl.function(type=pl.FunctionType.Orchestration)
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                     a = self.k1(x)
+                    a_tid = pl.task_id_of(a)
                     # No manual_scope around this — the deps= kwarg must error.
-                    b = self.k1(x, deps=[a])
+                    b = self.k1(x, deps=[a_tid])
                     return b
 
 

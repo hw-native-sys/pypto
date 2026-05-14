@@ -337,9 +337,11 @@ user opt out and manage ordering explicitly:
 | ------- | ----------- | ------ |
 | `pl.no_dep(arg)` | per-call argument | At a kernel call site, the wrapped argument's `ArgDirection` becomes `NoDep`. Auto-tracking ignores that slot for this submission only. **Auto scope only** — has no semantic effect inside `pl.manual_scope`. |
 | `with pl.manual_scope():` | per-region | Lowers to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; the user must declare **every** required ordering edge explicitly via `deps=[...]`. |
-| `kernel(..., deps=[var, ...])` | per-call (manual_scope only) | Declares explicit task-id edges. Each entry must be a tensor `Var` produced by a prior `self.kernel(...)` in the same `manual_scope`, an iter_arg/return-var carrying such a producer through a loop, or a function parameter passed in as an initial seed. |
+| `pl.task_id_of(producer)` | per-call producer | Inside `manual_scope`, returns a `pl.Scalar[pl.TASK_ID]` naming the task that produced `producer` (must be a tensor directly assigned by a prior `self.kernel(...)`). |
+| `pl.task_id_invalid()` | per-loop seed | Returns the `PTO2TaskId::invalid()` sentinel — used as the initial value of a TaskId iter_arg threaded through a loop, before any producer has run. Downstream `set_dependencies` calls skip invalid entries automatically. |
+| `kernel(..., deps=[tid, ...])` | per-call (manual_scope only) | Declares explicit task-id dependency edges. Every entry must be a `pl.Scalar[pl.TASK_ID]` variable, produced by `pl.task_id_of(...)`, `pl.task_id_invalid()`, or threaded through a `pl.range` / `pl.parallel` iter_arg. |
 
-Manual scope is **declare-only**: omitting a `deps=[scratch]` on `stage2` will not be backfilled by the pass, even if `stage2` reads what `stage1` wrote. Auto-derivation from data flow was removed because it produced false edges whenever a buffer was reused in-place across unrelated kernels.
+Manual scope is **declare-only**: omitting a `deps=[...]` on `stage2` will not be backfilled, even if `stage2` reads what `stage1` wrote. The user names every task dependency explicitly via TaskId scalars; the compiler performs no closure analysis or auto-derivation. Tensor variables are **not** accepted in `deps=[...]`.
 
 ```python
 @pl.function(type=pl.FunctionType.Orchestration)
@@ -348,22 +350,21 @@ def main(self, x: pl.Tensor[[64], pl.FP32],
          out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
     with pl.manual_scope():
         scratch = self.stage1(x, scratch)
-        out     = self.stage2(scratch, out, deps=[scratch])   # required: stage2 reads scratch
+        stage1_tid = pl.task_id_of(scratch)
+        out = self.stage2(scratch, out, deps=[stage1_tid])  # stage2 follows stage1
     return out
 ```
 
-Inside `with pl.manual_scope():`, the manual-scope lowering phase of
-[DeriveCallDirections](../passes/33-derive_call_directions.md)
-(implemented internally by `LowerManualDepsToTaskId`)
-resolves each `deps=[var, ...]` entry to a TaskId companion of the producer,
-attaches it to the call's `manual_dep_edges` attr, and threads matching TaskId
-iter_args / return-vars / yields through every enclosing `pl.range` /
-`pl.parallel`. There is no cap on the number of edges per call — codegen
-sizes the emitted `ArgWithDeps<N>` to the exact dep count.
+The parser writes each `deps=[tid, ...]` list directly into the kernel
+`Call.attrs["manual_dep_edges"]`; codegen materialises each entry as a
+`params.add_dep(<task_id>);` call on a per-task `ArgWithDeps<N>` wrapper
+sized to the exact dep count. The runtime's
+`Arg::set_dependencies(ptr, count)` (which `ArgWithDeps` finalizes into)
+accepts a caller-owned array of arbitrary size, so there is no per-call
+edge cap.
 
 `pl.no_dep(arg)` is an auto-scope primitive; inside `pl.manual_scope` it has
-no effect since the pass never inspects per-arg directions for dependency
-resolution.
+no effect.
 
 #### `pl.parallel` under manual scope: array-carry fence
 
@@ -383,14 +384,17 @@ Requirements for the array-carry path:
 
 ```python
 with pl.manual_scope():
+    prev_tid = pl.task_id_invalid()                      # seed: no producer yet
     for phase in pl.range(N_PHASES):
         for branch in pl.parallel(N_BRANCHES):           # const trip count
             row = (phase * N_BRANCHES + branch) * TILE_M
-            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+            out = self.kernel_stripe(data, row, 1.0, out, deps=[prev_tid])
+            prev_tid = pl.task_id_of(out)                # carries TaskId across iters
 ```
 
-Each task in phase `N+1` waits for all `N_BRANCHES` tasks of phase `N`,
-not just the last one.
+`prev_tid` is rebound inside `pl.parallel`, so codegen lowers the carry as
+a `PTO2TaskId[N_BRANCHES]` array. Each task in phase `N+1` waits for all
+`N_BRANCHES` tasks of phase `N`, not just the last-dispatched one.
 
 ### Yield Statement
 

@@ -323,7 +323,7 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   bool attrs_changed = false;
   new_attrs.reserve(op->attrs_.size());
   for (const auto& [k, v] : op->attrs_) {
-    if (k == kAttrUserManualDepEdges || k == kAttrManualDepEdges) {
+    if (k == kAttrManualDepEdges) {
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
       if (edges) {
         std::vector<VarPtr> new_edges;
