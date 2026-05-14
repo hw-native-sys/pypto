@@ -22,17 +22,17 @@ The orchestrator wraps the nested loops in ``with pl.manual_scope():``:
         row = i * TILE_R
         for j in pl.parallel(N):
             col = j * TILE_C
-            scratch = self.stage1(x, scratch, row, col)
-            out     = self.stage2(scratch, out, row, col)
+            scratch, stage1_tid = pl.submit(self.stage1, x, scratch, row, col)
+            out, _              = pl.submit(self.stage2, scratch, out, row, col, deps=[stage1_tid])
 
 What the swimlane visualization should show
 -------------------------------------------
-The user-declared ``deps=[stage1_tid]`` on the stage2 call produces:
+The user-declared ``deps=[stage1_tid]`` on the stage2 submit produces:
 
-* **Within an iteration**: stage2 has an explicit ``add_dep(task_<stage1>)``
-  on stage1, so stage2 starts strictly after stage1 finishes for the same
-  ``(i, j)`` tile.
-* **Across iterations**: no extra ``add_dep`` is emitted, so different
+* **Within an iteration**: stage2's ``set_dependencies`` lists stage1's
+  producer TaskId, so stage2 starts strictly after stage1 finishes for the
+  same ``(i, j)`` tile.
+* **Across iterations**: no extra dependency is emitted, so different
   ``(i, j)`` tiles run at maximum parallelism.
 
 In the swimlane chart this manifests as 2 vertically-stacked tasks per
@@ -127,9 +127,8 @@ def _build_program():
                     row: pl.Scalar[pl.INDEX] = i * TILE_R
                     for j in pl.parallel(N):
                         col: pl.Scalar[pl.INDEX] = j * TILE_C
-                        scratch = self.stage1(x, scratch, row, col)
-                        stage1_tid = pl.task_id_of(scratch)
-                        out = self.stage2(scratch, out, row, col, deps=[stage1_tid])
+                        scratch, stage1_tid = pl.submit(self.stage1, x, scratch, row, col)
+                        out, _ = pl.submit(self.stage2, scratch, out, row, col, deps=[stage1_tid])
             return out
 
     return ManualScopePipelineProgram
@@ -172,7 +171,7 @@ class TestManualScopePipeline:
         """``out`` matches ``2 * x + 1`` after on-board execution.
 
         This guards against three regressions at once: the manual_scope
-        codegen wrapper, the explicit ``add_dep`` between stage1/stage2,
+        codegen wrapper, the explicit ``set_dependencies`` edge between stage1/stage2,
         and the absence of cross-iteration serialization (which would
         still pass numerically but show up as wrong parallelism in the
         swimlane fixture below).
@@ -244,7 +243,7 @@ class TestManualScopeSwimlane:
     def test_inner_parallel_loop_runs_concurrently(self, manual_scope_swimlane_data: dict):
         """Inner ``pl.parallel(N)`` iterations must overlap across cores.
 
-        With manual_scope and no cross-iteration ``add_dep``, the runtime
+        With manual_scope and no cross-iteration dependency edge, the runtime
         is free to dispatch all ``N`` tiles of one outer iteration to
         ``N`` different AIV cores. The assertion: across all tasks, at
         least 2 distinct ``core_id`` values appear (i.e. the runtime did
@@ -342,8 +341,9 @@ def _build_phase_fence_program():
                 # branches in phase P. Use an explicit ``Array[N_BRANCHES,
                 # TASK_ID]`` to hold one TaskId per branch slot — every
                 # parallel iter writes its own slot, and ``deps=[tids]``
-                # expands to N_BRANCHES guarded ``add_dep`` calls on the
-                # downstream task (one per slot of the previous phase).
+                # expands to N_BRANCHES guarded slot fills in the
+                # downstream task's ``set_dependencies`` array (one per slot
+                # of the previous phase).
                 # ``pl.array.create`` auto-initializes all slots to
                 # ``PTO2TaskId::invalid()``; the runtime fence skips
                 # invalid entries via ``is_valid()`` so the first phase
@@ -352,8 +352,8 @@ def _build_phase_fence_program():
                 for phase in pl.range(N_PHASES):
                     for branch in pl.parallel(N_BRANCHES):
                         row = (phase * N_BRANCHES + branch) * TILE_M
-                        out = self.kernel_stripe(data, row, 1.0, out, deps=[tids])
-                        tids[branch] = pl.task_id_of(out)
+                        out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[tids])
+                        tids[branch] = tid
             return out
 
     return PhaseFenceManualScope
@@ -501,7 +501,7 @@ class TestPhaseFenceSwimlane:
 #     Branch 3:  a30 -> a31 -> a32 -> a33    (linear chain)
 #
 # All 4 branches run in parallel; within a branch the 4 steps form a
-# strict ``add_dep`` chain. Codegen lowers this as outer-parallel
+# strict dependency chain. Codegen lowers this as outer-parallel
 # array-carry of size 4 plus an inner-sequential scalar carry — see
 # ``orchestration_codegen.cpp``.
 # ---------------------------------------------------------------------------
@@ -547,13 +547,13 @@ def _build_branch_chain_program():
                 for branch in pl.parallel(N_BRANCHES):
                     # Per-branch sequential chain: thread the previous step's
                     # TaskId through the inner ``pl.range`` iter_arg. The
-                    # first step uses ``task_id_invalid()`` (no producer yet);
-                    # ``set_dependencies`` skips the slot via ``is_valid()``.
-                    prev_tid = pl.task_id_invalid()
+                    # first step seeds the carry with ``None`` (no producer
+                    # yet); ``set_dependencies`` skips the slot via
+                    # ``is_valid()``.
+                    prev_tid = None
                     for step in pl.range(N_STEPS):
                         row = step * N_BRANCHES * TILE_M + branch * TILE_M
-                        out = self.kernel_stripe(data, row, 1.0, out, deps=[prev_tid])
-                        prev_tid = pl.task_id_of(out)
+                        out, prev_tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[prev_tid])
             return out
 
     return BranchChainManualScope

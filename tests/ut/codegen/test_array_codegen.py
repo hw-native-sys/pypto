@@ -134,9 +134,9 @@ class P:
 # ----------------------------------------------------------------------------
 # ForStmt with explicit ArrayType iter_arg — phase-fence carry shape.
 #
-# Phase-fence lowering produces ForStmts with explicit ArrayType iter_args
-# (the per-slot TaskId carry that fans out to N add_dep calls on every
-# downstream task). The DSL parser does NOT currently promote ``arr`` into a
+# Phase-fence carries produce ForStmts with explicit ArrayType iter_args
+# (the per-slot TaskId carry that fills N slots of the downstream task's
+# ``set_dependencies`` array). The DSL parser does NOT currently promote ``arr`` into a
 # loop-carried iter_arg when only ``arr[k] = ...`` writes happen inside the
 # loop body — those go through the LHS-alias path of update_element, so the
 # array stays in scope without crossing an iter_arg boundary. The phase-fence

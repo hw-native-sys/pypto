@@ -312,9 +312,9 @@ with ib.function("tile_computation") as f:
 | `system.sync_src` | Set sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | Wait sync flag | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | Sentinel `PTO2TaskId::invalid()` — "no producer" seed for a TaskId carry | None |
-| `system.task_id_of` | Extract the `PTO2TaskId` of a kernel-Call producer's LHS | None; sole positional arg is the producer Var |
+| `system.task_is_valid` | Test whether a `TASK_ID` value is a valid (non-sentinel) handle | None; sole positional arg is the TaskId Var |
 
-`system.task_invalid` and `system.task_id_of` both return [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). They are exposed to the DSL as `pl.task_id_invalid()` and `pl.task_id_of(producer)` respectively, used inside `with pl.manual_scope():` to thread explicit task dependencies through `deps=[tid1, tid2]` kwargs. Source: `src/ir/op/sync_ops/task.cpp`.
+`system.task_invalid` returns [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype). It is the lowering target of the Python literal `None` when `None` appears in a TaskId position (a `deps=[None]` entry or a TaskId loop iter_arg seed) inside `with pl.manual_scope():` regions. There is no `system.task_id_of` op — producer task ids are obtained from the second tuple element returned by the `pl.submit(...)` parser construct, not from a builtin. Source: `src/ir/op/sync_ops/task.cpp`.
 
 **Python Example:**
 

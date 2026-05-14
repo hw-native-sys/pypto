@@ -70,6 +70,24 @@ def _is_pld_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
     )
 
 
+def _is_pl_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
+    """Return True when ``node`` is the AST for a ``pl.<attr_name>(...)`` call.
+
+    Recognises only the dotted ``pl.<attr>`` form. Aliasing under another
+    name (``from pypto.language import submit``) is intentionally not matched —
+    the parser anchors construct detection on the ``pl.`` prefix.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == attr_name
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "pl"
+    )
+
+
 def _is_const_int(value: object) -> bool:
     """Check if a value is a compile-time constant integer.
 
@@ -81,18 +99,17 @@ def _is_const_int(value: object) -> bool:
 
 
 def _is_dep_var_type(type_: ir.Type | None) -> bool:
-    """Return True if ``type_`` is acceptable as a manual_scope ``deps=`` entry.
+    """Return True if ``type_`` is acceptable as a ``pl.submit(...)`` ``deps=`` entry.
 
     Two shapes are accepted:
 
-    * ``ScalarType(TASK_ID)`` — a single TaskId (typically from
-      ``pl.task_id_of(producer)`` or ``pl.task_id_invalid()``); codegen
-      emits one ``add_dep(name)`` for it.
-    * ``ArrayType(..., TASK_ID)`` — a per-slot TaskId array (typically
-      from ``pl.array.create(N, pl.TASK_ID)`` threaded through a loop as
-      an iter_arg). Codegen expands it to one ``add_dep(arr[i])`` per
-      slot, each guarded by ``is_valid()`` (early-phase slots may still
-      hold the invalid sentinel).
+    * ``ScalarType(TASK_ID)`` — a single TaskId (typically the ``tid`` bound
+      by a prior ``_, tid = pl.submit(...)``, or the ``system.task_invalid``
+      sentinel a bare ``None`` lowers to).
+    * ``ArrayType(..., TASK_ID)`` — a per-slot TaskId array (typically from
+      ``pl.array.create(N, pl.TASK_ID)`` threaded through a loop as an
+      iter_arg). Codegen expands it to one entry per slot, each guarded by
+      ``is_valid()`` (early-phase slots may still hold the invalid sentinel).
     """
     if isinstance(type_, ir.ScalarType) and type_.dtype == DataType.TASK_ID:
         return True
@@ -1058,6 +1075,13 @@ class ASTParser:
                         self.parse_yield_assignment(target, stmt.value)
                         return
 
+                # ``out, tid = pl.submit(self.kernel, *args, deps=[...])`` —
+                # manual_scope submit construct (desugars to a single Call
+                # with an augmented Tuple{<kernel return>, TaskId} type).
+                if _is_pl_call(stmt.value, "submit"):
+                    self._parse_submit_assignment(target, stmt.value)
+                    return
+
                 # General tuple unpacking for function calls returning TupleType
                 span = self.span_tracker.get_span(stmt)
                 value_expr = self.parse_expression(stmt.value)
@@ -1127,6 +1151,115 @@ class ASTParser:
             span=self.span_tracker.get_span(stmt),
             hint="Use simple variable assignments or tuple unpacking with pl.yield_()",
         )
+
+    def _bind_unpack_target(self, target: ast.expr, value_expr: ir.Expr, span: ir.Span) -> None:
+        """Bind a tuple-unpacking target (a Name or a nested Tuple) to an IR expr.
+
+        Used by the ``pl.submit(...)`` desugaring so a multi-output kernel can
+        be unpacked as ``(a, b), tid = pl.submit(...)``.
+        """
+        if isinstance(target, ast.Name):
+            var = self._assign_or_let(target.id, value_expr, span)
+            self.scope_manager.define_var(target.id, var, span=span)
+            return
+        if isinstance(target, ast.Tuple):
+            tuple_var = self.builder.let("_tuple_tmp", value_expr, span=span)
+            for i, elt in enumerate(target.elts):
+                item_expr = ir.TupleGetItemExpr(tuple_var, i, span)
+                self._bind_unpack_target(elt, item_expr, span)
+            return
+        raise ParserSyntaxError(
+            f"Tuple unpacking target must be a variable name or nested tuple, got {ast.unparse(target)}",
+            span=span,
+            hint="Use simple variable names in tuple unpacking: a, b, c = func()",
+        )
+
+    def _parse_submit_assignment(self, target: ast.Tuple, call: ast.Call) -> None:
+        """Parse ``out, tid = pl.submit(self.kernel, *args, deps=[...])``.
+
+        ``pl.submit`` is a manual_scope construct: it submits a kernel call
+        and binds both the kernel result(s) and the producer TaskId. The
+        desugared IR is a single :class:`ir.Call` whose return type is the
+        flat ``TupleType([*<kernel results>, Scalar[TASK_ID]])`` — elements
+        ``0..N-1`` are the kernel's results (one element per output, matching
+        the kernel's declared return arity) and element ``N`` is the producer
+        ``Scalar[TASK_ID]``.
+        """
+        span = self.span_tracker.get_span(call)
+        if self._manual_scope_depth == 0:
+            raise ParserSyntaxError(
+                "pl.submit(...) is only valid inside a `with pl.manual_scope():` block",
+                span=span,
+                hint="Wrap the submit in pl.manual_scope(), or use a plain "
+                "self.kernel(...) call outside manual scopes.",
+            )
+        if len(target.elts) != 2:
+            raise ParserSyntaxError(
+                f"pl.submit(...) must be unpacked as exactly 2 targets "
+                f"(result, task_id), got {len(target.elts)}",
+                span=span,
+                hint="Use `out, tid = pl.submit(self.kernel, ...)`.",
+            )
+        out_target, tid_target = target.elts
+        if not isinstance(tid_target, ast.Name):
+            raise ParserSyntaxError(
+                "pl.submit(...) task_id target must be a plain variable name",
+                span=span,
+                hint="Use `out, tid = pl.submit(self.kernel, ...)`.",
+            )
+        # The result target is either a single Name (single-output kernel) or
+        # a tuple of Names (multi-output kernel).
+        if isinstance(out_target, ast.Name):
+            out_names: list[ast.expr] = [out_target]
+        elif isinstance(out_target, ast.Tuple):
+            out_names = list(out_target.elts)
+        else:
+            raise ParserSyntaxError(
+                "pl.submit(...) result target must be a variable name or a tuple of names",
+                span=span,
+                hint="Use `out, tid = pl.submit(...)` or `(a, b), tid = pl.submit(...)`.",
+            )
+        n_outs = len(out_names)
+        if not call.args:
+            raise ParserSyntaxError(
+                "pl.submit(...) requires the kernel as its first argument",
+                span=span,
+                hint="Use `out, tid = pl.submit(self.kernel, *kernel_args, deps=[...])`.",
+            )
+        method_attr = call.args[0]
+        if not (
+            isinstance(method_attr, ast.Attribute)
+            and isinstance(method_attr.value, ast.Name)
+            and method_attr.value.id == "self"
+        ):
+            raise ParserSyntaxError(
+                "pl.submit(...) first argument must be a `self.<kernel>` method reference",
+                span=span,
+                hint="Pass the kernel itself, not a call: "
+                "`pl.submit(self.kernel, x, y)` — not `pl.submit(self.kernel(x, y))`.",
+            )
+
+        call_expr = self._parse_kernel_call(method_attr, call.args[1:], call.keywords, span, as_submit=True)
+
+        # The submit Call returns a flat Tuple{*<kernel results>, TaskId};
+        # validate the result-target arity against the kernel's return arity.
+        ret_type = call_expr.type
+        if isinstance(ret_type, ir.TupleType) and len(ret_type.types) != n_outs + 1:
+            raise ParserTypeError(
+                f"pl.submit(...) unpacks {n_outs} result value(s) but kernel "
+                f"'{method_attr.attr}' returns {len(ret_type.types) - 1}",
+                span=span,
+                hint="Match the number of result targets to the kernel's return arity.",
+            )
+
+        # Bind the flat tuple: elements 0..N-1 -> kernel results, element N ->
+        # the producer TaskId.
+        submit_var = self.builder.let("_submit_tmp", call_expr, span=span)
+        for i, elt in enumerate(out_names):
+            self._bind_unpack_target(elt, ir.TupleGetItemExpr(submit_var, i, span), span)
+        task_id_expr = ir.TupleGetItemExpr(submit_var, n_outs, span)
+        tid_var = self._assign_or_let(tid_target.id, task_id_expr, span)
+        self.scope_manager.define_var(tid_target.id, tid_var, span=span)
 
     def _parse_alloc_window_buffer_assignment(self, target: ast.expr, value: ast.Call) -> None:
         """Parse ``buf = pld.alloc_window_buffer(size)``.
@@ -3402,11 +3535,19 @@ class ASTParser:
             return ir.ConstInt(value, DataType.INDEX, span)
         elif isinstance(value, float):
             return ir.ConstFloat(value, DataType.DEFAULT_CONST_FLOAT, span)
+        elif value is None:
+            # ``None`` is the "no producer yet" TaskId sentinel — the Pythonic
+            # spelling of an invalid PTO2TaskId. Used to seed a TaskId loop
+            # carry (``prev_tid = None``) or as a ``deps=[None]`` entry.
+            # Lowers to ``system.task_invalid`` -> Scalar[TASK_ID]; codegen
+            # emits ``PTO2TaskId::invalid()`` and downstream ``set_dependencies``
+            # skips it via an ``is_valid()`` guard.
+            return ir.create_op_call("system.task_invalid", [], {}, span)
         else:
             raise ParserTypeError(
                 f"Unsupported constant type: {type(value)}",
                 span=self.span_tracker.get_span(const),
-                hint="Use int, float, or bool constants",
+                hint="Use int, float, bool, or None (TaskId sentinel) constants",
             )
 
     def _can_fold_expr(self, node: ast.expr) -> bool:
@@ -3609,72 +3750,26 @@ class ASTParser:
         if isinstance(func, ast.Attribute) and func.attr == "yield_":
             return self.parse_yield_call(call)
 
+        # ``pl.submit(...)`` is an assignment-only construct — it must be
+        # unpacked as ``out, tid = pl.submit(self.kernel, ...)``. Reaching it
+        # in an expression context (bare statement or simple assignment) is a
+        # usage error.
+        if _is_pl_call(call, "submit"):
+            raise ParserSyntaxError(
+                "pl.submit(...) must be unpacked as a 2-tuple: `out, tid = pl.submit(self.kernel, ...)`",
+                span=self.span_tracker.get_span(call),
+                hint="pl.submit returns (kernel result, producer TaskId); bind both with tuple unpacking.",
+            )
+
         # Handle cross-function calls via self.method_name() in @pl.program classes
         if isinstance(func, ast.Attribute):
             # Check for self.method_name pattern
             if isinstance(func.value, ast.Name) and func.value.id == "self":
-                method_name = func.attr
-                if method_name in self.global_vars:
-                    gvar = self.global_vars[method_name]
-                    span = self.span_tracker.get_span(call)
-                    # ``attrs={"arg_directions": [...]}`` is the preferred way to
-                    # surface call-site directions on cross-function calls.
-                    # Inside a ``with pl.manual_scope():`` block we additionally
-                    # accept ``deps=[var1, var2, ...]`` to attach explicit
-                    # dependency edges (Phase 4). ``device=`` selects the physical
-                    # device for an Orchestration dispatch; permitted only when
-                    # the callee is an Orchestration function. Other kwargs are
-                    # rejected.
-                    func_obj = self.gvar_to_func.get(gvar)
-                    allowed_kwargs = {"attrs"}
-                    if self._manual_scope_depth > 0:
-                        allowed_kwargs.add("deps")
-                    if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
-                        allowed_kwargs.add("device")
-                    self._reject_keyword_args(method_name, call, span, allowed=allowed_kwargs)
-
-                    # Validate argument count before parsing args to fail fast
-                    if func_obj is not None:
-                        self._validate_call_arg_count(method_name, func_obj, len(call.args), span)
-
-                    arg_directions = self._extract_arg_directions_from_attrs(method_name, call, span)
-                    if arg_directions is None:
-                        arg_directions = []
-                    # Detect ``pl.no_dep(...)`` wrappers at call-arg positions and
-                    # collect their indices for the arg_direction_overrides attr.
-                    unwrapped_args, no_dep_indices = self._strip_no_dep_wrappers(call.args)
-                    args = [self.parse_expression(arg) for arg in unwrapped_args]
-                    # Inside manual_scope, parse the optional ``deps=[var1, var2]`` kwarg
-                    # into a list of VarPtr for the explicit-edge attr.
-                    user_dep_vars: list[ir.Var] = []
-                    if self._manual_scope_depth > 0:
-                        user_dep_vars = self._parse_manual_scope_deps_kwarg(method_name, call, span)
-                    # Orchestration dispatch ``device=`` kwarg: resolves to a
-                    # ConstInt or an enclosing-loop induction Var.
-                    device_expr = self._parse_dispatch_device_kwarg(call)
-                    return_types = func_obj.return_types if func_obj else []
-                    if func_obj is not None and return_types:
-                        return_types = ir.deduce_call_return_type(
-                            list(func_obj.params),
-                            args,
-                            return_types,
-                        )
-                    return self._make_call_with_return_type(
-                        gvar,
-                        args,
-                        return_types,
-                        span,
-                        arg_directions=arg_directions,
-                        no_dep_indices=no_dep_indices,
-                        user_dep_vars=user_dep_vars,
-                        device_expr=device_expr,
-                    )
-                else:
-                    raise UndefinedVariableError(
-                        f"Function '{method_name}' not defined in program",
-                        span=self.span_tracker.get_span(call),
-                        hint=f"Available functions: {list(self.global_vars.keys())}",
-                    )
+                span = self.span_tracker.get_span(call)
+                # Plain ``self.kernel(...)`` is fire-and-forget — no producer
+                # TaskId and ``deps=`` is rejected. Use ``pl.submit(...)`` to
+                # capture a TaskId and attach explicit dependency edges.
+                return self._parse_kernel_call(func, call.args, call.keywords, span, as_submit=False)
 
             # Handle pl.tensor.*, pl.tile.*, and pl.* operation calls
             return self.parse_op_call(call)
@@ -3799,46 +3894,158 @@ class ASTParser:
             hint="Use pl.*, pl.tensor.*, pl.tile.*, or pl.system.* operations",
         )
 
-    def _parse_manual_scope_deps_kwarg(self, method_name: str, call: ast.Call, span: ir.Span) -> list[ir.Var]:
-        """Extract the optional ``deps=[tid1, tid2]`` kwarg on a self.kernel(...) call.
+    def _parse_kernel_call(
+        self,
+        method_attr: ast.Attribute,
+        arg_nodes: list[ast.expr],
+        keywords: list[ast.keyword],
+        span: ir.Span,
+        *,
+        as_submit: bool,
+    ) -> ir.Expr:
+        """Build the ``ir.Call`` for a cross-function ``self.<method>(...)`` invocation.
 
-        Only valid inside a ``with pl.manual_scope():`` block. Each list entry
-        must be a ``pl.Scalar[pl.TASK_ID]`` variable — typically produced by
-        ``pl.task_id_of(producer_tensor)``, ``pl.task_id_invalid()``, or
-        threaded through a ``pl.range`` / ``pl.parallel`` iter_arg as the
-        TaskId carry. Tensors are not accepted: the user names the producer
-        TaskId directly so the compiler does not need closure analysis to
-        figure out which kernel Call to depend on.
+        Shared by two call surfaces:
+
+        * the plain-call path in :meth:`parse_call` (``as_submit=False``) — a
+          fire-and-forget kernel call; ``deps=`` is rejected and the call's
+          return type is the callee's own.
+        * the ``pl.submit(...)`` path in :meth:`_parse_submit_assignment`
+          (``as_submit=True``) — the call captures a producer TaskId; ``deps=``
+          is accepted and the return type is augmented to the flat
+          ``TupleType([*<callee returns>, Scalar[TASK_ID]])``.
+
+        Args:
+            method_attr: The ``self.<method>`` attribute node.
+            arg_nodes: Positional kernel argument AST nodes (no ``self.method``).
+            keywords: Keyword AST nodes from the call site.
+            span: Source span of the call.
+            as_submit: Whether this originates from a ``pl.submit(...)`` call.
+        """
+        method_name = method_attr.attr
+        if method_name not in self.global_vars:
+            raise UndefinedVariableError(
+                f"Function '{method_name}' not defined in program",
+                span=span,
+                hint=f"Available functions: {list(self.global_vars.keys())}",
+            )
+        gvar = self.global_vars[method_name]
+        func_obj = self.gvar_to_func.get(gvar)
+
+        # ``attrs={"arg_directions": [...]}`` surfaces call-site directions on
+        # any cross-function call. ``deps=[...]`` attaches explicit manual_scope
+        # dependency edges and is accepted only on ``pl.submit(...)``.
+        # ``device=`` selects the physical device for an Orchestration
+        # dispatch. Other kwargs are rejected.
+        allowed_kwargs = {"attrs"}
+        if as_submit:
+            allowed_kwargs.add("deps")
+        if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
+            allowed_kwargs.add("device")
+        for kw in keywords:
+            if kw.arg not in allowed_kwargs:
+                hint = f"Allowed keyword arguments: {sorted(allowed_kwargs)}"
+                if kw.arg == "deps" and not as_submit:
+                    hint = (
+                        "Plain self.kernel(...) is fire-and-forget. To attach "
+                        "dependency edges, submit it: "
+                        "`out, tid = pl.submit(self.kernel, ..., deps=[...])`."
+                    )
+                raise ParserTypeError(
+                    f"Function '{method_name}' does not accept keyword argument '{kw.arg}'",
+                    span=span,
+                    hint=hint,
+                )
+
+        # Validate argument count before parsing args to fail fast.
+        if func_obj is not None:
+            self._validate_call_arg_count(method_name, func_obj, len(arg_nodes), span)
+
+        arg_directions = self._extract_arg_directions_from_attrs(method_name, keywords, len(arg_nodes), span)
+        if arg_directions is None:
+            arg_directions = []
+        # Detect ``pl.no_dep(...)`` wrappers at call-arg positions and collect
+        # their indices for the arg_direction_overrides attr.
+        unwrapped_args, no_dep_indices = self._strip_no_dep_wrappers(arg_nodes)
+        args = [self.parse_expression(arg) for arg in unwrapped_args]
+        # ``pl.submit`` parses the optional ``deps=[tid, ...]`` kwarg into a
+        # list of TaskId Vars for the explicit-edge attr.
+        user_dep_vars: list[ir.Var] = []
+        if as_submit:
+            user_dep_vars = self._parse_submit_deps_kwarg(method_name, keywords, span)
+        # Orchestration dispatch ``device=`` kwarg: resolves to a ConstInt or
+        # an enclosing-loop induction Var.
+        device_expr = self._parse_dispatch_device_kwarg(keywords)
+        return_types = func_obj.return_types if func_obj else []
+        if func_obj is not None and return_types:
+            return_types = ir.deduce_call_return_type(
+                list(func_obj.params),
+                args,
+                return_types,
+            )
+        return self._make_call_with_return_type(
+            gvar,
+            args,
+            return_types,
+            span,
+            arg_directions=arg_directions,
+            no_dep_indices=no_dep_indices,
+            user_dep_vars=user_dep_vars,
+            device_expr=device_expr,
+            augment_task_id=as_submit,
+        )
+
+    def _parse_submit_deps_kwarg(
+        self, method_name: str, keywords: list[ast.keyword], span: ir.Span
+    ) -> list[ir.Var]:
+        """Extract the optional ``deps=[tid1, tid2]`` kwarg on a ``pl.submit(...)`` call.
+
+        Each list entry must be a TaskId variable — typically the ``tid``
+        bound by a previous ``out, tid = pl.submit(...)``, or threaded through
+        a ``pl.range`` / ``pl.parallel`` iter_arg as the TaskId carry. A bare
+        ``None`` entry (the "no producer yet" sentinel) is also accepted and
+        lowers to ``system.task_invalid``; codegen skips it via an
+        ``is_valid()`` guard. Tensors are not accepted: the user names the
+        producer TaskId directly so the compiler does not need closure
+        analysis to figure out which kernel Call to depend on.
+
+        Two variable shapes pass: ``Scalar[TASK_ID]`` (single producer) and
+        ``Array[N, TASK_ID]`` (per-slot TaskId array, e.g. from
+        ``pl.array.create(N, pl.TASK_ID)`` threaded through a loop).
 
         Returns an empty list when ``deps=`` is absent.
         """
-        deps_kw = next((kw for kw in call.keywords if kw.arg == "deps"), None)
+        deps_kw = next((kw for kw in keywords if kw.arg == "deps"), None)
         if deps_kw is None:
             return []
         if not isinstance(deps_kw.value, (ast.List, ast.Tuple)):
             raise ParserTypeError(
-                f"'{method_name}' deps= must be a list/tuple of TaskId scalars",
+                f"'{method_name}' deps= must be a list/tuple of TaskId values",
                 span=span,
-                hint="Use deps=[tid] where tid is a pl.Scalar[pl.TASK_ID] from "
-                "pl.task_id_of(...) / pl.task_id_invalid() / a loop iter_arg.",
+                hint="Use deps=[tid] where tid is a TaskId from a prior "
+                "`_, tid = pl.submit(...)`, a loop iter_arg, or `None`.",
             )
         out: list[ir.Var] = []
         for elt in deps_kw.value.elts:
+            # A bare ``None`` entry is the "no producer yet" sentinel — it
+            # contributes no edge (an invalid TaskId would be skipped by the
+            # codegen ``is_valid()`` guard anyway), so drop it here.
+            if isinstance(elt, ast.Constant) and elt.value is None:
+                continue
             expr = self.parse_expression(elt)
             if not isinstance(expr, ir.Var) or not _is_dep_var_type(expr.type):
                 raise ParserTypeError(
-                    f"'{method_name}' deps= entries must be pl.Scalar[pl.TASK_ID] variables, "
-                    f"got '{ast.unparse(elt)}'",
+                    f"'{method_name}' deps= entries must be TaskId variables, got '{ast.unparse(elt)}'",
                     span=span,
-                    hint="Extract a TaskId from a producer tensor with pl.task_id_of(producer), "
-                    "or seed an iter_arg with pl.task_id_invalid() and thread it through the loop.",
+                    hint="Bind a TaskId with `_, tid = pl.submit(self.producer, ...)`, "
+                    "thread it through a loop iter_arg, or pass `None` for no producer.",
                 )
             out.append(expr)
         return out
 
     def _parse_dispatch_device_kwarg(
         self,
-        call: ast.Call,
+        keywords: list[ast.keyword],
     ) -> ir.Expr | None:
         """Extract the optional ``device=`` kwarg on a ``self.<orch>(...)`` call.
 
@@ -3864,7 +4071,7 @@ class ASTParser:
         Returns:
             The parsed IR expression, or ``None`` when ``device=`` is absent.
         """
-        device_kw = next((kw for kw in call.keywords if kw.arg == "device"), None)
+        device_kw = next((kw for kw in keywords if kw.arg == "device"), None)
         if device_kw is None:
             return None
         return self.parse_expression(device_kw.value)
@@ -3879,6 +4086,7 @@ class ASTParser:
         no_dep_indices: list[int] | None = None,
         user_dep_vars: list[ir.Var] | None = None,
         device_expr: ir.Expr | None = None,
+        augment_task_id: bool = False,
     ) -> ir.Expr:
         """Create an ir.Call, attaching the return type, optional call-site directions
         and optional per-arg ``NoDep`` overrides.
@@ -3898,18 +4106,23 @@ class ASTParser:
                 at the call site. Stored as ``attrs['arg_direction_overrides']`` so
                 ``DeriveCallDirections`` can overwrite the auto-derived direction at
                 each indicated slot to ``ArgDirection.NoDep``.
-            user_dep_vars: Optional list of TaskId Vars from a manual_scope
+            user_dep_vars: Optional list of TaskId Vars from a ``pl.submit(...)``
                 ``deps=[tid1, tid2]`` kwarg. Each entry is a
-                ``Scalar[TASK_ID]`` (from ``pl.task_id_of(...)`` /
-                ``pl.task_id_invalid()`` / a loop iter_arg) or an
+                ``Scalar[TASK_ID]`` (from a prior ``_, tid = pl.submit(...)`` /
+                a ``None`` sentinel / a loop iter_arg) or an
                 ``Array[N, TASK_ID]`` (from ``pl.array.create(N, pl.TASK_ID)``).
                 Stored directly as ``attrs['manual_dep_edges']``; codegen
-                emits one ``add_dep`` call per entry (array entries expand to
-                one per slot) on the per-call ``ArgWithDeps<N>`` wrapper.
+                emits a ``set_dependencies(arr, count)`` call built from the
+                entries (array entries expand to one slot each).
             device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
                 on an Orchestration dispatch call. Stored under
                 ``attrs['device']`` so the comm-collection pass can recover
                 per-dispatch device subsets without re-parsing the AST.
+            augment_task_id: When True (``pl.submit(...)`` path), the call's
+                return type is wrapped as the flat
+                ``TupleType([*<callee returns>, Scalar[TASK_ID]])`` — elements
+                ``0..N-1`` are the kernel results, element ``N`` is the
+                producer TaskId.
         """
         if not return_types:
             return_type: ir.Type = ir.UnknownType()
@@ -3930,6 +4143,17 @@ class ASTParser:
         if device_expr is not None:
             attrs = attrs or {}
             attrs["device"] = device_expr
+
+        if augment_task_id:
+            # pl.submit: the Call natively returns a flat
+            # Tuple{*<kernel results>, TaskId}. Keeping it flat (rather than
+            # nesting the kernel's own TupleType) lets codegen's existing
+            # tuple-return aliasing map elements 0..N-2 straight to the
+            # kernel's output params and element N-1 to the producer TaskId.
+            return_type = ir.TupleType([*return_types, ir.ScalarType(DataType.TASK_ID)])
+            if attrs is not None:
+                return ir.Call(gvar, args, {}, attrs, return_type, span)
+            return ir.Call(gvar, args, return_type, span)
 
         if attrs is not None:
             return ir.Call(gvar, args, {}, attrs, return_type, span)
@@ -4019,7 +4243,8 @@ class ASTParser:
     def _extract_arg_directions_from_attrs(
         self,
         method_name: str,
-        call: ast.Call,
+        keywords: list[ast.keyword],
+        arg_count: int,
         span: ir.Span,
     ) -> list[ir.ArgDirection] | None:
         """Extract ``arg_directions`` from an ``attrs={"arg_directions": [...]}`` kwarg.
@@ -4034,7 +4259,9 @@ class ASTParser:
         Args:
             method_name: Name of the cross-function method being called (used
                 in error messages).
-            call: AST call node.
+            keywords: AST keyword nodes from the call site.
+            arg_count: Number of positional kernel arguments (used to validate
+                the ``arg_directions`` list length).
             span: Source span of the call (used for error reporting).
 
         Returns:
@@ -4047,7 +4274,7 @@ class ASTParser:
         """
         from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
 
-        attrs_kw: ast.keyword | None = next((kw for kw in call.keywords if kw.arg == "attrs"), None)
+        attrs_kw: ast.keyword | None = next((kw for kw in keywords if kw.arg == "attrs"), None)
         if attrs_kw is None:
             return None
 
@@ -4102,10 +4329,10 @@ class ASTParser:
         if directions is None:
             return []
 
-        if directions and len(directions) != len(call.args):
+        if directions and len(directions) != arg_count:
             raise ParserTypeError(
                 f"attrs['arg_directions'] length ({len(directions)}) on call to "
-                f"'{method_name}' must match positional arg count ({len(call.args)})",
+                f"'{method_name}' must match positional arg count ({arg_count})",
                 span=span,
             )
         return directions

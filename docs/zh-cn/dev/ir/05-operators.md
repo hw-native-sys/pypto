@@ -306,9 +306,9 @@ with ib.function("tile_computation") as f:
 | `system.sync_src` | 设置同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.sync_dst` | 等待同步标志 | `set_pipe`, `wait_pipe`, `event_id` |
 | `system.task_invalid` | `PTO2TaskId::invalid()` 哨兵——TaskId carry 的 "暂无 producer" 种子 | 无 |
-| `system.task_id_of` | 提取 kernel-Call producer LHS 背后的 `PTO2TaskId` | 无；唯一位置参数是 producer Var |
+| `system.task_is_valid` | 测试某个 `TASK_ID` 值是否为有效（非哨兵）handle | 无；唯一位置参数是 TaskId Var |
 
-`system.task_invalid` 与 `system.task_id_of` 返回类型均为 [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype)。它们通过 DSL 包装 `pl.task_id_invalid()` 与 `pl.task_id_of(producer)` 暴露给用户，在 `with pl.manual_scope():` 内构造显式任务依赖，并通过 kernel call 的 `deps=[tid1, tid2]` kwarg 传入。源码：`src/ir/op/sync_ops/task.cpp`。
+`system.task_invalid` 返回类型为 [`ScalarType(DataType::TASK_ID)`](02-types.md#scalartype)。当 Python 字面量 `None` 出现在 TaskId 位置（`deps=[None]` 条目或 TaskId 循环 iter_arg 种子）时，它就是 `None` 在 `with pl.manual_scope():` 区域内的下沉目标。不存在 `system.task_id_of` op —— producer task id 由 `pl.submit(...)` parser construct 返回的二元组第二个元素获得，而非来自 builtin。源码：`src/ir/op/sync_ops/task.cpp`。
 
 **Python 示例：**
 

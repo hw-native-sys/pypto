@@ -563,8 +563,8 @@ class TestFlattenPreservesAttrs:
     """Tests that flatten_call_expr preserves Call.attrs when rewriting args.
 
     Call must keep `attrs_` (e.g. `manual_dep_edges` set by the parser for
-    `kernel(..., deps=[tid, ...])`); otherwise codegen never emits the
-    `params.add_dep(<task_id>);` calls, silently breaking manual
+    `pl.submit(..., deps=[tid, ...])`); otherwise codegen never emits the
+    `params.set_dependencies(arr, count)` call, silently breaking manual
     dependencies.
     """
 
@@ -598,12 +598,11 @@ class TestFlattenPreservesAttrs:
                 out: pl.Out[pl.Tensor[[64], pl.FP32]],
             ) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
-                    a = self.k1(x)
-                    a_tid = pl.task_id_of(a)
+                    a, a_tid = pl.submit(self.k1, x)
                     # Inline `pl.slice(...)` arg forces FlattenCallExpr to rebuild
                     # the k2 call. The deps=[a_tid] kwarg attaches manual_dep_edges
                     # which must survive the rebuild.
-                    _b = self.k2(x, pl.slice(out, [32], [0]), deps=[a_tid])
+                    _b, _ = pl.submit(self.k2, x, pl.slice(out, [32], [0]), deps=[a_tid])
                 return out
 
         with ctx:

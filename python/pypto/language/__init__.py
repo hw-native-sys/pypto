@@ -87,8 +87,6 @@ from .op.system_ops import (
     aiv_initialize_pipe,
     import_peer_buffer,
     reserve_buffer,
-    task_id_invalid,
-    task_id_of,
     tfree_to_aic,
     tfree_to_aiv,
     tpop_from_aic,
@@ -186,7 +184,7 @@ from .op.unified_ops import (
 from .optimizations import auto_chunk, split
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
-from .scope import manual_scope
+from .scope import manual_scope, submit
 from .typing import Array, DynVar, InOut, IntLike, MemRef, Out, Scalar, Tensor, Tile, Tuple, dynamic
 
 # Short alias for MemorySpace (pl.Mem.Vec instead of pl.MemorySpace.Vec)
@@ -373,6 +371,7 @@ __all__ = [
     "dim",
     "full",
     "manual_scope",
+    "submit",
     "no_dep",
     "scatter_update",
     "sin",
@@ -422,6 +421,4 @@ __all__ = [
     "INDEX",
     "TASK_ID",
     "TaskId",
-    "task_id_invalid",
-    "task_id_of",
 ]

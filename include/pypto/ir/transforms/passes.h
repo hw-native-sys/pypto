@@ -598,12 +598,11 @@ Pass NormalizeReturnOrder();
 Pass FuseCreateAssembleToSlice();
 
 /**
- * @brief Derive Call::GetArgDirections() (stored in attrs_["arg_directions"]) from
- *        callee param directions and buffer lineage, and lower manual-scope
- *        dependency edges into runtime TaskId infrastructure.
+ * @brief Derive Call::GetArgDirections() (stored in attrs_["arg_directions"])
+ *        from callee param directions and buffer lineage.
  *
- * Phase 1 (arg_directions). For every non-builtin call in Orchestration /
- * Group / Spmd functions, compute the runtime call-site direction
+ * For every non-builtin call in Orchestration / Group / Spmd functions,
+ * compute the runtime call-site direction
  * (Input/Output/InOut/OutputExisting/Scalar) for each argument and write it
  * into Call::attrs_ under the reserved key ``"arg_directions"``.
  *
@@ -618,15 +617,9 @@ Pass FuseCreateAssembleToSlice();
  *
  * Builtin ops (tensor.*, tile.*, system.*) are left untouched (arg_directions empty).
  *
- * Phase 2 (manual-scope lowering). For every kernel ``Call`` inside a
- * ``RuntimeScopeStmt(manual=true)`` region, resolve
- * ``Call.attrs[user_manual_dep_edges]`` (the parser-supplied
- * ``deps=[var1, var2]`` list) into ``Call.attrs[manual_dep_edges]``, allocate
- * ``__tid`` TaskId companions for the closure of involved Vars, and synthesise
- * ``system.task_id_of`` / ``system.task_invalid`` AssignStmts so codegen can
- * thread runtime TaskIds through the manual region. The 16-deps-per-submit
- * cap (``PTO2_MAX_EXPLICIT_DEPS``) is enforced at orchestration codegen, not
- * in this pass. No-op when no manual scope exists.
+ * Manual-scope dependency edges (``Call.attrs[manual_dep_edges]``) are written
+ * directly by the parser from a ``pl.submit(...)`` ``deps=[...]`` kwarg — this
+ * pass does not synthesise or lower them.
  *
  * Requirements:
  *   - InCore scopes outlined (run OutlineIncoreScopes first)

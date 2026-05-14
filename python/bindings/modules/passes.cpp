@@ -472,15 +472,13 @@ void BindPass(nb::module_& m) {
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,
-             "Derive Call attrs['arg_directions'] and lower manual-scope dep edges.\n\n"
-             "Phase 1: writes per-argument runtime ArgDirection (Input / Output / InOut /\n"
+             "Derive Call attrs['arg_directions'].\n\n"
+             "Writes per-argument runtime ArgDirection (Input / Output / InOut /\n"
              "OutputExisting / Scalar) onto every non-builtin Call. Locally allocated\n"
              "Out arguments are promoted to InOut to model WAW dependencies.\n\n"
-             "Phase 2: lowers RuntimeScopeStmt(manual=true) regions — resolves user\n"
-             "``deps=[var1, var2]`` lists into Call.attrs['manual_dep_edges'] and\n"
-             "synthesises ``__tid`` TaskId companions plus the ``system.task_id_of`` /\n"
-             "``system.task_invalid`` AssignStmts that codegen consumes. The\n"
-             "16-deps-per-submit cap is enforced at orchestration codegen, not here.\n\n"
+             "Manual-scope dependency edges (Call.attrs['manual_dep_edges']) are\n"
+             "written directly by the parser from a pl.submit(...) deps= kwarg — this\n"
+             "pass does not synthesise or lower them.\n\n"
              "Post-condition: ``IRProperty::CallDirectionsResolved``. The integrity of\n"
              "the produced ``Call.attrs['arg_directions']`` is verified automatically by the\n"
              "``CallDirectionsResolved`` PropertyVerifier (no separate verify pass).");

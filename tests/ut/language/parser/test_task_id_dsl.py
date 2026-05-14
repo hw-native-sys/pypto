@@ -7,8 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Parser tests for ``pl.task_id_invalid()`` / ``pl.task_id_of(...)`` and the
-``deps=[...]`` kwarg that accepts TaskId scalars."""
+"""Parser tests for the TaskId DSL surface: the ``None`` sentinel, the
+``pl.submit(...)`` construct, and the ``deps=[...]`` kwarg it accepts."""
 
 import pypto.language as pl
 import pytest
@@ -29,32 +29,25 @@ def _first_runtime_scope(stmt):
 
 def _flatten(stmt):
     if isinstance(stmt, ir.SeqStmts):
-        return list(stmt.stmts)
+        out = []
+        for s in stmt.stmts:
+            out.extend(_flatten(s))
+        return out
     return [stmt]
+
+
+def _calls_in(stmt):
+    return [s.value for s in _flatten(stmt) if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call)]
 
 
 class TestTaskIdNamespace:
     def test_pl_task_id_alias(self):
         """``pl.TASK_ID`` is the TASK_ID DataType; ``pl.TaskId`` is its scalar annotation."""
         assert pl.TASK_ID == DataType.TASK_ID
-        # ``pl.TaskId`` is the annotation-only Scalar form of TASK_ID. Two
-        # constructions of ``Scalar[TASK_ID]`` give different instances but
-        # both should report the same dtype.
         assert pl.TaskId.dtype == DataType.TASK_ID
 
-    def test_task_id_invalid_returns_task_id_scalar(self):
-        """``pl.task_id_invalid()`` wraps a Call of result type Scalar[TASK_ID]."""
-        s = pl.task_id_invalid()
-        assert isinstance(s.expr, ir.Call)
-        assert s.expr.op.name == "system.task_invalid"
-        assert isinstance(s.expr.type, ir.ScalarType)
-        assert s.expr.type.dtype == DataType.TASK_ID
-
-
-class TestTaskIdOfParsing:
-    def test_task_id_of_extracts_kernel_lhs_task_id(self):
-        """``tid = pl.task_id_of(out)`` parses to an AssignStmt whose RHS is a
-        ``Call(system.task_id_of, [out])`` and whose LHS Var has TASK_ID type."""
+    def test_none_sentinel_lowers_to_task_invalid(self):
+        """The Python literal ``None`` in a TaskId position lowers to ``system.task_invalid``."""
 
         @pl.program
         class Prog:
@@ -65,30 +58,54 @@ class TestTaskIdOfParsing:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
-                    a = self.k1(x)
-                    tid = pl.task_id_of(a)  # noqa: F841 — referenced via attr on resulting Var
+                    prev_tid = None  # noqa: F841 — "no producer yet" sentinel
+                    a, _ = pl.submit(self.k1, x)
                 return a
 
         fn = Prog.get_function("main")
         assert fn is not None
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
-        stmts = _flatten(scope.body)
-        assert len(stmts) >= 2
-        # The second AssignStmt should hold the task_id_of call.
-        tid_assign = stmts[1]
-        assert isinstance(tid_assign, ir.AssignStmt)
-        tid_call = tid_assign.value
-        assert isinstance(tid_call, ir.Call)
-        assert tid_call.op.name == "system.task_id_of"
-        # LHS Var has TASK_ID scalar type.
-        assert isinstance(tid_assign.var.type, ir.ScalarType)
-        assert tid_assign.var.type.dtype == DataType.TASK_ID
+        # The ``prev_tid = None`` assignment lowers to a system.task_invalid Call.
+        invalid_calls = [c for c in _calls_in(scope.body) if c.op.name == "system.task_invalid"]
+        assert len(invalid_calls) == 1
+        assert isinstance(invalid_calls[0].type, ir.ScalarType)
+        assert invalid_calls[0].type.dtype == DataType.TASK_ID
 
 
-class TestDepsKwargAcceptsTaskIdScalar:
-    def test_deps_accepts_task_id_scalar_var(self):
-        """``deps=[task_id_scalar]`` is the canonical form."""
+class TestSubmitParsing:
+    def test_submit_augments_return_type_with_task_id(self):
+        """``out, tid = pl.submit(self.k, x)`` builds one Call typed Tuple{<result>, TaskId}."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, tid = pl.submit(self.k1, x)  # noqa: F841 — tid checked via IR
+                return a
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        scope = _first_runtime_scope(fn.body)
+        assert scope is not None
+        k1_calls = [c for c in _calls_in(scope.body) if c.op.name == "k1"]
+        assert len(k1_calls) == 1
+        ret = k1_calls[0].type
+        assert isinstance(ret, ir.TupleType)
+        # Flat Tuple{<single result>, TaskId}.
+        assert len(ret.types) == 2
+        assert isinstance(ret.types[1], ir.ScalarType)
+        assert ret.types[1].dtype == DataType.TASK_ID
+
+
+class TestDepsKwargAcceptsTaskId:
+    def test_deps_accepts_submit_task_id(self):
+        """``deps=[tid]`` where ``tid`` is a prior submit's producer TaskId."""
 
         @pl.program
         class Prog:
@@ -103,30 +120,22 @@ class TestDepsKwargAcceptsTaskIdScalar:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
-                    a = self.k1(x)
-                    tid = pl.task_id_of(a)
-                    b = self.k2(x, deps=[tid])
+                    a, tid = pl.submit(self.k1, x)
+                    b, _ = pl.submit(self.k2, x, deps=[tid])
                 return b
 
         fn = Prog.get_function("main")
         assert fn is not None
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
-        # Stmt 0: a = self.k1(x)
-        # Stmt 1: tid = pl.task_id_of(a)
-        # Stmt 2: b = self.k2(x, deps=[tid])
-        b_assign = _flatten(scope.body)[2]
-        assert isinstance(b_assign, ir.AssignStmt)
-        b_call = b_assign.value
-        assert isinstance(b_call, ir.Call)
-        edges = b_call.attrs.get("manual_dep_edges", [])
+        k2_call = next(c for c in _calls_in(scope.body) if c.op.name == "k2")
+        edges = k2_call.attrs.get("manual_dep_edges", [])
         assert len(edges) == 1
-        # TaskId-typed dep var.
         assert isinstance(edges[0].type, ir.ScalarType)
         assert edges[0].type.dtype == DataType.TASK_ID
 
     def test_deps_rejects_tensor_var(self):
-        """Tensor variables are no longer accepted in ``deps=[...]``."""
+        """Tensor variables are not accepted in ``deps=[...]``."""
         with pytest.raises(Exception):  # noqa: B017 — ParserTypeError
 
             @pl.program
@@ -142,13 +151,13 @@ class TestDepsKwargAcceptsTaskIdScalar:
                 @pl.function(type=pl.FunctionType.Orchestration)
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                     with pl.manual_scope():
-                        a = self.k1(x)
-                        # Bare tensor — reject (must wrap with pl.task_id_of).
-                        b = self.k2(x, deps=[a])
+                        a, _ = pl.submit(self.k1, x)
+                        # Bare tensor — reject (deps= takes TaskIds only).
+                        b, _ = pl.submit(self.k2, x, deps=[a])
                     return b
 
-    def test_deps_rejects_non_var_expr(self):
-        """``deps=[some_scalar_int]`` (a non-TaskId scalar) errors."""
+    def test_deps_rejects_non_task_id_scalar(self):
+        """``deps=[int_scalar]`` (a non-TaskId scalar) errors."""
         with pytest.raises(Exception):  # noqa: B017 — ParserTypeError
 
             @pl.program
@@ -164,8 +173,8 @@ class TestDepsKwargAcceptsTaskIdScalar:
                     n: pl.Scalar[pl.INT32],
                 ) -> pl.Tensor[[64], pl.FP32]:
                     with pl.manual_scope():
-                        # n is INT32, not TASK_ID and not a tensor — reject.
-                        b = self.k1(x, deps=[n])
+                        # n is INT32, not TASK_ID — reject.
+                        b, _ = pl.submit(self.k1, x, deps=[n])
                     return b
 
 

@@ -90,8 +90,7 @@ class DataType {
   // Identifier / handle types: 0x50-0x5F (16 slots reserved).
   // Opaque 64-bit handles to runtime-managed entities. Not numeric — they
   // do not participate in arithmetic or casts. Used for IR Vars whose value
-  // is a runtime identity (e.g. a ``PTO2TaskId`` produced by
-  // ``pl.task_id_of(...)``).
+  // is a runtime identity (e.g. a ``PTO2TaskId`` captured by ``pl.submit``).
   static constexpr uint8_t kIdentifierRangeStart = 0x50;
   static constexpr uint8_t kTaskIdCode = 0x50;  // PTO2TaskId — manual_scope dep handle
   static constexpr uint8_t kIdentifierRangeEnd = 0x5F;
@@ -120,9 +119,10 @@ class DataType {
   // Semantic alias for index computations (loop variables, dimensions, offsets, strides)
   static const DataType INDEX;  // Machine-word sized integer for index computations
 
-  // Opaque 64-bit handle to a runtime task in a ``manual_scope``. Obtained
-  // from ``pl.task_id_of(producer_tensor)`` or ``pl.task_id_invalid()`` and
-  // passed in ``deps=[tid1, tid2]`` on a kernel call. Not numeric.
+  // Opaque 64-bit handle to a runtime task in a ``manual_scope``. Captured as
+  // the producer TaskId of a ``pl.submit(...)`` call (or the ``None``
+  // sentinel) and passed in ``deps=[tid1, tid2]`` on a later submit. Not
+  // numeric.
   static const DataType TASK_ID;
 
   // Default dtypes for bare constant literals (used by printer/parser for round-trip)

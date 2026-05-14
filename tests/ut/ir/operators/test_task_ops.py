@@ -8,9 +8,11 @@
 # -----------------------------------------------------------------------------------------------------------
 """IR-level tests for the manual_scope task ops (``system.task_*``).
 
-These ops are synthesized internally by ``LowerManualDepsToTaskId`` and the
-upcoming phase-fence lowering pass. They are not exposed as DSL surfaces;
-the tests construct ``Call`` nodes directly via ``ir.create_op_call``.
+``system.task_invalid`` is the lowering target of the DSL ``None`` TaskId
+sentinel; ``system.task_is_valid`` is its boolean predicate. The producer
+TaskId of a ``pl.submit(...)`` call is carried as a tuple element of the
+kernel ``Call`` itself, not as a standalone op. The tests construct ``Call``
+nodes directly via ``ir.create_op_call``.
 """
 
 import pytest
@@ -28,15 +30,6 @@ def _span():
 
 def test_task_invalid_returns_scalar_task_id():
     call = ir.create_op_call("system.task_invalid", [], {}, _span())
-    assert isinstance(call.type, ir.ScalarType)
-    assert call.type.dtype == DataType.TASK_ID
-
-
-def test_task_id_of_returns_scalar_task_id():
-    # Producer is a Var of any type — the op only carries the SSA companion
-    # threading and doesn't constrain its argument's dtype in the IR.
-    producer = ir.Var("v", ir.ScalarType(DataType.INT32), _span())
-    call = ir.create_op_call("system.task_id_of", [producer], {}, _span())
     assert isinstance(call.type, ir.ScalarType)
     assert call.type.dtype == DataType.TASK_ID
 

@@ -11,7 +11,7 @@
 编排代码生成器（Orchestration Codegen）生成 PTO2 运行时 C++ 代码，用于管理昇腾硬件上的任务图执行。[PTO 代码生成](00-pto_codegen.md)产生 InCore 核函数代码（Tile 级计算），而编排代码生成器产生主机侧代码，负责：
 
 - 将设备内存指针（通过 `ChipStorageTaskArgs`）封装为 `Tensor` 对象
-- 构建 `Arg` 对象（当 task 在 manual scope 内携带显式 `add_dep` 边时构建 `ArgWithDeps<N>`），调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类
+- 构建 `Arg` 对象，调用 `add_input`/`add_output`/`add_inout`/`add_scalar` 对参数分类（manual scope 的依赖边通过一个 `set_dependencies` 栈数组单独发出——见 [Manual Scope 与 TaskId 降级](#manual-scope-与-taskid-降级)）
 - 通过 `rt_submit_*_task` 向 AIC（CUBE）或 AIV（VECTOR）核心提交任务
 - 处理控制流（循环、条件分支），使用 `PTO2_SCOPE`
 
@@ -388,11 +388,25 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 ## Manual Scope 与 TaskId 降级
 
 `with pl.manual_scope():` 区域被降级为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
-代码块，区域内 runtime 的 auto OverlapMap 关闭。orchestration codegen 对
-每个 kernel call 的每条 dep 边都在 per-task `ArgWithDeps<N>` wrapper 上发出
-一次 `params.add_dep(<task_id>);` 调用（wrapper 的 N 等于 dep 数）。dep 边
-直接来自 parser：parser 把用户的 `deps=[tid1, tid2]` kwarg 写入
-`Call.attrs["manual_dep_edges"]`，每项为 `Scalar[TASK_ID]` 类型的 Var。
+代码块，区域内 runtime 的 auto OverlapMap 关闭。每个 task 的 params 始终
+声明为普通的 `Arg <task_var>;`。orchestration codegen 把所需的依赖边
+物化为一个定长栈数组加一次 `set_dependencies` 调用：
+
+```cpp
+Arg params_t1;
+params_t1.add_input(...);
+// ...
+PTO2TaskId params_t1_deps[K];          // K = 精确的 dep 边数
+uint32_t params_t1_deps_count = 0;
+params_t1_deps[params_t1_deps_count++] = tid;                          // 普通 TaskId 绑定：无条件
+if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;  // iter-arg / 数组槽 carry：is_valid() 守卫
+params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
+```
+
+不再有 `params.add_dep(...)` 调用，也没有 16 条依赖上限——runtime 的
+`Arg::set_dependencies` 原语没有上限，栈数组按精确数量定长。dep 边
+直接来自 parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg
+写入 `Call.attrs["manual_dep_edges"]`，每项为 `Scalar[TASK_ID]` 类型的 Var。
 
 ### TaskId 的来源
 
@@ -402,12 +416,16 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 
 | Producer 种类 | codegen 发出的 C++ |
 | ------------- | ------------------ |
-| Kernel Call LHS（pass 合成 `system.task_id_of(producer)`） | `PTO2TaskId <lhs>__tid = task_<n>_outs.task_id();` |
-| 函数参数种子（pass 在函数 body 入口合成 `system.task_invalid()`） | `PTO2TaskId <param>__tid = PTO2TaskId::invalid();` |
-| 循环 carry iter_arg（pass 追加的 TaskId 配套） | for 循环中穿行的命名变量——标量或数组，见下 |
+| `pl.submit` 的 producer TaskId（增广 Call 的 TaskId tuple 元素） | `PTO2TaskId <tid_name> = task_<n>_outs.task_id();`，其中 `task_<n>_outs` 是 submit 捕获的 `TaskOutputTensors` |
+| `None` 种子（`deps=[None]` 条目中的字面量，或 TaskId iter_arg init） | `PTO2TaskId::invalid()` |
+| 循环 carry iter_arg（穿行循环的 TaskId 配套） | for 循环中穿行的命名变量——标量或数组，见下 |
 
-`add_dep` 在 source 是 iter_arg carry 时会被 `if (<task_id>.is_valid())`
-包裹（首轮迭代种子可能仍是 invalid 哨兵）；对直接 producer 配套则无条件发出。
+`pl.submit` call 的 kernel-result tuple 元素与普通多输出 kernel call 一样，
+直接 alias kernel 的 `Out`/`InOut` 参数。
+
+dep 数组填充条目在 source 是 iter_arg / 数组槽 carry 时会被
+`if (<task_id>.is_valid())` 包裹（首轮迭代种子可能仍是 invalid 哨兵）；
+对直接 `pl.submit` producer TaskId 绑定则无条件追加。
 
 ### `pl.parallel` TaskId iter_arg 的 array carry
 
@@ -421,12 +439,12 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 2. 每个 parallel iter 体内把新产生的 task id 写入一个槽位：
    `arr[(loop_var - start) / step] = <task_id>;`。当 `start == 0 && step == 1`
    （常见形式）时，槽位表达式被 peephole 化简为 `arr[loop_var]`。
-3. 对每个 `manual_dep_edges` 引用该 iter_arg 的下游消费者，把单条 dep
-   展开为 N 条带守卫的 `add_dep`：
+3. 对每个 `manual_dep_edges` 引用该 iter_arg 的下游消费者，把 N 个带守卫
+   的槽位填入该 task 的 dep 栈数组，每个槽位一条：
 
    ```cpp
    for each k in [0..N):
-       if (arr[k].is_valid()) { params.add_dep(arr[k]); }
+       if (arr[k].is_valid()) { params_deps[params_deps_count++] = arr[k]; }
    ```
 
 `pl.range`（Sequential）循环，若其 yield 是内层 `pl.parallel` array carry
@@ -439,10 +457,9 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 - `pl.parallel` 的 trip count 必须是 Python 字面量（编译期常量）。
   动态 trip count 在 codegen 时被拒绝，提示 "statically-known trip count"。
 
-下游 wrapper 通过 `ArgWithDeps<N>`（见
-`runtime/src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/orchestration/pto_arg_with_deps.h`）
-按实际依赖数定制，不再对 trip count 超过 16 设上限——runtime 原语
-`Arg::set_dependencies(ptr, count)` 同样没有上限。
+dep 栈数组按精确依赖数定长（对数组 carry 为 `N` 个槽），不再对 trip count
+超过 16 设上限——runtime 原语 `Arg::set_dependencies(ptr, count)` 同样
+没有上限。
 
 ### 示例
 
@@ -450,20 +467,20 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 
 ```python
 with pl.manual_scope():
+    prev_tid = None
     for phase in pl.range(N_PHASES):
         for branch in pl.parallel(N_BRANCHES):
             row = (phase * N_BRANCHES + branch) * TILE_M
-            out = self.kernel_stripe(data, row, 1.0, out, deps=[out])
+            out, prev_tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[prev_tid])
 ```
 
 生成 C++（骨架）：
 
 ```cpp
-PTO2TaskId out__ssa_v0__tid = PTO2TaskId::invalid();           // import-var 种子
 PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
     PTO2TaskId out__rv_v2__tid[N_BRANCHES];                    // 外层 rv = 数组
     for (int64_t i = 0; i < N_BRANCHES; ++i)
-        out__rv_v2__tid[i] = out__ssa_v0__tid;                 // 标量 init 广播
+        out__rv_v2__tid[i] = PTO2TaskId::invalid();            // 广播 None 种子
     for (int64_t phase = 0; phase < N_PHASES; phase += 1) {
         PTO2TaskId out__rv_v4__tid[N_BRANCHES];                // 内层 rv = 数组
         for (int64_t i = 0; i < N_BRANCHES; ++i)
@@ -471,10 +488,13 @@ PTO2_SCOPE(PTO2ScopeMode::MANUAL) {
         for (int64_t branch = 0; branch < N_BRANCHES; branch += 1) {
             int64_t row = ...;
             Arg params_t0; /* ... */
+            PTO2TaskId params_t0_deps[N_BRANCHES];             // 按数组 carry N 定长
+            uint32_t params_t0_deps_count = 0;
             for (int64_t k = 0; k < N_BRANCHES; ++k) {         // 多依赖 fanout
                 if (out__rv_v2__tid[k].is_valid())
-                    params_t0.add_dep(out__rv_v2__tid[k]);
+                    params_t0_deps[params_t0_deps_count++] = out__rv_v2__tid[k];
             }
+            params_t0.set_dependencies(params_t0_deps, params_t0_deps_count);
             TaskOutputTensors task_0_outs = rt_submit_aiv_task(0, params_t0);
             PTO2TaskId out__ssa_v5__tid = task_0_outs.task_id();
             out__rv_v4__tid[branch] = out__ssa_v5__tid;        // 槽位 yield

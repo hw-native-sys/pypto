@@ -680,10 +680,10 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
  * Value type: ``std::vector<VarPtr>`` where every entry is a Var of
  * ``ScalarType(DataType::TASK_ID)`` or ``ArrayType(..., TASK_ID)``. Written
  * directly by the parser when the user passes ``deps=[tid1, tid2, ...]`` on a
- * kernel call inside ``with pl.manual_scope():``. Users obtain each entry via
- * ``pl.task_id_of(producer)``, ``pl.task_id_invalid()``, ``pl.array.create(N,
- * pl.TASK_ID)``, or by threading a TaskId iter_arg through a ``pl.range`` /
- * ``pl.parallel`` loop.
+ * ``pl.submit(...)`` call inside ``with pl.manual_scope():``. Users obtain
+ * each entry as the producer TaskId of a prior ``pl.submit(...)``, from
+ * ``pl.array.create(N, pl.TASK_ID)``, the ``None`` sentinel, or by threading
+ * a TaskId iter_arg through a ``pl.range`` / ``pl.parallel`` loop.
  */
 inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
 

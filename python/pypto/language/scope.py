@@ -7,38 +7,35 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Runtime scope context managers for the PyPTO Language DSL."""
+"""Runtime scope context managers and submit primitive for the PyPTO Language DSL."""
+
+from typing import Any, NoReturn
 
 
 class manual_scope:
     """Context manager for a manual-dependency runtime scope.
 
     Inside this block, the simpler runtime skips OverlapMap dependency
-    tracking and TensorMap insert. Dependencies are emitted explicitly by
-    the compiler:
+    tracking and TensorMap insert. The user declares every required
+    task-to-task ordering edge explicitly:
 
-      1. Auto-derived from SSA data flow: each tensor argument referencing a
-         Var produced by a prior kernel call in the same ``manual_scope``
-         becomes an explicit dep edge.
-      2. User-supplied via the ``deps=[var1, var2, ...]`` kwarg on any
-         ``self.kernel(...)`` call inside this block.
-      3. ``pl.no_dep(arg)`` (Phase 2) suppresses the auto-derived edge for
-         that single argument.
+      - A plain ``out = self.kernel(...)`` call is fire-and-forget — no
+        task id, and ``deps=`` is rejected.
+      - ``out, tid = pl.submit(self.kernel, ...)`` submits the kernel,
+        binds the result tensor(s) to ``out`` and the producer TaskId to
+        ``tid``, and accepts an optional ``deps=[...]`` kwarg.
+      - ``pl.no_dep(arg)`` suppresses the auto-derived edge for a single
+        argument (auto-scope primitive; no effect inside manual_scope).
 
     Usage::
 
         with pl.manual_scope():
-            sij = self.qk_matmul(qi, kj, sij_buf)
-            pij = self.softmax(sij)                       # auto edge: sij → softmax
-            oi = self.pv_matmul(pij, vj, oi_buf,
-                                deps=[sij])               # auto + user edge
-            other = self.peek(pl.no_dep(pij))             # no auto edge for pij
+            scratch, tid = pl.submit(self.stage1, x, scratch)
+            out, _       = pl.submit(self.stage2, scratch, out, deps=[tid])
 
     Restrictions:
       - Must appear inside an Orchestration function (not InCore).
       - Cannot be nested inside another ``manual_scope`` (runtime forbids).
-      - Each kernel call's total deps (auto + user) must not exceed the
-        runtime cap of 16; the compiler reports an error otherwise.
     """
 
     def __enter__(self):
@@ -48,4 +45,29 @@ class manual_scope:
         return False
 
 
-__all__ = ["manual_scope"]
+def submit(*args: Any, **kwargs: Any) -> NoReturn:
+    """Submit a kernel inside a ``manual_scope`` and capture its TaskId.
+
+    ``pl.submit`` is a **parser construct**, not a runtime function — the
+    DSL parser intercepts ``result, tid = pl.submit(self.kernel, *args,
+    deps=[...])`` syntactically and never actually calls this body. It is
+    defined only so the name resolves (for imports / linters).
+
+    Surface form (must be unpacked as a 2-tuple)::
+
+        out, tid       = pl.submit(self.stage1, x, scratch, deps=[prev_tid])
+        (a, b), tid    = pl.submit(self.multi_out_kernel, x)
+
+    The kernel ``Call`` natively returns ``Tuple[<kernel return>, TASK_ID]``;
+    element 0 is the tensor result(s), element 1 is the producer TaskId
+    (``Scalar[TASK_ID]``). The optional ``deps=[...]`` kwarg lists TaskId
+    scalars / arrays this submit must wait on.
+    """
+    raise RuntimeError(
+        "pl.submit is a DSL parser construct and cannot be called directly; "
+        "use it as `result, task_id = pl.submit(self.kernel, *args, deps=[...])` "
+        "inside a @pl.function body."
+    )
+
+
+__all__ = ["manual_scope", "submit"]

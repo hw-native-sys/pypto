@@ -2389,8 +2389,8 @@ class TestTensorReadWriteOffsetCodegen:
 class TestTaskIsValidCodegen:
     """``system.task_is_valid`` lowers to ``<expr>.is_valid()`` in C++.
 
-    The op is synthesized by the upcoming phase-fence lowering pass as the
-    guard on each per-slot ``add_dep`` for manual_scope array-carry TaskIds.
+    The op guards each per-slot fill of a manual_scope array-carry TaskId
+    into the ``set_dependencies`` stack array.
     Codegen is hand-tested here on minimal IR rather than waiting for the
     end-to-end pass, so the emitter contract is pinned independently of the
     pass implementation.
@@ -2910,9 +2910,8 @@ class TestManualScopeCodegen:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
-                    a = self.k1(x)
-                    a_tid = pl.task_id_of(a)
-                    b = self.k2(a, deps=[a_tid])
+                    a, a_tid = pl.submit(self.k1, x)
+                    b, _ = pl.submit(self.k2, a, deps=[a_tid])
                 return b
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -2923,13 +2922,13 @@ class TestManualScopeCodegen:
         # Every kernel submit inside a manual scope captures the submit's
         # outputs handle so downstream code can call ``.task_id()`` on it.
         # We no longer pre-emit a ``PTO2TaskId task_<n>`` variable — the
-        # task_id is materialised by the user via ``pl.task_id_of(...)``.
+        # ``pl.submit`` producer-TaskId tuple element binds it on demand.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code
-        # User-named TaskId binding: ``a_tid = task_0_outs.task_id();``,
-        # threaded into ``ArgWithDeps<N>`` and submitted via ``add_dep`` calls.
+        # The ``pl.submit`` producer TaskId binds to ``task_0_outs.task_id()``
+        # and is wired into the consumer via ``set_dependencies``.
         assert "task_0_outs.task_id()" in code
-        assert ".add_dep(" in code
+        assert ".set_dependencies(" in code
 
     def test_manual_scope_emits_explicit_user_deps(self):
         backend.reset_for_testing()
@@ -2952,28 +2951,28 @@ class TestManualScopeCodegen:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
-                    a = self.k1(x)
-                    a_tid = pl.task_id_of(a)
-                    b = self.k2(x)
-                    b_tid = pl.task_id_of(b)
+                    a, a_tid = pl.submit(self.k1, x)
+                    b, b_tid = pl.submit(self.k2, x)
                     # Explicit deps even though `c` doesn't consume `a`/`b` data.
-                    c = self.k3(x, deps=[a_tid, b_tid])
+                    c, _ = pl.submit(self.k3, x, deps=[a_tid, b_tid])
                 return c
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        # ``pl.task_id_of(...)`` emits ``<user_name> = task_<n>_outs.task_id();``
-        # directly using the user-chosen variable name. Each dep entry is
-        # forwarded into the per-call ``ArgWithDeps<N>`` wrapper as an
-        # ``add_dep`` call (no is_valid guard since task_id_of returns a
-        # known-valid id).
+        # Each ``pl.submit`` producer TaskId binds to ``task_<n>_outs.task_id()``.
         assert "PTO2TaskId a_tid = task_0_outs.task_id();" in code
         assert "PTO2TaskId b_tid = task_1_outs.task_id();" in code
-        assert "ArgWithDeps<2> params_t2;" in code
-        assert "params_t2.add_dep(a_tid);" in code
-        assert "params_t2.add_dep(b_tid);" in code
+        # The consumer's deps are packed into a fixed-size stack array and
+        # attached with a single ``set_dependencies(arr, count)`` call. Both
+        # entries are unconditionally filled (plain TaskId bindings, not
+        # iter-arg carries, so no is_valid() guard).
+        assert "Arg params_t2;" in code
+        assert "PTO2TaskId params_t2_deps[2];" in code
+        assert "params_t2_deps[params_t2_deps_count++] = a_tid;" in code
+        assert "params_t2_deps[params_t2_deps_count++] = b_tid;" in code
+        assert "params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);" in code
 
     def test_auto_scope_does_not_emit_task_id_capture(self):
         """Sanity: auto scope keeps the legacy fire-and-forget submit."""
@@ -2996,7 +2995,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
         assert "PTO2ScopeMode::MANUAL" not in code
         assert "TaskOutputTensors task_0_outs" not in code
-        assert "add_dep(task_" not in code
+        assert "set_dependencies(" not in code
 
     def test_manual_scope_seq_outer_parallel_inner_two_stage_pipeline(self):
         """End-to-end: ``with pl.manual_scope():`` wrapping
@@ -3015,9 +3014,9 @@ class TestManualScopeCodegen:
            submit tasks at maximum concurrency.
 
         Because MANUAL mode skips the runtime OverlapMap, the only ordering
-        comes from explicit ``add_dep`` calls. The codegen output therefore
-        proves correct parallelism: present where required (stage2→stage1
-        within each iteration), absent everywhere else.
+        comes from explicit ``set_dependencies`` calls. The codegen output
+        therefore proves correct parallelism: present where required
+        (stage2→stage1 within each iteration), absent everywhere else.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -3066,9 +3065,8 @@ class TestManualScopeCodegen:
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            scratch = self.stage1(x, scratch, row, col)
-                            stage1_tid = pl.task_id_of(scratch)
-                            out = self.stage2(scratch, out, row, col, deps=[stage1_tid])
+                            scratch, stage1_tid = pl.submit(self.stage1, x, scratch, row, col)
+                            out, _ = pl.submit(self.stage2, scratch, out, row, col, deps=[stage1_tid])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3082,9 +3080,8 @@ class TestManualScopeCodegen:
         assert code.count("PTO2_SCOPE() {") == 1, code
         assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
 
-        # ``pl.task_id_of(scratch)`` lowers to
-        # ``PTO2TaskId stage1_tid = task_0_outs.task_id();`` using the
-        # user-chosen variable name directly.
+        # The ``pl.submit`` producer TaskId binds to
+        # ``PTO2TaskId stage1_tid = task_0_outs.task_id();``.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
         assert "PTO2TaskId stage1_tid = task_0_outs.task_id();" in code, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
@@ -3092,13 +3089,14 @@ class TestManualScopeCodegen:
         # *** Manual dep correctly established WITHIN each iteration ***
         # stage2 reads what stage1 just wrote to ``scratch``: this dep is
         # required for correctness.
-        assert "params_t1.add_dep(stage1_tid);" in code, code
+        assert "params_t1_deps[params_t1_deps_count++] = stage1_tid;" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
         # *** Correct parallelism ACROSS iterations ***
-        # The only ``add_dep`` in the manual scope is the one above; there
-        # is no cross-iteration serialization. Different (i, j) tiles run
-        # in parallel as MANUAL mode allows.
-        assert code.count("add_dep(") == 1, code
+        # The only ``set_dependencies`` in the manual scope is the one above;
+        # there is no cross-iteration serialization. Different (i, j) tiles
+        # run in parallel as MANUAL mode allows.
+        assert code.count("set_dependencies(") == 1, code
 
     def test_manual_scope_parallel_outer_seq_inner_two_stage_pipeline(self):
         """End-to-end: outer ``pl.parallel`` + inner ``pl.range`` inside
@@ -3156,9 +3154,8 @@ class TestManualScopeCodegen:
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.range(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            scratch = self.stage1(x, scratch, row, col)
-                            stage1_tid = pl.task_id_of(scratch)
-                            out = self.stage2(scratch, out, row, col, deps=[stage1_tid])
+                            scratch, stage1_tid = pl.submit(self.stage1, x, scratch, row, col)
+                            out, _ = pl.submit(self.stage2, scratch, out, row, col, deps=[stage1_tid])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3171,16 +3168,18 @@ class TestManualScopeCodegen:
         assert code.count("PTO2_SCOPE() {") == 1, code
         assert code.count("PTO2_SCOPE(PTO2ScopeMode::MANUAL)") == 1, code
 
-        # ``pl.task_id_of(scratch)`` lowers to the user-named TaskId binding.
+        # The ``pl.submit`` producer TaskId binds to the user-named variable.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
         assert "PTO2TaskId stage1_tid = task_0_outs.task_id();" in code, code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
 
         # Manual dep WITHIN each iteration: stage2 follows stage1.
-        assert "params_t1.add_dep(stage1_tid);" in code, code
+        assert "params_t1_deps[params_t1_deps_count++] = stage1_tid;" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
-        # Cross-iteration parallel: the ONLY add_dep is the intra-iteration one.
-        assert code.count("add_dep(") == 1, code
+        # Cross-iteration parallel: the ONLY set_dependencies is the
+        # intra-iteration one.
+        assert code.count("set_dependencies(") == 1, code
 
     def test_manual_scope_parallel_dynamic_trip_count_rejected(self):
         """``pl.parallel(<dynamic>)`` carrying a manual_scope dep must error.
@@ -3220,13 +3219,12 @@ class TestManualScopeCodegen:
                 n_branches: pl.Scalar[pl.INDEX],
             ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
                 with pl.manual_scope():
-                    prev_tid = pl.task_id_invalid()
+                    prev_tid = None
                     for i in pl.range(4):
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(n_branches):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            out = self.kern(x, out, row, col, deps=[prev_tid])
-                            prev_tid = pl.task_id_of(out)
+                            out, prev_tid = pl.submit(self.kern, x, out, row, col, deps=[prev_tid])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
@@ -3235,13 +3233,13 @@ class TestManualScopeCodegen:
             _generate_orch_code(transformed)
 
     def test_manual_scope_parallel_array_carry_above_legacy_16_cap(self):
-        """``pl.parallel(N)`` with ``N > 16`` must succeed and size the wrapper.
+        """``pl.parallel(N)`` with ``N > 16`` must succeed and size the deps array.
 
         The runtime's ``Arg::set_dependencies(ptr, count)`` primitive has no
-        upper bound on explicit deps, so codegen emits ``ArgWithDeps<N>``
-        sized to the exact dep-edge count. A parallel loop carrying a
-        manual_scope dep across N=17 slots produces a downstream task with
-        17 ``add_dep`` calls wrapped in ``ArgWithDeps<17>``.
+        upper bound on explicit deps, so codegen sizes the per-task
+        ``PTO2TaskId <task>_deps[K]`` stack array to the exact dep-edge count.
+        A parallel loop carrying a manual_scope dep across N=17 slots produces
+        a downstream task with a ``PTO2TaskId params_t0_deps[17]`` array.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -3274,41 +3272,39 @@ class TestManualScopeCodegen:
                 with pl.manual_scope():
                     # Per-slot TaskId array (length = parallel trip count).
                     # ``deps=[tids]`` expands to ABOVE_LEGACY_CAP guarded
-                    # ``add_dep`` calls, sizing the wrapper accordingly.
+                    # array-slot fills, sizing the stack deps array accordingly.
                     tids = pl.array.create(ABOVE_LEGACY_CAP, pl.TASK_ID)
                     for i in pl.range(4):
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(ABOVE_LEGACY_CAP):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            out = self.kern(x, out, row, col, deps=[tids])
-                            tids[j] = pl.task_id_of(out)
+                            out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
+                            tids[j] = tid
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
-        # Wrapper is sized to the exact dep count (17 slots from the parallel
-        # array carry), proving the legacy 16-cap is gone.
-        assert f"ArgWithDeps<{ABOVE_LEGACY_CAP}>" in code, code
+        # The stack deps array is sized to the exact dep count (17 slots from
+        # the parallel array carry), proving the legacy 16-cap is gone.
+        assert f"PTO2TaskId params_t0_deps[{ABOVE_LEGACY_CAP}];" in code, code
 
-    def test_manual_scope_explicit_task_id_of_dep(self):
-        """User-supplied TaskId Scalar in ``deps=[...]`` short-circuits the
-        per-tensor companion synthesis and emits the user-named TaskId
-        variable directly.
+    def test_manual_scope_submit_task_id_dep(self):
+        """The producer TaskId of a ``pl.submit(...)`` threaded into a later
+        submit's ``deps=[...]`` emits the user-named TaskId variable directly.
 
         Pattern:
-            scratch = self.stage1(x, scratch, row, col)
-            tid = pl.task_id_of(scratch)
-            out  = self.stage2(scratch, out, row, col, deps=[tid])
+            scratch, tid = pl.submit(self.stage1, x, scratch, row, col)
+            out, _       = pl.submit(self.stage2, scratch, out, row, col, deps=[tid])
 
         Expected codegen for the dep chain:
-            PTO2TaskId tid = task_0_outs.task_id();   // from pl.task_id_of
+            PTO2TaskId tid = task_0_outs.task_id();   // submit producer TaskId
             ...
-            ArgWithDeps<1> params_t1;
-            params_t1.add_dep(tid);                   // user-named TaskId
-
-        Critically: no ``<...>__tid`` synthesized name appears, because the
-        dep edge already names the TaskId producer directly.
+            Arg params_t1;
+            PTO2TaskId params_t1_deps[1];
+            uint32_t params_t1_deps_count = 0;
+            params_t1_deps[params_t1_deps_count++] = tid;
+            params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -3357,24 +3353,81 @@ class TestManualScopeCodegen:
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(N):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            scratch = self.stage1(x, scratch, row, col)
-                            tid = pl.task_id_of(scratch)
-                            out = self.stage2(scratch, out, row, col, deps=[tid])
+                            scratch, tid = pl.submit(self.stage1, x, scratch, row, col)
+                            out, _ = pl.submit(self.stage2, scratch, out, row, col, deps=[tid])
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        # The user-named ``tid`` becomes the C++ identifier directly — no
-        # synthesized ``__tid`` companion is allocated for it (because it's
-        # already a TaskId scalar).
+        # The user-named ``tid`` becomes the C++ identifier directly, bound to
+        # the submit's producer TaskId.
         assert "PTO2TaskId tid = task_0_outs.task_id();" in code, code
-        # The dep edge references the user-named TaskId, not a synthesized
-        # ``scratch__ssa_v?__tid``.
-        assert "params_t1.add_dep(tid);" in code, code
-        # Sanity: no ``__tid__tid`` double-suffix leaks into the output.
-        assert "__tid__tid" not in code, code
+        # The dep edge is filled into the consumer's stack deps array and
+        # attached with a single ``set_dependencies`` call.
+        assert "params_t1_deps[params_t1_deps_count++] = tid;" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
+
+    def test_manual_scope_submit_iter_arg_taskid_carry(self):
+        """A ``pl.submit`` producer TaskId threaded through a ``pl.range``
+        iter_arg seeds the next iteration's ``deps=[...]``.
+
+        Pattern (per-branch linear chain):
+            prev_tid = None
+            for step in pl.range(N):
+                out, prev_tid = pl.submit(self.kern, ..., deps=[prev_tid])
+
+        ``prev_tid`` starts as the ``None`` sentinel (``PTO2TaskId::invalid()``)
+        and is rebound each iteration to the submit's producer TaskId. Because
+        it is a loop iter_arg, the dep fill is guarded by ``is_valid()`` so the
+        first iteration contributes no edge.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        N_BRANCHES, N_STEPS = 4, 4
+        TILE_M, BIG_N = 32, 32
+        BIG_M = N_BRANCHES * N_STEPS * TILE_M
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                data: pl.Tensor[[BIG_M, BIG_N], pl.FP32],
+                row: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
+            ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
+                t: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(data, [row, 0], [TILE_M, BIG_N])
+                r: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[BIG_M, BIG_N], pl.FP32] = pl.store(r, [row, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[BIG_M, BIG_N], pl.FP32],
+                out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
+            ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
+                with pl.manual_scope():
+                    for branch in pl.parallel(N_BRANCHES):
+                        prev_tid = None
+                        for step in pl.range(N_STEPS):
+                            row: pl.Scalar[pl.INDEX] = (step * N_BRANCHES + branch) * TILE_M
+                            out, prev_tid = pl.submit(self.kern, data, row, out, deps=[prev_tid])
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        # The ``None`` seed lowers to an invalid PTO2TaskId sentinel.
+        assert "PTO2TaskId::invalid()" in code, code
+        # The iter-arg TaskId carry is filled into the deps array under an
+        # ``is_valid()`` guard (first iteration's sentinel is skipped).
+        assert ".is_valid())" in code, code
+        assert ".set_dependencies(" in code, code
 
 
 if __name__ == "__main__":

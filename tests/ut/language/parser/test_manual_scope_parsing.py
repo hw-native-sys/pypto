@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Parser tests for ``with pl.manual_scope():`` and the ``deps=[tid]`` Call kwarg."""
+"""Parser tests for ``with pl.manual_scope():`` and the ``pl.submit(...)`` construct."""
 
 import pypto.language as pl
 import pytest
@@ -24,6 +24,25 @@ def _first_runtime_scope(stmt):
             if r is not None:
                 return r
     return None
+
+
+def _flatten(stmt):
+    """Flatten a (possibly nested) SeqStmts subtree into a list of statements."""
+    if isinstance(stmt, ir.SeqStmts):
+        out = []
+        for s in stmt.stmts:
+            out.extend(_flatten(s))
+        return out
+    return [stmt]
+
+
+def _calls_in(stmt):
+    """Collect every ir.Call that is the RHS of an AssignStmt in the subtree."""
+    calls = []
+    for s in _flatten(stmt):
+        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call):
+            calls.append(s.value)
+    return calls
 
 
 class TestManualScopeParsing:
@@ -56,7 +75,7 @@ class TestManualScopeParsing:
                     with pl.manual_scope(name="foo"):
                         return x
 
-    def test_deps_kwarg_records_manual_dep_edges(self):
+    def test_submit_records_manual_dep_edges(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -70,41 +89,76 @@ class TestManualScopeParsing:
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.manual_scope():
-                    a = self.k1(x)
-                    a_tid = pl.task_id_of(a)
-                    b = self.k2(x, deps=[a_tid])
+                    a, a_tid = pl.submit(self.k1, x)
+                    b, _ = pl.submit(self.k2, x, deps=[a_tid])
                 return b
 
         fn = Prog.get_function("main")
         assert fn is not None
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
-        # Walk the scope body and inspect the calls. With the explicit-TaskId
-        # API there are three statements: ``a = k1(x)``, ``a_tid = task_id_of(a)``,
-        # and ``b = k2(x, deps=[a_tid])``.
-        body = scope.body
-        if isinstance(body, ir.SeqStmts):
-            stmts = list(body.stmts)
-        else:
-            stmts = [body]
-        assert len(stmts) == 3
-        a_assign, tid_assign, b_assign = stmts
-        assert isinstance(a_assign, ir.AssignStmt)
-        assert isinstance(tid_assign, ir.AssignStmt)
-        assert isinstance(b_assign, ir.AssignStmt)
-        a_call = a_assign.value
-        b_call = b_assign.value
-        assert isinstance(a_call, ir.Call)
-        assert isinstance(b_call, ir.Call)
+        calls = _calls_in(scope.body)
+        # One kernel Call per submit; each carries the flat augmented return
+        # type Tuple{<kernel result>, TaskId}.
+        k1_calls = [c for c in calls if c.op.name == "k1"]
+        k2_calls = [c for c in calls if c.op.name == "k2"]
+        assert len(k1_calls) == 1
+        assert len(k2_calls) == 1
+        k1_call, k2_call = k1_calls[0], k2_calls[0]
+        for c in (k1_call, k2_call):
+            assert isinstance(c.type, ir.TupleType)
+            assert len(c.type.types) == 2
+            assert isinstance(c.type.types[1], ir.ScalarType)
+            assert c.type.types[1].dtype == pl.TASK_ID
         # Producer k1 has no dep edges of its own.
-        assert "manual_dep_edges" not in a_call.attrs
-        # Consumer k2 records one dep edge, naming the TaskId scalar bound by
-        # ``a_tid = pl.task_id_of(a)``.
-        b_deps = b_call.attrs.get("manual_dep_edges", [])
-        assert len(b_deps) == 1
-        assert b_deps[0].same_as(tid_assign.var)
+        assert "manual_dep_edges" not in k1_call.attrs
+        # Consumer k2 records one dep edge, naming the TaskId scalar `a_tid`.
+        k2_deps = k2_call.attrs.get("manual_dep_edges", [])
+        assert len(k2_deps) == 1
+        assert isinstance(k2_deps[0].type, ir.ScalarType)
+        assert k2_deps[0].type.dtype == pl.TASK_ID
 
-    def test_deps_outside_manual_scope_is_rejected(self):
+    def test_submit_none_dep_entry_dropped(self):
+        """A bare ``None`` entry in ``deps=`` contributes no edge."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, _ = pl.submit(self.k1, x, deps=[None])
+                return a
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        scope = _first_runtime_scope(fn.body)
+        assert scope is not None
+        k1_call = next(c for c in _calls_in(scope.body) if c.op.name == "k1")
+        # ``deps=[None]`` drops the only entry, so no edge attr is recorded.
+        assert k1_call.attrs.get("manual_dep_edges", []) == []
+
+    def test_plain_call_rejects_deps_kwarg(self):
+        """``deps=`` on a plain ``self.kernel(...)`` call is rejected — use pl.submit."""
+        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserTypeError
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        a = self.k1(x)
+                        b = self.k1(x, deps=[a])
+                    return b
+
+    def test_submit_outside_manual_scope_is_rejected(self):
         with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
 
             @pl.program
@@ -115,11 +169,40 @@ class TestManualScopeParsing:
 
                 @pl.function(type=pl.FunctionType.Orchestration)
                 def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    a = self.k1(x)
-                    a_tid = pl.task_id_of(a)
-                    # No manual_scope around this — the deps= kwarg must error.
-                    b = self.k1(x, deps=[a_tid])
+                    # No manual_scope around this — pl.submit must error.
+                    b, _ = pl.submit(self.k1, x)
                     return b
+
+    def test_submit_as_bare_expression_is_rejected(self):
+        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        pl.submit(self.k1, x)
+                    return x
+
+    def test_submit_single_target_is_rejected(self):
+        """pl.submit must be unpacked as exactly ``(result, task_id)``."""
+        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        a = pl.submit(self.k1, x)
+                    return a
 
 
 if __name__ == "__main__":

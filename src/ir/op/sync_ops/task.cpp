@@ -57,29 +57,15 @@ TypePtr DeduceBoolScalarType(const std::vector<ExprPtr>& args,
 
 // system.task_invalid — produces an invalid PTO2TaskId sentinel.
 //
-// User-callable via the ``pl.task_id_invalid()`` DSL wrapper. Typical use
-// is the initial value of a TaskId iter_arg carrying manual-scope dep
-// state across loop iterations. At codegen time it lowers to
-// ``PTO2TaskId::invalid()``; downstream ``set_dependencies`` calls skip
-// invalid entries via an ``is_valid()`` guard so the runtime sees no edge
-// on the first iteration.
+// Surfaced as the Python literal ``None`` in TaskId-typed positions: a
+// ``prev_tid = None`` loop-carry seed or a ``deps=[None]`` entry. At codegen
+// time it lowers to ``PTO2TaskId::invalid()``; downstream
+// ``set_dependencies`` calls skip invalid entries via an ``is_valid()``
+// guard so the runtime sees no edge on the first iteration.
 REGISTER_OP("system.task_invalid")
     .set_description("Construct an invalid PTO2TaskId sentinel for manual_scope dep carries")
     .set_op_category("TaskOp")
     .no_argument()
-    .f_deduce_type(DeduceTaskIdScalarType);
-
-// system.task_id_of — extracts the PTO2TaskId of the kernel Call that produced
-// the given Var. User-callable via the ``pl.task_id_of(producer)`` DSL
-// wrapper inside ``with pl.manual_scope():`` regions.
-//
-// Codegen lowers ``v_tid = task_id_of(v)`` to
-// ``PTO2TaskId v_tid = task_<n>_outs.task_id();`` where ``task_<n>`` is the
-// task counter assigned to the kernel Call that produced ``v``.
-REGISTER_OP("system.task_id_of")
-    .set_description("Extract the PTO2TaskId of a manual_scope kernel Call's producer Var")
-    .set_op_category("TaskOp")
-    .add_argument("producer", "Var produced by the kernel Call whose TaskId is wanted")
     .f_deduce_type(DeduceTaskIdScalarType);
 
 // system.task_is_valid — boolean predicate over a Scalar[TASK_ID]. Returns

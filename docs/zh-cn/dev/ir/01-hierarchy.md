@@ -301,11 +301,11 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
     将独立的 `SpmdScopeStmt` 提取为 `Function(Spmd)`
   - `OutlineHierarchyScopes` 提取 `HierarchyScopeStmt`
   - 对于 `RuntimeScopeStmt(manual=true)` 内的每个 kernel call，parser 直接
-    把用户 `kernel(..., deps=[tid1, tid2])` 中的 TaskId 标量列表写入
-    `Call.attrs["manual_dep_edges"]`（每项为 `Scalar[TASK_ID]`，来自
-    `pl.task_id_of(...)` / `pl.task_id_invalid()` / 循环 iter_arg）；codegen
-    在 per-call `ArgWithDeps<N>` wrapper 上对每个条目发出一次
-    `params.add_dep(<task_id>);` 调用。
+    把用户 `pl.submit(kernel, ..., deps=[tid1, tid2])` 中的 TaskId 标量列表
+    写入 `Call.attrs["manual_dep_edges"]`（每项为 `Scalar[TASK_ID]` —— 由
+    先前 `pl.submit(...)` 返回的 producer TaskId、TaskId 循环 iter_arg，或
+    字面量 `None`，`None` 会被丢弃）；codegen 填充一个定长栈数组，并对每个
+    task 发出一次 `params.set_dependencies(arr, count)` 调用。
 - `RuntimeScopeStmt` 在 `manual=false` 时下沉为 `PTO2_SCOPE()`，在
   `manual=true` 时下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。它由
   `pl.manual_scope()`（manual 模式）和 orchestration codegen 路径
