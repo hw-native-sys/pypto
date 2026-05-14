@@ -245,12 +245,12 @@ class TensorCmpProgram:
         pl.Tensor[[M, N], pl.FP32],
     ]:
         with pl.at(level=pl.Level.CORE_GROUP):
-            eq = pl.assemble(eq, pl.tensor.cmp(lhs, rhs, cmp_type=0), [0, 0])
-            ne = pl.assemble(ne, pl.tensor.cmp(lhs, rhs, cmp_type=1), [0, 0])
-            lt = pl.assemble(lt, pl.tensor.cmp(lhs, rhs, cmp_type=2), [0, 0])
-            le = pl.assemble(le, pl.tensor.cmp(lhs, rhs, cmp_type=3), [0, 0])
-            gt = pl.assemble(gt, pl.tensor.cmp(lhs, rhs, cmp_type=4), [0, 0])
-            ge = pl.assemble(ge, pl.tensor.cmp(lhs, rhs, cmp_type=5), [0, 0])
+            eq = pl.assemble(eq, pl.cmp(lhs, rhs, cmp_type=0), [0, 0])
+            ne = pl.assemble(ne, pl.cmp(lhs, rhs, cmp_type=1), [0, 0])
+            lt = pl.assemble(lt, pl.cmp(lhs, rhs, cmp_type=2), [0, 0])
+            le = pl.assemble(le, pl.cmp(lhs, rhs, cmp_type=3), [0, 0])
+            gt = pl.assemble(gt, pl.cmp(lhs, rhs, cmp_type=4), [0, 0])
+            ge = pl.assemble(ge, pl.cmp(lhs, rhs, cmp_type=5), [0, 0])
         return eq, ne, lt, le, gt, ge
 
 
@@ -277,12 +277,12 @@ class TensorCmpsProgram:
         pl.Tensor[[M, N], pl.FP32],
     ]:
         with pl.at(level=pl.Level.CORE_GROUP):
-            eq = pl.assemble(eq, pl.tensor.cmp(lhs, 0.0, cmp_type=0), [0, 0])
-            ne = pl.assemble(ne, pl.tensor.cmp(lhs, 0.0, cmp_type=1), [0, 0])
-            lt = pl.assemble(lt, pl.tensor.cmp(lhs, 0.0, cmp_type=2), [0, 0])
-            le = pl.assemble(le, pl.tensor.cmp(lhs, 0.0, cmp_type=3), [0, 0])
-            gt = pl.assemble(gt, pl.tensor.cmp(lhs, 0.0, cmp_type=4), [0, 0])
-            ge = pl.assemble(ge, pl.tensor.cmp(lhs, 0.0, cmp_type=5), [0, 0])
+            eq = pl.assemble(eq, pl.cmp(lhs, 0.0, cmp_type=0), [0, 0])
+            ne = pl.assemble(ne, pl.cmp(lhs, 0.0, cmp_type=1), [0, 0])
+            lt = pl.assemble(lt, pl.cmp(lhs, 0.0, cmp_type=2), [0, 0])
+            le = pl.assemble(le, pl.cmp(lhs, 0.0, cmp_type=3), [0, 0])
+            gt = pl.assemble(gt, pl.cmp(lhs, 0.0, cmp_type=4), [0, 0])
+            ge = pl.assemble(ge, pl.cmp(lhs, 0.0, cmp_type=5), [0, 0])
         return eq, ne, lt, le, gt, ge
 
 

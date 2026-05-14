@@ -56,6 +56,8 @@ __all__ = [
     "col_max",
     "col_min",
     "cast",
+    "cmp",
+    "set_validshape",
     "create_tile",
     "read",
     "write",
@@ -675,6 +677,43 @@ def cast(
         dtype = DataType(target_type) if isinstance(target_type, int) else target_type
         return Scalar(expr=_ir_core.cast(_to_scalar_expr(input), dtype))
     raise TypeError(f"pl.cast: expected Tensor, Tile, or Scalar, got {type(input).__name__}")
+
+
+@overload
+def cmp(lhs: Tensor, rhs: Tensor | int | float | Scalar, cmp_type: int = 0) -> Tensor: ...
+@overload
+def cmp(lhs: Tile, rhs: Tile | int | float | Scalar, cmp_type: int = 0) -> Tile: ...
+def cmp(lhs, rhs, cmp_type: int = 0):
+    """Element-wise comparison, dispatched by input type.
+
+    Comparison type codes: ``0=eq, 1=ne, 2=lt, 3=le, 4=gt, 5=ge``. For Tile
+    inputs with a scalar ``rhs``, dispatches to ``tile.cmps`` automatically.
+    """
+    if isinstance(lhs, Tensor) and isinstance(rhs, (Tensor, int, float, Scalar, _ir_core.Expr)):
+        return _tensor.cmp(lhs, rhs, cmp_type=cmp_type)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.cmp(lhs, rhs, cmp_type=cmp_type)
+    if isinstance(lhs, Tile) and isinstance(rhs, (int, float, Scalar, _ir_core.Expr)):
+        return _tile.cmps(lhs, rhs, cmp_type=cmp_type)
+    _raise_type_dispatch_error("cmp", lhs, rhs)
+
+
+@overload
+def set_validshape(input: Tensor, valid_rows: IntLike, valid_cols: IntLike) -> Tensor: ...
+@overload
+def set_validshape(input: Tile, valid_rows: IntLike, valid_cols: IntLike) -> Tile: ...
+def set_validshape(input, valid_rows, valid_cols):
+    """Update valid-shape metadata without data movement, dispatched by input type.
+
+    .. note::
+        Internal API — intended for compiler-generated code. End users should
+        prefer ``pl.load(..., valid_shapes=...)`` plus ``pl.tile.fillpad``.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.set_validshape(input, valid_rows, valid_cols)
+    if isinstance(input, Tile):
+        return _tile.set_validshape(input, valid_rows, valid_cols)
+    raise TypeError(f"pl.set_validshape: expected Tensor or Tile, got {type(input).__name__}")
 
 
 # ---------------------------------------------------------------------------
