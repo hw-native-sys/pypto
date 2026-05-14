@@ -154,7 +154,7 @@ def test_window_rejects_non_ptr_arg():
 
 
 def test_window_rejects_unknown_kwarg():
-    with pytest.raises(Exception, match="does not accept kwarg"):
+    with pytest.raises(Exception, match="unexpected keyword argument|does not accept kwarg"):
 
         @pl.program
         class P:  # noqa: F841
@@ -166,7 +166,7 @@ def test_window_rejects_unknown_kwarg():
 
 
 def test_window_rejects_missing_shape_arg():
-    with pytest.raises(Exception, match="2 positional"):
+    with pytest.raises(Exception, match="missing.*positional argument|2 positional"):
 
         @pl.program
         class P:  # noqa: F841

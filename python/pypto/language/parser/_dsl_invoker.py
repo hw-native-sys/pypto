@@ -31,7 +31,7 @@ from collections.abc import Callable
 from typing import Any
 
 from pypto.ir.utils import use_parser_span
-from pypto.language.typing import Array, Scalar, Tensor, Tile
+from pypto.language.typing import Array, Ptr, Scalar, Tensor, Tile
 from pypto.pypto_core import ir
 
 
@@ -74,6 +74,8 @@ def _wrap_arg(arg: Any) -> Any:
         return Array(expr=arg)
     if isinstance(t, ir.ScalarType):
         return Scalar(expr=arg)
+    if isinstance(t, ir.PtrType):
+        return Ptr(expr=arg)
     return arg
 
 
@@ -87,7 +89,7 @@ def _unwrap_result(value: Any) -> Any:
     expects the bare Call so it can rebind ``_tuple_tmp`` and re-emit the
     ``TupleGetItemExpr``s; here we recover that Call.
     """
-    if isinstance(value, (Tensor, Tile, Scalar, Array)):
+    if isinstance(value, (Tensor, Tile, Scalar, Array, Ptr)):
         return value.unwrap()
     if isinstance(value, tuple) and value and all(isinstance(v, (Tensor, Tile, Scalar)) for v in value):
         unwrapped = tuple(v.unwrap() for v in value)

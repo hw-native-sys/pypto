@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any, TypeGuard, cast
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
+from pypto.ir.utils import use_parser_span
+from pypto.language.distributed import op as _dsl_pld
 from pypto.language.op import array_ops as _dsl_array
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
@@ -913,6 +915,22 @@ class ASTParser:
             self.scope_manager.define_var(var_name, ptr_var, span=span)
             return
 
+        # Printer round-trip: ``buf: pl.Ptr = pld.alloc_window_buffer(N)``. The
+        # alloc op normally appears in a plain (unannotated) assignment — but
+        # the printer emits the ``pl.Ptr`` annotation for clarity. Route this
+        # through the same dedicated alloc parser that runs for the unannotated
+        # form so the name-uniqueness and no-kwargs rules apply uniformly.
+        if (
+            is_ptr_type_annotation
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Attribute)
+            and isinstance(stmt.value.func.value, ast.Name)
+            and stmt.value.func.value.id == "pld"
+            and stmt.value.func.attr == "alloc_window_buffer"
+        ):
+            self._parse_alloc_window_buffer_assignment(stmt.target, stmt.value)
+            return
+
         value_expr = self.parse_expression(stmt.value)
 
         # Validate annotation against inferred type; use annotation as override only for memref
@@ -1334,7 +1352,12 @@ class ASTParser:
                 hint="Use a literal like '1024' or a symbolic expression (pld.world_size() * N, ...)",
             )
 
-        alloc_call = ir.create_op_call("pld.alloc_window_buffer", [size_expr], {"name": name}, span)
+        # Funnel through the DSL wrapper so the actual ``ir.create_op_call``
+        # site is single-sourced in pypto.ir.op.distributed.memory_ops. The
+        # wrapper returns a ``pl.Ptr`` DSL object — unwrap to the underlying
+        # ``ir.Call`` for ``_assign_or_let`` (which expects a raw IR expr).
+        with use_parser_span(span):
+            alloc_call = _dsl_pld.alloc_window_buffer(size_expr, name=name).unwrap()
 
         self._alloc_window_buffer_names.add(name)
         var = self._assign_or_let(name, alloc_call, span)
@@ -4791,16 +4814,20 @@ class ASTParser:
     def _parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse a ``pld.<op>(...)`` distributed-DSL operation.
 
-        Dispatches to per-op parsers (``pld.window``, ``pld.world_size``).
-        ``pld.alloc_window_buffer`` is intercepted in
-        :meth:`parse_assignment` (it needs the LHS name) and reaches this
-        method only when it appears outside an assignment — in which case
-        we emit a targeted error rather than silently constructing a
-        nameless alloc op.
+        Dispatches to the matching DSL wrapper in
+        :mod:`pypto.language.distributed.op` via the unified ``_dispatch_op``
+        helper — same path as ``pl.tile.*`` / ``pl.tensor.*`` / ``pl.system.*``.
+        Parser-context-dependent validation (host-only scoping for
+        ``pld.world_size``, LHS-name extraction for ``pld.alloc_window_buffer``)
+        runs here before the dispatch.
         """
         span = self.span_tracker.get_span(call)
 
         if op_name == "alloc_window_buffer":
+            # The DSL wrapper requires a ``name`` kwarg that only the parser can
+            # supply (it's derived from the assignment LHS). Calling the alloc
+            # op outside an assignment context is meaningless — emit a targeted
+            # error rather than dispatch with a synthetic name.
             raise ParserSyntaxError(
                 "pld.alloc_window_buffer must appear as the RHS of a simple assignment "
                 "(its result must be bound to a named variable)",
@@ -4809,22 +4836,9 @@ class ASTParser:
             )
 
         if op_name == "world_size":
-            if call.args:
-                raise ParserSyntaxError(
-                    f"pld.world_size() takes no positional arguments; got {len(call.args)}",
-                    span=span,
-                    hint="Write 'pld.world_size()'",
-                )
-            if call.keywords:
-                raise ParserSyntaxError(
-                    "pld.world_size() does not accept keyword arguments",
-                    span=span,
-                    hint="Write 'pld.world_size()'",
-                )
-            # Host-only: pld.world_size() is only meaningful inside a host-level
-            # orchestrator AND outside any nested device-side scope (a HOST
-            # function may still open `with pl.at(level=CORE_GROUP):` blocks via
-            # InCore / AutoInCore / Spmd, where the call is not lowerable).
+            # Parser-context check: host-only, not inside a device-side scope.
+            # The DSL wrapper itself has no access to this context, so we
+            # validate before dispatching.
             in_device_scope = any(
                 self._is_inside_scope(kind)
                 for kind in (ir.ScopeKind.InCore, ir.ScopeKind.AutoInCore, ir.ScopeKind.Spmd)
@@ -4838,62 +4852,15 @@ class ASTParser:
                     hint="Use '@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)' "
                     "on the enclosing function and call outside any nested device-side scope",
                 )
-            return ir.create_op_call("pld.world_size", [], {}, span)
 
-        if op_name == "window":
-            if len(call.args) != 2:
-                raise ParserSyntaxError(
-                    f"pld.window takes exactly 2 positional arguments (buf, shape); got {len(call.args)}",
-                    span=span,
-                    hint="Use 'pld.window(buf, [shape], dtype=pl.<DT>)'",
-                )
+        if not hasattr(_dsl_pld, op_name):
+            raise InvalidOperationError(
+                f"Unknown distributed operation 'pld.{op_name}'",
+                span=span,
+                hint="Available: pld.alloc_window_buffer, pld.window, pld.world_size",
+            )
 
-            allowed_kwargs = {"dtype"}
-            for kw in call.keywords:
-                if kw.arg not in allowed_kwargs:
-                    raise ParserSyntaxError(
-                        f"pld.window does not accept kwarg '{kw.arg}'",
-                        span=span,
-                        hint="Only 'dtype' is accepted as a kwarg",
-                    )
-
-            buf_expr = self.parse_expression(call.args[0])
-            if not isinstance(buf_expr, ir.Expr):
-                raise ParserSyntaxError(
-                    "pld.window first argument must be an IR expression",
-                    span=span,
-                )
-            if not isinstance(buf_expr.type, ir.PtrType):
-                raise ParserTypeError(
-                    "pld.window expects a Ptr handle (output of pld.alloc_window_buffer); "
-                    f"got {ir.python_print_type(buf_expr.type)}",
-                    span=span,
-                    hint="Pass a variable assigned from 'pld.alloc_window_buffer(...)'",
-                )
-
-            shape_raw = self._parse_op_positional_arg(call.args[1])
-            if not isinstance(shape_raw, ir.MakeTuple):
-                raise ParserSyntaxError(
-                    f"pld.window shape must be a list/tuple literal (got {type(shape_raw).__name__})",
-                    span=span,
-                    hint="Use a list literal like '[N]' or '[pld.world_size(), N]'",
-                )
-            shape_arg: ir.Expr = shape_raw
-
-            kwargs = self._parse_op_kwargs(call)
-            if "dtype" not in kwargs:
-                raise ParserSyntaxError(
-                    "pld.window requires a 'dtype' kwarg",
-                    span=span,
-                    hint="Use 'pld.window(buf, [shape], dtype=pl.FP32)'",
-                )
-            return ir.create_op_call("pld.window", [buf_expr, shape_arg], kwargs, span)
-
-        raise InvalidOperationError(
-            f"Unknown distributed operation 'pld.{op_name}'",
-            span=span,
-            hint="Available: pld.alloc_window_buffer, pld.window, pld.world_size",
-        )
+        return self._dispatch_op(_dsl_pld, "pld", op_name, call)
 
     def _parse_pld_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse a ``pld.tile.<op>(...)`` cross-rank tile operation.

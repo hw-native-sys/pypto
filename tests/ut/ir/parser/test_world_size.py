@@ -117,7 +117,7 @@ def test_world_size_can_drive_pl_range_bound():
 
 
 def test_world_size_rejects_positional_args():
-    with pytest.raises(Exception, match="no positional arguments"):
+    with pytest.raises(Exception, match="no positional arguments|takes 0 positional"):
 
         @pl.program
         class P:  # noqa: F841
@@ -128,7 +128,7 @@ def test_world_size_rejects_positional_args():
 
 
 def test_world_size_rejects_kwargs():
-    with pytest.raises(Exception, match="does not accept keyword arguments"):
+    with pytest.raises(Exception, match="does not accept keyword arguments|unexpected keyword argument"):
 
         @pl.program
         class P:  # noqa: F841

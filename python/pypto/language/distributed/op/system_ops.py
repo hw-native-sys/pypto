@@ -7,17 +7,16 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Distributed system-level op sentinels (``pld.<op>``).
+"""Distributed system-level op DSL wrappers (``pld.<op>``).
 
 System-level ops cover cross-rank synchronization and runtime queries.
 Currently exposes :func:`world_size`; N6 will add ``notify`` / ``wait``
 (``pld.system.notify`` / ``pld.system.wait``) here as well.
 
-* ``world_size`` — host-only scalar returning the number of devices in
-  the current distributed execution. The parser lifts
-  ``pld.world_size()`` to ``ir.OpExpr('pld.world_size')`` of type
-  :class:`ir.ScalarType` (INT64). Codegen later lowers each call site
-  to ``len(contexts)``.
+* ``world_size`` — host-only scalar returning the number of devices in the
+  current distributed execution. Returns an :class:`ir.Expr` of type
+  ``ScalarType(INT64)``. Codegen later lowers each call site to
+  ``len(contexts)``.
 
 Typical use sites for ``world_size``:
 
@@ -26,27 +25,20 @@ Typical use sites for ``world_size``:
 * per-rank tensor shapes: ``pld.window(buf, [pld.world_size()], dtype=pl.INT32)``
 """
 
-from pypto.pypto_core.ir import Expr
+from pypto.ir.op.distributed import system_ops as _ir_system
+from pypto.language.typing import Scalar
 
 
-def world_size() -> Expr:
-    """Return the distributed world size as a scalar INT64 expression.
+def world_size() -> Scalar:
+    """Return the distributed world size as an ``INT64`` :class:`Scalar`.
 
-    Must be called inside a function annotated with
-    ``@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)``. The
-    parser intercepts the call before Python runtime ever sees it; calling
-    ``pld.world_size()`` outside a host-level orchestrator body raises.
-
-    Returns:
-        An :class:`ir.Expr` of type ``ScalarType(INT64)`` whose value is the
-        number of devices in the current distributed execution.
-
-    Raises:
-        RuntimeError: Always — this function is a parser sentinel.
+    Parser context (host-only, not inside a nested device-side scope) is
+    validated by the parser before this wrapper is invoked. The DSL-side
+    return wrapping lets call sites compose naturally with Python operators
+    (``pld.world_size() * 4``, ``pl.range(pld.world_size())``), which the
+    parser's ``invoke_dsl`` unwraps back to the underlying Call.
     """
-    raise RuntimeError(
-        "pld.world_size() must be called inside a @pl.function (level=Level.HOST, role=Role.Orchestrator)"
-    )
+    return Scalar(expr=_ir_system.world_size())
 
 
 __all__ = ["world_size"]
