@@ -339,18 +339,21 @@ def _build_phase_fence_program():
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
             with pl.manual_scope():
                 # Phase fence: every kernel in phase P+1 must wait for ALL
-                # branches in phase P. The TaskId iter_arg lives outside the
-                # phase loop and is rebound inside the inner ``pl.parallel``;
-                # codegen lowers the TaskId carry through a ``pl.parallel``
-                # body as a size-``N_BRANCHES`` array, so each downstream
-                # kernel takes a dep on every slot (one per parallel iter
-                # of the previous phase).
-                prev_tid = pl.task_id_invalid()
+                # branches in phase P. Use an explicit ``Array[N_BRANCHES,
+                # TASK_ID]`` to hold one TaskId per branch slot — every
+                # parallel iter writes its own slot, and ``deps=[tids]``
+                # expands to N_BRANCHES guarded ``add_dep`` calls on the
+                # downstream task (one per slot of the previous phase).
+                # ``pl.array.create`` auto-initializes all slots to
+                # ``PTO2TaskId::invalid()``; the runtime fence skips
+                # invalid entries via ``is_valid()`` so the first phase
+                # has no prior-phase dependency.
+                tids = pl.array.create(N_BRANCHES, pl.TASK_ID)
                 for phase in pl.range(N_PHASES):
                     for branch in pl.parallel(N_BRANCHES):
                         row = (phase * N_BRANCHES + branch) * TILE_M
-                        out = self.kernel_stripe(data, row, 1.0, out, deps=[prev_tid])
-                        prev_tid = pl.task_id_of(out)
+                        out = self.kernel_stripe(data, row, 1.0, out, deps=[tids])
+                        tids[branch] = pl.task_id_of(out)
             return out
 
     return PhaseFenceManualScope

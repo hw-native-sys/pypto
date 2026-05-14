@@ -83,11 +83,22 @@ def _is_const_int(value: object) -> bool:
 def _is_dep_var_type(type_: ir.Type | None) -> bool:
     """Return True if ``type_`` is acceptable as a manual_scope ``deps=`` entry.
 
-    Only ``ScalarType(TASK_ID)`` is accepted. Users extract a TaskId via
-    ``pl.task_id_of(producer)`` (or ``pl.task_id_invalid()`` for the seed
-    of a loop iter_arg) and pass the resulting scalar in ``deps=[...]``.
+    Two shapes are accepted:
+
+    * ``ScalarType(TASK_ID)`` — a single TaskId (typically from
+      ``pl.task_id_of(producer)`` or ``pl.task_id_invalid()``); codegen
+      emits one ``add_dep(name)`` for it.
+    * ``ArrayType(..., TASK_ID)`` — a per-slot TaskId array (typically
+      from ``pl.array.create(N, pl.TASK_ID)`` threaded through a loop as
+      an iter_arg). Codegen expands it to one ``add_dep(arr[i])`` per
+      slot, each guarded by ``is_valid()`` (early-phase slots may still
+      hold the invalid sentinel).
     """
-    return isinstance(type_, ir.ScalarType) and type_.dtype == DataType.TASK_ID
+    if isinstance(type_, ir.ScalarType) and type_.dtype == DataType.TASK_ID:
+        return True
+    if isinstance(type_, ir.ArrayType) and type_.dtype == DataType.TASK_ID:
+        return True
+    return False
 
 
 def _fold_const_slice_extent(upper: object, lower: object) -> int | None:

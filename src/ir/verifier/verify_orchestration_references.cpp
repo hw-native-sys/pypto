@@ -28,10 +28,11 @@ namespace {
 
 /// Local copy of the builtin-op classifier. Verifiers live in the IR layer
 /// and must not depend on `pypto::codegen::IsBuiltinOp`. The classification
-/// is intentionally a 3-line string-prefix check; if a third reader appears,
+/// is intentionally a string-prefix check; if a third reader appears,
 /// promote it to a shared IR utility.
 bool IsBuiltinOpName(const std::string& name) {
-  return name.rfind("tile.", 0) == 0 || name.rfind("tensor.", 0) == 0 || name.rfind("system.", 0) == 0;
+  return name.rfind("tile.", 0) == 0 || name.rfind("tensor.", 0) == 0 || name.rfind("system.", 0) == 0 ||
+         name.rfind("array.", 0) == 0;
 }
 
 class OrchestrationCallTargetChecker : public IRVisitor {

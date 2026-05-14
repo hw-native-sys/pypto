@@ -3272,13 +3272,16 @@ class TestManualScopeCodegen:
                 out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
             ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
                 with pl.manual_scope():
-                    prev_tid = pl.task_id_invalid()
+                    # Per-slot TaskId array (length = parallel trip count).
+                    # ``deps=[tids]`` expands to ABOVE_LEGACY_CAP guarded
+                    # ``add_dep`` calls, sizing the wrapper accordingly.
+                    tids = pl.array.create(ABOVE_LEGACY_CAP, pl.TASK_ID)
                     for i in pl.range(4):
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(ABOVE_LEGACY_CAP):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            out = self.kern(x, out, row, col, deps=[prev_tid])
-                            prev_tid = pl.task_id_of(out)
+                            out = self.kern(x, out, row, col, deps=[tids])
+                            tids[j] = pl.task_id_of(out)
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)

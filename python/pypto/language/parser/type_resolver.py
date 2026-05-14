@@ -150,6 +150,7 @@ class TypeResolver:
         "UINT64": DataType.UINT64,
         "BOOL": DataType.BOOL,
         "INDEX": DataType.INDEX,
+        "TASK_ID": DataType.TASK_ID,
     }
 
     _DIRECTION_MAP: dict[str, "ir.ParamDirection"] = {

@@ -640,15 +640,34 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << "Internal error: ArrayType iter_arg extent must be ConstInt, got "
             << array_ty->extent()->TypeName();
         const int64_t N = extent_const->value_;
-        const std::string cpp_dtype =
-            array_ty->dtype_ == DataType::TASK_ID ? "PTO2TaskId" : array_ty->dtype_.ToCTypeString();
+        const bool is_task_id_array = (array_ty->dtype_ == DataType::TASK_ID);
+        const std::string cpp_dtype = is_task_id_array ? "PTO2TaskId" : array_ty->dtype_.ToCTypeString();
         std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
-        code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "] = {0};\n";
-        // Init by slot-by-slot copy from the init array.
+        if (is_task_id_array) {
+          // PTO2TaskId is not a plain integer — zero-init would alias every
+          // slot to the runtime's real task id 0, causing the runtime fence
+          // to wait on a bogus producer. Init explicitly with the invalid
+          // sentinel (matches ``array.create`` codegen).
+          code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "];\n";
+          code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
+                << "[__init_i] = PTO2TaskId::invalid();\n";
+        } else {
+          code_ << Indent() << cpp_dtype << " " << carry_name << "[" << N << "] = {0};\n";
+        }
+        // Init by slot-by-slot copy from the init array (overrides the
+        // sentinel/zero init above with the actual incoming values).
         code_ << Indent() << "for (int64_t __init_i = 0; __init_i < " << N << "; ++__init_i) " << carry_name
               << "[__init_i] = " << init_var_name << "[__init_i];\n";
         emit_name_map_[iter_arg.get()] = carry_name;
         emit_name_map_[return_var.get()] = carry_name;
+        // For TaskId arrays, also register the iter_arg / return_var in
+        // ``manual_task_id_map_`` as ``vector<string>`` of per-slot names so
+        // a downstream ``deps=[arr]`` expands into N guarded ``add_dep``
+        // calls (one per slot).
+        if (is_task_id_array && in_manual_scope_depth_ > 0) {
+          RegisterArrayCarry(iter_arg.get(), carry_name, N);
+          RegisterArrayCarry(return_var.get(), carry_name, N);
+        }
       } else if (is_rebind[i]) {
         // Scalar (single-name) carry path — only fires for non-TaskId
         // iter_args (e.g. Tensor) or Sequential TaskId iter_args whose
@@ -1996,6 +2015,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Internal error: array.update_element expects 3 arguments";
     std::string array_name = GenerateExprString(call->args_[0]);
     emit_name_map_[assign->var_.get()] = array_name;
+    // Propagate ``array_carry_vars_`` and ``manual_task_id_map_`` from the
+    // input array to the LHS: they share storage, so a downstream
+    // ``deps=[lhs]`` or array-yield treats them identically. Without this,
+    // a parallel iter_arg yielding the post-update Array would fall through
+    // ``array_carry_vars_.find(yield_var)`` and trip the scalar-yield branch.
+    if (auto input_var = AsVarLike(call->args_[0])) {
+      auto carry_it = array_carry_vars_.find(input_var.get());
+      if (carry_it != array_carry_vars_.end()) {
+        array_carry_vars_[assign->var_.get()] = carry_it->second;
+      }
+      auto tid_it = manual_task_id_map_.find(input_var.get());
+      if (tid_it != manual_task_id_map_.end()) {
+        manual_task_id_map_[assign->var_.get()] = tid_it->second;
+      }
+    }
   }
 
   std::string ReserveVarEmitName(const Var* var) {
