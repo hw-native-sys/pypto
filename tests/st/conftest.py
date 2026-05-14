@@ -167,7 +167,7 @@ def pytest_addoption(parser):
         action="store",
         default=None,
         help="Simpler runtime log level (debug, v0..v9, info, warn, error, null). "
-             "Default: leave simpler at its V5/INFO default.",
+        "Default: leave simpler at its V5/INFO default.",
     )
     parser.addoption(
         "--pto-isa-commit",
@@ -450,6 +450,7 @@ def pytest_configure(config):
     else:
         if simpler_level is not None:
             from pypto.runtime import configure_log  # noqa: PLC0415
+
             configure_log(simpler_level)  # ValueError propagates: invalid CLI value must fail fast
 
 

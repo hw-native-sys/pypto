@@ -28,7 +28,8 @@ imported callables are memoized after first access to keep the hot path cheap.
 """
 
 import os
-from typing import Any, Callable, Final
+from collections.abc import Callable
+from typing import Any, Final
 
 _ENV_LEVEL: Final[str] = "PYPTO_RUNTIME_LOG"
 _ENV_SYNC: Final[str] = "PYPTO_RUNTIME_LOG_SYNC"
@@ -50,8 +51,10 @@ def _load_simpler() -> tuple[Callable[[Any], int], Callable[[], Any]]:
     """
     if "parse_level" not in _simpler_cache:
         try:
-            from simpler_setup.log_config import parse_level  # type: ignore[import-not-found]
-            from simpler._log import get_logger  # type: ignore[import-not-found]
+            # type: ignore[import-not-found] applied per-line; noqa: PLC0415 — lazy
+            # import: simpler is optional and may be absent in offline environments.
+            from simpler._log import get_logger  # type: ignore[import-not-found] # noqa: PLC0415
+            from simpler_setup.log_config import parse_level  # type: ignore[import-not-found] # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001 — surface any partial-install failure as one error
             raise RuntimeError(
                 "simpler runtime logger is unavailable; install simpler to use configure_log()"
