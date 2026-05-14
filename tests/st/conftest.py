@@ -445,11 +445,12 @@ def pytest_configure(config):
     # Set simpler runtime log level (orthogonal to PyPTO C++ logger above).
     try:
         simpler_level = config.getoption("--simpler-log-level")
+    except KeyError:
+        pass  # option not yet registered (e.g. during --co --help)
+    else:
         if simpler_level is not None:
             from pypto.runtime import configure_log  # noqa: PLC0415
-            configure_log(simpler_level)
-    except (ValueError, KeyError):
-        pass  # option not yet registered (e.g. during --co --help)
+            configure_log(simpler_level)  # ValueError propagates: invalid CLI value must fail fast
 
 
 def pytest_collection_modifyitems(config, items):

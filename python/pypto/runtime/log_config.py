@@ -23,16 +23,42 @@ Three entry points:
 
 Level parsing delegates to :mod:`simpler_setup.log_config` (the canonical
 CLI level table); simpler imports are lazy so ``import pypto.runtime`` still
-works in offline-compile environments where simpler is not installed.
+works in offline-compile environments where simpler is not installed. The
+imported callables are memoized after first access to keep the hot path cheap.
 """
 
 import os
-from typing import Final
+from typing import Any, Callable, Final
 
 _ENV_LEVEL: Final[str] = "PYPTO_RUNTIME_LOG"
 _ENV_SYNC: Final[str] = "PYPTO_RUNTIME_LOG_SYNC"
 
-_configured: bool = False
+# Module-level mutable state. Stored in containers so we never need ``global``.
+# ``_state["configured"]`` flips True after the first explicit/env-driven call
+# to :func:`configure_log`. ``_simpler_cache`` memoizes the lazily resolved
+# ``(parse_level, get_logger)`` pair from simpler.
+_state: dict[str, bool] = {"configured": False}
+_simpler_cache: dict[str, Callable[..., Any]] = {}
+
+
+def _load_simpler() -> tuple[Callable[[Any], int], Callable[[], Any]]:
+    """Return ``(parse_level, get_logger)`` from simpler, importing once.
+
+    A broad ``Exception`` catch covers ImportError plus AttributeError /
+    TypeError that surface from broken or partial simpler installs; in any
+    of those cases we surface a clear RuntimeError so callers can act.
+    """
+    if "parse_level" not in _simpler_cache:
+        try:
+            from simpler_setup.log_config import parse_level  # type: ignore[import-not-found]
+            from simpler._log import get_logger  # type: ignore[import-not-found]
+        except Exception as exc:  # noqa: BLE001 — surface any partial-install failure as one error
+            raise RuntimeError(
+                "simpler runtime logger is unavailable; install simpler to use configure_log()"
+            ) from exc
+        _simpler_cache["parse_level"] = parse_level
+        _simpler_cache["get_logger"] = get_logger
+    return _simpler_cache["parse_level"], _simpler_cache["get_logger"]
 
 
 def configure_log(level: int | str, *, sync_pypto: bool = False) -> None:
@@ -46,18 +72,14 @@ def configure_log(level: int | str, *, sync_pypto: bool = False) -> None:
             the C++ side so both subsystems display the same band. Defaults to
             ``False`` because the two loggers are intentionally independent.
     """
-    global _configured
-
-    from simpler_setup.log_config import parse_level  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-    from simpler._log import get_logger as _simpler_logger  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-
+    parse_level, get_logger = _load_simpler()
     threshold = parse_level(level)
-    _simpler_logger().setLevel(threshold)
+    get_logger().setLevel(threshold)
 
     if sync_pypto:
         _sync_to_pypto(threshold)
 
-    _configured = True
+    _state["configured"] = True
 
 
 def _sync_to_pypto(threshold: int) -> None:
@@ -87,13 +109,12 @@ def _ensure_configured() -> None:
     If the user later calls :func:`configure_log` explicitly, that wins; if
     the env var was unset, this is a no-op beyond flipping the cache flag.
     """
-    global _configured
-    if _configured:
+    if _state["configured"]:
         return
     raw = os.environ.get(_ENV_LEVEL)
     if raw is None:
         # Mark configured so we do not re-check the env on every call.
-        _configured = True
+        _state["configured"] = True
         return
     sync = os.environ.get(_ENV_SYNC) == "1"
     configure_log(raw, sync_pypto=sync)
@@ -101,5 +122,5 @@ def _ensure_configured() -> None:
 
 def current_level() -> int:
     """Return simpler's effective Python ``logging`` threshold."""
-    from simpler._log import get_logger as _simpler_logger  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
-    return _simpler_logger().getEffectiveLevel()
+    _, get_logger = _load_simpler()
+    return get_logger().getEffectiveLevel()

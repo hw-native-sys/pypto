@@ -26,7 +26,8 @@ Example::
 
 from .device_tensor import DeviceTensor
 from .log_config import _ensure_configured as _ensure_log_configured
-from .log_config import configure_log, current_level as log_level
+from .log_config import configure_log
+from .log_config import current_level as log_level
 from .runner import RunConfig, RunResult, compile_program, execute_compiled, run
 from .tensor_spec import ScalarSpec, TensorSpec
 from .worker import Worker
