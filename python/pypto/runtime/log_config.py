@@ -67,7 +67,7 @@ def _sync_to_pypto(threshold: int) -> None:
     ``<=14`` DEBUG, ``15..24`` (V0..V9) INFO, ``25..39`` WARN,
     ``40..59`` ERROR, ``>=60`` NUL/NONE.
     """
-    from pypto import LogLevel, set_log_level  # noqa: PLC0415
+    from pypto.pypto_core import LogLevel, set_log_level  # noqa: PLC0415
 
     if threshold <= 14:
         set_log_level(LogLevel.DEBUG)
