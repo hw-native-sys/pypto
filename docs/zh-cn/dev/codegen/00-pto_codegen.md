@@ -542,6 +542,16 @@ output_dir/
 
 编排代码生成使用 PTO2 运行时 API (`rt_submit_task`, `make_tensor_external` 等) 生成编排 C++ 代码。
 
+### 运行时配置 (`kernel_config.py`)
+
+`kernel_config.py` 暴露一个 `RUNTIME_CONFIG` 字典，调用方 (如 `execute_compiled`) 据此派发程序。固定键：
+
+| 键 | 何时写入 | 备注 |
+| -- | -------- | ---- |
+| `runtime` | 总是 | 目前为 `"tensormap_and_ringbuffer"`——该运行时要求 4 个 AICPU 线程 (3 个调度器 + 1 个编排器位于 thread 3)。 |
+| `aicpu_thread_num` | 总是 (`4`) | 由所选运行时决定。 |
+| `block_dim` | 仅当传入 `compile(..., block_dim=N)` | 派发的逻辑 SPMD block 数量。默认不写入；此时 simpler 运行时使用自身默认值并对照设备能力校验——超容量直接抛错 (`max_block_dim=...`)，不再挂起。当目标设备可用核数低于运行时默认值，或 kernel 自带 block 数约束时，请传入 `compile(block_dim=...)` 或 `RunConfig(block_dim=...)` (按次调用覆盖)。 |
+
 ### 参数解包
 
 包装器按照标准约定解包 `int64_t* args`:

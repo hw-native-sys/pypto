@@ -383,7 +383,7 @@ def compile_and_assemble(
     work_dir: Path,
     platform: str,
     pto_isa_commit: str | None = None,
-) -> tuple[ChipCallable, str]:
+) -> tuple[ChipCallable, str, dict]:
     """Compile kernels + orchestration from *work_dir*, assemble ``ChipCallable``.
 
     Reads ``kernel_config.py`` from *work_dir* to discover kernel sources,
@@ -396,8 +396,13 @@ def compile_and_assemble(
         pto_isa_commit: If set, pin the pto-isa clone to this commit.
 
     Returns:
-        ``(chip_callable, runtime_name)`` — the assembled callable and the
-        runtime name (e.g. ``"tensormap_and_ringbuffer"``).
+        ``(chip_callable, runtime_name, runtime_config)`` — the assembled
+        callable, the runtime name (e.g. ``"tensormap_and_ringbuffer"``),
+        and the full ``RUNTIME_CONFIG`` dict loaded from
+        ``kernel_config.py``. Callers can read defaults such as
+        ``block_dim`` / ``aicpu_thread_num`` from ``runtime_config`` —
+        keys are only present when the producer of the artifact opted
+        to bake them in.
     """
     # Load kernel_config.py
     config_path = work_dir / "kernel_config.py"
@@ -478,7 +483,7 @@ def compile_and_assemble(
         children=kernel_binaries,
     )
 
-    return chip_callable, runtime_name
+    return chip_callable, runtime_name, runtime_config
 
 
 # ---------------------------------------------------------------------------
@@ -494,8 +499,8 @@ def execute_on_device(  # noqa: PLR0913
     device_id: int,
     *,
     level: int = 2,
-    block_dim: int = 24,
-    aicpu_thread_num: int = 4,
+    block_dim: int | None = None,
+    aicpu_thread_num: int | None = None,
     output_prefix: str | None = None,
     enable_l2_swimlane: bool = False,
     enable_dump_tensor: bool = False,
@@ -522,8 +527,17 @@ def execute_on_device(  # noqa: PLR0913
             supported; passing any other value raises ``ValueError``. The
             parameter exists so callers can plumb level through ahead of L3
             user-API support.
-        block_dim: Block dimension for execution.
-        aicpu_thread_num: Number of AICPU threads.
+        block_dim: Number of logical SPMD blocks to dispatch. ``None``
+            (default) leaves the field unset on the underlying
+            ``ChipCallConfig``, so the simpler runtime's own default
+            (``ChipCallConfig::block_dim = 24``) applies. Simpler
+            validates the value against device capacity and rejects
+            over-capacity requests with a clear error
+            (``max_block_dim=... cube=... vector=...``). Callers that
+            know the kernel's required block count should pass it
+            explicitly rather than relying on the implicit default.
+        aicpu_thread_num: Number of AICPU threads. ``None`` leaves the
+            field unset and uses the simpler runtime default.
         output_prefix: Directory under which the runtime writes diagnostic
             artifacts (``l2_perf_records.json`` / ``tensor_dump/`` /
             ``pmu.csv`` / ``deps.json``). Required whenever any
@@ -568,8 +582,10 @@ def execute_on_device(  # noqa: PLR0913
     from .worker import Worker as _PyptoWorker  # noqa: PLC0415
 
     cfg = CallConfig()
-    cfg.block_dim = block_dim
-    cfg.aicpu_thread_num = aicpu_thread_num
+    if block_dim is not None:
+        cfg.block_dim = block_dim
+    if aicpu_thread_num is not None:
+        cfg.aicpu_thread_num = aicpu_thread_num
     # CallConfig nanobind setters: the three bool fields take `bool`,
     # ``enable_pmu`` is a raw ``int32_t`` (0 disabled, >0 event type).
     cfg.enable_l2_swimlane = enable_l2_swimlane

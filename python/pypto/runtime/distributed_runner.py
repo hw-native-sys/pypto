@@ -239,7 +239,7 @@ def execute_distributed(  # noqa: PLR0912
         if func.func_type == FunctionType.Orchestration:
             chip_dir = next_levels_dir / func.name
             if chip_dir.exists():
-                chip_callable, runtime_name = compile_and_assemble(chip_dir, compiled.platform)
+                chip_callable, runtime_name, _ = compile_and_assemble(chip_dir, compiled.platform)
                 chip_callables[func.name] = chip_callable
 
     if not chip_callables:

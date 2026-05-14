@@ -79,7 +79,7 @@ def patched_runtime(tmp_path):
         patch("pypto.runtime.runner._patch_orchestration_headers"),
         patch(
             "pypto.runtime.device_runner.compile_and_assemble",
-            return_value=(MagicMock(name="chip_callable"), "host_build_graph"),
+            return_value=(MagicMock(name="chip_callable"), "host_build_graph", {}),
         ),
         patch("pypto.runtime.device_runner.execute_on_device"),
         patch("pypto.runtime.device_runner.ChipStorageTaskArgs", return_value=chip_args),

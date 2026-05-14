@@ -303,7 +303,9 @@ def _fused_compile_task(
             )
         from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-        chip_callable, runtime_name = compile_and_assemble(work_dir, resolved, pto_isa_commit=pto_isa_commit)
+        chip_callable, runtime_name, _ = compile_and_assemble(
+            work_dir, resolved, pto_isa_commit=pto_isa_commit
+        )
         return CompileArtifact(
             work_dir=work_dir,
             resolved_platform=resolved,
@@ -641,7 +643,7 @@ class TestRunner:
 
             from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-            chip_callable, runtime_name = compile_and_assemble(
+            chip_callable, runtime_name, _ = compile_and_assemble(
                 work_dir, resolved_platform, pto_isa_commit=self.config.pto_isa_commit
             )
             _execute_on_device(

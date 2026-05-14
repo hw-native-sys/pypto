@@ -548,6 +548,16 @@ output_dir/
 
 The orchestration codegen generates identical orchestration C++ code using the PTO2 runtime API (`rt_submit_task`, `make_tensor_external`, etc.).
 
+### Runtime configuration (`kernel_config.py`)
+
+`kernel_config.py` exposes a `RUNTIME_CONFIG` dict that callers (e.g. `execute_compiled`) read to dispatch the program. Stable keys:
+
+| Key | When emitted | Notes |
+| --- | ------------ | ----- |
+| `runtime` | Always | Currently `"tensormap_and_ringbuffer"` — the runtime requires 4 AICPU threads (3 schedulers + 1 orchestrator on thread 3). |
+| `aicpu_thread_num` | Always (`4`) | Dictated by the chosen runtime. |
+| `block_dim` | Only when `compile(..., block_dim=N)` is set | Number of logical SPMD blocks to dispatch. Omitted by default; the simpler runtime then applies its own default and validates it against device capacity — over-capacity values raise a clear error (`max_block_dim=...`) instead of hanging. Pass `compile(block_dim=...)` or `RunConfig(block_dim=...)` (per-invocation override) when targeting devices whose usable core count is below the runtime default. |
+
 ### Argument Unpacking
 
 The wrapper unpacks `int64_t* args` following the standard convention:

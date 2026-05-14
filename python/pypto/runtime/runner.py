@@ -125,6 +125,13 @@ class RunConfig:
             there.  Use a path from a previous run
             (e.g. ``build_output/<name>_<ts>/data``) to reuse existing golden
             data, or specify a new path to persist data to a fixed location.
+        block_dim: Optional per-invocation override of the logical SPMD
+            block count. ``None`` (default) defers to the value baked
+            into ``kernel_config.py``'s ``RUNTIME_CONFIG`` at compile
+            time (which itself may be unset, in which case the simpler
+            runtime default applies). Set this when running the same
+            compiled artifact on devices with different usable core
+            counts.
     """
 
     __test__ = False  # Not a pytest test class
@@ -149,6 +156,7 @@ class RunConfig:
     diagnostic_phase: DiagnosticPhase | None = None
     disabled_diagnostics: DiagnosticCheckSet | None = None
     golden_data_dir: str | None = None
+    block_dim: int | None = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):
@@ -734,6 +742,8 @@ def execute_compiled(  # noqa: PLR0913
     dfx: _DfxOpts = _DfxOpts(),
     runtime_profiling: bool = False,
     level: int = 2,
+    block_dim: int | None = None,
+    aicpu_thread_num: int | None = None,
 ) -> None:
     """Execute a pre-compiled program with user-provided tensors and scalars.
 
@@ -765,6 +775,15 @@ def execute_compiled(  # noqa: PLR0913
             be removed in a future release.
         level: Hierarchy level. Forwarded to :func:`execute_on_device`,
             which currently only supports ``2``.
+        block_dim: Optional override of the logical SPMD block count.
+            When ``None`` (default), the value baked into
+            ``kernel_config.py``'s ``RUNTIME_CONFIG`` is used; if that
+            is also unset, simpler's runtime default applies (simpler
+            validates against device capacity and raises a clear error
+            on over-capacity requests). A caller-supplied value takes
+            precedence over ``RUNTIME_CONFIG``.
+        aicpu_thread_num: Optional override of the AICPU thread count;
+            same precedence rules as ``block_dim``.
     """
     work_dir = Path(work_dir)
 
@@ -800,7 +819,15 @@ def execute_compiled(  # noqa: PLR0913
         torch_dtype_to_datatype,  # pyright: ignore[reportAttributeAccessIssue]
     )
 
-    chip_callable, runtime_name = compile_and_assemble(work_dir, platform, pto_isa_commit)
+    chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform, pto_isa_commit)
+
+    # Caller-supplied values take precedence over the RUNTIME_CONFIG baked
+    # into kernel_config.py. When neither is provided, the simpler runtime's
+    # own default applies (and is validated against device capacity).
+    effective_block_dim = block_dim if block_dim is not None else runtime_config.get("block_dim")
+    effective_aicpu_thread_num = (
+        aicpu_thread_num if aicpu_thread_num is not None else runtime_config.get("aicpu_thread_num")
+    )
 
     # Build orch args from user-provided tensors and scalars.
     #
@@ -869,6 +896,8 @@ def execute_compiled(  # noqa: PLR0913
         runtime_name,
         device_id,
         level=level,
+        block_dim=effective_block_dim,
+        aicpu_thread_num=effective_aicpu_thread_num,
         output_prefix=str(dfx_dir) if dfx_dir is not None else None,
         enable_l2_swimlane=dfx.enable_l2_swimlane,
         enable_dump_tensor=dfx.enable_dump_tensor,

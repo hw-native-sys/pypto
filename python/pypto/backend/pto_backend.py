@@ -551,19 +551,35 @@ def _generate_config_file(
     orch_func_name: str,
     func_name_to_id: dict[str, int],
     func_name_to_core_type: dict[str, _ir_core.CoreType],
+    *,
+    block_dim: int | None = None,
 ) -> str:
-    """Generate kernel_config.py content."""
+    """Generate kernel_config.py content.
+
+    ``block_dim`` is only embedded into ``RUNTIME_CONFIG`` when the user
+    supplies it via ``compile(block_dim=...)``. When omitted, the
+    simpler runtime's own default applies at dispatch time; simpler
+    validates the value against device capacity and rejects
+    over-capacity requests with a clear error rather than hanging.
+    """
+    runtime_lines = [
+        "RUNTIME_CONFIG = {",
+        '\t"runtime": "tensormap_and_ringbuffer",',
+        '\t"aicpu_thread_num": 4,',
+    ]
+    if block_dim is not None:
+        runtime_lines.append(f'\t"block_dim": {block_dim},')
+    runtime_lines.append("}\n")
+
     lines = [
         "# Kernel and Orchestration Configuration\n",
         "from pathlib import Path\n",
         "_ROOT_DIR = Path(__file__).parent\n",
-        "# Runtime configuration for tensormap_and_ringbuffer",
-        "# This runtime requires 4 AICPU threads (3 schedulers + 1 orchestrator on thread 3)",
-        "RUNTIME_CONFIG = {",
-        '\t"runtime": "tensormap_and_ringbuffer",',
-        '\t"aicpu_thread_num": 4,',
-        '\t"block_dim": 24,',
-        "}\n",
+        "# Runtime configuration for tensormap_and_ringbuffer.",
+        "# This runtime requires 4 AICPU threads (3 schedulers + 1 orchestrator on thread 3).",
+        "# block_dim is only emitted when the user passes compile(block_dim=...);",
+        "# otherwise the runtime default applies (simpler validates against device capacity).",
+        *runtime_lines,
         "ORCHESTRATION = {",
         f'\t"source": str(_ROOT_DIR / "orchestration" / "{orch_func_name}.cpp"),',
         '\t"function_name": "aicpu_orchestration_entry"',
@@ -878,6 +894,8 @@ def generate(
     transformed_program: _ir_core.Program,
     output_dir: str,
     skip_ptoas: bool = False,
+    *,
+    block_dim: int | None = None,
 ) -> dict[str, str]:
     """Generate all PTO backend output files (kernels + orchestration + config).
 
@@ -895,6 +913,11 @@ def generate(
         output_dir: Base output directory (used for ptoas intermediates when skip_ptoas=False)
         skip_ptoas: When True, skip the ptoas compilation step and return raw MLIR
             content in result_files with .pto extension instead of compiled .cpp wrappers.
+        block_dim: Optional logical SPMD block count to bake into the
+            generated ``kernel_config.py``'s ``RUNTIME_CONFIG``. ``None``
+            (default) omits the key — the simpler runtime's own default
+            applies at dispatch time. Ignored for distributed (L3+)
+            programs, which carry ``block_dim`` via ``DistributedConfig``.
 
     Returns:
         Dict mapping relative file paths to their content.
@@ -908,7 +931,7 @@ def generate(
     if has_distributed:
         return _generate_with_distributed(transformed_program, output_dir, skip_ptoas)
 
-    return _generate_single_chip(transformed_program, output_dir, skip_ptoas)
+    return _generate_single_chip(transformed_program, output_dir, skip_ptoas, block_dim=block_dim)
 
 
 def _generate_with_distributed(
@@ -1048,6 +1071,8 @@ def _generate_single_chip(
     transformed_program: _ir_core.Program,
     output_dir: str,
     skip_ptoas: bool = False,
+    *,
+    block_dim: int | None = None,
 ) -> dict[str, str]:
     """Generate artifacts for a single-chip (L0-L2) program. Original generate() logic."""
     result_files: dict[str, str] = {}
@@ -1125,6 +1150,7 @@ def _generate_single_chip(
                     orch_func.name,
                     orch_result.func_name_to_id,
                     orch_result.func_name_to_core_type,
+                    block_dim=block_dim,
                 )
         except Exception as e:
             logger.error("Failed to generate orchestration '%s': %s", orch_func.name, e)

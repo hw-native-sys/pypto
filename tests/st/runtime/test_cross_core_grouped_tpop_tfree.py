@@ -223,7 +223,7 @@ class TestCrossCoreGroupedTpopTfree:
 
             kernel_config = _load_kernel_config(work_dir)
             runtime_cfg = getattr(kernel_config, "RUNTIME_CONFIG", {})
-            chip_callable, runtime_name = compile_and_assemble(
+            chip_callable, runtime_name, _ = compile_and_assemble(
                 work_dir, platform, pto_isa_commit=test_config.pto_isa_commit
             )
 
