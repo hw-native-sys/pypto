@@ -327,6 +327,24 @@ class PTOCodegen : public CodegenBase {
    */
   [[nodiscard]] std::string GetGMSlotBufferSSA() const;
 
+  /**
+   * @brief SSA name of the synthetic SPMD block_idx prefix param.
+   *
+   * When the current function uses tile.get_block_idx / tile.get_block_num,
+   * PTOCodegen prepends two i32 prefix params (%arg0, %arg1) to the emitted
+   * func.func signature. The kernel wrapper resolves the runtime values via
+   * intrinsic.h::get_block_idx(args) / get_block_num(args) and forwards them
+   * as the first two call args. Returns empty when the function does not use
+   * SPMD block ops.
+   */
+  [[nodiscard]] std::string GetSpmdBlockIdxArgSSA() const { return fs_.spmd_block_idx_arg; }
+
+  /**
+   * @brief SSA name of the synthetic SPMD block_num prefix param. See
+   * GetSpmdBlockIdxArgSSA() for the surrounding mechanism.
+   */
+  [[nodiscard]] std::string GetSpmdBlockNumArgSSA() const { return fs_.spmd_block_num_arg; }
+
   /// Increase/decrease the current indentation level (used by op codegen helpers that emit scf.for blocks)
   void IncreaseIndent() { indent_level_++; }
   void DecreaseIndent() { indent_level_--; }
@@ -533,6 +551,12 @@ class PTOCodegen : public CodegenBase {
     DataType gm_slot_buffer_dtype = DataType::FP32;
     std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
 
+    /// SSA names of the synthetic SPMD block_idx/block_num prefix params.
+    /// Empty when the current function does not use tile.get_block_idx /
+    /// tile.get_block_num.
+    std::string spmd_block_idx_arg;
+    std::string spmd_block_num_arg;
+
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
 
@@ -571,6 +595,9 @@ class PTOCodegen : public CodegenBase {
       gm_slot_buffer_ssa.clear();
       gm_slot_buffer_dtype = DataType::FP32;
       gm_slot_buffer_region_by_pipe.clear();
+
+      spmd_block_idx_arg.clear();
+      spmd_block_num_arg.clear();
 
       current_expr_value.clear();
       yield_buffer.clear();

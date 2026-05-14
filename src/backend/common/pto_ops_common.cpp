@@ -2153,8 +2153,27 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     });
   };
   reg_i64_to_index_op("tile.get_subblock_idx", "pto.get_subblock_idx");
-  reg_i64_to_index_op("tile.get_block_num", "pto.get_block_num");
-  reg_i64_to_index_op("tile.get_block_idx", "pto.get_block_idx");
+
+  // SPMD block identity ops read from synthetic i32 %arg prefix params that
+  // PTOCodegen prepends to the func.func signature whenever the function
+  // body contains tile.get_block_idx / tile.get_block_num. The kernel
+  // wrapper resolves the runtime values from intrinsic.h::get_block_idx(args) /
+  // get_block_num(args) and forwards them as the first two call args.
+  auto reg_spmd_block_op = [&](const char* tile_op, std::string (codegen::PTOCodegen::*getter)() const) {
+    reg(tile_op, [tile_op, getter](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+      auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+      CHECK(op->args_.empty()) << tile_op << " takes no arguments, got " << op->args_.size();
+      std::string result = codegen.GetCurrentResultTarget();
+      INTERNAL_CHECK_SPAN(!result.empty(), op->span_) << tile_op << " requires assignment target";
+      std::string arg_ssa = (codegen.*getter)();
+      INTERNAL_CHECK_SPAN(!arg_ssa.empty(), op->span_)
+          << tile_op << " requires PTOCodegen SPMD prefix params to be initialised";
+      codegen.Emit(result + " = arith.index_cast " + arg_ssa + " : i32 to index");
+      return std::string("");
+    });
+  };
+  reg_spmd_block_op("tile.get_block_idx", &codegen::PTOCodegen::GetSpmdBlockIdxArgSSA);
+  reg_spmd_block_op("tile.get_block_num", &codegen::PTOCodegen::GetSpmdBlockNumArgSSA);
 
   // tile.move → pto.tmov with no-op elision.
   // When MemoryReuse inserts a tile.move between two MemRefs that end up at the

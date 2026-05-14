@@ -557,6 +557,61 @@ The wrapper unpacks `int64_t* args` following the standard convention:
 | `TensorType` | `Tensor*` → `buffer.addr` → typed pointer |
 | `ScalarType` | `uint64_t` → union decode → typed value |
 
+### SPMD Block Identity Parameters
+
+`tile.get_block_idx()` and `tile.get_block_num()` lower to two synthetic
+`i32` parameters that PTOCodegen appends at the **end** of the `func.func`
+signature using named SSAs (`%__pypto_spmd_block_idx`,
+`%__pypto_spmd_block_num`). The IR contract for these ops is unchanged —
+the synthetic params live only in the generated MLIR / C++ and never appear
+in `Function.params`.
+
+```mlir
+func.func @spmd_kernel(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
+                       %__pypto_spmd_block_idx: i32,
+                       %__pypto_spmd_block_num: i32)
+                       attributes { ... } {
+  %0 = arith.index_cast %__pypto_spmd_block_idx : i32 to index
+  // ... use %0 as the block index ...
+}
+```
+
+The kernel wrapper resolves the runtime values once from
+`intrinsic.h::get_block_idx(args)` / `get_block_num(args)` and forwards them
+as the trailing two call args:
+
+```cpp
+extern "C" __aicore__ __attribute__((always_inline))
+void kernel_entry(__gm__ int64_t* args) {
+    // Read logical SPMD block identity from runtime dispatch payload
+    int32_t __pypto_spmd_block_idx = get_block_idx(args);
+    int32_t __pypto_spmd_block_num = get_block_num(args);
+
+    // ... tensor / scalar / dyn-dim unpacking ...
+
+    // Forward to ptoas-generated function (block args at the end)
+    spmd_kernel(a, out, __pypto_spmd_block_idx, __pypto_spmd_block_num);
+}
+```
+
+**Detection scope.** Both layers detect SPMD usage on a per-function basis:
+
+- `FunctionUsesSpmdBlockOps` (C++, `src/codegen/pto/pto_codegen.cpp`) drives
+  whether PTOCodegen appends the two params to a given function's signature.
+- `_uses_spmd_block_ops` (Python, `python/pypto/backend/pto_backend.py`)
+  drives whether the wrapper appends the two locals to the inner call site.
+
+For non-SPMD sibling functions in an SPMD group (`group_uses_spmd=True` but
+the function itself does not call `tile.get_block_*`), the wrapper still
+declares the two locals because the `__gm_pipe_buffer` sharding logic in
+`_generate_arg_unpacking` consumes them — but it does **not** append them to
+the inner call, matching the function's MLIR signature.
+
+This replaces the earlier macro-shadow + `[[block_local]] static` /
+`static thread_local` bridge plus `#pragma push_macro` / `#undef` /
+`pop_macro` dance. Block identity now flows through the call graph like
+every other per-launch value (tensor pointers, scalar args, dynamic dims).
+
 ### Implementation
 
 **Module**: `python/pypto/backend/pto_backend.py`

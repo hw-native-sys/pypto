@@ -1001,6 +1001,100 @@ class TestGenerateKernelWrapper:
         assert "#define get_subblockid() pypto_runtime_subblock_id" in split_vec_wrapper
         assert "pypto_runtime_subblock_id = get_sub_block_id(args);" in split_vec_wrapper
 
+    def test_spmd_wrapper_drops_macro_bridge_and_appends_block_args(self):
+        @pl.program
+        class SpmdWrapperProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def spmd_kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                block_idx = pl.tile.get_block_idx()
+                _block_num = pl.tile.get_block_num()
+                offset = block_idx * 128
+                tile_a = pl.load(a, [offset, 0], [128, 128])
+                out = pl.store(tile_a, [offset, 0], out)
+                return out
+
+        transformed = _run_default_passes(SpmdWrapperProgram)
+        func = transformed.get_function("spmd_kernel")
+        assert func is not None
+
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT)
+        # Macro shadow / dual storage class / push_pop dance are all gone.
+        assert "[[block_local]] static int32_t __pypto_spmd_block_idx" not in wrapper
+        assert "static thread_local int32_t __pypto_spmd_block_idx" not in wrapper
+        assert "#define get_block_idx()" not in wrapper
+        assert "#define get_block_num()" not in wrapper
+        assert 'push_macro("get_block_idx")' not in wrapper
+        assert 'pop_macro("get_block_idx")' not in wrapper
+        assert 'push_macro("get_block_num")' not in wrapper
+        assert 'pop_macro("get_block_num")' not in wrapper
+        # Plain locals, computed once from intrinsic.h overloads.
+        assert "int32_t __pypto_spmd_block_idx = get_block_idx(args);" in wrapper
+        assert "int32_t __pypto_spmd_block_num = get_block_num(args);" in wrapper
+        # Inner function call APPENDS the two block args after user args.
+        # SSA conversion may rename params (e.g. `a` → `a__ssa_v0`), so match
+        # the call-site suffix rather than the full arg list.
+        assert "__pypto_spmd_block_idx, __pypto_spmd_block_num);" in wrapper
+        # And the call entry uses the inner function name.
+        assert "spmd_kernel(" in wrapper
+
+    def test_non_spmd_func_in_spmd_group_keeps_locals_but_not_call_suffix(self):
+        # Sibling-only SPMD usage: func itself does not call get_block_idx /
+        # get_block_num, so PTOCodegen does not append SPMD params to its
+        # signature — and the wrapper must NOT append them to the inner call
+        # either. But __gm_pipe_buffer sharding in _generate_arg_unpacking
+        # still consumes the two locals, so they remain in the wrapper.
+        func = _make_func("plain_kernel", [("a", "tensor"), ("out", "tensor")])
+        wrapper = _generate_kernel_wrapper(func, SAMPLE_PTOAS_OUTPUT, group_uses_spmd=True)
+        assert "int32_t __pypto_spmd_block_idx = get_block_idx(args);" in wrapper
+        assert "int32_t __pypto_spmd_block_num = get_block_num(args);" in wrapper
+        # Call site does not append block args.
+        assert "__pypto_spmd_block_idx" not in wrapper.split("plain_kernel(", 1)[1].split(");")[0]
+
+
+def test_pto_codegen_spmd_block_params_appended_with_named_ssas():
+    """tile.get_block_idx/num lower to arith.index_cast of two named i32 params
+    appended at the end of the func.func signature."""
+
+    @pl.program
+    class SpmdCodegenProgram:
+        @pl.function(type=pl.FunctionType.InCore)
+        def spmd_func(
+            self,
+            a: pl.Tensor[[512, 128], pl.FP32],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            block_idx = pl.tile.get_block_idx()
+            _block_num = pl.tile.get_block_num()
+            offset = block_idx * 128
+            tile_a = pl.load(a, [offset, 0], [128, 128])
+            out = pl.store(tile_a, [offset, 0], out)
+            return out
+
+    mlir = _generate_default_mlir(SpmdCodegenProgram)
+    # User-defined tensor params stay at the front under the existing
+    # tensors-first convention (indices unchanged).
+    assert "%arg0: !pto.ptr<f32>" in mlir
+    assert "%arg1: !pto.ptr<f32>" in mlir
+    # SPMD block identity params are appended at the end with named SSAs.
+    assert "%__pypto_spmd_block_idx: i32" in mlir
+    assert "%__pypto_spmd_block_num: i32" in mlir
+    # tile.get_block_idx / num lower to arith.index_cast of those named params.
+    assert "arith.index_cast %__pypto_spmd_block_idx : i32 to index" in mlir
+    assert "arith.index_cast %__pypto_spmd_block_num : i32 to index" in mlir
+    # The legacy pto.get_block_idx / pto.get_block_num pseudo-ops are gone.
+    assert "pto.get_block_idx" not in mlir
+    assert "pto.get_block_num" not in mlir
+    # SPMD params come AFTER the user-defined params in textual signature order.
+    signature_line = next(line for line in mlir.splitlines() if "func.func @spmd_func(" in line)
+    arg0_pos = signature_line.find("%arg0")
+    spmd_idx_pos = signature_line.find("%__pypto_spmd_block_idx")
+    assert arg0_pos != -1 and spmd_idx_pos != -1
+    assert spmd_idx_pos > arg0_pos, f"SPMD param must come after user params: {signature_line}"
+
 
 class TestGenerateSkipPtoas:
     """Tests for generate() with skip_ptoas=True."""

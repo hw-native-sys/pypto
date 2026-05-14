@@ -469,37 +469,13 @@ def _generate_kernel_header(func: _ir_core.Function, *, uses_spmd: bool | None =
             """
         )
 
-    # SPMD block ops bridge: redirect ccec built-in get_block_idx()/get_block_num()
-    # to runtime intrinsics that read from the dispatch payload (LocalContext).
-    # On NPU, AICore has no writable static data segment for GM pointers, so we
-    # store scalar values in [[block_local]] variables (same pattern as subblock
-    # bridge). On SIM, fall back to thread_local storage.
-    #
-    # IMPORTANT: this bridge is emitted AFTER <pto/pto-inst.hpp> so that the
-    # `inline uint32_t get_block_idx()` declaration in cpu_stub.hpp is parsed
-    # before our function-like macro redefines the identifier.
+    # SPMD: include intrinsic.h so the wrapper can call get_block_idx(args) /
+    # get_block_num(args). Block identity now flows into the kernel as the
+    # first two wrapper-passed parameters, so there is no macro shadow, no
+    # [[block_local]] static / thread_local storage, and no __CPU_SIM fork.
     if uses_spmd is None:
         uses_spmd = _uses_spmd_block_ops(func)
-    spmd_override = ""
-    if uses_spmd:
-        spmd_override = textwrap.dedent(
-            """\
-            #include "intrinsic.h"
-
-            // SPMD runtime bridge: redirect get_block_idx()/get_block_num() to
-            // runtime LocalContext values (written by build_payload per dispatch).
-            #if defined(__CPU_SIM)
-            static thread_local int32_t __pypto_spmd_block_idx;
-            static thread_local int32_t __pypto_spmd_block_num;
-            #else
-            [[block_local]] static int32_t __pypto_spmd_block_idx;
-            [[block_local]] static int32_t __pypto_spmd_block_num;
-            #endif
-            #define get_block_idx() ((int64_t)__pypto_spmd_block_idx)
-            #define get_block_num() ((int64_t)__pypto_spmd_block_num)
-
-            """
-        )
+    spmd_override = '#include "intrinsic.h"\n' if uses_spmd else ""
 
     return _KERNEL_HEADER.format(
         func_name=func.name,
@@ -521,11 +497,11 @@ def _generate_kernel_wrapper(
     2. Preprocessed ptoas code (static, no duplicate includes)
     3. ``kernel_entry`` wrapper with arg unpacking and forward call
     """
-    uses_spmd = group_uses_spmd or _uses_spmd_block_ops(func)
+    func_uses_spmd = _uses_spmd_block_ops(func)
+    uses_spmd = group_uses_spmd or func_uses_spmd
     header = _generate_kernel_header(func, uses_spmd=uses_spmd)
     ptoas_body = _preprocess_ptoas_output(ptoas_code)
     unpacking_code, var_names = _generate_arg_unpacking(func, uses_spmd=uses_spmd)
-    call_args = ", ".join(var_names)
     runtime_subblock_setup = ""
     if _needs_runtime_subblock_bridge(func):
         runtime_subblock_setup = (
@@ -535,23 +511,25 @@ def _generate_kernel_wrapper(
             "#endif\n\n"
         )
 
+    # Resolve SPMD block identity once from intrinsic.h::get_block_idx(args) /
+    # get_block_num(args). Locals are declared whenever any function in the
+    # group needs them (e.g., __gm_pipe_buffer sharding in _generate_arg_unpacking
+    # references them even for non-SPMD members of an SPMD group).
     spmd_args_setup = ""
     if uses_spmd:
-        # Use undef/redefine dance: temporarily remove our macros so we can call
-        # the intrinsic.h functions that take args, then restore the macros.
-        # Runs under both NPU and SIM — in SIM, intrinsic.h::get_block_idx(args)
-        # reads the runtime-dispatched LocalContext so block_idx is correct.
         spmd_args_setup = (
             "    // Read logical SPMD block identity from runtime dispatch payload\n"
-            '    #pragma push_macro("get_block_idx")\n'
-            '    #pragma push_macro("get_block_num")\n'
-            "    #undef get_block_idx\n"
-            "    #undef get_block_num\n"
-            "    __pypto_spmd_block_idx = get_block_idx(args);\n"
-            "    __pypto_spmd_block_num = get_block_num(args);\n"
-            '    #pragma pop_macro("get_block_idx")\n'
-            '    #pragma pop_macro("get_block_num")\n\n'
+            "    int32_t __pypto_spmd_block_idx = get_block_idx(args);\n"
+            "    int32_t __pypto_spmd_block_num = get_block_num(args);\n\n"
         )
+
+    # PTOCodegen appends two synthetic i32 params (block_idx, block_num) at
+    # the end of the func.func signature when func itself uses
+    # tile.get_block_idx / tile.get_block_num. Mirror that order in the call.
+    call_args_list = list(var_names)
+    if func_uses_spmd:
+        call_args_list = call_args_list + ["__pypto_spmd_block_idx", "__pypto_spmd_block_num"]
+    call_args = ", ".join(call_args_list)
 
     wrapper_func = (
         "// --- Kernel entry point ---\n"

@@ -173,6 +173,28 @@ class TupleConsumerCollector : public ir::IRVisitor {
   std::vector<ir::VarPtr> elements_;
 };
 
+// Returns true when the function body invokes tile.get_block_idx or
+// tile.get_block_num. Drives PTOCodegen's decision to prepend two synthetic
+// i32 prefix params to the emitted func.func signature; the kernel wrapper
+// resolves those values from intrinsic.h::get_block_idx(args) /
+// get_block_num(args) at dispatch time.
+bool FunctionUsesSpmdBlockOps(const ir::FunctionPtr& func) {
+  if (!func || !func->body_) return false;
+  struct Finder : public ir::IRVisitor {
+    bool found = false;
+    void VisitExpr_(const ir::CallPtr& op) override {
+      if (found) return;
+      if (op->op_ && (op->op_->name_ == "tile.get_block_idx" || op->op_->name_ == "tile.get_block_num")) {
+        found = true;
+        return;
+      }
+      ir::IRVisitor::VisitExpr_(op);
+    }
+  } finder;
+  finder.VisitStmt(func->body_);
+  return finder.found;
+}
+
 }  // namespace
 
 // Visitor to collect all MemRef objects from TileType variables
@@ -327,6 +349,14 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   fs_.Reset();
   fs_.current_function = func;
 
+  // SPMD block identity params are injected at codegen time (not at IR level)
+  // when the function body invokes tile.get_block_idx / tile.get_block_num.
+  // They are appended at the end of the func.func signature with named SSAs;
+  // tile.get_block_idx / tile.get_block_num lower to arith.index_cast of those
+  // params, and the kernel wrapper supplies the runtime values via
+  // intrinsic.h::get_block_idx(args) / get_block_num(args).
+  const bool uses_spmd_params = FunctionUsesSpmdBlockOps(func);
+
   // Reserve %argN names upfront so NewNamedTemp never collides with them
   for (size_t i = 0; i < func->params_.size(); i++) {
     fs_.used_ssa_names.insert("arg" + std::to_string(i));
@@ -349,6 +379,10 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     for (size_t i = 0; i < extra; i++) {
       fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + i));
     }
+  }
+  if (uses_spmd_params) {
+    fs_.used_ssa_names.insert("__pypto_spmd_block_idx");
+    fs_.used_ssa_names.insert("__pypto_spmd_block_num");
   }
 
   BuildVarToMemRefMapping(func);
@@ -453,6 +487,15 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     std::string arg_name = "%arg" + std::to_string(next_arg_idx++);
     stream_ << ", " << arg_name << ": index";
     BindVarToMlir(dyn_var, arg_name);
+  }
+
+  // Append SPMD block identity params after dynamic-dim args. Named SSAs make
+  // the synthetic origin obvious in the emitted MLIR and let lowerings refer
+  // to them via PTOCodegen::GetSpmdBlock{Idx,Num}ArgSSA().
+  if (uses_spmd_params) {
+    fs_.spmd_block_idx_arg = "%__pypto_spmd_block_idx";
+    fs_.spmd_block_num_arg = "%__pypto_spmd_block_num";
+    stream_ << ", " << fs_.spmd_block_idx_arg << ": i32, " << fs_.spmd_block_num_arg << ": i32";
   }
 
   stream_ << ")";

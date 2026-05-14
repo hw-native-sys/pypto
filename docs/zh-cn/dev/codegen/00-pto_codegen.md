@@ -551,6 +551,59 @@ output_dir/
 | `TensorType` | `Tensor*` -> `buffer.addr` -> 带类型指针 |
 | `ScalarType` | `uint64_t` -> 联合体解码 -> 带类型值 |
 
+### SPMD Block 身份参数
+
+`tile.get_block_idx()` 和 `tile.get_block_num()` 在 codegen 阶段被降阶为两个
+合成 `i32` 形参，PTOCodegen 把它们**追加到** `func.func` 签名末尾，并使用
+有意义的命名 SSA(`%__pypto_spmd_block_idx`、`%__pypto_spmd_block_num`)。
+这两个 op 的 IR 契约不变 -- 合成形参只出现在生成的 MLIR / C++ 中，绝不进入
+`Function.params`。
+
+```mlir
+func.func @spmd_kernel(%arg0: !pto.ptr<f32>, %arg1: !pto.ptr<f32>,
+                       %__pypto_spmd_block_idx: i32,
+                       %__pypto_spmd_block_num: i32)
+                       attributes { ... } {
+  %0 = arith.index_cast %__pypto_spmd_block_idx : i32 to index
+  // ... 把 %0 当作 block 索引使用 ...
+}
+```
+
+kernel 包装器在 dispatch 时调用 `intrinsic.h::get_block_idx(args)` /
+`get_block_num(args)` 一次解析出运行时值，并把它们作为最后两个实参传给
+被包装的函数:
+
+```cpp
+extern "C" __aicore__ __attribute__((always_inline))
+void kernel_entry(__gm__ int64_t* args) {
+    // 从运行时 dispatch payload 读取逻辑 SPMD block 身份
+    int32_t __pypto_spmd_block_idx = get_block_idx(args);
+    int32_t __pypto_spmd_block_num = get_block_num(args);
+
+    // ... 张量 / 标量 / 动态维参数解包 ...
+
+    // 转发到 ptoas 生成的函数(block 参数追加在末尾)
+    spmd_kernel(a, out, __pypto_spmd_block_idx, __pypto_spmd_block_num);
+}
+```
+
+**检测范围。** 两层各自基于函数体独立检测 SPMD usage:
+
+- `FunctionUsesSpmdBlockOps`(C++，位于 `src/codegen/pto/pto_codegen.cpp`)
+  决定 PTOCodegen 是否给该函数签名追加两个形参。
+- `_uses_spmd_block_ops`(Python，位于 `python/pypto/backend/pto_backend.py`)
+  决定 wrapper 是否把这两个局部变量追加到对内函数调用末尾。
+
+对于 SPMD 组内自身不调用 `tile.get_block_*` 的 sibling 函数
+(`group_uses_spmd=True` 但函数本身不用 SPMD ops)，wrapper 仍会声明这两个
+局部变量供 `_generate_arg_unpacking` 中 `__gm_pipe_buffer` 分片逻辑消费，
+但**不会**把它们追加到对内调用 -- 这与该函数 MLIR 签名保持一致。
+
+此设计替换了旧的宏 shadow + `[[block_local]] static` /
+`static thread_local` 桥接以及 `#pragma push_macro` / `#undef` /
+`pop_macro` 舞步。block 身份现在与张量指针、标量参数、动态维一样
+通过调用图正常传递。
+
 ### 实现
 
 **模块**: `python/pypto/backend/pto_backend.py`
