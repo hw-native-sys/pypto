@@ -78,7 +78,7 @@ jobs:
   system-tests:
     runs-on: [self-hosted, linux, arm64, npu]
     env:
-      ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTOAS_VERSION: v0.36
       PTOAS_SHA256: 698f753b67ca4387e2e4ef96dfdbb35d71295e94f9f5b20a545b34647f548efc
@@ -98,7 +98,7 @@ jobs:
         -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
         -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
         -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
-        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
+        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
         -e DEVICE_ID
         -e DEVICE_RANGE
     steps:
@@ -142,7 +142,7 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
 
       - name: Add Ascend tools to PATH
-        run: echo "/usr/local/Ascend/cann-8.5.0/bin" >> $GITHUB_PATH
+        run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
 
       - name: Install simpler
         run: |
@@ -169,7 +169,7 @@ jobs:
   pypto-lib-model:
     runs-on: [self-hosted, linux, arm64, npu]
     env:
-      ASCEND_HOME_PATH: /usr/local/Ascend/cann-8.5.0
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTOAS_VERSION: v0.36
       PTOAS_SHA256: 698f753b67ca4387e2e4ef96dfdbb35d71295e94f9f5b20a545b34647f548efc
@@ -189,7 +189,7 @@ jobs:
         -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
         -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
         -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
-        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0
+        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
         -e DEVICE_ID
         -e DEVICE_RANGE
     steps:
@@ -229,7 +229,7 @@ jobs:
           chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
 
       - name: Add Ascend tools to PATH
-        run: echo "/usr/local/Ascend/cann-8.5.0/bin" >> $GITHUB_PATH
+        run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
 
       - name: Install simpler
         run: |
