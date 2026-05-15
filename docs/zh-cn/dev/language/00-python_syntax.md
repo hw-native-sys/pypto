@@ -329,38 +329,107 @@ for (x,) in pl.while_(init_values=(x_init,)):
 ### 手工依赖原语
 
 默认情况下 runtime 通过缓冲区读写重叠（`OverlapMap`）自动推导任务间依赖。
-两个互补的原语让用户可以选择性地退出自动跟踪并显式管理排序：
+DSL 暴露**两套正交的机制**，用户可任意组合：
+
+> **两套机制相互独立。** 把某个 buffer / 区域 / arg 从自动跟踪中"摘出来"
+> 并**不要求**你同时声明显式边；声明显式边也**不要求**你同时关掉自动
+> 跟踪。最终 task 的 fanin 是 **`自动跟踪 deps ∪ 显式 deps`**——它们
+> 是相加而非互相替代。
+
+#### 机制 A——退出自动依赖跟踪（3 种粒度）
+
+三种粒度彼此独立。按需选择最小的单位，必要时叠加。
 
 | 表层语法 | 粒度 | 作用 |
 | -------- | ---- | ---- |
-| `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`。该次提交对该槽位不进入自动跟踪。**仅 auto scope 生效**——在 `pl.manual_scope` 内没有语义。 |
-| `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；用户必须通过 `deps=[...]` **显式声明每一条**需要的排序边。 |
-| `result, tid = pl.submit(kernel, *args, deps=[...])` | per-call submit | 在 `manual_scope` 内提交 `kernel` 并解包一个二元组：`result` 是 kernel 的结果（单输出 kernel 为单个名字，多输出 kernel 为名字 tuple），`tid` 是 producer `pl.Scalar[pl.TASK_ID]`。它是 parser construct（类似 `pl.range`），不是 runtime 函数。`deps=[...]` **只**在 `pl.submit(...)` 上被接受。 |
-| `None`（Python 字面量） | per-loop 种子 / dep 条目 | "暂无 producer" 的 TaskId 哨兵。`prev_tid = None` 用作 TaskId 循环 iter_arg 的种子；`None` 也可作为 `deps=[None]` 条目（被丢弃——不贡献任何边）。当它出现在 TaskId 位置时下沉为 `system.task_invalid` → `PTO2TaskId::invalid()`。 |
+| `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；用户需要的排序边必须通过机制 B 显式声明。 |
+| `pl.create_tensor([...], dtype=..., manual_dep=True)` | per-tensor 生命周期 | 任何读 / 写该 tensor 的 task 都**整生命周期**跳过 `OverlapMap` 的 lookup 和 insert，不受 scope 影响。适合那种"完全交给显式边管理"的 scratch buffer。 |
+| `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`——**仅本次提交**对该槽位不进入自动跟踪。在 `pl.manual_scope` 内没有意义（scope 已经全员退出）。 |
 
-普通的 `out = self.kernel(...)` 是 **fire-and-forget**：它不返回 task id，并且在它上面写 `deps=` 会被拒绝（parser 报错，提示 "use `pl.submit`"）。Manual scope 是**只看声明**的：即使某个 kernel 读取了先前 kernel 写过的 buffer，若 `pl.submit` 上没写 `deps=[...]`，编译器也不会替你补上。每个 `deps=[...]` 条目必须是 TaskId 值：先前 `pl.submit(...)` 绑定的 `tid`、TaskId 循环 iter_arg carry、来自 `pl.array.create(N, pl.TASK_ID)` 的 `Array[N, TASK_ID]`，或字面量 `None`。`deps=[...]` 不接受 tensor。
+#### 机制 B——显式声明 task 间的边（`deps=`）
+
+两种表面都下沉为相同的 `set_dependencies` codegen。选哪个取决于
+producer 是一个 kernel 调用 (`pl.submit`) 还是一段多语句的 outlined 区域
+(`pl.at`-块)。
+
+| 表层语法 | producer 形态 | 备注 |
+| -------- | ------------- | ---- |
+| `result, tid = pl.submit(kernel, *args, deps=[...])` | 单个 kernel 调用 | 尾部 `tid` 是 producer `pl.Scalar[pl.TASK_ID]`。它是 parser construct（类似 `pl.range`），不是 runtime 函数。 |
+| `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-块 | 整块被 outline 成 InCore kernel + Call；`tid` 捕获被合成的 Call 的 TaskId，可作为后续 `pl.submit` / `pl.at` 的 dep。 |
+| `None`（Python 字面量） | 种子 / dep 条目 | "暂无 producer" 的哨兵。`prev_tid = None` 用作 TaskId 循环 iter_arg 的种子；`deps=[None]` 中的 `None` 被丢弃（不贡献任何边）。下沉为 `system.task_invalid` → `PTO2TaskId::invalid()`。 |
+
+**两个表面都不依赖机制 A 的状态。** 你可以在普通自动跟踪的 orchestration 里
+使用 `pl.submit(..., deps=[tid])`、也可以在 `pl.manual_scope()` 内使用、
+还可以在 `manual_dep=True` 的 tensor 上使用——显式边总是在自动跟踪的结果
+**之上**追加。早期"`deps=` 只在 `pl.manual_scope` 内有效"的限制已经
+解除。
+
+普通的 `out = self.kernel(...)` 是 **fire-and-forget**：它不返回 task id，
+并且在它上面写 `deps=` 会被拒绝（parser 报错，提示 "use `pl.submit`"）。
+每个 `deps=[...]` 条目必须是 TaskId 值：先前 `pl.submit(...)` /
+`pl.at(..., deps=) as tid` 绑定的 `tid`、TaskId 循环 iter_arg carry、
+来自 `pl.array.create(N, pl.TASK_ID)` 的 `Array[N, TASK_ID]`，或字面量
+`None`。`deps=[...]` 不接受 tensor。
 
 ```python
+# 示例 1——两套机制同用：scope-wide 退出 + 显式边。
 @pl.function(type=pl.FunctionType.Orchestration)
 def main(self, x: pl.Tensor[[64], pl.FP32],
          scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
          out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
-    with pl.manual_scope():
+    with pl.manual_scope():                                           # 机制 A: scope-wide
         scratch, stage1_tid = pl.submit(self.stage1, x, scratch)
-        out, _ = pl.submit(self.stage2, scratch, out, deps=[stage1_tid])  # stage2 follows stage1
+        out, _ = pl.submit(self.stage2, scratch, out, deps=[stage1_tid])  # 机制 B
     return out
+```
+
+```python
+# 示例 2——只用机制 B，**不**进 manual_scope。其他 buffer 仍然走自动跟踪；
+# 显式边是在自动跟踪结果**之上**追加。注意没有 `with pl.manual_scope():`。
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: pl.Tensor[[64], pl.FP32],
+         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+    tmp, prep_tid = pl.submit(self.preprocess, x)
+    out, _ = pl.submit(self.consume, tmp, out, deps=[prep_tid])
+    return out
+```
+
+```python
+# 示例 3——以 pl.at-块作为 producer，给下游 pl.at-块加显式边。
+# `as tid` 捕获被合成 outlined Call 的 TaskId。
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: pl.Tensor[[64], pl.FP32],
+         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP) as tid_a:
+        # 块体被 outline 成 InCore kernel
+        ...
+    with pl.at(level=pl.Level.CORE_GROUP, deps=[tid_a]) as tid_b:
+        # 显式边——严格在 tid_a 块之后运行
+        ...
+    return out
+```
+
+```python
+# 示例 4——机制 A 的 tensor-lifetime 形态：scratch buffer 整生命周期退出
+# 自动跟踪；ordering 完全交给显式边管理。
+scratch = pl.create_tensor([N], dtype=pl.FP32, manual_dep=True)
+scratch, prod_tid = pl.submit(self.fill, x, scratch)
+out, _ = pl.submit(self.consume, scratch, out, deps=[prod_tid])
 ```
 
 `pl.submit` 脱糖为单个 `ir.Call`，其返回类型是扁平的增广
 `TupleType([*<kernel return types>, ScalarType(TASK_ID)])` ——
 元素 `0..N-1` 是 kernel 结果，元素 `N` 是 producer TaskId。parser 把每个
 `deps=[...]` 列表直接写入 kernel `Call.attrs["manual_dep_edges"]`（一个
-`vector<VarPtr>`）。codegen 填充一个按精确依赖数定长的栈数组，并对每个
-task 发出一次 `params.set_dependencies(arr, count);` 调用。runtime 的
-`Arg::set_dependencies(ptr, count)` 直接接收调用者持有的任意长度数组，
-所以单 call 的依赖边数没有硬上限。
+`vector<VarPtr>`）。`pl.at(..., deps=) as tid` 走相同的路径：outliner 读
+`ScopeStmt` 上的 `attrs["task_id_var"]` + `attrs["manual_dep_edges"]`，
+把它们一起搬到合成的 Call 上。codegen 填充一个按精确依赖数定长的栈数组，
+并对每个 task 发出一次 `params.set_dependencies(arr, count);` 调用。
+runtime 的 `Arg::set_dependencies(ptr, count)` 直接接收调用者持有的任意
+长度数组，所以单 call 的依赖边数没有硬上限。
 
-`pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用。
+`pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用
+（整个 scope 已经退出自动跟踪了）。
 
 #### Manual scope 下的 `pl.parallel`：array-carry fence
 

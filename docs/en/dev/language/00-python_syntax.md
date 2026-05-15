@@ -330,41 +330,115 @@ See [Language Guide](../../user/01-language_guide.md#incore-scopes) for examples
 ### Manual dependency primitives
 
 By default the runtime auto-derives task→task dependencies from buffer
-read/write overlap (the `OverlapMap`). Two complementary primitives let the
-user opt out and manage ordering explicitly:
+read/write overlap (the `OverlapMap`). The DSL exposes **two orthogonal
+mechanisms** the user can combine:
+
+> **The two mechanisms are independent.** Opting a buffer / region / arg
+> out of auto-tracking does **not** require declaring explicit edges, and
+> declaring explicit edges does **not** require turning auto-tracking off.
+> The final task fanin is **`auto-tracked deps ∪ explicit deps`** — they
+> compose, they don't substitute for each other.
+
+#### Mechanism A — opt out of auto-dep tracking (3 granularities)
+
+All three granularities are independent of each other. Pick the smallest
+unit that fits your use case; combine if needed.
 
 | Surface | Granularity | Effect |
 | ------- | ----------- | ------ |
-| `pl.no_dep(arg)` | per-call argument | At a kernel call site, the wrapped argument's `ArgDirection` becomes `NoDep`. Auto-tracking ignores that slot for this submission only. **Auto scope only** — has no semantic effect inside `pl.manual_scope`. |
-| `with pl.manual_scope():` | per-region | Lowers to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; the user must declare **every** required ordering edge explicitly via `deps=[...]`. |
-| `result, tid = pl.submit(kernel, *args, deps=[...])` | per-call submit | Inside `manual_scope`, submits `kernel` and unpacks a 2-tuple: `result` is the kernel's result (a single name, or a tuple of names for a multi-output kernel) and `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. `deps=[...]` is accepted **only** on `pl.submit(...)`. |
-| `None` (Python literal) | per-loop seed / dep entry | The "no producer yet" TaskId sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` is also accepted as a `deps=[None]` entry (dropped — contributes no edge). In a TaskId position it lowers to `system.task_invalid` → `PTO2TaskId::invalid()`. |
+| `with pl.manual_scope():` | per-region | Lowers to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; the user must declare every required ordering edge explicitly (see Mechanism B). |
+| `pl.create_tensor([...], dtype=..., manual_dep=True)` | per-tensor lifetime | Every task that reads or writes this tensor skips `OverlapMap` lookup and insert for its **entire lifetime**, regardless of scope. Useful for scratch buffers that are managed entirely by explicit edges. |
+| `pl.no_dep(arg)` | per-call argument | At a kernel call site, the wrapped argument's `ArgDirection` becomes `NoDep` — auto-tracking ignores that slot **for this submission only**. No effect inside `pl.manual_scope` (the scope already disables auto-tracking). |
 
-Plain `out = self.kernel(...)` is **fire-and-forget**: it does not return a task id, and `deps=` is rejected on it (the parser raises, hinting "use `pl.submit`"). Manual scope is **declare-only**: omitting `deps=[...]` on a `pl.submit` will not be backfilled, even if the kernel reads what a prior kernel wrote. Each `deps=[...]` entry must be a TaskId value: a `tid` bound by a prior `pl.submit(...)`, a TaskId loop iter_arg carry, an `Array[N, TASK_ID]` from `pl.array.create(N, pl.TASK_ID)`, or the literal `None`. Tensors are **not** accepted in `deps=[...]`.
+#### Mechanism B — declare explicit task→task edges (`deps=`)
+
+Two surfaces both produce the same `set_dependencies` codegen. The
+choice depends on whether the producer is a single kernel call
+(`pl.submit`) or a multi-statement region (`pl.at`-block).
+
+| Surface | Producer shape | Notes |
+| ------- | -------------- | ----- |
+| `result, tid = pl.submit(kernel, *args, deps=[...])` | single kernel call | The trailing `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. |
+| `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + Call; `tid` captures the synthesized call's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. |
+| `None` (Python literal) | seed / dep entry | The "no producer yet" sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` in `deps=[None]` is dropped (contributes no edge). Lowers to `system.task_invalid` → `PTO2TaskId::invalid()`. |
+
+**Both surfaces work regardless of Mechanism A state.** You can use
+`pl.submit(..., deps=[tid])` in plain auto-tracked orchestration, or
+inside `pl.manual_scope()`, or against a `manual_dep=True` tensor, and the
+explicit edge is always added on top of whatever auto-tracking decided.
+The earlier restriction that "`deps=` is accepted only inside
+`pl.manual_scope`" no longer applies.
+
+Plain `out = self.kernel(...)` is **fire-and-forget**: it returns no task
+id, and `deps=` is rejected on it (the parser raises, hinting "use
+`pl.submit`"). Each `deps=[...]` entry must be a TaskId value: a `tid`
+bound by a prior `pl.submit(...)` / `pl.at(..., deps=) as tid`, a TaskId
+loop iter_arg carry, an `Array[N, TASK_ID]` from
+`pl.array.create(N, pl.TASK_ID)`, or the literal `None`. Tensors are
+**not** accepted in `deps=[...]`.
 
 ```python
+# Example 1 — both mechanisms together: scope-wide opt-out + explicit edge.
 @pl.function(type=pl.FunctionType.Orchestration)
 def main(self, x: pl.Tensor[[64], pl.FP32],
          scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
          out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
-    with pl.manual_scope():
+    with pl.manual_scope():                                           # Mechanism A: scope-wide
         scratch, stage1_tid = pl.submit(self.stage1, x, scratch)
-        out, _ = pl.submit(self.stage2, scratch, out, deps=[stage1_tid])  # stage2 follows stage1
+        out, _ = pl.submit(self.stage2, scratch, out, deps=[stage1_tid])  # Mechanism B
     return out
+```
+
+```python
+# Example 2 — Mechanism B alone, NO manual_scope. Auto-tracking stays on
+# for everything else; the explicit edge is *added on top* of whatever
+# auto-tracking decided. Note the absence of `with pl.manual_scope():`.
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: pl.Tensor[[64], pl.FP32],
+         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+    tmp, prep_tid = pl.submit(self.preprocess, x)
+    out, _ = pl.submit(self.consume, tmp, out, deps=[prep_tid])
+    return out
+```
+
+```python
+# Example 3 — pl.at-block as the producer, with deps= on a downstream block.
+# `as tid` captures the synthesized outlined-Call's TaskId.
+@pl.function(type=pl.FunctionType.Orchestration)
+def main(self, x: pl.Tensor[[64], pl.FP32],
+         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+    with pl.at(level=pl.Level.CORE_GROUP) as tid_a:
+        # body becomes an outlined InCore kernel
+        ...
+    with pl.at(level=pl.Level.CORE_GROUP, deps=[tid_a]) as tid_b:
+        # explicit edge — runs strictly after the `tid_a` block
+        ...
+    return out
+```
+
+```python
+# Example 4 — Mechanism A tensor-lifetime: scratch buffer opted out for its
+# whole lifetime; explicit edge still pins the ordering between producer
+# and consumer.
+scratch = pl.create_tensor([N], dtype=pl.FP32, manual_dep=True)
+scratch, prod_tid = pl.submit(self.fill, x, scratch)
+out, _ = pl.submit(self.consume, scratch, out, deps=[prod_tid])
 ```
 
 `pl.submit` desugars to a single `ir.Call` whose return type is the flat
 augmented `TupleType([*<kernel return types>, ScalarType(TASK_ID)])` —
 elements `0..N-1` are the kernel results, element `N` is the producer
 TaskId. The parser writes each `deps=[...]` list directly into the kernel
-`Call.attrs["manual_dep_edges"]` (a `vector<VarPtr>`). Codegen fills a
-fixed-size stack array sized to the exact dep count and emits one
-`params.set_dependencies(arr, count);` call per task. The runtime's
-`Arg::set_dependencies(ptr, count)` accepts a caller-owned array of
-arbitrary size, so there is no per-call edge cap.
+`Call.attrs["manual_dep_edges"]` (a `vector<VarPtr>`). `pl.at(..., deps=)
+as tid` follows the same path: the outliner reads `attrs["task_id_var"]`
+and `attrs["manual_dep_edges"]` on the `ScopeStmt` and lifts them onto the
+synthesized Call. Codegen fills a fixed-size stack array sized to the
+exact dep count and emits one `params.set_dependencies(arr, count);`
+call per task. The runtime's `Arg::set_dependencies(ptr, count)` accepts a
+caller-owned array of arbitrary size, so there is no per-call edge cap.
 
-`pl.no_dep(arg)` is an auto-scope primitive; inside `pl.manual_scope` it has
-no effect.
+`pl.no_dep(arg)` is an auto-scope primitive; inside `pl.manual_scope` it
+has no effect (the whole region already skips auto-tracking).
 
 #### `pl.parallel` under manual scope: array-carry fence
 
