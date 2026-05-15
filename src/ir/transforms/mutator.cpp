@@ -762,13 +762,64 @@ StmtPtr IRMutator::VisitStmt_(const WhileStmtPtr& op) {
   return op;
 }
 
+std::pair<std::vector<std::pair<std::string, std::any>>, bool> IRMutator::MutateScopeAttrs(
+    const std::vector<std::pair<std::string, std::any>>& attrs) {
+  std::vector<std::pair<std::string, std::any>> new_attrs;
+  new_attrs.reserve(attrs.size());
+  bool any_changed = false;
+  for (const auto& [k, v] : attrs) {
+    if (k == kAttrManualDepEdges) {
+      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+      if (edges) {
+        std::vector<VarPtr> new_edges;
+        new_edges.reserve(edges->size());
+        bool edges_changed = false;
+        for (const auto& e : *edges) {
+          if (!e) {
+            new_edges.push_back(e);
+            continue;
+          }
+          auto remapped = ExprFunctor<ExprPtr>::VisitExpr(e);
+          auto remapped_var = AsVarLike(remapped);
+          if (!remapped_var) {
+            new_edges.push_back(e);
+            continue;
+          }
+          if (remapped_var.get() != e.get()) edges_changed = true;
+          new_edges.push_back(std::move(remapped_var));
+        }
+        if (edges_changed) {
+          any_changed = true;
+          new_attrs.emplace_back(k, std::any(std::move(new_edges)));
+          continue;
+        }
+      }
+    } else if (k == kAttrTaskIdVar) {
+      const auto* var = std::any_cast<VarPtr>(&v);
+      if (var && *var) {
+        auto remapped = ExprFunctor<ExprPtr>::VisitExpr(*var);
+        auto remapped_var = AsVarLike(remapped);
+        if (remapped_var && remapped_var.get() != var->get()) {
+          any_changed = true;
+          new_attrs.emplace_back(k, std::any(std::move(remapped_var)));
+          continue;
+        }
+      }
+    }
+    new_attrs.emplace_back(k, v);
+  }
+  return {std::move(new_attrs), any_changed};
+}
+
 StmtPtr IRMutator::VisitStmt_(const InCoreScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "InCoreScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK_SPAN(new_body, op->span_) << "InCoreScopeStmt body mutated to null";
-  if (new_body.get() != op->body_.get()) {
+  auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
+  if (new_body.get() != op->body_.get() || attrs_changed) {
     auto result = MutableCopy(op);
     result->body_ = std::move(new_body);
+    if (attrs_changed) result->attrs_ = std::move(new_attrs);
     return result;
   }
   return op;
@@ -778,9 +829,11 @@ StmtPtr IRMutator::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "AutoInCoreScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK_SPAN(new_body, op->span_) << "AutoInCoreScopeStmt body mutated to null";
-  if (new_body.get() != op->body_.get()) {
+  auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
+  if (new_body.get() != op->body_.get() || attrs_changed) {
     auto result = MutableCopy(op);
     result->body_ = std::move(new_body);
+    if (attrs_changed) result->attrs_ = std::move(new_attrs);
     return result;
   }
   return op;
@@ -802,9 +855,11 @@ StmtPtr IRMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "HierarchyScopeStmt has null body";
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK_SPAN(new_body, op->span_) << "HierarchyScopeStmt body mutated to null";
-  if (new_body.get() != op->body_.get()) {
+  auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
+  if (new_body.get() != op->body_.get() || attrs_changed) {
     auto result = MutableCopy(op);
     result->body_ = std::move(new_body);
+    if (attrs_changed) result->attrs_ = std::move(new_attrs);
     return result;
   }
   return op;

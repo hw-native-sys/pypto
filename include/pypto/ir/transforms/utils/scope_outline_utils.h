@@ -296,7 +296,42 @@ class ScopeOutliner : public IRMutator {
     std::vector<StmtPtr> new_stmts;
     bool changed = false;
 
+    // ``with pl.at(...) as tid:`` emits a placeholder
+    // ``AssignStmt(tid, system.task_invalid())`` right *before* the scope so
+    // ConvertToSSA has a def to rename consistently with the scope's
+    // ``task_id_var`` attr reference and subsequent ``deps=[tid]`` uses. The
+    // real binding is synthesised by ``OutlineScope`` below (as a
+    // TupleGetItem on the outlined Call's tail). When we see such a
+    // placeholder, drop it so the synthesised binding is the sole definition.
+    auto is_task_id_placeholder = [](const StmtPtr& s, const Var* target) -> bool {
+      if (!s || !target) return false;
+      auto assign = std::dynamic_pointer_cast<const AssignStmt>(s);
+      if (!assign || assign->var_.get() != target) return false;
+      auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      if (!call || !call->op_) return false;
+      return call->op_->name_ == "system.task_invalid";
+    };
+
+    // Indices of any preceding-scope placeholders we plan to drop.
+    std::unordered_set<size_t> dropped_indices;
+    for (size_t i = 1; i < op->stmts_.size(); ++i) {
+      auto scope = std::dynamic_pointer_cast<const ScopeStmt>(op->stmts_[i]);
+      if (!scope || scope->GetScopeKind() != target_scope_kind_) continue;
+      auto tid_var = scope->GetAttr<VarPtr>(kAttrTaskIdVar);
+      if (!tid_var) continue;
+      if (is_task_id_placeholder(op->stmts_[i - 1], tid_var.get())) {
+        dropped_indices.insert(i - 1);
+      }
+    }
+
     for (size_t i = 0; i < op->stmts_.size(); ++i) {
+      if (dropped_indices.count(i)) {
+        // Skip the ``with pl.at(...) as tid:`` placeholder — OutlineScope
+        // emits the real ``AssignStmt(tid, TupleGetItem(...))`` in its
+        // returned SeqStmts.
+        changed = true;
+        continue;
+      }
       auto scope = std::dynamic_pointer_cast<const ScopeStmt>(op->stmts_[i]);
       // Always compute what's used in the tail of this SeqStmts; this set is
       // the "used_after" for a target scope at position i, and doubles as the
@@ -304,6 +339,7 @@ class ScopeOutliner : public IRMutator {
       // target-kind scope nested inside knows what needs to leak out.
       VarDefUseCollector after_ref_collector;
       for (size_t j = i + 1; j < op->stmts_.size(); ++j) {
+        if (dropped_indices.count(j)) continue;
         after_ref_collector.VisitStmt(op->stmts_[j]);
       }
       auto after_refs = after_ref_collector.GetAllVarRefs();
@@ -748,18 +784,43 @@ class ScopeOutliner : public IRMutator {
       call_args.push_back(var_it->second);
     }
 
-    // Determine call return type
+    // ``with pl.at(..., deps=[...]) as tid:`` attaches metadata to the
+    // ScopeStmt via ``attrs_``. The outliner propagates it onto the
+    // synthesised Call:
+    //   * ``task_id_var`` (a ``Scalar[TASK_ID]`` Var) → augment the Call's
+    //     return type with a trailing ``Scalar[TASK_ID]`` tuple element so
+    //     codegen's ``IsSubmitCall`` detection fires and binds it to
+    //     ``task_<n>_outs.task_id()`` on demand.
+    //   * ``manual_dep_edges`` → attach verbatim to ``Call.attrs[manual_dep_edges]``
+    //     (codegen's ``EmitManualDeps`` packs them into a stack
+    //     ``PTO2TaskId[]`` and emits a single ``set_dependencies`` call).
+    VarPtr scope_task_id_var = op->GetAttr<VarPtr>(kAttrTaskIdVar);
+    std::vector<VarPtr> scope_dep_edges = op->GetAttr<std::vector<VarPtr>>(kAttrManualDepEdges);
+
+    // Determine call return type. When ``task_id_var`` is set, append the
+    // TaskId element at the tail of the (already flat) return-type tuple so
+    // the augmentation matches the ``pl.submit(...)`` shape.
+    std::vector<TypePtr> effective_return_types = return_types;
+    if (scope_task_id_var) {
+      effective_return_types.push_back(std::make_shared<ScalarType>(DataType::TASK_ID));
+    }
     TypePtr call_return_type;
-    if (return_types.empty()) {
+    if (effective_return_types.empty()) {
       call_return_type = nullptr;
-    } else if (return_types.size() == 1) {
-      call_return_type = return_types[0];
+    } else if (effective_return_types.size() == 1) {
+      call_return_type = effective_return_types[0];
     } else {
-      call_return_type = std::make_shared<TupleType>(return_types);
+      call_return_type = std::make_shared<TupleType>(effective_return_types);
     }
 
     std::shared_ptr<Call> call_expr;
-    if (call_return_type) {
+    if (!scope_dep_edges.empty()) {
+      std::vector<std::pair<std::string, std::any>> call_attrs;
+      call_attrs.emplace_back(kAttrManualDepEdges, std::move(scope_dep_edges));
+      call_expr = std::make_shared<Call>(
+          global_var, call_args, std::vector<std::pair<std::string, std::any>>{}, std::move(call_attrs),
+          call_return_type ? call_return_type : std::make_shared<UnknownType>(), op->span_);
+    } else if (call_return_type) {
       call_expr = std::make_shared<Call>(global_var, call_args, call_return_type, op->span_);
     } else {
       call_expr = std::make_shared<Call>(global_var, call_args, op->span_);
@@ -793,7 +854,25 @@ class ScopeOutliner : public IRMutator {
     // store_target_renames_, so the registration must happen after all
     // resolve_call_site_var calls.
     StmtPtr result;
-    if (output_vars.empty()) {
+    if (scope_task_id_var) {
+      // ``with pl.at(...) as tid:`` always goes through the temp+unpack path
+      // even for ≤1 output: the producer TaskId is an extra trailing element
+      // that needs its own ``TupleGetItem``, and we cannot bind it inline.
+      auto ret_var =
+          std::make_shared<Var>(auto_name::BuildName("ret", "", "tmp", 0), call_return_type, op->span_);
+      std::vector<StmtPtr> stmts;
+      stmts.push_back(std::make_shared<AssignStmt>(ret_var, call_expr, op->span_));
+      for (size_t i = 0; i < output_vars.size(); ++i) {
+        auto tuple_get = std::make_shared<TupleGetItemExpr>(ret_var, static_cast<int>(i), op->span_);
+        auto output_var = resolve_call_site_var(output_vars[i]);
+        stmts.push_back(std::make_shared<AssignStmt>(output_var, tuple_get, op->span_));
+      }
+      // The TaskId element sits at the flat tuple's trailing position.
+      auto tid_get =
+          std::make_shared<TupleGetItemExpr>(ret_var, static_cast<int>(output_vars.size()), op->span_);
+      stmts.push_back(std::make_shared<AssignStmt>(scope_task_id_var, tid_get, op->span_));
+      result = std::make_shared<SeqStmts>(stmts, op->span_);
+    } else if (output_vars.empty()) {
       result = std::make_shared<EvalStmt>(call_expr, op->span_);
     } else if (output_vars.size() == 1) {
       auto output_var = resolve_call_site_var(output_vars[0]);

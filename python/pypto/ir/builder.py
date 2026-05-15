@@ -263,6 +263,7 @@ class IRBuilder:
         core_num: int | ir.Expr | None = None,
         sync_start: bool | None = None,
         manual: bool | None = None,
+        attrs: list[tuple[str, Any]] | None = None,
     ) -> Iterator["ScopeBuilder"]:
         """Context manager for building scope statements.
 
@@ -292,8 +293,18 @@ class IRBuilder:
         self._begin_spans[ctx_id] = begin_span
 
         core_num_expr = _normalize_expr(core_num, begin_span) if core_num is not None else None
+        attrs_list = list(attrs) if attrs is not None else []
         self._builder.begin_scope(
-            scope_kind, begin_span, level, role, split, name_hint, core_num_expr, sync_start, manual
+            scope_kind,
+            begin_span,
+            level,
+            role,
+            split,
+            name_hint,
+            core_num_expr,
+            sync_start,
+            manual,
+            attrs_list,
         )
         builder_obj = ScopeBuilder(self)
         try:

@@ -2997,6 +2997,62 @@ class TestManualScopeCodegen:
         assert "TaskOutputTensors task_0_outs" not in code
         assert "set_dependencies(" not in code
 
+    def test_pl_at_with_deps_and_as_tid_emits_submit_call(self):
+        """``with pl.at(..., deps=[tid]) as tid:`` extends the dep interface
+        to the ``pl.at``-block style (no explicit ``self.kernel(...)`` calls).
+
+        The outlined kernel ``Call``'s return type is augmented with
+        ``Scalar[TASK_ID]`` so codegen's ``IsSubmitCall`` detection fires:
+        the call captures a ``TaskOutputTensors`` handle, binds the producer
+        TaskId Var, and downstream ``deps=[tid]`` flows through the same
+        stack-array + ``set_dependencies`` codegen path used by
+        ``pl.submit(...)``. Equivalent to writing two ``pl.submit`` calls,
+        but matches the ``pl.at``-block programming style.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                # Two back-to-back pl.at blocks writing *disjoint* output
+                # tensors (scratch / out) so the test pins the deps wiring
+                # without tripping the pre-existing SSA rename limitation
+                # for two pl.at blocks writing the same buffer.
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage1") as t1:
+                    t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                    r: pl.Tile[[64], pl.FP32] = pl.add(t, t)
+                    scratch = pl.store(r, [0], scratch)
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2", deps=[t1]) as _t2:
+                    t2t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                    r2: pl.Tile[[64], pl.FP32] = pl.add(t2t, t2t)
+                    out = pl.store(r2, [0], out)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        # The outlined ``stage1`` Call captures the TaskOutputTensors handle
+        # and binds ``t1`` to the producer TaskId.
+        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
+        assert "PTO2TaskId t1 = task_0_outs.task_id();" in code, code
+        # ``stage2`` carries the explicit dep on ``t1`` via the stack-array
+        # + set_dependencies path.
+        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "if (t1.is_valid()) params_t1_deps[params_t1_deps_count++] = t1;" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
+        # The parser-emitted ``t1 = system.task_invalid()`` placeholder is
+        # dropped by the outliner once the real TupleGetItem binding is
+        # generated.
+        assert "PTO2TaskId t1 = PTO2TaskId::invalid();" not in code, code
+
     def test_submit_with_deps_in_auto_scope_emits_set_dependencies(self):
         """``pl.submit(..., deps=[tid])`` works in auto scope too.
 

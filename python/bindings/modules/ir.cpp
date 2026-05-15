@@ -133,6 +133,11 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<LoopOrigin>(item.second));
     } else if (nb::isinstance<ArgDirection>(item.second)) {
       kwargs.emplace_back(key, nb::cast<ArgDirection>(item.second));
+    } else if (key == kAttrTaskIdVar && nb::isinstance<Var>(item.second)) {
+      // ``with pl.at(...) as tid:`` stashes the captured TaskId Var directly
+      // (not wrapped as an Expr). Stored as ``VarPtr`` to match the C++ attr
+      // reader in ``OutlineIncoreScopes``.
+      kwargs.emplace_back(key, nb::cast<VarPtr>(item.second));
     } else if (nb::isinstance<Expr>(item.second)) {
       // IR expression (e.g. SpmdScopeStmt core_num stored as Function attr).
       kwargs.emplace_back(key, nb::cast<ExprPtr>(item.second));

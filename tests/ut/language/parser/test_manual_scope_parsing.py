@@ -227,6 +227,50 @@ class TestManualScopeParsing:
                         a = pl.submit(self.k1, x)
                     return a
 
+    def test_pl_at_deps_and_as_tid_attach_scope_attrs(self):
+        """``with pl.at(..., deps=[d1]) as tid:`` attaches metadata to the
+        synthesised ScopeStmt via ``attrs_``. The outliner later promotes
+        them to the ``Call`` it synthesises for the outlined kernel.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="s1") as t1:
+                    y: pl.Tensor[[64], pl.FP32] = x
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="s2", deps=[t1]) as _t2:
+                    z: pl.Tensor[[64], pl.FP32] = y
+                return z
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        # Parser emits placeholder ``AssignStmt(tid, system.task_invalid())``
+        # before each scope to give ConvertToSSA a definition; the outliner
+        # drops these once it generates the real binding.
+        stmts = list(fn.body.stmts) if isinstance(fn.body, ir.SeqStmts) else [fn.body]
+        # First stmt: placeholder for t1.
+        assert isinstance(stmts[0], ir.AssignStmt)
+        assert isinstance(stmts[0].value, ir.Call)
+        assert stmts[0].value.op.name == "system.task_invalid"
+        # Second stmt: the first pl.at scope.
+        assert isinstance(stmts[1], ir.InCoreScopeStmt)
+        # Third stmt: placeholder for t2.
+        assert isinstance(stmts[2], ir.AssignStmt)
+        # Fourth stmt: the second pl.at scope with deps=.
+        assert isinstance(stmts[3], ir.InCoreScopeStmt)
+
+    def test_pl_at_as_on_non_at_scope_is_rejected(self):
+        """``as`` is only meaningful on ``pl.at(...)``; other constructs reject it."""
+        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope() as not_supported:  # noqa: F841
+                        return x
+
     def test_submit_nested_result_tuple_is_rejected(self):
         """pl.submit result targets must be plain names — no nested tuples."""
         with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError

@@ -226,13 +226,34 @@ void IRVisitor::VisitStmt_(const WhileStmtPtr& op) {
   }
 }
 
+// Visit Var-typed entries in a ScopeStmt's ``attrs_``. Mirrors the Call.attrs
+// handling in VisitExpr_(CallPtr) so analyses (unused-var detection, SSA Var
+// liveness, etc.) see Var refs stashed on a ScopeStmt's ``manual_dep_edges`` /
+// ``task_id_var`` attrs.
+void IRVisitor::VisitScopeAttrs(const ScopeStmtPtr& op) {
+  for (const auto& [k, v] : op->attrs_) {
+    if (k == kAttrManualDepEdges) {
+      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+      if (!edges) continue;
+      for (const auto& e : *edges) {
+        if (e) VisitExpr(e);
+      }
+    } else if (k == kAttrTaskIdVar) {
+      const auto* var = std::any_cast<VarPtr>(&v);
+      if (var && *var) VisitExpr(*var);
+    }
+  }
+}
+
 void IRVisitor::VisitStmt_(const InCoreScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "InCoreScopeStmt has null body";
+  VisitScopeAttrs(op);
   VisitStmt(op->body_);
 }
 
 void IRVisitor::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "AutoInCoreScopeStmt has null body";
+  VisitScopeAttrs(op);
   VisitStmt(op->body_);
 }
 
@@ -243,6 +264,7 @@ void IRVisitor::VisitStmt_(const ClusterScopeStmtPtr& op) {
 
 void IRVisitor::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   INTERNAL_CHECK_SPAN(op->body_, op->span_) << "HierarchyScopeStmt has null body";
+  VisitScopeAttrs(op);
   VisitStmt(op->body_);
 }
 

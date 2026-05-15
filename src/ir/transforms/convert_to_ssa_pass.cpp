@@ -922,14 +922,68 @@ class SSAConverter {
     return result;
   }
 
+  /// Substitute Var-typed entries in a ScopeStmt's ``attrs_``
+  /// (``manual_dep_edges`` / ``task_id_var``). Returns the rebuilt attrs and a
+  /// flag indicating whether any entry was rewritten — mirrors the per-Call
+  /// ``SubstCallAttrs`` so SSA renaming propagates into scope-level attrs the
+  /// same way it does for Call attrs.
+  std::pair<std::vector<std::pair<std::string, std::any>>, bool> SubstScopeAttrs(
+      const std::vector<std::pair<std::string, std::any>>& attrs) {
+    bool changed = false;
+    std::vector<std::pair<std::string, std::any>> out;
+    out.reserve(attrs.size());
+    for (const auto& [k, v] : attrs) {
+      if (k == kAttrManualDepEdges) {
+        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+        if (edges) {
+          std::vector<VarPtr> new_edges;
+          new_edges.reserve(edges->size());
+          bool any = false;
+          for (const auto& e : *edges) {
+            if (!e) {
+              new_edges.push_back(e);
+              continue;
+            }
+            auto it = cur_.find(e.get());
+            if (it != cur_.end() && it->second.get() != e.get()) {
+              new_edges.push_back(it->second);
+              any = true;
+            } else {
+              new_edges.push_back(e);
+            }
+          }
+          if (any) {
+            changed = true;
+            out.emplace_back(k, std::any(std::move(new_edges)));
+            continue;
+          }
+        }
+      } else if (k == kAttrTaskIdVar) {
+        const auto* var = std::any_cast<VarPtr>(&v);
+        if (var && *var) {
+          auto it = cur_.find(var->get());
+          if (it != cur_.end() && it->second.get() != var->get()) {
+            changed = true;
+            out.emplace_back(k, std::any(it->second));
+            continue;
+          }
+        }
+      }
+      out.emplace_back(k, v);
+    }
+    return {std::move(out), changed};
+  }
+
   StmtPtr ConvertScope(const ScopeStmtPtr& op) {
     auto body = ConvertStmt(op->body_);
-    if (body == op->body_) return op;
+    auto [new_attrs, attrs_changed] = SubstScopeAttrs(op->attrs_);
+    if (body == op->body_ && !attrs_changed) return op;
     // ScopeStmt is abstract; dispatch on the concrete derived class so MutableCopy
     // can construct the right subclass.
     auto rewrite = [&](auto&& concrete) -> StmtPtr {
       auto result = MutableCopy(concrete);
       result->body_ = body;
+      if (attrs_changed) result->attrs_ = std::move(new_attrs);
       return result;
     };
     if (auto in_core = As<InCoreScopeStmt>(op)) return rewrite(in_core);

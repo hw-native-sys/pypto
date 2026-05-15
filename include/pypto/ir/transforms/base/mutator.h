@@ -12,8 +12,12 @@
 #ifndef PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 #define PYPTO_IR_TRANSFORMS_BASE_MUTATOR_H_
 
+#include <any>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -101,6 +105,14 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override;
+
+  /// Rewrite Var-typed entries in a ScopeStmt's ``attrs_`` (``manual_dep_edges``
+  /// / ``task_id_var``). Returns the rewritten attrs along with a flag indicating
+  /// whether any entry actually changed. Called from the per-subclass mutators
+  /// so SSA renaming / type remapping propagates into scope attrs the way it
+  /// already does for ``Call.attrs``.
+  std::pair<std::vector<std::pair<std::string, std::any>>, bool> MutateScopeAttrs(
+      const std::vector<std::pair<std::string, std::any>>& attrs);
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const RuntimeScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override;

@@ -720,10 +720,12 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  */
 class ScopeStmt : public Stmt {
  public:
-  ScopeStmt(std::string name_hint, StmtPtr body, Span span, std::vector<std::string> leading_comments = {})
+  ScopeStmt(std::string name_hint, StmtPtr body, Span span, std::vector<std::string> leading_comments = {},
+            std::vector<std::pair<std::string, std::any>> attrs = {})
       : Stmt(std::move(span), std::move(leading_comments)),
         name_hint_(std::move(name_hint)),
-        body_(std::move(body)) {}
+        body_(std::move(body)),
+        attrs_(std::move(attrs)) {}
 
   /// Each derived class returns its ScopeKind. Used for switch-style dispatch.
   [[nodiscard]] virtual ScopeKind GetScopeKind() const = 0;
@@ -733,12 +735,31 @@ class ScopeStmt : public Stmt {
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(Stmt::GetFieldDescriptors(),
                           std::make_tuple(reflection::UsualField(&ScopeStmt::name_hint_, "name_hint"),
-                                          reflection::UsualField(&ScopeStmt::body_, "body")));
+                                          reflection::UsualField(&ScopeStmt::body_, "body"),
+                                          reflection::UsualField(&ScopeStmt::attrs_, "attrs")));
   }
+
+  /// Get a typed attribute value (returns default_value if key not found).
+  template <typename T>
+  [[nodiscard]] T GetAttr(const std::string& key, const T& default_value = T{}) const {
+    for (const auto& [k, v] : attrs_) {
+      if (k == key) return AnyCast<T>(v, "scope_stmt attr key: " + key);
+    }
+    return default_value;
+  }
+
+  /// Check if an attribute exists.
+  [[nodiscard]] bool HasAttr(const std::string& key) const {
+    return std::any_of(attrs_.begin(), attrs_.end(), [&key](const auto& pair) { return pair.first == key; });
+  }
+
+  /// Get all attributes.
+  [[nodiscard]] const std::vector<std::pair<std::string, std::any>>& GetAttrs() const { return attrs_; }
 
  public:
   std::string name_hint_;  // User-provided scope name hint (empty = auto-generate)
   StmtPtr body_;           // The nested statements
+  std::vector<std::pair<std::string, std::any>> attrs_;  // Scope-level metadata (key-value)
 };
 
 using ScopeStmtPtr = std::shared_ptr<const ScopeStmt>;
@@ -751,8 +772,10 @@ using ScopeStmtPtr = std::shared_ptr<const ScopeStmt>;
 class InCoreScopeStmt : public ScopeStmt {
  public:
   InCoreScopeStmt(std::optional<SplitMode> split, std::string name_hint, StmtPtr body, Span span,
-                  std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+                  std::vector<std::string> leading_comments = {},
+                  std::vector<std::pair<std::string, std::any>> attrs = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
+                  std::move(attrs)),
         split_(split) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::InCoreScopeStmt; }
@@ -778,8 +801,10 @@ using InCoreScopeStmtPtr = std::shared_ptr<const InCoreScopeStmt>;
 class AutoInCoreScopeStmt : public ScopeStmt {
  public:
   AutoInCoreScopeStmt(std::optional<SplitMode> split, std::string name_hint, StmtPtr body, Span span,
-                      std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+                      std::vector<std::string> leading_comments = {},
+                      std::vector<std::pair<std::string, std::any>> attrs = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
+                  std::move(attrs)),
         split_(split) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::AutoInCoreScopeStmt; }
@@ -825,8 +850,10 @@ using ClusterScopeStmtPtr = std::shared_ptr<const ClusterScopeStmt>;
 class HierarchyScopeStmt : public ScopeStmt {
  public:
   HierarchyScopeStmt(Level level, std::optional<Role> role, std::string name_hint, StmtPtr body, Span span,
-                     std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+                     std::vector<std::string> leading_comments = {},
+                     std::vector<std::pair<std::string, std::any>> attrs = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
+                  std::move(attrs)),
         level_(level),
         role_(role) {}
 

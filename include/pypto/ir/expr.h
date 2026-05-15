@@ -688,6 +688,20 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
 inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
 
 /**
+ * @brief Reserved attr key for the producer-TaskId Var captured by a
+ * ``with pl.at(...) as tid:`` block.
+ *
+ * Set by the parser as a key on the enclosing ``ScopeStmt``'s ``attrs_``
+ * (``InCoreScopeStmt`` / ``AutoInCoreScopeStmt`` / ``HierarchyScopeStmt``).
+ * Value type: ``VarPtr`` — a fresh ``Scalar[TASK_ID]`` Var allocated in the
+ * outer scope. ``OutlineIncoreScopes`` / ``OutlineHierarchyScopes`` augment
+ * the synthesised ``Call``'s return type with ``Scalar[TASK_ID]`` and emit
+ * an ``AssignStmt(tid_var, TupleGetItem(call_lhs, last_idx))`` so the outer
+ * scope's references to ``tid`` resolve to the producer TaskId.
+ */
+inline constexpr const char* kAttrTaskIdVar = "task_id_var";
+
+/**
  * Build a copy of ``attrs`` with ``kAttrManualDepEdges`` set to ``vars``.
  * Replaces an existing entry if present; otherwise appends.
  */

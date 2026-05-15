@@ -240,25 +240,38 @@ void BindIRBuilder(nb::module_& m) {
            "    RuntimeError: If not inside an if context")
 
       // Scope building
-      .def("begin_scope", &IRBuilder::BeginScope, nb::arg("scope_kind"), nb::arg("span"),
-           nb::arg("level") = nb::none(), nb::arg("role") = nb::none(), nb::arg("split") = nb::none(),
-           nb::arg("name_hint") = "", nb::arg("core_num") = nb::none(), nb::arg("sync_start") = nb::none(),
-           nb::arg("manual") = nb::none(),
-           "Begin building a scope statement.\n\n"
-           "Creates a new scope context. Must be closed with end_scope().\n\n"
-           "Args:\n"
-           "    scope_kind: The kind of scope (e.g., ScopeKind.InCore)\n"
-           "    span: Source location for scope statement\n"
-           "    level: Hierarchy level (default: None)\n"
-           "    role: Hierarchy scope role (default: None)\n"
-           "    split: Split mode for cross-core transfer (default: None)\n"
-           "    name_hint: User-provided scope name hint (default: empty, auto-generated)\n"
-           "    core_num: SPMD block count expression (default: None)\n"
-           "    sync_start: Require sync-start for SPMD dispatch (default: None)\n"
-           "    manual: Required for ScopeKind.Runtime — True for MANUAL scope, "
-           "False for AUTO (default: None)\n\n"
-           "Raises:\n"
-           "    RuntimeError: If not inside a function or loop")
+      .def(
+          "begin_scope",
+          [](IRBuilder& self, ScopeKind scope_kind, const Span& span, std::optional<Level> level,
+             std::optional<Role> role, std::optional<SplitMode> split, std::string name_hint,
+             ExprPtr core_num, std::optional<bool> sync_start, std::optional<bool> manual,
+             const nb::object& attrs_or_none) {
+            self.BeginScope(scope_kind, span, level, role, split, std::move(name_hint), std::move(core_num),
+                            sync_start, manual, ConvertAttrsFromPython(attrs_or_none));
+          },
+          nb::arg("scope_kind"), nb::arg("span"), nb::arg("level") = nb::none(), nb::arg("role") = nb::none(),
+          nb::arg("split") = nb::none(), nb::arg("name_hint") = "", nb::arg("core_num") = nb::none(),
+          nb::arg("sync_start") = nb::none(), nb::arg("manual") = nb::none(), nb::arg("attrs") = nb::none(),
+          "Begin building a scope statement.\n\n"
+          "Creates a new scope context. Must be closed with end_scope().\n\n"
+          "Args:\n"
+          "    scope_kind: The kind of scope (e.g., ScopeKind.InCore)\n"
+          "    span: Source location for scope statement\n"
+          "    level: Hierarchy level (default: None)\n"
+          "    role: Hierarchy scope role (default: None)\n"
+          "    split: Split mode for cross-core transfer (default: None)\n"
+          "    name_hint: User-provided scope name hint (default: empty, auto-generated)\n"
+          "    core_num: SPMD block count expression (default: None)\n"
+          "    sync_start: Require sync-start for SPMD dispatch (default: None)\n"
+          "    manual: Required for ScopeKind.Runtime — True for MANUAL scope, "
+          "False for AUTO (default: None)\n"
+          "    attrs: Scope-level metadata (key-value list). Used to attach\n"
+          "        per-scope attributes such as ``manual_dep_edges`` /\n"
+          "        ``task_id_var`` that ``OutlineIncoreScopes`` /\n"
+          "        ``OutlineHierarchyScopes`` propagate onto the synthesised\n"
+          "        ``Call``.\n\n"
+          "Raises:\n"
+          "    RuntimeError: If not inside a function or loop")
       .def("end_scope", &IRBuilder::EndScope, nb::arg("end_span"),
            "End building a scope statement.\n\n"
            "Finalizes the scope statement and returns it.\n\n"

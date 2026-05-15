@@ -952,6 +952,7 @@ class AtContext:
         role: ir.Role | None = None,
         *,
         optimizations: list[Optimization] | None = None,
+        deps: list[Any] | None = None,
         # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
         optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
         split: SplitMode | None = None,
@@ -960,12 +961,19 @@ class AtContext:
         self.level = level
         self.role = role
         self.optimizations = optimizations
+        self.deps = deps
         self.optimization = optimization
         self.split = split
         self.name_hint = name_hint
 
-    def __enter__(self) -> None:
-        pass
+    def __enter__(self) -> Any:
+        # The parser intercepts the ``with pl.at(...) [as tid]:`` pattern and
+        # binds ``tid`` (when present) to the outlined kernel Call's producer
+        # TaskId. This runtime return value is not consumed in practice — the
+        # ``@pl.program`` decorator parses the function source rather than
+        # executing it — but returning ``self`` keeps ``as`` syntactically
+        # legal in case a script is executed directly (e.g. for linting).
+        return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         pass
@@ -976,6 +984,7 @@ def at(
     role: ir.Role | None = None,
     *,
     optimizations: list[Optimization] | None = None,
+    deps: list[Any] | None = None,
     # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
     optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
     split: SplitMode | None = None,
@@ -1039,6 +1048,7 @@ def at(
         level,
         role,
         optimizations=optimizations,
+        deps=deps,
         optimization=optimization,
         split=split,
         name_hint=name_hint,

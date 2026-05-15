@@ -291,6 +291,9 @@ class _AtKwargState:
     new_optimizations_kw: "ast.keyword | None" = field(default=None)
     legacy_optimization_kw: "ast.keyword | None" = field(default=None)
     legacy_split_kw: "ast.keyword | None" = field(default=None)
+    # ``deps=[tid1, tid2]`` AST kept verbatim; resolved into Var refs by the
+    # caller once it has decided this scope opts into the manual_dep_edges path.
+    deps_kw: "ast.keyword | None" = field(default=None)
 
 
 class ASTParser:
@@ -2528,10 +2531,8 @@ class ASTParser:
         self.in_if_stmt = False
         self.current_if_builder = None
 
-    def _parse_at_kwargs(
-        self, call: ast.Call
-    ) -> tuple[ir.Level, ir.Role | None, bool, ir.SplitMode | None, str]:
-        """Extract level, role, AutoChunk request, split mode, and name from pl.at(...) call.
+    def _parse_at_kwargs(self, call: ast.Call) -> "_AtKwargState":
+        """Extract level, role, AutoChunk request, split mode, deps, and name from pl.at(...).
 
         Supports both positional and keyword forms. Preferred new API uses the
         ``optimizations=[...]`` list with ``pl.split(...)`` and ``pl.auto_chunk``
@@ -2539,10 +2540,11 @@ class ASTParser:
         are still accepted but emit a DeprecationWarning. Mixing the new
         ``optimizations=`` list with either deprecated kwarg is a hard error.
 
-        Returns:
-            Tuple of (level, role, requests_auto_chunk, split_mode, name_hint).
-            ``requests_auto_chunk`` is True when the resulting scope must be
-            ``AutoInCore`` rather than ``InCore``.
+        Returns the populated :class:`_AtKwargState`. ``requests_auto_chunk`` is
+        True when the resulting scope must be ``AutoInCore`` rather than
+        ``InCore``. ``deps_kw`` carries the verbatim ``deps=`` keyword AST when
+        present, so the caller can resolve it into ``Var`` refs once it has
+        decided this scope opts into the ``manual_dep_edges`` path.
         """
         if len(call.args) > 2:
             raise ParserSyntaxError(
@@ -2568,7 +2570,7 @@ class ASTParser:
             )
 
         self._validate_at_kwarg_combinations(state)
-        return state.level, state.role, state.requests_auto_chunk, state.split_mode, state.name_hint
+        return state
 
     def _dispatch_at_keyword(self, kw: ast.keyword, state: "_AtKwargState") -> None:
         """Dispatch a single pl.at() keyword argument and update state."""
@@ -2594,6 +2596,13 @@ class ASTParser:
             self._handle_at_legacy_split_kw(kw, state)
         elif kw.arg == "name_hint":
             state.name_hint = self._parse_scope_name_hint(kw.value, "pl.at()")
+        elif kw.arg == "deps":
+            if state.deps_kw is not None:
+                raise ParserSyntaxError(
+                    "pl.at() got multiple values for argument 'deps'",
+                    span=self.span_tracker.get_span(kw),
+                )
+            state.deps_kw = kw
         elif kw.arg is None:
             raise ParserSyntaxError(
                 "Unsupported **kwargs in pl.at()",
@@ -2604,7 +2613,7 @@ class ASTParser:
             raise ParserSyntaxError(
                 f"Unknown keyword argument '{kw.arg}' in pl.at()",
                 span=self.span_tracker.get_span(kw),
-                hint="Supported arguments: level, role, optimizations, name_hint",
+                hint="Supported arguments: level, role, optimizations, deps, name_hint",
             )
 
     def _handle_at_optimizations_kw(self, kw: ast.keyword, state: "_AtKwargState") -> None:
@@ -3185,7 +3194,7 @@ class ASTParser:
                 # own for-loop variable-leaking semantics.
                 self.scope_manager.exit_scope(leak_vars=True)
 
-    def _parse_scope_body(
+    def _parse_scope_body(  # noqa: PLR0913 — kwargs map 1:1 to ScopeStmt fields
         self,
         stmt: ast.With,
         scope_kind: "ir.ScopeKind",
@@ -3198,6 +3207,7 @@ class ASTParser:
         core_num: "ir.Expr | None" = None,
         sync_start: bool | None = None,
         manual: bool | None = None,
+        attrs: "list[tuple[str, Any]] | None" = None,
     ) -> None:
         """Build a scope statement from a with-statement body."""
         with self.builder.scope(
@@ -3210,6 +3220,7 @@ class ASTParser:
             core_num=core_num,
             sync_start=sync_start,
             manual=manual,
+            attrs=attrs,
         ):
             with self._scope_kind_context(scope_kind):
                 self.scope_manager.enter_scope("scope")
@@ -3217,9 +3228,18 @@ class ASTParser:
                 self._discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
                 self.scope_manager.exit_scope(leak_vars=True)
 
-    def _parse_at_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+    def _parse_at_scope(
+        self, stmt: ast.With, context_expr: ast.Call, optional_vars: "ast.expr | None" = None
+    ) -> None:
         """Parse pl.at(...) context manager into a ScopeStmt."""
-        level, role, requests_auto_chunk, split_mode, name_hint = self._parse_at_kwargs(context_expr)
+        state = self._parse_at_kwargs(context_expr)
+        level = state.level
+        role = state.role
+        requests_auto_chunk = state.requests_auto_chunk
+        split_mode = state.split_mode
+        name_hint = state.name_hint
+        deps_kw = state.deps_kw
+        assert level is not None  # _parse_at_kwargs raises if level is missing
         span = self.span_tracker.get_span(stmt)
 
         is_core_group = level == ir.Level.CORE_GROUP
@@ -3250,6 +3270,31 @@ class ASTParser:
                 "or use a non-CORE_GROUP level for Hierarchy scope",
             )
 
+        # Build the optional ``manual_dep_edges`` / ``task_id_var`` attrs for the
+        # synthesised ScopeStmt. ``deps=[tid1, tid2]`` accepts the same shapes
+        # as ``pl.submit(..., deps=)`` — TaskId Vars, the ``None`` sentinel, or
+        # an ``Array[N, TASK_ID]`` carry. ``with pl.at(...) as tid:`` binds a
+        # fresh ``Scalar[TASK_ID]`` Var in the outer scope; the outliner
+        # later wires it to ``TupleGetItem(call_lhs, last_idx)``.
+        scope_attrs = self._parse_at_meta(deps_kw, optional_vars, span)
+
+        # ``with pl.at(...) as tid:`` allocates ``tid`` as an outer-scope Var
+        # whose real definition is synthesised later by ``OutlineIncoreScopes``
+        # (as ``AssignStmt(tid, TupleGetItem(call_lhs, last_idx))``). The
+        # outlining pass runs *after* ConvertToSSA, so we emit a placeholder
+        # ``AssignStmt(tid, system.task_invalid())`` *before* the scope to give
+        # ConvertToSSA a def that gets renamed consistently with the scope's
+        # ``task_id_var`` attr reference and subsequent ``deps=[tid]`` uses.
+        # ``ScopeOutliner::VisitStmt_(SeqStmtsPtr)`` detects this placeholder
+        # by looking one stmt *behind* each target scope and drops it once it
+        # has generated the real binding.
+        if scope_attrs is not None:
+            for k, v in scope_attrs:
+                if k == "task_id_var":
+                    placeholder_rhs = ir.create_op_call("system.task_invalid", [], {}, span)
+                    self.builder.assign(v, placeholder_rhs, span=span)
+                    break
+
         if not is_core_group:
             # SubWorker scopes are no longer supported as inline `with pl.at(...)`
             # blocks. Declare a SubWorker via @pl.function(level=..., role=Worker).
@@ -3261,12 +3306,80 @@ class ASTParser:
                     "as a self-contained function (no 'self' parameter) inside @pl.program.",
                 )
             self._parse_scope_body(
-                stmt, ir.ScopeKind.Hierarchy, span, level=level, role=role, name_hint=name_hint
+                stmt,
+                ir.ScopeKind.Hierarchy,
+                span,
+                level=level,
+                role=role,
+                name_hint=name_hint,
+                attrs=scope_attrs,
             )
         elif requests_auto_chunk:
-            self._parse_scope_body(stmt, ir.ScopeKind.AutoInCore, span, split=split_mode, name_hint=name_hint)
+            self._parse_scope_body(
+                stmt,
+                ir.ScopeKind.AutoInCore,
+                span,
+                split=split_mode,
+                name_hint=name_hint,
+                attrs=scope_attrs,
+            )
         else:
-            self._parse_scope_body(stmt, ir.ScopeKind.InCore, span, split=split_mode, name_hint=name_hint)
+            self._parse_scope_body(
+                stmt,
+                ir.ScopeKind.InCore,
+                span,
+                split=split_mode,
+                name_hint=name_hint,
+                attrs=scope_attrs,
+            )
+
+    def _parse_at_meta(
+        self,
+        deps_kw: "ast.keyword | None",
+        optional_vars: "ast.expr | None",
+        span: "ir.Span",
+    ) -> "list[tuple[str, Any]] | None":
+        """Build the ScopeStmt ``attrs`` list from a ``pl.at(...)`` ``deps=`` kwarg
+        and a ``with ... as <tid>:`` capture target.
+
+        Returns ``None`` when neither is present, leaving the scope's ``attrs_``
+        empty (the typical plain ``pl.at(...)`` case). Otherwise returns a list
+        with two reserved keys:
+
+          * ``manual_dep_edges``: ``list[VarPtr]`` — same shape as the
+            ``pl.submit(..., deps=)`` attr; consumed by codegen via
+            ``Arg::set_dependencies``.
+          * ``task_id_var``: ``VarPtr`` — the outer-scope ``Scalar[TASK_ID]``
+            Var the outliner binds to the producer TaskId tuple element.
+
+        The ``tid`` Var is defined in the outer scope so subsequent statements
+        (e.g. another ``pl.at(..., deps=[tid])``) can reference it.
+        """
+        if deps_kw is None and optional_vars is None:
+            return None
+
+        attrs: list[tuple[str, Any]] = []
+
+        if deps_kw is not None:
+            dep_vars = self._parse_submit_deps_kwarg("pl.at()", [deps_kw], span)
+            if dep_vars:
+                # Attr keys mirror the C++ ``kAttrManualDepEdges`` /
+                # ``kAttrTaskIdVar`` constants (include/pypto/ir/expr.h);
+                # passed as raw strings since they are not exposed to Python.
+                attrs.append(("manual_dep_edges", dep_vars))
+
+        if optional_vars is not None:
+            if not isinstance(optional_vars, ast.Name):
+                raise ParserSyntaxError(
+                    "`as` target on `with pl.at(...)` must be a plain variable name",
+                    span=span,
+                    hint="Use `with pl.at(...) as tid:` (single name; nested tuples are not allowed).",
+                )
+            tid_var = self.builder.var(optional_vars.id, ir.ScalarType(DataType.TASK_ID), span=span)
+            self.scope_manager.define_var(optional_vars.id, tid_var, span=span)
+            attrs.append(("task_id_var", tid_var))
+
+        return attrs if attrs else None
 
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.
@@ -3298,6 +3411,7 @@ class ASTParser:
 
         item = stmt.items[0]
         context_expr = item.context_expr
+        optional_vars = item.optional_vars  # the ``as <target>`` clause, if any
 
         # Map DSL function names to ScopeKind values
         _SCOPE_KIND_MAP = {
@@ -3310,6 +3424,19 @@ class ASTParser:
         if isinstance(context_expr, ast.Call):
             func = context_expr.func
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pl":
+                # ``as <target>`` is currently only meaningful on ``pl.at(...)``
+                # (binds the producer TaskId of the outlined kernel Call).
+                # Reject it on every other scope construct so misuses surface
+                # at parse time rather than silently dropping the binding.
+                if optional_vars is not None and func.attr != "at":
+                    raise ParserSyntaxError(
+                        f"`with pl.{func.attr}(...) as ...:` is not supported "
+                        "— the `as` clause only applies to `with pl.at(...) as tid:`",
+                        span=self.span_tracker.get_span(stmt),
+                        hint="Drop the `as` target, or use `with pl.at(...) as tid:` "
+                        "to capture the outlined kernel's producer TaskId.",
+                    )
+
                 # Manual scope: with pl.manual_scope(): ...
                 if func.attr == "manual_scope":
                     self._parse_manual_scope(stmt, context_expr)
@@ -3320,9 +3447,9 @@ class ASTParser:
                     self._parse_legacy_scope(stmt, context_expr, func.attr, _SCOPE_KIND_MAP)
                     return
 
-                # pl.at(level=..., role=..., optimization=...)
+                # pl.at(level=..., role=..., deps=...) [as tid]
                 if func.attr == "at":
-                    self._parse_at_scope(stmt, context_expr)
+                    self._parse_at_scope(stmt, context_expr, optional_vars=optional_vars)
                     return
 
         # Unsupported context manager

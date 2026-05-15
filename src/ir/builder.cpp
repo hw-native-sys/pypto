@@ -292,15 +292,17 @@ StmtPtr IRBuilder::EndIf(const Span& end_span) {
 
 void IRBuilder::BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level,
                            std::optional<Role> role, std::optional<SplitMode> split, std::string name_hint,
-                           ExprPtr core_num, std::optional<bool> sync_start, std::optional<bool> manual) {
+                           ExprPtr core_num, std::optional<bool> sync_start, std::optional<bool> manual,
+                           std::vector<std::pair<std::string, std::any>> attrs) {
   CHECK(!context_stack_.empty()) << "Cannot begin scope: not inside a function or another valid context at "
                                  << span.to_string();
   CHECK(scope_kind != ScopeKind::Hierarchy || level.has_value())
       << "Hierarchy scope requires a level at " << span.to_string();
   CHECK(scope_kind != ScopeKind::Runtime || manual.has_value())
       << "Runtime scope requires manual flag at " << span.to_string();
-  context_stack_.push_back(std::make_unique<ScopeContext>(
-      scope_kind, span, level, role, split, std::move(name_hint), std::move(core_num), sync_start, manual));
+  context_stack_.push_back(std::make_unique<ScopeContext>(scope_kind, span, level, role, split,
+                                                          std::move(name_hint), std::move(core_num),
+                                                          sync_start, manual, std::move(attrs)));
 }
 
 StmtPtr IRBuilder::EndScope(const Span& end_span) {
@@ -326,6 +328,7 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   auto core_num = scope_ctx->GetCoreNum();
   auto sync_start = scope_ctx->GetSyncStart();
   auto manual = scope_ctx->GetManual();
+  auto attrs = scope_ctx->TakeAttrs();
 
   // Create scope statement before popping context so that if construction throws
   // (e.g. validation CHECK fails) the builder state stays consistent.
@@ -333,11 +336,12 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
   ScopeStmtPtr scope_stmt;
   switch (scope_kind) {
     case ScopeKind::InCore:
-      scope_stmt = std::make_shared<const InCoreScopeStmt>(split, std::move(name_hint), body, combined_span);
+      scope_stmt = std::make_shared<const InCoreScopeStmt>(split, std::move(name_hint), body, combined_span,
+                                                           std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::AutoInCore:
-      scope_stmt =
-          std::make_shared<const AutoInCoreScopeStmt>(split, std::move(name_hint), body, combined_span);
+      scope_stmt = std::make_shared<const AutoInCoreScopeStmt>(
+          split, std::move(name_hint), body, combined_span, std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::Cluster:
       scope_stmt = std::make_shared<const ClusterScopeStmt>(std::move(name_hint), body, combined_span);
@@ -345,7 +349,8 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
     case ScopeKind::Hierarchy:
       CHECK(level.has_value()) << "Hierarchy scope requires a level";
       scope_stmt =
-          std::make_shared<const HierarchyScopeStmt>(*level, role, std::move(name_hint), body, combined_span);
+          std::make_shared<const HierarchyScopeStmt>(*level, role, std::move(name_hint), body, combined_span,
+                                                     std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::Spmd:
       CHECK(core_num != nullptr) << "Spmd scope requires core_num";

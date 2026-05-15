@@ -321,14 +321,15 @@ StmtPtr FlattenScopeBody(FlattenCallExprMutator* self, std::vector<StmtPtr>& pen
 StmtPtr FlattenCallExprMutator::VisitStmt_(const InCoreScopeStmtPtr& op) {
   auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
   if (new_body.get() == op->body_.get()) return op;
-  return std::make_shared<const InCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body), op->span_);
+  return std::make_shared<const InCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body), op->span_,
+                                                 std::vector<std::string>{}, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
   auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const AutoInCoreScopeStmt>(op->split_, op->name_hint_, std::move(new_body),
-                                                     op->span_);
+                                                     op->span_, std::vector<std::string>{}, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const ClusterScopeStmtPtr& op) {
@@ -341,7 +342,8 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   auto new_body = FlattenScopeBody(this, pending_stmts_, op->body_);
   if (new_body.get() == op->body_.get()) return op;
   return std::make_shared<const HierarchyScopeStmt>(op->level_, op->role_, op->name_hint_,
-                                                    std::move(new_body), op->span_);
+                                                    std::move(new_body), op->span_,
+                                                    std::vector<std::string>{}, op->attrs_);
 }
 
 StmtPtr FlattenCallExprMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {

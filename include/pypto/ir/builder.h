@@ -302,7 +302,8 @@ class IRBuilder {
   void BeginScope(ScopeKind scope_kind, const Span& span, std::optional<Level> level = std::nullopt,
                   std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
                   std::string name_hint = "", ExprPtr core_num = nullptr,
-                  std::optional<bool> sync_start = std::nullopt, std::optional<bool> manual = std::nullopt);
+                  std::optional<bool> sync_start = std::nullopt, std::optional<bool> manual = std::nullopt,
+                  std::vector<std::pair<std::string, std::any>> attrs = {});
 
   /**
    * @brief End building a scope statement
@@ -723,7 +724,8 @@ class ScopeContext : public BuildContext {
   ScopeContext(ScopeKind scope_kind, Span span, std::optional<Level> level = std::nullopt,
                std::optional<Role> role = std::nullopt, std::optional<SplitMode> split = std::nullopt,
                std::string name_hint = "", ExprPtr core_num = nullptr,
-               std::optional<bool> sync_start = std::nullopt, std::optional<bool> manual = std::nullopt)
+               std::optional<bool> sync_start = std::nullopt, std::optional<bool> manual = std::nullopt,
+               std::vector<std::pair<std::string, std::any>> attrs = {})
       : BuildContext(Type::SCOPE, std::move(span)),
         scope_kind_(scope_kind),
         level_(level),
@@ -732,7 +734,8 @@ class ScopeContext : public BuildContext {
         name_hint_(std::move(name_hint)),
         core_num_(std::move(core_num)),
         sync_start_(sync_start),
-        manual_(manual) {}
+        manual_(manual),
+        attrs_(std::move(attrs)) {}
 
   void AddStmt(const StmtPtr& stmt) override { stmts_.push_back(stmt); }
 
@@ -744,6 +747,8 @@ class ScopeContext : public BuildContext {
   [[nodiscard]] const ExprPtr& GetCoreNum() const { return core_num_; }
   [[nodiscard]] std::optional<bool> GetSyncStart() const { return sync_start_; }
   [[nodiscard]] std::optional<bool> GetManual() const { return manual_; }
+  [[nodiscard]] const std::vector<std::pair<std::string, std::any>>& GetAttrs() const { return attrs_; }
+  [[nodiscard]] std::vector<std::pair<std::string, std::any>> TakeAttrs() { return std::move(attrs_); }
   [[nodiscard]] const std::vector<StmtPtr>& GetStmts() const { return stmts_; }
 
  private:
@@ -755,6 +760,7 @@ class ScopeContext : public BuildContext {
   ExprPtr core_num_;
   std::optional<bool> sync_start_;
   std::optional<bool> manual_;
+  std::vector<std::pair<std::string, std::any>> attrs_;
   std::vector<StmtPtr> stmts_;
 };
 
