@@ -33,13 +33,13 @@ Layout mirrors the ``tile.alloc`` / ``MemRef`` / ``TileType`` triple:
 """
 
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 from pypto.ir.op.distributed import memory_ops as _ir_memory
 from pypto.language.typing import IntLike, Ptr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
-from pypto.pypto_core.ir import Call, Expr
+from pypto.pypto_core.ir import Expr
 
 from ..typing.distributed_tensor import DistributedTensor
 
@@ -125,8 +125,8 @@ def window(
             f"got {_ir.python_print_type(buf_expr.type)}"
         )
     shape_list = [_unwrap(s) for s in shape]
-    call: Call = _ir_memory.window(buf_expr, shape_list, dtype=dtype)
-    return cast(DistributedTensor, DistributedTensor(expr=call))
+    call = _ir_memory.window(buf_expr, shape_list, dtype=dtype)
+    return DistributedTensor(expr=call)
 
 
 __all__ = ["alloc_window_buffer", "window"]

@@ -10,10 +10,12 @@
 """Tensor wrapper type for PyPTO Language DSL."""
 
 from collections.abc import Sequence
-from typing import Any, cast, overload
+from typing import Any, TypeVar, cast, overload
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr, MemRef, TensorLayout
+
+TensorT = TypeVar("TensorT", bound="Tensor")
 
 
 def _validate_tensor_meta_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
@@ -76,27 +78,27 @@ class TensorMeta(type):
 
     @overload
     def __call__(
-        cls,
+        cls: type[TensorT],
         shape: Sequence[int] | None = None,
         dtype: DataType | None = None,
         expr: Expr | None = None,
         layout: "TensorLayout | None" = None,
         memref: "MemRef | None" = None,
         _annotation_only: bool = False,
-    ) -> "Tensor": ...
+    ) -> TensorT: ...
 
     @overload
     def __call__(
-        cls,
+        cls: type[TensorT],
         shape: tuple[Any, Any],
         dtype: None = None,
         expr: None = None,
         layout: "TensorLayout | None" = None,
         memref: "MemRef | None" = None,
         _annotation_only: bool = False,
-    ) -> "Tensor": ...
+    ) -> TensorT: ...
 
-    def __call__(cls, *args: Any, **kwargs: Any) -> "Tensor":
+    def __call__(cls: type[TensorT], *args: Any, **kwargs: Any) -> TensorT:
         """Enable both Tensor((shape), dtype) syntax and runtime wrapping.
 
         Args:
@@ -129,7 +131,7 @@ class TensorMeta(type):
         ):
             real_shape, real_dtype = shape
             return cast(
-                "Tensor",
+                TensorT,
                 type.__call__(cls, real_shape, real_dtype, None, layout, memref, annotation_only),
             )
 
@@ -137,7 +139,7 @@ class TensorMeta(type):
             annotation_only = True
 
         return cast(
-            "Tensor",
+            TensorT,
             type.__call__(cls, shape, dtype, expr, layout, memref, annotation_only),
         )
 
