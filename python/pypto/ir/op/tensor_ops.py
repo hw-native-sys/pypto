@@ -34,12 +34,22 @@ def create(
         shape: List of dimension sizes (int or Expr), or a MakeTuple
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
-        manual_dep: **Internal-only.** When True, the codegen marks this
-            ``tensor.create`` call so the runtime skips OverlapMap dep
-            tracking. Set programmatically by the ``InjectGMPipeBuffer``
-            pass for compiler-injected scratch buffers; user code should
-            never set this — order kernel calls with ``pl.no_dep(...)``
-            or ``with pl.manual_scope():`` instead.
+        manual_dep: Opt this tensor out of OverlapMap auto-dep tracking
+            for its **entire lifetime**. When True, codegen marks the
+            ``tensor.create`` call so every task that reads or writes the
+            tensor skips OverlapMap lookup and insert. Creator retention
+            (the ``tensor.create``'s owner_task_id) still applies.
+
+            This is the **tensor-lifetime** granularity of opting out of
+            auto-dep tracking; the orthogonal scope-wide
+            (``with pl.manual_scope():``) and per-arg (``pl.no_dep(t)``)
+            granularities live in the language layer. The opt-outs
+            compose with explicit edges (``pl.submit(..., deps=[...])``
+            / ``pl.at(..., deps=)``): the final task fanin is
+            *auto-tracked deps* ∪ *explicit deps*.
+
+            Also used internally by ``InjectGMPipeBuffer`` to mark the
+            ring-buffer slots it synthesises.
         span: Optional source span for debugging (auto-captured if not provided)
 
     Returns:

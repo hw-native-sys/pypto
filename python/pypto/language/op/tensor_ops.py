@@ -111,10 +111,30 @@ def create(
         shape: List of dimension sizes (int or Expr)
         dtype: Data type of tensor elements
         layout: Tensor layout (default: ND)
-        manual_dep: **Internal-only.** Set by ``InjectGMPipeBuffer`` for the
-            scratch buffers it injects. User code should never set this —
-            order kernel calls explicitly with ``pl.no_dep(...)`` or wrap
-            them in ``with pl.manual_scope():`` instead.
+        manual_dep: Opt this tensor out of OverlapMap auto-dep tracking for
+            its **entire lifetime**. When True, every task that reads or
+            writes this tensor skips OverlapMap lookup and insert, so the
+            runtime neither makes the task wait on prior writers nor
+            registers it as a producer for later readers. Creator retention
+            (the original ``tensor.create``'s owner_task_id) still applies.
+
+            This is the **tensor-lifetime** granularity of opting out of
+            auto-dep tracking. The other two granularities, both orthogonal
+            to this one, are:
+
+              * ``with pl.manual_scope():`` — scope-wide opt-out.
+              * ``pl.no_dep(t)`` at a kernel-call arg position — single-task
+                opt-out for one arg.
+
+            All three opt-outs compose with the orthogonal **explicit edges**
+            mechanism (``pl.submit(..., deps=[...])`` / ``pl.at(..., deps=)``):
+            the final task fanin is *auto-tracked deps* ∪ *explicit deps*,
+            so you can use ``manual_dep=True`` to silence auto-tracking on
+            a scratch buffer while still pinning its ordering with a
+            ``deps=[tid]`` on the consumer.
+
+            Internally also used by ``InjectGMPipeBuffer`` to mark the
+            ring-buffer slots it synthesises.
 
     Returns:
         Tensor wrapping the create operation

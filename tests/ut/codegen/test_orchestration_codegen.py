@@ -670,6 +670,48 @@ class TestOrchestration:
         assert "const Tensor& buf = " in code
         assert "make_tensor_external(nullptr, buf_ci_shapes, 2, DataType::FLOAT16)" not in code
 
+    def test_tensor_create_with_manual_dep(self):
+        """``pl.create_tensor(..., manual_dep=True)`` opts a tensor out of OverlapMap
+        auto-dep tracking for its entire lifetime. Codegen forwards the flag to the
+        ``TensorCreateInfo`` ctor's trailing ``manual_dep`` argument.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ManualDepProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_fill(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP16],
+                output: pl.Out[pl.Tensor[[32, 32], pl.FP16]],
+            ) -> pl.Tensor[[32, 32], pl.FP16]:
+                t: pl.Tile[[32, 32], pl.FP16] = pl.load(a, [0, 0], [32, 32])
+                out: pl.Tensor[[32, 32], pl.FP16] = pl.store(t, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_create(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP16],
+                result: pl.Out[pl.Tensor[[32, 32], pl.FP16]],
+            ) -> pl.Tensor[[32, 32], pl.FP16]:
+                scratch: pl.Tensor[[32, 32], pl.FP16] = pl.create_tensor(
+                    [32, 32], dtype=pl.FP16, manual_dep=True
+                )
+                scratch = self.kernel_fill(a, scratch)
+                result = self.kernel_fill(scratch, result)
+                return result
+
+        code = _generate_orch_code(ManualDepProgram)
+
+        # The trailing /*manual_dep=*/true on TensorCreateInfo is the codegen hook
+        # the runtime reads to skip OverlapMap insert/lookup for this tensor.
+        assert (
+            "TensorCreateInfo scratch_ci(scratch_ci_shapes, 2, DataType::FLOAT16, /*manual_dep=*/true)"
+            in code
+        )
+
     def test_inplace_tensor(self):
         """Test inplace tensors use make_inout_param when a tensor is both input and output.
 
