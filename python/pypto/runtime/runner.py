@@ -29,7 +29,6 @@ import os
 import subprocess
 import sys
 import time
-import warnings
 from ctypes import _SimpleCData
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -85,11 +84,6 @@ class RunConfig:
             on device.  Useful for validating compilation output.
         pto_isa_commit: If set, pin the pto-isa clone to this specific git
             commit (hash or tag).  ``None`` means use the latest remote HEAD.
-        runtime_profiling: DEPRECATED alias for ``enable_l2_swimlane``.
-            Kept temporarily so external callers that still set
-            ``runtime_profiling=True`` keep working. Emits a
-            ``DeprecationWarning`` and ORs into ``enable_l2_swimlane``
-            during ``__post_init__``. Will be removed in a future release.
         enable_l2_swimlane: Capture per-task L2 perf records into
             ``<work_dir>/dfx_outputs/l2_perf_records.json``. After the run
             ``swimlane_converter`` produces ``merged_swimlane_*.json``.
@@ -149,7 +143,6 @@ class RunConfig:
     save_kernels_dir: str | None = None
     codegen_only: bool = False
     pto_isa_commit: str | None = None
-    runtime_profiling: bool = False  # DEPRECATED: use enable_l2_swimlane
     enable_l2_swimlane: bool = False
     enable_dump_tensor: bool = False
     enable_pmu: int = 0
@@ -180,19 +173,6 @@ class RunConfig:
         if not self.platform.startswith(expected_arch):
             sim_suffix = "sim" if self.platform.endswith("sim") else ""
             self.platform = f"{expected_arch}{sim_suffix}"
-
-        # Deprecated alias: ``runtime_profiling=True`` is folded into
-        # ``enable_l2_swimlane`` (the feature it actually controlled). Kept
-        # so external callers that have not migrated yet keep working.
-        if self.runtime_profiling:
-            warnings.warn(
-                "RunConfig.runtime_profiling is deprecated; use "
-                "enable_l2_swimlane instead. The two are aliased today and "
-                "runtime_profiling will be removed in a future release.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self.enable_l2_swimlane = True
 
         # Any DFX flag requires kernel artefacts to be retained so the
         # ``<work_dir>/dfx_outputs/`` directory survives the run.
@@ -743,7 +723,6 @@ def execute_compiled(  # noqa: PLR0913
     device_id: int,
     pto_isa_commit: str | None = None,
     dfx: _DfxOpts = _DfxOpts(),
-    runtime_profiling: bool = False,
     level: int = 2,
     block_dim: int | None = None,
     aicpu_thread_num: int | None = None,
@@ -770,12 +749,6 @@ def execute_compiled(  # noqa: PLR0913
         dfx: Runtime DFX toggles. When any flag is enabled the artefacts
             land under ``<work_dir>/dfx_outputs/`` and the matching
             post-run converter is invoked.
-        runtime_profiling: DEPRECATED alias for
-            ``dfx=_DfxOpts(enable_l2_swimlane=True)``. Kept so external
-            callers (e.g. ``pypto-lib/golden/runner.py``) that still pass
-            ``runtime_profiling=True`` keep working. Emits a
-            ``DeprecationWarning`` and ORs into the swimlane flag. Will
-            be removed in a future release.
         level: Hierarchy level. Forwarded to :func:`execute_on_device`,
             which currently only supports ``2``.
         block_dim: Optional override of the logical SPMD block count.
@@ -789,23 +762,6 @@ def execute_compiled(  # noqa: PLR0913
             same precedence rules as ``block_dim``.
     """
     work_dir = Path(work_dir)
-
-    # Deprecated alias: fold ``runtime_profiling=True`` onto ``dfx``.
-    if runtime_profiling:
-        warnings.warn(
-            "execute_compiled(runtime_profiling=...) is deprecated; pass "
-            "``dfx=_DfxOpts(enable_l2_swimlane=True)`` instead. The two are "
-            "aliased today and runtime_profiling will be removed in a future "
-            "release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        dfx = _DfxOpts(
-            enable_l2_swimlane=True,
-            enable_dump_tensor=dfx.enable_dump_tensor,
-            enable_pmu=dfx.enable_pmu,
-            enable_dep_gen=dfx.enable_dep_gen,
-        )
 
     # Ensure orchestration headers are patched (idempotent)
     _patch_orchestration_headers(work_dir)

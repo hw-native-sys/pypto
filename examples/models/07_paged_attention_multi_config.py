@@ -766,7 +766,7 @@ def build_tensors_multi_config(
 def main():
     parser = argparse.ArgumentParser(description="Multi-config paged attention example")
     parser.add_argument(
-        "--runtime-profiling",
+        "--enable-l2-swimlane",
         action="store_true",
         default=False,
         help="Enable on-device runtime profiling and generate swimlane JSON",
@@ -816,7 +816,7 @@ def main():
             dump_passes=True,
             backend_type=BackendType.Ascend910B,
             compile_profiling=True,
-            runtime_profiling=args.runtime_profiling,
+            enable_l2_swimlane=args.enable_l2_swimlane,
         ),
     )
 

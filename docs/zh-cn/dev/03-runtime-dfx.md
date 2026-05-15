@@ -66,14 +66,6 @@ pytest tests/st/runtime/ \
 | pytest 入口 | [tests/st/conftest.py](../../../tests/st/conftest.py) | `pytest_addoption` |
 | Harness 流水线上下文 | [tests/st/harness/core/test_runner.py](../../../tests/st/harness/core/test_runner.py) | `start_pipeline(..., enable_*)` |
 
-## 已弃用别名
-
-`RunConfig.runtime_profiling` 与 pytest flag `--runtime-profiling` 是
-四项 DFX 独立化之前唯一启用 L2 swimlane 采集的入口，现作为
-`enable_l2_swimlane` / `--enable-l2-swimlane` 的别名暂时保留，以兼容
-仍在使用它们的外部脚本。两条路径都会发出 `DeprecationWarning`，并将
-在未来版本中移除，请尽快迁移到新名称。
-
 ## 相关文档
 
 - Simpler runtime 侧参考：`runtime/docs/dfx/{l2-swimlane,

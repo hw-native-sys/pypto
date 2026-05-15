@@ -747,7 +747,7 @@ def main():
     )
     parser.add_argument("-d", "--device", type=int, default=default_device)
     parser.add_argument(
-        "--runtime-profiling",
+        "--enable-l2-swimlane",
         action="store_true",
         default=False,
         help="Enable on-device runtime profiling and generate swimlane JSON",
@@ -797,7 +797,7 @@ def main():
         strategy=OptimizationStrategy.Default,
         dump_passes=True,
         backend_type=BackendType.Ascend950 if args.platform.startswith("a5") else BackendType.Ascend910B,
-        runtime_profiling=args.runtime_profiling,
+        enable_l2_swimlane=args.enable_l2_swimlane,
     )
     compiled = run(program, config=run_config)
     output = compiled(*input_tensors, config=run_config)

@@ -21,7 +21,6 @@ import re
 import shutil
 import sys
 import tempfile
-import warnings
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -187,15 +186,6 @@ def pytest_addoption(parser):
         "and render merged_swimlane_*.json after execution.",
     )
     parser.addoption(
-        "--runtime-profiling",
-        action="store_true",
-        default=False,
-        help=(
-            "DEPRECATED alias for --enable-l2-swimlane. Kept so existing "
-            "scripts keep working; will be removed in a future release."
-        ),
-    )
-    parser.addoption(
         "--dump-tensor",
         action="store_true",
         default=False,
@@ -354,14 +344,7 @@ def test_config(request) -> RunConfig:
         dump_passes=request.config.getoption("--dump-passes"),
         codegen_only=request.config.getoption("--codegen-only"),
         pto_isa_commit=request.config.getoption("--pto-isa-commit"),
-        # ``--runtime-profiling`` is the deprecated alias for
-        # ``--enable-l2-swimlane``; OR them so existing scripts keep working
-        # (``RunConfig.__post_init__`` emits the DeprecationWarning on the
-        # field path; the bool here doesn't need its own warning).
-        enable_l2_swimlane=(
-            request.config.getoption("--enable-l2-swimlane")
-            or request.config.getoption("--runtime-profiling")
-        ),
+        enable_l2_swimlane=request.config.getoption("--enable-l2-swimlane"),
         enable_dump_tensor=request.config.getoption("--dump-tensor"),
         enable_pmu=request.config.getoption("--enable-pmu"),
         enable_dep_gen=request.config.getoption("--enable-dep-gen"),
@@ -586,21 +569,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     dump_passes: bool = session.config.getoption("--dump-passes")
     codegen_only: bool = session.config.getoption("--codegen-only")
     pto_isa_commit: str | None = session.config.getoption("--pto-isa-commit")
-    # ``--runtime-profiling`` is the deprecated alias for ``--enable-l2-swimlane``;
-    # OR them so existing scripts keep working. Warn once at the session boundary
-    # so the deprecation surfaces even when no per-test ``RunConfig`` is built.
-    deprecated_runtime_profiling: bool = session.config.getoption("--runtime-profiling")
-    if deprecated_runtime_profiling:
-        warnings.warn(
-            "--runtime-profiling is deprecated; use --enable-l2-swimlane instead. "
-            "The two are aliased today and --runtime-profiling will be removed in "
-            "a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-    enable_l2_swimlane: bool = (
-        session.config.getoption("--enable-l2-swimlane") or deprecated_runtime_profiling
-    )
+    enable_l2_swimlane: bool = session.config.getoption("--enable-l2-swimlane")
     enable_dump_tensor: bool = session.config.getoption("--dump-tensor")
     enable_pmu: int = session.config.getoption("--enable-pmu")
     enable_dep_gen: bool = session.config.getoption("--enable-dep-gen")
