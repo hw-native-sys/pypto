@@ -114,6 +114,7 @@ enum class ObjectKind {
   ArrayType,
   TupleType,
   WindowBufferType,
+  CommCtxType,
 
   // Other IR node kinds
   Function,

@@ -325,5 +325,72 @@ def test_remote_load_rejects_non_make_tuple_offsets():
         )
 
 
+# ---------------------------------------------------------------------------
+# CommCtxType singleton + pld.get_comm_ctx / pld.comm_ctx.{rank,nranks}
+# ---------------------------------------------------------------------------
+
+
+def test_comm_ctx_type_is_singleton():
+    a = ir.CommCtxType.get()
+    b = ir.CommCtxType.get()
+    assert a is b
+    assert ir.structural_equal(a, ir.CommCtxType())
+
+
+def test_get_comm_ctx_returns_comm_ctx_type():
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
+    call = ir.create_op_call("pld.get_comm_ctx", [target], {}, span)
+    assert isinstance(call.type, ir.CommCtxType)
+
+
+def test_get_comm_ctx_rejects_plain_tensor():
+    span = ir.Span.unknown()
+    plain = ir.Var("x", ir.TensorType([ir.ConstInt(4, DataType.INT64, span)], DataType.FP32), span)
+    with pytest.raises(Exception, match="DistributedTensor"):
+        ir.create_op_call("pld.get_comm_ctx", [plain], {}, span)
+
+
+def test_get_comm_ctx_rejects_kwargs():
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("data", [4], DataType.FP32, span)
+    with pytest.raises(Exception, match="no kwargs"):
+        ir.create_op_call("pld.get_comm_ctx", [target], {"foo": 1}, span)
+
+
+def _make_comm_ctx_var(name: str, span: ir.Span) -> ir.Var:
+    return ir.Var(name, ir.CommCtxType.get(), span)
+
+
+def test_comm_ctx_rank_returns_int32_scalar():
+    span = ir.Span.unknown()
+    ctx = _make_comm_ctx_var("ctx", span)
+    call = ir.create_op_call("pld.comm_ctx.rank", [ctx], {}, span)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.INT32
+
+
+def test_comm_ctx_nranks_returns_int32_scalar():
+    span = ir.Span.unknown()
+    ctx = _make_comm_ctx_var("ctx", span)
+    call = ir.create_op_call("pld.comm_ctx.nranks", [ctx], {}, span)
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.INT32
+
+
+def test_comm_ctx_rank_rejects_non_ctx_arg():
+    span = ir.Span.unknown()
+    bad = _make_distributed_tensor_var("data", [4], DataType.FP32, span)
+    with pytest.raises(Exception, match="CommCtxType"):
+        ir.create_op_call("pld.comm_ctx.rank", [bad], {}, span)
+
+
+def test_comm_ctx_nranks_rejects_non_ctx_arg():
+    span = ir.Span.unknown()
+    bad = ir.Var("x", ir.ScalarType(DataType.INT32), span)
+    with pytest.raises(Exception, match="CommCtxType"):
+        ir.create_op_call("pld.comm_ctx.nranks", [bad], {}, span)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1080,6 +1080,23 @@ class WindowBufferType(Type):
         """Get the shared singleton WindowBufferType instance."""
         ...
 
+class CommCtxType(Type):
+    """Singleton marker type for ``pld.get_comm_ctx`` results.
+
+    Stands in for a device-side ``CommContext*`` whose concrete address is
+    resolved by ``host_orch`` codegen (picks the right ``ctx.device_ctx[i]``
+    based on the source DistributedTensor's CommGroup membership). The type
+    itself is field-less — different comm groups are distinguished by the
+    DistributedTensor that spawned the ``get_comm_ctx`` call, not by the
+    result type.
+    """
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> CommCtxType:
+        """Get the shared singleton CommCtxType instance."""
+        ...
+
 class MemRef(Var):
     """Memory reference variable for shaped types (inherits from Var)."""
 

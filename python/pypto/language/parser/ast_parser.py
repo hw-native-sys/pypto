@@ -5038,6 +5038,28 @@ class ASTParser:
         Returns:
             IR expression
         """
+        # Distributed-DSL attribute desugar (lift cross-rank Python attribute
+        # chains to their underlying IR ops):
+        #
+        #   dist_t.comm          → pld.get_comm_ctx(dist_t)
+        #   ctx.rank   / .nranks → pld.comm_ctx.{rank,nranks}(ctx)
+        #
+        # The lookup is on the LHS *IR type*, not on the textual name, so any
+        # alias (function parameter, ``pld.window(...)`` result Var, threaded-in
+        # tensor argument) routes through the same desugar. We only attempt to
+        # parse the LHS as an IR expression when the leading token is a name in
+        # scope or a chained attribute access; module-level lookups like
+        # ``pl.MemorySpace.Vec`` fall through to the closure-eval path below.
+        if self._looks_like_ir_expr_attribute(attr):
+            try:
+                base = self.parse_expression(attr.value)
+            except Exception:
+                base = None
+            if base is not None:
+                desugared = self._desugar_distributed_attribute(base, attr)
+                if desugared is not None:
+                    return desugared
+
         # Try to evaluate as a Python enum value (e.g., pl.MemorySpace.Vec -> ConstInt)
         try:
             value = self.expr_evaluator.eval_expr(attr)
@@ -5052,6 +5074,51 @@ class ASTParser:
             span=self.span_tracker.get_span(attr),
             hint="Attribute access is only supported within function calls",
         )
+
+    def _looks_like_ir_expr_attribute(self, attr: ast.Attribute) -> bool:
+        """Return True when ``attr.value`` plausibly evaluates to an IR Expr.
+
+        We accept ``Name`` (single scope lookup), ``Attribute`` (chained access
+        like ``data.comm.rank``), and ``Subscript`` (e.g. ``buf[0].comm``).
+        Anything else — calls, comprehensions — would have its own path and
+        we don't attempt to coerce.
+        """
+        leaf = attr.value
+        while isinstance(leaf, (ast.Attribute, ast.Subscript)):
+            leaf = leaf.value
+        return isinstance(leaf, ast.Name)
+
+    def _desugar_distributed_attribute(self, base: ir.Expr, attr: ast.Attribute) -> ir.Expr | None:
+        """Lift ``dist_t.comm`` and ``ctx.rank/.nranks`` to their IR op calls.
+
+        Returns ``None`` when the LHS type / attribute name combination does
+        not match a distributed-DSL pattern, letting the caller fall through
+        to the generic enum-resolution path.
+        """
+        span = self.span_tracker.get_span(attr)
+        base_type = base.type if isinstance(base, ir.Expr) else None
+
+        if isinstance(base_type, ir.DistributedTensorType):
+            if attr.attr == "comm":
+                return ir.create_op_call("pld.get_comm_ctx", [base], {}, span)
+            raise ParserTypeError(
+                f"DistributedTensor has no attribute '{attr.attr}'; only '.comm' is supported",
+                span=span,
+                hint="Use 'data.comm.rank' or 'data.comm.nranks' to access the comm context fields",
+            )
+
+        if isinstance(base_type, ir.CommCtxType):
+            if attr.attr == "rank":
+                return ir.create_op_call("pld.comm_ctx.rank", [base], {}, span)
+            if attr.attr == "nranks":
+                return ir.create_op_call("pld.comm_ctx.nranks", [base], {}, span)
+            raise ParserTypeError(
+                f"CommCtx has no attribute '{attr.attr}'; supported: 'rank', 'nranks'",
+                span=span,
+                hint="Use 'ctx.rank' or 'ctx.nranks'",
+            )
+
+        return None
 
     def _parse_sequence_literal(self, node: ast.List | ast.Tuple) -> ir.MakeTuple:
         """Parse list or tuple literal into MakeTuple IR expression.

@@ -768,6 +768,35 @@ inline WindowBufferTypePtr GetWindowBufferType() {
   return window_buffer_type;
 }
 
+/**
+ * @brief Singleton marker type for cross-rank communication context handles.
+ *
+ * Returned by ``pld.get_comm_ctx(dist_t)`` and consumed by ``pld.comm_ctx.rank``
+ * / ``pld.comm_ctx.nranks``. Stands in for a device-side ``CommContext*`` whose
+ * concrete address is selected per call site by the host_orch codegen (the
+ * pointer flows into the InCore kernel as a synthesised scalar param keyed by
+ * ``group_idx``; see N6 codegen). The marker carries no per-instance fields —
+ * different comm groups are distinguished by the DistributedTensor that
+ * spawned the ``get_comm_ctx`` call, not by the result type.
+ */
+class CommCtxType : public Type {
+ public:
+  CommCtxType() = default;
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::CommCtxType; }
+  [[nodiscard]] std::string TypeName() const override { return "CommCtxType"; }
+
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+
+using CommCtxTypePtr = std::shared_ptr<const CommCtxType>;
+
+/// Get the shared singleton CommCtxType instance.
+inline CommCtxTypePtr GetCommCtxType() {
+  static const auto comm_ctx_type = std::make_shared<CommCtxType>();
+  return comm_ctx_type;
+}
+
 }  // namespace ir
 }  // namespace pypto
 

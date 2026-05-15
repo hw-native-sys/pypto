@@ -524,6 +524,17 @@ void BindIR(nb::module_& m) {
                                       "Get the shared singleton WindowBufferType instance.");
   BindFields<WindowBufferType>(window_buffer_type_class);
 
+  // CommCtxType - singleton marker type for pld.get_comm_ctx outputs.
+  // Mirrors WindowBufferType: no per-instance fields. The handle is reified at
+  // codegen time into a synthesised incore ctx pointer (group_idx-dependent).
+  auto comm_ctx_type_class = nb::class_<CommCtxType, Type>(
+      ir, "CommCtxType",
+      "Singleton marker type for pld.get_comm_ctx outputs. Stands in for a device-side "
+      "CommContext* whose concrete address is resolved by host_orch codegen.");
+  comm_ctx_type_class.def(nb::init<>(), "Create the singleton CommCtxType instance.");
+  comm_ctx_type_class.def_static("get", &GetCommCtxType, "Get the shared singleton CommCtxType instance.");
+  BindFields<CommCtxType>(comm_ctx_type_class);
+
   // MemorySpace enum
   nb::enum_<MemorySpace>(ir, "MemorySpace", "Memory space enumeration")
       .value("DDR", MemorySpace::DDR, "DDR memory (off-chip)")

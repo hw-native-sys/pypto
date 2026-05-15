@@ -1263,7 +1263,7 @@ bool StructuralEqualImpl<AssertMode>::EqualType(const TypePtr& lhs, const TypePt
     }
     return true;
   } else if (IsA<MemRefType>(lhs) || IsA<UnknownType>(lhs) || IsA<PtrType>(lhs) ||
-             IsA<WindowBufferType>(lhs)) {
+             IsA<WindowBufferType>(lhs) || IsA<CommCtxType>(lhs)) {
     return true;  // Singleton type, both being same type kind is sufficient
   }
 

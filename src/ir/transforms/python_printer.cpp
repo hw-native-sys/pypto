@@ -504,6 +504,11 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return "pld.WindowBufferType";
   }
 
+  if (As<CommCtxType>(type)) {
+    // Singleton marker — same rendering convention as WindowBufferType.
+    return "pld.CommCtxType";
+  }
+
   return prefix_ + ".UnknownType";
 }
 

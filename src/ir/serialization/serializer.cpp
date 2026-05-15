@@ -32,6 +32,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -458,7 +459,7 @@ class IRSerializer::Impl {
       }
       type_map["types"] = msgpack::object(types_vec, zone);
     } else if (IsA<MemRefType>(type) || IsA<UnknownType>(type) || IsA<PtrType>(type) ||
-               IsA<WindowBufferType>(type)) {
+               IsA<WindowBufferType>(type) || IsA<CommCtxType>(type)) {
       // Singleton marker types (no extra fields beyond the type_kind key).
     } else {
       INTERNAL_UNREACHABLE << "Unknown Type subclass: " << type->TypeName();
