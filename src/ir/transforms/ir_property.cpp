@@ -81,6 +81,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TensorViewCanonical";
     case IRProperty::ArrayNotEscaped:
       return "ArrayNotEscaped";
+    case IRProperty::CommGroupsCollected:
+      return "CommGroupsCollected";
     default:
       return "Unknown";
   }

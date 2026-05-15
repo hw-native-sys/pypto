@@ -167,6 +167,15 @@ class PassManager:
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
             ("DeriveCallDirections", lambda: passes.derive_call_directions()),
+            # Trace pld.alloc_window_buffer → pld.window → dispatch(device=r)
+            # in each host_orch and materialise WindowBuffer +
+            # Program.comm_groups_. Runs at the end of the pipeline because
+            # nothing between InlineFunctions and here touches the host_orch
+            # alloc/window/dispatch chain (host_orch is never tile-lowered),
+            # so the alloc/view/dispatch sites are still discoverable. Runs
+            # before the final Simplify so any constant folding it does on the
+            # collected sizes is applied uniformly.
+            ("CollectCommGroups", lambda: passes.collect_comm_groups()),
             ("Simplify", lambda: passes.simplify()),
         ]
         cls._strategy_passes = {

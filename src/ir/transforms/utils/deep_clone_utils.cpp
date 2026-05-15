@@ -138,6 +138,28 @@ class DeepCloneMutator : public IRMutator {
     return fresh;
   }
 
+  ExprPtr VisitExpr_(const WindowBufferPtr& op) override {
+    auto it = expr_map_.find(op.get());
+    if (it != expr_map_.end()) {
+      return it->second;
+    }
+    // Mirror MemRef: remap base_ through the mutator so substitutions on the
+    // alloc Ptr Var propagate; remap size_ similarly so symbolic sizes pick up
+    // any var substitutions.
+    VarPtr new_base = op->base_;
+    if (op->base_) {
+      auto remapped_base = IRMutator::VisitExpr(op->base_);
+      if (auto as_var = std::dynamic_pointer_cast<const Var>(remapped_base)) {
+        new_base = as_var;
+      }
+    }
+    auto new_size = op->size_ ? IRMutator::VisitExpr(op->size_) : op->size_;
+    auto fresh = std::make_shared<WindowBuffer>(std::move(new_base), std::move(new_size), op->load_from_host_,
+                                                op->store_to_host_, op->span_);
+    expr_map_[op.get()] = fresh;
+    return fresh;
+  }
+
  private:
   /// Create a fresh Var with a remapped type, register in expr_map_.
   /// The type is rewritten so shape dims, TileView/TensorView fields, and any
@@ -145,9 +167,9 @@ class DeepCloneMutator : public IRMutator {
   /// the fresh Var's type would still reference the caller's old Var pointers.
   void CloneVar(const VarPtr& op) {
     if (expr_map_.count(op.get())) return;  // Already mapped (e.g. pre-seeded)
-    // Check if the actual runtime type is MemRef — don't create a plain Var for MemRef
-    if (op->GetKind() == ObjectKind::MemRef) {
-      // MemRef will be handled by VisitExpr_(MemRefPtr) during traversal
+    // Check if the actual runtime type is MemRef / WindowBuffer — don't create a
+    // plain Var for those; their dedicated VisitExpr_ overloads handle cloning.
+    if (op->GetKind() == ObjectKind::MemRef || op->GetKind() == ObjectKind::WindowBuffer) {
       return;
     }
     auto new_type = RemapType(op->GetType());

@@ -292,6 +292,7 @@ class IntSetAnalyzer::Impl : public ExprFunctor<IntSet> {
   }
 
   IntSet VisitExpr_(const MemRefPtr& /*op*/) override { return IntSet::Everything(); }
+  IntSet VisitExpr_(const WindowBufferPtr& /*op*/) override { return IntSet::Everything(); }
   IntSet VisitExpr_(const CallPtr& /*op*/) override { return IntSet::Everything(); }
   IntSet VisitExpr_(const MakeTuplePtr& /*op*/) override { return IntSet::Everything(); }
   IntSet VisitExpr_(const TupleGetItemExprPtr& /*op*/) override { return IntSet::Everything(); }

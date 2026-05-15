@@ -28,6 +28,15 @@ namespace pass {
 
 inline const PassProperties kInlineFunctionsProperties{.produced = {IRProperty::InlineFunctionsEliminated}};
 
+// -- CollectCommGroups pass (runs at the end of the pipeline, just before -----
+//    the final Simplify). Nothing between InlineFunctions and here touches
+//    the host_orch alloc/window/dispatch chain (host_orch is never tile-
+//    lowered), so the alloc/view/dispatch sites are still discoverable.
+//    Traces pld.alloc_window_buffer → pld.window → dispatch(device=r) and
+//    materialises WindowBuffer + Program.comm_groups_.
+
+inline const PassProperties kCollectCommGroupsProperties{.produced = {IRProperty::CommGroupsCollected}};
+
 // -- Loop unrolling pass (runs before SSA) ------------------------------------
 
 inline const PassProperties kUnrollLoopsProperties{};

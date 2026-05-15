@@ -14,9 +14,9 @@ Currently exposes :func:`world_size`; N6 will add ``notify`` / ``wait``
 (``pld.system.notify`` / ``pld.system.wait``) here as well.
 
 * ``world_size`` — host-only scalar returning the number of devices in the
-  current distributed execution. Returns an :class:`ir.Expr` of type
-  ``ScalarType(INT64)``. Codegen later lowers each call site to
-  ``len(contexts)``.
+  current distributed execution. Returns a :class:`Scalar` wrapping an
+  :class:`ir.Expr` of type ``ScalarType(INT64)``. Codegen later lowers each
+  call site to ``len(contexts)``.
 
 Typical use sites for ``world_size``:
 

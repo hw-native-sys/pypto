@@ -89,7 +89,10 @@ void BindPass(nb::module_& m) {
       .value("TensorViewCanonical", IRProperty::TensorViewCanonical,
              "Every TensorType.tensor_view_ is canonical per RFC #1300 §2.2")
       .value("ArrayNotEscaped", IRProperty::ArrayNotEscaped,
-             "ArrayType never appears as a function parameter or return type");
+             "ArrayType never appears as a function parameter or return type")
+      .value("CommGroupsCollected", IRProperty::CommGroupsCollected,
+             "Program.comm_groups_ populated and pld.window result types carry "
+             "DistributedTensorType.window_buffer_ back-references");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -469,6 +472,12 @@ void BindPass(nb::module_& m) {
              "Detects cycles in the Inline → Inline call graph and raises ValueError.\n"
              "Supports multi-return inline (emits MakeTuple at call site) and nested\n"
              "Inline-calls-Inline (iterates to fixpoint).");
+  passes.def("collect_comm_groups", &pass::CollectCommGroups,
+             "Trace pld.alloc_window_buffer → pld.window → dispatch(device=r) chains in each\n"
+             "host_orch function, materialise WindowBuffer instances back-referenced from\n"
+             "DistributedTensorType.window_buffer_ on view Vars, and populate\n"
+             "Program.comm_groups_ with the inferred coverage. Runs immediately after\n"
+             "InlineFunctions (L2 orch is never inlined into L3).");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,

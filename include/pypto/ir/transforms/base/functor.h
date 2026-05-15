@@ -19,6 +19,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 
@@ -55,6 +56,7 @@ class ExprFunctor {
   virtual R VisitExpr_(const VarPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const IterArgPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const MemRefPtr& op, Args... args) = 0;
+  virtual R VisitExpr_(const WindowBufferPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const ConstIntPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const ConstFloatPtr& op, Args... args) = 0;
   virtual R VisitExpr_(const ConstBoolPtr& op, Args... args) = 0;
@@ -104,9 +106,10 @@ class ExprFunctor {
 template <typename R, typename... Args>
 R ExprFunctor<R, Args...>::VisitExpr(const ExprPtr& expr, Args... args) {
   // Leaf nodes
-  // Note: IterArg and MemRef must be checked before Var since they inherit from Var
+  // Note: IterArg, MemRef and WindowBuffer must be checked before Var since they inherit from Var
   EXPR_FUNCTOR_DISPATCH(IterArg);
   EXPR_FUNCTOR_DISPATCH(MemRef);
+  EXPR_FUNCTOR_DISPATCH(WindowBuffer);
   EXPR_FUNCTOR_DISPATCH(Var);
   EXPR_FUNCTOR_DISPATCH(ConstInt);
   EXPR_FUNCTOR_DISPATCH(ConstFloat);

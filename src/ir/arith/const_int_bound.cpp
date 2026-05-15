@@ -213,6 +213,7 @@ class ConstIntBoundAnalyzer::Impl : public ExprFunctor<Bound> {
   }
 
   Bound VisitExpr_(const MemRefPtr& /*op*/) override { return Everything(); }
+  Bound VisitExpr_(const WindowBufferPtr& /*op*/) override { return Everything(); }
   Bound VisitExpr_(const CallPtr& /*op*/) override { return Everything(); }
   Bound VisitExpr_(const MakeTuplePtr& /*op*/) override { return Everything(); }
   Bound VisitExpr_(const TupleGetItemExprPtr& /*op*/) override { return Everything(); }

@@ -51,6 +51,7 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   ExprPtr VisitExpr_(const VarPtr& op) override;
   ExprPtr VisitExpr_(const IterArgPtr& op) override;
   ExprPtr VisitExpr_(const MemRefPtr& op) override;
+  ExprPtr VisitExpr_(const WindowBufferPtr& op) override;
   ExprPtr VisitExpr_(const ConstIntPtr& op) override;
   ExprPtr VisitExpr_(const ConstFloatPtr& op) override;
   ExprPtr VisitExpr_(const ConstBoolPtr& op) override;
@@ -137,7 +138,7 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   /// Pointer remapping for Vars whose definitions changed during mutation.
   /// Two sources populate this map: (1) subclass-seeded substitutions (e.g.
   /// SubstituteMutator copies the user's var_map at construction); (2) fresh
-  /// Vars minted by VisitExpr_(VarPtr/IterArgPtr/MemRefPtr) when an old Var's
+  /// Vars minted by VisitExpr_(VarPtr/IterArgPtr/MemRefPtr/WindowBufferPtr) when an old Var's
   /// type embeds a substituted Var and gets remapped. Both forms preserve
   /// def-use closure: every visit of the old Var resolves to the same
   /// replacement.

@@ -193,6 +193,7 @@ def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
     """
     # Import pypto.language here to avoid circular imports
     import pypto.language as pl  # noqa: PLC0415
+    import pypto.language.distributed as pld  # noqa: PLC0415
 
     # Make the source code available to inspect.getsourcelines() via linecache
     # Store ORIGINAL code (not modified) for accurate line numbers
@@ -216,6 +217,7 @@ def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
     temp_module = types.ModuleType(module_name)
     temp_module.__file__ = filename
     temp_module.__setattr__("pl", pl)
+    temp_module.__setattr__("pld", pld)
 
     # Add module to sys.modules so inspect can find it
     sys.modules[module_name] = temp_module

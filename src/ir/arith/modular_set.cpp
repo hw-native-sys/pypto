@@ -137,6 +137,7 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<Entry> {
   }
 
   Entry VisitExpr_(const MemRefPtr& /*op*/) override { return Everything(); }
+  Entry VisitExpr_(const WindowBufferPtr& /*op*/) override { return Everything(); }
   Entry VisitExpr_(const CallPtr& /*op*/) override { return Everything(); }
   Entry VisitExpr_(const MakeTuplePtr& /*op*/) override { return Everything(); }
   Entry VisitExpr_(const TupleGetItemExprPtr& /*op*/) override { return Everything(); }

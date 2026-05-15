@@ -116,6 +116,7 @@ ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const ConstIntPtr& op) { return op
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const ConstFloatPtr& op) { return op; }
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const ConstBoolPtr& op) { return op; }
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const MemRefPtr& op) { return op; }
+ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const WindowBufferPtr& op) { return op; }
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const CallPtr& op) { return op; }
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const MakeTuplePtr& op) { return op; }
 ExprPtr CanonicalSimplifier::Impl::VisitExpr_(const TupleGetItemExprPtr& op) { return op; }

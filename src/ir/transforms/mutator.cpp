@@ -287,6 +287,34 @@ ExprPtr IRMutator::VisitExpr_(const MemRefPtr& op) {
   return fresh;
 }
 
+ExprPtr IRMutator::VisitExpr_(const WindowBufferPtr& op) {
+  auto it = var_remap_.find(op.get());
+  if (it != var_remap_.end()) {
+    return ResolveVarRemapHit(op.get(), it->second);
+  }
+  // WindowBuffer's own type_ is the singleton WindowBufferType (no embedded
+  // exprs); only base_/size_ need remapping. Mirror MemRef's pattern.
+  VarPtr new_base = op->base_;
+  if (op->base_) {
+    auto remapped_base = ExprFunctor<ExprPtr>::VisitExpr(op->base_);
+    new_base = As<Var>(remapped_base);
+    INTERNAL_CHECK_SPAN(new_base, op->span_)
+        << "WindowBuffer base_ mutated to non-Var (substitution map mapped a WindowBuffer base "
+        << "to a non-Var expression — not supported)";
+  }
+  ExprPtr new_size = op->size_;
+  if (op->size_) {
+    new_size = ExprFunctor<ExprPtr>::VisitExpr(op->size_);
+  }
+  if (new_base.get() == op->base_.get() && new_size.get() == op->size_.get()) {
+    return op;
+  }
+  auto fresh = std::make_shared<const WindowBuffer>(std::move(new_base), std::move(new_size),
+                                                    op->load_from_host_, op->store_to_host_, op->span_);
+  var_remap_[op.get()] = fresh;
+  return fresh;
+}
+
 ExprPtr IRMutator::VisitExpr_(const ConstIntPtr& op) { return op; }
 
 ExprPtr IRMutator::VisitExpr_(const ConstFloatPtr& op) { return op; }

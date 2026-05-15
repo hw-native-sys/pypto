@@ -46,7 +46,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 31 | `31-fold_no_op_reshape.md` | 31st pass |
 | 32 | `32-fuse_create_assemble_to_slice.md` | 32nd pass |
 | 33 | `33-derive_call_directions.md` | 33rd pass (two-phase: arg directions + manual-scope lowering) |
-| 34 | _(reserved gap — was `DeriveManualScopeDeps`, merged into #33)_ | — |
+| 34 | `34-collect_comm_groups.md` | 34th pass (distributed: WindowBuffer + Program.comm_groups_; runs immediately before the final Simplify) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

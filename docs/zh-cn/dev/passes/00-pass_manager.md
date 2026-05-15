@@ -83,6 +83,7 @@ struct PassProperties {
 | FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | FuseCreateAssembleToSlice | — | — | — |
 | DeriveCallDirections | SplitIncoreOrch | CallDirectionsResolved | — |
+| CollectCommGroups | — | CommGroupsCollected | — |
 | Simplify | — | — | — |
 
 > **注意**：VerifySSA 和 TypeCheck 是**属性验证器 (PropertyVerifier)**（验证规则），不是 Pass。它们通过 `VerificationInstrument` 或 `run_verifier()` 工具函数运行——参见[验证器](99-verifier.md)。
@@ -388,7 +389,8 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 18. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
 19. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
 20. [`DeriveCallDirections`](33-derive_call_directions.md)
-21. `Simplify`
+21. [`CollectCommGroups`](34-collect_comm_groups.md)（分布式：构造 WindowBuffer 并写 Program.comm_groups_；无通信程序为 no-op）
+22. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

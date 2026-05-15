@@ -196,6 +196,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitExpr_(const VarPtr& op) override;
   void VisitExpr_(const IterArgPtr& op) override;
   void VisitExpr_(const MemRefPtr& op) override;
+  void VisitExpr_(const WindowBufferPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const ConstBoolPtr& op) override;
@@ -525,6 +526,8 @@ void IRPythonPrinter::VisitExpr_(const IterArgPtr& op) { stream_ << GetVarName(o
 
 void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_hint_; }
 
+void IRPythonPrinter::VisitExpr_(const WindowBufferPtr& op) { stream_ << op->name_hint_; }
+
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
   // DEFAULT_CONST_INT (= INT64) and INDEX both represent 64-bit integer constants
   // in the Python DSL, so they print as bare integers. Other integer types (INT8,
@@ -611,6 +614,21 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         need_kwarg_comma = true;
       }
 
+      // Surface ``attrs["device"]`` (set by N3 parser on host_orch → chip_orch
+      // dispatches) as a ``device=<expr>`` kwarg so it round-trips through
+      // reparse and remains observable by the CollectCommGroups pass.
+      for (const auto& [k, v] : op->attrs_) {
+        if (k != "device") continue;
+        if (const auto* p = std::any_cast<ExprPtr>(&v)) {
+          if (*p) {
+            stream_ << (need_kwarg_comma ? ", " : "") << "device=";
+            VisitExpr(*p);
+            need_kwarg_comma = true;
+          }
+        }
+        break;
+      }
+
       // When ``attrs_["arg_directions"]`` is populated (post DeriveCallDirections),
       // surface the direction vector as a trailing ``attrs={"arg_directions": [...]}``
       // keyword so the parser can recover it on the round-trip. When empty
@@ -650,8 +668,15 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
   // Check if this is a registered operation (contains a dot)
   if (op_name.find('.') != std::string::npos) {
-    // Print with pl. prefix
-    stream_ << prefix_ << "." << op_name << "(";
+    // ``pld.*`` ops live in the ``pypto.language.distributed`` namespace (aliased
+    // to ``pld`` by the parser). Print them bare so the roundtrip parser
+    // resolves them correctly via the same ``pld`` import path.
+    if (op_name.rfind("pld.", 0) == 0) {
+      stream_ << op_name << "(";
+    } else {
+      // Print with pl. prefix for the standard pl namespace.
+      stream_ << prefix_ << "." << op_name << "(";
+    }
   } else {
     // Not a registered operation, print as-is
     stream_ << op_name << "(";
@@ -707,6 +732,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
   for (const auto& [key, value] : op->kwargs_) {
+    // ``pld.alloc_window_buffer`` injects its ``name`` kwarg from the LHS at
+    // parse time and explicitly rejects a user-written ``name=`` kwarg. Skip
+    // it on print so the round-trip parser can re-derive the name from the
+    // assignment LHS without tripping the no-user-kwargs check.
+    if (op->op_->name_ == "pld.alloc_window_buffer" && key == "name") continue;
     if (need_comma) {
       stream_ << ", ";
     }

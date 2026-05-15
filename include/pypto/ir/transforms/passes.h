@@ -213,6 +213,42 @@ Pass InterchangeChunkLoops();
 Pass InlineFunctions();
 
 /**
+ * @brief Collect CommGroups for distributed window-buffer allocations.
+ *
+ * Runs at the end of the pipeline, just before the final Simplify. None of
+ * the intervening passes touches the host_orch alloc/window/dispatch chain
+ * (host_orch is never tile-lowered and L2 orch is never inlined into L3),
+ * so the ``host_orch → chip_orch → InCore`` dispatch chain is still
+ * discoverable here.
+ *
+ * For each ``@pl.program`` host_orch function:
+ *
+ *  1. Find every ``pld.alloc_window_buffer(size, *, name)`` Call op; its
+ *     ``AssignStmt`` LHS is a plain ``Var(PtrType)`` (``ptr_var``).
+ *  2. Follow def-use to the ``pld.window(ptr_var, shape, *, dtype)`` views
+ *     materialised over each ``ptr_var`` and the dispatch calls that consume
+ *     those views (recursing through chip_orch formal-param bindings).
+ *  3. From each dispatch call's ``attrs["device"]`` expression, derive a
+ *     ``DeviceDescriptor`` (``kAll`` / explicit subset). Merge across all
+ *     consuming dispatches for the same alloc.
+ *  4. Construct a :class:`WindowBuffer` per alloc (``base = ptr_var``,
+ *     ``size = size_expr``). Rewrite every ``pld.window`` result Var's type
+ *     so ``DistributedTensorType.window_buffer_`` points to the new
+ *     ``WindowBuffer`` (host_orch only — chip_orch / InCore param types
+ *     remain ``nullopt``).
+ *  5. Cluster ``WindowBuffer`` s by ``DeviceDescriptor`` into ``CommGroup`` s
+ *     (same descriptor → one group, slots in alloc-source order) and write
+ *     ``Program.comm_groups_``.
+ *
+ * Sanity-checks (``pypto::ValueError`` on failure):
+ *  - Every alloc must have at least one ``pld.window`` materialisation and
+ *    at least one dispatch consumer.
+ *  - Allocation names are unique within a group (parser-enforced globally;
+ *    re-asserted here).
+ */
+Pass CollectCommGroups();
+
+/**
  * @brief Create a loop unrolling pass
  *
  * Expands ForStmt nodes with ForKind::Unroll into inlined copies of the loop

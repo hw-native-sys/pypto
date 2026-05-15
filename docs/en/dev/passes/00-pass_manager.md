@@ -83,6 +83,7 @@ struct PassProperties {
 | FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | FuseCreateAssembleToSlice | — | — | — |
 | DeriveCallDirections | SplitIncoreOrch | CallDirectionsResolved | — |
+| CollectCommGroups | — | CommGroupsCollected | — |
 | Simplify | — | — | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `VerificationInstrument` or the `run_verifier()` utility — see [Verifier](99-verifier.md).
@@ -388,7 +389,8 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 18. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
 19. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
 20. [`DeriveCallDirections`](33-derive_call_directions.md)
-21. `Simplify`
+21. [`CollectCommGroups`](34-collect_comm_groups.md) (distributed: WindowBuffer + Program.comm_groups_; no-op for comm-less programs)
+22. `Simplify`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

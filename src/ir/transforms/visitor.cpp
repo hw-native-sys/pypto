@@ -66,6 +66,8 @@ void IRVisitor::VisitExpr_(const IterArgPtr& op) {
 
 void IRVisitor::VisitExpr_(const MemRefPtr& op) {}
 
+void IRVisitor::VisitExpr_(const WindowBufferPtr& op) {}
+
 void IRVisitor::VisitExpr_(const ConstIntPtr& op) {}
 
 void IRVisitor::VisitExpr_(const ConstFloatPtr& op) {}

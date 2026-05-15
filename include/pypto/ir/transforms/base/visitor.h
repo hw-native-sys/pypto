@@ -45,13 +45,15 @@ class IRVisitor : public IRFunctor<void> {
   /// Override to handle both Var and IterArg with a single method.
   /// Called by default VisitExpr_(VarPtr) and VisitExpr_(IterArgPtr).
   /// For IterArg, initValue_ is visited automatically after VisitVarLike_.
-  /// Note: MemRef has its own VisitExpr_ handler (MemRefType is not TensorType).
+  /// Note: MemRef and WindowBuffer have their own VisitExpr_ handlers (their
+  /// SSA-edge types are not TensorType).
   virtual void VisitVarLike_(const VarPtr& op);
 
   // Leaf nodes - no children to visit
   void VisitExpr_(const VarPtr& op) override;
   void VisitExpr_(const IterArgPtr& op) override;
   void VisitExpr_(const MemRefPtr& op) override;
+  void VisitExpr_(const WindowBufferPtr& op) override;
   void VisitExpr_(const ConstIntPtr& op) override;
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const ConstBoolPtr& op) override;

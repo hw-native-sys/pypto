@@ -50,7 +50,7 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 // --- IRVisitor trampoline ---
 struct PyIRVisitor : IRVisitor {
-  NB_TRAMPOLINE(IRVisitor, 59);  // 31 base + 23 binary + 5 unary (5 scope kinds)
+  NB_TRAMPOLINE(IRVisitor, 60);  // 32 base + 23 binary + 5 unary (5 scope kinds)
 
   // Top-level entry points
   void VisitProgram(const ProgramPtr& p) override { NB_OVERRIDE_NAME("visit_program", VisitProgram, p); }
@@ -84,6 +84,7 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_EXPR_TRAMPOLINE(Var, visit_var)
   VISITOR_EXPR_TRAMPOLINE(IterArg, visit_iter_arg)
   VISITOR_EXPR_TRAMPOLINE(MemRef, visit_mem_ref)
+  VISITOR_EXPR_TRAMPOLINE(WindowBuffer, visit_window_buffer)
   VISITOR_EXPR_TRAMPOLINE(ConstInt, visit_const_int)
   VISITOR_EXPR_TRAMPOLINE(ConstFloat, visit_const_float)
   VISITOR_EXPR_TRAMPOLINE(ConstBool, visit_const_bool)
@@ -143,7 +144,7 @@ struct PyIRVisitor : IRVisitor {
 
 // --- IRMutator trampoline ---
 struct PyIRMutator : IRMutator {
-  NB_TRAMPOLINE(IRMutator, 58);  // 30 base + 23 binary + 5 unary (5 scope kinds)
+  NB_TRAMPOLINE(IRMutator, 59);  // 31 base + 23 binary + 5 unary (5 scope kinds)
 
   // Top-level entry points
   ProgramPtr VisitProgram(const ProgramPtr& p) override {
@@ -178,6 +179,7 @@ struct PyIRMutator : IRMutator {
   MUTATOR_EXPR_TRAMPOLINE(Var, visit_var)
   MUTATOR_EXPR_TRAMPOLINE(IterArg, visit_iter_arg)
   MUTATOR_EXPR_TRAMPOLINE(MemRef, visit_mem_ref)
+  MUTATOR_EXPR_TRAMPOLINE(WindowBuffer, visit_window_buffer)
   MUTATOR_EXPR_TRAMPOLINE(ConstInt, visit_const_int)
   MUTATOR_EXPR_TRAMPOLINE(ConstFloat, visit_const_float)
   MUTATOR_EXPR_TRAMPOLINE(ConstBool, visit_const_bool)
@@ -306,6 +308,7 @@ void BindFunctor(nb::module_& m) {
   BIND_VISITOR(visitor_cls, Var, visit_var);
   BIND_VISITOR(visitor_cls, IterArg, visit_iter_arg);
   BIND_VISITOR(visitor_cls, MemRef, visit_mem_ref);
+  BIND_VISITOR(visitor_cls, WindowBuffer, visit_window_buffer);
   BIND_VISITOR(visitor_cls, ConstInt, visit_const_int);
   BIND_VISITOR(visitor_cls, ConstFloat, visit_const_float);
   BIND_VISITOR(visitor_cls, ConstBool, visit_const_bool);
@@ -401,6 +404,7 @@ void BindFunctor(nb::module_& m) {
   BIND_MUTATOR(mutator_cls, Var, visit_var);
   BIND_MUTATOR(mutator_cls, IterArg, visit_iter_arg);
   BIND_MUTATOR(mutator_cls, MemRef, visit_mem_ref);
+  BIND_MUTATOR(mutator_cls, WindowBuffer, visit_window_buffer);
   BIND_MUTATOR(mutator_cls, ConstInt, visit_const_int);
   BIND_MUTATOR(mutator_cls, ConstFloat, visit_const_float);
   BIND_MUTATOR(mutator_cls, ConstBool, visit_const_bool);

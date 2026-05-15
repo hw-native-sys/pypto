@@ -47,6 +47,7 @@ class IRProperty(Enum):
     OrchestrationReferencesResolved = ...
     TensorViewCanonical = ...
     ArrayNotEscaped = ...
+    CommGroupsCollected = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -539,6 +540,19 @@ def inline_functions() -> Pass:
 
 def normalize_stmt_structure() -> Pass:
     """Create a pass that normalizes statement structure."""
+
+def collect_comm_groups() -> Pass:
+    """Collect CommGroups for distributed window-buffer allocations.
+
+    For each ``@pl.program`` host_orch function, traces
+    ``pld.alloc_window_buffer → pld.window → dispatch(device=r)`` chains,
+    constructs a :class:`WindowBuffer` per alloc, back-fills the
+    ``DistributedTensorType.window_buffer_`` field on every ``pld.window``
+    result Var, and writes :attr:`Program.comm_groups`.
+
+    Runs immediately after :func:`inline_functions` — L2 orchestrations are
+    never inlined into L3, so the dispatch chain survives inlining.
+    """
 
 class NestedCallErrorType(Enum):
     """Nested call verification error types."""
