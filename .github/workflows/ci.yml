@@ -155,16 +155,16 @@ jobs:
 
       - name: Test system tests
         timeout-minutes: 15
-        run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed
+        run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=d779cd0 --ignore=tests/st/distributed
 
       - name: Test distributed system tests
         timeout-minutes: 5
-        run: pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938
+        run: pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=d779cd0
 
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/test_perf_swimlane.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=2c607938
+            -v --device="$DEVICE_ID" --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=d779cd0
 
   pypto-lib-model:
     runs-on: [self-hosted, linux, arm64, npu]
@@ -242,7 +242,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 2c607938
+          git checkout d779cd0
 
       - name: Clone pypto-lib (Qwen3-14B decode)
         run: git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git $GITHUB_WORKSPACE/pypto-lib
@@ -303,10 +303,10 @@ jobs:
           pip install -v ./runtime
 
       - name: Test A5 system tests (simulator)
-        run: pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=2c607938
+        run: pytest tests/st/runtime/test_assemble.py tests/st/runtime/test_mscatter.py tests/st/runtime/test_qwen3_decode_scope3_mixed.py tests/st/runtime/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=d779cd0
 
       - name: Test A5 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=2c607938
+        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=d779cd0
 
       - name: Test A2A3 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=2c607938
+        run: pytest tests/st/runtime/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=d779cd0
