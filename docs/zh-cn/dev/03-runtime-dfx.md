@@ -93,12 +93,15 @@ CLI 形式（从目录里的 `golden.py` 加载输入）:
 
 ```bash
 python -m pypto.runtime.debug.replay build_output/_jit_xxx/ \
-    --pmu 2 --swimlane
+    --pmu 2 --swimlane --log-level debug
 ```
 
 默认 `recompile=True` 会清掉缓存的 `.so` / `.bin`,确保手改的 cpp
 能被重新编译。如果没改 cpp、想跳过重编译,传 `recompile=False`
-（或 CLI 的 `--no-recompile`）即可。
+（或 CLI 的 `--no-recompile`）即可。`--log-level` 接受和
+`PYPTO_RUNTIME_LOG` 相同的值（`debug`、`v0..v9`、`info`、`warn`、
+`error`、`null`）;加上 `--log-sync-pypto` 可以把同一档位推到
+PyPTO 的 C++ logger。
 
 
 ## 相关文档

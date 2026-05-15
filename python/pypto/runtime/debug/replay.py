@@ -27,7 +27,7 @@ The added value is:
 CLI::
 
     python -m pypto.runtime.debug.replay build_output/<jit_dir>/ \\
-        --pmu 2 --swimlane
+        --pmu 2 --swimlane --log-level debug
 
 Python::
 
@@ -128,10 +128,11 @@ def replay(
 def _load_inputs_from_golden(work_dir: Path) -> list[torch.Tensor]:
     """Load ordered input tensors from ``<work_dir>/golden.py``.
 
-    Mirrors the loading pattern in ``runner._execute_on_device`` so the CLI
-    can run without the user writing a Python harness for simple cases.
-    Insertion order of ``generate_inputs``'s returned dict is the
-    orchestration parameter order.
+    ``generate_inputs`` returns ``list[tuple[str, value]]`` (see
+    :func:`pypto.runtime.device_runner.build_orch_args_from_inputs`). The
+    order matches the orchestration entry parameter order, so the values
+    can be passed positionally to :func:`replay`. Output tensors are
+    included — orchestration writes back into them in place.
     """
     golden_path = work_dir / "golden.py"
     if not golden_path.exists():
@@ -144,7 +145,7 @@ def _load_inputs_from_golden(work_dir: Path) -> list[torch.Tensor]:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     result = module.generate_inputs({"name": "Default"})
-    return list(result.values())
+    return [value for _, value in result]
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -167,7 +168,26 @@ def _main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Reuse cached binaries (faster, but ignores cpp edits)",
     )
+    parser.add_argument(
+        "--log-level",
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "PyPTO runtime log level (debug, v0..v9, info, warn, error, null). "
+            "Equivalent to setting PYPTO_RUNTIME_LOG=<level> in the environment. "
+            "Pass --log-sync-pypto to also push the band to PyPTO's C++ logger."
+        ),
+    )
+    parser.add_argument(
+        "--log-sync-pypto",
+        action="store_true",
+        help="When used with --log-level, mirror the level onto PyPTO's C++ logger.",
+    )
     args = parser.parse_args(argv)
+
+    if args.log_level is not None:
+        from pypto.runtime.log_config import configure_log  # noqa: PLC0415 — keep import lazy
+        configure_log(args.log_level, sync_pypto=args.log_sync_pypto)
 
     config = RunConfig(
         platform=args.platform,

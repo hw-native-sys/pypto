@@ -159,7 +159,11 @@ def test_load_inputs_from_golden_returns_values_in_order(tmp_path: Path) -> None
     (tmp_path / "golden.py").write_text(
         "import torch\n"
         "def generate_inputs(params):\n"
-        "    return {'x': torch.zeros(2), 'y': torch.ones(3), 'z': torch.full((4,), 7.0)}\n"
+        "    return [\n"
+        "        ('x', torch.zeros(2)),\n"
+        "        ('y', torch.ones(3)),\n"
+        "        ('z', torch.full((4,), 7.0)),\n"
+        "    ]\n"
     )
     tensors = _load_inputs_from_golden(tmp_path)
     assert len(tensors) == 3
@@ -216,6 +220,40 @@ def test_cli_no_recompile_flag(tmp_path: Path) -> None:
     ):
         _main([str(work_dir), "--no-recompile"])
     assert captured["recompile"] is False
+
+
+def test_cli_log_level_calls_configure_log(tmp_path: Path) -> None:
+    work_dir = _make_build_output(tmp_path)
+    captured: dict = {}
+
+    def fake_configure_log(level, *, sync_pypto):
+        captured["level"] = level
+        captured["sync_pypto"] = sync_pypto
+
+    with (
+        patch.object(replay_module, "replay"),
+        patch.object(replay_module, "_load_inputs_from_golden", return_value=[]),
+        patch("pypto.runtime.log_config.configure_log", side_effect=fake_configure_log),
+    ):
+        _main([str(work_dir), "--log-level", "debug", "--log-sync-pypto"])
+    assert captured["level"] == "debug"
+    assert captured["sync_pypto"] is True
+
+
+def test_cli_no_log_level_skips_configure_log(tmp_path: Path) -> None:
+    work_dir = _make_build_output(tmp_path)
+    called: dict = {"count": 0}
+
+    def fake_configure_log(*a, **kw):
+        called["count"] += 1
+
+    with (
+        patch.object(replay_module, "replay"),
+        patch.object(replay_module, "_load_inputs_from_golden", return_value=[]),
+        patch("pypto.runtime.log_config.configure_log", side_effect=fake_configure_log),
+    ):
+        _main([str(work_dir)])
+    assert called["count"] == 0
 
 
 if __name__ == "__main__":
