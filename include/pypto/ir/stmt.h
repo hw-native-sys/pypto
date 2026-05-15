@@ -830,8 +830,10 @@ using AutoInCoreScopeStmtPtr = std::shared_ptr<const AutoInCoreScopeStmt>;
 class ClusterScopeStmt : public ScopeStmt {
  public:
   ClusterScopeStmt(std::string name_hint, StmtPtr body, Span span,
-                   std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)) {}
+                   std::vector<std::string> leading_comments = {},
+                   std::vector<std::pair<std::string, std::any>> attrs = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
+                  std::move(attrs)) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::ClusterScopeStmt; }
   [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::Cluster; }
@@ -889,8 +891,10 @@ using HierarchyScopeStmtPtr = std::shared_ptr<const HierarchyScopeStmt>;
 class SpmdScopeStmt : public ScopeStmt {
  public:
   SpmdScopeStmt(ExprPtr core_num, bool sync_start, std::string name_hint, StmtPtr body, Span span,
-                std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+                std::vector<std::string> leading_comments = {},
+                std::vector<std::pair<std::string, std::any>> attrs = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
+                  std::move(attrs)),
         core_num_(std::move(core_num)),
         sync_start_(sync_start) {
     INTERNAL_CHECK(core_num_ != nullptr) << "SpmdScopeStmt core_num must not be null";
@@ -938,8 +942,10 @@ using SpmdScopeStmtPtr = std::shared_ptr<const SpmdScopeStmt>;
 class RuntimeScopeStmt : public ScopeStmt {
  public:
   RuntimeScopeStmt(bool manual, std::string name_hint, StmtPtr body, Span span,
-                   std::vector<std::string> leading_comments = {})
-      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments)),
+                   std::vector<std::string> leading_comments = {},
+                   std::vector<std::pair<std::string, std::any>> attrs = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
+                  std::move(attrs)),
         manual_(manual) {}
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::RuntimeScopeStmt; }

@@ -2064,6 +2064,11 @@ class ScopeStmt(Stmt):
     body: Final[Stmt]
     """The nested statements."""
 
+    attrs: Final[Mapping[str, Any]]
+    """Scope-level attributes. Reserved keys: ``task_id_var`` (a ``Var`` of dtype
+    ``TASK_ID`` populated by ``with pl.at(...) as tid:``) and ``manual_dep_edges``
+    (a ``list[Var]`` of TaskId producers populated by ``pl.at(..., deps=[...])``)."""
+
     def __init__(self, *args: object, **kwargs: object) -> None:
         """ScopeStmt is abstract — construct an InCoreScopeStmt, AutoInCoreScopeStmt,
         ClusterScopeStmt, HierarchyScopeStmt, or SpmdScopeStmt instead."""

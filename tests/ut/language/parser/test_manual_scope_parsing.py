@@ -253,12 +253,28 @@ class TestManualScopeParsing:
         assert isinstance(stmts[0], ir.AssignStmt)
         assert isinstance(stmts[0].value, ir.Call)
         assert stmts[0].value.op.name == "system.task_invalid"
-        # Second stmt: the first pl.at scope.
+        # Second stmt: the first pl.at scope. Its ``task_id_var`` attr must
+        # point at the same Var bound by the placeholder above (otherwise the
+        # outliner couldn't unify the synthesised ``TupleGetItem`` binding
+        # with subsequent ``deps=[t1]`` uses).
         assert isinstance(stmts[1], ir.InCoreScopeStmt)
+        scope1_attrs = stmts[1].attrs
+        assert "task_id_var" in scope1_attrs, f"scope1 missing task_id_var: keys={list(scope1_attrs)}"
+        assert scope1_attrs["task_id_var"] is stmts[0].var
+        # First scope has no deps=, so manual_dep_edges is absent (not an empty list).
+        assert "manual_dep_edges" not in scope1_attrs
         # Third stmt: placeholder for t2.
         assert isinstance(stmts[2], ir.AssignStmt)
-        # Fourth stmt: the second pl.at scope with deps=.
+        # Fourth stmt: the second pl.at scope with deps=. Both attrs are set;
+        # ``manual_dep_edges`` references t1 (the producer Var from scope1's
+        # ``task_id_var``).
         assert isinstance(stmts[3], ir.InCoreScopeStmt)
+        scope2_attrs = stmts[3].attrs
+        assert "task_id_var" in scope2_attrs
+        assert scope2_attrs["task_id_var"] is stmts[2].var
+        assert "manual_dep_edges" in scope2_attrs
+        assert len(scope2_attrs["manual_dep_edges"]) == 1
+        assert scope2_attrs["manual_dep_edges"][0] is scope1_attrs["task_id_var"]
 
     def test_pl_at_as_on_non_at_scope_is_rejected(self):
         """``as`` is only meaningful on ``pl.at(...)``; other constructs reject it."""

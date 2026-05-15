@@ -976,10 +976,14 @@ class SSAConverter {
 
   StmtPtr ConvertScope(const ScopeStmtPtr& op) {
     auto body = ConvertStmt(op->body_);
-    auto [new_attrs, attrs_changed] = SubstScopeAttrs(op->attrs_);
+    auto subst = SubstScopeAttrs(op->attrs_);
+    auto& new_attrs = subst.first;
+    const bool attrs_changed = subst.second;
     if (body == op->body_ && !attrs_changed) return op;
     // ScopeStmt is abstract; dispatch on the concrete derived class so MutableCopy
-    // can construct the right subclass.
+    // can construct the right subclass. Structured bindings are intentionally
+    // avoided above — capturing them in this lambda is non-portable C++17
+    // (clang-tidy rejects it as clang-diagnostic-error).
     auto rewrite = [&](auto&& concrete) -> StmtPtr {
       auto result = MutableCopy(concrete);
       result->body_ = body;

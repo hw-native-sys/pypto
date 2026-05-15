@@ -807,6 +807,11 @@ class ScopeOutliner : public IRMutator {
     TypePtr call_return_type;
     if (effective_return_types.empty()) {
       call_return_type = nullptr;
+    } else if (scope_task_id_var) {
+      // ``IsSubmitCall`` keys on a trailing ``Scalar[TASK_ID]`` element of a
+      // ``TupleType`` — keep the tuple wrapping even when there is only the
+      // one (TASK_ID) element so codegen's submit-detection fires uniformly.
+      call_return_type = std::make_shared<TupleType>(effective_return_types);
     } else if (effective_return_types.size() == 1) {
       call_return_type = effective_return_types[0];
     } else {

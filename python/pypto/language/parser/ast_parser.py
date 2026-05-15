@@ -1191,11 +1191,11 @@ class ASTParser:
         span = self.span_tracker.get_span(call)
         # ``pl.submit`` and ``deps=`` are orthogonal to ``manual_scope``: the
         # runtime's ``Arg::set_dependencies`` adds explicit edges on top of the
-        # auto-tracked deps (final fanin = auto ∪ explicit), so both flavours
-        # of orchestrator scope (auto or manual) accept ``pl.submit(...,
-        # deps=[...])``. In auto scope it is a precision tool — auto handles
-        # most of the dep graph; explicit edges patch the cases the runtime
-        # cannot infer (or infers too conservatively).
+        # auto-tracked deps (final fanin = auto union explicit), so both
+        # flavours of orchestrator scope (auto or manual) accept
+        # ``pl.submit(..., deps=[...])``. In auto scope it is a precision tool
+        # — auto handles most of the dep graph; explicit edges patch the
+        # cases the runtime cannot infer (or infers too conservatively).
         if len(target.elts) != 2:
             raise ParserSyntaxError(
                 f"pl.submit(...) must be unpacked as exactly 2 targets "
@@ -3288,11 +3288,19 @@ class ASTParser:
         # ``ScopeOutliner::VisitStmt_(SeqStmtsPtr)`` detects this placeholder
         # by looking one stmt *behind* each target scope and drops it once it
         # has generated the real binding.
+        #
+        # The placeholder is *transient*: the outliner drops it. Any leading
+        # comments attached to the ``with`` statement therefore must NOT land
+        # on the placeholder — they belong on the surviving scope. We pop the
+        # pending-comment stack here and re-push it so the scope, emitted
+        # next, absorbs them.
         if scope_attrs is not None:
             for k, v in scope_attrs:
                 if k == "task_id_var":
+                    leading = self.builder.pop_pending_leading_comments()
                     placeholder_rhs = ir.create_op_call("system.task_invalid", [], {}, span)
                     self.builder.assign(v, placeholder_rhs, span=span)
+                    self.builder.push_pending_leading_comments(leading)
                     break
 
         if not is_core_group:

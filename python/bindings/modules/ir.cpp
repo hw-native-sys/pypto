@@ -878,6 +878,9 @@ void BindIR(nb::module_& m) {
           lst.append(nb::cast(v));
         }
         result[key.c_str()] = lst;
+      } else if (value.type() == typeid(VarPtr)) {
+        // Used by ScopeStmt attrs["task_id_var"] (single producer TaskId Var).
+        result[key.c_str()] = nb::cast(AnyCast<VarPtr>(value, "converting to Python: " + key));
       } else if (value.type() == typeid(ExprPtr)) {
         // IR expressions stored in attrs (e.g. attrs["device"] on Orchestration
         // dispatch calls; attrs["core_num"] on Function attrs for outlined Spmd).
@@ -1210,6 +1213,18 @@ void BindIR(nb::module_& m) {
       ir, "ScopeStmt", "Scope statement: marks a region with specific execution context (abstract base)");
   scope_stmt_class.def_prop_ro("scope_kind", &ScopeStmt::GetScopeKind, "Discriminator for the scope kind");
   BindFields<ScopeStmt>(scope_stmt_class);  // exposes name_hint, body
+  // Custom ``attrs`` property: reflection's auto-bind would expose
+  // ``vector<pair<string, any>>`` raw (nanobind can't convert), so we shadow
+  // it with a dict-returning lambda. Each concrete subclass below re-registers
+  // the parent's reflection fields under itself, so we must shadow on every
+  // subclass too (see ``shadow_scope_attrs`` calls after each ``BindFields``).
+  const auto scope_attrs_doc =
+      "Scope-level attributes (e.g. 'task_id_var' for "
+      "``pl.at(...) as tid``, 'manual_dep_edges' for "
+      "``pl.at(..., deps=)``).";
+  scope_stmt_class.def_prop_ro(
+      "attrs", [kwargs_to_pydict](const ScopeStmtPtr& self) { return kwargs_to_pydict(self->attrs_); },
+      scope_attrs_doc);
 
   // InCoreScopeStmt
   auto in_core_scope_stmt_class =
@@ -1218,6 +1233,12 @@ void BindIR(nb::module_& m) {
                                nb::arg("split") = nb::none(), nb::arg("name_hint") = "", nb::arg("body"),
                                nb::arg("span"), "Create an InCore scope statement");
   BindFields<InCoreScopeStmt>(in_core_scope_stmt_class);
+  in_core_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const InCoreScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
 
   // AutoInCoreScopeStmt
   auto auto_in_core_scope_stmt_class = nb::class_<AutoInCoreScopeStmt, ScopeStmt>(
@@ -1227,6 +1248,12 @@ void BindIR(nb::module_& m) {
       nb::arg("split") = nb::none(), nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
       "Create an AutoInCore scope statement");
   BindFields<AutoInCoreScopeStmt>(auto_in_core_scope_stmt_class);
+  auto_in_core_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const AutoInCoreScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
 
   // ClusterScopeStmt
   auto cluster_scope_stmt_class = nb::class_<ClusterScopeStmt, ScopeStmt>(
@@ -1235,6 +1262,12 @@ void BindIR(nb::module_& m) {
                                nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
                                "Create a Cluster scope statement");
   BindFields<ClusterScopeStmt>(cluster_scope_stmt_class);
+  cluster_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const ClusterScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
 
   // HierarchyScopeStmt
   auto hierarchy_scope_stmt_class = nb::class_<HierarchyScopeStmt, ScopeStmt>(
@@ -1244,6 +1277,12 @@ void BindIR(nb::module_& m) {
       nb::arg("role") = nb::none(), nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
       "Create a Hierarchy scope statement");
   BindFields<HierarchyScopeStmt>(hierarchy_scope_stmt_class);
+  hierarchy_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const HierarchyScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
 
   // SpmdScopeStmt
   auto spmd_scope_stmt_class =
@@ -1264,6 +1303,12 @@ void BindIR(nb::module_& m) {
       nb::arg("core_num"), nb::arg("sync_start") = false, nb::arg("name_hint") = "", nb::arg("body"),
       nb::arg("span"), "Create an SPMD scope statement (int core_num is wrapped as ConstInt)");
   BindFields<SpmdScopeStmt>(spmd_scope_stmt_class);
+  spmd_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const SpmdScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
 
   // RuntimeScopeStmt
   auto runtime_scope_stmt_class = nb::class_<RuntimeScopeStmt, ScopeStmt>(
@@ -1274,6 +1319,12 @@ void BindIR(nb::module_& m) {
                                nb::arg("manual") = false, nb::arg("name_hint") = "", nb::arg("body"),
                                nb::arg("span"), "Create a Runtime scope statement");
   BindFields<RuntimeScopeStmt>(runtime_scope_stmt_class);
+  runtime_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const RuntimeScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
 
   // SeqStmts - const shared_ptr
   auto seq_stmts_class =

@@ -344,7 +344,8 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
           split, std::move(name_hint), body, combined_span, std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::Cluster:
-      scope_stmt = std::make_shared<const ClusterScopeStmt>(std::move(name_hint), body, combined_span);
+      scope_stmt = std::make_shared<const ClusterScopeStmt>(std::move(name_hint), body, combined_span,
+                                                            std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::Hierarchy:
       CHECK(level.has_value()) << "Hierarchy scope requires a level";
@@ -355,12 +356,13 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
     case ScopeKind::Spmd:
       CHECK(core_num != nullptr) << "Spmd scope requires core_num";
       scope_stmt = std::make_shared<const SpmdScopeStmt>(core_num, sync_start.value_or(false),
-                                                         std::move(name_hint), body, combined_span);
+                                                         std::move(name_hint), body, combined_span,
+                                                         std::vector<std::string>{}, std::move(attrs));
       break;
     case ScopeKind::Runtime:
       CHECK(manual.has_value()) << "Runtime scope requires manual flag";
-      scope_stmt =
-          std::make_shared<const RuntimeScopeStmt>(*manual, std::move(name_hint), body, combined_span);
+      scope_stmt = std::make_shared<const RuntimeScopeStmt>(
+          *manual, std::move(name_hint), body, combined_span, std::vector<std::string>{}, std::move(attrs));
       break;
   }
   // Safety net: every ScopeKind value above must populate scope_stmt. The switch has
