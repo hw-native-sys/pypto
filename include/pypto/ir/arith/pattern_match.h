@@ -59,6 +59,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
+#include "pypto/ir/transforms/structural_comparison.h"
 
 namespace pypto {
 namespace ir {
@@ -130,16 +131,24 @@ class PEqualChecker<ConstIntPtr> {
   }
 };
 
-/// ExprPtr equality: pointer identity first, then value comparison for constants.
-/// This ensures that two distinct ConstInt(8) nodes match as equal in patterns
-/// like `floordiv(x, y) * y + floormod(x, y)`, which is critical for div-mod
-/// recombination after IR transformations that create separate constant nodes.
+/// ExprPtr equality: pointer identity first, then value comparison for
+/// constants, then a structural fallback for compound expressions.
+///
+/// Pointer identity is the fast path and covers the common case where the
+/// same Var or shared subexpression appears multiple times. The constant
+/// fallback ensures two distinct ConstInt(8) nodes match as equal in
+/// patterns like `floordiv(x, y) * y + floormod(x, y)`. The structural
+/// fallback catches transformations that synthesize structurally-equal but
+/// pointer-distinct sub-expressions — e.g. the parser inserts a fresh
+/// `cast(x, INDEX)` Call at each slice-bound site, so `cast(x) - cast(x)`
+/// has two pointer-distinct Cast children that must still pattern-match as
+/// the same `x` for `(a + b) - a => b` to fire (issue #1377).
 template <>
 class PEqualChecker<ExprPtr> {
  public:
   bool operator()(const ExprPtr& lhs, const ExprPtr& rhs) const {
     if (lhs.get() == rhs.get()) return true;
-    // Value-based fallback for constant leaf nodes.
+    if (!lhs || !rhs || lhs->GetKind() != rhs->GetKind()) return false;
     if (auto lhs_ci = As<ConstInt>(lhs)) {
       auto rhs_ci = As<ConstInt>(rhs);
       return rhs_ci && PEqualChecker<ConstIntPtr>()(lhs_ci, rhs_ci);
@@ -148,7 +157,7 @@ class PEqualChecker<ExprPtr> {
       auto rhs_cb = As<ConstBool>(rhs);
       return rhs_cb && lhs_cb->value_ == rhs_cb->value_;
     }
-    return false;
+    return structural_equal(lhs, rhs);
   }
 };
 

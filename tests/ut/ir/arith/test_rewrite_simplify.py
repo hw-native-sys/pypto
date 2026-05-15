@@ -217,6 +217,26 @@ class TestSubRules:
         result = simplifier(ir.Sub(x, ir.Sub(y, z, INT, S), INT, S))
         assert isinstance(result, ir.Sub)
 
+    def test_sub_structurally_equal_compound_subexprs(self):
+        """e - (e - 1) => 1 where e is a compound Call appearing twice as
+        pointer-distinct nodes (regression for issue #1377).
+
+        The parser inserts a fresh `cast(scalar, INDEX)` Call at each use of
+        a non-INDEX scalar in a slice-bound context. Two such uses produce
+        structurally-equal but pointer-distinct Cast nodes, and pattern
+        matching must still treat them as equal for `(a + b) - a => b` to
+        fire after `x - (y - z) => (x + z) - y` rewrites the input.
+        """
+        analyzer = Analyzer()
+        c = ir.Var("c", ir.ScalarType(DataType.INT32), S)
+        cast1 = ir.cast(c, IDX)
+        cast2 = ir.cast(c, IDX)
+        assert cast1 is not cast2, "test setup requires distinct Cast nodes"
+        # Mirrors `slice[c - 1 : c]` extent: cast(c) - (cast(c) - 1)
+        expr = ir.Sub(cast1, ir.Sub(cast2, ci(1, IDX), IDX, S), IDX, S)
+        result = analyzer.simplify(expr)
+        assert_is_const_int(result, 1)
+
 
 # ============================================================================
 # Mul rules
