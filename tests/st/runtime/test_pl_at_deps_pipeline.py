@@ -255,5 +255,411 @@ class TestPlAtDepsSwimlane:
         )
 
 
+# ---------------------------------------------------------------------------
+# Phase fence: outer SEQ x inner PARALLEL — multi-deps array carry.
+# ---------------------------------------------------------------------------
+#
+# Mirror of ``test_manual_scope_pipeline._build_phase_fence_program`` but the
+# kernel body lives inside a ``pl.at(level=CORE_GROUP, deps=[tids]) as tid:``
+# block. Topology (N_PHASES=4 phases x N_BRANCHES=4 branches = 16 tasks)::
+#
+#     Phase 0:  a00  a01  a02  a03    (parallel within phase)
+#                  \  \  \  /  /  /
+#     Phase 1:  a10  a11  a12  a13    (each depends on ALL of phase 0)
+#                  \  \  \  /  /  /
+#     Phase 2:  a20  a21  a22  a23    (each depends on ALL of phase 1)
+#                  \  \  \  /  /  /
+#     Phase 3:  a30  a31  a32  a33    (each depends on ALL of phase 2)
+#
+# Every task writes a disjoint ``TILE_M``-row stripe of ``out``. The value of
+# these tests is in the SWIMLANE shape: array-carry multi-deps must produce
+# a fence keyed on ALL prior-phase tasks, not just the last-dispatched one.
+# Same expectations as the pl.submit-variant ``TestPhaseFenceSwimlane``.
+# ---------------------------------------------------------------------------
+
+
+_PHASE_FENCE_N_PHASES = 4
+_PHASE_FENCE_N_BRANCHES = 4
+_PHASE_FENCE_TILE_M = 64
+_PHASE_FENCE_BIG_N = 64
+_PHASE_FENCE_BIG_M = _PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES * _PHASE_FENCE_TILE_M
+
+
+def _build_phase_fence_program():
+    """4-phase × 4-branch outer-seq / inner-parallel pl.at-deps program."""
+    N_PHASES = _PHASE_FENCE_N_PHASES
+    N_BRANCHES = _PHASE_FENCE_N_BRANCHES
+    TILE_M = _PHASE_FENCE_TILE_M
+    BIG_N = _PHASE_FENCE_BIG_N
+    BIG_M = _PHASE_FENCE_BIG_M
+
+    @pl.program
+    class PhaseFencePlAtDeps:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[BIG_M, BIG_N], pl.FP32],
+            out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
+        ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
+            with pl.manual_scope():
+                # Phase fence: every block in phase P+1 must wait for ALL
+                # branches in phase P. Use an explicit ``Array[N_BRANCHES,
+                # TASK_ID]`` to hold one TaskId per branch slot — every
+                # parallel iter writes its own slot via ``tids[branch] = tid``
+                # (where ``tid`` is captured by ``as tid`` on the pl.at block),
+                # and ``deps=[tids]`` expands to N_BRANCHES guarded slot fills
+                # in the downstream block's ``set_dependencies`` array.
+                # First phase has no prior-phase producer; ``pl.array.create``
+                # initialises every slot to ``PTO2TaskId::invalid()`` and the
+                # runtime fence skips invalid entries via ``is_valid()``.
+                tids = pl.array.create(N_BRANCHES, pl.TASK_ID)
+                for phase in pl.range(N_PHASES):
+                    for branch in pl.parallel(N_BRANCHES):
+                        row = (phase * N_BRANCHES + branch) * TILE_M
+                        with pl.at(
+                            level=pl.Level.CORE_GROUP,
+                            name_hint="kernel_stripe",
+                            deps=[tids],
+                        ) as tid:
+                            tile: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(data, [row, 0], [TILE_M, BIG_N])
+                            result: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.add(tile, 1.0)
+                            out = pl.store(result, [row, 0], out)
+                        tids[branch] = tid
+            return out
+
+    return PhaseFencePlAtDeps
+
+
+class _PhaseFencePlAtDepsPTO(PTOTestCase):
+    """Outer SEQ × inner PARALLEL under manual_scope, pl.at-deps interface."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"phase_fence_pl_at_deps_{_PHASE_FENCE_N_PHASES}x{_PHASE_FENCE_N_BRANCHES}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "data",
+                [_PHASE_FENCE_BIG_M, _PHASE_FENCE_BIG_N],
+                DataType.FP32,
+                init_value=torch.randn,
+            ),
+            TensorSpec(
+                "out",
+                [_PHASE_FENCE_BIG_M, _PHASE_FENCE_BIG_N],
+                DataType.FP32,
+                init_value=0.0,
+                is_output=True,
+            ),
+        ]
+
+    def get_program(self) -> Any:
+        return _build_phase_fence_program()
+
+    def compute_expected(self, tensors, params=None):
+        # Each of the 16 blocks writes a disjoint TILE_M-row stripe with
+        # ``bias=1.0``. Rows not covered by any stripe keep their zero init.
+        data = tensors["data"]
+        out = tensors["out"]
+        out.zero_()
+        for i in range(_PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES):
+            r0 = i * _PHASE_FENCE_TILE_M
+            out[r0 : r0 + _PHASE_FENCE_TILE_M, :] = data[r0 : r0 + _PHASE_FENCE_TILE_M, :] + 1.0
+
+
+class TestPhaseFencePlAtDeps:
+    """Numerical correctness for the outer-seq × inner-parallel pl.at-deps topology."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_correctness(self, test_runner, platform):
+        result = test_runner.run(_PhaseFencePlAtDepsPTO(platform=platform))
+        assert result.passed, f"phase-fence pl.at-deps execution failed: {result.error}"
+
+
+@pytest.fixture(scope="module")
+def phase_fence_pl_at_swimlane_file(test_runner) -> Path:
+    if not test_runner.config.enable_l2_swimlane:
+        pytest.skip("pass --enable-l2-swimlane to validate the phase-fence pl.at swimlane")
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    result = test_runner.run(_PhaseFencePlAtDepsPTO())
+    assert result.passed, f"phase-fence pl.at-deps failed: {result.error}"
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    new_files = after - before
+    assert new_files, "No l2_perf_records.json generated for the phase-fence pl.at run"
+    return max(new_files, key=lambda p: p.stat().st_mtime)
+
+
+@pytest.fixture(scope="module")
+def phase_fence_pl_at_swimlane_data(phase_fence_pl_at_swimlane_file: Path) -> dict:
+    return json.loads(phase_fence_pl_at_swimlane_file.read_text())
+
+
+class TestPhaseFencePlAtSwimlane:
+    """Validate the array-carry multi-deps fence using the pl.at-deps interface.
+
+    Mirror of ``TestPhaseFenceSwimlane`` from the pl.submit-variant test —
+    the runtime DAG shape must be interface-independent.
+    """
+
+    def test_total_task_count(self, phase_fence_pl_at_swimlane_data: dict):
+        tasks = phase_fence_pl_at_swimlane_data["tasks"]
+        assert len(tasks) >= _PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES, (
+            f"expected ≥ {_PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES} tasks "
+            f"({_PHASE_FENCE_N_PHASES} phases × {_PHASE_FENCE_N_BRANCHES} branches), got {len(tasks)}"
+        )
+
+    def test_phase_fence_strict(self, phase_fence_pl_at_swimlane_data: dict):
+        """Every block in phase N+1 starts AFTER every block in phase N ends.
+
+        Without array-carry multi-deps, only the *last-dispatched* phase-N
+        block would fence — a slower earlier-dispatched block could still be
+        running when phase N+1 begins.
+        """
+        expected = _PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES
+        tasks = phase_fence_pl_at_swimlane_data["tasks"]
+        if len(tasks) < expected:
+            pytest.skip(f"need ≥ {expected} tasks for phase fence check, got {len(tasks)}")
+        tasks = sorted(tasks, key=lambda t: t["start_time_us"])[:expected]
+        phases = [
+            tasks[i * _PHASE_FENCE_N_BRANCHES : (i + 1) * _PHASE_FENCE_N_BRANCHES]
+            for i in range(_PHASE_FENCE_N_PHASES)
+        ]
+        for i in range(_PHASE_FENCE_N_PHASES - 1):
+            n_end = max(t["end_time_us"] for t in phases[i])
+            n1_start = min(t["start_time_us"] for t in phases[i + 1])
+            assert n1_start >= n_end, (
+                f"phase {i + 1} starts at {n1_start:.2f}us before phase {i} "
+                f"ends at {n_end:.2f}us — multi-deps fence violated"
+            )
+
+    def test_multi_deps_fanout_observed(self, phase_fence_pl_at_swimlane_data: dict):
+        """At least one block fans out to ``N_BRANCHES`` successors.
+
+        Same observability criterion as the pl.submit-variant test: with
+        array-carry codegen on a pl.at-deps block, the max ``fanout_count``
+        over the whole DAG should be ≥ ``N_BRANCHES``. A regression where
+        codegen only records the *last-dispatched* phase-N block as a dep
+        would cap the max fanout at 1.
+        """
+        tasks = phase_fence_pl_at_swimlane_data["tasks"]
+        max_fanout = max((t["fanout_count"] for t in tasks), default=0)
+        assert max_fanout >= _PHASE_FENCE_N_BRANCHES, (
+            f"max fanout across all tasks = {max_fanout}, expected ≥ {_PHASE_FENCE_N_BRANCHES} "
+            "(array-carry multi-deps means each phase-N block should fan out to all "
+            f"{_PHASE_FENCE_N_BRANCHES} phase-N+1 blocks)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Branch chain: outer PARALLEL x inner SEQ — per-branch linear chains.
+# ---------------------------------------------------------------------------
+#
+# Mirror of ``test_manual_scope_pipeline._build_branch_chain_program`` but
+# the kernel body lives inside a ``pl.at(deps=[prev_tid]) as prev_tid:`` block.
+# Topology (N_BRANCHES=4 branches x N_STEPS=4 steps = 16 tasks)::
+#
+#     Branch 0:  a00 -> a01 -> a02 -> a03    (linear chain)
+#     Branch 1:  a10 -> a11 -> a12 -> a13    (linear chain)
+#     Branch 2:  a20 -> a21 -> a22 -> a23    (linear chain)
+#     Branch 3:  a30 -> a31 -> a32 -> a33    (linear chain)
+#
+# All 4 branches run in parallel; within a branch the 4 steps form a strict
+# dependency chain via a scalar TaskId iter_arg carried through ``pl.range``.
+# Same expectations as the pl.submit-variant ``TestBranchChainSwimlane``.
+# ---------------------------------------------------------------------------
+
+
+_BRANCH_CHAIN_N_BRANCHES = 4
+_BRANCH_CHAIN_N_STEPS = 4
+_BRANCH_CHAIN_TILE_M = 64
+_BRANCH_CHAIN_BIG_N = 64
+_BRANCH_CHAIN_BIG_M = _BRANCH_CHAIN_N_BRANCHES * _BRANCH_CHAIN_N_STEPS * _BRANCH_CHAIN_TILE_M
+
+
+def _build_branch_chain_program():
+    """4-branch × 4-step outer-parallel / inner-seq pl.at-deps program."""
+    N_BRANCHES = _BRANCH_CHAIN_N_BRANCHES
+    N_STEPS = _BRANCH_CHAIN_N_STEPS
+    TILE_M = _BRANCH_CHAIN_TILE_M
+    BIG_N = _BRANCH_CHAIN_BIG_N
+    BIG_M = _BRANCH_CHAIN_BIG_M
+
+    @pl.program
+    class BranchChainPlAtDeps:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[BIG_M, BIG_N], pl.FP32],
+            out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
+        ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
+            with pl.manual_scope():
+                for branch in pl.parallel(N_BRANCHES):
+                    # Per-branch sequential chain: thread the previous step's
+                    # TaskId through the inner ``pl.range`` iter_arg. The
+                    # first step seeds the carry with ``None`` (no producer
+                    # yet); ``set_dependencies`` skips the slot via
+                    # ``is_valid()``. ``as prev_tid`` on the pl.at block
+                    # rebinds the iter_arg with the captured TaskId.
+                    prev_tid = None
+                    for step in pl.range(N_STEPS):
+                        row = step * N_BRANCHES * TILE_M + branch * TILE_M
+                        with pl.at(
+                            level=pl.Level.CORE_GROUP,
+                            name_hint="kernel_stripe",
+                            deps=[prev_tid],
+                        ) as prev_tid:
+                            tile: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(data, [row, 0], [TILE_M, BIG_N])
+                            result: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.add(tile, 1.0)
+                            out = pl.store(result, [row, 0], out)
+            return out
+
+    return BranchChainPlAtDeps
+
+
+class _BranchChainPlAtDepsPTO(PTOTestCase):
+    """Outer PARALLEL × inner SEQ under manual_scope, pl.at-deps interface."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"branch_chain_pl_at_deps_{_BRANCH_CHAIN_N_BRANCHES}x{_BRANCH_CHAIN_N_STEPS}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "data",
+                [_BRANCH_CHAIN_BIG_M, _BRANCH_CHAIN_BIG_N],
+                DataType.FP32,
+                init_value=torch.randn,
+            ),
+            TensorSpec(
+                "out",
+                [_BRANCH_CHAIN_BIG_M, _BRANCH_CHAIN_BIG_N],
+                DataType.FP32,
+                init_value=0.0,
+                is_output=True,
+            ),
+        ]
+
+    def get_program(self) -> Any:
+        return _build_branch_chain_program()
+
+    def compute_expected(self, tensors, params=None):
+        # Each block writes a disjoint stripe at
+        # ``row = step * N_BRANCHES * TILE_M + branch * TILE_M``;
+        # the 16 stripes tile the full row range without overlap.
+        data = tensors["data"]
+        out = tensors["out"]
+        out.zero_()
+        for branch in range(_BRANCH_CHAIN_N_BRANCHES):
+            for step in range(_BRANCH_CHAIN_N_STEPS):
+                r0 = step * _BRANCH_CHAIN_N_BRANCHES * _BRANCH_CHAIN_TILE_M + branch * _BRANCH_CHAIN_TILE_M
+                out[r0 : r0 + _BRANCH_CHAIN_TILE_M, :] = data[r0 : r0 + _BRANCH_CHAIN_TILE_M, :] + 1.0
+
+
+class TestBranchChainPlAtDeps:
+    """Numerical correctness for the outer-parallel × inner-seq pl.at-deps topology."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_correctness(self, test_runner, platform):
+        result = test_runner.run(_BranchChainPlAtDepsPTO(platform=platform))
+        assert result.passed, f"branch-chain pl.at-deps execution failed: {result.error}"
+
+
+@pytest.fixture(scope="module")
+def branch_chain_pl_at_swimlane_file(test_runner) -> Path:
+    if not test_runner.config.enable_l2_swimlane:
+        pytest.skip("pass --enable-l2-swimlane to validate the branch-chain pl.at swimlane")
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    result = test_runner.run(_BranchChainPlAtDepsPTO())
+    assert result.passed, f"branch-chain pl.at-deps failed: {result.error}"
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    new_files = after - before
+    assert new_files, "No l2_perf_records.json generated for the branch-chain pl.at run"
+    return max(new_files, key=lambda p: p.stat().st_mtime)
+
+
+@pytest.fixture(scope="module")
+def branch_chain_pl_at_swimlane_data(branch_chain_pl_at_swimlane_file: Path) -> dict:
+    return json.loads(branch_chain_pl_at_swimlane_file.read_text())
+
+
+class TestBranchChainPlAtSwimlane:
+    """Validate per-branch linear chain + cross-branch parallelism (pl.at-deps)."""
+
+    def test_total_task_count(self, branch_chain_pl_at_swimlane_data: dict):
+        tasks = branch_chain_pl_at_swimlane_data["tasks"]
+        assert len(tasks) >= _BRANCH_CHAIN_N_BRANCHES * _BRANCH_CHAIN_N_STEPS, (
+            f"expected ≥ {_BRANCH_CHAIN_N_BRANCHES * _BRANCH_CHAIN_N_STEPS} tasks "
+            f"({_BRANCH_CHAIN_N_BRANCHES} branches × {_BRANCH_CHAIN_N_STEPS} steps), got {len(tasks)}"
+        )
+
+    def test_intra_branch_linear_chain(self, branch_chain_pl_at_swimlane_data: dict):
+        """Within each branch, step k+1 starts after step k ends.
+
+        Tasks dispatch in branch-major / step-minor order (outer parallel
+        over branches in the emitted C++), so the first ``N_STEPS`` tasks
+        by ``task_id`` belong to branch 0, the next ``N_STEPS`` to branch 1,
+        and so on.
+        """
+        expected = _BRANCH_CHAIN_N_BRANCHES * _BRANCH_CHAIN_N_STEPS
+        tasks = branch_chain_pl_at_swimlane_data["tasks"]
+        if len(tasks) < expected:
+            pytest.skip(f"need ≥ {expected} tasks for chain check, got {len(tasks)}")
+        tasks = sorted(tasks, key=lambda t: t["task_id"])[:expected]
+        for b in range(_BRANCH_CHAIN_N_BRANCHES):
+            branch_tasks = tasks[b * _BRANCH_CHAIN_N_STEPS : (b + 1) * _BRANCH_CHAIN_N_STEPS]
+            for s in range(_BRANCH_CHAIN_N_STEPS - 1):
+                prev_end = branch_tasks[s]["end_time_us"]
+                next_start = branch_tasks[s + 1]["start_time_us"]
+                assert next_start >= prev_end, (
+                    f"branch {b} step {s + 1} starts at {next_start:.2f}us before "
+                    f"step {s} ends at {prev_end:.2f}us — seq chain broken"
+                )
+
+    def test_no_cross_branch_fanout(self, branch_chain_pl_at_swimlane_data: dict):
+        """Each task has at most 1 successor (next step in its own branch).
+
+        A cross-branch dep would push ``fanout_count`` above 1 for at least
+        one task — indicating the outliner accidentally cross-linked sibling
+        parallel iterations.
+        """
+        tasks = branch_chain_pl_at_swimlane_data["tasks"]
+        for t in tasks:
+            assert t["fanout_count"] <= 1, (
+                f"task fanout_count = {t['fanout_count']}, expected ≤ 1 (per-branch linear chain only)"
+            )
+
+    def test_branches_dispatch_to_distinct_cores(self, branch_chain_pl_at_swimlane_data: dict):
+        """The 4 branches should land on different AIV cores (true parallelism).
+
+        On single-core simulators this assertion is relaxed.
+        """
+        expected = _BRANCH_CHAIN_N_BRANCHES * _BRANCH_CHAIN_N_STEPS
+        tasks = branch_chain_pl_at_swimlane_data["tasks"]
+        if len(tasks) < expected:
+            pytest.skip(f"need ≥ {expected} tasks for parallelism check, got {len(tasks)}")
+        tasks = sorted(tasks, key=lambda t: t["task_id"])[:expected]
+        step0_cores = {tasks[b * _BRANCH_CHAIN_N_STEPS]["core_id"] for b in range(_BRANCH_CHAIN_N_BRANCHES)}
+        if len({t["core_id"] for t in tasks}) > 1:
+            assert len(step0_cores) >= 2, (
+                f"branches should spread across cores; step-0 core_ids = {sorted(step0_cores)}"
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
