@@ -1186,13 +1186,13 @@ class ASTParser:
         ``Scalar[TASK_ID]``.
         """
         span = self.span_tracker.get_span(call)
-        if self._manual_scope_depth == 0:
-            raise ParserSyntaxError(
-                "pl.submit(...) is only valid inside a `with pl.manual_scope():` block",
-                span=span,
-                hint="Wrap the submit in pl.manual_scope(), or use a plain "
-                "self.kernel(...) call outside manual scopes.",
-            )
+        # ``pl.submit`` and ``deps=`` are orthogonal to ``manual_scope``: the
+        # runtime's ``Arg::set_dependencies`` adds explicit edges on top of the
+        # auto-tracked deps (final fanin = auto ∪ explicit), so both flavours
+        # of orchestrator scope (auto or manual) accept ``pl.submit(...,
+        # deps=[...])``. In auto scope it is a precision tool — auto handles
+        # most of the dep graph; explicit edges patch the cases the runtime
+        # cannot infer (or infers too conservatively).
         if len(target.elts) != 2:
             raise ParserSyntaxError(
                 f"pl.submit(...) must be unpacked as exactly 2 targets "

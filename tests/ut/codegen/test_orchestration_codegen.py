@@ -2975,7 +2975,7 @@ class TestManualScopeCodegen:
         assert "params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);" in code
 
     def test_auto_scope_does_not_emit_task_id_capture(self):
-        """Sanity: auto scope keeps the legacy fire-and-forget submit."""
+        """Sanity: plain ``self.kernel(...)`` in auto scope stays fire-and-forget."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -2996,6 +2996,50 @@ class TestManualScopeCodegen:
         assert "PTO2ScopeMode::MANUAL" not in code
         assert "TaskOutputTensors task_0_outs" not in code
         assert "set_dependencies(" not in code
+
+    def test_submit_with_deps_in_auto_scope_emits_set_dependencies(self):
+        """``pl.submit(..., deps=[tid])`` works in auto scope too.
+
+        The runtime's ``Arg::set_dependencies`` is orthogonal to OverlapMap
+        auto-tracking (final fanin = auto ∪ explicit), so the codegen emits
+        the task-output capture and the deps stack array without requiring a
+        ``with pl.manual_scope():`` wrapper. The implicit ``PTO2_SCOPE()``
+        (auto OverlapMap) stays on.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a, a_tid = pl.submit(self.k1, x)
+                b, _ = pl.submit(self.k2, x, deps=[a_tid])
+                return b
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        # Stays in auto scope — no MANUAL wrapper.
+        assert "PTO2ScopeMode::MANUAL" not in code, code
+        # Both submits capture their TaskOutputTensors handle for downstream
+        # ``.task_id()``.
+        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
+        assert "PTO2TaskId a_tid = task_0_outs.task_id();" in code, code
+        # k2's explicit dep on a_tid is wired through a stack deps array +
+        # set_dependencies, exactly like in manual scope.
+        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "if (a_tid.is_valid()) params_t1_deps[params_t1_deps_count++] = a_tid;" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_manual_scope_seq_outer_parallel_inner_two_stage_pipeline(self):
         """End-to-end: ``with pl.manual_scope():`` wrapping

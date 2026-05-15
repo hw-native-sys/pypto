@@ -1404,15 +1404,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  void EmitTaskSubmitAndBind(const std::string& submit_expr) {
-    if (in_manual_scope_depth_ > 0) {
-      // Manual scope: capture the submit's outputs so later code can call
-      // ``.task_id()`` on it. We do NOT pre-emit a ``PTO2TaskId task_<n>``
-      // variable — instead, ``GenerateSubmitReturnAliases`` binds the
-      // ``pl.submit`` producer-TaskId tuple element to
-      // ``task_<n>_outs.task_id()`` on demand. This avoids a redundant
-      // variable when the caller threads the task id through a TaskId
-      // iter_arg carry rather than referring to it by name.
+  void EmitTaskSubmitAndBind(const std::string& submit_expr, bool capture_outputs) {
+    if (capture_outputs) {
+      // The caller will consume this task's producer TaskId — capture the
+      // ``TaskOutputTensors`` handle so ``GenerateSubmitReturnAliases`` can
+      // bind it to ``task_<n>_outs.task_id()`` on demand. Orthogonal to
+      // scope mode: a ``pl.submit(...)`` call captures the handle whether
+      // it appears in a manual or auto scope, since
+      // ``Arg::set_dependencies`` is itself orthogonal to OverlapMap
+      // tracking (final fanin = auto ∪ explicit).
       const std::string outs_var = "task_" + std::to_string(task_counter_) + "_outs";
       code_ << Indent() << "TaskOutputTensors " << outs_var << " = " << submit_expr << ";\n";
     } else {
@@ -1423,10 +1423,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   /// Upper bound on the number of dependency entries ``EmitManualDeps`` could
   /// fill for ``call``. Used to size the per-task ``PTO2TaskId <task>_deps[K]``
-  /// stack array. Returns 0 outside a manual scope (auto scope derives deps
-  /// from data flow at runtime, so codegen emits no dependency entries).
+  /// stack array. ``manual_dep_edges`` is orthogonal to scope mode: the
+  /// runtime adds these on top of any auto-tracked deps in auto scope (final
+  /// fanin = auto ∪ explicit), so this count fires whenever the parser
+  /// attached ``deps=[...]`` to the Call.
   size_t CountManualDeps(const CallPtr& call) const {
-    if (in_manual_scope_depth_ == 0) return 0;
     for (const auto& [k, v] : call->attrs_) {
       if (k != kAttrManualDepEdges) continue;
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
@@ -1454,10 +1455,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "Arg " << task_var << ";\n";
   }
 
-  /// Emit the manual-scope dependency wiring for a kernel ``Call``: a
-  /// fixed-size ``PTO2TaskId <task>_deps[K]`` stack array filled with the
-  /// valid producer TaskIds from ``Call.attrs["manual_dep_edges"]``, followed
-  /// by a single ``<task>.set_dependencies(<task>_deps, <task>_deps_count)``.
+  /// Emit explicit dependency wiring for a kernel ``Call``: a fixed-size
+  /// ``PTO2TaskId <task>_deps[K]`` stack array filled with the valid producer
+  /// TaskIds from ``Call.attrs["manual_dep_edges"]``, followed by a single
+  /// ``<task>.set_dependencies(<task>_deps, <task>_deps_count)``.
   ///
   /// The edge list is written directly by the parser from a ``pl.submit(...)``
   /// ``deps=[tid1, tid2]`` kwarg — each entry a ``Scalar[TASK_ID]`` Var, or an
@@ -1466,10 +1467,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// ``PTO2TaskId::invalid()`` sentinel — a ``None`` loop-carry seed, an early
   /// loop iteration's iter_arg carry, or an unwritten array slot — and an
   /// invalid id must never reach ``set_dependencies``. The guard is a cheap
-  /// always-true branch for ids known valid. No-op outside a manual scope or
-  /// when there are no edges.
+  /// always-true branch for ids known valid.
+  ///
+  /// Orthogonal to scope mode: ``set_dependencies`` adds explicit edges on top
+  /// of any auto-tracked deps the runtime infers from OverlapMap (final
+  /// fanin = auto ∪ explicit), so this fires in both auto and manual scopes.
+  /// No-op when there are no edges attached.
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
-    if (in_manual_scope_depth_ == 0) return;
     const size_t dep_capacity = CountManualDeps(call);
     if (dep_capacity == 0) return;
     for (const auto& [k, v] : call->attrs_) {
@@ -1754,7 +1758,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr);
+    EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call));
   }
 
   void GenerateSpmdCallCode(const CallPtr& call, const FunctionPtr& spmd_func) {
@@ -1787,7 +1791,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr);
+    EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call));
   }
 
   void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func,
@@ -1827,7 +1831,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
       std::string submit_expr =
           CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
-      EmitTaskSubmitAndBind(submit_expr);
+      EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call));
       return;
     }
 
@@ -1873,7 +1877,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitManualDeps(call, task_var);
 
     std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr);
+    EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call));
   }
 
   // --- Alias generation helpers ---

@@ -158,20 +158,43 @@ class TestManualScopeParsing:
                         b = self.k1(x, deps=[a])
                     return b
 
-    def test_submit_outside_manual_scope_is_rejected(self):
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+    def test_submit_in_auto_scope_records_manual_dep_edges(self):
+        """``pl.submit(..., deps=[...])`` is orthogonal to ``manual_scope``.
 
-            @pl.program
-            class _Prog:
-                @pl.function(type=pl.FunctionType.InCore)
-                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    return x
+        The runtime's ``Arg::set_dependencies`` adds explicit edges on top of
+        auto-tracked OverlapMap deps (final fanin = auto ∪ explicit), so
+        ``pl.submit`` and ``deps=`` work in auto scope too — as a precision
+        tool that patches the edges auto can't infer (or infers too
+        conservatively). No ``with pl.manual_scope():`` required.
+        """
 
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    # No manual_scope around this — pl.submit must error.
-                    b, _ = pl.submit(self.k1, x)
-                    return b
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                # No manual_scope wrapper — auto OverlapMap stays on; the
+                # explicit deps= entry is added on top.
+                a, a_tid = pl.submit(self.k1, x)
+                b, _ = pl.submit(self.k2, x, deps=[a_tid])
+                return b
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        # No RuntimeScopeStmt: the program stays in the implicit auto scope.
+        assert _first_runtime_scope(fn.body) is None
+        k2_call = next(c for c in _calls_in(fn.body) if c.op.name == "k2")
+        edges = k2_call.attrs.get("manual_dep_edges", [])
+        assert len(edges) == 1
+        assert isinstance(edges[0].type, ir.ScalarType)
+        assert edges[0].type.dtype == pl.TASK_ID
 
     def test_submit_as_bare_expression_is_rejected(self):
         with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
