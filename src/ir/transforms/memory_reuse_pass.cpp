@@ -1621,6 +1621,10 @@ StmtPtr RemoveUnusedAllocStatements(const StmtPtr& body, const std::set<const Va
 FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "MemoryReusePass cannot run on null function";
 
+  // Orchestration functions submit tasks and never hold TileType variables,
+  // so there is nothing for memory reuse to do — skip them silently.
+  if (func->func_type_ == FunctionType::Orchestration) return func;
+
   // Step 0: Top-down retarget — propagate iter_arg/initValue MemRefs down the
   // yield chain so accumulator producers land directly in the canonical buffer.
   // This eliminates most accumulator-related move insertions downstream.
@@ -1638,7 +1642,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   auto analysis_result = ComputeLifetimes(new_body);
 
   if (analysis_result.lifetimes.empty()) {
-    LOG_WARN << "No TileType variables found, skipping memory reuse";
+    LOG_INFO << "No TileType variables found in function '" << func->name_ << "', skipping memory reuse";
     return func;
   }
 
