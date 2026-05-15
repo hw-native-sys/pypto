@@ -68,6 +68,42 @@ pytest tests/st/runtime/ \
 | pytest entry | [tests/st/conftest.py](../../../tests/st/conftest.py) | `pytest_addoption` |
 | Harness pipeline ctx | [tests/st/harness/core/test_runner.py](../../../tests/st/harness/core/test_runner.py) | `start_pipeline(..., enable_*)` |
 
+## Replaying an existing build_output
+
+To re-run a previously compiled `build_output/<jit_dir>/` after editing
+one or more kernel cpp files — typically to verify a hand-tuned change
+under PMU / swimlane / tensor-dump — use the debug-only
+[`pypto.runtime.debug.replay`](../../../python/pypto/runtime/debug/replay.py)
+module. It reuses the same `execute_compiled` path as the normal
+`pypto.runtime.run` flow, so DFX flags behave identically.
+
+```python
+from pypto.runtime.debug import replay
+from pypto.runtime import RunConfig
+
+replay(
+    "build_output/_jit_xxx/",
+    a, b, c,
+    config=RunConfig(
+        platform="a2a3sim",
+        enable_pmu=2,
+        enable_l2_swimlane=True,
+    ),
+)
+```
+
+CLI form (loads inputs from the directory's `golden.py`):
+
+```bash
+python -m pypto.runtime.debug.replay build_output/_jit_xxx/ \
+    --pmu 2 --swimlane
+```
+
+`recompile=True` (default) deletes cached `.so`/`.bin` artefacts so
+hand-edited cpps are picked up. Pass `recompile=False` (or
+`--no-recompile`) when no cpp changed and you want to skip the rebuild.
+
+
 ## Related
 
 - Simpler's runtime-side reference: `runtime/docs/dfx/{l2-swimlane,

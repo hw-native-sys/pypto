@@ -66,6 +66,41 @@ pytest tests/st/runtime/ \
 | pytest 入口 | [tests/st/conftest.py](../../../tests/st/conftest.py) | `pytest_addoption` |
 | Harness 流水线上下文 | [tests/st/harness/core/test_runner.py](../../../tests/st/harness/core/test_runner.py) | `start_pipeline(..., enable_*)` |
 
+## 重放已有的 build_output
+
+需要在改完 kernel cpp 之后重新跑一遍编译产物（典型场景：手调 kernel
+后用 PMU / swimlane / tensor-dump 验证修改是否正确），使用 debug 专用
+的 [`pypto.runtime.debug.replay`](../../../python/pypto/runtime/debug/replay.py)
+模块。它复用与 `pypto.runtime.run` 相同的 `execute_compiled` 路径,
+因此 DFX 开关的行为完全一致。
+
+```python
+from pypto.runtime.debug import replay
+from pypto.runtime import RunConfig
+
+replay(
+    "build_output/_jit_xxx/",
+    a, b, c,
+    config=RunConfig(
+        platform="a2a3sim",
+        enable_pmu=2,
+        enable_l2_swimlane=True,
+    ),
+)
+```
+
+CLI 形式（从目录里的 `golden.py` 加载输入）:
+
+```bash
+python -m pypto.runtime.debug.replay build_output/_jit_xxx/ \
+    --pmu 2 --swimlane
+```
+
+默认 `recompile=True` 会清掉缓存的 `.so` / `.bin`,确保手改的 cpp
+能被重新编译。如果没改 cpp、想跳过重编译,传 `recompile=False`
+（或 CLI 的 `--no-recompile`）即可。
+
+
 ## 相关文档
 
 - Simpler runtime 侧参考：`runtime/docs/dfx/{l2-swimlane,
