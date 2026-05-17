@@ -84,18 +84,18 @@ def _pair_flag_events(events: list[dict], name: str) -> list[dict]:
     for event in events:
         if event.get("name") != name:
             continue
-        key = (event["pid"], event["tid"])
+        key = (event.get("pid", ""), event.get("tid", ""))
         if event.get("ph") == "B":
             open_stack.setdefault(key, []).append(event)
         elif event.get("ph") == "E" and open_stack.get(key):
             begin = open_stack[key].pop()
             records.append(
                 {
-                    "pid": event["pid"],
-                    "tid": event["tid"],
+                    "pid": event.get("pid", ""),
+                    "tid": event.get("tid", ""),
                     "detail": begin.get("args", {}).get("detail", ""),
-                    "begin_ts": begin["ts"],
-                    "end_ts": event["ts"],
+                    "begin_ts": begin.get("ts", 0.0),
+                    "end_ts": event.get("ts", 0.0),
                 }
             )
     return records
@@ -133,9 +133,9 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
     """
     by_lane: dict[tuple[str, str], list[dict]] = {}
     for inst in insts:
-        by_lane.setdefault((inst["pid"], inst["tid"]), []).append(inst)
+        by_lane.setdefault((inst.get("pid", ""), inst.get("tid", "")), []).append(inst)
     for lane in by_lane.values():
-        lane.sort(key=lambda inst: inst["ts"])
+        lane.sort(key=lambda inst: inst.get("ts", 0.0))
 
     waits_by_key: dict[tuple[str, str], list[dict]] = {}
     for wait in _pair_flag_events(events, "WAIT_FLAG"):
@@ -170,7 +170,7 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
                 "name": label,
                 "pid": flag["pid"],
                 "tid": producer,
-                "ts": prod["ts"],
+                "ts": prod.get("ts", 0.0),
             }
         )
         arrows.append(
@@ -182,7 +182,7 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
                 "name": label,
                 "pid": flag["pid"],
                 "tid": consumer,
-                "ts": cons["ts"],
+                "ts": cons.get("ts", 0.0),
             }
         )
     return arrows, skipped

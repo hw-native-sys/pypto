@@ -347,5 +347,22 @@ def test_main_keep_scalar_flag(tmp_path):
     assert [e for e in kept_out["traceEvents"] if e["ph"] == "X" and e.get("tid") == "SCALAR"]
 
 
+def test_build_sync_arrows_tolerates_missing_keys():
+    # A SET_FLAG event missing "tid" must not crash _build_sync_arrows.
+    insts = [{"name": "VADD", "ph": "X", "pid": "c0", "tid": "VECTOR", "ts": 3.0}]
+    events = insts + [
+        {
+            "name": "SET_FLAG",
+            "ph": "B",
+            "pid": "c0",
+            "ts": 2.4,
+            "args": {"detail": "PIPE:MTE2,TRIGGERPIPE:VEC,FLAGID:0,"},
+        },
+        {"name": "SET_FLAG", "ph": "E", "pid": "c0", "ts": 2.41, "args": {}},
+    ]
+    arrows, skipped = clean_sim_trace._build_sync_arrows(insts, events)
+    assert isinstance(arrows, list) and isinstance(skipped, int)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
