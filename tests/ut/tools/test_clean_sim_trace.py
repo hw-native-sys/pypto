@@ -247,5 +247,28 @@ def test_rebuild_sync_arrows():
     assert len({e["id"] for e in flows}) == 1
 
 
+def test_reshape_metrics():
+    api = {
+        "Cores": ["c0", "c1"],
+        "Instructions": [
+            {
+                "Address": "0x10",
+                "Pipe": "VECTOR",
+                "Cycles": [5, 7],
+                "Vector Utilization Percentage": [12.5, 0.0],
+            },
+        ],
+        "Instructions Dtype": {"Instructions": {"Cycles": 1}},
+    }
+    out = clean_sim_trace.reshape_metrics(api)
+    assert out["cores"] == ["c0", "c1"]
+    c0 = out["instructions"]["c0"][0]
+    c1 = out["instructions"]["c1"][0]
+    assert c0["address"] == "0x10" and c0["pipe"] == "VECTOR"
+    assert c0["cycles"] == 5 and c1["cycles"] == 7
+    assert c0["vector_utilization_percentage"] == 12.5
+    assert out["column_types"] == {"Instructions": {"Cycles": 1}}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -301,3 +301,38 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
         "traceEvents": out,
     }
     return clean, skipped
+
+
+# --- API_INSTR metrics sidecar -------------------------------------------------
+def reshape_metrics(api_instr: dict) -> dict:
+    """Reshape the API_INSTR block into per-core instruction records.
+
+    The raw block stores each metric as an array indexed by the ``Cores`` list.
+    This flattens those arrays so each core gets its own list of records with
+    scalar field values; field names are lower-cased with spaces replaced by
+    underscores.
+
+    Args:
+        api_instr: The parsed ``API_INSTR`` block.
+
+    Returns:
+        A dict with ``cores``, ``instructions`` (keyed by core name) and
+        ``column_types`` (the original ``Instructions Dtype`` map).
+    """
+    cores = api_instr.get("Cores", [])
+    by_core: dict[str, list[dict]] = {core: [] for core in cores}
+    for record in api_instr.get("Instructions", []):
+        for index, core in enumerate(cores):
+            row: dict = {}
+            for key, value in record.items():
+                field = key.lower().replace(" ", "_")
+                if isinstance(value, list) and len(value) == len(cores):
+                    row[field] = value[index]
+                else:
+                    row[field] = value
+            by_core[core].append(row)
+    return {
+        "cores": cores,
+        "instructions": by_core,
+        "column_types": api_instr.get("Instructions Dtype", {}),
+    }
