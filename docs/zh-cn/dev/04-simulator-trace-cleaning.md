@@ -1,0 +1,63 @@
+# 仿真器 Trace 清洗
+
+算子仿真器每次 kernel 运行都会生成一个 `OPPROF_*/simulator/` 目录，其中包含
+`trace.json`（Chrome Trace Event JSON）和 `visualize_data.bin`（供 MindStudio
+Insight 使用的二进制容器）。直接在 Perfetto UI 中打开 `trace.json` 很难阅读：
+`SET_FLAG` / `WAIT_FLAG` 同步切片和标量地址运算指令淹没了真正的 AI Core 流水线。
+
+`clean_sim_trace` 将该 dump 重建为一个去噪的、可在 Chrome 中查看的流水线 trace。
+
+## 用法
+
+```bash
+python -m pypto.tools.clean_sim_trace <path> [-o OUTPUT_DIR] [--keep-scalar] [--raw-metrics]
+```
+
+`<path>` 是一个 `visualize_data.bin` 文件或一个 `OPPROF_*` 目录（工具会在其中
+定位 `simulator/visualize_data.bin`）。会在输入旁边（或 `-o` 指定的目录）写出两个文件：
+
+| 文件 | 内容 |
+| ---- | ---- |
+| `trace.clean.json` | 重建后的 Chrome Trace Event JSON，可在 `chrome://tracing` 与 Perfetto UI 打开 |
+| `instr_metrics.json` | 来自 `API_INSTR` 块的逐核指令指标 |
+
+| 选项 | 作用 |
+| ---- | ---- |
+| `--keep-scalar` | 保留 `SCALAR` 准备车道（默认丢弃） |
+| `--raw-metrics` | 原样输出 `API_INSTR` 块，而不做重塑 |
+
+## `visualize_data.bin` 格式
+
+该文件是一串带长度前缀的数据块。每个块有一个 12 字节、4 字节对齐的头部:
+
+| 偏移 | 大小 | 字段 | 含义 |
+| ---- | ---- | ---- | ---- |
+| 0 | `uint64` LE | `contentSize` | 负载长度，含尾部填充 |
+| 8 | `uint8` | `type` | 块类型（`2` = TRACE，`4` = API_INSTR，`1` = SOURCE，...） |
+| 9 | `uint8` | `paddingLength` | 用于 4 字节对齐的尾部补零字节数 |
+| 10 | `uint8` | `instrVersion` | API_INSTR 版本标识 |
+| 11 | `uint8` | `reserve` | 恒为 `0x5a`（二进制格式幻数） |
+
+每个块的负载都是纯 JSON。`SOURCE` 块在负载前有一个固定 4096 字节的文件路径。
+工具只消费 `TRACE` 与 `API_INSTR` 块，其它块类型会被跳过。
+
+## 重建规则
+
+1. **车道选择** —— 保留流水线车道（`MTE2`、`MTE1`、`CUBE`、`VECTOR`、
+   `FIXPIPE`、`MTE3`）；丢弃 `CACHEMISS`、`FLOWCTRL`、`ALL`。`SCALAR` 车道
+   默认丢弃（`--keep-scalar` 可恢复）。
+2. **事件过滤** —— 保留 `X`（完整）指令事件；丢弃 `SET_FLAG` / `WAIT_FLAG` /
+   `BAR` 切片。
+3. **车道排序** —— 发出 `process_*` / `thread_*` 元数据，使核与流水线车道按
+   数据流顺序（加载 -> 计算 -> 存储）显示。
+4. **同步转为箭头** —— 每个 `SET_FLAG` -> `WAIT_FLAG` 对变成一条流向箭头，
+   从生产指令重新锚定到消费指令。
+5. **着色** —— 切片按流水线车道重新着色。
+6. **时间戳** —— 原样保留，使清洗后的 trace 与原始 `trace.json` 对齐。
+
+## 指标旁车文件
+
+`instr_metrics.json` 重塑 `API_INSTR` 块：原始块中每个按核索引的指标数组，
+会被展平为逐核的指令记录列表（`address`、`pipe`、`cycles`、
+`vector_utilization_percentage` 等）。原始的 `Instructions Dtype` 映射保留在
+`column_types` 下。
