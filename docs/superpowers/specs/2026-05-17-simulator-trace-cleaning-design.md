@@ -281,8 +281,9 @@ hermetic. A helper builds a minimal `visualize_data.bin` in memory
 
 ## Documentation
 
-A new `docs/en/dev/02-simulator-trace-cleaning.md` (and the `docs/zh-cn/` mirror,
-per the documentation rule), sitting next to the existing `01-compile-profiling.md`.
+A new `docs/en/dev/04-simulator-trace-cleaning.md` (and the `docs/zh-cn/` mirror,
+per the documentation rule). The `00`–`03` slots are taken; `04` is the next free
+number.
 It covers the `visualize_data.bin` block format, the six rebuild rules, the CLI, and
 the output files. Kept under the 500-line documentation limit.
 
