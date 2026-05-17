@@ -9,6 +9,8 @@
 
 """Unit tests for the simulator trace cleaning tool."""
 
+import json
+
 import pytest
 from pypto.tools import clean_sim_trace
 
@@ -268,6 +270,55 @@ def test_reshape_metrics():
     assert c0["cycles"] == 5 and c1["cycles"] == 7
     assert c0["vector_utilization_percentage"] == 12.5
     assert out["column_types"] == {"Instructions": {"Cycles": 1}}
+
+
+def test_main_end_to_end(tmp_path):
+    trace = (
+        b'{"traceEvents":[{"name":"VADD","ph":"X","pid":"c0","tid":"VECTOR","ts":1.0,"dur":0.1,"args":{}}]}'
+    )
+    api = b'{"Cores":["c0"],"Instructions":[{"Address":"0x1","Cycles":[3]}],"Instructions Dtype":{}}'
+    buf = _make_bin([(clean_sim_trace._TYPE_TRACE, trace), (clean_sim_trace._TYPE_API_INSTR, api)])
+    bin_path = tmp_path / "visualize_data.bin"
+    bin_path.write_bytes(buf)
+
+    assert clean_sim_trace.main([str(bin_path)]) == 0
+
+    clean = json.loads((tmp_path / "trace.clean.json").read_text())
+    assert any(e["ph"] == "X" and e["name"] == "VADD" for e in clean["traceEvents"])
+    metrics = json.loads((tmp_path / "instr_metrics.json").read_text())
+    assert metrics["instructions"]["c0"][0]["cycles"] == 3
+
+
+def test_main_resolves_opprof_dir(tmp_path):
+    sim_dir = tmp_path / "simulator"
+    sim_dir.mkdir()
+    buf = _make_bin([(clean_sim_trace._TYPE_TRACE, b'{"traceEvents":[]}')])
+    (sim_dir / "visualize_data.bin").write_bytes(buf)
+    assert clean_sim_trace.main([str(tmp_path)]) == 0
+    assert (sim_dir / "trace.clean.json").is_file()
+
+
+def test_main_missing_file(tmp_path, capsys):
+    assert clean_sim_trace.main([str(tmp_path / "nope")]) == 1
+    assert "error:" in capsys.readouterr().err
+
+
+def test_main_missing_trace_block(tmp_path, capsys):
+    buf = _make_bin([(clean_sim_trace._TYPE_API_INSTR, b'{"Cores":[]}')])
+    bin_path = tmp_path / "visualize_data.bin"
+    bin_path.write_bytes(buf)
+    assert clean_sim_trace.main([str(bin_path)]) == 1
+    assert "no TRACE block" in capsys.readouterr().err
+
+
+def test_main_missing_api_instr_block(tmp_path, capsys):
+    buf = _make_bin([(clean_sim_trace._TYPE_TRACE, b'{"traceEvents":[]}')])
+    bin_path = tmp_path / "visualize_data.bin"
+    bin_path.write_bytes(buf)
+    assert clean_sim_trace.main([str(bin_path)]) == 0
+    assert (tmp_path / "trace.clean.json").is_file()
+    assert not (tmp_path / "instr_metrics.json").exists()
+    assert "no API_INSTR block" in capsys.readouterr().err
 
 
 if __name__ == "__main__":

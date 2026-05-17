@@ -15,8 +15,12 @@ the ``TRACE`` block into a de-cluttered Chrome Trace Event JSON and reshapes the
 ``API_INSTR`` block into a per-core metrics sidecar.
 """
 
+import argparse
+import json
 import struct
+import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 # --- visualize_data.bin block container format ---------------------------------
 # Header: contentSize:u64, type:u8, padding:u8, instrVersion:u8, reserve:u8.
@@ -336,3 +340,90 @@ def reshape_metrics(api_instr: dict) -> dict:
         "instructions": by_core,
         "column_types": api_instr.get("Instructions Dtype", {}),
     }
+
+
+# --- command-line interface ----------------------------------------------------
+def _resolve_input(path: Path) -> Path:
+    """Resolve a CLI path to an actual ``visualize_data.bin`` file.
+
+    Accepts the file directly, or an ``OPPROF_*`` directory containing either
+    ``visualize_data.bin`` or ``simulator/visualize_data.bin``.
+
+    Raises:
+        FileNotFoundError: No ``visualize_data.bin`` could be located.
+    """
+    if path.is_file():
+        return path
+    if path.is_dir():
+        for candidate in (path / "visualize_data.bin", path / "simulator" / "visualize_data.bin"):
+            if candidate.is_file():
+                return candidate
+    raise FileNotFoundError(
+        f"no visualize_data.bin found at {path} (expected a .bin file or a "
+        f"directory containing simulator/visualize_data.bin)"
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point. Returns a process exit code."""
+    parser = argparse.ArgumentParser(
+        prog="clean_sim_trace", description="Rebuild a clean AI-core pipeline trace from visualize_data.bin."
+    )
+    parser.add_argument("path", type=Path, help="a visualize_data.bin file or an OPPROF_* directory")
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="output directory (default: next to the input file)",
+    )
+    parser.add_argument(
+        "--keep-scalar", action="store_true", help="keep the SCALAR setup lane (dropped by default)"
+    )
+    parser.add_argument(
+        "--raw-metrics", action="store_true", help="dump the API_INSTR block verbatim instead of reshaping"
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        bin_path = _resolve_input(args.path)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        blocks: dict[int, bytes] = {}
+        for btype, payload in iter_blocks(bin_path.read_bytes()):
+            blocks.setdefault(btype, payload)
+    except ValueError as exc:
+        print(f"error: {bin_path}: {exc}", file=sys.stderr)
+        return 1
+
+    if _TYPE_TRACE not in blocks:
+        print(f"error: {bin_path}: no TRACE block found", file=sys.stderr)
+        return 1
+
+    out_dir = args.output_dir or bin_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    trace, skipped = rebuild_trace(json.loads(blocks[_TYPE_TRACE]), keep_scalar=args.keep_scalar)
+    trace_path = out_dir / "trace.clean.json"
+    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    print(f"wrote {trace_path}")
+    if skipped:
+        print(f"note: {skipped} sync flag(s) could not be re-anchored and were skipped")
+
+    if _TYPE_API_INSTR in blocks:
+        api = json.loads(blocks[_TYPE_API_INSTR])
+        metrics = api if args.raw_metrics else reshape_metrics(api)
+        metrics_path = out_dir / "instr_metrics.json"
+        metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+        print(f"wrote {metrics_path}")
+    else:
+        print("warning: no API_INSTR block found; skipping instr_metrics.json", file=sys.stderr)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
