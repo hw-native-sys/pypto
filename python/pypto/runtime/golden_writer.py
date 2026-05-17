@@ -565,19 +565,35 @@ def _inline_bound_self_attributes(source: str, bound_instance: object) -> str:
     return source
 
 
-def _extract_closure_constants(fn: Callable) -> list[str]:
-    """Extract closure and global variable bindings as top-level constant assignments.
+def _extract_closure_constants(
+    fn: Callable,
+    _seen_inlined: set[int] | None = None,
+) -> list[str]:
+    """Extract closure and global variable bindings as top-level preamble lines.
 
-    Handles two categories of captured variables:
+    Handles three categories of captured variables:
 
-    1. **Closure variables** (free variables from an enclosing scope).
-    2. **Global constants** referenced by the function that are simple scalar
-       values (not builtins, modules, or callables).
+    1. **Closure variables** (free variables from an enclosing scope) with
+       simple scalar values — emitted as ``name = literal``.
+    2. **Global constants** referenced via LOAD_GLOBAL that resolve to simple
+       scalar values — emitted as ``name = literal``.
+    3. **Callable globals** with extractable source (top-level functions in
+       the user's own module) — emitted as full ``def`` blocks, with their
+       own transitive dependencies inlined recursively.
 
-    Only supports int, float, str, bool, and None values. Unsupported types
-    are silently skipped (the generated code may still fail at runtime if those
-    variables are actually used).
+    Cycle protection: ``_seen_inlined`` tracks already-inlined callable
+    objects by ``id()`` so mutual recursion in user helpers does not produce
+    duplicate ``def`` blocks or infinite recursion. Callers should not pass
+    this parameter — it is reset on each top-level invocation.
+
+    Silently skipped: non-scalar constants (lists / dicts / objects), non-finite
+    floats, lambdas, and C-extension callables with no ``inspect``-visible
+    source. These cases either produce no usable preamble or cannot be
+    materialised as standalone code.
     """
+    if _seen_inlined is None:
+        _seen_inlined = set()
+
     lines: list[str] = []
     seen: set[str] = set()
     _SIMPLE_TYPES = (int, float, str, bool, type(None))
@@ -603,8 +619,7 @@ def _extract_closure_constants(fn: Callable) -> list[str]:
                     lines.append(f"{name} = {literal}")
                     seen.add(name)
 
-    # 2. Global constants — names referenced via LOAD_GLOBAL that resolve to
-    #    simple scalar values in the function's __globals__.
+    # 2. Global names referenced via LOAD_GLOBAL.
     code = getattr(fn, "__code__", None)
     fn_globals = getattr(fn, "__globals__", {})
     if code and fn_globals:
@@ -617,12 +632,49 @@ def _extract_closure_constants(fn: Callable) -> list[str]:
                 continue  # Name not in globals at all
             if isinstance(value, (types.ModuleType, type)):
                 continue
-            if callable(value):
-                continue
             if isinstance(value, _SIMPLE_TYPES):
                 literal = _safe_repr(value)
                 if literal is not None:
                     lines.append(f"{name} = {literal}")
                     seen.add(name)
+                continue
+            if callable(value):
+                inlined = _try_inline_callable_global(value, _seen_inlined)
+                if inlined is not None:
+                    lines.extend(inlined)
+                    seen.add(name)
 
     return lines
+
+
+def _try_inline_callable_global(
+    value: Callable,
+    seen_inlined: set[int],
+) -> list[str] | None:
+    """Inline a callable global as a top-level ``def`` block.
+
+    Returns a list of preamble lines (the callable's own dependencies first,
+    then its source), or ``None`` when the callable cannot be inlined
+    (lambda, C extension, already inlined elsewhere). Callers should
+    treat ``None`` as "skip silently" to preserve back-compat with the
+    original behaviour.
+    """
+    fn_name = getattr(value, "__name__", None)
+    if fn_name is None or not fn_name.isidentifier():
+        return None  # lambda or other anonymous callable
+    if id(value) in seen_inlined:
+        return None  # already emitted earlier in this generation
+    try:
+        src = inspect.getsource(value)
+    except (TypeError, OSError):
+        return None  # C extension / dynamically defined — no source available
+
+    seen_inlined.add(id(value))
+    parts: list[str] = []
+    # Recursively pull in the inlined callable's own globals/closure
+    # before its own def block, so forward references resolve.
+    transitive = _extract_closure_constants(value, seen_inlined)
+    if transitive:
+        parts.extend(transitive)
+    parts.append(textwrap.dedent(src))
+    return parts

@@ -26,6 +26,47 @@ def _dummy_golden(tensors, params=None):
     tensors["out"][:] = tensors["a"] * 3
 
 
+# ---------------------------------------------------------------------------
+# Module-level helpers used by callable-global inlining tests.
+# These mirror the real-world pattern in
+# tests/st/codegen/test_paged_attention_spmd.py where the test module binds
+# ``golden = _spmd_module.golden`` at top level and ``compute_expected``
+# delegates to it. _extract_closure_constants must inline these into the
+# generated golden.py so compute_golden can resolve the reference.
+# ---------------------------------------------------------------------------
+
+
+def _ref_scale_into(tensors, params=None):
+    """Self-contained reference impl. No transitive deps."""
+    tensors["out"][:] = tensors["a"] * 2 + 1
+
+
+def _double_value(x):
+    return x * 2
+
+
+def _ref_via_double(tensors, params=None):
+    """Calls _double_value — exercises transitive inlining."""
+    tensors["out"][:] = _double_value(tensors["a"]) + 1
+
+
+def _ping(x, depth):
+    if depth <= 0:
+        return x
+    return _pong(x + 1, depth - 1)
+
+
+def _pong(x, depth):
+    if depth <= 0:
+        return x
+    return _ping(x - 1, depth - 1)
+
+
+def _ref_mutual_recursion(tensors, params=None):
+    """Exercises cycle protection: _ping <-> _pong reference each other."""
+    tensors["out"][:] = tensors["a"] + _ping(0, 3)
+
+
 class _BoundGoldenCase:
     def __init__(self, scale: float):
         self._scale = scale
@@ -325,6 +366,101 @@ class TestExtractClosureConstants:
         src = _extract_compute_golden(my_golden)
         assert "factor = 5" in src
         assert src.index("factor = 5") < src.index("def compute_golden(")
+
+    def test_callable_global_inlined_as_def_block(self):
+        """Callable global with extractable source is inlined as a def block.
+
+        Regresses the paged_attention_spmd NameError: a top-level ``golden``
+        binding referenced by compute_expected was previously dropped on the
+        floor, producing a compute_golden that crashed at validate time.
+        """
+
+        def compute_expected(tensors, params=None):
+            _ref_scale_into(tensors, params)
+
+        lines = _extract_closure_constants(compute_expected)
+        joined = "\n".join(lines)
+        assert "def _ref_scale_into(tensors, params=None):" in joined
+        assert "tensors[\"out\"][:] = tensors[\"a\"] * 2 + 1" in joined
+
+    def test_callable_global_transitive_dep_inlined(self):
+        """Helpers called by an inlined callable are inlined too (recursion)."""
+
+        def compute_expected(tensors, params=None):
+            _ref_via_double(tensors, params)
+
+        lines = _extract_closure_constants(compute_expected)
+        joined = "\n".join(lines)
+        assert "def _ref_via_double(tensors, params=None):" in joined
+        assert "def _double_value(x):" in joined
+        # The transitive dep must be emitted *before* the function that uses it
+        # so module-level execution order resolves the forward reference.
+        assert joined.index("def _double_value(") < joined.index("def _ref_via_double(")
+
+    def test_callable_global_mutual_recursion_is_cycle_safe(self):
+        """Mutually-recursive helpers are each inlined exactly once."""
+
+        def compute_expected(tensors, params=None):
+            _ref_mutual_recursion(tensors, params)
+
+        lines = _extract_closure_constants(compute_expected)
+        joined = "\n".join(lines)
+        assert joined.count("def _ping(x, depth):") == 1
+        assert joined.count("def _pong(x, depth):") == 1
+
+    def test_callable_global_lambda_skipped(self):
+        """Lambdas (no valid __name__) are silently skipped, matching legacy behavior."""
+        # A module-scope lambda binding — _extract_closure_constants should
+        # see it via co_names but skip silently because its __name__ is
+        # ``<lambda>`` which is not a valid Python identifier.
+        # We patch into globals to simulate the call site.
+        global _some_lambda  # noqa: PLW0603
+        _some_lambda = lambda tensors, params=None: tensors["out"][:].zero_()  # noqa: E731
+
+        def compute_expected(tensors, params=None):
+            _some_lambda(tensors, params)
+
+        try:
+            lines = _extract_closure_constants(compute_expected)
+            joined = "\n".join(lines)
+            # No def block emitted — _some_lambda is silently skipped.
+            assert "_some_lambda" not in joined
+        finally:
+            del _some_lambda
+
+    def test_callable_global_c_extension_skipped(self):
+        """C-extension callables (no inspect-visible source) are silently skipped."""
+
+        def compute_expected(tensors, params=None):
+            tensors["out"][:] = len(tensors["a"]) + 1  # noqa: PLC1801
+
+        # ``len`` is a builtin and filtered before the callable branch ever
+        # runs, so no def block should be emitted for it.
+        lines = _extract_closure_constants(compute_expected)
+        joined = "\n".join(lines)
+        assert "len" not in joined
+
+    def test_compute_golden_with_callable_global_executes_end_to_end(self):
+        """Generated compute_golden imports and runs without NameError.
+
+        End-to-end check that the inlined def block resolves correctly when
+        the generated source is exec'd — i.e. the actual scenario that
+        crashed in the paged_attention_spmd build_output.
+        """
+
+        def compute_expected(tensors, params=None):
+            _ref_scale_into(tensors, params)
+
+        src = _extract_compute_golden(compute_expected)
+        # Module namespace mimics the runtime: only torch is pre-imported.
+        ns: dict[str, object] = {"torch": torch}
+        exec(src, ns)
+        tensors = {
+            "a": torch.tensor([1.0, 2.0, 3.0]),
+            "out": torch.zeros(3),
+        }
+        ns["compute_golden"](tensors)
+        assert torch.equal(tensors["out"], torch.tensor([3.0, 5.0, 7.0]))
 
 
 class TestDataFileMode:
