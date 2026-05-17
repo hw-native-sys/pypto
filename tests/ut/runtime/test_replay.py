@@ -15,8 +15,8 @@ without the optional ``simpler`` runtime package.
 
 from __future__ import annotations
 
-from pathlib import Path
 import importlib
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -137,7 +137,7 @@ def test_replay_skips_invalidation_when_recompile_false(tmp_path: Path) -> None:
 
 
 def test_replay_missing_kernel_config_raises(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="kernel_config.py"):
+    with pytest.raises(FileNotFoundError, match=r"kernel_config\.py"):
         replay(tmp_path)
 
 
@@ -194,7 +194,7 @@ def test_replay_validate_fails_when_outputs_mismatch(tmp_path: Path) -> None:
 
 def test_replay_validate_missing_golden_raises(tmp_path: Path) -> None:
     work_dir = _make_build_output(tmp_path)
-    with pytest.raises(FileNotFoundError, match="golden.py"):
+    with pytest.raises(FileNotFoundError, match=r"golden\.py"):
         replay(work_dir, torch.zeros(1), validate=True)
 
 
@@ -236,7 +236,7 @@ def test_load_inputs_from_golden_returns_named_tuples_in_order(tmp_path: Path) -
 
 
 def test_load_inputs_from_golden_missing_file_raises(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="golden.py"):
+    with pytest.raises(FileNotFoundError, match=r"golden\.py"):
         _load_named_inputs_from_golden(tmp_path)
 
 

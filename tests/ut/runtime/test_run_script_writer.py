@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import cast
 
 import pytest
-
 from pypto.ir.compiled_program import ParamInfo
+from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
 from pypto.runtime.debug.run_script_writer import write_run_script
 
@@ -32,7 +33,7 @@ class _FakeDataType:
 
 
 def _info(name: str, direction: ParamDirection, shape: list[int] | None, dtype: str = "fp32") -> ParamInfo:
-    return ParamInfo(name=name, direction=direction, shape=shape, dtype=_FakeDataType(dtype))
+    return ParamInfo(name=name, direction=direction, shape=shape, dtype=cast(DataType, _FakeDataType(dtype)))
 
 
 def test_writes_to_debug_subdir(tmp_path: Path) -> None:
@@ -98,9 +99,9 @@ def test_platform_baked_into_cli_default(tmp_path: Path) -> None:
     assert 'parser.add_argument("--platform", default="a5sim")' in out.read_text()
 
 
-def test_platform_defaults_to_a2a3(tmp_path: Path) -> None:
+def test_platform_defaults_to_a2a3sim(tmp_path: Path) -> None:
     out = write_run_script(tmp_path, [_info("a", ParamDirection.In, [4])])
-    assert 'parser.add_argument("--platform", default="a2a3")' in out.read_text()
+    assert 'parser.add_argument("--platform", default="a2a3sim")' in out.read_text()
 
 
 def test_scalar_param_emits_placeholder(tmp_path: Path) -> None:

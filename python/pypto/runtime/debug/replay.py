@@ -46,6 +46,7 @@ import argparse
 import importlib.util
 from ctypes import _SimpleCData
 from pathlib import Path
+from types import ModuleType
 
 import torch
 
@@ -124,20 +125,28 @@ def replay(
     work_dir = Path(work_dir)
     if not (work_dir / "kernel_config.py").exists():
         raise FileNotFoundError(
-            f"replay(): {work_dir} is not a build_output directory "
-            f"(missing kernel_config.py)"
+            f"replay(): {work_dir} is not a build_output directory (missing kernel_config.py)"
         )
 
     named_tensors: list[tuple[str, torch.Tensor]] | None = None
+    golden_module = None
     if validate:
-        named_defaults = _load_named_inputs_from_golden(work_dir)
+        golden_module = _load_golden_module(work_dir)
+        named_defaults = list(golden_module.generate_inputs({"name": "Default"}))
         if len(tensors) != len(named_defaults):
             raise ValueError(
                 f"replay(validate=True): expected {len(named_defaults)} tensors "
                 f"(orchestration parameter count from {work_dir}/golden.py), "
                 f"got {len(tensors)}"
             )
-        named_tensors = [(n, t) for (n, _), t in zip(named_defaults, tensors, strict=True)]
+        named_tensors = []
+        for (name, _), t in zip(named_defaults, tensors, strict=True):
+            if not isinstance(t, torch.Tensor):
+                raise TypeError(
+                    f"replay(validate=True): parameter {name!r} must be a torch.Tensor, "
+                    f"got {type(t).__name__}"
+                )
+            named_tensors.append((name, t))
 
     if recompile:
         invalidate_binary_cache(work_dir)
@@ -151,7 +160,25 @@ def replay(
     )
 
     if named_tensors is not None:
-        _validate_against_golden(work_dir, named_tensors)
+        assert golden_module is not None
+        _validate_against_golden_module(golden_module, named_tensors)
+
+
+def _load_golden_module(work_dir: Path) -> ModuleType:
+    """Import and return ``<work_dir>/golden.py`` as a module object.
+
+    Raises ``FileNotFoundError`` when ``golden.py`` is absent. The module is
+    loaded under a fixed name (``_replay_golden``); callers should reuse the
+    returned object instead of re-importing the file.
+    """
+    golden_path = work_dir / "golden.py"
+    if not golden_path.exists():
+        raise FileNotFoundError(f"{golden_path} not found; cannot derive named inputs / outputs.")
+    spec = importlib.util.spec_from_file_location("_replay_golden", str(golden_path))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_named_inputs_from_golden(
@@ -163,23 +190,15 @@ def _load_named_inputs_from_golden(
     inputs and outputs are present — outputs are zero-initialised tensors
     that orchestration writes back into in place.
     """
-    golden_path = work_dir / "golden.py"
-    if not golden_path.exists():
-        raise FileNotFoundError(
-            f"{golden_path} not found; cannot derive named inputs / outputs."
-        )
-    spec = importlib.util.spec_from_file_location("_replay_golden", str(golden_path))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_golden_module(work_dir)
     return list(module.generate_inputs({"name": "Default"}))
 
 
-def _validate_against_golden(
-    work_dir: Path,
+def _validate_against_golden_module(
+    module: ModuleType,
     named_tensors: list[tuple[str, torch.Tensor]],
 ) -> None:
-    """Compute expected outputs via ``golden.py`` and compare against actuals.
+    """Compute expected outputs via a pre-loaded golden module and compare.
 
     Actual outputs (already written in place by orchestration) are matched
     by name against the ``__outputs__`` list. Expected outputs are produced
@@ -188,13 +207,6 @@ def _validate_against_golden(
     :func:`torch.testing.assert_close` with the tolerances declared on the
     ``golden.py`` module (``RTOL`` / ``ATOL``, defaulting to ``1e-5``).
     """
-    spec = importlib.util.spec_from_file_location(
-        "_replay_golden_validate", str(work_dir / "golden.py")
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
     output_names = set(getattr(module, "__outputs__", []))
     if not output_names:
         return  # nothing declared as output — skip silently
@@ -208,13 +220,10 @@ def _validate_against_golden(
     atol = getattr(module, "ATOL", 1e-5)
     for name, actual in actual_outputs.items():
         try:
-            torch.testing.assert_close(
-                actual.cpu(), expected[name].cpu(), rtol=rtol, atol=atol
-            )
+            torch.testing.assert_close(actual.cpu(), expected[name].cpu(), rtol=rtol, atol=atol)
         except AssertionError as e:
             raise AssertionError(
-                f"Output '{name}' does not match golden "
-                f"(rtol={rtol}, atol={atol}):\n{e}"
+                f"Output '{name}' does not match golden (rtol={rtol}, atol={atol}):\n{e}"
             ) from e
 
 
@@ -266,6 +275,7 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.log_level is not None:
         from pypto.runtime.log_config import configure_log  # noqa: PLC0415 — keep import lazy
+
         configure_log(args.log_level, sync_pypto=args.log_sync_pypto)
 
     config = RunConfig(

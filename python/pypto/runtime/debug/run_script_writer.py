@@ -79,7 +79,7 @@ def write_run_script(
 def _render(param_infos: list[ParamInfo], platform: str | None) -> str:
     init_lines = [_init_expr_for(p) for p in param_infos]
     names = ", ".join(p.name for p in param_infos)
-    default_platform = platform or "a2a3"
+    default_platform = platform or "a2a3sim"
     indented_inits = "\n".join("    " + line for line in init_lines) or "    pass"
 
     return f'''"""Auto-generated debug runner — only ``_inline_inputs`` and ``_user_compare`` are editable.
@@ -219,12 +219,30 @@ if __name__ == "__main__":
 '''
 
 
+_INT_DTYPES: set[torch.dtype] = {
+    torch.int8,
+    torch.int16,
+    torch.int32,
+    torch.int64,
+    torch.uint8,
+}
+for _uint_name in ("uint16", "uint32", "uint64"):
+    _uint_dt = getattr(torch, _uint_name, None)
+    if _uint_dt is not None:
+        _INT_DTYPES.add(_uint_dt)
+del _uint_name, _uint_dt
+
+
 def _init_expr_for(p: ParamInfo) -> str:
     """Return a Python statement initialising parameter *p*.
 
     Scalars (no shape) are not auto-materialised in v1 — emit a placeholder
     line so the user can hand-edit. Dynamic dimensions (``-1``) are filled
     with ``1`` so the generated file is at least syntactically valid.
+
+    ``torch.randn`` only supports floating-point dtypes, so integer / bool
+    inputs use ``torch.randint`` (the only API that accepts those dtypes
+    natively without a downstream cast).
     """
     if p.shape is None:
         return f"{p.name} = None  # TODO: scalar param — set a ctypes value"
@@ -237,4 +255,8 @@ def _init_expr_for(p: ParamInfo) -> str:
 
     if p.direction == ParamDirection.Out:
         return f"{p.name} = torch.zeros({concrete_shape!r}, dtype={dtype_str}){comment}"
+    if torch_dtype is torch.bool:
+        return f"{p.name} = torch.randint(0, 2, {concrete_shape!r}, dtype={dtype_str}){comment}"
+    if torch_dtype in _INT_DTYPES:
+        return f"{p.name} = torch.randint(0, 8, {concrete_shape!r}, dtype={dtype_str}){comment}"
     return f"{p.name} = torch.randn({concrete_shape!r}, dtype={dtype_str}){comment}"

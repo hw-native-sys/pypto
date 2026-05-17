@@ -381,7 +381,7 @@ class TestExtractClosureConstants:
         lines = _extract_closure_constants(compute_expected)
         joined = "\n".join(lines)
         assert "def _ref_scale_into(tensors, params=None):" in joined
-        assert "tensors[\"out\"][:] = tensors[\"a\"] * 2 + 1" in joined
+        assert 'tensors["out"][:] = tensors["a"] * 2 + 1' in joined
 
     def test_callable_global_transitive_dep_inlined(self):
         """Helpers called by an inlined callable are inlined too (recursion)."""
@@ -418,7 +418,7 @@ class TestExtractClosureConstants:
         _some_lambda = lambda tensors, params=None: tensors["out"][:].zero_()  # noqa: E731
 
         def compute_expected(tensors, params=None):
-            _some_lambda(tensors, params)
+            _some_lambda(tensors, params)  # noqa: F821 — bound via globals() above
 
         try:
             lines = _extract_closure_constants(compute_expected)
@@ -432,7 +432,7 @@ class TestExtractClosureConstants:
         """C-extension callables (no inspect-visible source) are silently skipped."""
 
         def compute_expected(tensors, params=None):
-            tensors["out"][:] = len(tensors["a"]) + 1  # noqa: PLC1801
+            tensors["out"][:] = len(tensors["a"]) + 1
 
         # ``len`` is a builtin and filtered before the callable branch ever
         # runs, so no def block should be emitted for it.
