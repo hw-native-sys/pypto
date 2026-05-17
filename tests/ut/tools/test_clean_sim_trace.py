@@ -54,5 +54,68 @@ def test_source_block_path_skipped():
     ]
 
 
+def test_parse_detail():
+    assert clean_sim_trace._parse_detail("PIPE:MTE2,TRIGGERPIPE:VEC,FLAGID:0,") == {
+        "PIPE": "MTE2",
+        "TRIGGERPIPE": "VEC",
+        "FLAGID": "0",
+    }
+    assert clean_sim_trace._parse_detail("") == {}
+
+
+def test_build_sync_arrows_reanchored():
+    insts = [
+        {"name": "MOV_SRC_TO_DST_ALIGN", "ph": "X", "pid": "c0", "tid": "MTE2", "ts": 2.0, "dur": 0.4},
+        {"name": "VADD", "ph": "X", "pid": "c0", "tid": "VECTOR", "ts": 3.0, "dur": 0.1},
+    ]
+    events = insts + [
+        {
+            "name": "SET_FLAG",
+            "ph": "B",
+            "pid": "c0",
+            "tid": "MTE2",
+            "ts": 2.4,
+            "args": {"detail": "PIPE:MTE2,TRIGGERPIPE:VEC,FLAGID:0,"},
+        },
+        {"name": "SET_FLAG", "ph": "E", "pid": "c0", "tid": "MTE2", "ts": 2.41, "args": {}},
+        {
+            "name": "WAIT_FLAG",
+            "ph": "B",
+            "pid": "c0",
+            "tid": "VECTOR",
+            "ts": 1.5,
+            "args": {"detail": "PIPE:MTE2,TRIGGERPIPE:VEC,FLAGID:0,"},
+        },
+        {"name": "WAIT_FLAG", "ph": "E", "pid": "c0", "tid": "VECTOR", "ts": 2.9, "args": {}},
+    ]
+    arrows, skipped = clean_sim_trace._build_sync_arrows(insts, events)
+    assert skipped == 0
+    assert len(arrows) == 2
+    start = next(a for a in arrows if a["ph"] == "s")
+    end = next(a for a in arrows if a["ph"] == "f")
+    assert start["id"] == end["id"]
+    assert start["cat"] == "sync" and end["bp"] == "e"
+    assert start["tid"] == "MTE2" and start["ts"] == 2.0
+    assert end["tid"] == "VECTOR" and end["ts"] == 3.0
+
+
+def test_build_sync_arrows_unmatchable():
+    insts = [{"name": "VADD", "ph": "X", "pid": "c0", "tid": "VECTOR", "ts": 3.0, "dur": 0.1}]
+    events = insts + [
+        {
+            "name": "SET_FLAG",
+            "ph": "B",
+            "pid": "c0",
+            "tid": "MTE2",
+            "ts": 2.4,
+            "args": {"detail": "PIPE:MTE2,TRIGGERPIPE:VEC,FLAGID:0,"},
+        },
+        {"name": "SET_FLAG", "ph": "E", "pid": "c0", "tid": "MTE2", "ts": 2.41, "args": {}},
+    ]
+    arrows, skipped = clean_sim_trace._build_sync_arrows(insts, events)
+    assert arrows == []
+    assert skipped == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

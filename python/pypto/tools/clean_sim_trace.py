@@ -51,3 +51,134 @@ def iter_blocks(data: bytes) -> Iterator[tuple[int, bytes]]:
             payload = payload[_SOURCE_PATH_LEN:]
         yield btype, payload[: len(payload) - padding]
         off = body + size
+
+
+# --- sync-flag arrow reconstruction --------------------------------------------
+# Pipeline names used in SET_FLAG/WAIT_FLAG detail strings differ from trace
+# thread (tid) names; map the aliases.
+_PIPE_ALIAS = {"VEC": "VECTOR"}
+
+
+def _parse_detail(detail: str) -> dict[str, str]:
+    """Parse a comma-separated ``KEY:VALUE,`` detail string into a dict."""
+    out: dict[str, str] = {}
+    for part in detail.split(","):
+        if ":" in part:
+            key, _, val = part.partition(":")
+            out[key.strip()] = val.strip()
+    return out
+
+
+def _pair_flag_events(events: list[dict], name: str) -> list[dict]:
+    """Pair the B/E phases of a flag op into begin/end records.
+
+    Returns one record per matched pair with keys ``pid``, ``tid``, ``detail``
+    (taken from the B phase), ``begin_ts`` and ``end_ts``.
+    """
+    open_stack: dict[tuple[str, str], list[dict]] = {}
+    records: list[dict] = []
+    for event in events:
+        if event.get("name") != name:
+            continue
+        key = (event["pid"], event["tid"])
+        if event.get("ph") == "B":
+            open_stack.setdefault(key, []).append(event)
+        elif event.get("ph") == "E" and open_stack.get(key):
+            begin = open_stack[key].pop()
+            records.append(
+                {
+                    "pid": event["pid"],
+                    "tid": event["tid"],
+                    "detail": begin.get("args", {}).get("detail", ""),
+                    "begin_ts": begin["ts"],
+                    "end_ts": event["ts"],
+                }
+            )
+    return records
+
+
+def _last_at_or_before(insts_sorted: list[dict], ts: float) -> dict | None:
+    """Return the last instruction with ``ts`` <= the given timestamp."""
+    found = None
+    for inst in insts_sorted:
+        if inst["ts"] <= ts:
+            found = inst
+        else:
+            break
+    return found
+
+
+def _first_at_or_after(insts_sorted: list[dict], ts: float) -> dict | None:
+    """Return the first instruction with ``ts`` >= the given timestamp."""
+    for inst in insts_sorted:
+        if inst["ts"] >= ts:
+            return inst
+    return None
+
+
+def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict], int]:
+    """Rebuild SET_FLAG/WAIT_FLAG pairs as re-anchored Chrome flow arrows.
+
+    Args:
+        insts: The kept instruction slices (used as arrow anchor points).
+        events: All raw trace events (the SET_FLAG/WAIT_FLAG source).
+
+    Returns:
+        ``(flow_events, skipped_count)`` — one ``s``/``f`` flow-event pair per
+        re-anchored flag, plus the count of flags that could not be anchored.
+    """
+    by_lane: dict[tuple[str, str], list[dict]] = {}
+    for inst in insts:
+        by_lane.setdefault((inst["pid"], inst["tid"]), []).append(inst)
+    for lane in by_lane.values():
+        lane.sort(key=lambda inst: inst["ts"])
+
+    waits_by_key: dict[tuple[str, str], list[dict]] = {}
+    for wait in _pair_flag_events(events, "WAIT_FLAG"):
+        waits_by_key.setdefault((wait["pid"], wait["detail"]), []).append(wait)
+    for wlist in waits_by_key.values():
+        wlist.sort(key=lambda rec: rec["begin_ts"])
+
+    arrows: list[dict] = []
+    skipped = 0
+    flow_id = 0
+    for flag in sorted(_pair_flag_events(events, "SET_FLAG"), key=lambda rec: rec["begin_ts"]):
+        detail = _parse_detail(flag["detail"])
+        producer = _PIPE_ALIAS.get(detail.get("PIPE", ""), detail.get("PIPE", ""))
+        consumer = _PIPE_ALIAS.get(detail.get("TRIGGERPIPE", ""), detail.get("TRIGGERPIPE", ""))
+        wlist = waits_by_key.get((flag["pid"], flag["detail"]))
+        if not wlist:
+            skipped += 1
+            continue
+        wait = wlist.pop(0)
+        prod = _last_at_or_before(by_lane.get((flag["pid"], producer), []), flag["begin_ts"])
+        cons = _first_at_or_after(by_lane.get((flag["pid"], consumer), []), wait["end_ts"])
+        if prod is None or cons is None:
+            skipped += 1
+            continue
+        flow_id += 1
+        label = f"{detail.get('PIPE', '?')}->{detail.get('TRIGGERPIPE', '?')} flag{detail.get('FLAGID', '?')}"
+        arrows.append(
+            {
+                "ph": "s",
+                "id": flow_id,
+                "cat": "sync",
+                "name": label,
+                "pid": flag["pid"],
+                "tid": producer,
+                "ts": prod["ts"],
+            }
+        )
+        arrows.append(
+            {
+                "ph": "f",
+                "id": flow_id,
+                "cat": "sync",
+                "bp": "e",
+                "name": label,
+                "pid": flag["pid"],
+                "tid": consumer,
+                "ts": cons["ts"],
+            }
+        )
+    return arrows, skipped
