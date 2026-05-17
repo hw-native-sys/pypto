@@ -117,5 +117,135 @@ def test_build_sync_arrows_unmatchable():
     assert skipped == 1
 
 
+def _raw_trace() -> dict:
+    """A synthetic raw trace covering noise lanes, scalar setup, pipeline, sync."""
+    return {
+        "displayTimeUnit": "ns",
+        "profilingType": "op",
+        "schemaVersion": 1,
+        "traceEvents": [
+            {
+                "name": "thread_state_runnable",
+                "ph": "X",
+                "pid": "core0.veccore0",
+                "tid": "CACHEMISS",
+                "ts": 1.0,
+                "dur": 0.001,
+                "args": {},
+            },
+            {
+                "name": "JUMP",
+                "ph": "X",
+                "pid": "core0.veccore0",
+                "tid": "FLOWCTRL",
+                "ts": 1.1,
+                "dur": 0.001,
+                "args": {},
+            },
+            {
+                "name": "MOV_XD_IMM",
+                "ph": "X",
+                "pid": "core0.veccore0",
+                "tid": "SCALAR",
+                "ts": 1.2,
+                "dur": 0.001,
+                "args": {},
+            },
+            {
+                "name": "MOV_SRC_TO_DST_ALIGN",
+                "ph": "X",
+                "pid": "core0.veccore0",
+                "tid": "MTE2",
+                "ts": 2.0,
+                "dur": 0.4,
+                "args": {"pc_addr": "0x10"},
+            },
+            {
+                "name": "VADD",
+                "ph": "X",
+                "pid": "core0.veccore0",
+                "tid": "VECTOR",
+                "ts": 3.0,
+                "dur": 0.1,
+                "args": {"pc_addr": "0x20"},
+            },
+            {
+                "name": "MOV_SRC_TO_DST_ALIGN",
+                "ph": "X",
+                "pid": "core0.veccore0",
+                "tid": "MTE3",
+                "ts": 3.5,
+                "dur": 0.1,
+                "args": {"pc_addr": "0x30"},
+            },
+            {
+                "name": "SET_FLAG",
+                "ph": "B",
+                "pid": "core0.veccore0",
+                "tid": "MTE2",
+                "ts": 2.4,
+                "args": {"detail": "PIPE:MTE2,TRIGGERPIPE:VEC,FLAGID:0,"},
+            },
+            {"name": "SET_FLAG", "ph": "E", "pid": "core0.veccore0", "tid": "MTE2", "ts": 2.41, "args": {}},
+            {
+                "name": "WAIT_FLAG",
+                "ph": "B",
+                "pid": "core0.veccore0",
+                "tid": "VECTOR",
+                "ts": 1.5,
+                "args": {"detail": "PIPE:MTE2,TRIGGERPIPE:VEC,FLAGID:0,"},
+            },
+            {"name": "WAIT_FLAG", "ph": "E", "pid": "core0.veccore0", "tid": "VECTOR", "ts": 2.9, "args": {}},
+        ],
+    }
+
+
+def _x_lanes(trace: dict) -> set[str]:
+    return {e["tid"] for e in trace["traceEvents"] if e["ph"] == "X"}
+
+
+def test_rebuild_drops_noise():
+    trace, _ = clean_sim_trace.rebuild_trace(_raw_trace())
+    names = {e["name"] for e in trace["traceEvents"] if e["ph"] == "X"}
+    assert "CACHEMISS" not in _x_lanes(trace)
+    assert "FLOWCTRL" not in _x_lanes(trace)
+    assert "SET_FLAG" not in names and "WAIT_FLAG" not in names
+    assert {"MOV_SRC_TO_DST_ALIGN", "VADD"} <= names
+
+
+def test_rebuild_scalar_flag():
+    assert "SCALAR" not in _x_lanes(clean_sim_trace.rebuild_trace(_raw_trace())[0])
+    kept, _ = clean_sim_trace.rebuild_trace(_raw_trace(), keep_scalar=True)
+    assert "SCALAR" in _x_lanes(kept)
+
+
+def test_rebuild_lane_order_and_naming():
+    trace, _ = clean_sim_trace.rebuild_trace(_raw_trace())
+    sort = {
+        e["tid"]: e["args"]["sort_index"] for e in trace["traceEvents"] if e["name"] == "thread_sort_index"
+    }
+    assert sort["MTE2"] < sort["VECTOR"] < sort["MTE3"]
+    names = {e["tid"]: e["args"]["name"] for e in trace["traceEvents"] if e["name"] == "thread_name"}
+    assert names["MTE2"].startswith("MTE2")
+    procs = [e for e in trace["traceEvents"] if e["name"] == "process_name"]
+    assert procs and procs[0]["args"]["name"] == "core0.veccore0"
+
+
+def test_rebuild_recolors_and_keeps_timestamps():
+    trace, _ = clean_sim_trace.rebuild_trace(_raw_trace())
+    vadd = next(e for e in trace["traceEvents"] if e["ph"] == "X" and e["name"] == "VADD")
+    assert vadd["ts"] == 3.0 and vadd["dur"] == 0.1
+    assert vadd["cname"] == "good"
+    assert vadd["args"]["pc_addr"] == "0x20"
+
+
+def test_rebuild_sync_arrows():
+    trace, skipped = clean_sim_trace.rebuild_trace(_raw_trace())
+    assert skipped == 0
+    flows = [e for e in trace["traceEvents"] if e.get("cat") == "sync"]
+    assert {e["ph"] for e in flows} == {"s", "f"}
+    assert len({e["id"] for e in flows}) == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

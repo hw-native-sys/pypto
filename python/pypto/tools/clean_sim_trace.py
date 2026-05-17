@@ -182,3 +182,121 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
             }
         )
     return arrows, skipped
+
+
+# --- clean trace rebuild -------------------------------------------------------
+# Pipeline lanes in dataflow order (load -> compute -> store -> setup).
+_PIPELINE_ORDER = {
+    "MTE2": 0,
+    "MTE1": 1,
+    "CUBE": 2,
+    "VECTOR": 3,
+    "FIXPIPE": 4,
+    "MTE3": 5,
+    "SCALAR": 6,
+}
+_DROP_LANES = frozenset({"CACHEMISS", "FLOWCTRL", "ALL"})
+_SYNC_NAMES = frozenset({"SET_FLAG", "WAIT_FLAG", "BAR"})
+_LANE_LABEL = {
+    "MTE2": "MTE2 (load GM->UB)",
+    "MTE1": "MTE1 (load L1->L0)",
+    "CUBE": "CUBE (matmul)",
+    "VECTOR": "VECTOR (compute)",
+    "FIXPIPE": "FIXPIPE (quant/out)",
+    "MTE3": "MTE3 (store UB->GM)",
+    "SCALAR": "SCALAR (setup)",
+}
+_LANE_CNAME = {
+    "MTE2": "thread_state_iowait",
+    "MTE1": "thread_state_iowait",
+    "CUBE": "rail_response",
+    "VECTOR": "good",
+    "FIXPIPE": "yellow",
+    "MTE3": "cq_build_passed",
+    "SCALAR": "grey",
+}
+
+
+def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
+    """Rebuild a raw simulator trace into a clean AI-core pipeline view.
+
+    Args:
+        raw: The parsed ``TRACE`` block (a Chrome Trace Event JSON dict).
+        keep_scalar: Keep the ``SCALAR`` setup lane (dropped by default).
+
+    Returns:
+        ``(clean_trace, skipped_arrows)`` — the rebuilt Chrome trace dict and
+        the number of sync flags that could not be re-anchored.
+    """
+    events = raw.get("traceEvents", [])
+
+    def lane_kept(tid: str) -> bool:
+        if tid in _DROP_LANES:
+            return False
+        if tid == "SCALAR" and not keep_scalar:
+            return False
+        return True
+
+    # Rules 1 + 2: keep only X (complete) instruction events on pipeline lanes.
+    insts = [
+        e
+        for e in events
+        if e.get("ph") == "X" and lane_kept(e.get("tid", "")) and e.get("name") not in _SYNC_NAMES
+    ]
+
+    out: list[dict] = []
+
+    # Rule 3: process/thread metadata for a deterministic dataflow ordering.
+    for proc_index, pid in enumerate(sorted({e["pid"] for e in insts})):
+        out.append({"name": "process_name", "ph": "M", "pid": pid, "args": {"name": pid}})
+        out.append({"name": "process_sort_index", "ph": "M", "pid": pid, "args": {"sort_index": proc_index}})
+        lanes = sorted(
+            {e["tid"] for e in insts if e["pid"] == pid}, key=lambda tid: _PIPELINE_ORDER.get(tid, 99)
+        )
+        for tid in lanes:
+            out.append(
+                {
+                    "name": "thread_name",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": tid,
+                    "args": {"name": _LANE_LABEL.get(tid, tid)},
+                }
+            )
+            out.append(
+                {
+                    "name": "thread_sort_index",
+                    "ph": "M",
+                    "pid": pid,
+                    "tid": tid,
+                    "args": {"sort_index": _PIPELINE_ORDER.get(tid, 99)},
+                }
+            )
+
+    # Rules 5 + 6: copy instruction slices, recolor by lane, timestamps verbatim.
+    for e in insts:
+        slice_ = {
+            "name": e["name"],
+            "ph": "X",
+            "pid": e["pid"],
+            "tid": e["tid"],
+            "ts": e["ts"],
+            "cname": _LANE_CNAME.get(e["tid"], "grey"),
+        }
+        if "dur" in e:
+            slice_["dur"] = e["dur"]
+        if "args" in e:
+            slice_["args"] = e["args"]
+        out.append(slice_)
+
+    # Rule 4: rebuild SET_FLAG/WAIT_FLAG pairs as re-anchored flow arrows.
+    arrows, skipped = _build_sync_arrows(insts, events)
+    out.extend(arrows)
+
+    clean = {
+        "displayTimeUnit": "ns",
+        "profilingType": raw.get("profilingType", "op"),
+        "schemaVersion": raw.get("schemaVersion", 1),
+        "traceEvents": out,
+    }
+    return clean, skipped
