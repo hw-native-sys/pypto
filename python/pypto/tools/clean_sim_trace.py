@@ -406,7 +406,11 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.output_dir or bin_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    trace, skipped = rebuild_trace(json.loads(blocks[_TYPE_TRACE]), keep_scalar=args.keep_scalar)
+    try:
+        trace, skipped = rebuild_trace(json.loads(blocks[_TYPE_TRACE]), keep_scalar=args.keep_scalar)
+    except ValueError as exc:
+        print(f"error: {bin_path}: TRACE block: {exc}", file=sys.stderr)
+        return 1
     trace_path = out_dir / "trace.clean.json"
     trace_path.write_text(json.dumps(trace), encoding="utf-8")
     print(f"wrote {trace_path}")
@@ -414,7 +418,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"note: {skipped} sync flag(s) could not be re-anchored and were skipped")
 
     if _TYPE_API_INSTR in blocks:
-        api = json.loads(blocks[_TYPE_API_INSTR])
+        try:
+            api = json.loads(blocks[_TYPE_API_INSTR])
+        except ValueError as exc:
+            print(f"error: {bin_path}: API_INSTR block: {exc}", file=sys.stderr)
+            return 1
         metrics = api if args.raw_metrics else reshape_metrics(api)
         metrics_path = out_dir / "instr_metrics.json"
         metrics_path.write_text(json.dumps(metrics), encoding="utf-8")

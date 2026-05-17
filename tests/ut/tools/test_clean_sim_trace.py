@@ -321,5 +321,31 @@ def test_main_missing_api_instr_block(tmp_path, capsys):
     assert "no API_INSTR block" in capsys.readouterr().err
 
 
+def test_main_corrupt_json_payload(tmp_path, capsys):
+    buf = _make_bin([(clean_sim_trace._TYPE_TRACE, b"NOT JSON")])
+    bin_path = tmp_path / "visualize_data.bin"
+    bin_path.write_bytes(buf)
+    assert clean_sim_trace.main([str(bin_path)]) == 1
+    assert "error:" in capsys.readouterr().err
+
+
+def test_main_keep_scalar_flag(tmp_path):
+    trace = (
+        b'{"traceEvents":[{"name":"MOV_XD_IMM","ph":"X","pid":"c0",'
+        b'"tid":"SCALAR","ts":1.0,"dur":0.1,"args":{}}]}'
+    )
+    buf = _make_bin([(clean_sim_trace._TYPE_TRACE, trace)])
+    bin_path = tmp_path / "visualize_data.bin"
+    bin_path.write_bytes(buf)
+
+    assert clean_sim_trace.main([str(bin_path)]) == 0
+    default_out = json.loads((tmp_path / "trace.clean.json").read_text())
+    assert not [e for e in default_out["traceEvents"] if e["ph"] == "X" and e.get("tid") == "SCALAR"]
+
+    assert clean_sim_trace.main(["--keep-scalar", str(bin_path)]) == 0
+    kept_out = json.loads((tmp_path / "trace.clean.json").read_text())
+    assert [e for e in kept_out["traceEvents"] if e["ph"] == "X" and e.get("tid") == "SCALAR"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
