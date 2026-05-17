@@ -247,11 +247,12 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
     out: list[dict] = []
 
     # Rule 3: process/thread metadata for a deterministic dataflow ordering.
-    for proc_index, pid in enumerate(sorted({e["pid"] for e in insts})):
+    for proc_index, pid in enumerate(sorted({e.get("pid", "") for e in insts})):
         out.append({"name": "process_name", "ph": "M", "pid": pid, "args": {"name": pid}})
         out.append({"name": "process_sort_index", "ph": "M", "pid": pid, "args": {"sort_index": proc_index}})
         lanes = sorted(
-            {e["tid"] for e in insts if e["pid"] == pid}, key=lambda tid: _PIPELINE_ORDER.get(tid, 99)
+            {e.get("tid", "") for e in insts if e.get("pid", "") == pid},
+            key=lambda tid: _PIPELINE_ORDER.get(tid, 99),
         )
         for tid in lanes:
             out.append(
@@ -278,10 +279,10 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
         slice_ = {
             "name": e["name"],
             "ph": "X",
-            "pid": e["pid"],
-            "tid": e["tid"],
+            "pid": e.get("pid", ""),
+            "tid": e.get("tid", ""),
             "ts": e["ts"],
-            "cname": _LANE_CNAME.get(e["tid"], "grey"),
+            "cname": _LANE_CNAME.get(e.get("tid", ""), "grey"),
         }
         if "dur" in e:
             slice_["dur"] = e["dur"]
