@@ -1,14 +1,9 @@
 name: Daily CI
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  schedule:
+    - cron: '0 22 * * *'  # UTC 22:00 = Shanghai 06:00
   workflow_dispatch:
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   qwen3-pypto-lib:
