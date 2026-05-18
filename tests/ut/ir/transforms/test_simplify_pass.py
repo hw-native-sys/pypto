@@ -977,6 +977,47 @@ class TestConstantIfCollapse:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_always_false_via_loop_affine_scalar(self):
+        """A dead `if` guarded by a scalar bound to a loop-affine expression folds.
+
+        `off = i * 256 + 256` with i ∈ [0, 8) gives off ∈ [256, ...], so
+        `off == 0` is statically false and the else branch is kept.
+
+        Regression for the qwen3 down_proj chunk guard `if o0__ssa_v2_1 == 0`
+        that survived Simplify: the pass only registered *constant* scalar
+        bindings (so a symbolic affine RHS was never analyzed), and
+        MultiAssignCollector flagged every loop-body assignment as unsafe.
+        `off` is bound for ConstIntBound analysis only — not substituted — so
+        a surviving use of it would still print as `off`.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(0, 8, 2):
+                    off: pl.Scalar[pl.INDEX] = i * 256 + 256
+                    if off == 0:
+                        y: pl.Scalar[pl.INDEX] = 99
+                        pl.tensor.write(out, [i], y)
+                    else:
+                        y2: pl.Scalar[pl.INDEX] = i + 1
+                        pl.tensor.write(out, [i], y2)
+
+        # `off` becomes dead once the always-false branch is dropped, so scalar
+        # DCE removes it. `y2 = i + 1` is symbolic and inside the loop, so it is
+        # bound for analysis only and kept as a scalar (not inlined).
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(0, 8, 2):
+                    y2: pl.Scalar[pl.INDEX] = i + 1
+                    pl.tensor.write(out, [i], y2)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
     def test_keeps_unprovable_condition(self):
         """`if i == 0` with i ∈ [0, 8): polarity unknown — IfStmt preserved."""
 

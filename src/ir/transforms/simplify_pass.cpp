@@ -40,7 +40,6 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/tensor_view_semantics.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -49,43 +48,27 @@ namespace ir {
 
 namespace {
 
-/// Collects Var pointers whose LHS assignment is NOT safe to bind as a
-/// dominating constant. Unsafe if assigned more than once, OR assigned inside
-/// a nested scope (IfStmt branch, ForStmt/WhileStmt body) where the
-/// assignment may not execute on all paths. This protects pre-SSA callers;
-/// in SSA form each Var is single-assigned so the nesting check is redundant
-/// but harmless.
+/// Collects Var pointers assigned more than once anywhere in the function.
+/// Such Vars are unsafe to bind to a single value: a later assignment would
+/// invalidate the value recorded at the first. A Var assigned exactly once is
+/// always safe to bind — SimplifyMutator scopes every binding to the
+/// loop / if-branch / while / spmd region the assignment lives in (see
+/// UnbindScalarsSince), so a Var defined inside a branch or loop body never
+/// leaks its value past that region even if the branch did not execute. In
+/// SSA form every Var is single-assigned, so nothing is collected.
 class MultiAssignCollector : public IRVisitor {
  public:
   std::unordered_set<const Var*> multi_assigned;
 
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (nesting_depth_ > 0 || !seen_.insert(op->var_.get()).second) {
+    if (!seen_.insert(op->var_.get()).second) {
       multi_assigned.insert(op->var_.get());
     }
     IRVisitor::VisitStmt_(op);
   }
 
-  void VisitStmt_(const IfStmtPtr& op) override {
-    WithNesting([&] { IRVisitor::VisitStmt_(op); });
-  }
-  void VisitStmt_(const ForStmtPtr& op) override {
-    WithNesting([&] { IRVisitor::VisitStmt_(op); });
-  }
-  void VisitStmt_(const WhileStmtPtr& op) override {
-    WithNesting([&] { IRVisitor::VisitStmt_(op); });
-  }
-
  private:
-  template <typename F>
-  void WithNesting(F&& body) {
-    ++nesting_depth_;
-    body();
-    --nesting_depth_;
-  }
-
   std::unordered_set<const Var*> seen_;
-  int nesting_depth_ = 0;
 };
 
 /// Strip the trailing YieldStmt from @p body and return both the stripped
@@ -197,12 +180,33 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     auto new_var = MaybeRebuildVar(op->var_);
     auto new_type = new_var->GetType();
 
-    // Bind scalar constant assignments so subsequent uses fold to the literal.
-    // Pre-SSA: skip if the Var is reassigned — binding the initial value
-    // would incorrectly propagate to reads after a reassignment.
-    if (As<ScalarType>(new_type) && IsConstScalar(new_value) &&
-        multi_assigned_.find(op->var_.get()) == multi_assigned_.end()) {
-      analyzer_->Bind(new_var, new_value);
+    // Register scalar assignments with the analyzer so downstream expressions
+    // can be folded or proven. Two binding strengths:
+    //
+    //   * Full bind (BindScalar) — the literal is substituted into later uses.
+    //     Restricted to constant RHS at function-body top level: this is the
+    //     established constant-propagation behavior. Substituting a literal
+    //     into a Call arg inside a loop body would both churn downstream IR
+    //     and surface a printer roundtrip gap (a bare integer literal loses
+    //     its dtype on reparse), so it is intentionally not done there.
+    //   * Bound-only (BindScalarBound) — only a ConstIntBound is registered,
+    //     no substitution. Applied to symbolic RHS (e.g. a loop-derived
+    //     `ob_idx * 256 + 256`) and to constants inside nested scopes. Enough
+    //     to prove dead branch guards like `if expr == 0` without inlining the
+    //     scalar into every use site.
+    //
+    // Both kinds are logged in scalar_binding_log_ so the For/If/While/Spmd
+    // visitors can unbind them on leaving the region where the assignment
+    // lives, keeping the fold sound for pre-SSA callers.
+    //
+    // Skip a Var that MultiAssignCollector flagged as assigned more than once:
+    // a later assignment would invalidate the value bound here.
+    if (As<ScalarType>(new_type) && multi_assigned_.find(op->var_.get()) == multi_assigned_.end()) {
+      if (IsConstScalar(new_value) && scope_depth_ == 0) {
+        BindScalar(new_var, new_value);
+      } else {
+        BindScalarBound(new_var, new_value);
+      }
     }
 
     if (new_value.get() == op->value_.get() && new_var.get() == op->var_.get()) return op;
@@ -293,15 +297,11 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         for (size_t i = 0; i < op->iter_args_.size(); ++i) {
           sub_map.emplace(op->iter_args_[i].get(), new_iter_args[i]->initValue_);
         }
-        // clone_def_vars=true is load-bearing: MultiAssignCollector ran on the
-        // pre-fold IR and marked any scalar Var defined inside nested for-loop
-        // bodies as multi_assigned (the safety check that protects pre-SSA
-        // callers). After the loop is unrolled and lifted, those Vars are
-        // single-assigned at top-level, but multi_assigned_ still references
-        // the original Var pointers — analyzer Bind would be skipped on those.
-        // Producing fresh Var clones at every DefField breaks that staleness:
-        // the cloned Vars are not in multi_assigned_, so subsequent uses of
-        // (e.g.) `cur_offset = 0` propagate via analyzer Bind as expected.
+        // clone_def_vars=true gives the unrolled body fresh Var identities at
+        // every DefField, matching LoopUnrollMutator. This keeps the lifted
+        // copy structurally independent of the original (discarded) loop body
+        // and lets the re-visit below bind the body's scalars on identities
+        // distinct from anything in the surrounding scope.
         auto cloned = DeepClone(op->body_, sub_map, /*clone_def_vars=*/true);
 
         // Snapshot var_remap_ around the cloned-body visit. MaybeRebuildVar
@@ -343,7 +343,10 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // baseline_remap (they're valid in body and after).
     auto baseline_remap = var_remap_;
 
-    auto new_body = VisitStmt(op->body_);
+    // Scalars assigned inside the loop body are scoped to that body so their
+    // values do not leak to siblings of this ForStmt or to code after the loop
+    // (pre-SSA soundness).
+    auto new_body = VisitScopedBody(op->body_);
 
     if (bound) {
       analyzer_->Unbind(op->loop_var_);
@@ -381,7 +384,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // arithmetic (e.g. `core_num=MAX // TILE` where both operands are closure
     // ints) may still need one simplify pass after SSA conversion.
     auto new_core_num = SimplifyExpr(op->core_num_);
-    auto new_body = VisitStmt(op->body_);
+    auto new_body = VisitScopedBody(op->body_);
     if (new_core_num.get() == op->core_num_.get() && new_body.get() == op->body_.get()) return op;
     auto result = MutableCopy(op);
     result->core_num_ = new_core_num;
@@ -407,23 +410,32 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     // bodies remain in their own scopes.
     auto baseline_remap = var_remap_;
 
+    // Scalars assigned inside a branch are scoped to that branch: unbind them
+    // after each branch visit so a then-branch scalar does not leak into the
+    // else branch, and neither leaks past the IfStmt (pre-SSA soundness).
+    auto scalar_mark = scalar_binding_log_.size();
+
     // Enter constraint scope for then branch (condition is known true).
     StmtPtr new_then;
     {
       auto ctx = analyzer_->GetConstraintContext(new_condition);
+      ScopeDepthGuard depth_guard(scope_depth_);
       new_then = VisitStmt(op->then_body_);
     }
     auto then_remap = std::move(var_remap_);
     var_remap_ = baseline_remap;
+    UnbindScalarsSince(scalar_mark);
 
     // Enter constraint scope for else branch (condition is known false → Not(condition)).
     std::optional<StmtPtr> new_else;
     if (op->else_body_.has_value()) {
       auto ctx = analyzer_->GetConstraintContext(MakeNot(new_condition, new_condition->span_));
+      ScopeDepthGuard depth_guard(scope_depth_);
       new_else = VisitStmt(*op->else_body_);
     }
     auto else_remap = std::move(var_remap_);
     var_remap_ = baseline_remap;
+    UnbindScalarsSince(scalar_mark);
 
     // Fold A: collapse the IfStmt when the analyzer can prove the polarity.
     // True  → keep then_body_; drop else.
@@ -470,7 +482,7 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
 
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override {
     auto new_condition = SimplifyExpr(op->condition_);
-    auto new_body = VisitStmt(op->body_);
+    auto new_body = VisitScopedBody(op->body_);
     bool changed = (new_condition.get() != op->condition_.get()) || (new_body.get() != op->body_.get());
     if (!changed) return op;
     auto result = MutableCopy(op);
@@ -642,6 +654,60 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
     return e && (As<ConstInt>(e) || As<ConstFloat>(e) || As<ConstBool>(e));
   }
 
+  /// RAII increment of scope_depth_ for the lifetime of the guard. Wrapped
+  /// around loop / if-branch / while / spmd body visits.
+  struct ScopeDepthGuard {
+    int& depth;
+    explicit ScopeDepthGuard(int& d) : depth(d) { ++depth; }
+    ~ScopeDepthGuard() { --depth; }
+    ScopeDepthGuard(const ScopeDepthGuard&) = delete;
+    ScopeDepthGuard& operator=(const ScopeDepthGuard&) = delete;
+  };
+
+  /// Bind a scalar Var to a constant @p value (full substitution across all
+  /// sub-analyzers) and log it so the enclosing scope can unbind it on exit.
+  /// See VisitStmt_(AssignStmtPtr).
+  void BindScalar(const VarPtr& var, const ExprPtr& value) {
+    analyzer_->Bind(var, value);
+    scalar_binding_log_.push_back(var);
+  }
+
+  /// Register only a ConstIntBound for a symbolic scalar Var (no value
+  /// substitution) and log it for scoped unbinding. This lets the analyzer
+  /// prove dead branch guards from the value's range without inlining the
+  /// scalar into its use sites.
+  void BindScalarBound(const VarPtr& var, const ExprPtr& value) {
+    analyzer_->const_int_bound.Update(var, analyzer_->const_int_bound(value));
+    scalar_binding_log_.push_back(var);
+  }
+
+  /// Unbind every scalar logged at or after @p mark and shrink the log back to
+  /// @p mark. Called when leaving a structural region (loop / if-branch /
+  /// while / spmd body) so a scalar defined inside it does not leak its value
+  /// to siblings or to code after the region — required for pre-SSA soundness.
+  void UnbindScalarsSince(size_t mark) {
+    for (size_t i = scalar_binding_log_.size(); i > mark; --i) {
+      analyzer_->Unbind(scalar_binding_log_[i - 1]);
+    }
+    scalar_binding_log_.resize(mark);
+  }
+
+  /// Visit a structural region's body with scope_depth_ incremented, then
+  /// unbind any scalars the body bound so their values do not leak to siblings
+  /// or to code after the region (pre-SSA soundness). Used for loop / while /
+  /// spmd bodies; IfStmt branches manage the mark manually because both
+  /// branches share one mark and interleave var_remap_ snapshots.
+  StmtPtr VisitScopedBody(const StmtPtr& body) {
+    auto scalar_mark = scalar_binding_log_.size();
+    StmtPtr new_body;
+    {
+      ScopeDepthGuard depth_guard(scope_depth_);
+      new_body = VisitStmt(body);
+    }
+    UnbindScalarsSince(scalar_mark);
+    return new_body;
+  }
+
   /// Rebuild a Var with a simplified type, recording the remap so downstream
   /// VarExpr references pick up the new identity. If the Var was already
   /// rebuilt earlier (e.g., at its defining AssignStmt during the body
@@ -694,6 +760,15 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
   std::unordered_set<const Var*> multi_assigned_;
+
+  /// Scalar Vars bound via BindScalar / BindScalarBound, in bind order. Used
+  /// by UnbindScalarsSince to scope bindings to the region they were made in.
+  std::vector<VarPtr> scalar_binding_log_;
+
+  /// Structural nesting depth: 0 at function-body top level, incremented for
+  /// each enclosing loop / if-branch / while / spmd body. Gates full constant
+  /// substitution in VisitStmt_(AssignStmtPtr).
+  int scope_depth_ = 0;
 };
 
 FunctionPtr TransformSimplify(const FunctionPtr& func) {
