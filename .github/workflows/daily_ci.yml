@@ -110,6 +110,9 @@ jobs:
 
   a5-system-tests:
     runs-on: [self-hosted, a5]
+    defaults:
+      run:
+        shell: bash -leo pipefail {0}
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
