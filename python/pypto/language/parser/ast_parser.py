@@ -5046,14 +5046,19 @@ class ASTParser:
         #
         # The lookup is on the LHS *IR type*, not on the textual name, so any
         # alias (function parameter, ``pld.window(...)`` result Var, threaded-in
-        # tensor argument) routes through the same desugar. We only attempt to
-        # parse the LHS as an IR expression when the leading token is a name in
-        # scope or a chained attribute access; module-level lookups like
-        # ``pl.MemorySpace.Vec`` fall through to the closure-eval path below.
+        # tensor argument) routes through the same desugar. We only attempt the
+        # desugar when the chain's leaf is a name already bound in the IR
+        # scope; module-level chains like ``pl.MemorySpace.Vec`` are filtered
+        # out structurally so that exceptions raised during real IR-expression
+        # parsing surface to the user instead of being swallowed by a broad
+        # ``except``. The narrow ``UndefinedVariableError`` catch is a
+        # defensive backstop for the race where ``_looks_like_ir_expr_attribute``
+        # sees a name that disappears from scope before ``parse_expression``
+        # resolves it.
         if self._looks_like_ir_expr_attribute(attr):
             try:
                 base = self.parse_expression(attr.value)
-            except Exception:
+            except UndefinedVariableError:
                 base = None
             if base is not None:
                 desugared = self._desugar_distributed_attribute(base, attr)
@@ -5082,11 +5087,18 @@ class ASTParser:
         like ``data.comm.rank``), and ``Subscript`` (e.g. ``buf[0].comm``).
         Anything else — calls, comprehensions — would have its own path and
         we don't attempt to coerce.
+
+        The leaf name must also be bound in the IR scope; otherwise the chain
+        is a closure / module reference (e.g. ``pl.MemorySpace.Vec``) and the
+        caller should fall through to the enum-eval path rather than attempt
+        to parse it as IR.
         """
         leaf = attr.value
         while isinstance(leaf, (ast.Attribute, ast.Subscript)):
             leaf = leaf.value
-        return isinstance(leaf, ast.Name)
+        if not isinstance(leaf, ast.Name):
+            return False
+        return self.scope_manager.lookup_var(leaf.id) is not None
 
     def _desugar_distributed_attribute(self, base: ir.Expr, attr: ast.Attribute) -> ir.Expr | None:
         """Lift ``dist_t.comm`` and ``ctx.rank/.nranks`` to their IR op calls.
@@ -5105,6 +5117,18 @@ class ASTParser:
                 f"DistributedTensor has no attribute '{attr.attr}'; only '.comm' is supported",
                 span=span,
                 hint="Use 'data.comm.rank' or 'data.comm.nranks' to access the comm context fields",
+            )
+
+        # ``.comm`` on a plain ``pl.Tensor`` (or any non-distributed TensorType
+        # subclass) is a common slip — surface a precise message instead of the
+        # generic "Standalone attribute access not supported" fallback.
+        if isinstance(base_type, ir.TensorType) and attr.attr == "comm":
+            raise ParserTypeError(
+                f"'.comm' is only valid on pld.DistributedTensor; "
+                f"'{ast.unparse(attr.value)}' has type pl.Tensor",
+                span=span,
+                hint="Annotate the parameter as pld.DistributedTensor[shape, dtype] "
+                "to expose the comm context",
             )
 
         if isinstance(base_type, ir.CommCtxType):

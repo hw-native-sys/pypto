@@ -150,7 +150,7 @@ def test_dist_tensor_comm_can_be_used_in_expr():
 
 
 def test_plain_tensor_comm_attribute_rejected():
-    with pytest.raises(Exception, match="DistributedTensor|attribute"):
+    with pytest.raises(Exception, match=r"'\.comm' is only valid on pld\.DistributedTensor"):
 
         @pl.program
         class P:  # noqa: F841
