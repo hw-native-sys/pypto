@@ -31,6 +31,7 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core.ir import (
     ConstInt,
+    Function,
     FunctionType,
     ParamDirection,
     Program,
@@ -105,7 +106,7 @@ class _ParamInfo:
     dtype: DataType
 
 
-def _extract_func_param_infos(func: Any) -> tuple[list[_ParamInfo], list[int], list[Any]]:
+def _extract_func_param_infos(func: Function) -> tuple[list[_ParamInfo], list[int], list[Any]]:
     """Extract parameter metadata from a specific IR function.
 
     Returns:
@@ -578,7 +579,7 @@ class _SubChipCallable:
 
     __test__ = False
 
-    def __init__(self, name: str, func: Any, sub_dir: Path, platform: str) -> None:
+    def __init__(self, name: str, func: Function, sub_dir: Path, platform: str) -> None:
         self._name = name
         self._func = func
         self._output_dir = sub_dir
