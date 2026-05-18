@@ -164,7 +164,7 @@ jobs:
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/test_perf_swimlane.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --runtime-profiling --forked --pto-isa-commit=2c607938
+            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=2c607938
 
   pypto-lib-model:
     runs-on: [self-hosted, linux, arm64, npu]
