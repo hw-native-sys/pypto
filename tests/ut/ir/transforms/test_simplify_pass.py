@@ -1018,6 +1018,39 @@ class TestConstantIfCollapse:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_symbolic_index_scalar_keeps_nonneg_default_bound(self):
+        """A symbolic INDEX scalar must keep its non-negative default bound.
+
+        `idx = a - b` (a, b INDEX) has an unknown [-inf, +inf] range, but
+        `idx` is INDEX-typed and therefore non-negative. BindScalarBound must
+        intersect the RHS range with the dtype default rather than overwrite
+        it — otherwise the uninformative RHS range erases the non-negativity
+        and `if idx < 0` (statically false for an INDEX scalar) stops folding.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, a: pl.Scalar[pl.INDEX], b: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):
+                idx: pl.Scalar[pl.INDEX] = a - b
+                if idx < 0:
+                    pl.tensor.write(out, [0], a)
+                else:
+                    pl.tensor.write(out, [0], idx)
+
+        # `idx < 0` is statically false (INDEX ≥ 0), so the then branch drops.
+        # `idx` is bound for analysis only, not substituted, so the surviving
+        # write still references it.
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, a: pl.Scalar[pl.INDEX], b: pl.Scalar[pl.INDEX], out: pl.Tensor[[1], pl.INDEX]):  # noqa: ARG002
+                idx: pl.Scalar[pl.INDEX] = a - b
+                pl.tensor.write(out, [0], idx)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
     def test_keeps_unprovable_condition(self):
         """`if i == 0` with i ∈ [0, 8): polarity unknown — IfStmt preserved."""
 

@@ -676,8 +676,22 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// substitution) and log it for scoped unbinding. This lets the analyzer
   /// prove dead branch guards from the value's range without inlining the
   /// scalar into its use sites.
+  ///
+  /// The RHS range is intersected with @p var's dtype-default bound rather
+  /// than overwriting it. `var` is not yet bound, so `const_int_bound(var)`
+  /// returns that default (e.g. an INDEX scalar is implicitly non-negative).
+  /// Intersecting can only tighten: an uninformative RHS — a Call, whose bound
+  /// analyzer returns "everything" — then leaves the default intact instead of
+  /// erasing it, so guards like `if idx < 0` on an INDEX scalar still fold.
   void BindScalarBound(const VarPtr& var, const ExprPtr& value) {
-    analyzer_->const_int_bound.Update(var, analyzer_->const_int_bound(value));
+    auto rhs = analyzer_->const_int_bound(value);
+    auto def = analyzer_->const_int_bound(var);
+    arith::ConstIntBound bound{std::max(rhs.min_value, def.min_value),
+                               std::min(rhs.max_value, def.max_value)};
+    // An empty intersection means the RHS range contradicts the var's dtype
+    // (malformed IR); skip the update and leave the default untouched.
+    if (bound.min_value > bound.max_value) return;
+    analyzer_->const_int_bound.Update(var, bound);
     scalar_binding_log_.push_back(var);
   }
 
