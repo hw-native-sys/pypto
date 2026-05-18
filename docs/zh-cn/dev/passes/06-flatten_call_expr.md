@@ -10,6 +10,7 @@
 2. If 条件不能是调用
 3. For 循环范围（start/stop/step）不能是调用
 4. 二元/一元表达式操作数不能是调用
+5. Return 值不能是调用
 
 **需要**：TypeChecked、SSAForm 属性 (Property)（通常由前序 Pass 产生；如需在执行前校验 required/produced，请在 `PassContext` 中启用 `VerificationInstrument`）。
 
@@ -116,6 +117,23 @@ t__tmp_v0 = compute(a)
 t__tmp_v1 = compute(b)
 x = t__tmp_v0 + t__tmp_v1
 ```
+
+### Return 中的直接调用
+
+**变换前**：
+
+```python
+return self.tile_add(a, b, f)
+```
+
+**变换后**：
+
+```python
+t__tmp_v0 = self.tile_add(a, b, f)
+return t__tmp_v0
+```
+
+如果不做这种归一化，`Call` 仍包裹在 `ReturnStmt` 内进入 CodeGen。部分 CodeGen 路径（典型如 `OrchestrationCodegen::VisitStmt_(ReturnStmtPtr)`）将 `ReturnStmt` 视为空操作，会静默丢弃内核 dispatch。
 
 ### Scope 块内的嵌套调用
 

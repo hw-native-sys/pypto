@@ -301,7 +301,8 @@ class TestFlattenCallInIfCondition:
                 # Flattened: temp variable for second nested call
                 t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(b, 2.0)
                 a: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, c)
-                return pl.add(x, a)
+                t__tmp_v2: pl.Tensor[[64], pl.FP32] = pl.add(x, a)
+                return t__tmp_v2
 
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))
@@ -716,7 +717,8 @@ class TestFlattenCallInScopeStmt:
                 with pl.at(level=pl.Level.CORE_GROUP):
                     t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.exp(y)
                     b: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v1, 3.0)
-                return pl.add(a, b)
+                t__tmp_v2: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                return t__tmp_v2
 
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))
@@ -768,6 +770,55 @@ class TestFlattenCallInScopeStmt:
                     t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, 1.0)
                     result: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, 2.0)
                 return result
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+
+class TestFlattenCallInReturn:
+    """Tests for flattening Call expressions that appear directly inside ReturnStmt.
+
+    Regression tests for issue #1394: `return some_call(...)` (no intermediate
+    variable) used to leave a ReturnStmt-wrapped Call untouched, and the
+    OrchestrationCodegen's ReturnStmt visitor is a no-op — so the kernel
+    dispatch was silently dropped from generated chip orchestration code.
+    """
+
+    def test_single_call_in_return(self):
+        """`return pl.add(x, 1.0)` is rewritten to bind the call to a temp first."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return pl.add(x, 1.0)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return t__tmp_v0
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_nested_call_in_return(self):
+        """`return pl.mul(pl.add(x, 1.0), 2.0)` extracts both calls into temps."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return pl.mul(pl.add(x, 1.0), 2.0)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, 2.0)
+                return t__tmp_v1
 
         After = passes.flatten_call_expr()(Before)
         ir.assert_structural_equal(After, NormalizeIR(Expected))

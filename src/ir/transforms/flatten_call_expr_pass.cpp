@@ -41,6 +41,7 @@ namespace {
  * 2. If conditions cannot be calls
  * 3. For loop ranges (start/stop/step) cannot be calls
  * 4. Binary/unary expression operands cannot be calls
+ * 5. Return values cannot be calls
  *
  * Nested calls are extracted into temporary variables and inserted as
  * AssignStmt before the statement containing the nested call.
@@ -57,6 +58,7 @@ class FlattenCallExprMutator : public IRMutator {
   StmtPtr VisitStmt_(const IfStmtPtr& op) override;
   StmtPtr VisitStmt_(const ForStmtPtr& op) override;
   StmtPtr VisitStmt_(const WhileStmtPtr& op) override;
+  StmtPtr VisitStmt_(const ReturnStmtPtr& op) override;
   StmtPtr VisitStmt_(const InCoreScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const AutoInCoreScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const ClusterScopeStmtPtr& op) override;
@@ -94,6 +96,28 @@ class FlattenCallExprMutator : public IRMutator {
   ExprPtr VisitExpr_(const NotPtr& op) override;
   ExprPtr VisitExpr_(const BitNotPtr& op) override;
   ExprPtr VisitExpr_(const CastPtr& op) override;
+
+  /**
+   * @brief Flatten a function body and drain any leftover pending temporaries.
+   *
+   * Regular `VisitStmt` may leave extracted-temp `AssignStmt`s in
+   * `pending_stmts_` when the body root itself is the statement that triggered
+   * extraction (e.g. a bare `ReturnStmt` body, with no enclosing `SeqStmts`
+   * visitor to splice them in). Returning through this entry point guarantees
+   * those temps end up in the IR.
+   */
+  StmtPtr FlattenFunctionBody(const StmtPtr& body) {
+    auto new_body = VisitStmt(body);
+    if (pending_stmts_.empty()) {
+      return new_body;
+    }
+    std::vector<StmtPtr> wrapped;
+    wrapped.reserve(pending_stmts_.size() + 1);
+    for (const auto& p : pending_stmts_) wrapped.push_back(p);
+    wrapped.push_back(new_body);
+    pending_stmts_.clear();
+    return SeqStmts::Flatten(std::move(wrapped), body->span_);
+  }
 
  private:
   int temp_var_counter_ = 0;
@@ -195,6 +219,13 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const SeqStmtsPtr& op) {
     new_stmts.push_back(new_stmt);
   }
 
+  // The last child's extracted temps were already pushed into new_stmts above
+  // but the entries also still sit in pending_stmts_. Scope visitors don't
+  // notice (they save/restore around their own body), but FlattenFunctionBody
+  // would treat them as a real leftover and double-add. Clear to make this
+  // path unambiguous.
+  pending_stmts_.clear();
+
   return SeqStmts::Flatten(std::move(new_stmts), op->span_);
 }
 
@@ -292,6 +323,37 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const WhileStmtPtr& op) {
   result->condition_ = new_condition;
   result->body_ = new_body;
   return result;
+}
+
+StmtPtr FlattenCallExprMutator::VisitStmt_(const ReturnStmtPtr& op) {
+  // Note: Don't clear pending_stmts_, preserve previous state so SeqStmts
+  // visitor inserts our extracted temporaries before the ReturnStmt.
+
+  std::vector<ExprPtr> new_values;
+  new_values.reserve(op->value_.size());
+  bool changed = false;
+
+  for (const auto& value : op->value_) {
+    auto visited = VisitExpr(value);
+
+    // A direct `return call(...)` would otherwise reach codegen as a
+    // ReturnStmt-wrapped Call, which several codegen paths silently drop
+    // because they only walk top-level AssignStmt/EvalStmt for side effects.
+    // Extract any Call value into a temporary so codegen always sees the
+    // dispatch as a real statement.
+    if (As<Call>(visited)) {
+      visited = ExtractCallToTemp(visited);
+      changed = true;
+    } else if (visited.get() != value.get()) {
+      changed = true;
+    }
+    new_values.push_back(visited);
+  }
+
+  if (!changed) {
+    return op;
+  }
+  return std::make_shared<const ReturnStmt>(std::move(new_values), op->span_, op->leading_comments_);
 }
 
 // Shared scope-body flattening: returns the new body (which may equal the
@@ -429,7 +491,7 @@ FunctionPtr TransformFlattenCallExpr(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "FlattenCallExpr cannot run on null function";
 
   FlattenCallExprMutator mutator;
-  auto new_body = mutator.VisitStmt(func->body_);
+  auto new_body = mutator.FlattenFunctionBody(func->body_);
   auto result = MutableCopy(func);
   result->body_ = new_body;
   return result;

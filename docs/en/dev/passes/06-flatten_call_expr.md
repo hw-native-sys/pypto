@@ -10,6 +10,7 @@ This pass ensures that call expressions do not appear in nested contexts by extr
 2. If conditions cannot be calls
 3. For loop ranges (start/stop/step) cannot be calls
 4. Binary/unary expression operands cannot be calls
+5. Return values cannot be calls
 
 **Requires**: `TypeChecked`, `SSAForm` properties. These properties are automatically verified at BASIC level once produced; use a `VerificationInstrument` via `PassContext` if you need required properties to be validated before running passes.
 
@@ -116,6 +117,23 @@ t__tmp_v0 = compute(a)
 t__tmp_v1 = compute(b)
 x = t__tmp_v0 + t__tmp_v1
 ```
+
+### Direct Call in Return
+
+**Before**:
+
+```python
+return self.tile_add(a, b, f)
+```
+
+**After**:
+
+```python
+t__tmp_v0 = self.tile_add(a, b, f)
+return t__tmp_v0
+```
+
+Without this normalization, the `Call` reaches codegen still wrapped inside a `ReturnStmt`. Some codegen paths (notably `OrchestrationCodegen::VisitStmt_(ReturnStmtPtr)`) treat `ReturnStmt` as a no-op and would silently drop the kernel dispatch.
 
 ### Nested Call inside Scope Block
 
