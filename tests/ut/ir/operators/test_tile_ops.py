@@ -412,6 +412,83 @@ class TestTileUnaryOps:
         with pytest.raises(ValueError, match=r"(?i)FP32"):
             tile.sin(tile_var)
 
+    # ------------------------------------------------------------------
+    # Issue #1370: unary tile ops must preserve TileView.valid_shape
+    # from their input. Without this, chains like
+    #   pl.slice(..., valid_shape=[16, 4]) -> pl.tile.muls -> pl.tile.neg
+    # cause codegen to emit dst.validCol=8 against src.validCol=4 and the
+    # NPU produces wrong outputs.
+    # ------------------------------------------------------------------
+
+    def _make_sliced_tile_with_valid_shape(self):
+        """Helper: returns a tile-typed Call whose result has valid_shape=[8, 4]."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        src_var = ir.Var("src", src_type, span)
+        return tile.slice(src_var, [8, 16], [0, 0], valid_shape=[8, 4])
+
+    def test_tile_neg_preserves_input_valid_shape(self):
+        """tile.neg must propagate the source TileView's valid_shape (issue #1370)."""
+        sliced = self._make_sliced_tile_with_valid_shape()
+        call = tile.neg(sliced)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert len(valid_shape) == 2
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_exp_preserves_input_valid_shape(self):
+        """tile.exp must propagate the source TileView's valid_shape (issue #1370)."""
+        sliced = self._make_sliced_tile_with_valid_shape()
+        call = tile.exp(sliced)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_cast_preserves_input_valid_shape(self):
+        """tile.cast must propagate the source TileView's valid_shape (issue #1370)."""
+        sliced = self._make_sliced_tile_with_valid_shape()
+        call = tile.cast(sliced, DataType.FP16)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.dtype == DataType.FP16
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_rsqrt_preserves_input_valid_shape(self):
+        """tile.rsqrt must propagate the source TileView's valid_shape (issue #1370)."""
+        sliced = self._make_sliced_tile_with_valid_shape()
+        call = tile.rsqrt(sliced)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_not_preserves_input_valid_shape(self):
+        """tile.not must propagate the source TileView's valid_shape (issue #1370)."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.INT16,
+        )
+        src_var = ir.Var("src", src_type, span)
+        sliced = tile.slice(src_var, [8, 16], [0, 0], valid_shape=[8, 4])
+        call = tile.not_(sliced)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
 
 class TestTileReductionOps:
     """Test suite for tile-level reduction operators."""

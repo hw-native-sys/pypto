@@ -49,9 +49,9 @@ TypePtr DeduceTileUnaryType(const std::vector<ExprPtr>& args,
   CHECK(tile_type) << "The operator " << op_name << " requires argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
-  // Unary operations preserve shape and data type
+  // Unary operations preserve shape, dtype, and the source tile's valid_shape (issue #1370).
   TileView tile_view;
-  tile_view.valid_shape = tile_type->shape_;
+  tile_view.valid_shape = GetValidShape(tile_type);
   InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
@@ -86,7 +86,7 @@ TypePtr DeduceTileRsqrtType(const std::vector<ExprPtr>& args,
   }
 
   TileView tile_view;
-  tile_view.valid_shape = tile_type->shape_;
+  tile_view.valid_shape = GetValidShape(tile_type);
   InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
 }
@@ -139,9 +139,9 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
   }
   CHECK(found_target_type) << "tile.cast requires 'target_type' kwarg";
 
-  // Cast operation preserves shape but changes data type
+  // Cast preserves shape and the source tile's valid_shape; only dtype changes.
   TileView tile_view;
-  tile_view.valid_shape = tile_type->shape_;
+  tile_view.valid_shape = GetValidShape(tile_type);
   InheritTileViewLayout(tile_view, tile_type);
   return std::make_shared<TileType>(tile_type->shape_, target_dtype, std::nullopt, tile_view);
 }
@@ -296,7 +296,7 @@ REGISTER_OP("tile.not")
           << "The operator " << op_name << " requires int16 or uint16 tile dtype, but got "
           << tile_type->dtype_.ToString();
       TileView tile_view;
-      tile_view.valid_shape = tile_type->shape_;
+      tile_view.valid_shape = GetValidShape(tile_type);
       InheritTileViewLayout(tile_view, tile_type);
       return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
     });

@@ -42,14 +42,6 @@
 namespace pypto {
 namespace ir {
 
-// Extract valid_shape from a TileType's TileView, falling back to static shape.
-static std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>& tile_type) {
-  if (tile_type->tile_view_ && !tile_type->tile_view_->valid_shape.empty()) {
-    return tile_type->tile_view_->valid_shape;
-  }
-  return tile_type->shape_;
-}
-
 static ExprPtr MakeIndexConst(int64_t value, const Span& span = Span::unknown()) {
   return std::make_shared<ConstInt>(value, DataType::INDEX, span);
 }
