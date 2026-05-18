@@ -206,6 +206,8 @@ struct KindTrait<Type> {
                                          ObjectKind::TileType,
                                          ObjectKind::ArrayType,
                                          ObjectKind::TupleType,
+                                         ObjectKind::MemRefType,
+                                         ObjectKind::PtrType,
                                          ObjectKind::WindowBufferType,
                                          ObjectKind::CommCtxType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);

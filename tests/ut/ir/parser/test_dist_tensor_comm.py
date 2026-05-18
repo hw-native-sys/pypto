@@ -22,6 +22,7 @@ while the IR sees explicit op calls.
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto.language.parser.diagnostics import ParserError
 from pypto.pypto_core import ir
 
 
@@ -150,7 +151,7 @@ def test_dist_tensor_comm_can_be_used_in_expr():
 
 
 def test_plain_tensor_comm_attribute_rejected():
-    with pytest.raises(Exception, match="DistributedTensor|attribute"):
+    with pytest.raises(ParserError, match="DistributedTensor|attribute"):
 
         @pl.program
         class P:  # noqa: F841
@@ -160,7 +161,7 @@ def test_plain_tensor_comm_attribute_rejected():
 
 
 def test_dist_tensor_unknown_attribute_rejected():
-    with pytest.raises(Exception, match="DistributedTensor has no attribute"):
+    with pytest.raises(ParserError, match="DistributedTensor has no attribute"):
 
         @pl.program
         class P:  # noqa: F841
@@ -170,7 +171,7 @@ def test_dist_tensor_unknown_attribute_rejected():
 
 
 def test_comm_ctx_unknown_attribute_rejected():
-    with pytest.raises(Exception, match="CommCtx has no attribute"):
+    with pytest.raises(ParserError, match="CommCtx has no attribute"):
 
         @pl.program
         class P:  # noqa: F841

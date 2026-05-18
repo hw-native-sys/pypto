@@ -64,15 +64,15 @@ namespace {
 
 TypePtr DeduceGetCommCtxType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 1) << "pld.get_comm_ctx requires exactly 1 positional argument "
-                             "(target: DistributedTensor), but got "
-                          << args.size();
-  CHECK(args[0]) << "pld.get_comm_ctx target argument must not be null";
-  CHECK(kwargs.empty()) << "pld.get_comm_ctx takes no kwargs, but got " << kwargs.size();
+  INTERNAL_CHECK(args.size() == 1) << "pld.get_comm_ctx requires exactly 1 positional argument "
+                                      "(target: DistributedTensor), but got "
+                                   << args.size();
+  INTERNAL_CHECK(args[0]) << "pld.get_comm_ctx target argument must not be null";
+  INTERNAL_CHECK(kwargs.empty()) << "pld.get_comm_ctx takes no kwargs, but got " << kwargs.size();
 
   // target must be a DistributedTensorType — As<DistributedTensorType> is an
   // exact ObjectKind match, so plain TensorType is correctly refused here.
-  CHECK(IsA<DistributedTensorType>(args[0]->GetType()))
+  INTERNAL_CHECK_SPAN(IsA<DistributedTensorType>(args[0]->GetType()), args[0]->span_)
       << "pld.get_comm_ctx target must be a DistributedTensor (window-bound), got "
       << args[0]->GetType()->TypeName();
 
@@ -82,11 +82,12 @@ TypePtr DeduceGetCommCtxType(const std::vector<ExprPtr>& args,
 TypePtr DeduceCommCtxFieldType(const std::vector<ExprPtr>& args,
                                const std::vector<std::pair<std::string, std::any>>& kwargs,
                                const std::string& op_name) {
-  CHECK(args.size() == 1) << op_name << " requires exactly 1 positional argument (ctx: CommCtxType), but got "
-                          << args.size();
-  CHECK(args[0]) << op_name << " ctx argument must not be null";
-  CHECK(kwargs.empty()) << op_name << " takes no kwargs, but got " << kwargs.size();
-  CHECK(IsA<CommCtxType>(args[0]->GetType()))
+  INTERNAL_CHECK(args.size() == 1) << op_name
+                                   << " requires exactly 1 positional argument (ctx: CommCtxType), but got "
+                                   << args.size();
+  INTERNAL_CHECK(args[0]) << op_name << " ctx argument must not be null";
+  INTERNAL_CHECK(kwargs.empty()) << op_name << " takes no kwargs, but got " << kwargs.size();
+  INTERNAL_CHECK_SPAN(IsA<CommCtxType>(args[0]->GetType()), args[0]->span_)
       << op_name << " ctx must have CommCtxType (result of pld.get_comm_ctx), got "
       << args[0]->GetType()->TypeName();
 

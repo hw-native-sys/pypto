@@ -5053,7 +5053,7 @@ class ASTParser:
         if self._looks_like_ir_expr_attribute(attr):
             try:
                 base = self.parse_expression(attr.value)
-            except Exception:
+            except ParserError:
                 base = None
             if base is not None:
                 desugared = self._desugar_distributed_attribute(base, attr)
