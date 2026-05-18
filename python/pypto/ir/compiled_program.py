@@ -105,6 +105,41 @@ class _ParamInfo:
     dtype: DataType
 
 
+def _extract_func_param_infos(func: Any) -> tuple[list[_ParamInfo], list[int], list[Any]]:
+    """Extract parameter metadata from a specific IR function.
+
+    Returns:
+        Tuple of ``(param_infos, output_indices, return_types)``.
+    """
+    param_infos: list[_ParamInfo] = []
+    output_indices: list[int] = []
+
+    for i, (param, direction) in enumerate(zip(func.params, func.param_directions, strict=True)):
+        param_type = param.type
+        shape: list[int] | None = None
+
+        if isinstance(param_type, ShapedType):
+            dtype = param_type.dtype
+            shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
+        elif isinstance(param_type, ScalarType):
+            dtype = param_type.dtype
+        else:
+            raise TypeError(
+                f"Unsupported parameter type for {param.name_hint!r}: {type(param_type).__name__}. "
+                f"Expected ShapedType or ScalarType."
+            )
+
+        param_infos.append(_ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype))
+
+        # Only pure Out params can be auto-allocated in return-style calls.
+        # InOut params require an initial value from the caller, so they must
+        # be passed explicitly like inputs.
+        if direction == ParamDirection.Out:
+            output_indices.append(i)
+
+    return param_infos, output_indices, list(func.return_types)
+
+
 def _extract_param_infos(program: Program) -> tuple[list[_ParamInfo], list[int], list[Any]]:
     """Extract parameter metadata from the program's orchestration function.
 
@@ -133,33 +168,147 @@ def _extract_param_infos(program: Program) -> tuple[list[_ParamInfo], list[int],
                 "Add an explicit Orchestration function to define the call signature."
             )
 
-    param_infos: list[_ParamInfo] = []
-    output_indices: list[int] = []
+    return _extract_func_param_infos(orch_func)
 
-    for i, (param, direction) in enumerate(zip(orch_func.params, orch_func.param_directions, strict=True)):
-        param_type = param.type
-        shape: list[int] | None = None
 
-        if isinstance(param_type, ShapedType):
-            dtype = param_type.dtype
-            shape = [dim.value if isinstance(dim, ConstInt) else -1 for dim in param_type.shape]
-        elif isinstance(param_type, ScalarType):
-            dtype = param_type.dtype
-        else:
+def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
+    """Check a ``DeviceTensor`` arg against IR parameter metadata.
+
+    Raises:
+        TypeError: when shape or dtype disagrees with ``info``.
+
+    Static IR shapes are compared exactly; dynamic dims (any ``-1`` in
+    ``info.shape``) are skipped.  Dtypes that the runtime can't map to
+    torch are also skipped.
+    """
+    if info.shape is not None and all(d >= 0 for d in info.shape):
+        expected_shape = tuple(info.shape)
+        if expected_shape != arg.shape:
             raise TypeError(
-                f"Unsupported parameter type for {param.name_hint!r}: {type(param_type).__name__}. "
-                f"Expected ShapedType or ScalarType."
+                f"Parameter {info.name!r} expects shape {expected_shape}; got DeviceTensor shape {arg.shape}"
             )
+    expected_dtype = _to_torch_dtype(info.dtype)
+    if expected_dtype is not None and arg.dtype != expected_dtype:
+        raise TypeError(
+            f"Parameter {info.name!r} expects dtype {expected_dtype}; got DeviceTensor dtype {arg.dtype}"
+        )
 
-        param_infos.append(_ParamInfo(name=param.name_hint, direction=direction, shape=shape, dtype=dtype))
 
-        # Only pure Out params can be auto-allocated in return-style calls.
-        # InOut params require an initial value from the caller, so they must
-        # be passed explicitly like inputs.
-        if direction == ParamDirection.Out:
-            output_indices.append(i)
+def _build_full_args(
+    input_args: tuple["CallArg", ...],
+    param_infos: list[_ParamInfo],
+    output_indices: list[int],
+) -> list["CallArg"]:
+    """Allocate output tensors and interleave with input args."""
+    output_set = set(output_indices)
+    all_tensors: list[CallArg] = []
+    input_idx = 0
 
-    return param_infos, output_indices, list(orch_func.return_types)
+    for i, info in enumerate(param_infos):
+        if i in output_set:
+            if info.shape is None:
+                raise ValueError(f"Cannot allocate output tensor {info.name!r}: no shape in IR")
+            if any(d < 0 for d in info.shape):
+                raise ValueError(
+                    f"Cannot allocate output tensor {info.name!r}: shape {info.shape} "
+                    f"contains dynamic dimensions. Pass all tensors explicitly (in-place style)."
+                )
+            torch_dtype = _to_torch_dtype(info.dtype)
+            if torch_dtype is None:
+                raise ValueError(f"Unsupported dtype {info.dtype} for output tensor {info.name!r}")
+            all_tensors.append(torch.zeros(info.shape, dtype=torch_dtype))
+        else:
+            all_tensors.append(input_args[input_idx])
+            input_idx += 1
+
+    return all_tensors
+
+
+def _invoke_compiled(  # noqa: PLR0912 — branches for in-place vs return + scalar/tensor coercion
+    *,
+    output_dir: Path,
+    platform: str,
+    param_infos: list[_ParamInfo],
+    output_indices: list[int],
+    return_types: list[Any],
+    args: tuple["CallArg", ...],
+    config: Any,
+    caller_name: str,
+) -> "torch.Tensor | tuple[torch.Tensor, ...] | None":
+    """Shared dispatch: coerce args, call the runtime, pack outputs.
+
+    Used by both :meth:`CompiledProgram.__call__` (single-orch case) and
+    :meth:`_SubChipCallable.__call__` (multi-orch case). The two callers
+    differ only in *where* the artifacts live and *whose* metadata they
+    apply — everything from argument coercion onward is identical.
+    """
+    n_params = len(param_infos)
+    n_inputs = n_params - len(output_indices)
+    has_return = len(return_types) > 0
+    return_style = has_return and len(args) == n_inputs
+
+    if len(args) == n_params:
+        all_args: list[CallArg] = list(args)
+    elif return_style:
+        all_args = _build_full_args(args, param_infos, output_indices)
+    else:
+        expected = f"{n_params} (in-place)"
+        if has_return:
+            expected += f" or {n_inputs} (return)"
+        raise TypeError(
+            f"{caller_name} expects {expected} arguments, got {len(args)}. "
+            f"Parameters: {[p.name for p in param_infos]}"
+        )
+
+    coerced: list[torch.Tensor | DeviceTensor | ctypes._SimpleCData] = []
+    for info, arg in zip(param_infos, all_args, strict=True):
+        if info.shape is None:
+            if isinstance(arg, torch.Tensor):
+                raise TypeError(f"Parameter {info.name!r} is a scalar ({info.dtype}); got torch.Tensor")
+            if isinstance(arg, ctypes._SimpleCData):
+                expected_ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
+                if expected_ctype is not None and not isinstance(arg, expected_ctype):
+                    raise TypeError(
+                        f"Parameter {info.name!r} expects {expected_ctype.__name__} "
+                        f"for dtype {info.dtype}; got {type(arg).__name__}"
+                    )
+                coerced.append(arg)
+            else:
+                ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
+                if ctype is None:
+                    raise TypeError(f"Unsupported scalar dtype {info.dtype} for parameter {info.name!r}")
+                coerced.append(ctype(arg))
+        else:
+            if not isinstance(arg, (torch.Tensor, DeviceTensor)):
+                raise TypeError(
+                    f"Parameter {info.name!r} is a tensor; got {type(arg).__name__}. "
+                    f"Pass a torch.Tensor (host) or DeviceTensor (worker-resident)."
+                )
+            if isinstance(arg, DeviceTensor):
+                _validate_device_tensor(arg, info)
+            coerced.append(arg)
+
+    from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled  # noqa: PLC0415
+
+    if config is None:
+        config = RunConfig()
+
+    execute_compiled(
+        output_dir,
+        coerced,
+        platform=platform,
+        device_id=config.device_id,
+        pto_isa_commit=config.pto_isa_commit,
+        dfx=_DfxOpts.from_run_config(config),
+        block_dim=config.block_dim,
+        aicpu_thread_num=config.aicpu_thread_num,
+    )
+
+    if not return_style:
+        return None
+    outputs = [coerced[i] for i in output_indices]
+    assert all(isinstance(o, torch.Tensor) for o in outputs)
+    return outputs[0] if len(outputs) == 1 else tuple(outputs)  # type: ignore[return-value]
 
 
 def _default_platform(backend_type: BackendType) -> str:
@@ -219,7 +368,28 @@ class CompiledProgram:
         self._output_indices: list[int] | None = None
         self._return_types: list[Any] | None = None
 
-        self._emit_debug_runner()
+        # Multi-orch (L2-only) programs emit each Orchestration as a
+        # self-contained sub-build under ``next_levels/<name>/``. Detect
+        # those sub-dirs eagerly so ``__call__`` can error early and
+        # ``__getitem__`` / ``__getattr__`` can dispatch by orch name.
+        # The marker is ``orchestration/`` (always present after
+        # codegen) rather than ``kernel_config.py`` (only present after
+        # ptoas) so the dispatch surface works for inspection in
+        # ``skip_ptoas=True`` builds — actually calling a sub-callable
+        # without ``kernel_config.py`` fails cleanly inside
+        # ``execute_compiled`` with a ``FileNotFoundError``.
+        self._sub_chip_dirs: dict[str, Path] = {}
+        next_levels = self._output_dir / "next_levels"
+        if next_levels.is_dir():
+            for child in sorted(next_levels.iterdir()):
+                if child.is_dir() and (child / "orchestration").is_dir():
+                    self._sub_chip_dirs[child.name] = child
+
+        # Debug runner only makes sense when there's a single canonical entry
+        # point; multi-orch programs have one sub-build (and one debug script)
+        # per orch, emitted by each sub-build's own pipeline.
+        if not self._sub_chip_dirs:
+            self._emit_debug_runner()
 
     def _emit_debug_runner(self) -> None:
         """Write ``<output_dir>/debug/run.py`` so the kernel can be replayed via
@@ -314,9 +484,41 @@ class CompiledProgram:
         _, _, return_types = self._get_metadata()
         return len(return_types) > 0
 
+    # --- Multi-orch dispatch (L2-only programs with >1 Orchestration) -------
+
+    @property
+    def orchestration_names(self) -> list[str]:
+        """Names of L2 orchestrations addressable via ``compiled[name]``.
+
+        Empty for single-orch programs (use ``compiled(...)`` directly).
+        """
+        return sorted(self._sub_chip_dirs)
+
+    def __getitem__(self, name: str) -> "_SubChipCallable":
+        if name not in self._sub_chip_dirs:
+            raise KeyError(
+                f"No orchestration {name!r} under {self._output_dir / 'next_levels'}. "
+                f"Available: {sorted(self._sub_chip_dirs)}"
+            )
+        func = self._program.get_function(name)
+        if func is None:
+            raise KeyError(
+                f"next_levels/{name}/ exists but function {name!r} is missing from the program IR."
+            )
+        return _SubChipCallable(name, func, self._sub_chip_dirs[name], self._platform)
+
+    def __getattr__(self, name: str) -> "_SubChipCallable":
+        # __getattr__ only fires when normal attribute lookup fails. Read
+        # _sub_chip_dirs from __dict__ to avoid recursion through __getattr__
+        # itself during early-construction or pickle/copy edge cases.
+        sub_dirs = self.__dict__.get("_sub_chip_dirs", {})
+        if name in sub_dirs:
+            return self[name]
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
     # --- Callable API ---------------------------------------------------------
 
-    def __call__(  # noqa: PLR0912 — dispatch logic with several arg-shape branches
+    def __call__(
         self,
         *args: CallArg,
         config: Any = None,
@@ -343,142 +545,76 @@ class CompiledProgram:
             ``tuple`` for return-style calls.
 
         Raises:
-            TypeError: If argument count or types do not match.
+            TypeError: If the program has multiple L2 orchestrations (use
+                ``compiled[name](...)``), or if argument count/types do
+                not match the orchestration signature.
         """
-        param_infos, output_indices, return_types = self._get_metadata()
-        n_params = len(param_infos)
-        n_inputs = n_params - len(output_indices)
-        has_return = len(return_types) > 0
-        return_style = has_return and len(args) == n_inputs
-
-        # Determine calling convention
-        if len(args) == n_params:
-            all_args: list[CallArg] = list(args)
-        elif return_style:
-            all_args = self._build_full_args(args, param_infos, output_indices)
-        else:
-            expected = f"{n_params} (in-place)"
-            if has_return:
-                expected += f" or {n_inputs} (return)"
+        if self._sub_chip_dirs:
             raise TypeError(
-                f"CompiledProgram expects {expected} arguments, got {len(args)}. "
-                f"Parameters: {[p.name for p in param_infos]}"
+                f"Program has {len(self._sub_chip_dirs)} L2 orchestrations "
+                f"{sorted(self._sub_chip_dirs)}; select one explicitly via "
+                f"compiled['<name>'](...) or compiled.<name>(...)."
             )
-
-        # Coerce args: wrap Python scalars into ctypes, validate tensor vs scalar
-        coerced: list[torch.Tensor | DeviceTensor | ctypes._SimpleCData] = []
-        for info, arg in zip(param_infos, all_args, strict=True):
-            if info.shape is None:
-                # Scalar parameter
-                if isinstance(arg, torch.Tensor):
-                    raise TypeError(f"Parameter {info.name!r} is a scalar ({info.dtype}); got torch.Tensor")
-                if isinstance(arg, ctypes._SimpleCData):
-                    expected_ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
-                    if expected_ctype is not None and not isinstance(arg, expected_ctype):
-                        raise TypeError(
-                            f"Parameter {info.name!r} expects {expected_ctype.__name__} "
-                            f"for dtype {info.dtype}; got {type(arg).__name__}"
-                        )
-                    coerced.append(arg)
-                else:
-                    ctype = _DATATYPE_TO_CTYPE.get(str(info.dtype))
-                    if ctype is None:
-                        raise TypeError(f"Unsupported scalar dtype {info.dtype} for parameter {info.name!r}")
-                    coerced.append(ctype(arg))
-            else:
-                # Tensor parameter — accept torch.Tensor (host) or DeviceTensor (worker-resident)
-                if not isinstance(arg, (torch.Tensor, DeviceTensor)):
-                    raise TypeError(
-                        f"Parameter {info.name!r} is a tensor; got {type(arg).__name__}. "
-                        f"Pass a torch.Tensor (host) or DeviceTensor (worker-resident)."
-                    )
-                # Early shape/dtype validation for DeviceTensor.  ``torch.Tensor`` already
-                # carries its shape/dtype natively and downstream codegen has its own
-                # checks; ``DeviceTensor`` is opaque, so a mismatch would only surface
-                # deep inside the runtime with a far less actionable error.  Skip the
-                # check on dynamic dims (any ``-1`` in info.shape) since the IR has not
-                # committed to a concrete shape there.
-                if isinstance(arg, DeviceTensor):
-                    self._validate_device_tensor(arg, info)
-                coerced.append(arg)
-
-        from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled  # noqa: PLC0415
-
-        if config is None:
-            config = RunConfig()
-
-        execute_compiled(
-            self._output_dir,
-            coerced,
+        param_infos, output_indices, return_types = self._get_metadata()
+        return _invoke_compiled(
+            output_dir=self._output_dir,
             platform=self._platform,
-            device_id=config.device_id,
-            pto_isa_commit=config.pto_isa_commit,
-            dfx=_DfxOpts.from_run_config(config),
-            block_dim=config.block_dim,
-            aicpu_thread_num=config.aicpu_thread_num,
+            param_infos=param_infos,
+            output_indices=output_indices,
+            return_types=return_types,
+            args=args,
+            config=config,
+            caller_name="CompiledProgram",
         )
 
-        if not return_style:
-            return None
-        # Output indices always correspond to tensor params (scalars cannot be Out
-        # direction), so the elements are guaranteed to be torch.Tensor.
-        outputs = [coerced[i] for i in output_indices]
-        assert all(isinstance(o, torch.Tensor) for o in outputs)
-        return outputs[0] if len(outputs) == 1 else tuple(outputs)  # type: ignore[return-value]
 
-    @staticmethod
-    def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
-        """Check a ``DeviceTensor`` arg against IR parameter metadata.
+class _SubChipCallable:
+    """One L2 orchestration of a multi-orch :class:`CompiledProgram`.
 
-        Raises:
-            TypeError: when shape or dtype disagrees with ``info``.
+    Returned by ``compiled[name]`` / ``compiled.<name>``. Self-contained:
+    binds the orch's IR function, its sub-build directory, and the parent's
+    platform, so calling it dispatches to that sub-dir only.
+    """
 
-        Static IR shapes are compared exactly; dynamic dims (any ``-1`` in
-        ``info.shape``) are skipped.  Dtypes that the runtime can't map to
-        torch are also skipped.
-        """
-        if info.shape is not None and all(d >= 0 for d in info.shape):
-            expected_shape = tuple(info.shape)
-            if expected_shape != arg.shape:
-                raise TypeError(
-                    f"Parameter {info.name!r} expects shape {expected_shape}; "
-                    f"got DeviceTensor shape {arg.shape}"
-                )
-        expected_dtype = _to_torch_dtype(info.dtype)
-        if expected_dtype is not None and arg.dtype != expected_dtype:
-            raise TypeError(
-                f"Parameter {info.name!r} expects dtype {expected_dtype}; got DeviceTensor dtype {arg.dtype}"
-            )
+    __test__ = False
 
-    @staticmethod
-    def _build_full_args(
-        input_args: tuple[CallArg, ...],
-        param_infos: list[_ParamInfo],
-        output_indices: list[int],
-    ) -> list[CallArg]:
-        """Allocate output tensors and interleave with input args."""
-        output_set = set(output_indices)
-        all_tensors: list[CallArg] = []
-        input_idx = 0
+    def __init__(self, name: str, func: Any, sub_dir: Path, platform: str) -> None:
+        self._name = name
+        self._func = func
+        self._output_dir = sub_dir
+        self._platform = platform
+        self._param_infos, self._output_indices, self._return_types = _extract_func_param_infos(func)
 
-        for i, info in enumerate(param_infos):
-            if i in output_set:
-                if info.shape is None:
-                    raise ValueError(f"Cannot allocate output tensor {info.name!r}: no shape in IR")
-                if any(d < 0 for d in info.shape):
-                    raise ValueError(
-                        f"Cannot allocate output tensor {info.name!r}: shape {info.shape} "
-                        f"contains dynamic dimensions. Pass all tensors explicitly (in-place style)."
-                    )
-                torch_dtype = _to_torch_dtype(info.dtype)
-                if torch_dtype is None:
-                    raise ValueError(f"Unsupported dtype {info.dtype} for output tensor {info.name!r}")
-                all_tensors.append(torch.zeros(info.shape, dtype=torch_dtype))
-            else:
-                all_tensors.append(input_args[input_idx])
-                input_idx += 1
+    @property
+    def name(self) -> str:
+        return self._name
 
-        return all_tensors
+    @property
+    def output_dir(self) -> Path:
+        return self._output_dir
+
+    @property
+    def param_names(self) -> list[str]:
+        return [p.name for p in self._param_infos]
+
+    def __repr__(self) -> str:
+        return f"_SubChipCallable({self._name!r} @ {self._output_dir})"
+
+    def __call__(
+        self,
+        *args: CallArg,
+        config: Any = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
+        return _invoke_compiled(
+            output_dir=self._output_dir,
+            platform=self._platform,
+            param_infos=self._param_infos,
+            output_indices=self._output_indices,
+            return_types=self._return_types,
+            args=args,
+            config=config,
+            caller_name=f"orchestration {self._name!r}",
+        )
 
 
 # Public re-exports for callers (e.g. ir.compile()) that need orchestration

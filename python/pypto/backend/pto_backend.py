@@ -931,6 +931,18 @@ def generate(
     if has_distributed:
         return _generate_with_distributed(transformed_program, output_dir, skip_ptoas)
 
+    # L2-only program with multiple Orchestrations: emit each as a
+    # self-contained sub-build under ``next_levels/{orch_name}/``.
+    # ``_generate_single_chip`` assumes at most one Orchestration; the
+    # per-orch split here keeps that invariant.
+    orch_count = sum(
+        1
+        for f in transformed_program.functions.values()
+        if f.func_type == _ir_core.FunctionType.Orchestration
+    )
+    if orch_count > 1:
+        return _generate_multi_chip(transformed_program, output_dir, skip_ptoas, block_dim=block_dim)
+
     return _generate_single_chip(transformed_program, output_dir, skip_ptoas, block_dim=block_dim)
 
 
@@ -1067,6 +1079,35 @@ def _collect_chip_task_functions(
     return result
 
 
+def _generate_multi_chip(
+    transformed_program: _ir_core.Program,
+    output_dir: str,
+    skip_ptoas: bool = False,
+    *,
+    block_dim: int | None = None,
+) -> dict[str, str]:
+    """Generate artifacts for an L2-only program with multiple Orchestrations.
+
+    Each Orchestration function is emitted as a self-contained sub-build
+    under ``next_levels/{orch_name}/``, mirroring the layout that
+    :func:`_generate_with_distributed` produces for the chip tier of L3+
+    programs. No ``orchestration/host_orch.py`` or ``sub_workers/`` are
+    emitted because there is no L3 host driver — the user is expected to
+    select an orch at call time (see ``CompiledProgram.__getitem__``).
+    """
+    result_files: dict[str, str] = {}
+    for func in transformed_program.functions.values():
+        if func.func_type != _ir_core.FunctionType.Orchestration:
+            continue
+        chip_funcs = _collect_chip_task_functions(func, transformed_program)
+        chip_program = _ir_core.Program(chip_funcs, func.name, transformed_program.span)
+        chip_subdir = os.path.join(output_dir, "next_levels", func.name)
+        chip_files = _generate_single_chip(chip_program, chip_subdir, skip_ptoas, block_dim=block_dim)
+        for path, content in chip_files.items():
+            result_files[f"next_levels/{func.name}/{path}"] = content
+    return result_files
+
+
 def _generate_single_chip(
     transformed_program: _ir_core.Program,
     output_dir: str,
@@ -1074,7 +1115,13 @@ def _generate_single_chip(
     *,
     block_dim: int | None = None,
 ) -> dict[str, str]:
-    """Generate artifacts for a single-chip (L0-L2) program. Original generate() logic."""
+    """Generate artifacts for a single-chip (L0-L2) program.
+
+    Assumes the program contains at most one Orchestration function.
+    Multi-orch programs are pre-split by :func:`_generate_multi_chip`
+    (called from the top-level :func:`generate` dispatcher), so each
+    sub-program reaching this function has exactly one orch.
+    """
     result_files: dict[str, str] = {}
     errors: list[tuple[str, Exception]] = []
     prof = CompileProfiler.current()

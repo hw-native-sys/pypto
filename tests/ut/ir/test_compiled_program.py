@@ -17,7 +17,7 @@ import pytest
 import torch
 from pypto import DataType, backend, ir
 from pypto.backend import BackendType
-from pypto.ir.compiled_program import CompiledProgram, _extract_param_infos
+from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
 from pypto.runtime import DeviceTensor
 
 
@@ -262,7 +262,7 @@ class TestBuildFullArgs:
 
         a = torch.randn(128, 128)
         b = torch.randn(128, 128)
-        full_args = cp._build_full_args((a, b), param_infos, output_indices)
+        full_args = _build_full_args((a, b), param_infos, output_indices)
 
         assert len(full_args) == 3
         assert full_args[0] is a
