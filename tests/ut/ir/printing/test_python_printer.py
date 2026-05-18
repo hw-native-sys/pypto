@@ -144,15 +144,15 @@ def test_python_print_if_stmt_basic():
 def test_python_print_for_stmt_basic():
     """Test basic for loop printing."""
     span = ir.Span.unknown()
-    dtype = DataType.INT64
-    idx = DataType.INDEX  # loop var / bounds are canonically index-typed
-    i = ir.Var("i", ir.ScalarType(idx), span)
-    start = ir.ConstInt(0, idx, span)
-    stop = ir.ConstInt(10, idx, span)
-    step = ir.ConstInt(1, idx, span)
+    # Loop var, bounds, and body expression are all index-typed and consistent.
+    dtype = DataType.INDEX
+    i = ir.Var("i", ir.ScalarType(dtype), span)
+    start = ir.ConstInt(0, dtype, span)
+    stop = ir.ConstInt(10, dtype, span)
+    step = ir.ConstInt(1, dtype, span)
 
     x = ir.Var("x", ir.ScalarType(dtype), span)
-    c2 = ir.ConstInt(2, idx, span)
+    c2 = ir.ConstInt(2, dtype, span)
     mul = ir.Mul(i, c2, dtype, span)
     assign = ir.AssignStmt(x, mul, span)
 
@@ -161,7 +161,7 @@ def test_python_print_for_stmt_basic():
 
     assert "for" in result
     assert "for i in pl.range(10)" in result  # Concise: start=0, step=1 omitted
-    assert "pl.INT64" in result  # Type annotation in body assignment
+    assert "pl.INDEX" in result  # Type annotation in body assignment
 
 
 def test_python_print_for_range_concise_forms():
