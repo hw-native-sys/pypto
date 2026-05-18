@@ -13,6 +13,8 @@ Each test uses explicit Before (post-ConvertTensorToTileOps tile-level IR)
 and Expected (optimized) programs in @pl.program style.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -1065,9 +1067,9 @@ class TestOutWindowExternalizer:
                 v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
                 row: pl.Scalar[pl.INDEX] = 64
-                result: tuple[
-                    pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]
-                ] = self.kv_stripe(data, row, k_out, v_out)
+                result: tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]] = self.kv_stripe(
+                    data, row, k_out, v_out
+                )
                 return result
 
         After = _run_to_optimize_orch_tensors(Before)
@@ -1111,9 +1113,9 @@ class TestOutWindowExternalizer:
                 v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
             ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
                 row: pl.Scalar[pl.INDEX] = 64
-                result: tuple[
-                    pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]
-                ] = self.kv_stripe(data, row, k_out, v_out)
+                result: tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]] = self.kv_stripe(
+                    data, row, k_out, v_out
+                )
                 return result
 
         After = _run_to_optimize_orch_tensors(Before)
@@ -1140,15 +1142,11 @@ class TestOutWindowExternalizer:
                 for ob_chunk in pl.range(0, 8, 4):
                     for ob in pl.range(ob_chunk, ob_chunk + 4):
                         kv0: pl.Scalar[pl.INDEX] = ob * 64
-                        tile_a: pl.Tensor[[16, 128], pl.BF16] = pl.slice(
-                            normed_tile, [16, 128], [0, 0]
-                        )
+                        tile_a: pl.Tensor[[16, 128], pl.BF16] = pl.slice(normed_tile, [16, 128], [0, 0])
                         tile_wk: pl.Tensor[[128, 64], pl.BF16] = pl.slice(
                             wk, [128, 64], [layer_hidden_base, kv0]
                         )
-                        k_acc: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(
-                            tile_a, tile_wk, out_dtype=pl.FP32
-                        )
+                        k_acc: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(tile_a, tile_wk, out_dtype=pl.FP32)
                         for kb in pl.range(1, 4):
                             k0: pl.Scalar[pl.INDEX] = kb * 128
                             tile_a_i: pl.Tensor[[16, 128], pl.BF16] = pl.slice(
@@ -1164,9 +1162,7 @@ class TestOutWindowExternalizer:
                         tile_wv: pl.Tensor[[128, 64], pl.BF16] = pl.slice(
                             wv, [128, 64], [layer_hidden_base, kv0]
                         )
-                        v_acc: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(
-                            tile_a, tile_wv, out_dtype=pl.FP32
-                        )
+                        v_acc: pl.Tensor[[16, 64], pl.FP32] = pl.matmul(tile_a, tile_wv, out_dtype=pl.FP32)
                         for kb in pl.range(1, 4):
                             k0 = kb * 128
                             tile_a_i = pl.slice(normed_tile, [16, 128], [0, k0])
@@ -1221,21 +1217,13 @@ class TestOutWindowExternalizer:
                     tile_a: pl.Tile[[16, 128], pl.BF16] = pl.tile.load(
                         normed_tile, [0, 0], [16, 128], [16, 128]
                     )
-                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
-                        wk, [0, kv0], [128, 64], [128, 64]
-                    )
+                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(wk, [0, kv0], [128, 64], [128, 64])
                     k_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wk)
-                    k_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(
-                        k_acc, [0, kv0], k_proj_iter
-                    )
+                    k_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(k_acc, [0, kv0], k_proj_iter)
 
-                    tile_wv: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
-                        wv, [0, kv0], [128, 64], [128, 64]
-                    )
+                    tile_wv: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(wv, [0, kv0], [128, 64], [128, 64])
                     v_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wv)
-                    v_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(
-                        v_acc, [0, kv0], v_proj_iter
-                    )
+                    v_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(v_acc, [0, kv0], v_proj_iter)
                     k_proj_rv, v_proj_rv = pl.yield_(k_proj_next, v_proj_next)
                 return k_proj_rv, v_proj_rv
 
@@ -1248,12 +1236,10 @@ class TestOutWindowExternalizer:
                 k_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
                 v_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
             ) -> tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]]:
-                for ob_chunk, (k_proj_iter, v_proj_iter) in pl.range(
-                    0, 8, 4, init_values=(k_proj, v_proj)
-                ):
-                    result: tuple[
-                        pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]
-                    ] = self.kv_proj(k_proj_iter, v_proj_iter, ob_chunk, normed_tile, wk, wv)
+                for ob_chunk, (k_proj_iter, v_proj_iter) in pl.range(0, 8, 4, init_values=(k_proj, v_proj)):
+                    result: tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]] = (
+                        self.kv_proj(k_proj_iter, v_proj_iter, ob_chunk, normed_tile, wk, wv)
+                    )
                     k_proj_next: pl.Tensor[[16, 512], pl.FP32] = result[0]
                     v_proj_next: pl.Tensor[[16, 512], pl.FP32] = result[1]
                     k_proj_rv, v_proj_rv = pl.yield_(k_proj_next, v_proj_next)
@@ -1276,8 +1262,8 @@ class TestOutWindowExternalizer:
         printed_windowed = ir.python_print(kv_proj_windowed)
         assert "pl.Tensor[[16, 256], pl.FP32" in printed_windowed
         assert "pl.TensorView(stride=[512, 1]" in printed_windowed
-        assert "pl.tile.store(k_acc" in printed_windowed
-        assert "pl.tile.store(v_acc" in printed_windowed
+        assert re.search(r"pl\.tile\.store\(\s*k_acc", printed_windowed), printed_windowed
+        assert re.search(r"pl\.tile\.store\(\s*v_acc", printed_windowed), printed_windowed
         assert "kv0" in printed_windowed
         assert "ob_chunk" in printed_windowed
 
@@ -1301,21 +1287,13 @@ class TestOutWindowExternalizer:
                     tile_a: pl.Tile[[16, 128], pl.BF16] = pl.tile.load(
                         normed_tile, [0, 0], [16, 128], [16, 128]
                     )
-                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
-                        wk, [0, kv0], [128, 64], [128, 64]
-                    )
+                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(wk, [0, kv0], [128, 64], [128, 64])
                     k_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wk)
-                    k_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(
-                        k_acc, [0, kv0], k_proj_iter
-                    )
+                    k_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(k_acc, [0, kv0], k_proj_iter)
 
-                    tile_wv: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
-                        wv, [0, kv0], [128, 64], [128, 64]
-                    )
+                    tile_wv: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(wv, [0, kv0], [128, 64], [128, 64])
                     v_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wv)
-                    v_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(
-                        v_acc, [0, kv0], v_proj_iter
-                    )
+                    v_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(v_acc, [0, kv0], v_proj_iter)
                     k_proj_rv, v_proj_rv = pl.yield_(k_proj_next, v_proj_next)
                 return k_proj_rv, v_proj_rv
 
@@ -1329,9 +1307,9 @@ class TestOutWindowExternalizer:
                 v_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
             ) -> tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]]:
                 ob_chunk: pl.Scalar[pl.INDEX] = 0
-                result: tuple[
-                    pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]
-                ] = self.kv_proj(k_proj, v_proj, ob_chunk, normed_tile, wk, wv)
+                result: tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]] = self.kv_proj(
+                    k_proj, v_proj, ob_chunk, normed_tile, wk, wv
+                )
                 return result
 
         After = _run_to_optimize_orch_tensors(Before)
@@ -1358,9 +1336,7 @@ class TestOutWindowExternalizer:
                     tile_a: pl.Tile[[16, 128], pl.BF16] = pl.tile.load(
                         normed_tile, [0, 0], [16, 128], [16, 128]
                     )
-                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
-                        wk, [0, kv0], [128, 64], [128, 64]
-                    )
+                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(wk, [0, kv0], [128, 64], [128, 64])
                     k_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wk)
                     k_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(k_acc, [0, kv0], k_iter)
                     k_rv = pl.yield_(k_next)
@@ -1374,9 +1350,7 @@ class TestOutWindowExternalizer:
                 k_out: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
             ) -> pl.Tensor[[16, 512], pl.FP32]:
                 for ob_chunk, (k_iter,) in pl.range(0, 8, 4, init_values=(k_out,)):
-                    k_next: pl.Tensor[[16, 512], pl.FP32] = self.k_proj(
-                        k_iter, ob_chunk, normed_tile, wk
-                    )
+                    k_next: pl.Tensor[[16, 512], pl.FP32] = self.k_proj(k_iter, ob_chunk, normed_tile, wk)
                     k_rv = pl.yield_(k_next)
                 return k_rv
 
@@ -1407,22 +1381,16 @@ class TestOutWindowExternalizer:
                 normed_tile: pl.Tensor[[16, 512], pl.BF16],
                 wk: pl.Tensor[[512, 512], pl.BF16],
             ) -> pl.Tensor[[16, 512], pl.FP32]:
-                k_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(
-                    k_out, [0, 0], [16, 64], [16, 64]
-                )
+                k_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(k_out, [0, 0], [16, 64], [16, 64])
                 for ob, (k_iter,) in pl.range(ob_chunk, ob_chunk + 4, init_values=(k_out,)):
                     kv0: pl.Scalar[pl.INDEX] = ob * 64
                     tile_a: pl.Tile[[16, 128], pl.BF16] = pl.tile.load(
                         normed_tile, [0, 0], [16, 128], [16, 128]
                     )
-                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
-                        wk, [0, kv0], [128, 64], [128, 64]
-                    )
+                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(wk, [0, kv0], [128, 64], [128, 64])
                     matmul: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wk)
                     k_acc = pl.tile.add(k_acc, matmul)
-                    k_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(
-                        k_acc, [0, kv0], k_iter
-                    )
+                    k_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(k_acc, [0, kv0], k_iter)
                     k_rv = pl.yield_(k_next)
                 return k_rv
 
@@ -1434,9 +1402,7 @@ class TestOutWindowExternalizer:
                 k_out: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
             ) -> pl.Tensor[[16, 512], pl.FP32]:
                 for ob_chunk, (k_iter,) in pl.range(0, 8, 4, init_values=(k_out,)):
-                    k_next: pl.Tensor[[16, 512], pl.FP32] = self.k_proj(
-                        k_iter, ob_chunk, normed_tile, wk
-                    )
+                    k_next: pl.Tensor[[16, 512], pl.FP32] = self.k_proj(k_iter, ob_chunk, normed_tile, wk)
                     k_rv = pl.yield_(k_next)
                 return k_rv
 
@@ -1498,9 +1464,7 @@ class TestOutWindowExternalizer:
                 row: pl.Scalar[pl.INDEX] = 0
                 for row_iter, out_iter in pl.while_(init_values=(row, out)):
                     pl.cond(row_iter < n)
-                    out_next: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(
-                        data, row_iter, out_iter
-                    )
+                    out_next: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, row_iter, out_iter)
                     row_next: pl.Scalar[pl.INDEX] = row_iter + 64
                     row_rv, out_rv = pl.yield_(row_next, out_next)
                 return out_rv

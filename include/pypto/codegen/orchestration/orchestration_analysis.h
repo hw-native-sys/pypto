@@ -68,6 +68,7 @@ class OrchestrationInfoCollector : public ir::IRVisitor {
  public:
   std::map<std::string, std::vector<TupleElement>> call_tuple_elements;
   std::map<const ir::Call*, std::string> call_to_tuple_key;
+  std::map<std::string, std::string> tuple_var_to_key;
 
  protected:
   void VisitStmt_(const ir::AssignStmtPtr& assign) override;

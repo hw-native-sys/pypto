@@ -265,6 +265,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void SetCallToTupleKey(const std::map<const Call*, std::string>& mapping) { call_to_tuple_key_ = mapping; }
 
+  void SetTupleVarToKey(std::map<std::string, std::string> mapping) {
+    tuple_var_to_key_ = std::move(mapping);
+  }
+
   void SetInitialIndent(int indent) { indent_ = indent; }
 
   void SetEffectiveUses(std::unordered_set<const Var*> uses) { effective_uses_ = std::move(uses); }
@@ -951,6 +955,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     } else if (As<TupleGetItemExpr>(assign->value_)) {
       // No-op: tuple elements handled via tuple_var_to_elements_
+    } else if (auto make_tuple = As<MakeTuple>(assign->value_)) {
+      PropagateMakeTupleAssign(assign, make_tuple);
     } else {
       std::string value_expr = GenerateExprString(assign->value_);
       // Drop a no-op `X = X;` that arises when VarLineageCollector has
@@ -2139,6 +2145,42 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
+  void PropagateMakeTupleAssign(const AssignStmtPtr& assign, const MakeTuplePtr& make_tuple) {
+    auto key_it = tuple_var_to_key_.find(assign->var_->name_hint_);
+    if (key_it == tuple_var_to_key_.end()) {
+      return;
+    }
+    auto elements_it = tuple_var_to_elements_.find(key_it->second);
+    if (elements_it == tuple_var_to_elements_.end()) {
+      return;
+    }
+
+    for (const auto& elem : elements_it->second) {
+      if (elem.index < 0 || elem.index >= static_cast<int>(make_tuple->elements_.size())) {
+        continue;
+      }
+      auto input_var = AsVarLike(make_tuple->elements_[elem.index]);
+      if (!input_var) {
+        continue;
+      }
+
+      auto emit_it = emit_name_map_.find(input_var.get());
+      if (emit_it != emit_name_map_.end()) {
+        emit_name_map_[elem.var] = emit_it->second;
+      }
+
+      auto tid_it = manual_task_id_map_.find(input_var.get());
+      if (tid_it != manual_task_id_map_.end()) {
+        manual_task_id_map_[elem.var] = tid_it->second;
+      }
+
+      auto carry_it = array_carry_vars_.find(input_var.get());
+      if (carry_it != array_carry_vars_.end()) {
+        array_carry_vars_[elem.var] = carry_it->second;
+      }
+    }
+  }
+
   std::string ReserveVarEmitName(const Var* var) {
     auto it = emit_name_map_.find(var);
     if (it != emit_name_map_.end()) {
@@ -2310,6 +2352,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::vector<std::string> current_loop_slot_exprs_;
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;
+  std::map<std::string, std::string> tuple_var_to_key_;
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
   std::unordered_set<const Var*> effective_uses_;
@@ -2381,6 +2424,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
+  stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
   stmt_codegen.SetInitialIndent(8);
   stmt_codegen.VisitStmt(func->body_);

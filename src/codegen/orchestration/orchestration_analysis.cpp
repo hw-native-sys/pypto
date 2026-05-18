@@ -86,9 +86,14 @@ void OrchestrationInfoCollector::VisitStmt_(const AssignStmtPtr& assign) {
       if (As<TupleType>(call->GetType())) {
         std::string unique_key = "_tc_" + std::to_string(tuple_call_counter_++);
         current_tuple_key_[assign->var_->name_hint_] = unique_key;
+        tuple_var_to_key[assign->var_->name_hint_] = unique_key;
         call_to_tuple_key[call.get()] = unique_key;
       }
     }
+  } else if (As<MakeTuple>(assign->value_)) {
+    std::string unique_key = "_tc_" + std::to_string(tuple_call_counter_++);
+    current_tuple_key_[assign->var_->name_hint_] = unique_key;
+    tuple_var_to_key[assign->var_->name_hint_] = unique_key;
   } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
     std::string tuple_ref_name;
     if (auto var = As<Var>(tuple_get->tuple_)) {
