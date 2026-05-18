@@ -82,6 +82,7 @@ class TestL3Manual:
             pytest.skip("manual L3 test needs at least one device")
 
         from simpler.task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
+            CallConfig,
             TaskArgs,
             TensorArgType,
         )
@@ -141,7 +142,17 @@ class TestL3Manual:
         verify_cid = w.register(verify)
         w.init()
 
-        # 5) Hand-written L3 orchestrator. ``submit_next_level`` queues chip
+        # 5) CallConfig for chip dispatch. ``submit_next_level`` takes a
+        # ``CallConfig`` as its third argument (see DistributedCodegen at
+        # ``src/codegen/distributed/distributed_codegen.cpp:566``); the chip
+        # binary reads ``block_dim`` / ``aicpu_thread_num`` from it. The
+        # values mirror ``test_l3_distributed.py`` so the same kernel runs
+        # identically under both paths.
+        call_config = CallConfig()
+        call_config.block_dim = 3
+        call_config.aicpu_thread_num = 4
+
+        # 6) Hand-written L3 orchestrator. ``submit_next_level`` queues chip
         # work; ``submit_sub`` queues the Python SubWorker. Both calls are
         # non-blocking; the implicit scope around ``orch_fn`` waits at return.
         def orch_fn(orch, _unused_args, _unused_cfg) -> None:
@@ -150,7 +161,7 @@ class TestL3Manual:
             chip_ta.add_tensor(make_tensor_arg(a), TensorArgType.INPUT)
             chip_ta.add_tensor(make_tensor_arg(b), TensorArgType.INPUT)
             chip_ta.add_tensor(make_tensor_arg(f), TensorArgType.OUTPUT_EXISTING)
-            orch.submit_next_level(chip_cid, chip_ta)
+            orch.submit_next_level(chip_cid, chip_ta, call_config)
 
             verify_ta = TaskArgs()
             verify_ta.add_tensor(make_tensor_arg(f), TensorArgType.INPUT)
