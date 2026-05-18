@@ -22,7 +22,7 @@ from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 def _run_to_optimize_orch_tensors(program):
     pm = PassManager.get_strategy(OptimizationStrategy.Default)
     result = program
-    for pass_name, pass_obj in zip(pm.pass_names, pm.passes):
+    for pass_name, pass_obj in zip(pm.pass_names, pm.passes, strict=True):
         result = pass_obj(result)
         if pass_name == "OptimizeOrchTensors":
             return result
@@ -1028,7 +1028,7 @@ class TestOutWindowExternalizer:
                     out_phase_next = pl.yield_(out_branch_next)
                 return out_phase_next
 
-        After = passes.optimize_orch_tensors()(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         kernel_windowed = After.get_function("kernel_stripe__windowed")
         main = After.get_function("main")
@@ -1176,7 +1176,7 @@ class TestOutWindowExternalizer:
                     k_proj_rv, v_proj_rv = pl.yield_(k_proj_next, v_proj_next)
                 return k_proj_rv, v_proj_rv
 
-        After = passes.optimize_orch_tensors()(Before)
+        After = _run_to_optimize_orch_tensors(Before)
 
         kv_proj_windowed = After.get_function("kv_proj__windowed")
         main = After.get_function("main")
@@ -1195,6 +1195,116 @@ class TestOutWindowExternalizer:
         assert "pl.TensorView(stride=[512, 1]" in printed_windowed
         assert "pl.tile.store(k_acc, [0, kv0 - ob_chunk * 64]" in printed_windowed
         assert "pl.tile.store(v_acc, [0, kv0 - ob_chunk * 64]" in printed_windowed
+
+    def test_post_outline_kv_direct_tuple_use_remains_defined(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kv_proj(
+                self,
+                k_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+                v_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+                ob_chunk: pl.Scalar[pl.INDEX],
+                normed_tile: pl.Tensor[[16, 512], pl.BF16],
+                wk: pl.Tensor[[512, 512], pl.BF16],
+                wv: pl.Tensor[[512, 512], pl.BF16],
+            ) -> tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]]:
+                for ob, (k_proj_iter, v_proj_iter) in pl.range(
+                    ob_chunk, ob_chunk + 4, init_values=(k_proj, v_proj)
+                ):
+                    kv0: pl.Scalar[pl.INDEX] = ob * 64
+                    tile_a: pl.Tile[[16, 128], pl.BF16] = pl.tile.load(
+                        normed_tile, [0, 0], [16, 128], [16, 128]
+                    )
+                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
+                        wk, [0, kv0], [128, 64], [128, 64]
+                    )
+                    k_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wk)
+                    k_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(
+                        k_acc, [0, kv0], k_proj_iter
+                    )
+
+                    tile_wv: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
+                        wv, [0, kv0], [128, 64], [128, 64]
+                    )
+                    v_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wv)
+                    v_proj_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(
+                        v_acc, [0, kv0], v_proj_iter
+                    )
+                    k_proj_rv, v_proj_rv = pl.yield_(k_proj_next, v_proj_next)
+                return k_proj_rv, v_proj_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                normed_tile: pl.Tensor[[16, 512], pl.BF16],
+                wk: pl.Tensor[[512, 512], pl.BF16],
+                wv: pl.Tensor[[512, 512], pl.BF16],
+                k_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+                v_proj: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]]:
+                ob_chunk: pl.Scalar[pl.INDEX] = 0
+                result: tuple[
+                    pl.Tensor[[16, 512], pl.FP32], pl.Tensor[[16, 512], pl.FP32]
+                ] = self.kv_proj(k_proj, v_proj, ob_chunk, normed_tile, wk, wv)
+                return result
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        printed_main = ir.python_print(After.get_function("main"))
+        assert "result = (" in printed_main
+        assert "return result" in printed_main
+
+    def test_post_outline_kv_descending_loop_aggregate_shape_rewrites(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k_proj(
+                self,
+                k_out: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+                ob_chunk: pl.Scalar[pl.INDEX],
+                normed_tile: pl.Tensor[[16, 512], pl.BF16],
+                wk: pl.Tensor[[512, 512], pl.BF16],
+            ) -> pl.Tensor[[16, 512], pl.FP32]:
+                for ob, (k_iter,) in pl.range(ob_chunk + 3, ob_chunk - 1, -1, init_values=(k_out,)):
+                    kv0: pl.Scalar[pl.INDEX] = ob * 64
+                    tile_a: pl.Tile[[16, 128], pl.BF16] = pl.tile.load(
+                        normed_tile, [0, 0], [16, 128], [16, 128]
+                    )
+                    tile_wk: pl.Tile[[128, 64], pl.BF16] = pl.tile.load(
+                        wk, [0, kv0], [128, 64], [128, 64]
+                    )
+                    k_acc: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(tile_a, tile_wk)
+                    k_next: pl.Tensor[[16, 512], pl.FP32] = pl.tile.store(k_acc, [0, kv0], k_iter)
+                    k_rv = pl.yield_(k_next)
+                return k_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                normed_tile: pl.Tensor[[16, 512], pl.BF16],
+                wk: pl.Tensor[[512, 512], pl.BF16],
+                k_out: pl.Out[pl.Tensor[[16, 512], pl.FP32]],
+            ) -> pl.Tensor[[16, 512], pl.FP32]:
+                for ob_chunk, (k_iter,) in pl.range(0, 8, 4, init_values=(k_out,)):
+                    k_next: pl.Tensor[[16, 512], pl.FP32] = self.k_proj(
+                        k_iter, ob_chunk, normed_tile, wk
+                    )
+                    k_rv = pl.yield_(k_next)
+                return k_rv
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        k_proj_windowed = After.get_function("k_proj__windowed")
+        assert k_proj_windowed is not None
+
+        printed_main = ir.python_print(After.get_function("main"))
+        assert "pl.tensor.slice(k_iter" in printed_main
+        assert "[16, 256]" in printed_main
+        assert "[0, ob_chunk * 64]" in printed_main
+
+        printed_windowed = ir.python_print(k_proj_windowed)
+        assert "pl.tile.store(k_acc, [0, kv0 - ob_chunk * 64]" in printed_windowed
 
     def test_overlapping_sequential_windows_stay_baseline(self):
         @pl.program

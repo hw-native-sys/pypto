@@ -364,7 +364,7 @@ def _build_phase_fence_program_auto():
 
     This keeps the same direct full-Out call shape as the manual_scope
     PhaseFence case but removes both ``with pl.manual_scope():`` and
-    ``deps=[out]`` so the runtime falls back to ordinary auto dependency
+    ``deps=[tids]`` so the runtime falls back to ordinary auto dependency
     tracking. It serves as a control case for the base Scenario A out-window
     rewrite independent of TaskId / explicit-dep lowering.
     """

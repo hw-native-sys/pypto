@@ -1830,6 +1830,56 @@ class OutWindowExternalizer {
     ExprPtr base;
   };
 
+  struct OrderedLoopOffsets {
+    ExprPtr min;
+    ExprPtr max;
+  };
+
+  static std::optional<AffineForm> ParseAffineInLoop(const ExprPtr& expr, const Var* loop_var) {
+    if (!expr) return std::nullopt;
+    if (auto ci = As<ConstInt>(expr)) {
+      return AffineForm{0, expr};
+    }
+    if (auto var = AsVarLike(expr)) {
+      if (var.get() == loop_var) {
+        auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, expr->span_);
+        return AffineForm{1, zero};
+      }
+      return AffineForm{0, expr};
+    }
+    if (auto add = As<Add>(expr)) {
+      auto lhs = ParseAffineInLoop(add->left_, loop_var);
+      auto rhs = ParseAffineInLoop(add->right_, loop_var);
+      if (!lhs.has_value() || !rhs.has_value()) return std::nullopt;
+      return AffineForm{lhs->coeff + rhs->coeff, MakeAdd(lhs->base, rhs->base, expr->span_)};
+    }
+    if (auto sub = As<Sub>(expr)) {
+      auto lhs = ParseAffineInLoop(sub->left_, loop_var);
+      auto rhs = ParseAffineInLoop(sub->right_, loop_var);
+      if (!lhs.has_value() || !rhs.has_value()) return std::nullopt;
+      return AffineForm{lhs->coeff - rhs->coeff, MakeSub(lhs->base, rhs->base, expr->span_)};
+    }
+    if (auto mul = As<Mul>(expr)) {
+      auto lhs_ci = As<ConstInt>(mul->left_);
+      auto rhs_ci = As<ConstInt>(mul->right_);
+      if (lhs_ci) {
+        auto rhs = ParseAffineInLoop(mul->right_, loop_var);
+        if (!rhs.has_value()) return std::nullopt;
+        return AffineForm{lhs_ci->value_ * rhs->coeff,
+                          MakeMul(std::make_shared<ConstInt>(lhs_ci->value_, lhs_ci->dtype(), lhs_ci->span_),
+                                  rhs->base, expr->span_)};
+      }
+      if (rhs_ci) {
+        auto lhs = ParseAffineInLoop(mul->left_, loop_var);
+        if (!lhs.has_value()) return std::nullopt;
+        return AffineForm{rhs_ci->value_ * lhs->coeff,
+                          MakeMul(lhs->base, std::make_shared<ConstInt>(rhs_ci->value_, rhs_ci->dtype(), rhs_ci->span_),
+                                  expr->span_)};
+      }
+    }
+    return std::nullopt;
+  }
+
   class WindowWriteLocalizer : public IRMutator {
    public:
     WindowWriteLocalizer(const std::unordered_map<const Var*, OutputRewriteInfo>& out_info_by_var,
@@ -2110,6 +2160,9 @@ class OutWindowExternalizer {
 
       tuple_result_subst_[call_assign->var_.get()] = std::move(assembled_result_exprs);
       stmts.insert(stmts.end(), tail_stmts.begin(), tail_stmts.end());
+      auto rebuilt_tuple =
+          std::make_shared<MakeTuple>(tuple_result_subst_.at(call_assign->var_.get()), call_assign->span_);
+      stmts.push_back(std::make_shared<AssignStmt>(call_assign->var_, rebuilt_tuple, call_assign->span_));
 
       RewriteBundle bundle;
       bundle.stmts = std::move(stmts);
@@ -2216,52 +2269,6 @@ class OutWindowExternalizer {
       return !varying_dims_used.empty();
     }
 
-    std::optional<AffineForm> ParseAffineInLoop(const ExprPtr& expr, const Var* loop_var) const {
-      if (!expr) return std::nullopt;
-      if (auto ci = As<ConstInt>(expr)) {
-        return AffineForm{0, expr};
-      }
-      if (auto var = AsVarLike(expr)) {
-        if (var.get() == loop_var) {
-          auto zero = std::make_shared<ConstInt>(0, DataType::INDEX, expr->span_);
-          return AffineForm{1, zero};
-        }
-        return AffineForm{0, expr};
-      }
-      if (auto add = As<Add>(expr)) {
-        auto lhs = ParseAffineInLoop(add->left_, loop_var);
-        auto rhs = ParseAffineInLoop(add->right_, loop_var);
-        if (!lhs.has_value() || !rhs.has_value()) return std::nullopt;
-        return AffineForm{lhs->coeff + rhs->coeff, MakeAdd(lhs->base, rhs->base, expr->span_)};
-      }
-      if (auto sub = As<Sub>(expr)) {
-        auto lhs = ParseAffineInLoop(sub->left_, loop_var);
-        auto rhs = ParseAffineInLoop(sub->right_, loop_var);
-        if (!lhs.has_value() || !rhs.has_value()) return std::nullopt;
-        return AffineForm{lhs->coeff - rhs->coeff, MakeSub(lhs->base, rhs->base, expr->span_)};
-      }
-      if (auto mul = As<Mul>(expr)) {
-        auto lhs_ci = As<ConstInt>(mul->left_);
-        auto rhs_ci = As<ConstInt>(mul->right_);
-        if (lhs_ci) {
-          auto rhs = ParseAffineInLoop(mul->right_, loop_var);
-          if (!rhs.has_value()) return std::nullopt;
-          return AffineForm{lhs_ci->value_ * rhs->coeff,
-                            MakeMul(std::make_shared<ConstInt>(lhs_ci->value_, lhs_ci->dtype(), lhs_ci->span_),
-                                    rhs->base, expr->span_)};
-        }
-        if (rhs_ci) {
-          auto lhs = ParseAffineInLoop(mul->left_, loop_var);
-          if (!lhs.has_value()) return std::nullopt;
-          return AffineForm{rhs_ci->value_ * lhs->coeff,
-                            MakeMul(lhs->base,
-                                    std::make_shared<ConstInt>(rhs_ci->value_, rhs_ci->dtype(), rhs_ci->span_),
-                                    expr->span_)};
-        }
-      }
-      return std::nullopt;
-    }
-
     ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
       auto tuple_var = AsVarLike(op->tuple_);
       if (tuple_var) {
@@ -2342,13 +2349,16 @@ class OutWindowExternalizer {
     if (static_trip_count.has_value()) return static_trip_count;
     if (!loop) return std::nullopt;
     auto step = GetConstIntValue(loop->step_);
-    if (!step.has_value() || *step <= 0) return std::nullopt;
+    if (!step.has_value() || *step == 0) return std::nullopt;
 
-    auto distance_expr = arith::Analyzer().Simplify(MakeSub(loop->stop_, loop->start_, loop->span_));
+    auto distance_expr = *step > 0 ? MakeSub(loop->stop_, loop->start_, loop->span_)
+                                   : MakeSub(loop->start_, loop->stop_, loop->span_);
+    distance_expr = arith::Analyzer().Simplify(distance_expr);
     auto distance = As<ConstInt>(distance_expr);
     if (!distance) return std::nullopt;
     if (distance->value_ <= 0) return int64_t{0};
-    return (distance->value_ + *step - 1) / *step;
+    int64_t step_abs = *step > 0 ? *step : -*step;
+    return (distance->value_ + step_abs - 1) / step_abs;
   }
 
   static std::optional<ExprPtr> SimplifyWithLoopBound(const ExprPtr& expr, const VarPtr& loop_var, int64_t value) {
@@ -2374,6 +2384,23 @@ class OutWindowExternalizer {
     if (delta == 0) return loop->start_;
     auto delta_expr = std::make_shared<ConstInt>(delta, DataType::INDEX, loop->span_);
     return arith::Analyzer().Simplify(MakeAdd(loop->start_, delta_expr, loop->span_));
+  }
+
+  static std::optional<OrderedLoopOffsets> GetOrderedLoopOffsets(const ExprPtr& expr, const ForStmtPtr& loop,
+                                                                 const ExprPtr& first_loop_value,
+                                                                 const ExprPtr& last_loop_value) {
+    if (!expr || !loop || !first_loop_value || !last_loop_value) return std::nullopt;
+    auto first_offset = SimplifyWithLoopValue(expr, loop->loop_var_, first_loop_value);
+    auto last_offset = SimplifyWithLoopValue(expr, loop->loop_var_, last_loop_value);
+    if (!first_offset.has_value() || !last_offset.has_value()) return std::nullopt;
+
+    auto affine = ParseAffineInLoop(expr, loop->loop_var_.get());
+    auto loop_step = GetConstIntValue(loop->step_);
+    if (!affine.has_value() || !loop_step.has_value()) return std::nullopt;
+    if (affine->coeff * *loop_step >= 0) {
+      return OrderedLoopOffsets{*first_offset, *last_offset};
+    }
+    return OrderedLoopOffsets{*last_offset, *first_offset};
   }
 
   static std::optional<ExprPtr> ExpandLoopLocalExpr(
@@ -2552,15 +2579,18 @@ class OutWindowExternalizer {
             }
           }
 
+          bool matched_update = false;
           if (updated_iter_arg) {
             for (const auto& match : loop_matches) {
               if (updated_iter_arg != loop->iter_args_[match.iter_arg_index].get()) continue;
               if (updates_by_iter_arg_index.count(match.iter_arg_index)) return std::nullopt;
               updates_by_iter_arg_index.emplace(
                   match.iter_arg_index, AggregateUpdate{assign, std::move(window_shape), std::move(offsets)});
-              goto next_stmt;
+              matched_update = true;
+              break;
             }
           }
+          if (matched_update) continue;
         }
         if (As<ScalarType>(assign->var_->GetType())) {
           scalar_defs[assign->var_.get()] = assign->value_;
@@ -2571,7 +2601,6 @@ class OutWindowExternalizer {
         if (yield_stmt || yield->value_.size() != loop->return_vars_.size()) return std::nullopt;
         yield_stmt = yield;
       }
-    next_stmt:;
     }
 
     if (!yield_stmt || updates_by_iter_arg_index.size() != loop_matches.size()) return std::nullopt;
@@ -2619,18 +2648,17 @@ class OutWindowExternalizer {
         if (!expanded.has_value()) return std::nullopt;
         if (!ExprReferencesOnlyVarsIn(*expanded, allowed)) return std::nullopt;
 
-        auto min_offset = SimplifyWithLoopValue(*expanded, loop->loop_var_, *first_loop_value);
-        auto max_offset = SimplifyWithLoopValue(*expanded, loop->loop_var_, *last_loop_value);
-        if (!min_offset.has_value() || !max_offset.has_value()) return std::nullopt;
+        auto ordered_offsets = GetOrderedLoopOffsets(*expanded, loop, *first_loop_value, *last_loop_value);
+        if (!ordered_offsets.has_value()) return std::nullopt;
 
         auto span_expr = arith::Analyzer().Simplify(
-            MakeAdd(MakeSub(*max_offset, *min_offset, func->span_), update.window_shape[i], func->span_));
+            MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_), update.window_shape[i], func->span_));
         auto span_ci = As<ConstInt>(span_expr);
         if (!span_ci || span_ci->value_ <= 0) return std::nullopt;
 
-        base_offsets.push_back(*min_offset);
-        local_offsets.push_back(arith::Analyzer().Simplify(
-            MakeSub(update.offsets[i], *min_offset, update.offsets[i]->span_)));
+        base_offsets.push_back(ordered_offsets->min);
+        local_offsets.push_back(
+            arith::Analyzer().Simplify(MakeSub(update.offsets[i], ordered_offsets->min, update.offsets[i]->span_)));
         window_shape.push_back(std::make_shared<ConstInt>(span_ci->value_, DataType::INDEX, func->span_));
       }
 
