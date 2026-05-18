@@ -353,7 +353,9 @@ StmtPtr FlattenCallExprMutator::VisitStmt_(const ReturnStmtPtr& op) {
   if (!changed) {
     return op;
   }
-  return std::make_shared<const ReturnStmt>(std::move(new_values), op->span_, op->leading_comments_);
+  auto result = MutableCopy(op);
+  result->value_ = std::move(new_values);
+  return result;
 }
 
 // Shared scope-body flattening: returns the new body (which may equal the
