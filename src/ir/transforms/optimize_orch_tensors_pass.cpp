@@ -2069,7 +2069,7 @@ class OutWindowExternalizer {
         std::vector<ExprPtr> offset_exprs;
         offset_exprs.reserve(output.callsite_offsets.size());
         for (const auto& offset : output.callsite_offsets) {
-          offset_exprs.push_back(transform_utils::Substitute(offset, callsite_subst));
+          offset_exprs.push_back(arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
         }
         auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
 
