@@ -1045,11 +1045,11 @@ void IRPythonPrinter::VisitStmt_(const ForStmtPtr& op) {
   // range(start, stop) when step==1, range(start, stop, step) otherwise.
   auto is_const_int = [](const ExprPtr& expr, int64_t value) -> bool {
     if (auto ci = As<ConstInt>(expr)) {
-      // Only elide for integer types that round-trip as the same value.
-      // INDEX and INT64 are structurally equivalent (structural_equal.cpp).
-      // Non-standard dtypes (e.g. INT32) are preserved to maintain fidelity.
-      return ci->value_ == value && (ci->dtype() == DataType::DEFAULT_CONST_INT ||
-                                     ci->dtype() == DataType::INDEX || ci->dtype() == DataType::INT64);
+      // Elide start/step only when the omitted literal round-trips identically.
+      // An elided bound reparses as ConstInt(INDEX) (the parser's bare-literal
+      // dtype), so elision is sound only for INDEX-typed bounds. INT64 and any
+      // other dtype must print explicitly via pl.const(...) to preserve fidelity.
+      return ci->value_ == value && ci->dtype() == DataType::INDEX;
     }
     return false;
   };
