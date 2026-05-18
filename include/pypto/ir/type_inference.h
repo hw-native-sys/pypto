@@ -209,6 +209,25 @@ inline void InheritTileViewLayout(TileView& dst, const std::shared_ptr<const Til
 }
 
 /**
+ * @brief Return the source tile's effective valid_shape, falling back to its static shape.
+ *
+ * Same-shape elementwise tile ops (tile.neg, tile.muls, tile.cast, ...) must propagate
+ * the input's runtime valid_shape onto their result so that downstream codegen emits
+ * matching validRow/validCol for src and dst. Without this propagation, a result built
+ * from `tile_type->shape_` re-expands to the full allocation shape and the lowered
+ * intrinsic receives mismatched valid extents (see issue #1370).
+ *
+ * @param tile_type Source TileType
+ * @return The TileView::valid_shape if set, otherwise the static shape
+ */
+inline std::vector<ExprPtr> GetValidShape(const std::shared_ptr<const TileType>& tile_type) {
+  if (tile_type->tile_view_ && !tile_type->tile_view_->valid_shape.empty()) {
+    return tile_type->tile_view_->valid_shape;
+  }
+  return tile_type->shape_;
+}
+
+/**
  * @brief Deduce return types for a cross-function call by substituting dynamic
  *        shape variables in the callee's return types with concrete values from
  *        the actual call arguments.
