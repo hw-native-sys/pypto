@@ -8,21 +8,23 @@
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
 
-"""Parser tests for ``pld.get_comm_ctx`` / ``pld.comm_ctx.rank`` / ``pld.comm_ctx.nranks``.
+"""Parser tests for ``pld.system.get_comm_ctx`` / ``pld.system.rank`` /
+``pld.system.nranks`` (and the matching unified short forms ``pld.get_comm_ctx``
+/ ``pld.rank`` / ``pld.nranks``).
 
-These ops are called explicitly (no attribute-access sugar). Dispatch
-mirrors the rest of the ``pld.*`` surface:
+These ops are called explicitly (no attribute-access sugar). Dispatch mirrors
+the rest of the ``pld.*`` surface — the canonical 3-segment form and the
+unified 2-segment short form both lift to the same registered IR op:
 
-* ``pld.get_comm_ctx(data)`` — 2-segment, routed through
-  :meth:`_parse_pld_op` / :func:`_dispatch_op` to the DSL wrapper in
+* 3-segment: ``pld.system.<op>(...)`` is routed through
+  :meth:`_parse_pld_category_op` to the DSL wrappers in
   :mod:`pypto.language.distributed.op.system_ops`.
-* ``pld.comm_ctx.rank(ctx)`` / ``pld.comm_ctx.nranks(ctx)`` — 3-segment,
-  routed through :meth:`_parse_pld_comm_ctx_op` to the DSL wrappers in
-  :mod:`pypto.language.distributed.op.comm_ctx_ops`.
+* 2-segment: ``pld.<op>(...)`` is routed through :meth:`_parse_pld_op` to the
+  same wrappers via :mod:`pypto.language.distributed.op.unified_ops`.
 
-Verifier-level negatives (plain ``pl.Tensor`` into ``pld.get_comm_ctx``,
-non-CommCtx into ``pld.comm_ctx.rank``) come from the C++ op definitions
-in :file:`src/ir/op/distributed/get_comm_ctx.cpp`.
+Verifier-level negatives (plain ``pl.Tensor`` into ``pld.system.get_comm_ctx``,
+non-CommCtx into ``pld.system.rank``) come from the C++ op definitions in
+:file:`src/ir/op/distributed/get_comm_ctx.cpp`.
 """
 
 import pypto.language as pl
@@ -78,60 +80,77 @@ def test_get_comm_ctx_returns_comm_ctx_typed_call():
             return ctx
 
     func = _get_func(P, "worker")
-    calls = _find_calls_in_func(func, "pld.get_comm_ctx")
+    calls = _find_calls_in_func(func, "pld.system.get_comm_ctx")
     assert len(calls) == 1
     assert isinstance(calls[0].type, ir.CommCtxType)
     assert len(calls[0].args) == 1
     assert isinstance(calls[0].args[0].type, ir.DistributedTensorType)
 
 
-def test_comm_ctx_rank_explicit_call():
-    """``pld.comm_ctx.rank(ctx)`` parses to the rank op with an INT32 result."""
+def test_rank_short_form():
+    """``pld.rank(ctx)`` (short form) parses to the rank op with an INT32 result."""
 
     @pl.program
     class P:
         @pl.function
         def worker(self, data: pld.DistributedTensor[[64], pl.FP32]):
             ctx = pld.get_comm_ctx(data)
-            return pld.comm_ctx.rank(ctx)
+            return pld.rank(ctx)
 
     func = _get_func(P, "worker")
-    rank_calls = _find_calls_in_func(func, "pld.comm_ctx.rank")
+    rank_calls = _find_calls_in_func(func, "pld.system.rank")
     assert len(rank_calls) == 1
     assert isinstance(rank_calls[0].type, ir.ScalarType)
     assert rank_calls[0].type.dtype == DataType.INT32
 
 
-def test_comm_ctx_nranks_explicit_call():
+def test_nranks_short_form():
     @pl.program
     class P:
         @pl.function
         def worker(self, data: pld.DistributedTensor[[64], pl.FP32]):
             ctx = pld.get_comm_ctx(data)
-            return pld.comm_ctx.nranks(ctx)
+            return pld.nranks(ctx)
 
     func = _get_func(P, "worker")
-    nranks_calls = _find_calls_in_func(func, "pld.comm_ctx.nranks")
+    nranks_calls = _find_calls_in_func(func, "pld.system.nranks")
     assert len(nranks_calls) == 1
     assert isinstance(nranks_calls[0].type, ir.ScalarType)
     assert nranks_calls[0].type.dtype == DataType.INT32
 
 
-def test_comm_ctx_rank_inline_nested_get_comm_ctx():
-    """``pld.comm_ctx.rank(pld.get_comm_ctx(data))`` parses to the nested Call form."""
+def test_long_form_system_ops():
+    """``pld.system.rank`` / ``pld.system.nranks`` (canonical 3-segment) parse
+    to the same registered IR op as the short form."""
 
     @pl.program
     class P:
         @pl.function
         def worker(self, data: pld.DistributedTensor[[64], pl.FP32]):
-            return pld.comm_ctx.rank(pld.get_comm_ctx(data))
+            ctx = pld.system.get_comm_ctx(data)
+            return pld.system.rank(ctx) + pld.system.nranks(ctx)
 
     func = _get_func(P, "worker")
-    assert len(_find_calls_in_func(func, "pld.comm_ctx.rank")) == 1
-    assert len(_find_calls_in_func(func, "pld.get_comm_ctx")) == 1
+    assert len(_find_calls_in_func(func, "pld.system.get_comm_ctx")) == 1
+    assert len(_find_calls_in_func(func, "pld.system.rank")) == 1
+    assert len(_find_calls_in_func(func, "pld.system.nranks")) == 1
 
 
-def test_comm_rank_and_nranks_compose_in_expression():
+def test_rank_inline_nested_get_comm_ctx():
+    """``pld.rank(pld.get_comm_ctx(data))`` parses to the nested Call form."""
+
+    @pl.program
+    class P:
+        @pl.function
+        def worker(self, data: pld.DistributedTensor[[64], pl.FP32]):
+            return pld.rank(pld.get_comm_ctx(data))
+
+    func = _get_func(P, "worker")
+    assert len(_find_calls_in_func(func, "pld.system.rank")) == 1
+    assert len(_find_calls_in_func(func, "pld.system.get_comm_ctx")) == 1
+
+
+def test_rank_and_nranks_compose_in_expression():
     """rank + nranks composes through arithmetic; both Calls survive in IR."""
 
     @pl.program
@@ -139,11 +158,11 @@ def test_comm_rank_and_nranks_compose_in_expression():
         @pl.function
         def worker(self, data: pld.DistributedTensor[[64], pl.FP32]):
             ctx = pld.get_comm_ctx(data)
-            return pld.comm_ctx.rank(ctx) + pld.comm_ctx.nranks(ctx)
+            return pld.rank(ctx) + pld.nranks(ctx)
 
     func = _get_func(P, "worker")
-    assert len(_find_calls_in_func(func, "pld.comm_ctx.rank")) == 1
-    assert len(_find_calls_in_func(func, "pld.comm_ctx.nranks")) == 1
+    assert len(_find_calls_in_func(func, "pld.system.rank")) == 1
+    assert len(_find_calls_in_func(func, "pld.system.nranks")) == 1
 
 
 def test_get_comm_ctx_rejects_plain_tensor():
@@ -157,27 +176,27 @@ def test_get_comm_ctx_rejects_plain_tensor():
                 return pld.get_comm_ctx(x)  # type: ignore[arg-type]
 
 
-def test_comm_ctx_rank_rejects_non_comm_ctx_arg():
-    """The C++ verifier refuses any non-CommCtx argument to comm_ctx.rank."""
+def test_rank_rejects_non_comm_ctx_arg():
+    """The C++ verifier refuses any non-CommCtx argument to pld.system.rank."""
     with pytest.raises(Exception, match="CommCtx"):
 
         @pl.program
         class P:  # noqa: F841
             @pl.function
             def worker(self, data: pld.DistributedTensor[[64], pl.FP32]):
-                return pld.comm_ctx.rank(data)  # type: ignore[arg-type]
+                return pld.rank(data)  # type: ignore[arg-type]
 
 
-def test_unknown_comm_ctx_op_rejected():
-    """Unknown 3-segment ``pld.comm_ctx.<foo>`` produces a clear parser error."""
-    with pytest.raises(Exception, match=r"pld\.comm_ctx\.foo"):
+def test_unknown_system_op_rejected():
+    """Unknown 3-segment ``pld.system.<foo>`` produces a clear parser error."""
+    with pytest.raises(Exception, match=r"pld\.system\.foo"):
 
         @pl.program
         class P:  # noqa: F841
             @pl.function
             def worker(self, data: pld.DistributedTensor[[64], pl.FP32]):
-                ctx = pld.get_comm_ctx(data)
-                return pld.comm_ctx.foo(ctx)  # type: ignore[attr-defined]
+                ctx = pld.system.get_comm_ctx(data)
+                return pld.system.foo(ctx)  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

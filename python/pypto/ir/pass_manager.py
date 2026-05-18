@@ -167,7 +167,7 @@ class PassManager:
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
             ("DeriveCallDirections", lambda: passes.derive_call_directions()),
-            # Trace pld.alloc_window_buffer → pld.window → dispatch(device=r)
+            # Trace pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r)
             # in each host_orch and materialise WindowBuffer +
             # Program.comm_groups_. Runs at the end of the pipeline because
             # nothing between InlineFunctions and here touches the host_orch

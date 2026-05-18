@@ -61,7 +61,7 @@ enum class IRProperty : uint64_t {
   TensorViewCanonical,              ///< TensorView canonicality verified (weak: stride.empty() ok; strict:
                                     ///< requires materialization, RFC #1300 §2.2)
   ArrayNotEscaped,                  ///< ArrayType never appears as a function parameter or return type
-  CommGroupsCollected,              ///< Program.comm_groups_ populated and pld.window result types
+  CommGroupsCollected,              ///< Program.comm_groups_ populated and pld.tensor.window result types
                                     ///< carry DistributedTensorType.window_buffer_ back-references
   kCount                            ///< Sentinel (must be last)
 };

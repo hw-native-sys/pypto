@@ -7,19 +7,25 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Type wrappers for the distributed DSL.
+"""Unified ``pld.<op>`` dispatch — short-form re-exports for the distributed DSL.
 
-Exposes:
-
-* :class:`DistributedTensor` — annotation form of
-  ``ir.DistributedTensorType``.
-* :class:`CommCtx` — annotation + value wrapper for
-  ``ir.CommCtxType`` (the handle returned by ``pld.system.get_comm_ctx``).
-
-Mirrors :mod:`pypto.language.typing` for the single-device DSL.
+Unlike :mod:`pypto.language.op.unified_ops` (which does runtime type-dispatch
+between ``pl.tensor`` / ``pl.tile``), every short op name in ``pld`` maps to
+exactly one category, so the short form is a plain re-export from the
+canonical 3-segment surface — preserving signatures and docstrings for IDE
+help with zero call-chain indirection.
 """
 
-from .comm_ctx import CommCtx
-from .distributed_tensor import DistributedTensor
+from .system_ops import get_comm_ctx, nranks, rank, world_size
+from .tensor_ops import alloc_window_buffer, window
+from .tile_ops import remote_load
 
-__all__ = ["CommCtx", "DistributedTensor"]
+__all__ = [
+    "alloc_window_buffer",
+    "get_comm_ctx",
+    "nranks",
+    "rank",
+    "remote_load",
+    "window",
+    "world_size",
+]

@@ -11,7 +11,7 @@ the IR types so downstream codegen has O(1) access.
 
 | Aspect | `MemRef` side | `WindowBuffer` side |
 | ------ | ------------- | ------------------- |
-| Allocation op | `tile.alloc(memory_space, size_in_bytes)` | `pld.alloc_window_buffer(size_in_bytes)` |
+| Allocation op | `tile.alloc(memory_space, size_in_bytes)` | `pld.tensor.alloc_window_buffer(size_in_bytes)` |
 | Assignment LHS at parse time | `Var(PtrType)` | `Var(PtrType)` (same singleton) |
 | Wrapper Var subclass | `MemRef` | `WindowBuffer` |
 | Wrapper's SSA-edge type | `MemRefType` (singleton) | `WindowBufferType` (singleton) |
@@ -40,11 +40,11 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
 `Function::role_ == Role::Orchestrator`, regardless of `func_type_`):
 
 1. **Collect allocations.** Find every `AssignStmt` whose RHS is a
-   `pld.alloc_window_buffer(size, *, name)` Call. Record `(ptr_var, size_expr,
+   `pld.tensor.alloc_window_buffer(size, *, name)` Call. Record `(ptr_var, size_expr,
    name, span, call)`.
 
 2. **Collect views.** For every `AssignStmt` whose RHS is a
-   `pld.window(ptr_var, [shape], *, dtype)` Call referencing a recorded
+   `pld.tensor.window(ptr_var, [shape], *, dtype)` Call referencing a recorded
    `ptr_var`, record the binding `view_var → alloc`.
 
 3. **Scan dispatches.** Walk the body with a stack of enclosing `ForStmt`s.
@@ -55,7 +55,7 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
    | `device=` shape | Descriptor |
    | --------------- | ---------- |
    | `ConstInt(N)` | `subset = {N}` |
-   | `IterArg of for r in pl.range(pld.world_size())` | `kAll` |
+   | `IterArg of for r in pl.range(pld.system.world_size())` | `kAll` |
    | `IterArg of for r in pl.range(ConstInt(N))` | `subset = {0, …, N − 1}` |
    | other | `pypto::ValueError` |
 
@@ -74,7 +74,7 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
    fresh `Var` of the same `name_hint_` whose type is
    `DistributedTensorType(shape, dtype, memref, tensor_view, wb)` and run
    `Substitute` to swap every reference to the old view Var with the fresh
-   one. Two `pld.window` views over the same allocation share the same
+   one. Two `pld.tensor.window` views over the same allocation share the same
    `shared_ptr<const WindowBuffer>`. Chip-orch / InCore parameter types are
    not touched.
 
@@ -86,7 +86,7 @@ For every host-orchestration function (`Function::level_ == Level::HOST` and
 
 The pass raises `pypto::ValueError` (carrying the alloc's span) if:
 
-- An allocation has no `pld.window` materialisation (dead alloc).
+- An allocation has no `pld.tensor.window` materialisation (dead alloc).
 - An allocation has at least one view but no chip-orch dispatch consumes it.
 - The `device=` expression on a dispatch is something other than `ConstInt`
   or a recognised `pl.range` induction var.
@@ -99,9 +99,9 @@ After the pass:
 
 - `Program.comm_groups_` is populated (possibly empty if the program does no
   window-buffer allocation).
-- Every `pld.window` result Var's type is a `DistributedTensorType` whose
+- Every `pld.tensor.window` result Var's type is a `DistributedTensorType` whose
   `window_buffer_` field points to the corresponding `WindowBuffer`.
-- `pld.window` views over the same allocation share the same
+- `pld.tensor.window` views over the same allocation share the same
   `shared_ptr<const WindowBuffer>` — pointer-equality is a load-bearing
   invariant for downstream codegen.
 - Chip-orchestration and InCore parameter types remain `nullopt` on
@@ -122,6 +122,6 @@ After the pass:
 - Header: [include/pypto/ir/transforms/passes.h](../../../../include/pypto/ir/transforms/passes.h)
 - Schema: [include/pypto/ir/program.h](../../../../include/pypto/ir/program.h)
   defines `WindowBuffer` and `CommGroup`.
-- DSL: [`pld.alloc_window_buffer`](../../../../python/pypto/language/distributed/op/memory_ops.py),
-  [`pld.window`](../../../../python/pypto/language/distributed/op/memory_ops.py),
-  [`pld.world_size`](../../../../python/pypto/language/distributed/op/system_ops.py).
+- DSL: [`pld.tensor.alloc_window_buffer`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
+  [`pld.tensor.window`](../../../../python/pypto/language/distributed/op/tensor_ops.py),
+  [`pld.system.world_size`](../../../../python/pypto/language/distributed/op/system_ops.py).

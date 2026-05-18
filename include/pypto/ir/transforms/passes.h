@@ -223,16 +223,16 @@ Pass InlineFunctions();
  *
  * For each ``@pl.program`` host_orch function:
  *
- *  1. Find every ``pld.alloc_window_buffer(size, *, name)`` Call op; its
+ *  1. Find every ``pld.tensor.alloc_window_buffer(size, *, name)`` Call op; its
  *     ``AssignStmt`` LHS is a plain ``Var(PtrType)`` (``ptr_var``).
- *  2. Follow def-use to the ``pld.window(ptr_var, shape, *, dtype)`` views
+ *  2. Follow def-use to the ``pld.tensor.window(ptr_var, shape, *, dtype)`` views
  *     materialised over each ``ptr_var`` and the dispatch calls that consume
  *     those views (recursing through chip_orch formal-param bindings).
  *  3. From each dispatch call's ``attrs["device"]`` expression, derive a
  *     ``DeviceDescriptor`` (``kAll`` / explicit subset). Merge across all
  *     consuming dispatches for the same alloc.
  *  4. Construct a :class:`WindowBuffer` per alloc (``base = ptr_var``,
- *     ``size = size_expr``). Rewrite every ``pld.window`` result Var's type
+ *     ``size = size_expr``). Rewrite every ``pld.tensor.window`` result Var's type
  *     so ``DistributedTensorType.window_buffer_`` points to the new
  *     ``WindowBuffer`` (host_orch only — chip_orch / InCore param types
  *     remain ``nullopt``).
@@ -241,7 +241,7 @@ Pass InlineFunctions();
  *     ``Program.comm_groups_``.
  *
  * Sanity-checks (``pypto::ValueError`` on failure):
- *  - Every alloc must have at least one ``pld.window`` materialisation and
+ *  - Every alloc must have at least one ``pld.tensor.window`` materialisation and
  *    at least one dispatch consumer.
  *  - Allocation names are unique within a group (parser-enforced globally;
  *    re-asserted here).

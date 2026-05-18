@@ -737,11 +737,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
   for (const auto& [key, value] : op->kwargs_) {
-    // ``pld.alloc_window_buffer`` injects its ``name`` kwarg from the LHS at
-    // parse time and explicitly rejects a user-written ``name=`` kwarg. Skip
+    // ``pld.tensor.alloc_window_buffer`` injects its ``name`` kwarg from the LHS
+    // at parse time and explicitly rejects a user-written ``name=`` kwarg. Skip
     // it on print so the round-trip parser can re-derive the name from the
     // assignment LHS without tripping the no-user-kwargs check.
-    if (op->op_->name_ == "pld.alloc_window_buffer" && key == "name") continue;
+    if (op->op_->name_ == "pld.tensor.alloc_window_buffer" && key == "name") continue;
     if (need_comma) {
       stream_ << ", ";
     }

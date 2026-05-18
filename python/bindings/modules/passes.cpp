@@ -91,7 +91,7 @@ void BindPass(nb::module_& m) {
       .value("ArrayNotEscaped", IRProperty::ArrayNotEscaped,
              "ArrayType never appears as a function parameter or return type")
       .value("CommGroupsCollected", IRProperty::CommGroupsCollected,
-             "Program.comm_groups_ populated and pld.window result types carry "
+             "Program.comm_groups_ populated and pld.tensor.window result types carry "
              "DistributedTensorType.window_buffer_ back-references");
 
   // Bind IRPropertySet
@@ -473,7 +473,8 @@ void BindPass(nb::module_& m) {
              "Supports multi-return inline (emits MakeTuple at call site) and nested\n"
              "Inline-calls-Inline (iterates to fixpoint).");
   passes.def("collect_comm_groups", &pass::CollectCommGroups,
-             "Trace pld.alloc_window_buffer → pld.window → dispatch(device=r) chains in each\n"
+             "Trace pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r) "
+             "chains in each\n"
              "host_orch function, materialise WindowBuffer instances back-referenced from\n"
              "DistributedTensorType.window_buffer_ on view Vars, and populate\n"
              "Program.comm_groups_ with the inferred coverage. Runs immediately after\n"

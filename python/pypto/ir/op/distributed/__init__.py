@@ -11,7 +11,7 @@
 
 These are the namespace siblings of :mod:`pypto.ir.op.tensor_ops` /
 :mod:`pypto.ir.op.tile_ops` / :mod:`pypto.ir.op.system_ops`, exposing the
-``pld.<op>`` registered C++ ops as Python builder functions.
+``pld.<category>.<op>`` registered C++ ops as Python builder functions.
 
 Layering (mirrors the ``pl.<ns>.<op>`` stack):
 
@@ -19,22 +19,26 @@ Layering (mirrors the ``pl.<ns>.<op>`` stack):
   ``ir.Expr`` arguments, call :func:`ir.create_op_call`, and return ``ir.Call``.
 * The DSL layer (`pypto.language.distributed.op`) — thin wrappers that accept
   DSL types (``DistributedTensor``, ``Tile``, ``Scalar``, …) and delegate
-  here after unwrapping.
-* The parser dispatches `pld.<op>` calls through `_dispatch_op` (the same
-  helper used for `pl.tile.*` and friends), which routes via the DSL layer.
+  here after unwrapping. ``pld.<op>`` unified dispatch re-exports the short
+  form, parallel to ``pl.<op>``.
+* The parser dispatches `pld.<category>.<op>` calls through a generic
+  3-segment helper and `pld.<op>` through the unified-dispatch path.
 """
 
-from . import memory_ops, system_ops
-from .memory_ops import alloc_window_buffer, window
-from .system_ops import comm_ctx_nranks, comm_ctx_rank, get_comm_ctx, world_size
+from . import system_ops, tensor_ops, tile_ops
+from .system_ops import get_comm_ctx, nranks, rank, world_size
+from .tensor_ops import alloc_window_buffer, window
+from .tile_ops import remote_load
 
 __all__ = [
     "alloc_window_buffer",
-    "comm_ctx_nranks",
-    "comm_ctx_rank",
     "get_comm_ctx",
-    "memory_ops",
+    "nranks",
+    "rank",
+    "remote_load",
     "system_ops",
+    "tensor_ops",
+    "tile_ops",
     "window",
     "world_size",
 ]

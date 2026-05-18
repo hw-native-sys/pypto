@@ -8,10 +8,11 @@
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
 
-"""Parser tests for ``pld.world_size()``.
+"""Parser tests for ``pld.world_size()`` / ``pld.system.world_size()``.
 
-``pld.world_size()`` is the host-only entry point for the distributed world
-size. The parser lifts it to ``ir.OpExpr('pld.world_size')`` returning a
+The short form (``pld.world_size()``) is the unified-dispatch entry point
+and the long form (``pld.system.world_size()``) is the canonical 3-segment
+surface. Both lift to ``ir.OpExpr('pld.system.world_size')`` returning a
 scalar INT64. Host-only enforcement happens at parse time: invocations
 outside a ``level=pl.Level.HOST`` function body are rejected with a clear
 error message.
@@ -31,18 +32,18 @@ def _get_func(program: ir.Program, name: str) -> ir.Function:
 
 
 def _find_world_size_calls(func: ir.Function) -> list[ir.Call]:
-    """Return every ``pld.world_size()`` call appearing anywhere in ``func``.
+    """Return every ``pld.system.world_size()`` call appearing anywhere in ``func``.
 
     Walks both statements and expression subtrees so we catch calls nested
     inside another call's argument list (e.g.
-    ``pld.alloc_window_buffer(pld.world_size() * 4)``).
+    ``pld.tensor.alloc_window_buffer(pld.world_size() * 4)``).
     """
     found: list[ir.Call] = []
 
     def visit_expr(expr: ir.Expr | None) -> None:
         if expr is None or not isinstance(expr, ir.Call):
             return
-        if expr.op.name == "pld.world_size":
+        if expr.op.name == "pld.system.world_size":
             found.append(expr)
         for sub in expr.args:
             visit_expr(sub)
@@ -168,8 +169,8 @@ def test_world_size_rejected_in_nested_device_scope_within_host_function():
 
 
 def test_world_size_call_used_as_size_in_alloc():
-    """``pld.world_size()`` can flow into ``pld.alloc_window_buffer(size)`` as
-    a per-rank byte-size operand."""
+    """``pld.world_size()`` can flow into ``pld.tensor.alloc_window_buffer(size)``
+    as a per-rank byte-size operand."""
 
     @pl.program
     class P:
@@ -189,10 +190,27 @@ def test_world_size_call_used_as_size_in_alloc():
         for stmt in body.stmts
         if isinstance(stmt, ir.AssignStmt)
         and isinstance(stmt.value, ir.Call)
-        and stmt.value.op.name == "pld.alloc_window_buffer"
+        and stmt.value.op.name == "pld.tensor.alloc_window_buffer"
         for c in [stmt.value]
     )
     assert alloc_call.args[0] is calls[0]
+
+
+def test_long_form_world_size_call():
+    """The canonical ``pld.system.world_size()`` long form parses to the same op
+    as the unified short form."""
+
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            n = pld.system.world_size()
+            return n
+
+    func = _get_func(P, "host_orch")
+    calls = _find_world_size_calls(func)
+    assert len(calls) == 1
+    assert calls[0].op.name == "pld.system.world_size"
 
 
 if __name__ == "__main__":

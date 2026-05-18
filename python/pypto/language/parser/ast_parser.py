@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, TypeGuard, cast
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
-from pypto.ir.utils import use_parser_span
 from pypto.language.distributed import op as _dsl_pld
 from pypto.language.op import array_ops as _dsl_array
 from pypto.language.op import system_ops as _dsl_system
@@ -54,21 +53,22 @@ if TYPE_CHECKING:
 
 
 def _is_pld_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
-    """Return True when ``node`` is the AST for a ``pld.<attr_name>(...)`` call.
+    """Match ``pld.<attr_name>(...)`` or ``pld.<category>.<attr_name>(...)``.
 
-    Recognises only the dotted ``pld.<attr>`` form. Aliasing under another
-    name (``from pypto.language.distributed import alloc_window_buffer``) is
-    intentionally not matched — the parser anchors distributed-DSL detection
-    on the ``pld.`` prefix.
+    Anchored on the literal ``pld.`` prefix; aliased imports don't match.
     """
     if not isinstance(node, ast.Call):
         return False
     func = node.func
+    if not isinstance(func, ast.Attribute) or func.attr != attr_name:
+        return False
+    parent = func.value
+    # 2-segment: pld.<attr_name>
+    if isinstance(parent, ast.Name) and parent.id == "pld":
+        return True
+    # 3-segment: pld.<category>.<attr_name>
     return (
-        isinstance(func, ast.Attribute)
-        and func.attr == attr_name
-        and isinstance(func.value, ast.Name)
-        and func.value.id == "pld"
+        isinstance(parent, ast.Attribute) and isinstance(parent.value, ast.Name) and parent.value.id == "pld"
     )
 
 
@@ -336,10 +336,9 @@ class ASTParser:
             pending_comments: Map from 1-based line number to ``#``-stripped comment lines
                 (produced by :func:`extract_line_comments`). Drained in source order and
                 attached as ``leading_comments`` metadata to the stmt that follows.
-            alloc_window_buffer_names: Optional shared set of buffer names that have already
-                been declared by ``pld.alloc_window_buffer`` within this program. Multiple
-                functions in a ``@pl.program`` share this set so the name-uniqueness check
-                spans the whole program rather than a single function.
+            alloc_window_buffer_names: Optional shared set of declared buffer names
+                (``pld.tensor.alloc_window_buffer`` LHS). Shared across all functions in
+                a ``@pl.program`` to enforce program-wide name uniqueness.
         """
         self.span_tracker = SpanTracker(source_file, source_lines, line_offset, col_offset)
         self.scope_manager = ScopeManager(strict_ssa=strict_ssa)
@@ -391,8 +390,8 @@ class ASTParser:
         )
         # Current function name (set during parse_function)
         self._func_name: str = ""
-        # Current function level (set during parse_function). Used by ops with
-        # context constraints (e.g. ``pld.world_size`` is host-only).
+        # Current function level (set during parse_function). Drives
+        # context-scoped op constraints (e.g. pld.system.world_size is host-only).
         self._func_level: ir.Level | None = None
 
         # Pending comments keyed by 1-based line number, drained by parse_statement.
@@ -400,9 +399,8 @@ class ASTParser:
         # tail-of-block comments (inside body indent) from outer-scope comments.
         self._pending_comments: dict[int, list[tuple[int, str]]] = pending_comments or {}
 
-        # Names declared by pld.alloc_window_buffer in this program. Globally unique
-        # across all functions in a single @pl.program (the decorator passes a shared
-        # set when constructing per-function parsers).
+        # Declared pld.tensor.alloc_window_buffer names — globally unique across
+        # all functions in a @pl.program (the decorator shares this set).
         self._alloc_window_buffer_names: set[str] = (
             alloc_window_buffer_names if alloc_window_buffer_names is not None else set()
         )
@@ -918,19 +916,11 @@ class ASTParser:
             self.scope_manager.define_var(var_name, ptr_var, span=span)
             return
 
-        # Printer round-trip: ``buf: pl.Ptr = pld.alloc_window_buffer(N)``. The
-        # alloc op normally appears in a plain (unannotated) assignment — but
-        # the printer emits the ``pl.Ptr`` annotation for clarity. Route this
-        # through the same dedicated alloc parser that runs for the unannotated
-        # form so the name-uniqueness and no-kwargs rules apply uniformly.
-        if (
-            is_ptr_type_annotation
-            and isinstance(stmt.value, ast.Call)
-            and isinstance(stmt.value.func, ast.Attribute)
-            and isinstance(stmt.value.func.value, ast.Name)
-            and stmt.value.func.value.id == "pld"
-            and stmt.value.func.attr == "alloc_window_buffer"
-        ):
+        # Printer round-trip: ``buf: pl.Ptr = pld.[tensor.]alloc_window_buffer(N)``.
+        # The printer adds a ``pl.Ptr`` annotation for clarity; route the
+        # annotated form through the same dedicated alloc parser as the
+        # unannotated form.
+        if is_ptr_type_annotation and _is_pld_call(stmt.value, "alloc_window_buffer"):
             self._parse_alloc_window_buffer_assignment(stmt.target, stmt.value)
             return
 
@@ -1073,11 +1063,9 @@ class ASTParser:
         Args:
             stmt: Assign AST node
         """
-        # Intercept ``buf = pld.alloc_window_buffer(...)`` before the generic
-        # path: the alloc op needs the LHS name as a kwarg, and we enforce a
-        # single-Name target + program-global name uniqueness here so the
-        # error surfaces at the original assignment site rather than from
-        # deep inside type deduction.
+        # Intercept ``buf = pld.[tensor.]alloc_window_buffer(...)``: the alloc
+        # op derives its ``name`` kwarg from the LHS, and the LHS name must be
+        # globally unique within the @pl.program.
         if len(stmt.targets) == 1 and _is_pld_call(stmt.value, "alloc_window_buffer"):
             self._parse_alloc_window_buffer_assignment(stmt.targets[0], stmt.value)
             return
@@ -1294,73 +1282,52 @@ class ASTParser:
         self.scope_manager.define_var(tid_target.id, tid_var, span=span)
 
     def _parse_alloc_window_buffer_assignment(self, target: ast.expr, value: ast.Call) -> None:
-        """Parse ``buf = pld.alloc_window_buffer(size)``.
+        """Parse ``buf = pld.[tensor.]alloc_window_buffer(size)``.
 
-        Takes one positional ``size`` (per-rank byte count) and binds the LHS
-        to a plain ``Var(PtrType)``. The LHS must be a single ``ast.Name``,
-        the chosen name must be program-globally unique, and no user kwargs
-        are accepted (``name`` is parser-injected from the LHS).
+        Parser-only concerns (everything else delegates to the DSL wrapper /
+        IR builder / C++ deducer via :func:`invoke_dsl`):
+
+        - LHS must be a single ``ast.Name``.
+        - That name must be globally unique within the ``@pl.program``.
+        - User can't pass ``name=`` (it's parser-injected from the LHS).
         """
         span = self.span_tracker.get_span(value)
 
         if not isinstance(target, ast.Name):
             raise ParserSyntaxError(
-                "pld.alloc_window_buffer must be assigned to a single variable name "
+                "pld.tensor.alloc_window_buffer must be assigned to a single variable name "
                 f"(got '{ast.unparse(target)}')",
                 span=span,
-                hint="Use 'buf = pld.alloc_window_buffer(...)' (no tuple unpacking, no subscripts)",
+                hint="Use 'buf = pld.tensor.alloc_window_buffer(...)' (no tuple unpacking, no subscripts)",
             )
 
         name = target.id
 
         if name in self._alloc_window_buffer_names:
             raise ParserSyntaxError(
-                f"pld.alloc_window_buffer name '{name}' is already declared in this program",
+                f"pld.tensor.alloc_window_buffer name '{name}' is already declared in this program",
                 span=span,
                 hint="Each window buffer must have a globally unique name across all functions",
             )
 
-        if len(value.args) != 1:
+        args = [self._parse_op_positional_arg(a) for a in value.args]
+        user_kwargs = self._parse_op_kwargs(value)
+        if "name" in user_kwargs:
             raise ParserSyntaxError(
-                "pld.alloc_window_buffer takes exactly 1 positional argument (size in bytes); "
-                f"got {len(value.args)}",
+                "pld.tensor.alloc_window_buffer 'name' kwarg cannot be passed explicitly — "
+                f"it is auto-derived from the assignment LHS ('{name}')",
                 span=span,
-                hint="Use 'pld.alloc_window_buffer(N)' where N is the per-rank size in bytes",
+                hint="Drop the 'name=...' kwarg; the LHS variable name becomes the buffer name",
             )
 
-        if value.keywords:
-            kw_names = [kw.arg for kw in value.keywords if kw.arg is not None]
-            raise ParserSyntaxError(
-                f"pld.alloc_window_buffer does not accept user-supplied kwargs; got {kw_names}",
-                span=span,
-                hint="Pass only the size as a positional argument; the buffer's name is "
-                "auto-derived from the assignment LHS",
-            )
-
-        size_expr = self._parse_op_positional_arg(value.args[0])
-        if isinstance(size_expr, int):
-            size_expr = ir.ConstInt(int(size_expr), DataType.INT64, span)
-        elif isinstance(size_expr, (list, tuple, ir.MakeTuple)):
-            raise ParserSyntaxError(
-                "pld.alloc_window_buffer size must be a scalar (int / Expr in bytes), not a list/tuple",
-                span=span,
-                hint="The redesigned alloc is pure-allocation — pass a single byte count "
-                "(e.g. 256 * 4). Shape lives on pld.window(buf, [shape], dtype=...) instead.",
-            )
-        elif not isinstance(size_expr, ir.Expr):
-            raise ParserSyntaxError(
-                "pld.alloc_window_buffer size must be an int / Expr in bytes "
-                f"(got {type(size_expr).__name__})",
-                span=span,
-                hint="Use a literal like '1024' or a symbolic expression (pld.world_size() * N, ...)",
-            )
-
-        # Funnel through the DSL wrapper so the actual ``ir.create_op_call``
-        # site is single-sourced in pypto.ir.op.distributed.memory_ops. The
-        # wrapper returns a ``pl.Ptr`` DSL object — unwrap to the underlying
-        # ``ir.Call`` for ``_assign_or_let`` (which expects a raw IR expr).
-        with use_parser_span(span):
-            alloc_call = _dsl_pld.alloc_window_buffer(size_expr, name=name).unwrap()
+        # Route through invoke_dsl — same path as _dispatch_op. Arity, size
+        # type, unknown kwargs are validated by the DSL wrapper / IR / C++.
+        alloc_call = invoke_dsl(
+            _dsl_pld.alloc_window_buffer,
+            args,
+            {**user_kwargs, "name": name},
+            span,
+        )
 
         self._alloc_window_buffer_names.add(name)
         var = self._assign_or_let(name, alloc_call, span)
@@ -4024,17 +3991,13 @@ class ASTParser:
         if isinstance(node, ast.Name):
             attrs.insert(0, node.id)
 
-        # pld.{operation} (2-segment) — distributed DSL ops
+        # pld.<op> (2-segment unified short form)
         if len(attrs) == 2 and attrs[0] == "pld":
             return self._parse_pld_op(attrs[1], call)
 
-        # pld.tile.{operation} (3-segment) — distributed cross-rank tile ops
-        if len(attrs) == 3 and attrs[0] == "pld" and attrs[1] == "tile":
-            return self._parse_pld_tile_op(attrs[2], call)
-
-        # pld.comm_ctx.{operation} (3-segment) — CommContext scalar accessors
-        if len(attrs) == 3 and attrs[0] == "pld" and attrs[1] == "comm_ctx":
-            return self._parse_pld_comm_ctx_op(attrs[2], call)
+        # pld.<category>.<op> (3-segment canonical form; category = system/tensor/tile)
+        if len(attrs) == 3 and attrs[0] == "pld":
+            return self._parse_pld_category_op(attrs[1], attrs[2], call)
 
         # pl.tensor.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":
@@ -4950,41 +4913,32 @@ class ASTParser:
         """Parse array operation (create / get_element / update_element)."""
         return self._dispatch_op(_dsl_array, "pl.array", op_name, call)
 
-    def _parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse a ``pld.<op>(...)`` distributed-DSL operation.
+    def _validate_pld_op_call(self, op_name: str, call: ast.Call) -> None:
+        """Parser-context checks shared by 2-segment and 3-segment pld paths.
 
-        Dispatches to the matching DSL wrapper in
-        :mod:`pypto.language.distributed.op` via the unified ``_dispatch_op``
-        helper — same path as ``pl.tile.*`` / ``pl.tensor.*`` / ``pl.system.*``.
-        Parser-context-dependent validation (host-only scoping for
-        ``pld.world_size``, LHS-name extraction for ``pld.alloc_window_buffer``)
-        runs here before the dispatch.
+        - ``alloc_window_buffer``: must be intercepted at assignment-LHS.
+          Reaching here means it was used outside that context.
+        - ``world_size``: host-only.
         """
         span = self.span_tracker.get_span(call)
 
         if op_name == "alloc_window_buffer":
-            # The DSL wrapper requires a ``name`` kwarg that only the parser can
-            # supply (it's derived from the assignment LHS). Calling the alloc
-            # op outside an assignment context is meaningless — emit a targeted
-            # error rather than dispatch with a synthetic name.
             raise ParserSyntaxError(
-                "pld.alloc_window_buffer must appear as the RHS of a simple assignment "
+                "pld.tensor.alloc_window_buffer must appear as the RHS of a simple assignment "
                 "(its result must be bound to a named variable)",
                 span=span,
-                hint="Write 'buf = pld.alloc_window_buffer(N)'",
+                hint="Write 'buf = pld.tensor.alloc_window_buffer(N)' "
+                "(or the short form 'buf = pld.alloc_window_buffer(N)')",
             )
 
         if op_name == "world_size":
-            # Parser-context check: host-only, not inside a device-side scope.
-            # The DSL wrapper itself has no access to this context, so we
-            # validate before dispatching.
             in_device_scope = any(
                 self._is_inside_scope(kind)
                 for kind in (ir.ScopeKind.InCore, ir.ScopeKind.AutoInCore, ir.ScopeKind.Spmd)
             )
             if self._func_level != ir.Level.HOST or in_device_scope:
                 raise ParserSyntaxError(
-                    "pld.world_size() can only be called in HOST orchestration context "
+                    "pld.system.world_size() can only be called in HOST orchestration context "
                     "(not inside InCore / AutoInCore / SPMD scopes); "
                     f"current function level: {self._func_level}",
                     span=span,
@@ -4992,123 +4946,50 @@ class ASTParser:
                     "on the enclosing function and call outside any nested device-side scope",
                 )
 
+    def _parse_pld_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse ``pld.<op>(...)`` — 2-segment unified short form.
+
+        Forwards to the 3-segment surface via the unified-dispatch shim in
+        :mod:`pypto.language.distributed.op.unified_ops`.
+        """
+        self._validate_pld_op_call(op_name, call)
+        span = self.span_tracker.get_span(call)
+
         if not hasattr(_dsl_pld, op_name):
             raise InvalidOperationError(
                 f"Unknown distributed operation 'pld.{op_name}'",
                 span=span,
-                hint="Available: pld.alloc_window_buffer, pld.window, pld.world_size, pld.get_comm_ctx",
+                hint="Available short forms: pld.world_size, pld.get_comm_ctx, pld.rank, "
+                "pld.nranks, pld.alloc_window_buffer, pld.window, pld.remote_load",
             )
 
         return self._dispatch_op(_dsl_pld, "pld", op_name, call)
 
-    def _parse_pld_comm_ctx_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse a ``pld.comm_ctx.<op>(...)`` CommContext scalar accessor.
+    def _parse_pld_category_op(self, category: str, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse ``pld.<category>.<op>(...)`` — 3-segment canonical form.
 
-        Dispatches to the DSL wrappers in
-        :mod:`pypto.language.distributed.op.comm_ctx_ops` via the unified
-        :meth:`_dispatch_op` helper — same path used by ``pl.tile.*`` and
-        the other ``pld.*`` ops. The C++ verifier rejects any argument
-        that is not :class:`ir.CommCtxType`.
+        Categories: ``system`` / ``tensor`` / ``tile`` (mirrors ``pl.system`` /
+        ``pl.tensor`` / ``pl.tile``).
         """
         span = self.span_tracker.get_span(call)
-        if not hasattr(_dsl_pld.comm_ctx, op_name):
+        self._validate_pld_op_call(op_name, call)
+
+        if not hasattr(_dsl_pld, category):
             raise InvalidOperationError(
-                f"Unknown distributed comm-ctx operation 'pld.comm_ctx.{op_name}'",
+                f"Unknown distributed category 'pld.{category}'",
                 span=span,
-                hint="Available: pld.comm_ctx.rank, pld.comm_ctx.nranks",
-            )
-        return self._dispatch_op(_dsl_pld.comm_ctx, "pld.comm_ctx", op_name, call)
-
-    def _parse_pld_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
-        """Parse a ``pld.tile.<op>(...)`` cross-rank tile operation.
-
-        Currently only ``pld.tile.remote_load`` is registered. The DSL surface
-        keeps ``peer`` / ``offsets`` / ``shape`` keyword-only for readability;
-        the IR op takes them positional, matching ``tile.load``.
-        """
-        span = self.span_tracker.get_span(call)
-
-        if op_name == "remote_load":
-            if len(call.args) != 1:
-                raise ParserSyntaxError(
-                    "pld.tile.remote_load takes 1 positional argument (target) and the "
-                    "kwargs 'peer', 'offsets', 'shape'; "
-                    f"got {len(call.args)} positional args",
-                    span=span,
-                    hint="Use 'pld.tile.remote_load(target, peer=..., offsets=[...], shape=[...])'",
-                )
-
-            allowed_kwargs = {"peer", "offsets", "shape"}
-            kw_names = {kw.arg for kw in call.keywords if kw.arg is not None}
-            extra = kw_names - allowed_kwargs
-            if extra:
-                raise ParserSyntaxError(
-                    f"pld.tile.remote_load does not accept kwarg(s) {sorted(extra)}",
-                    span=span,
-                    hint=f"Accepted kwargs: {sorted(allowed_kwargs)}",
-                )
-            missing = allowed_kwargs - kw_names
-            if missing:
-                raise ParserSyntaxError(
-                    f"pld.tile.remote_load missing required kwarg(s) {sorted(missing)}",
-                    span=span,
-                    hint="Pass 'peer', 'offsets', and 'shape' as kwargs",
-                )
-
-            target_expr = self.parse_expression(call.args[0])
-            if not isinstance(target_expr, ir.Expr):
-                raise ParserSyntaxError(
-                    "pld.tile.remote_load target must be an IR expression",
-                    span=span,
-                )
-            if not isinstance(target_expr.type, ir.DistributedTensorType):
-                raise ParserTypeError(
-                    "pld.tile.remote_load expects a DistributedTensor target (window-bound); "
-                    f"got {ir.python_print_type(target_expr.type)}",
-                    span=span,
-                    hint="Pass a parameter annotated as 'pld.DistributedTensor[[...], dtype]' "
-                    "or the result of 'pld.window(...)'",
-                )
-
-            kw_by_name = {kw.arg: kw for kw in call.keywords}
-
-            peer_expr = self.parse_expression(kw_by_name["peer"].value)
-            if not isinstance(peer_expr, ir.Expr):
-                raise ParserSyntaxError(
-                    "pld.tile.remote_load peer must be an IR expression (scalar rank index)",
-                    span=span,
-                )
-
-            offsets_raw = self._parse_op_positional_arg(kw_by_name["offsets"].value)
-            if not isinstance(offsets_raw, ir.MakeTuple):
-                raise ParserSyntaxError(
-                    f"pld.tile.remote_load offsets must be a list/tuple literal "
-                    f"(got {type(offsets_raw).__name__})",
-                    span=span,
-                    hint="Use a list literal like '[0]' or '[i, j]'",
-                )
-
-            shape_raw = self._parse_op_positional_arg(kw_by_name["shape"].value)
-            if not isinstance(shape_raw, ir.MakeTuple):
-                raise ParserSyntaxError(
-                    f"pld.tile.remote_load shape must be a list/tuple literal "
-                    f"(got {type(shape_raw).__name__})",
-                    span=span,
-                    hint="Use a list literal like '[N]' or '[M, N]'",
-                )
-
-            return ir.create_op_call(
-                "pld.tile.remote_load",
-                [target_expr, peer_expr, offsets_raw, shape_raw],
-                {},
-                span,
+                hint="Available categories: pld.system, pld.tensor, pld.tile",
             )
 
-        raise InvalidOperationError(
-            f"Unknown distributed tile operation 'pld.tile.{op_name}'",
-            span=span,
-            hint="Available: pld.tile.remote_load",
-        )
+        submodule = getattr(_dsl_pld, category)
+        if not hasattr(submodule, op_name):
+            raise InvalidOperationError(
+                f"Unknown distributed operation 'pld.{category}.{op_name}'",
+                span=span,
+                hint=f"Check spelling, or list available ops in pypto.language.distributed.op.{category}_ops",
+            )
+
+        return self._dispatch_op(submodule, f"pld.{category}", op_name, call)
 
     # Maps iterator type name to ForKind enum value.
     _ITERATOR_TO_KIND = {

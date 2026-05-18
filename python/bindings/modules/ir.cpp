@@ -535,9 +535,9 @@ void BindIR(nb::module_& m) {
   // type itself carries no per-instance fields.
   auto comm_ctx_type_class =
       nb::class_<CommCtxType, Type>(ir, "CommCtxType",
-                                    "Singleton marker type for pld.get_comm_ctx outputs. Consumed by "
-                                    "pld.comm_ctx.rank / pld.comm_ctx.nranks to read scalar fields of the "
-                                    "runtime CommContext struct.");
+                                    "Singleton marker type for pld.system.get_comm_ctx outputs. "
+                                    "Consumed by pld.system.rank / pld.system.nranks to read "
+                                    "scalar fields of the runtime CommContext struct.");
   comm_ctx_type_class.def(nb::init<>(), "Create the singleton CommCtxType instance.");
   comm_ctx_type_class.def_static("get", &GetCommCtxType, "Get the shared singleton CommCtxType instance.");
   BindFields<CommCtxType>(comm_ctx_type_class);

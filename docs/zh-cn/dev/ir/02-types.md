@@ -68,9 +68,9 @@ assert isinstance(t, ir.TensorType)            # C++ 继承关系保留
 # As<TensorType>(t) → null；As<DistributedTensorType>(t) → 转型成功
 ```
 
-分配侧的元数据（每 rank 大小、host staging 标志）挂在 `pld.alloc_window_buffer`
+分配侧的元数据（每 rank 大小、host staging 标志）挂在 `pld.tensor.alloc_window_buffer`
 op 所绑定的 `ir.WindowBuffer`（`Var` 子类）上。通过
-`pld.window(buf, [shape], dtype=...)` 物化的切片在
+`pld.tensor.window(buf, [shape], dtype=...)` 物化的切片在
 `DistributedTensorType.window_buffer` 上保留指向源 `WindowBuffer` 的可选反向
 引用，从而让两个 shape/dtype 相同但分配来源不同的切片在结构上保持不同。
 用户在签名中写的 `pld.DistributedTensor[[shape], dtype]` 不填该字段（为

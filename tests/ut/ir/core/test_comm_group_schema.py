@@ -13,7 +13,7 @@ Post-redesign, ``WindowBuffer`` is a :class:`Var` subclass that mirrors
 :class:`MemRef` exactly:
 
 * Wraps a :class:`Var` of type :class:`PtrType` (``base``) — the
-  allocation-identity token from ``pld.alloc_window_buffer``.
+  allocation-identity token from ``pld.tensor.alloc_window_buffer``.
 * Carries ``size`` (per-rank bytes), ``load_from_host`` / ``store_to_host``
   flags. **No** dtype, **no** name field — the runtime-unique identifier
   comes from the inherited ``Var.name_hint`` (taken from ``base.name_hint``).

@@ -17,16 +17,17 @@
  * unit owns every op that touches CommGroup window-buffer address-space life
  * cycle. Two ops are registered:
  *
- * * ``pld.alloc_window_buffer(size, *, name)`` — pure address-space allocation.
- *   Takes a per-rank scalar ``size`` (in **bytes**, matching ``tile.alloc``)
- *   plus a ``name`` kwarg, and returns the singleton :class:`PtrType` (the
- *   same allocation-identity token ``tile.alloc`` produces). The parser binds
- *   the result to a plain ``Var(PtrType, name_hint=name)``; the comm-collection
- *   pass later wraps the Ptr in an :class:`ir.WindowBuffer` Var subclass and
- *   threads it through ``DistributedTensorType.window_buffer_``.
+ * * ``pld.tensor.alloc_window_buffer(size, *, name)`` — pure address-space
+ *   allocation. Takes a per-rank scalar ``size`` (in **bytes**, matching
+ *   ``tile.alloc``) plus a ``name`` kwarg, and returns the singleton
+ *   :class:`PtrType` (the same allocation-identity token ``tile.alloc``
+ *   produces). The parser binds the result to a plain
+ *   ``Var(PtrType, name_hint=name)``; the comm-collection pass later wraps the
+ *   Ptr in an :class:`ir.WindowBuffer` Var subclass and threads it through
+ *   ``DistributedTensorType.window_buffer_``.
  *
- * * ``pld.window(buf, shape, *, dtype)`` — materialises a Ptr handle as a
- *   :class:`DistributedTensorType` view with the supplied shape and dtype.
+ * * ``pld.tensor.window(buf, shape, *, dtype)`` — materialises a Ptr handle as
+ *   a :class:`DistributedTensorType` view with the supplied shape and dtype.
  *   The result type's ``window_buffer_`` field is left ``nullopt`` at parse
  *   time; the comm-collection pass populates it from the def-use chain back
  *   to the alloc. Shape & dtype enter the type system only here.
@@ -64,13 +65,13 @@ T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const st
 
 TypePtr DeduceAllocWindowBufferType(const std::vector<ExprPtr>& args,
                                     const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 1) << "pld.alloc_window_buffer requires exactly 1 positional argument "
+  CHECK(args.size() == 1) << "pld.tensor.alloc_window_buffer requires exactly 1 positional argument "
                              "(size: ScalarType expression in bytes), but got "
                           << args.size();
-  CHECK(args[0]) << "pld.alloc_window_buffer size argument must not be null";
+  CHECK(args[0]) << "pld.tensor.alloc_window_buffer size argument must not be null";
 
-  auto name = GetKwarg<std::string>(kwargs, "name", "pld.alloc_window_buffer");
-  CHECK(!name.empty()) << "pld.alloc_window_buffer requires a non-empty 'name' kwarg";
+  auto name = GetKwarg<std::string>(kwargs, "name", "pld.tensor.alloc_window_buffer");
+  CHECK(!name.empty()) << "pld.tensor.alloc_window_buffer requires a non-empty 'name' kwarg";
 
   // The op produces a Ptr — exact mirror of tile.alloc / tensor.alloc.
   return GetPtrType();
@@ -78,22 +79,24 @@ TypePtr DeduceAllocWindowBufferType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceWindowType(const std::vector<ExprPtr>& args,
                          const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.size() == 2) << "pld.window requires 2 positional args (buf, shape), but got " << args.size();
-  CHECK(args[0]) << "pld.window 'buf' argument must not be null";
+  CHECK(args.size() == 2) << "pld.tensor.window requires 2 positional args (buf, shape), but got "
+                          << args.size();
+  CHECK(args[0]) << "pld.tensor.window 'buf' argument must not be null";
 
-  // First arg is the allocation-identity token from pld.alloc_window_buffer
+  // First arg is the allocation-identity token from pld.tensor.alloc_window_buffer
   // (or, in principle, any Ptr-typed Var the parser routes here). The
   // back-reference to the actual ``WindowBuffer`` is filled in later by the
   // comm-collection pass; until then ``window_buffer_`` is ``std::nullopt``.
   CHECK(IsA<PtrType>(args[0]->GetType()))
-      << "pld.window 'buf' must have type Ptr (output of pld.alloc_window_buffer), got "
+      << "pld.tensor.window 'buf' must have type Ptr (output of pld.tensor.alloc_window_buffer), got "
       << args[0]->GetType()->TypeName();
 
   auto shape_tuple = As<MakeTuple>(args[1]);
-  CHECK(shape_tuple) << "pld.window second argument must be a shape tuple (MakeTuple of ints / Exprs), got "
-                     << args[1]->TypeName();
+  CHECK(shape_tuple)
+      << "pld.tensor.window second argument must be a shape tuple (MakeTuple of ints / Exprs), got "
+      << args[1]->TypeName();
 
-  auto dtype = GetKwarg<DataType>(kwargs, "dtype", "pld.window");
+  auto dtype = GetKwarg<DataType>(kwargs, "dtype", "pld.tensor.window");
 
   // Shape & dtype enter the type system here. window_buffer_ stays nullopt
   // until CollectCommGroups (N4) wires it to the originating WindowBuffer.
@@ -103,10 +106,10 @@ TypePtr DeduceWindowType(const std::vector<ExprPtr>& args,
 }  // namespace
 
 // ============================================================================
-// pld.alloc_window_buffer — per-rank CommGroup window-buffer allocation
+// pld.tensor.alloc_window_buffer — per-rank CommGroup window-buffer allocation
 // ============================================================================
 
-REGISTER_OP("pld.alloc_window_buffer")
+REGISTER_OP("pld.tensor.alloc_window_buffer")
     .set_description(
         "Declare a per-rank CommGroup window-buffer slot of `size` bytes. Returns a Ptr "
         "(allocation-identity token, exactly like tile.alloc / tensor.alloc). The "
@@ -119,17 +122,17 @@ REGISTER_OP("pld.alloc_window_buffer")
     .f_deduce_type(DeduceAllocWindowBufferType);
 
 // ============================================================================
-// pld.window — materialise a window-buffer Ptr as a DistributedTensor view
+// pld.tensor.window — materialise a window-buffer Ptr as a DistributedTensor view
 // ============================================================================
 
-REGISTER_OP("pld.window")
+REGISTER_OP("pld.tensor.window")
     .set_description(
         "Materialise a window-buffer Ptr as a DistributedTensor view with the given shape "
         "and dtype. The result type's window_buffer back-reference is left unset at parse "
         "time; the comm-collection pass populates it from the def-use chain back to the "
         "alloc op.")
     .set_op_category("DistributedOp")
-    .add_argument("buf", "Ptr handle (output of pld.alloc_window_buffer)")
+    .add_argument("buf", "Ptr handle (output of pld.tensor.alloc_window_buffer)")
     .add_argument("shape", "Per-rank shape (MakeTuple of ExprPtr / ConstInt)")
     .set_attr<DataType>("dtype")
     .no_memory_spec()

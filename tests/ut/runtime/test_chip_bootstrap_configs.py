@@ -20,7 +20,7 @@ allocation size in bytes). The runtime passes the placeholder string
 that field.
 
 The CollectCommGroups pass that *infers* CommGroups from
-``pld.alloc_window_buffer`` ops is added in N4. These tests pre-stage the
+``pld.tensor.alloc_window_buffer`` ops is added in N4. These tests pre-stage the
 CommGroups directly on a hand-built ``ir.Program`` so the manifest pipeline
 can be exercised independently of the inference logic.
 """

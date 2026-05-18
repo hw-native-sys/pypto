@@ -82,7 +82,7 @@ using WindowBufferPtr = std::shared_ptr<const WindowBuffer>;
  * @brief A communication group inferred for a ``@pl.program``.
  *
  * The ``CollectCommGroups`` pass (N4) builds these from
- * ``pld.alloc_window_buffer`` ops and their dispatch coverage. The runtime
+ * ``pld.tensor.alloc_window_buffer`` ops and their dispatch coverage. The runtime
  * (``distributed_runner``) uses this to compose ``ChipBootstrapConfig`` before
  * bringing the workers up.
  *

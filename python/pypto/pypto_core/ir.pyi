@@ -1086,8 +1086,8 @@ class CommCtxType(Type):
     Carries no per-instance fields; the back-reference to the originating
     :class:`CommGroup` is recovered from the producing op's
     :class:`DistributedTensorType` argument (via its ``window_buffer_``
-    back-reference). Consumed by ``pld.comm_ctx.rank`` /
-    ``pld.comm_ctx.nranks`` to read scalar fields of the runtime
+    back-reference). Consumed by ``pld.system.rank`` /
+    ``pld.system.nranks`` to read scalar fields of the runtime
     ``CommContext`` struct.
     """
 

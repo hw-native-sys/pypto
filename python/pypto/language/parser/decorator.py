@@ -895,7 +895,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
             # ir.Var objects for dynamic dimension variables (issue #618).
             dyn_var_cache: dict[str, ir.Var] = {}
 
-            # Shared set of pld.alloc_window_buffer names so name-uniqueness
+            # Shared set of pld.tensor.alloc_window_buffer names so name-uniqueness
             # checks span every function in the program.
             alloc_window_buffer_names: set[str] = set()
 

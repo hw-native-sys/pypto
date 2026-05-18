@@ -15,9 +15,11 @@ cross-rank tile load: it reads a sub-region from a peer rank's window-bound
 distributed tensor and returns a local Tile of the requested shape and the
 target's dtype.
 
-The parser dispatches via the 3-segment ``pld.tile.<op>`` path
-(``ast_parser.py:_parse_pld_tile_op``); these tests cover both the positive
-DSL→IR lifting and the parser-level rejection of malformed call sites.
+The parser dispatches via the generic 3-segment ``pld.<category>.<op>`` path
+(``ast_parser.py:_parse_pld_category_op``); these tests cover both the
+positive DSL→IR lifting and the parser-level rejection of malformed call
+sites. The unified short form ``pld.remote_load(...)`` is exercised in
+``test_remote_load_short_form`` below.
 """
 
 import pypto.language as pl
@@ -143,7 +145,7 @@ def test_remote_load_handles_multi_dim_shape():
 
 
 def test_remote_load_rejects_zero_positional():
-    with pytest.raises(Exception, match="1 positional"):
+    with pytest.raises(Exception, match="positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -158,7 +160,7 @@ def test_remote_load_rejects_zero_positional():
 
 
 def test_remote_load_rejects_extra_positional():
-    with pytest.raises(Exception, match="1 positional"):
+    with pytest.raises(Exception, match="positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -173,7 +175,7 @@ def test_remote_load_rejects_extra_positional():
 
 
 def test_remote_load_rejects_missing_peer():
-    with pytest.raises(Exception, match="missing required kwarg"):
+    with pytest.raises(Exception, match="keyword-only argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -187,7 +189,7 @@ def test_remote_load_rejects_missing_peer():
 
 
 def test_remote_load_rejects_missing_offsets():
-    with pytest.raises(Exception, match="missing required kwarg"):
+    with pytest.raises(Exception, match="keyword-only argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -202,7 +204,7 @@ def test_remote_load_rejects_missing_offsets():
 
 
 def test_remote_load_rejects_missing_shape():
-    with pytest.raises(Exception, match="missing required kwarg"):
+    with pytest.raises(Exception, match="keyword-only argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -217,7 +219,7 @@ def test_remote_load_rejects_missing_shape():
 
 
 def test_remote_load_rejects_unknown_kwarg():
-    with pytest.raises(Exception, match="does not accept kwarg"):
+    with pytest.raises(Exception, match="unexpected keyword argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -255,8 +257,12 @@ def test_remote_load_rejects_plain_tensor_target():
 
 
 def test_remote_load_rejects_non_list_offsets():
-    """A scalar in place of ``offsets=[...]`` is rejected at parse time."""
-    with pytest.raises(Exception, match="offsets"):
+    """A scalar in place of ``offsets=[...]`` is rejected at parse time.
+
+    Mirrors ``pl.tile.load``: a non-iterable ``offsets`` is rejected by
+    ``_normalize_intlike`` and surfaces as a ``pld.tile`` dispatch error.
+    """
+    with pytest.raises(Exception, match="remote_load"):
 
         @pl.program
         class P:  # noqa: F841
@@ -284,6 +290,27 @@ def test_remote_load_rejects_unknown_subop():
             ) -> pl.Tensor[[64], pl.FP32]:
                 t = pld.tile.no_such_op(data, peer=peer, offsets=[0], shape=[32])  # type: ignore[attr-defined]  # noqa: F841
                 return data  # type: ignore[return-value]
+
+
+def test_remote_load_short_form():
+    """``pld.remote_load(...)`` (unified short form) parses to the same IR op
+    as the canonical 3-segment ``pld.tile.remote_load(...)``."""
+
+    @pl.program
+    class P:
+        @pl.function
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[64], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            t = pld.remote_load(data, peer=peer, offsets=[0], shape=[32])  # noqa: F841
+            return data  # type: ignore[return-value]
+
+    func = _get_func(P, "kernel")
+    call = _find_call(func, "pld.tile.remote_load")
+    assert call.op.name == "pld.tile.remote_load"
+    assert isinstance(call.type, ir.TileType)
 
 
 if __name__ == "__main__":

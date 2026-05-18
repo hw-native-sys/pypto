@@ -32,7 +32,7 @@ inline const PassProperties kInlineFunctionsProperties{.produced = {IRProperty::
 //    the final Simplify). Nothing between InlineFunctions and here touches
 //    the host_orch alloc/window/dispatch chain (host_orch is never tile-
 //    lowered), so the alloc/view/dispatch sites are still discoverable.
-//    Traces pld.alloc_window_buffer → pld.window → dispatch(device=r) and
+//    Traces pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r) and
 //    materialises WindowBuffer + Program.comm_groups_.
 
 inline const PassProperties kCollectCommGroupsProperties{.produced = {IRProperty::CommGroupsCollected}};

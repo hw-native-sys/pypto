@@ -11,10 +11,11 @@
 """Tests for the ``CollectCommGroups`` pass.
 
 The pass walks each ``host_orch`` function, traces
-``pld.alloc_window_buffer → pld.window → dispatch(device=r)`` chains, and:
+``pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r)``
+chains, and:
 
 * constructs one :class:`ir.WindowBuffer` per alloc,
-* rewrites every ``pld.window`` result Var so its
+* rewrites every ``pld.tensor.window`` result Var so its
   :class:`ir.DistributedTensorType` carries a ``window_buffer`` back-reference,
 * clusters allocs with the same device descriptor into a single
   :class:`ir.CommGroup` and writes them to ``Program.comm_groups``.
@@ -51,13 +52,13 @@ def _get_func(program: ir.Program, name: str) -> ir.Function:
 
 
 def _find_window_calls(func: ir.Function) -> list[ir.AssignStmt]:
-    """Return all ``AssignStmt``s whose RHS is a ``pld.window`` Call."""
+    """Return all ``AssignStmt``s whose RHS is a ``pld.tensor.window`` Call."""
 
     found: list[ir.AssignStmt] = []
 
     def walk(stmt: ir.Stmt) -> None:
         if isinstance(stmt, ir.AssignStmt):
-            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "pld.window":
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "pld.tensor.window":
                 found.append(stmt)
         if isinstance(stmt, ir.SeqStmts):
             for s in stmt.stmts:
@@ -70,7 +71,7 @@ def _find_window_calls(func: ir.Function) -> list[ir.AssignStmt]:
 
 
 def _view_var_types(func: ir.Function) -> list[ir.DistributedTensorType]:
-    """Return the type of each pld.window result Var, in source order."""
+    """Return the type of each pld.tensor.window result Var, in source order."""
     return [
         stmt.var.type
         for stmt in _find_window_calls(func)
@@ -364,7 +365,7 @@ def test_idempotent():
 
 
 # ---------------------------------------------------------------------------
-# Programs without any pld.alloc_window_buffer pass straight through
+# Programs without any pld.tensor.alloc_window_buffer pass straight through
 # ---------------------------------------------------------------------------
 
 

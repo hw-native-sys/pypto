@@ -545,9 +545,9 @@ def collect_comm_groups() -> Pass:
     """Collect CommGroups for distributed window-buffer allocations.
 
     For each ``@pl.program`` host_orch function, traces
-    ``pld.alloc_window_buffer → pld.window → dispatch(device=r)`` chains,
-    constructs a :class:`WindowBuffer` per alloc, back-fills the
-    ``DistributedTensorType.window_buffer_`` field on every ``pld.window``
+    ``pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r)``
+    chains, constructs a :class:`WindowBuffer` per alloc, back-fills the
+    ``DistributedTensorType.window_buffer_`` field on every ``pld.tensor.window``
     result Var, and writes :attr:`Program.comm_groups`.
 
     Runs immediately after :func:`inline_functions` — L2 orchestrations are

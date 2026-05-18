@@ -65,7 +65,7 @@ struct DeviceDescriptor {
 
 /// Per-alloc bookkeeping populated during the host_orch scan.
 struct AllocRecord {
-  CallPtr alloc_call;                  ///< pld.alloc_window_buffer Call
+  CallPtr alloc_call;                  ///< pld.tensor.alloc_window_buffer Call
   VarPtr ptr_var;                      ///< AssignStmt LHS (Var of PtrType)
   ExprPtr size_expr;                   ///< alloc_call->args_[0]
   std::string name;                    ///< from alloc_call attr "name"
@@ -81,7 +81,7 @@ struct AllocRecord {
         span(std::move(sp)) {}
 };
 
-/// Per-pld.window result Var: maps the LHS Var pointer back to its alloc.
+/// Per-pld.tensor.window result Var: maps the LHS Var pointer back to its alloc.
 struct WindowRecord {
   CallPtr window_call;
   VarPtr old_view_var;
@@ -89,7 +89,7 @@ struct WindowRecord {
 };
 
 /// Scans a host_orch function body once and records every
-/// ``pld.alloc_window_buffer`` and ``pld.window`` assignment.
+/// ``pld.tensor.alloc_window_buffer`` and ``pld.tensor.window`` assignment.
 class AllocAndWindowCollector : public IRVisitor {
  public:
   void VisitStmt_(const AssignStmtPtr& op) override {
@@ -97,18 +97,18 @@ class AllocAndWindowCollector : public IRVisitor {
     auto call = As<Call>(op->value_);
     if (var && call && call->op_) {
       const auto& op_name = call->op_->name_;
-      if (op_name == "pld.alloc_window_buffer") {
+      if (op_name == "pld.tensor.alloc_window_buffer") {
         INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
-            << "CollectCommGroups: pld.alloc_window_buffer expects exactly one arg (size)";
+            << "CollectCommGroups: pld.tensor.alloc_window_buffer expects exactly one arg (size)";
         // The parser injects ``name`` as a kwarg derived from the assignment
         // LHS — not as an ``attrs`` entry — so use GetKwarg here.
         auto name = call->GetKwarg<std::string>("name");
         INTERNAL_CHECK_SPAN(!name.empty(), call->span_)
-            << "CollectCommGroups: pld.alloc_window_buffer missing 'name' kwarg";
+            << "CollectCommGroups: pld.tensor.alloc_window_buffer missing 'name' kwarg";
         auto rec = std::make_unique<AllocRecord>(call, var, call->args_[0], name, call->span_);
         ptr_to_alloc[var.get()] = rec.get();
         allocs.push_back(std::move(rec));
-      } else if (op_name == "pld.window" && !call->args_.empty()) {
+      } else if (op_name == "pld.tensor.window" && !call->args_.empty()) {
         auto ptr_arg_var = As<Var>(call->args_[0]);
         if (ptr_arg_var) {
           auto it = ptr_to_alloc.find(ptr_arg_var.get());
@@ -158,7 +158,7 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
       if (fs->loop_var_.get() == v.get()) {
         // Loop bound determines coverage.
         if (auto stop_call = As<Call>(fs->stop_)) {
-          if (stop_call->op_ && stop_call->op_->name_ == "pld.world_size") {
+          if (stop_call->op_ && stop_call->op_->name_ == "pld.system.world_size") {
             desc.is_all = true;
             return desc;
           }
@@ -177,7 +177,7 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
           return desc;
         }
         throw pypto::ValueError(
-            "CollectCommGroups: device=r loop bound must be ConstInt or pld.world_size()");
+            "CollectCommGroups: device=r loop bound must be ConstInt or pld.system.world_size()");
       }
     }
     throw pypto::ValueError(
@@ -258,9 +258,9 @@ class DispatchAnalyzer : public IRVisitor {
 [[nodiscard]] VarPtr MintViewVar(const VarPtr& old_var, const WindowBufferPtr& wb) {
   auto dt = As<DistributedTensorType>(old_var->GetType());
   INTERNAL_CHECK_SPAN(dt, old_var->span_)
-      << "CollectCommGroups: pld.window result Var should have DistributedTensorType";
+      << "CollectCommGroups: pld.tensor.window result Var should have DistributedTensorType";
   // Preserve every field (shape / dtype / memref / tensor_view) and set
-  // window_buffer to the freshly-built ``wb``. ``pld.window`` outputs never
+  // window_buffer to the freshly-built ``wb``. ``pld.tensor.window`` outputs never
   // carry memref / tensor_view today (parser-fresh views), but the full-fields
   // ctor is the safe form.
   auto new_type = std::make_shared<const DistributedTensorType>(dt->shape_, dt->dtype_, dt->memref_,
@@ -294,9 +294,9 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   }
   for (const auto& rec : collector.allocs) {
     CHECK(!allocs_with_windows[rec->ptr_var.get()].empty())
-        << "CollectCommGroups: pld.alloc_window_buffer '" << rec->name
-        << "' has no pld.window materialisation (dead allocation) at " << rec->span.to_string();
-    CHECK(!rec->seen.empty()) << "CollectCommGroups: pld.alloc_window_buffer '" << rec->name
+        << "CollectCommGroups: pld.tensor.alloc_window_buffer '" << rec->name
+        << "' has no pld.tensor.window materialisation (dead allocation) at " << rec->span.to_string();
+    CHECK(!rec->seen.empty()) << "CollectCommGroups: pld.tensor.alloc_window_buffer '" << rec->name
                               << "' is not consumed by any chip_orch dispatch at " << rec->span.to_string();
   }
 
@@ -308,7 +308,7 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
                                                    /*store_to_host=*/false, rec->span);
   }
 
-  // Phase 5: build var substitution map for every pld.window result Var.
+  // Phase 5: build var substitution map for every pld.tensor.window result Var.
   std::unordered_map<const Var*, VarPtr> view_subst;
   for (const auto& w : collector.windows) {
     view_subst[w.old_view_var.get()] = MintViewVar(w.old_view_var, w.alloc->wb);
@@ -347,7 +347,7 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
     groups.push_back(std::make_shared<const CommGroup>(g.desc.ToDevices(), std::move(g.slots), g.span));
   }
 
-  // Phase 7: rewrite host_orch body so every reference to a pld.window result
+  // Phase 7: rewrite host_orch body so every reference to a pld.tensor.window result
   // Var picks up the type-updated copy. The base IRMutator handles all uses;
   // Substitute is the wrapper that does exactly this transformation.
   if (view_subst.empty()) return func;

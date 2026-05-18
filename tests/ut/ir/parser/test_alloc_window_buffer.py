@@ -8,7 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
 
-"""Parser tests for ``pld.alloc_window_buffer``.
+"""Parser tests for ``pld.tensor.alloc_window_buffer`` (and its
+``pld.alloc_window_buffer`` short form).
 
 After the MemRef-mirror redesign, the alloc op is a pure-allocation primitive
 (parallel to ``tile.alloc(memspace, size)``):
@@ -35,11 +36,11 @@ def _get_host_orch(program: ir.Program, name: str = "host_orch") -> ir.Function:
 
 
 def _find_alloc_assignment(func: ir.Function) -> ir.AssignStmt:
-    """Return the first AssignStmt whose RHS is a ``pld.alloc_window_buffer`` Call."""
+    """Return the first AssignStmt whose RHS is a ``pld.tensor.alloc_window_buffer`` Call."""
 
     def walk(stmt: ir.Stmt) -> ir.AssignStmt | None:
         if isinstance(stmt, ir.AssignStmt):
-            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "pld.alloc_window_buffer":
+            if isinstance(stmt.value, ir.Call) and stmt.value.op.name == "pld.tensor.alloc_window_buffer":
                 return stmt
         if isinstance(stmt, ir.SeqStmts):
             for s in stmt.stmts:
@@ -49,7 +50,7 @@ def _find_alloc_assignment(func: ir.Function) -> ir.AssignStmt:
         return None
 
     hit = walk(func.body)
-    assert hit is not None, "no pld.alloc_window_buffer assignment found in function body"
+    assert hit is not None, "no pld.tensor.alloc_window_buffer assignment found in function body"
     return hit
 
 
@@ -113,7 +114,7 @@ def test_alloc_window_buffer_returns_singleton_ptr_type():
 
     def walk(stmt: ir.Stmt) -> None:
         if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-            if stmt.value.op.name == "pld.alloc_window_buffer":
+            if stmt.value.op.name == "pld.tensor.alloc_window_buffer":
                 allocs.append(stmt)
         if isinstance(stmt, ir.SeqStmts):
             for s in stmt.stmts:
@@ -126,6 +127,24 @@ def test_alloc_window_buffer_returns_singleton_ptr_type():
     assert isinstance(type_a, ir.PtrType)
     assert isinstance(type_b, ir.PtrType)
     assert ir.structural_equal(type_a, type_b)
+
+
+def test_alloc_window_buffer_long_form():
+    """``pld.tensor.alloc_window_buffer(N)`` (canonical 3-segment form) parses
+    to the same registered op as the unified short form."""
+
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.tensor.alloc_window_buffer(64)
+            return buf
+
+    func = _get_host_orch(P)
+    stmt = _find_alloc_assignment(func)
+    assert isinstance(stmt.value, ir.Call)
+    assert stmt.value.op.name == "pld.tensor.alloc_window_buffer"
+    assert stmt.value.kwargs["name"] == "buf"
 
 
 def test_alloc_window_buffer_rejects_non_name_lhs():
@@ -153,14 +172,27 @@ def test_alloc_window_buffer_rejects_duplicate_names():
 
 
 def test_alloc_window_buffer_rejects_user_kwargs():
-    """The user-facing alloc takes only a positional size — no kwargs are allowed."""
-    with pytest.raises(Exception, match="does not accept user-supplied kwargs"):
+    """The user-facing alloc takes only a positional size — no kwargs are allowed.
+    Unknown kwargs surface from the DSL wrapper's Python signature."""
+    with pytest.raises(Exception, match="unexpected keyword argument"):
 
         @pl.program
         class P:  # noqa: F841
             @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
             def host_orch(self):
                 buf = pld.alloc_window_buffer(8, dtype=pl.FP32)  # noqa: F841
+                return buf
+
+
+def test_alloc_window_buffer_rejects_explicit_name_kwarg():
+    """``name`` is parser-injected from the LHS and can't be passed explicitly."""
+    with pytest.raises(Exception, match="'name' kwarg cannot be passed explicitly"):
+
+        @pl.program
+        class P:  # noqa: F841
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(self):
+                buf = pld.alloc_window_buffer(8, name="other")  # noqa: F841
                 return buf
 
 

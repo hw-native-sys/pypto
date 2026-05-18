@@ -7,28 +7,26 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Distributed system-level op DSL wrappers (``pld.<op>``).
+"""``pld.system.*`` — distributed system-level op DSL wrappers.
 
-System-level ops cover cross-rank synchronization and runtime queries.
-Exposes :func:`world_size` and :func:`get_comm_ctx`; N6 will add
-``notify`` / ``wait`` (``pld.system.notify`` / ``pld.system.wait``)
-here as well. The ``pld.comm_ctx.rank`` / ``pld.comm_ctx.nranks``
-accessors live in :mod:`.comm_ctx_ops`, exposed as the ``comm_ctx``
-sub-namespace.
+System-level ops cover host-only queries and CommContext scalar accessors:
 
-* ``world_size`` — host-only scalar returning the number of devices in the
+* :func:`world_size` — host-only scalar returning the number of devices in the
   current distributed execution. Returns a :class:`Scalar` wrapping an
   :class:`ir.Expr` of type ``ScalarType(INT64)``. Codegen later lowers each
   call site to ``len(contexts)``.
-* ``get_comm_ctx`` — lift a :class:`pld.DistributedTensor` to its
-  :class:`pld.CommCtx` handle. The op verifier (C++) refuses any
-  argument that is not :class:`ir.DistributedTensorType`.
+* :func:`get_comm_ctx` — lift a :class:`pld.DistributedTensor` to its
+  :class:`pld.CommCtx` handle. The op verifier (C++) refuses any argument
+  that is not :class:`ir.DistributedTensorType`.
+* :func:`rank` / :func:`nranks` — CommContext scalar reads (``INT32``). The
+  op verifier rejects any argument whose type is not :class:`ir.CommCtxType`.
 
 Typical use sites for ``world_size``:
 
 * loop bounds: ``for r in pl.range(pld.world_size()): ...``
-* allocation sizes (in bytes): ``pld.alloc_window_buffer(pld.world_size() * 4)``
-* per-rank tensor shapes: ``pld.window(buf, [pld.world_size()], dtype=pl.INT32)``
+* allocation sizes (in bytes): ``pld.tensor.alloc_window_buffer(pld.world_size() * 4)``
+* per-rank tensor shapes:
+  ``pld.tensor.window(buf, [pld.world_size()], dtype=pl.INT32)``
 """
 
 from pypto.ir.op.distributed import system_ops as _ir_system
@@ -36,7 +34,7 @@ from pypto.language.typing import Scalar
 
 from ..typing.comm_ctx import CommCtx
 from ..typing.distributed_tensor import DistributedTensor
-from .memory_ops import _unwrap
+from ._utils import _unwrap
 
 
 def world_size() -> Scalar:
@@ -65,10 +63,42 @@ def get_comm_ctx(dist_tensor: DistributedTensor) -> CommCtx:
 
     Returns:
         A :class:`pld.CommCtx` wrapping an :class:`ir.Call` of type
-        :class:`ir.CommCtxType`. Pass to :func:`pld.comm_ctx.rank` /
-        :func:`pld.comm_ctx.nranks` to read scalar fields.
+        :class:`ir.CommCtxType`. Pass to :func:`rank` / :func:`nranks` to
+        read scalar fields.
     """
     return CommCtx(expr=_ir_system.get_comm_ctx(_unwrap(dist_tensor)))
 
 
-__all__ = ["get_comm_ctx", "world_size"]
+def rank(ctx: CommCtx) -> Scalar:
+    """Return the local rank as an ``INT32`` :class:`Scalar`.
+
+    Codegen lowers each call site to a scalar load of the runtime
+    ``CommContext::rankId`` field.
+
+    Args:
+        ctx: A :class:`pld.CommCtx` handle from :func:`get_comm_ctx`.
+
+    Returns:
+        :class:`Scalar` wrapping an :class:`ir.Expr` of type
+        ``ScalarType(INT32)``.
+    """
+    return Scalar(expr=_ir_system.rank(_unwrap(ctx)))
+
+
+def nranks(ctx: CommCtx) -> Scalar:
+    """Return the rank count of the comm group as an ``INT32`` :class:`Scalar`.
+
+    Codegen lowers each call site to a scalar load of the runtime
+    ``CommContext::rankNum`` field.
+
+    Args:
+        ctx: A :class:`pld.CommCtx` handle from :func:`get_comm_ctx`.
+
+    Returns:
+        :class:`Scalar` wrapping an :class:`ir.Expr` of type
+        ``ScalarType(INT32)``.
+    """
+    return Scalar(expr=_ir_system.nranks(_unwrap(ctx)))
+
+
+__all__ = ["get_comm_ctx", "nranks", "rank", "world_size"]

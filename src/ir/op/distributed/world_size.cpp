@@ -11,7 +11,7 @@
 
 /**
  * @file world_size.cpp
- * @brief ``pld.world_size`` — host-only IR op returning the L3 world size.
+ * @brief ``pld.system.world_size`` — host-only IR op returning the L3 world size.
  *
  * Returns a scalar ``INT64`` value equal to the number of devices participating
  * in the current distributed execution (``len(contexts)`` at codegen time).
@@ -40,18 +40,18 @@ namespace {
 
 TypePtr DeduceWorldSizeType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CHECK(args.empty()) << "pld.world_size takes no positional arguments, but got " << args.size();
-  CHECK(kwargs.empty()) << "pld.world_size takes no kwargs, but got " << kwargs.size();
+  CHECK(args.empty()) << "pld.system.world_size takes no positional arguments, but got " << args.size();
+  CHECK(kwargs.empty()) << "pld.system.world_size takes no kwargs, but got " << kwargs.size();
   return std::make_shared<ScalarType>(DataType::INT64);
 }
 
 }  // namespace
 
 // ============================================================================
-// pld.world_size — host-only scalar producing the distributed world size
+// pld.system.world_size — host-only scalar producing the distributed world size
 // ============================================================================
 
-REGISTER_OP("pld.world_size")
+REGISTER_OP("pld.system.world_size")
     .set_description(
         "Return the number of devices participating in the current distributed execution "
         "as a scalar INT64. Host-only: must appear inside a host-level orchestrator function "

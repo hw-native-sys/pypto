@@ -70,8 +70,8 @@ assert isinstance(t, ir.TensorType)            # C++ inheritance preserved
 ```
 
 Allocation-side metadata (per-rank size, host-staging flags) lives on the
-`ir.WindowBuffer` `Var` subclass that the `pld.alloc_window_buffer` op binds.
-Slices materialised through `pld.window(buf, [shape], dtype=...)` carry an
+`ir.WindowBuffer` `Var` subclass that the `pld.tensor.alloc_window_buffer` op binds.
+Slices materialised through `pld.tensor.window(buf, [shape], dtype=...)` carry an
 optional back-reference (`DistributedTensorType.window_buffer`) to the source
 `WindowBuffer`, so two same-shape / same-dtype slices of different
 allocations stay structurally distinct. User-declared parameter annotations

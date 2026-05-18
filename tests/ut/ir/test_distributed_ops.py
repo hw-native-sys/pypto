@@ -15,9 +15,9 @@ After the MemRef-mirror redesign:
 * ``WindowBuffer`` is a :class:`Var` subclass with no ``name``/``dtype``
   fields; it wraps a base ``Var(PtrType)`` plus a per-rank byte size and
   host-staging flags. Constructed by the comm-collection pass.
-* ``pld.alloc_window_buffer(size, name=...)`` is pure-allocation and returns
-  the singleton :class:`PtrType` (same as ``tile.alloc``).
-* ``pld.window(buf, shape, dtype=...)`` consumes a ``Ptr`` and returns
+* ``pld.tensor.alloc_window_buffer(size, name=...)`` is pure-allocation and
+  returns the singleton :class:`PtrType` (same as ``tile.alloc``).
+* ``pld.tensor.window(buf, shape, dtype=...)`` consumes a ``Ptr`` and returns
   :class:`DistributedTensorType`; ``window_buffer`` back-reference is
   ``None`` at parse time and filled in by the comm-collection pass later.
 """
@@ -44,7 +44,7 @@ def test_window_buffer_type_is_singleton():
 
 
 # ---------------------------------------------------------------------------
-# pld.alloc_window_buffer op
+# pld.tensor.alloc_window_buffer op
 # ---------------------------------------------------------------------------
 
 
@@ -53,7 +53,7 @@ def test_alloc_window_buffer_returns_ptr_type():
     span = ir.Span.unknown()
     size = ir.ConstInt(1024, DataType.INT64, span)
     call = ir.create_op_call(
-        "pld.alloc_window_buffer",
+        "pld.tensor.alloc_window_buffer",
         [size],
         {"name": "buf"},
         span,
@@ -70,7 +70,7 @@ def test_alloc_window_buffer_requires_non_empty_name():
     size = ir.ConstInt(4, DataType.INT64, span)
     with pytest.raises(Exception, match="non-empty 'name'"):
         ir.create_op_call(
-            "pld.alloc_window_buffer",
+            "pld.tensor.alloc_window_buffer",
             [size],
             {"name": ""},
             span,
@@ -102,18 +102,18 @@ def test_window_buffer_is_var_subclass_wrapping_ptr():
 
 
 # ---------------------------------------------------------------------------
-# pld.window op
+# pld.tensor.window op
 # ---------------------------------------------------------------------------
 
 
 def test_window_returns_distributed_tensor_with_no_buffer_at_parse_time():
-    """``pld.window(ptr, shape, dtype=...)`` returns DistributedTensorType
+    """``pld.tensor.window(ptr, shape, dtype=...)`` returns DistributedTensorType
     with shape + dtype set; ``window_buffer`` is None until the
     comm-collection pass populates it."""
     span = ir.Span.unknown()
     base = ir.Var("buf", ir.PtrType(), span)
     shape = _make_shape_tuple([64], span)
-    call = ir.create_op_call("pld.window", [base, shape], {"dtype": DataType.FP16}, span)
+    call = ir.create_op_call("pld.tensor.window", [base, shape], {"dtype": DataType.FP16}, span)
     assert isinstance(call.type, ir.DistributedTensorType)
     assert call.type.dtype == DataType.FP16
     assert len(call.type.shape) == 1
@@ -125,13 +125,13 @@ def test_window_returns_distributed_tensor_with_no_buffer_at_parse_time():
 
 
 def test_window_rejects_non_ptr_arg():
-    """A Var with a non-PtrType type cannot be passed to ``pld.window``."""
+    """A Var with a non-PtrType type cannot be passed to ``pld.tensor.window``."""
     span = ir.Span.unknown()
     tensor_type = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
     bad = ir.Var("x", tensor_type, span)
     shape = _make_shape_tuple([64], span)
     with pytest.raises(Exception, match="Ptr"):
-        ir.create_op_call("pld.window", [bad, shape], {"dtype": DataType.FP32}, span)
+        ir.create_op_call("pld.tensor.window", [bad, shape], {"dtype": DataType.FP32}, span)
 
 
 def test_window_rejects_non_make_tuple_shape():
@@ -139,7 +139,7 @@ def test_window_rejects_non_make_tuple_shape():
     base = ir.Var("buf", ir.PtrType(), span)
     bad_shape = ir.ConstInt(8, DataType.INT64, span)
     with pytest.raises(Exception, match="shape tuple"):
-        ir.create_op_call("pld.window", [base, bad_shape], {"dtype": DataType.FP32}, span)
+        ir.create_op_call("pld.tensor.window", [base, bad_shape], {"dtype": DataType.FP32}, span)
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +176,14 @@ def test_distributed_tensor_type_with_and_without_window_buffer_differ():
 
 
 # ---------------------------------------------------------------------------
-# pld.world_size op
+# pld.system.world_size op
 # ---------------------------------------------------------------------------
 
 
 def test_world_size_returns_int64_scalar():
-    """``pld.world_size()`` returns a scalar INT64 — the distributed device count."""
+    """``pld.system.world_size()`` returns a scalar INT64 — the distributed device count."""
     span = ir.Span.unknown()
-    call = ir.create_op_call("pld.world_size", [], {}, span)
+    call = ir.create_op_call("pld.system.world_size", [], {}, span)
     assert isinstance(call.type, ir.ScalarType)
     assert call.type.dtype == DataType.INT64
     assert call.args == []
@@ -193,13 +193,13 @@ def test_world_size_returns_int64_scalar():
 def test_world_size_rejects_positional_args():
     span = ir.Span.unknown()
     with pytest.raises(Exception, match="no positional arguments"):
-        ir.create_op_call("pld.world_size", [ir.ConstInt(0, DataType.INT64, span)], {}, span)
+        ir.create_op_call("pld.system.world_size", [ir.ConstInt(0, DataType.INT64, span)], {}, span)
 
 
 def test_world_size_rejects_kwargs():
     span = ir.Span.unknown()
     with pytest.raises(Exception, match="no kwargs"):
-        ir.create_op_call("pld.world_size", [], {"foo": 1}, span)
+        ir.create_op_call("pld.system.world_size", [], {"foo": 1}, span)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +326,7 @@ def test_remote_load_rejects_non_make_tuple_offsets():
 
 
 # ---------------------------------------------------------------------------
-# pld.get_comm_ctx / pld.comm_ctx.rank / pld.comm_ctx.nranks ops (N5)
+# pld.system.get_comm_ctx / pld.system.rank / pld.system.nranks ops (N5)
 # ---------------------------------------------------------------------------
 
 
@@ -340,7 +340,7 @@ def test_comm_ctx_type_is_singleton():
 def test_get_comm_ctx_returns_comm_ctx_type():
     span = ir.Span.unknown()
     target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
-    ctx = ir.create_op_call("pld.get_comm_ctx", [target], {}, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
     assert isinstance(ctx.type, ir.CommCtxType)
     assert ctx.type is ir.CommCtxType.get()
 
@@ -351,14 +351,14 @@ def test_get_comm_ctx_rejects_plain_tensor():
     shape: list[ir.Expr] = [ir.ConstInt(64, DataType.INT64, span)]
     plain = ir.Var("x", ir.TensorType(shape, DataType.FP32), span)
     with pytest.raises(Exception, match="DistributedTensor"):
-        ir.create_op_call("pld.get_comm_ctx", [plain], {}, span)
+        ir.create_op_call("pld.system.get_comm_ctx", [plain], {}, span)
 
 
 def test_get_comm_ctx_rejects_kwargs():
     span = ir.Span.unknown()
     target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
     with pytest.raises(Exception, match="no kwargs"):
-        ir.create_op_call("pld.get_comm_ctx", [target], {"peer": 0}, span)
+        ir.create_op_call("pld.system.get_comm_ctx", [target], {"peer": 0}, span)
 
 
 def test_get_comm_ctx_rejects_extra_positional():
@@ -366,14 +366,14 @@ def test_get_comm_ctx_rejects_extra_positional():
     target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
     extra = ir.ConstInt(0, DataType.INT32, span)
     with pytest.raises(Exception, match="exactly 1 positional"):
-        ir.create_op_call("pld.get_comm_ctx", [target, extra], {}, span)
+        ir.create_op_call("pld.system.get_comm_ctx", [target, extra], {}, span)
 
 
 def test_comm_ctx_rank_returns_int32_scalar():
     span = ir.Span.unknown()
     target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
-    ctx = ir.create_op_call("pld.get_comm_ctx", [target], {}, span)
-    rank = ir.create_op_call("pld.comm_ctx.rank", [ctx], {}, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    rank = ir.create_op_call("pld.system.rank", [ctx], {}, span)
     assert isinstance(rank.type, ir.ScalarType)
     assert rank.type.dtype == DataType.INT32
 
@@ -381,8 +381,8 @@ def test_comm_ctx_rank_returns_int32_scalar():
 def test_comm_ctx_nranks_returns_int32_scalar():
     span = ir.Span.unknown()
     target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
-    ctx = ir.create_op_call("pld.get_comm_ctx", [target], {}, span)
-    nranks = ir.create_op_call("pld.comm_ctx.nranks", [ctx], {}, span)
+    ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
+    nranks = ir.create_op_call("pld.system.nranks", [ctx], {}, span)
     assert isinstance(nranks.type, ir.ScalarType)
     assert nranks.type.dtype == DataType.INT32
 
@@ -391,14 +391,14 @@ def test_comm_ctx_rank_rejects_non_comm_ctx_arg():
     span = ir.Span.unknown()
     not_ctx = ir.Var("n", ir.ScalarType(DataType.INT64), span)
     with pytest.raises(Exception, match="CommCtx"):
-        ir.create_op_call("pld.comm_ctx.rank", [not_ctx], {}, span)
+        ir.create_op_call("pld.system.rank", [not_ctx], {}, span)
 
 
 def test_comm_ctx_nranks_rejects_non_comm_ctx_arg():
     span = ir.Span.unknown()
     not_ctx = ir.Var("n", ir.ScalarType(DataType.INT64), span)
     with pytest.raises(Exception, match="CommCtx"):
-        ir.create_op_call("pld.comm_ctx.nranks", [not_ctx], {}, span)
+        ir.create_op_call("pld.system.nranks", [not_ctx], {}, span)
 
 
 if __name__ == "__main__":

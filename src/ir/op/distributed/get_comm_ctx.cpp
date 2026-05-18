@@ -11,19 +11,19 @@
 
 /**
  * @file get_comm_ctx.cpp
- * @brief Distributed comm-context ops — ``pld.get_comm_ctx`` and the
- *        ``pld.comm_ctx.rank`` / ``pld.comm_ctx.nranks`` scalar accessors.
+ * @brief Distributed comm-context ops — ``pld.system.get_comm_ctx`` and the
+ *        ``pld.system.rank`` / ``pld.system.nranks`` scalar accessors.
  *
  * DSL surface (explicit op calls, no attribute-access sugar)::
  *
- *     ctx = pld.get_comm_ctx(data)        # CommCtx
- *     r   = pld.comm_ctx.rank(ctx)        # INT32 scalar
- *     n   = pld.comm_ctx.nranks(ctx)      # INT32 scalar
+ *     ctx = pld.system.get_comm_ctx(data)  # CommCtx
+ *     r   = pld.system.rank(ctx)           # INT32 scalar
+ *     n   = pld.system.nranks(ctx)         # INT32 scalar
  *
- * ``pld.get_comm_ctx`` is 2-segment and dispatches through the parser's
- * generic ``_parse_pld_op`` path; ``pld.comm_ctx.<op>`` is 3-segment and
- * dispatches through ``_parse_pld_comm_ctx_op``, parallel to how
- * ``pld.tile.<op>`` is wired.
+ * All three ops use the standard 3-segment ``pld.<category>.<op>`` shape and
+ * dispatch through the parser's generic ``_parse_pld_category_op`` path. The
+ * unified shim (``pld.world_size(...)``, ``pld.rank(ctx)``, ...) re-exports the
+ * same builders so the short form resolves to identical IR.
  *
  * Codegen recovers the originating :class:`CommGroup` from the
  * ``DistributedTensorType`` (via its ``window_buffer_`` back-reference,
@@ -63,38 +63,38 @@ void CheckUnary(const std::string& op_name, const std::string& arg_role, const s
 
 TypePtr DeduceGetCommCtxType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  CheckUnary("pld.get_comm_ctx", "a DistributedTensor", args, kwargs);
+  CheckUnary("pld.system.get_comm_ctx", "a DistributedTensor", args, kwargs);
   // Strict ObjectKind match — As<DistributedTensorType> won't accept a plain
   // TensorType. Cross-rank metadata only exists on window-bound tensors.
   CHECK(As<DistributedTensorType>(args[0]->GetType()))
-      << "pld.get_comm_ctx expects a DistributedTensor (window-bound), got "
+      << "pld.system.get_comm_ctx expects a DistributedTensor (window-bound), got "
       << args[0]->GetType()->TypeName();
   return GetCommCtxType();
 }
 
-/// Shared deducer for the ``pld.comm_ctx.rank`` / ``pld.comm_ctx.nranks``
-/// scalar accessors — same signature (single ``CommCtx`` arg, ``INT32``
-/// result), differing only in the registered op name surfaced in error
-/// messages.
+/// Shared deducer for the ``pld.system.rank`` / ``pld.system.nranks`` scalar
+/// accessors — same signature (single ``CommCtx`` arg, ``INT32`` result),
+/// differing only in the registered op name surfaced in error messages.
 TypePtr DeduceCommCtxScalarType(const std::string& op_name, const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CheckUnary(op_name, "a CommCtx", args, kwargs);
   CHECK(IsA<CommCtxType>(args[0]->GetType()))
-      << op_name << " expects a CommCtx (output of pld.get_comm_ctx), got " << args[0]->GetType()->TypeName();
+      << op_name << " expects a CommCtx (output of pld.system.get_comm_ctx), got "
+      << args[0]->GetType()->TypeName();
   return std::make_shared<ScalarType>(DataType::INT32);
 }
 
 }  // namespace
 
 // ============================================================================
-// pld.get_comm_ctx — lift a DistributedTensor to its CommContext handle
+// pld.system.get_comm_ctx — lift a DistributedTensor to its CommContext handle
 // ============================================================================
 
-REGISTER_OP("pld.get_comm_ctx")
+REGISTER_OP("pld.system.get_comm_ctx")
     .set_description(
         "Return the communication-context handle (CommCtxType) of a window-bound "
-        "DistributedTensor. The result is the input to pld.comm_ctx.rank / "
-        "pld.comm_ctx.nranks; codegen recovers the originating CommGroup from "
+        "DistributedTensor. The result is the input to pld.system.rank / "
+        "pld.system.nranks; codegen recovers the originating CommGroup from "
         "the DistributedTensor's window_buffer back-reference.")
     .set_op_category("DistributedOp")
     .add_argument("dist_tensor", "A window-bound DistributedTensor (DistributedTensorType)")
@@ -102,10 +102,10 @@ REGISTER_OP("pld.get_comm_ctx")
     .f_deduce_type(DeduceGetCommCtxType);
 
 // ============================================================================
-// pld.comm_ctx.rank — read the local rank from a CommContext
+// pld.system.rank — read the local rank from a CommContext
 // ============================================================================
 
-REGISTER_OP("pld.comm_ctx.rank")
+REGISTER_OP("pld.system.rank")
     .set_description(
         "Read the local rank (INT32 scalar) from a CommContext handle. Codegen "
         "lowers this to a scalar load of CommContext::rankId.")
@@ -114,14 +114,14 @@ REGISTER_OP("pld.comm_ctx.rank")
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceCommCtxScalarType("pld.comm_ctx.rank", args, kwargs);
+      return DeduceCommCtxScalarType("pld.system.rank", args, kwargs);
     });
 
 // ============================================================================
-// pld.comm_ctx.nranks — read the rank count from a CommContext
+// pld.system.nranks — read the rank count from a CommContext
 // ============================================================================
 
-REGISTER_OP("pld.comm_ctx.nranks")
+REGISTER_OP("pld.system.nranks")
     .set_description(
         "Read the rank count (INT32 scalar) of the comm group from a CommContext "
         "handle. Codegen lowers this to a scalar load of CommContext::rankNum.")
@@ -130,7 +130,7 @@ REGISTER_OP("pld.comm_ctx.nranks")
     .no_memory_spec()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceCommCtxScalarType("pld.comm_ctx.nranks", args, kwargs);
+      return DeduceCommCtxScalarType("pld.system.nranks", args, kwargs);
     });
 
 }  // namespace ir

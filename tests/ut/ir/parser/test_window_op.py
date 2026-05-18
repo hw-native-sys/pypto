@@ -8,13 +8,13 @@
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
 
-"""Parser tests for ``pld.window``.
+"""Parser tests for ``pld.tensor.window`` (and its ``pld.window`` short form).
 
 After the MemRef-mirror redesign:
 
-* ``pld.window(buf, shape, dtype=...)`` consumes a ``Ptr``-typed Var
-  (the LHS of ``pld.alloc_window_buffer``) plus an explicit ``shape`` list
-  and a ``dtype`` kwarg.
+* ``pld.tensor.window(buf, shape, dtype=...)`` consumes a ``Ptr``-typed Var
+  (the LHS of ``pld.tensor.alloc_window_buffer``) plus an explicit ``shape``
+  list and a ``dtype`` kwarg.
 * Returns a :class:`ir.DistributedTensorType` carrying shape and dtype.
   ``window_buffer`` back-reference is **None** at parse time — the
   comm-collection pass populates it later.
@@ -53,13 +53,13 @@ def _find_call(func: ir.Function, op_name: str) -> ir.Call:
 
 
 def _find_alloc_var(func: ir.Function) -> ir.Var:
-    """Return the LHS Var of the first pld.alloc_window_buffer assignment."""
+    """Return the LHS Var of the first pld.tensor.alloc_window_buffer assignment."""
 
     def walk(stmt: ir.Stmt) -> ir.Var | None:
         if (
             isinstance(stmt, ir.AssignStmt)
             and isinstance(stmt.value, ir.Call)
-            and stmt.value.op.name == "pld.alloc_window_buffer"
+            and stmt.value.op.name == "pld.tensor.alloc_window_buffer"
         ):
             return stmt.var
         if isinstance(stmt, ir.SeqStmts):
@@ -86,7 +86,7 @@ def test_window_returns_distributed_tensor_type_no_buffer_yet():
             return data
 
     func = _get_host_orch(P)
-    win_call = _find_call(func, "pld.window")
+    win_call = _find_call(func, "pld.tensor.window")
     assert isinstance(win_call.type, ir.DistributedTensorType)
     assert win_call.type.dtype == pl.FP32
     shape = win_call.type.shape
@@ -110,7 +110,7 @@ def test_window_input_is_alloc_ptr_var():
             return data
 
     func = _get_host_orch(P)
-    win_call = _find_call(func, "pld.window")
+    win_call = _find_call(func, "pld.tensor.window")
     buf_var = _find_alloc_var(func)
     assert len(win_call.args) == 2
     buf_arg = win_call.args[0]
@@ -133,7 +133,7 @@ def test_window_propagates_multi_dim_shape():
             return data
 
     func = _get_host_orch(P)
-    call = _find_call(func, "pld.window")
+    call = _find_call(func, "pld.tensor.window")
     dt = call.type
     assert isinstance(dt, ir.DistributedTensorType)
     assert dt.dtype == pl.FP16
@@ -200,8 +200,26 @@ def test_window_can_be_called_inside_for_loop():
             return 0
 
     func = _get_host_orch(P)
-    win_call = _find_call(func, "pld.window")
+    win_call = _find_call(func, "pld.tensor.window")
     assert isinstance(win_call.type, ir.DistributedTensorType)
+
+
+def test_window_long_form():
+    """``pld.tensor.window`` canonical form parses to the same registered op
+    as the short form."""
+
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.tensor.alloc_window_buffer(32)
+            data = pld.tensor.window(buf, [8], dtype=pl.FP32)
+            return data
+
+    func = _get_host_orch(P)
+    call = _find_call(func, "pld.tensor.window")
+    assert call.op.name == "pld.tensor.window"
+    assert isinstance(call.type, ir.DistributedTensorType)
 
 
 def test_alloc_names_globally_unique_across_functions():
