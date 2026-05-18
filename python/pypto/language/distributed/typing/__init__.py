@@ -9,11 +9,17 @@
 
 """Type wrappers for the distributed DSL.
 
-Currently exposes :class:`DistributedTensor` — the annotation form of
-``ir.DistributedTensorType``. Mirrors :mod:`pypto.language.typing` for the
-single-device DSL.
+Exposes:
+
+* :class:`DistributedTensor` — annotation form of
+  ``ir.DistributedTensorType``.
+* :class:`CommCtx` — annotation + value wrapper for
+  ``ir.CommCtxType`` (the handle returned by ``pld.get_comm_ctx``).
+
+Mirrors :mod:`pypto.language.typing` for the single-device DSL.
 """
 
+from .comm_ctx import CommCtx
 from .distributed_tensor import DistributedTensor
 
-__all__ = ["DistributedTensor"]
+__all__ = ["CommCtx", "DistributedTensor"]

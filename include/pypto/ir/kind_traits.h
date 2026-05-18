@@ -115,6 +115,7 @@ DEFINE_KIND_TRAIT(TupleType, ObjectKind::TupleType)
 DEFINE_KIND_TRAIT(MemRefType, ObjectKind::MemRefType)
 DEFINE_KIND_TRAIT(PtrType, ObjectKind::PtrType)
 DEFINE_KIND_TRAIT(WindowBufferType, ObjectKind::WindowBufferType)
+DEFINE_KIND_TRAIT(CommCtxType, ObjectKind::CommCtxType)
 
 // Other IR node types
 DEFINE_KIND_TRAIT(Function, ObjectKind::Function)
@@ -205,7 +206,8 @@ struct KindTrait<Type> {
                                          ObjectKind::TileType,
                                          ObjectKind::ArrayType,
                                          ObjectKind::TupleType,
-                                         ObjectKind::WindowBufferType};
+                                         ObjectKind::WindowBufferType,
+                                         ObjectKind::CommCtxType};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 

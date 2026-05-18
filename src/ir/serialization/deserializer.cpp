@@ -425,6 +425,8 @@ class IRDeserializer::Impl : public detail::DeserializerContext {
       return std::make_shared<TupleType>(types);
     } else if (type_kind == "WindowBufferType") {
       return GetWindowBufferType();
+    } else if (type_kind == "CommCtxType") {
+      return GetCommCtxType();
     } else if (type_kind == "MemRefType") {
       return GetMemRefType();
     } else if (type_kind == "Ptr") {

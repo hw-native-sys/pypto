@@ -504,6 +504,10 @@ std::string IRPythonPrinter::Print(const TypePtr& type) {
     return "pld.WindowBufferType";
   }
 
+  if (As<CommCtxType>(type)) {
+    return "pld.CommCtxType";
+  }
+
   return prefix_ + ".UnknownType";
 }
 

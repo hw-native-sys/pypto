@@ -1080,6 +1080,23 @@ class WindowBufferType(Type):
         """Get the shared singleton WindowBufferType instance."""
         ...
 
+class CommCtxType(Type):
+    """Singleton marker type for ``pld.get_comm_ctx`` outputs.
+
+    Carries no per-instance fields; the back-reference to the originating
+    :class:`CommGroup` is recovered from the producing op's
+    :class:`DistributedTensorType` argument (via its ``window_buffer_``
+    back-reference). Consumed by ``pld.comm_ctx.rank`` /
+    ``pld.comm_ctx.nranks`` to read scalar fields of the runtime
+    ``CommContext`` struct.
+    """
+
+    def __init__(self) -> None: ...
+    @staticmethod
+    def get() -> CommCtxType:
+        """Get the shared singleton CommCtxType instance."""
+        ...
+
 class MemRef(Var):
     """Memory reference variable for shaped types (inherits from Var)."""
 

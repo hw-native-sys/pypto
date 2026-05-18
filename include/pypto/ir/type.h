@@ -768,6 +768,37 @@ inline WindowBufferTypePtr GetWindowBufferType() {
   return window_buffer_type;
 }
 
+/**
+ * @brief Singleton marker type for ``pld.get_comm_ctx`` results.
+ *
+ * Represents the communication context of a window-bound
+ * :class:`DistributedTensorType` — the runtime ``CommContext`` struct from
+ * which scalar fields like ``rank`` / ``nranks`` are read.
+ *
+ * Carries no per-instance fields; the back-reference to the originating
+ * :class:`WindowBuffer` / :class:`CommGroup` is recovered at codegen time
+ * from the producing ``pld.get_comm_ctx`` argument's type. Cross-rank op
+ * verifiers dispatch on this marker (``As<CommCtxType>``) to reject
+ * non-CommCtx arguments to ``pld.comm_ctx.rank`` / ``.nranks``.
+ */
+class CommCtxType : public Type {
+ public:
+  CommCtxType() = default;
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::CommCtxType; }
+  [[nodiscard]] std::string TypeName() const override { return "CommCtxType"; }
+
+  static constexpr auto GetFieldDescriptors() { return Type::GetFieldDescriptors(); }
+};
+
+using CommCtxTypePtr = std::shared_ptr<const CommCtxType>;
+
+/// Get the shared singleton CommCtxType instance.
+inline CommCtxTypePtr GetCommCtxType() {
+  static const auto comm_ctx_type = std::make_shared<CommCtxType>();
+  return comm_ctx_type;
+}
+
 }  // namespace ir
 }  // namespace pypto
 

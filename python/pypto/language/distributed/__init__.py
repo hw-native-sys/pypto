@@ -19,15 +19,25 @@ manually.
 Package layout mirrors :mod:`pypto.language`:
 
 * :mod:`pypto.language.distributed.op` — parser-sentinel ops
-  (:func:`alloc_window_buffer`, :func:`window`, :func:`world_size`, plus
-  the ``tile`` sub-namespace for cross-rank tile ops such as
-  :func:`pld.tile.remote_load`). Per-file split mirrors the C++ side
-  (``src/ir/op/distributed/``).
+  (:func:`alloc_window_buffer`, :func:`window`, :func:`world_size`,
+  :func:`get_comm_ctx`, plus the ``tile`` sub-namespace for cross-rank
+  tile ops such as :func:`pld.tile.remote_load` and the ``comm_ctx``
+  sub-namespace for :func:`pld.comm_ctx.rank` / :func:`pld.comm_ctx.nranks`).
+  Per-file split mirrors the C++ side (``src/ir/op/distributed/``).
 * :mod:`pypto.language.distributed.typing` — DSL type wrappers
-  (:class:`DistributedTensor`).
+  (:class:`DistributedTensor`, :class:`CommCtx`).
 """
 
-from .op import alloc_window_buffer, tile, window, world_size
-from .typing import DistributedTensor
+from .op import alloc_window_buffer, comm_ctx, get_comm_ctx, tile, window, world_size
+from .typing import CommCtx, DistributedTensor
 
-__all__ = ["DistributedTensor", "alloc_window_buffer", "tile", "window", "world_size"]
+__all__ = [
+    "CommCtx",
+    "DistributedTensor",
+    "alloc_window_buffer",
+    "comm_ctx",
+    "get_comm_ctx",
+    "tile",
+    "window",
+    "world_size",
+]

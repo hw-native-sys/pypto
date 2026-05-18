@@ -7,13 +7,15 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""IR builder for ``pld.world_size``.
+"""IR builders for distributed system-level ops (``pld.world_size``,
+``pld.get_comm_ctx``, ``pld.comm_ctx.rank`` / ``.nranks``).
 
 Mirror of :mod:`pypto.ir.op.system_ops` for the distributed namespace —
-exposes the registered C++ op as a Python builder. The DSL layer in
-:mod:`pypto.language.distributed.op.system_ops` wraps this for symmetry
-with the rest of the ``pld.*`` surface, even though the op has no DSL
-type to wrap.
+exposes the registered C++ ops as Python builders. The DSL layer in
+:mod:`pypto.language.distributed.op.system_ops` wraps :func:`world_size`
+for symmetry with the rest of the ``pld.*`` surface; the comm-ctx
+builders are consumed directly by the parser's ``data.comm.rank`` /
+``data.comm.nranks`` attribute desugar (no user-facing DSL surface).
 """
 
 from pypto.pypto_core import ir as _ir_core
@@ -32,4 +34,33 @@ def world_size(*, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("pld.world_size", [], {}, actual_span)
 
 
-__all__ = ["world_size"]
+def get_comm_ctx(dist_tensor: _ir_core.Expr, *, span: Span | None = None) -> Call:
+    """Build a ``pld.get_comm_ctx(dist_tensor)`` Call returning ``CommCtxType``.
+
+    Type verifier enforces that ``dist_tensor`` has
+    :class:`ir.DistributedTensorType` (precise ObjectKind match — plain
+    :class:`ir.TensorType` is refused).
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.get_comm_ctx", [dist_tensor], {}, actual_span)
+
+
+def comm_ctx_rank(ctx: _ir_core.Expr, *, span: Span | None = None) -> Call:
+    """Build a ``pld.comm_ctx.rank(ctx)`` Call returning ``ScalarType(INT32)``.
+
+    Type verifier enforces that ``ctx`` has :class:`ir.CommCtxType`.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.comm_ctx.rank", [ctx], {}, actual_span)
+
+
+def comm_ctx_nranks(ctx: _ir_core.Expr, *, span: Span | None = None) -> Call:
+    """Build a ``pld.comm_ctx.nranks(ctx)`` Call returning ``ScalarType(INT32)``.
+
+    Type verifier enforces that ``ctx`` has :class:`ir.CommCtxType`.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    return _ir_core.create_op_call("pld.comm_ctx.nranks", [ctx], {}, actual_span)
+
+
+__all__ = ["comm_ctx_nranks", "comm_ctx_rank", "get_comm_ctx", "world_size"]

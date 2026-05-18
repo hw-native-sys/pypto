@@ -4032,6 +4032,10 @@ class ASTParser:
         if len(attrs) == 3 and attrs[0] == "pld" and attrs[1] == "tile":
             return self._parse_pld_tile_op(attrs[2], call)
 
+        # pld.comm_ctx.{operation} (3-segment) — CommContext scalar accessors
+        if len(attrs) == 3 and attrs[0] == "pld" and attrs[1] == "comm_ctx":
+            return self._parse_pld_comm_ctx_op(attrs[2], call)
+
         # pl.tensor.{operation} (3-segment)
         if len(attrs) >= 3 and attrs[0] == "pl" and attrs[1] == "tensor":
             op_name = attrs[2]
@@ -4992,10 +4996,28 @@ class ASTParser:
             raise InvalidOperationError(
                 f"Unknown distributed operation 'pld.{op_name}'",
                 span=span,
-                hint="Available: pld.alloc_window_buffer, pld.window, pld.world_size",
+                hint="Available: pld.alloc_window_buffer, pld.window, pld.world_size, pld.get_comm_ctx",
             )
 
         return self._dispatch_op(_dsl_pld, "pld", op_name, call)
+
+    def _parse_pld_comm_ctx_op(self, op_name: str, call: ast.Call) -> ir.Expr:
+        """Parse a ``pld.comm_ctx.<op>(...)`` CommContext scalar accessor.
+
+        Dispatches to the DSL wrappers in
+        :mod:`pypto.language.distributed.op.comm_ctx_ops` via the unified
+        :meth:`_dispatch_op` helper — same path used by ``pl.tile.*`` and
+        the other ``pld.*`` ops. The C++ verifier rejects any argument
+        that is not :class:`ir.CommCtxType`.
+        """
+        span = self.span_tracker.get_span(call)
+        if not hasattr(_dsl_pld.comm_ctx, op_name):
+            raise InvalidOperationError(
+                f"Unknown distributed comm-ctx operation 'pld.comm_ctx.{op_name}'",
+                span=span,
+                hint="Available: pld.comm_ctx.rank, pld.comm_ctx.nranks",
+            )
+        return self._dispatch_op(_dsl_pld.comm_ctx, "pld.comm_ctx", op_name, call)
 
     def _parse_pld_tile_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse a ``pld.tile.<op>(...)`` cross-rank tile operation.

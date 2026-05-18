@@ -26,10 +26,13 @@ Layering (mirrors the ``pl.<ns>.<op>`` stack):
 
 from . import memory_ops, system_ops
 from .memory_ops import alloc_window_buffer, window
-from .system_ops import world_size
+from .system_ops import comm_ctx_nranks, comm_ctx_rank, get_comm_ctx, world_size
 
 __all__ = [
     "alloc_window_buffer",
+    "comm_ctx_nranks",
+    "comm_ctx_rank",
+    "get_comm_ctx",
     "memory_ops",
     "system_ops",
     "window",
