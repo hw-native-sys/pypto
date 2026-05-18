@@ -100,11 +100,16 @@ tile: pl.Tile[
 ### 变量和常量
 
 ```python
-x              # Variable reference
-tensor_a       # Tensor variable
-42             # Integer literal
-3.14           # Float literal
+x                       # Variable reference
+tensor_a                # Tensor variable
+42                      # Integer literal — INDEX-typed
+3.14                    # Float literal
+pl.const(42, pl.INT64)  # Typed integer literal (any non-INDEX dtype)
 ```
+
+裸整数字面量始终为 `INDEX` 类型。若需携带其他整数 dtype（如 `INT64`），
+请使用 `pl.const(value, dtype)`——打印器也以此形式渲染此类常量，
+从而保证打印出的 IR 能通过解析器正确往返。
 
 **闭包变量:** 在 DSL 作用域中未找到的名称会从外层 Python 作用域解析。支持的类型: `int`, `float`, `bool`, `list`, `tuple` 以及 IR 表达式。
 

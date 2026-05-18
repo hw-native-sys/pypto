@@ -2802,7 +2802,7 @@ class TestTileFormatShapeError:
         """Create a dim that is either a ConstInt (from ``int``) or a symbolic Var (from ``str``)."""
         if isinstance(value, str):
             return ir.Var(value, ir.ScalarType(DataType.INT32), span)
-        return ir.ConstInt(value, DataType.DEFAULT_CONST_INT, span)
+        return ir.ConstInt(value, DataType.INDEX, span)
 
     @pytest.mark.parametrize(
         ("op_callable", "lhs_dims", "rhs_dims", "match"),

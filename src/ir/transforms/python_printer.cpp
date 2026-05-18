@@ -529,10 +529,11 @@ void IRPythonPrinter::VisitExpr_(const MemRefPtr& op) { stream_ << op->name_hint
 void IRPythonPrinter::VisitExpr_(const WindowBufferPtr& op) { stream_ << op->name_hint_; }
 
 void IRPythonPrinter::VisitExpr_(const ConstIntPtr& op) {
-  // DEFAULT_CONST_INT (= INT64) and INDEX both represent 64-bit integer constants
-  // in the Python DSL, so they print as bare integers. Other integer types (INT8,
-  // INT32, etc.) need explicit dtype annotation.
-  if (op->dtype() == DataType::DEFAULT_CONST_INT || op->dtype() == DataType::INDEX) {
+  // A bare integer literal in the DSL canonically denotes INDEX -- that is what
+  // the parser (`ast_parser.parse_constant`) produces. Only INDEX may print
+  // bare; every other integer dtype (INT64 included) must carry an explicit
+  // `pl.const(value, pl.<DTYPE>)` annotation so print -> reparse round-trips.
+  if (op->dtype() == DataType::INDEX) {
     stream_ << op->value_;
   } else {
     stream_ << prefix_ << ".const(" << op->value_ << ", " << prefix_ << "." << DataTypeToString(op->dtype())

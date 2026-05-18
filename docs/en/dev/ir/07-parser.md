@@ -136,7 +136,7 @@ return result  # OK
 | -------- | -------- |
 | **Tensor Ops** | `pl.{add, mul, sub, div, matmul, cast, slice, ...}` |
 | **Binary Expr** | `a + b`, `a - b`, `a * b`, `a / b`, `i == 0`, `x < 10` |
-| **Literals** | `42` → `ConstInt`, `3.14` → `ConstFloat` |
+| **Literals** | `42` → `ConstInt` (INDEX), `pl.const(42, pl.INT64)` → typed `ConstInt`, `3.14` → `ConstFloat` |
 
 See [Python IR Syntax](../language/00-python_syntax.md) for complete operation list.
 

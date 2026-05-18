@@ -2366,9 +2366,9 @@ class TestTensorFormatShapeError:
         """Test that tensor shape mismatch errors show readable dimensions."""
         span = ir.Span.unknown()
 
-        dim4 = ir.ConstInt(4, DataType.DEFAULT_CONST_INT, span)
-        dim8 = ir.ConstInt(8, DataType.DEFAULT_CONST_INT, span)
-        dim3 = ir.ConstInt(3, DataType.DEFAULT_CONST_INT, span)
+        dim4 = ir.ConstInt(4, DataType.INDEX, span)
+        dim8 = ir.ConstInt(8, DataType.INDEX, span)
+        dim3 = ir.ConstInt(3, DataType.INDEX, span)
 
         tensor_type1 = ir.TensorType([dim4, dim8], DataType.FP32)
         tensor_type2 = ir.TensorType([dim3, dim8], DataType.FP32)
@@ -2385,7 +2385,7 @@ class TestTensorFormatShapeError:
 
         sym_m = ir.Var("M", ir.ScalarType(DataType.INT32), span)
         sym_n = ir.Var("N", ir.ScalarType(DataType.INT32), span)
-        dim8 = ir.ConstInt(8, DataType.DEFAULT_CONST_INT, span)
+        dim8 = ir.ConstInt(8, DataType.INDEX, span)
 
         tensor_type1 = ir.TensorType([sym_m, dim8], DataType.FP32)
         tensor_type2 = ir.TensorType([sym_n, dim8], DataType.FP32)

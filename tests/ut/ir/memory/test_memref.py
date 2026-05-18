@@ -1184,7 +1184,7 @@ class TestPythonSyntaxPrinting:
             ir.ConstInt(64, DataType.INT64, span),
             ir.ConstInt(128, DataType.INT64, span),
         ]
-        addr = ir.ConstInt(0x1000, DataType.INT64, span)
+        addr = ir.ConstInt(0x1000, DataType.INDEX, span)
         memref = ir.MemRef(ir.MemorySpace.DDR, addr, 1024, 7)
 
         tensor_type = ir.TensorType(shape, DataType.FP32, memref)
@@ -1204,7 +1204,7 @@ class TestPythonSyntaxPrinting:
             ir.ConstInt(16, DataType.INT64, span),
         ]
 
-        addr = ir.ConstInt(0x2000, DataType.INT64, span)
+        addr = ir.ConstInt(0x2000, DataType.INDEX, span)
         memref = ir.MemRef(ir.MemorySpace.Left, addr, 512, 8)
 
         valid_shape = [
@@ -1333,9 +1333,9 @@ class TestPythonSyntaxPrinting:
     def test_memref_print_with_symbolic_addr(self):
         """TensorType printing always uses constructor form because tensors live in DDR."""
         span = ir.Span.unknown()
-        base = ir.Var("base_addr", ir.ScalarType(DataType.INT64), span)
-        offset = ir.ConstInt(128, DataType.INT64, span)
-        addr = ir.Add(base, offset, DataType.INT64, span)
+        base = ir.Var("base_addr", ir.ScalarType(DataType.INDEX), span)
+        offset = ir.ConstInt(128, DataType.INDEX, span)
+        addr = ir.Add(base, offset, DataType.INDEX, span)
 
         # Legacy non-DDR MemRef hints on tensors still print in constructor form.
         memref_vec = ir.MemRef(ir.MemorySpace.Vec, addr, 2048, 9)
@@ -1378,7 +1378,7 @@ class TestPythonSyntaxPrinting:
             ir.ConstInt(64, DataType.INT64, span),
         ]
 
-        addr = ir.ConstInt(0x5000, DataType.INT64, span)
+        addr = ir.ConstInt(0x5000, DataType.INDEX, span)
         memref = ir.MemRef(ir.MemorySpace.Left, addr, 4096, 42)
         tensor_view = ir.TensorView(stride, ir.TensorLayout.NZ)
         tensor_type = ir.TensorType(shape, DataType.FP16, memref=memref, tensor_view=tensor_view)
@@ -1736,7 +1736,7 @@ class TestMemRefRoundTrip:
         shape = [dim64, dim64]
         tensor_type = ir.TensorType(shape, DataType.FP32)
 
-        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 16384, 0)
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INDEX, span), 16384, 0)
         tile_type = ir.TileType(shape, DataType.FP32, memref, None, ir.MemorySpace.Vec)
 
         input_var = ir.Var("x", tensor_type, span)

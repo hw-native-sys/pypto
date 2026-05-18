@@ -9,15 +9,19 @@
 
 """Tests for Python IR printer with type annotations and SSA-style syntax."""
 
+import textwrap
+
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 from pypto.ir import MemorySpace
+from pypto.ir.printer import python_print
 
 
 def test_python_print_basic_expressions():
     """Test Python-style printing of basic expressions."""
     span = ir.Span.unknown()
-    dtype = DataType.INT64
+    dtype = DataType.INDEX
 
     # Variables should include just the name
     x = ir.Var("x", ir.ScalarType(dtype), span)
@@ -121,7 +125,7 @@ def test_python_print_program():
 def test_python_print_if_stmt_basic():
     """Test basic if statement printing."""
     span = ir.Span.unknown()
-    dtype = DataType.INT64
+    dtype = DataType.INDEX
     x = ir.Var("x", ir.ScalarType(dtype), span)
     zero = ir.ConstInt(0, dtype, span)
     condition = ir.Gt(x, zero, dtype, span)
@@ -141,13 +145,14 @@ def test_python_print_for_stmt_basic():
     """Test basic for loop printing."""
     span = ir.Span.unknown()
     dtype = DataType.INT64
-    i = ir.Var("i", ir.ScalarType(dtype), span)
-    start = ir.ConstInt(0, dtype, span)
-    stop = ir.ConstInt(10, dtype, span)
-    step = ir.ConstInt(1, dtype, span)
+    idx = DataType.INDEX  # loop var / bounds are canonically index-typed
+    i = ir.Var("i", ir.ScalarType(idx), span)
+    start = ir.ConstInt(0, idx, span)
+    stop = ir.ConstInt(10, idx, span)
+    step = ir.ConstInt(1, idx, span)
 
     x = ir.Var("x", ir.ScalarType(dtype), span)
-    c2 = ir.ConstInt(2, dtype, span)
+    c2 = ir.ConstInt(2, idx, span)
     mul = ir.Mul(i, c2, dtype, span)
     assign = ir.AssignStmt(x, mul, span)
 
@@ -167,7 +172,7 @@ def test_python_print_for_range_concise_forms():
     - range(start, stop, step) otherwise
     """
     span = ir.Span.unknown()
-    dtype = DataType.INT64
+    dtype = DataType.INDEX
     i = ir.Var("i", ir.ScalarType(dtype), span)
     body = ir.SeqStmts([], span)
 
@@ -230,7 +235,7 @@ def test_python_print_for_range_concise_forms():
 def test_python_print_for_range_concise_with_var_bounds():
     """Test that concise range omission only applies to ConstInt, not Var expressions."""
     span = ir.Span.unknown()
-    dtype = DataType.INT64
+    dtype = DataType.INDEX
     i = ir.Var("i", ir.ScalarType(dtype), span)
     body = ir.SeqStmts([], span)
 
@@ -268,7 +273,7 @@ def test_python_print_for_range_concise_with_var_bounds():
 def test_python_print_for_range_concise_unroll_and_parallel():
     """Test concise range applies to pl.unroll() and pl.parallel() too."""
     span = ir.Span.unknown()
-    dtype = DataType.INT64
+    dtype = DataType.INDEX
     i = ir.Var("i", ir.ScalarType(dtype), span)
     body = ir.SeqStmts([], span)
 
@@ -502,7 +507,7 @@ def test_python_print_tile_type_prints_explicit_tile_memory_space():
     span = ir.Span.unknown()
     dim1 = ir.ConstInt(16, DataType.INT32, span)
     dim2 = ir.ConstInt(16, DataType.INT32, span)
-    memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 512, 0)
+    memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INDEX, span), 512, 0)
     tile_type = ir.TileType([dim1, dim2], DataType.FP16, memref, None, ir.MemorySpace.Vec)
 
     result = ir.python_print_type(tile_type)
@@ -745,7 +750,7 @@ def test_python_print_tile_load_store():
 def test_python_print_while_stmt_natural():
     """Test natural while loop printing (no iter_args)."""
     span = ir.Span.unknown()
-    dtype = DataType.INT64
+    dtype = DataType.INDEX
     x = ir.Var("x", ir.ScalarType(dtype), span)
     ten = ir.ConstInt(10, dtype, span)
     condition = ir.Lt(x, ten, dtype, span)
@@ -840,7 +845,7 @@ def test_python_print_while_stmt_ssa_multiple_iter_args():
 def test_python_print_while_stmt_with_complex_condition():
     """Test while loop printing with complex condition."""
     span = ir.Span.unknown()
-    dtype = DataType.INT64
+    dtype = DataType.INDEX
 
     init_x = ir.ConstInt(0, dtype, span)
     x_iter = ir.IterArg("x", ir.ScalarType(dtype), init_x, span)
@@ -1010,7 +1015,7 @@ def test_python_print_tile_shape_dims_always_bare():
 def test_python_print_concise_assignment():
     """Test that concise mode omits type annotations on AssignStmt."""
     span = ir.Span.unknown()
-    dtype = DataType.INT64
+    dtype = DataType.INDEX
     x = ir.Var("x", ir.ScalarType(dtype), span)
     c = ir.ConstInt(42, dtype, span)
     assign = ir.AssignStmt(x, c, span)
@@ -1222,6 +1227,32 @@ def test_python_print_dangling_iter_arg_use_disambiguated():
     # so the two distinct pointers are visibly different in the dump.
     assert "(acc,)" in text
     assert "acc_1" in text
+
+
+def test_int64_const_roundtrips_in_expression_context():
+    """ConstInt(INT64) prints explicit ``pl.const(...)`` and survives print -> reparse.
+
+    Regression: INT64 and INDEX both printed as bare integers, collapsing two
+    distinct types into identical text; the parser always reconstructed INDEX,
+    so a typed INT64 literal failed to round-trip (e.g. as a ``tensor.write``
+    value into an INT64 tensor, where the op deducer requires an exact dtype
+    match).
+    """
+    src = textwrap.dedent("""\
+        @pl.function
+        def main(out: pl.Tensor[[8], pl.INT64]):
+            for i in pl.range(0, 8):
+                pl.tensor.write(out, [i], pl.const(0, pl.INT64))
+    """)
+    func = pl.parse(src)
+
+    printed = python_print(func, format=False)
+    # INT64 literal must carry an explicit dtype, not print as a bare `0`.
+    assert "pl.const(0, pl.INT64)" in printed
+    # Reparse must not raise the tensor.write dtype-mismatch CHECK, and
+    # printing must be a fixed point.
+    reparsed = pl.parse(printed)
+    assert python_print(reparsed, format=False) == printed
 
 
 if __name__ == "__main__":

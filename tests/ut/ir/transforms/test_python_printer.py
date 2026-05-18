@@ -303,7 +303,7 @@ class TestTileViewTensorViewPrinting:
     def test_tiletype_with_tileview_no_keyword_subscript(self):
         span = ir.Span.unknown()
         tile_view = ir.TileView(valid_shape=[ir.ConstInt(32, DataType.INT64, span)])
-        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 256, 0)
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INDEX, span), 256, 0)
         tile_type = ir.TileType(
             [64], DataType.FP32, memref=memref, tile_view=tile_view, memory_space=ir.MemorySpace.Vec
         )
@@ -316,7 +316,7 @@ class TestTileViewTensorViewPrinting:
     def test_printed_type_is_valid_python_syntax(self):
         span = ir.Span.unknown()
         tile_view = ir.TileView(valid_shape=[ir.ConstInt(32, DataType.INT64, span)])
-        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INT64, span), 256, 0)
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, DataType.INDEX, span), 256, 0)
         tile_type = ir.TileType(
             [64], DataType.FP32, memref=memref, tile_view=tile_view, memory_space=ir.MemorySpace.Vec
         )
@@ -334,7 +334,7 @@ class TestTileViewTensorViewPrinting:
     def test_tileview_tensorview_parseable_by_type_resolver(self):
         span = ir.Span.unknown()
         tile_view = ir.TileView(valid_shape=[ir.ConstInt(32, DataType.INT64, span)])
-        memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INT64, span), 256, 0)
+        memref = ir.MemRef(ir.MemorySpace.DDR, ir.ConstInt(0, DataType.INDEX, span), 256, 0)
         original = ir.TileType(
             [64], DataType.FP32, memref=memref, tile_view=tile_view, memory_space=ir.MemorySpace.DDR
         )

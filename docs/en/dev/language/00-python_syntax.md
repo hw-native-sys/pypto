@@ -101,11 +101,16 @@ tile: pl.Tile[
 ### Variables and Constants
 
 ```python
-x              # Variable reference
-tensor_a       # Tensor variable
-42             # Integer literal
-3.14           # Float literal
+x                       # Variable reference
+tensor_a                # Tensor variable
+42                      # Integer literal — INDEX-typed
+3.14                    # Float literal
+pl.const(42, pl.INT64)  # Typed integer literal (any non-INDEX dtype)
 ```
+
+A bare integer literal is always `INDEX`-typed. To carry any other integer
+dtype (e.g. `INT64`), use `pl.const(value, dtype)` — this is also how the
+printer renders such constants so printed IR round-trips through the parser.
 
 **Closure variables:** Names not found in the DSL scope are resolved from the enclosing Python scope. Supported types: `int`, `float`, `bool`, `list`, `tuple`, and IR expressions.
 

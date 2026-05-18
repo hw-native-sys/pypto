@@ -136,7 +136,7 @@ return result  # OK
 | ---- | ---- |
 | **张量操作** | `pl.{add, mul, sub, div, matmul, cast, slice, ...}` |
 | **二元表达式 (Expression)** | `a + b`, `a - b`, `a * b`, `a / b`, `i == 0`, `x < 10` |
-| **字面量** | `42` → `ConstInt`, `3.14` → `ConstFloat` |
+| **字面量** | `42` → `ConstInt`（INDEX），`pl.const(42, pl.INT64)` → 带类型的 `ConstInt`，`3.14` → `ConstFloat` |
 
 参见 [Python IR 语法](../language/00-python_syntax.md) 获取完整操作列表。
 
