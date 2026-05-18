@@ -1081,7 +1081,7 @@ class WindowBufferType(Type):
         ...
 
 class CommCtxType(Type):
-    """Singleton marker type for ``pld.get_comm_ctx`` outputs.
+    """Singleton marker type for ``pld.system.get_comm_ctx`` outputs.
 
     Carries no per-instance fields; the back-reference to the originating
     :class:`CommGroup` is recovered from the producing op's

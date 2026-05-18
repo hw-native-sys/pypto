@@ -91,6 +91,7 @@ TypePtr DeduceWindowType(const std::vector<ExprPtr>& args,
       << "pld.tensor.window 'buf' must have type Ptr (output of pld.tensor.alloc_window_buffer), got "
       << args[0]->GetType()->TypeName();
 
+  CHECK(args[1]) << "pld.tensor.window 'shape' argument must not be null";
   auto shape_tuple = As<MakeTuple>(args[1]);
   CHECK(shape_tuple)
       << "pld.tensor.window second argument must be a shape tuple (MakeTuple of ints / Exprs), got "

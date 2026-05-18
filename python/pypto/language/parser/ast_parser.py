@@ -52,10 +52,19 @@ if TYPE_CHECKING:
     from .decorator import InlineFunction
 
 
+# Canonical pld.<category>.<op> middle segments. Kept in sync with the
+# submodules exposed by pypto.language.distributed.op (system_ops / tensor_ops
+# / tile_ops); also surfaced as the hint in _parse_pld_category_op.
+_PLD_CATEGORIES: frozenset[str] = frozenset({"system", "tensor", "tile"})
+
+
 def _is_pld_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
     """Match ``pld.<attr_name>(...)`` or ``pld.<category>.<attr_name>(...)``.
 
-    Anchored on the literal ``pld.`` prefix; aliased imports don't match.
+    Anchored on the literal ``pld.`` prefix; aliased imports don't match. For
+    the 3-segment form the middle segment must be one of the canonical
+    categories (``system`` / ``tensor`` / ``tile``) so typos like
+    ``pld.typo.alloc_window_buffer(...)`` don't bypass dispatch.
     """
     if not isinstance(node, ast.Call):
         return False
@@ -68,7 +77,10 @@ def _is_pld_call(node: object, attr_name: str) -> TypeGuard[ast.Call]:
         return True
     # 3-segment: pld.<category>.<attr_name>
     return (
-        isinstance(parent, ast.Attribute) and isinstance(parent.value, ast.Name) and parent.value.id == "pld"
+        isinstance(parent, ast.Attribute)
+        and parent.attr in _PLD_CATEGORIES
+        and isinstance(parent.value, ast.Name)
+        and parent.value.id == "pld"
     )
 
 
@@ -4974,7 +4986,7 @@ class ASTParser:
         span = self.span_tracker.get_span(call)
         self._validate_pld_op_call(op_name, call)
 
-        if not hasattr(_dsl_pld, category):
+        if category not in _PLD_CATEGORIES or not hasattr(_dsl_pld, category):
             raise InvalidOperationError(
                 f"Unknown distributed category 'pld.{category}'",
                 span=span,
