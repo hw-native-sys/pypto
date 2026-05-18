@@ -9,10 +9,10 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include <cstddef>
-#include <cstdint>
 #include <algorithm>
 #include <any>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -22,9 +22,9 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
-#include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -1793,9 +1793,9 @@ class OutWindowExternalizer {
       auto new_body = rewriter.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
       changed = true;
-      func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_, func->return_types_,
-                                        new_body, func->span_, func->func_type_, func->level_, func->role_,
-                                        func->attrs_);
+      func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
+                                        func->return_types_, new_body, func->span_, func->func_type_,
+                                        func->level_, func->role_, func->attrs_);
     }
 
     if (!changed) return program;
@@ -1872,9 +1872,10 @@ class OutWindowExternalizer {
       if (rhs_ci) {
         auto lhs = ParseAffineInLoop(mul->left_, loop_var);
         if (!lhs.has_value()) return std::nullopt;
-        return AffineForm{rhs_ci->value_ * lhs->coeff,
-                          MakeMul(lhs->base, std::make_shared<ConstInt>(rhs_ci->value_, rhs_ci->dtype(), rhs_ci->span_),
-                                  expr->span_)};
+        return AffineForm{
+            rhs_ci->value_ * lhs->coeff,
+            MakeMul(lhs->base, std::make_shared<ConstInt>(rhs_ci->value_, rhs_ci->dtype(), rhs_ci->span_),
+                    expr->span_)};
       }
     }
     return std::nullopt;
@@ -1939,12 +1940,14 @@ class OutWindowExternalizer {
       if (info_it == out_info_by_var_.end()) return assign;
       if (!offsets) return assign;
 
-      auto new_offset_tuple = std::make_shared<MakeTuple>(info_it->second.local_store_offsets, offsets->span_);
+      auto new_offset_tuple =
+          std::make_shared<MakeTuple>(info_it->second.local_store_offsets, offsets->span_);
       std::vector<ExprPtr> new_args = call->args_;
       new_args[offset_arg_index] = new_offset_tuple;
       new_args[target_arg_index] = new_out_vars_.at(target_var);
       auto new_type = new_store_types_.at(target_var);
-      auto new_call = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->attrs_, new_type, call->span_);
+      auto new_call =
+          std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->attrs_, new_type, call->span_);
 
       auto new_result_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
       result_var_remap_[assign->var_.get()] = new_result_var;
@@ -2069,17 +2072,19 @@ class OutWindowExternalizer {
         std::vector<ExprPtr> offset_exprs;
         offset_exprs.reserve(output.callsite_offsets.size());
         for (const auto& offset : output.callsite_offsets) {
-          offset_exprs.push_back(arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
+          offset_exprs.push_back(
+              arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
         }
         auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
 
         ExprPtr parent_expr = VisitExpr(call->args_[output.out_param_index]);
-        auto slice_call =
-            OpRegistry::GetInstance().Create("tensor.slice", {parent_expr, shape_tuple, offset_tuple}, call_assign->span_);
+        auto slice_call = OpRegistry::GetInstance().Create(
+            "tensor.slice", {parent_expr, shape_tuple, offset_tuple}, call_assign->span_);
         auto slice_var =
             std::make_shared<Var>(out_arg->name_hint_ + "__window", slice_call->GetType(), out_arg->span_);
         stmts.push_back(std::make_shared<AssignStmt>(slice_var, slice_call, call_assign->span_));
-        slices_by_out_index.emplace(output.out_param_index, SliceBundle{slice_var, parent_expr, offset_tuple});
+        slices_by_out_index.emplace(output.out_param_index,
+                                    SliceBundle{slice_var, parent_expr, offset_tuple});
       }
 
       std::vector<ExprPtr> new_args;
@@ -2105,10 +2110,10 @@ class OutWindowExternalizer {
           result_types.size() == 1 ? result_types[0] : std::make_shared<TupleType>(result_types);
 
       auto new_attrs = RewriteCallAttrs(call, analysis, slices_by_out_index);
-      auto new_call =
-          std::make_shared<Call>(cloned_gvar, new_args, call->kwargs_, new_attrs, new_return_type, call->span_);
-      auto tmp_result_var =
-          std::make_shared<Var>(call_assign->var_->name_hint_ + "__windowed", new_return_type, call_assign->var_->span_);
+      auto new_call = std::make_shared<Call>(cloned_gvar, new_args, call->kwargs_, new_attrs, new_return_type,
+                                             call->span_);
+      auto tmp_result_var = std::make_shared<Var>(call_assign->var_->name_hint_ + "__windowed",
+                                                  new_return_type, call_assign->var_->span_);
       stmts.push_back(std::make_shared<AssignStmt>(tmp_result_var, new_call, call_assign->span_));
 
       if (!is_submit_call && analysis.outputs.size() == 1 && result_types.size() == 1) {
@@ -2130,15 +2135,17 @@ class OutWindowExternalizer {
 
       std::unordered_map<size_t, VarPtr> tuple_items;
       for (const auto& output : analysis.outputs) {
-        auto get_item = std::make_shared<TupleGetItemExpr>(tmp_result_var, static_cast<int>(output.return_index),
-                                                           call_assign->span_);
-        auto item_var = std::make_shared<Var>(call_assign->var_->name_hint_ + "__windowed_" + std::to_string(output.return_index),
-                                              result_types[output.return_index], call_assign->var_->span_);
+        auto get_item = std::make_shared<TupleGetItemExpr>(
+            tmp_result_var, static_cast<int>(output.return_index), call_assign->span_);
+        auto item_var = std::make_shared<Var>(
+            call_assign->var_->name_hint_ + "__windowed_" + std::to_string(output.return_index),
+            result_types[output.return_index], call_assign->var_->span_);
         tail_stmts.push_back(std::make_shared<AssignStmt>(item_var, get_item, call_assign->span_));
 
         const auto& slice_bundle = slices_by_out_index.at(output.out_param_index);
         auto assemble_call = OpRegistry::GetInstance().Create(
-            "tensor.assemble", {slice_bundle.parent_expr, ExprPtr(item_var), slice_bundle.offset_tuple}, call_assign->span_);
+            "tensor.assemble", {slice_bundle.parent_expr, ExprPtr(item_var), slice_bundle.offset_tuple},
+            call_assign->span_);
         auto parent_type = slice_bundle.parent_expr->GetType();
         auto assembled_var = std::make_shared<Var>(
             call_assign->var_->name_hint_ + "__assembled_" + std::to_string(output.return_index), parent_type,
@@ -2361,7 +2368,8 @@ class OutWindowExternalizer {
     return (distance->value_ + step_abs - 1) / step_abs;
   }
 
-  static std::optional<ExprPtr> SimplifyWithLoopBound(const ExprPtr& expr, const VarPtr& loop_var, int64_t value) {
+  static std::optional<ExprPtr> SimplifyWithLoopBound(const ExprPtr& expr, const VarPtr& loop_var,
+                                                      int64_t value) {
     if (!expr) return std::nullopt;
     arith::Analyzer analyzer;
     analyzer.Bind(loop_var, value, value + 1);
@@ -2453,8 +2461,8 @@ class OutWindowExternalizer {
     return result;
   }
 
-  static std::optional<CalleeRewriteAnalysis> AnalyzeAggregateWindowLoop(const FunctionPtr& func,
-                                                                         const std::vector<size_t>& out_indices) {
+  static std::optional<CalleeRewriteAnalysis> AnalyzeAggregateWindowLoop(
+      const FunctionPtr& func, const std::vector<size_t>& out_indices) {
     if (!func || out_indices.empty()) return std::nullopt;
 
     auto body_stmts = FlattenToStmts(func->body_);
@@ -2636,7 +2644,8 @@ class OutWindowExternalizer {
 
       auto out_tensor_type = As<TensorType>(func->params_[match.out_param_index]->GetType());
       if (!out_tensor_type) return std::nullopt;
-      if (update.offsets.size() != update.window_shape.size() || update.offsets.size() != out_tensor_type->shape_.size()) {
+      if (update.offsets.size() != update.window_shape.size() ||
+          update.offsets.size() != out_tensor_type->shape_.size()) {
         return std::nullopt;
       }
 
@@ -2652,13 +2661,14 @@ class OutWindowExternalizer {
         if (!ordered_offsets.has_value()) return std::nullopt;
 
         auto span_expr = arith::Analyzer().Simplify(
-            MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_), update.window_shape[i], func->span_));
+            MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_), update.window_shape[i],
+                    func->span_));
         auto span_ci = As<ConstInt>(span_expr);
         if (!span_ci || span_ci->value_ <= 0) return std::nullopt;
 
         base_offsets.push_back(ordered_offsets->min);
-        local_offsets.push_back(
-            arith::Analyzer().Simplify(MakeSub(update.offsets[i], ordered_offsets->min, update.offsets[i]->span_)));
+        local_offsets.push_back(arith::Analyzer().Simplify(
+            MakeSub(update.offsets[i], ordered_offsets->min, update.offsets[i]->span_)));
         window_shape.push_back(std::make_shared<ConstInt>(span_ci->value_, DataType::INDEX, func->span_));
       }
 
@@ -2666,13 +2676,9 @@ class OutWindowExternalizer {
         return std::nullopt;
       }
 
-      analysis.outputs.push_back(OutputRewriteInfo{match.out_param_index,
-                                                   match.return_index,
-                                                   out_tensor_type->shape_,
-                                                   std::move(window_shape),
-                                                   std::move(base_offsets),
-                                                   std::move(local_offsets),
-                                                   match.iter_arg_index});
+      analysis.outputs.push_back(OutputRewriteInfo{
+          match.out_param_index, match.return_index, out_tensor_type->shape_, std::move(window_shape),
+          std::move(base_offsets), std::move(local_offsets), match.iter_arg_index});
     }
 
     return analysis;
@@ -2682,8 +2688,7 @@ class OutWindowExternalizer {
     AnalysisMap analyses;
     for (const auto& [gvar, func] : program->functions_) {
       if (!func || pypto::codegen::IsBuiltinOp(func->name_) ||
-          func->func_type_ == FunctionType::Orchestration ||
-          func->func_type_ == FunctionType::Inline) {
+          func->func_type_ == FunctionType::Orchestration || func->func_type_ == FunctionType::Inline) {
         continue;
       }
 
@@ -2704,7 +2709,8 @@ class OutWindowExternalizer {
           all_final = false;
           break;
         }
-        if (AreExprVectorsEqual(info->window_shape, out_tensor_type->shape_) && IsAllZeroOffsets(info->offsets)) {
+        if (AreExprVectorsEqual(info->window_shape, out_tensor_type->shape_) &&
+            IsAllZeroOffsets(info->offsets)) {
           all_final = false;
           break;
         }
@@ -2734,14 +2740,9 @@ class OutWindowExternalizer {
         for (size_t i = 0; i < info->offsets.size(); ++i) {
           local_zero_offsets.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, func->span_));
         }
-        analysis.outputs.push_back(
-            OutputRewriteInfo{out_index,
-                              info->return_index,
-                              out_tensor_type->shape_,
-                              info->window_shape,
-                              info->offsets,
-                              local_zero_offsets,
-                              SIZE_MAX});
+        analysis.outputs.push_back(OutputRewriteInfo{out_index, info->return_index, out_tensor_type->shape_,
+                                                     info->window_shape, info->offsets, local_zero_offsets,
+                                                     SIZE_MAX});
       }
       if (all_final && !analysis.outputs.empty()) {
         analysis.kind = RewriteKind::FinalStore;
@@ -2757,7 +2758,8 @@ class OutWindowExternalizer {
     return analyses;
   }
 
-  FunctionPtr RewriteCallee(const ProgramPtr& program, const FunctionPtr& func, const CalleeRewriteAnalysis& analysis) {
+  FunctionPtr RewriteCallee(const ProgramPtr& program, const FunctionPtr& func,
+                            const CalleeRewriteAnalysis& analysis) {
     if (!func) return nullptr;
 
     std::vector<VarPtr> new_params;
@@ -2780,13 +2782,14 @@ class OutWindowExternalizer {
           new_view = out_tensor_type->tensor_view_;
           if (new_view->stride.empty()) {
             if (new_view->layout == TensorLayout::NZ) return nullptr;
-            new_view->stride =
-                tensor_view_semantics::BuildLogicalStridesFromLayout(out_tensor_type->shape_, new_view->layout);
+            new_view->stride = tensor_view_semantics::BuildLogicalStridesFromLayout(out_tensor_type->shape_,
+                                                                                    new_view->layout);
           }
           if (!new_view->valid_shape.empty()) new_view->valid_shape = rewrite_it->window_shape;
         } else {
           auto parent_strides = ComputeRowMajorStrides(rewrite_it->parent_shape);
-          if (parent_strides.empty() || parent_strides.size() != rewrite_it->window_shape.size()) return nullptr;
+          if (parent_strides.empty() || parent_strides.size() != rewrite_it->window_shape.size())
+            return nullptr;
           new_view = TensorView(std::move(parent_strides), TensorLayout::ND);
         }
 
@@ -2795,7 +2798,8 @@ class OutWindowExternalizer {
         new_return_types[rewrite_it->return_index] = param_type;
       }
 
-      auto new_param = std::make_shared<Var>(func->params_[i]->name_hint_, param_type, func->params_[i]->span_);
+      auto new_param =
+          std::make_shared<Var>(func->params_[i]->name_hint_, param_type, func->params_[i]->span_);
       new_params.push_back(new_param);
       seed[func->params_[i].get()] = new_param;
     }
@@ -2868,7 +2872,8 @@ class OutWindowExternalizer {
 
       class AggregateLoopTypeLocalizer : public IRMutator {
        public:
-        explicit AggregateLoopTypeLocalizer(const std::unordered_map<const Var*, TypePtr>& narrowed_return_vars)
+        explicit AggregateLoopTypeLocalizer(
+            const std::unordered_map<const Var*, TypePtr>& narrowed_return_vars)
             : narrowed_return_vars_(narrowed_return_vars) {}
 
        protected:
@@ -2880,8 +2885,8 @@ class OutWindowExternalizer {
             if (it == narrowed_return_vars_.end()) continue;
             auto old_iter = op->iter_args_[i];
             auto old_ret = op->return_vars_[i];
-            auto new_iter =
-                std::make_shared<IterArg>(old_iter->name_hint_, it->second, old_iter->initValue_, old_iter->span_);
+            auto new_iter = std::make_shared<IterArg>(old_iter->name_hint_, it->second, old_iter->initValue_,
+                                                      old_iter->span_);
             auto new_ret = std::make_shared<Var>(old_ret->name_hint_, it->second, old_ret->span_);
             var_remap_[old_iter.get()] = new_iter;
             var_remap_[old_ret.get()] = new_ret;
@@ -2932,8 +2937,9 @@ class OutWindowExternalizer {
       new_body = localizer.VisitStmt(new_body);
     }
 
-    return std::make_shared<Function>(cloned_name, new_params, new_param_directions, new_return_types, new_body,
-                                      func->span_, func->func_type_, func->level_, func->role_, func->attrs_);
+    return std::make_shared<Function>(cloned_name, new_params, new_param_directions, new_return_types,
+                                      new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                      func->attrs_);
   }
 };
 

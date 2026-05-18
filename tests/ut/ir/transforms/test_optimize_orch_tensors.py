@@ -31,6 +31,12 @@ def _run_to_optimize_orch_tensors(program):
     raise AssertionError("Default pipeline did not run OptimizeOrchTensors")
 
 
+def _get_function(program, name: str):
+    func = program.get_function(name)
+    assert func is not None
+    return func
+
+
 class TestIterArgReuse:
     """Pattern 1: Merge Out params into In params via iter-arg feedback."""
 
@@ -1077,7 +1083,7 @@ class TestOutWindowExternalizer:
         kv_windowed = After.get_function("kv_stripe__windowed")
         assert kv_windowed is not None
 
-        printed_main = ir.python_print(After.get_function("main"))
+        printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(k_out" in printed_main
         assert "pl.tensor.slice(v_out" in printed_main
         assert "kv_stripe__windowed(" in printed_main
@@ -1121,7 +1127,7 @@ class TestOutWindowExternalizer:
         After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kv_stripe__windowed") is None
-        printed_main = ir.python_print(After.get_function("main"))
+        printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(k_out" not in printed_main
         assert "pl.tensor.slice(v_out" not in printed_main
 
@@ -1314,7 +1320,7 @@ class TestOutWindowExternalizer:
 
         After = _run_to_optimize_orch_tensors(Before)
 
-        printed_main = ir.python_print(After.get_function("main"))
+        printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.Tuple[pl.Tensor[[16, 512], pl.FP32]" in printed_main
         assert "__assembled_0" in printed_main
         assert "__assembled_1" in printed_main
@@ -1359,7 +1365,7 @@ class TestOutWindowExternalizer:
         k_proj_windowed = After.get_function("k_proj__windowed")
         assert k_proj_windowed is not None
 
-        printed_main = ir.python_print(After.get_function("main"))
+        printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(k_iter" in printed_main
         assert "[16, 256]" in printed_main
         assert "ob_chunk" in printed_main
@@ -1409,7 +1415,7 @@ class TestOutWindowExternalizer:
         After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("k_proj__windowed") is None
-        printed_main = ir.python_print(After.get_function("main"))
+        printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(k_iter" not in printed_main
 
     def test_overlapping_sequential_windows_stay_baseline(self):
@@ -1472,7 +1478,7 @@ class TestOutWindowExternalizer:
         After = passes.optimize_orch_tensors()(Before)
 
         assert After.get_function("kernel_stripe__windowed") is None
-        printed_main = ir.python_print(After.get_function("main"))
+        printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(out" not in printed_main
 
     def test_full_shape_zero_offset_window_stays_baseline(self):
@@ -1500,7 +1506,7 @@ class TestOutWindowExternalizer:
         After = _run_to_optimize_orch_tensors(Before)
 
         assert After.get_function("kernel_full__windowed") is None
-        printed_main = ir.python_print(After.get_function("main"))
+        printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(out" not in printed_main
 
 

@@ -596,6 +596,7 @@ class TestPhaseFenceSwimlane:
             f"{_PHASE_FENCE_N_BRANCHES} phase-N+1 tasks)"
         )
 
+
 class TestPhaseFenceAutoSwimlane:
     """Basic runtime validation for the auto-scope phase-fence control case."""
 
@@ -811,6 +812,7 @@ class TestBranchChainSwimlane:
             assert len(step0_cores) >= 2, (
                 f"branches should spread across cores; step-0 core_ids = {sorted(step0_cores)}"
             )
+
 
 _ORIGINAL_KV_PROJ_ROWS = 16
 _ORIGINAL_KV_PROJ_HIDDEN = 512
