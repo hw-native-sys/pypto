@@ -3227,14 +3227,15 @@ class TestManualScopeCodegen:
         # through the user-named variable, even if later passes introduce a
         # temporary tuple item for the windowed call result.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "task_0_outs.task_id()" in code, code
-        assert "PTO2TaskId stage1_tid =" in code, code
+        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        assert producer_tid, code
+        assert re.search(rf"PTO2TaskId stage1_tid(?:_\d+)? = {producer_tid.group(1)};", code), code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
 
         # *** Manual dep correctly established WITHIN each iteration ***
         # stage2 reads what stage1 just wrote to ``scratch``: this dep is
         # required for correctness.
-        assert "params_t1_deps[params_t1_deps_count++]" in code, code
+        assert f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};" in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
         # *** Correct parallelism ACROSS iterations ***
@@ -3315,12 +3316,13 @@ class TestManualScopeCodegen:
 
         # The ``pl.submit`` producer TaskId binds to the user-named variable.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "task_0_outs.task_id()" in code, code
-        assert "PTO2TaskId stage1_tid =" in code, code
+        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        assert producer_tid, code
+        assert re.search(rf"PTO2TaskId stage1_tid(?:_\d+)? = {producer_tid.group(1)};", code), code
         assert "TaskOutputTensors task_1_outs = rt_submit_aiv_task(" in code, code
 
         # Manual dep WITHIN each iteration: stage2 follows stage1.
-        assert "params_t1_deps[params_t1_deps_count++]" in code, code
+        assert f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};" in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
         # Cross-iteration parallel: the ONLY set_dependencies is the
@@ -3508,11 +3510,12 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         # The user-named ``tid`` resolves to the submit's producer TaskId.
-        assert "task_0_outs.task_id()" in code, code
-        assert "PTO2TaskId tid =" in code, code
+        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        assert producer_tid, code
+        assert re.search(rf"PTO2TaskId tid(?:_\d+)? = {producer_tid.group(1)};", code), code
         # The dep edge is filled into the consumer's stack deps array and
         # attached with a single ``set_dependencies`` call.
-        assert "params_t1_deps[params_t1_deps_count++]" in code, code
+        assert f"params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};" in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_manual_scope_submit_iter_arg_taskid_carry(self):

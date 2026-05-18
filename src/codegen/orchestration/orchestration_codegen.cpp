@@ -971,13 +971,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // about no-op aliases at all (today's Simplify only does scalar
       // constant propagation, not tensor-Var copy prop). Once such a pass
       // exists, this guard can go.
-      if (AsVarLike(assign->value_) && value_expr == var_name) {
-        return;
-      }
       if (auto input_var = AsVarLike(assign->value_)) {
         auto tid_it = manual_task_id_map_.find(input_var.get());
         if (tid_it != manual_task_id_map_.end()) {
           manual_task_id_map_[assign->var_.get()] = tid_it->second;
+        }
+        if (value_expr == var_name) {
+          return;
         }
       }
       code_ << Indent() << GetCppType(assign->var_->GetType()) << " " << var_name << " = " << value_expr
