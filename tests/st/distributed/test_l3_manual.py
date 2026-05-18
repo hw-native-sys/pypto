@@ -68,7 +68,12 @@ class L2OnlyAddProgram:
         b: pl.Tensor[[128, 128], pl.FP32],
         f: pl.Out[pl.Tensor[[128, 128], pl.FP32]],
     ) -> pl.Tensor[[128, 128], pl.FP32]:
-        return self.tile_add(a, b, f)
+        # NOTE: must bind the call to a local; `return self.tile_add(...)` is
+        # silently dropped by OrchestrationCodegen::VisitStmt_(ReturnStmtPtr)
+        # (no-op), producing an empty chip orch that traps in AICPU sync
+        # (RuntimeError 507018). Matches the test_l3_distributed.py shape.
+        out_f = self.tile_add(a, b, f)
+        return out_f
 
 
 class TestL3Manual:
