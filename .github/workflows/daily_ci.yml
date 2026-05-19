@@ -12,8 +12,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.36
-      PTOAS_SHA256: 698f753b67ca4387e2e4ef96dfdbb35d71295e94f9f5b20a545b34647f548efc
+      PTOAS_VERSION: v0.40
+      PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
     container:
       image: localhost:5000/ci-device-py310:latest
       options: >-
@@ -114,8 +114,8 @@ jobs:
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.36
-      PTOAS_SHA256: 698f753b67ca4387e2e4ef96dfdbb35d71295e94f9f5b20a545b34647f548efc
+      PTOAS_VERSION: v0.40
+      PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
     steps:
       - uses: actions/checkout@v4
         with:
