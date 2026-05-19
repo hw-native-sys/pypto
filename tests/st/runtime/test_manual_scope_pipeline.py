@@ -359,6 +359,51 @@ def _build_phase_fence_program():
     return PhaseFenceManualScope
 
 
+def _build_phase_fence_program_auto():
+    """4-phase x 4-branch outer-seq / inner-parallel auto-scope control program.
+
+    This keeps the same direct full-Out call shape as the manual_scope
+    PhaseFence case but removes both ``with pl.manual_scope():`` and
+    ``deps=[tids]`` so the runtime falls back to ordinary auto dependency
+    tracking. It serves as a control case for the base Scenario A out-window
+    rewrite independent of TaskId / explicit-dep lowering.
+    """
+    N_PHASES = _PHASE_FENCE_N_PHASES
+    N_BRANCHES = _PHASE_FENCE_N_BRANCHES
+    TILE_M = _PHASE_FENCE_TILE_M
+    BIG_N = _PHASE_FENCE_BIG_N
+    BIG_M = _PHASE_FENCE_BIG_M
+
+    @pl.program
+    class PhaseFenceAuto:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel_stripe(
+            self,
+            data: pl.Tensor[[BIG_M, BIG_N], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            bias: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
+        ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
+            tile: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(data, [row_offset, 0], [TILE_M, BIG_N])
+            result: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.add(tile, bias)
+            ret: pl.Tensor[[BIG_M, BIG_N], pl.FP32] = pl.store(result, [row_offset, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[BIG_M, BIG_N], pl.FP32],
+            out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
+        ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
+            for phase in pl.range(N_PHASES):
+                for branch in pl.parallel(N_BRANCHES):
+                    row = (phase * N_BRANCHES + branch) * TILE_M
+                    out = self.kernel_stripe(data, row, 1.0, out)
+            return out
+
+    return PhaseFenceAuto
+
+
 class _PhaseFenceManualScopePTO(PTOTestCase):
     """Outer SEQ × inner PARALLEL under manual_scope (multi-deps phase fence)."""
 
@@ -397,6 +442,42 @@ class _PhaseFenceManualScopePTO(PTOTestCase):
             out[r0 : r0 + _PHASE_FENCE_TILE_M, :] = data[r0 : r0 + _PHASE_FENCE_TILE_M, :] + 1.0
 
 
+class _PhaseFenceAutoPTO(PTOTestCase):
+    """Outer SEQ x inner PARALLEL under auto dependency tracking."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"phase_fence_auto_{_PHASE_FENCE_N_PHASES}x{_PHASE_FENCE_N_BRANCHES}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "data", [_PHASE_FENCE_BIG_M, _PHASE_FENCE_BIG_N], DataType.FP32, init_value=torch.randn
+            ),
+            TensorSpec(
+                "out", [_PHASE_FENCE_BIG_M, _PHASE_FENCE_BIG_N], DataType.FP32, init_value=0.0, is_output=True
+            ),
+        ]
+
+    def get_program(self) -> Any:
+        return _build_phase_fence_program_auto()
+
+    def compute_expected(self, tensors, params=None):
+        data = tensors["data"]
+        out = tensors["out"]
+        out.zero_()
+        for i in range(_PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES):
+            r0 = i * _PHASE_FENCE_TILE_M
+            out[r0 : r0 + _PHASE_FENCE_TILE_M, :] = data[r0 : r0 + _PHASE_FENCE_TILE_M, :] + 1.0
+
+
 class TestPhaseFenceManualScope:
     """Numerical correctness for the outer-seq × inner-parallel topology."""
 
@@ -404,6 +485,15 @@ class TestPhaseFenceManualScope:
     def test_correctness(self, test_runner, platform):
         result = test_runner.run(_PhaseFenceManualScopePTO(platform=platform))
         assert result.passed, f"phase-fence manual_scope execution failed: {result.error}"
+
+
+class TestPhaseFenceAuto:
+    """Numerical correctness for the auto-scope phase-fence control case."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_correctness(self, test_runner, platform):
+        result = test_runner.run(_PhaseFenceAutoPTO(platform=platform))
+        assert result.passed, f"phase-fence auto execution failed: {result.error}"
 
 
 @pytest.fixture(scope="module")
@@ -422,6 +512,24 @@ def phase_fence_swimlane_file(test_runner) -> Path:
 @pytest.fixture(scope="module")
 def phase_fence_swimlane_data(phase_fence_swimlane_file: Path) -> dict:
     return json.loads(phase_fence_swimlane_file.read_text())
+
+
+@pytest.fixture(scope="module")
+def phase_fence_auto_swimlane_file(test_runner) -> Path:
+    if not test_runner.config.enable_l2_swimlane:
+        pytest.skip("pass --enable-l2-swimlane to validate the auto phase-fence swimlane")
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    result = test_runner.run(_PhaseFenceAutoPTO())
+    assert result.passed, f"phase-fence auto failed: {result.error}"
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    new_files = after - before
+    assert new_files, "No l2_perf_records.json generated for the auto phase-fence run"
+    return max(new_files, key=lambda p: p.stat().st_mtime)
+
+
+@pytest.fixture(scope="module")
+def phase_fence_auto_swimlane_data(phase_fence_auto_swimlane_file: Path) -> dict:
+    return json.loads(phase_fence_auto_swimlane_file.read_text())
 
 
 class TestPhaseFenceSwimlane:
@@ -486,6 +594,17 @@ class TestPhaseFenceSwimlane:
             f"max fanout across all tasks = {max_fanout}, expected ≥ {_PHASE_FENCE_N_BRANCHES} "
             "(array-carry multi-deps means each phase-N task should fan out to all "
             f"{_PHASE_FENCE_N_BRANCHES} phase-N+1 tasks)"
+        )
+
+
+class TestPhaseFenceAutoSwimlane:
+    """Basic runtime validation for the auto-scope phase-fence control case."""
+
+    def test_total_task_count(self, phase_fence_auto_swimlane_data: dict):
+        tasks = phase_fence_auto_swimlane_data["tasks"]
+        assert len(tasks) >= _PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES, (
+            f"expected at least {_PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES} tasks "
+            f"({_PHASE_FENCE_N_PHASES} phases x {_PHASE_FENCE_N_BRANCHES} branches), got {len(tasks)}"
         )
 
 
@@ -693,6 +812,177 @@ class TestBranchChainSwimlane:
             assert len(step0_cores) >= 2, (
                 f"branches should spread across cores; step-0 core_ids = {sorted(step0_cores)}"
             )
+
+
+_ORIGINAL_KV_PROJ_ROWS = 16
+_ORIGINAL_KV_PROJ_HIDDEN = 512
+_ORIGINAL_KV_PROJ_OUT = 512
+_ORIGINAL_KV_PROJ_K_CHUNK = 128
+_ORIGINAL_KV_PROJ_OUT_CHUNK = 64
+_ORIGINAL_KV_PROJ_K_BLOCKS = _ORIGINAL_KV_PROJ_HIDDEN // _ORIGINAL_KV_PROJ_K_CHUNK
+_ORIGINAL_KV_PROJ_OUT_BLOCKS = _ORIGINAL_KV_PROJ_OUT // _ORIGINAL_KV_PROJ_OUT_CHUNK
+
+
+def _build_original_kv_proj_outer_parallel_program():
+    """Original kv_proj outer-parallel / inner-at multi-output Scenario B shape."""
+    ROWS = _ORIGINAL_KV_PROJ_ROWS
+    HIDDEN = _ORIGINAL_KV_PROJ_HIDDEN
+    OUT = _ORIGINAL_KV_PROJ_OUT
+    K_CHUNK = _ORIGINAL_KV_PROJ_K_CHUNK
+    OUT_CHUNK = _ORIGINAL_KV_PROJ_OUT_CHUNK
+    K_BLOCKS = _ORIGINAL_KV_PROJ_K_BLOCKS
+    OUT_BLOCKS = _ORIGINAL_KV_PROJ_OUT_BLOCKS
+
+    @pl.program
+    class OriginalKVProjOuterParallelProgram:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            normed_tile: pl.Tensor[[ROWS, HIDDEN], pl.BF16],
+            wk: pl.Tensor[[HIDDEN, OUT], pl.BF16],
+            wv: pl.Tensor[[HIDDEN, OUT], pl.BF16],
+            k_proj: pl.Out[pl.Tensor[[ROWS, OUT], pl.FP32]],
+            v_proj: pl.Out[pl.Tensor[[ROWS, OUT], pl.FP32]],
+        ) -> tuple[pl.Tensor[[ROWS, OUT], pl.FP32], pl.Tensor[[ROWS, OUT], pl.FP32]]:
+            b0: pl.Scalar[pl.INDEX] = 0
+            layer_hidden_base: pl.Scalar[pl.INDEX] = 0
+            for ob_chunk in pl.range(0, OUT_BLOCKS, 4):
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="kv_proj"):
+                    for ob in pl.range(ob_chunk, ob_chunk + 4):
+                        kv0: pl.Scalar[pl.INDEX] = ob * OUT_CHUNK
+                        tile_a: pl.Tensor[[ROWS, K_CHUNK], pl.BF16] = pl.slice(
+                            normed_tile, [ROWS, K_CHUNK], [0, 0]
+                        )
+                        tile_wk: pl.Tensor[[K_CHUNK, OUT_CHUNK], pl.BF16] = pl.slice(
+                            wk, [K_CHUNK, OUT_CHUNK], [layer_hidden_base, kv0]
+                        )
+                        k_acc: pl.Tensor[[ROWS, OUT_CHUNK], pl.FP32] = pl.matmul(
+                            tile_a, tile_wk, out_dtype=pl.FP32
+                        )
+                        for kb in pl.range(1, K_BLOCKS):
+                            k0: pl.Scalar[pl.INDEX] = kb * K_CHUNK
+                            tile_a_i: pl.Tensor[[ROWS, K_CHUNK], pl.BF16] = pl.slice(
+                                normed_tile, [ROWS, K_CHUNK], [0, k0]
+                            )
+                            tile_wk_i: pl.Tensor[[K_CHUNK, OUT_CHUNK], pl.BF16] = pl.slice(
+                                wk, [K_CHUNK, OUT_CHUNK], [layer_hidden_base + k0, kv0]
+                            )
+                            k_acc = pl.matmul_acc(k_acc, tile_a_i, tile_wk_i)
+                        k_proj = pl.assemble(k_proj, k_acc, [b0, kv0])
+
+                        tile_a = pl.slice(normed_tile, [ROWS, K_CHUNK], [0, 0])
+                        tile_wv: pl.Tensor[[K_CHUNK, OUT_CHUNK], pl.BF16] = pl.slice(
+                            wv, [K_CHUNK, OUT_CHUNK], [layer_hidden_base, kv0]
+                        )
+                        v_acc: pl.Tensor[[ROWS, OUT_CHUNK], pl.FP32] = pl.matmul(
+                            tile_a, tile_wv, out_dtype=pl.FP32
+                        )
+                        for kb in pl.range(1, K_BLOCKS):
+                            k0 = kb * K_CHUNK
+                            tile_a_i = pl.slice(normed_tile, [ROWS, K_CHUNK], [0, k0])
+                            tile_wv_i: pl.Tensor[[K_CHUNK, OUT_CHUNK], pl.BF16] = pl.slice(
+                                wv, [K_CHUNK, OUT_CHUNK], [layer_hidden_base + k0, kv0]
+                            )
+                            v_acc = pl.matmul_acc(v_acc, tile_a_i, tile_wv_i)
+                        v_proj = pl.assemble(v_proj, v_acc, [b0, kv0])
+            return k_proj, v_proj
+
+    return OriginalKVProjOuterParallelProgram
+
+
+class _OriginalKVProjOuterParallelPTO(PTOTestCase):
+    """Minimal runtime vehicle for the original kv_proj multi-output DSL."""
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+        self.config.atol = 2e-5
+        self.config.rtol = 2e-5
+
+    def get_name(self) -> str:
+        return f"original_kv_proj_outer_parallel_{_ORIGINAL_KV_PROJ_ROWS}x{_ORIGINAL_KV_PROJ_OUT}"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec(
+                "normed_tile",
+                [_ORIGINAL_KV_PROJ_ROWS, _ORIGINAL_KV_PROJ_HIDDEN],
+                DataType.BF16,
+                init_value=torch.randn,
+            ),
+            TensorSpec(
+                "wk",
+                [_ORIGINAL_KV_PROJ_HIDDEN, _ORIGINAL_KV_PROJ_OUT],
+                DataType.BF16,
+                init_value=torch.randn,
+            ),
+            TensorSpec(
+                "wv",
+                [_ORIGINAL_KV_PROJ_HIDDEN, _ORIGINAL_KV_PROJ_OUT],
+                DataType.BF16,
+                init_value=torch.randn,
+            ),
+            TensorSpec(
+                "k_proj",
+                [_ORIGINAL_KV_PROJ_ROWS, _ORIGINAL_KV_PROJ_OUT],
+                DataType.FP32,
+                init_value=0.0,
+                is_output=True,
+            ),
+            TensorSpec(
+                "v_proj",
+                [_ORIGINAL_KV_PROJ_ROWS, _ORIGINAL_KV_PROJ_OUT],
+                DataType.FP32,
+                init_value=0.0,
+                is_output=True,
+            ),
+        ]
+
+    def get_program(self) -> Any:
+        return _build_original_kv_proj_outer_parallel_program()
+
+    def compute_expected(self, tensors, params=None):
+        normed = tensors["normed_tile"].to(torch.float32)
+        tensors["k_proj"][:] = torch.matmul(normed, tensors["wk"].to(torch.float32))
+        tensors["v_proj"][:] = torch.matmul(normed, tensors["wv"].to(torch.float32))
+
+
+@pytest.fixture(scope="module")
+def original_kv_proj_swimlane_file(test_runner) -> Path:
+    """Run the original kv_proj case once and return the generated swimlane JSON."""
+    if not test_runner.config.enable_l2_swimlane:
+        pytest.skip("pass --enable-l2-swimlane to validate the original kv_proj swimlane")
+
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    result = test_runner.run(_OriginalKVProjOuterParallelPTO())
+    assert result.passed, f"original kv_proj outer-parallel execution failed: {result.error}"
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    new_files = after - before
+    assert new_files, "No l2_perf_records.json generated for the original kv_proj run"
+    return max(new_files, key=lambda p: p.stat().st_mtime)
+
+
+@pytest.fixture(scope="module")
+def original_kv_proj_swimlane_data(original_kv_proj_swimlane_file: Path) -> dict:
+    return json.loads(original_kv_proj_swimlane_file.read_text())
+
+
+class TestOriginalKVProjOuterParallelSwimlane:
+    """Validate that the original kv_proj case emits a basic swimlane artifact."""
+
+    def test_file_generated(self, original_kv_proj_swimlane_file: Path):
+        assert original_kv_proj_swimlane_file.exists(), (
+            f"Swimlane file not found: {original_kv_proj_swimlane_file}"
+        )
+
+    def test_top_level_structure(self, original_kv_proj_swimlane_data: dict):
+        assert "version" in original_kv_proj_swimlane_data
+        assert "tasks" in original_kv_proj_swimlane_data
+        assert len(original_kv_proj_swimlane_data["tasks"]) > 0
 
 
 if __name__ == "__main__":

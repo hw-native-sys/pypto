@@ -1003,7 +1003,7 @@ class TestSplitVectorKernelNoSplitA2A3:
             lane1,
         )
         assert re.search(
-            r"for acc_iter_\d+, count_iter_\d+ in pl.while_"
+            r"for \(?acc_iter_\d+, count_iter_\d+\)? in pl.while_"
             r"\(init_values=\(acc__ssa_v0_\d+, count__ssa_v0_\d+\)\)",
             lane1,
         )

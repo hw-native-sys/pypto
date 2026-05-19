@@ -1,10 +1,10 @@
 # OptimizeOrchTensors Pass
 
-优化编排函数与 InCore 函数之间的张量缓冲区使用，消除冗余分配并改善数据流。
+优化编排函数与 InCore 函数之间的张量缓冲区使用，消除冗余分配、改善布局信息，并把静态可证明的局部 Out 窗口写显式化。
 
 ## 概述
 
-`ConvertTensorToTileOps` 之后，编排函数在每个 InCore 调用点分配输出张量（`tensor.create`），即使在循环内同一缓冲区可以复用。本 pass 应用三个优化模式来减少分配并改善缓冲区布局信息。
+`ConvertTensorToTileOps` 之后，编排函数在每个 InCore 调用点分配输出张量（`tensor.create`），即使在循环内同一缓冲区可以复用。本 pass 应用五个优化模式来减少分配、改善缓冲区布局信息，并显式化可静态证明的局部 Out 窗口写。
 
 **前置条件**：
 
@@ -29,7 +29,7 @@ program_opt = opt_pass(program)
 
 ## 优化模式
 
-本 pass 按顺序应用四个模式。每个模式可以看到前一个模式的结果。
+本 pass 按顺序应用五个模式。每个模式可以看到前一个模式的结果。
 
 ### 模式 1：迭代参数复用（IterArgReuseOptimizer）
 
@@ -60,17 +60,41 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **方案**：分析编排函数中的 `tensor.assemble(parent, incore_result, offset)` 模式，将父张量的形状作为 `TensorView` 步长附加到 InCore 函数的 `Out` 参数类型上，使 `tile.store` 能使用正确的内存布局。
 
+### 模式 3：Assemble 循环重写（AssembleLoopRewriter）
+
+**问题**：InCore 函数包含一个通过 `tile.assemble` 将结果累积到 iter-arg 的 `for` 循环，然后存储最终结果。`tile.assemble` 每次迭代都创建中间 tile 副本。
+
+**方案**：将循环体重写为直接使用 `tile.store`（写入 `Out` 参数），用 `Out` 参数初始化 iter-arg 代替 `tile.create`。
+
 ### 模式 4：切片输入步长（SliceInputStridesOptimizer）
 
 **问题**：当编排函数将切片张量（`tensor.slice`）作为 `In` 参数传递给 InCore 函数时，InCore 函数的参数使用连续步长（从自身形状计算），而非父张量的步长。当切片是父张量的非连续视图时，这会导致错误的内存访问。
 
 **方案**：分析编排函数中的 `tensor.slice(parent, size, offset)` 模式。当切片结果作为 `In` 参数传递给 InCore 调用时，将父张量形状推导出的步长通过 `TensorView` 附加到 InCore 函数的 `In` 参数类型上，使 `tile.load` 能使用正确的内存布局。
 
-### 模式 3：Assemble 循环重写（AssembleLoopRewriter）
+### 模式 5：静态 Out 窗口外提（OutWindowExternalizer）
 
-**问题**：InCore 函数包含一个通过 `tile.assemble` 将结果累积到 iter-arg 的 `for` 循环，然后存储最终结果。`tile.assemble` 每次迭代都创建中间 tile 副本。
+**问题**：某些 outlined callee 实际只写入大 `Out` 张量中的一个静态可证明局部窗口，但调用点仍传入整块张量。后续依赖分析会把它视为整块缓冲区写者，从而引入不必要的串行化。
 
-**方案**：将循环体重写为直接使用 `tile.store`（写入 `Out` 参数），用 `Out` 参数初始化 iter-arg 代替 `tile.create`。
+**方案**：为 callee 克隆出 `__windowed` 版本，收窄被改写 `Out` 参数类型及返回类型，并局部化内部 `tile.store` offset。然后将 orchestration callsite 改写为显式的 `slice + __windowed call + assemble`：
+
+```python
+out_window = pl.tensor.slice(out, shape, offset)
+out_window_next = self.kernel__windowed(..., out_window)
+out = pl.tensor.assemble(out, out_window_next, offset)
+```
+
+支持的改写形态：
+
+- `FinalStore`：callee 返回一次写入局部窗口的最终 `tile.store(...)` 结果
+- `AggregateWindowLoop`：callee 在循环中携带一个或多个 `Out`，并写入静态可证明的聚合窗口，例如 outlined `kv_proj` 分组形态
+
+安全规则：
+
+- 只接受静态可证明的仿射 offset
+- multi-`Out` 改写采用全有或全无策略
+- 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写
+- `DeriveCallDirections` 保持现有 sound 的顺序 `Out -> InOut` 规则；Pattern 5 只是在该 pass 运行前显式化不重叠窗口
 
 ## 示例（模式 1）
 
@@ -144,6 +168,7 @@ class After:
 | `AssembleParentStridesOptimizer` | 模式 2 — 通过 TensorView 附加父张量步长 |
 | `SliceInputStridesOptimizer` | 模式 4 — 通过 TensorView 为切片输入的 In 参数附加父张量步长 |
 | `AssembleLoopRewriter` | 模式 3 — 将 tile.assemble 循环重写为 tile.store 循环 |
+| `OutWindowExternalizer` | 模式 5 — 识别静态可证明的局部 Out 窗口写，并改写为显式 `slice + call + assemble` |
 | `BuildOutParamReturnMappings` | 共享辅助函数 — 通过 tile.store 映射 Out 参数到返回索引 |
 | `ComputeRowMajorStrides` | 共享辅助函数 — 从形状计算行主序步长 |
 
@@ -151,6 +176,6 @@ class After:
 
 | 函数类型 | 操作 |
 | -------- | ---- |
-| InCore | 参数/函数体重写（模式 1、3、4） |
-| Orchestration / Opaque | 调用点重写（模式 1、2） |
+| InCore / outlined non-builtin callee | 参数/函数体重写（模式 1、3、4、5） |
+| Orchestration / Opaque | 调用点重写（模式 1、2、5） |
 | Group | 不变 |
