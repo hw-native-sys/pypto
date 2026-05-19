@@ -668,6 +668,9 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
   }
 
   // Check if this is a registered operation (contains a dot)
+  if (op_name == "tile.transpose" && op->args_.size() == 4) {
+    op_name = "tile._transpose_with_tmp";
+  }
   if (op_name.find('.') != std::string::npos) {
     // ``pld.*`` ops live in the ``pypto.language.distributed`` namespace (aliased
     // to ``pld`` by the parser). Print them bare so the roundtrip parser

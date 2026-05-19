@@ -22,6 +22,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -93,6 +94,12 @@ class LoweringBuilder {
   ExprPtr Cast(const ExprPtr& x, DataType to, int mode, const Span& span) {
     std::vector<std::pair<std::string, std::any>> kw = {{"target_type", to}, {"mode", mode}};
     return OpRegistry::GetInstance().Create("tile.cast", {x}, kw, span);
+  }
+  ExprPtr CreateTile(const std::vector<ExprPtr>& shape, DataType dtype, MemorySpace target_memory,
+                     const Span& span) {
+    auto shape_tuple = std::make_shared<MakeTuple>(shape, span);
+    std::vector<std::pair<std::string, std::any>> kw = {{"dtype", dtype}, {"target_memory", target_memory}};
+    return OpRegistry::GetInstance().Create("tile.create", {shape_tuple}, kw, span);
   }
 
   /// Drain accumulated statements (called by the mutator after the rule
@@ -244,6 +251,22 @@ ExprPtr LowerCosRule(const std::vector<ExprPtr>& args, const Span& span, Lowerin
   return LowerSinCos(args[0], /*is_cos=*/true, builder, span);
 }
 
+ExprPtr LowerTransposeRule(const std::vector<ExprPtr>& args, const Span& span, LoweringBuilder& builder) {
+  auto& op_reg = OpRegistry::GetInstance();
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "tile.transpose lowering expects 3 or 4 arguments, got " << args.size();
+  if (args.size() == 4) {
+    return op_reg.Create("tile.transpose", args, {}, span);
+  }
+
+  auto src_type = As<TileType>(args[0]->GetType());
+  INTERNAL_CHECK_SPAN(src_type, span) << "tile.transpose input must be TileType";
+  MemorySpace target_memory = src_type->memory_space_.value_or(MemorySpace::Vec);
+  auto tmp_create = builder.CreateTile(src_type->shape_, src_type->dtype_, target_memory, span);
+  auto tmp = builder.Bind("ttrans", tmp_create, span);
+  return op_reg.Create("tile.transpose", {args[0], tmp, args[1], args[2]}, {}, span);
+}
+
 // ----------------------------------------------------------------------------
 // Composite-op dispatch table.
 //
@@ -265,6 +288,7 @@ CompositeLoweringFn LookupCompositeRule(const std::string& op_name) {
   static const std::unordered_map<std::string, CompositeLoweringFn> kRules = {
       {"tile.sin", &LowerSinRule},
       {"tile.cos", &LowerCosRule},
+      {"tile.transpose", &LowerTransposeRule},
   };
   auto it = kRules.find(op_name);
   return it == kRules.end() ? nullptr : it->second;
