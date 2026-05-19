@@ -51,6 +51,24 @@ def _collect_op_names(prog) -> list[str]:
     return collector.op_names
 
 
+class _CallCollector(ir.IRVisitor):
+    """Walk the IR and record every Call encountered."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[ir.Call] = []
+
+    def visit_call(self, op: ir.Call) -> None:
+        self.calls.append(op)
+        super().visit_call(op)
+
+
+def _collect_calls(prog) -> list[ir.Call]:
+    collector = _CallCollector()
+    collector.visit_program(prog)
+    return collector.calls
+
+
 def test_lower_composite_ops_pass_factory_exists():
     """The factory returns a Pass instance with the expected name."""
     p = passes.lower_composite_ops()
@@ -296,6 +314,39 @@ def test_cos_in_return_stmt_is_decomposed():
 
     assert "tile.cos" not in op_names
     assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
+
+
+def test_transpose_gets_preallocated_scratch_tile():
+    """``tile.transpose`` is lowered to the 4-arg form with an addressable scratch tile."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 8], pl.FP32],
+            out_0: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+        ) -> pl.Tensor[[8, 16], pl.FP32]:
+            x_tile: pl.Tile[[16, 8], pl.FP32] = pl.load(x, [0, 0], [16, 8])
+            y_tile: pl.Tile[[8, 16], pl.FP32] = pl.tile.transpose(x_tile, 0, 1)
+            out_0: pl.Tensor[[8, 16], pl.FP32] = pl.store(y_tile, [0, 0], out_0)
+            return out_0
+
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 8], pl.FP32]) -> pl.Tensor[[8, 16], pl.FP32]:
+            out_0: pl.Tensor[[8, 16], pl.FP32] = pl.create_tensor([8, 16], dtype=pl.FP32)
+            r: pl.Tensor[[8, 16], pl.FP32] = self.main_incore_0(x, out_0)
+            return r
+
+    after = passes.lower_composite_ops()(Prog)
+    transpose_calls = [call for call in _collect_calls(after) if call.op.name == "tile.transpose"]
+
+    assert len(transpose_calls) == 1
+    transpose_call = transpose_calls[0]
+    assert len(transpose_call.args) == 4
+    scratch = transpose_call.args[1]
+    assert isinstance(scratch, ir.Var)
+    assert scratch.name_hint.startswith("y_tile__ttrans_tmp")
 
 
 if __name__ == "__main__":

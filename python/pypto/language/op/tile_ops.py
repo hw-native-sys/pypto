@@ -1447,6 +1447,24 @@ def transpose(tile: Tile, axis1: int, axis2: int) -> Tile:
     return Tile(expr=call_expr)
 
 
+def _transpose_with_tmp(tile: Tile, tmp: Tile, axis1: int, axis2: int) -> Tile:
+    """Parser-only wrapper for the lowered transpose form with explicit scratch."""
+    span = _get_span_or_capture(None)
+    axis1_expr = (
+        axis1 if isinstance(axis1, _ir_core.ConstInt) else _ir_core.ConstInt(axis1, DataType.INDEX, span)
+    )
+    axis2_expr = (
+        axis2 if isinstance(axis2, _ir_core.ConstInt) else _ir_core.ConstInt(axis2, DataType.INDEX, span)
+    )
+    call_expr = _ir_core.create_op_call(
+        "tile.transpose",
+        [tile.unwrap(), tmp.unwrap(), axis1_expr, axis2_expr],
+        {},
+        span,
+    )
+    return Tile(expr=call_expr)
+
+
 def set_validshape(tile: Tile, valid_rows: IntLike, valid_cols: IntLike) -> Tile:
     """Update valid-shape metadata of a tile without data movement.
 

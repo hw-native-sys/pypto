@@ -969,6 +969,51 @@ class TestTileSliceCodegen:
         )
 
 
+class TestTileTransposeCodegen:
+    """Tests for tile.transpose PTO code generation."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_transpose_scratch_has_addr_and_valid_shape(self):
+        """The ttrans scratch tile must be an allocated tile with addr and valid_shape operands."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], pl.FP32],
+                dst: pl.Tensor[[8, 16], pl.FP32],
+            ) -> pl.Tensor[[8, 16], pl.FP32]:
+                src_tile: pl.Tile[[16, 8], pl.FP32] = pl.load(src, [0, 0], [16, 8])
+                dst_tile: pl.Tile[[8, 16], pl.FP32] = pl.tile.transpose(src_tile, 0, 1)
+                return pl.store(dst_tile, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+
+        assert "pto.ttrans" in mlir, f"tile.transpose should generate pto.ttrans, got:\n{mlir}"
+        scratch_allocs = [
+            line.strip()
+            for line in mlir.splitlines()
+            if "ttrans_tmp" in line and "pto.alloc_tile" in line
+        ]
+        assert len(scratch_allocs) == 1, f"Expected one ttrans scratch alloc, got:\n{scratch_allocs}\n{mlir}"
+        scratch_alloc = scratch_allocs[0]
+        assert "addr =" in scratch_alloc, f"ttrans scratch alloc must carry addr, got:\n{scratch_alloc}"
+        assert "valid_row =" in scratch_alloc, f"ttrans scratch alloc must carry valid_row, got:\n{scratch_alloc}"
+        assert "valid_col =" in scratch_alloc, f"ttrans scratch alloc must carry valid_col, got:\n{scratch_alloc}"
+
+
 class TestTileAssembleCodegen:
     """Tests for tile.assemble PTO code generation (pto.subview + pto.tmov).
 

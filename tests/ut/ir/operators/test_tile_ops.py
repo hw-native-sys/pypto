@@ -1405,6 +1405,18 @@ class TestTileSliceReshapeOps:
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
 
+    def test_tile_transpose_public_api_rejects_tmp_arg(self):
+        """The public tile.transpose helper remains the 3-argument API."""
+        span = ir.Span.unknown()
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        tile_type = ir.TileType([dim8, dim16], DataType.FP32)
+        tile_var = ir.Var("tile", tile_type, span)
+        tmp_var = ir.Var("tmp", tile_type, span)
+
+        with pytest.raises(TypeError):
+            tile.transpose(tile_var, tmp_var, 0, 1)
+
     def test_tile_set_validshape(self):
         """Test tile.set_validshape with constant valid dimensions."""
         span = ir.Span.unknown()

@@ -227,7 +227,7 @@ TypePtr DeduceTileSliceType(const std::vector<ExprPtr>& args,
   // intermediate IR built before backend-level allocation).
   TileView tile_view;
   if (tile_type->tile_view_.has_value()) {
-    const auto& src_v = *tile_type->tile_view_;
+    const auto src_v = tile_type->tile_view_.value_or(TileView{});
     tile_view.blayout = src_v.blayout;
     tile_view.slayout = src_v.slayout;
     tile_view.fractal = src_v.fractal;
@@ -317,9 +317,11 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tile.transpose requires exactly 3 arguments: input tile, axis1, axis2
-  CHECK(args.size() == 3) << "tile.transpose requires exactly 3 arguments (input, axis1, axis2), but got "
-                          << args.size();
+  // tile.transpose accepts either:
+  //   tile.transpose(input, axis1, axis2)
+  //   tile.transpose(input, tmp, axis1, axis2)
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "tile.transpose requires 3 or 4 arguments (input, [tmp,] axis1, axis2), but got " << args.size();
 
   // First argument must be TileType
   auto tile_type = As<TileType>(args[0]->GetType());
@@ -331,13 +333,20 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
 
   CHECK(ndim >= 2) << "tile.transpose requires at least 2 dimensions, but got " << ndim;
 
-  // Second argument is axis1 (ConstInt)
-  auto axis1_const = As<ConstInt>(args[1]);
-  CHECK(axis1_const) << "tile.transpose requires second argument (axis1) to be a ConstInt";
+  const size_t axis_base = args.size() == 4 ? 2 : 1;
+  if (args.size() == 4) {
+    auto tmp_type = As<TileType>(args[1]->GetType());
+    CHECK(tmp_type) << "tile.transpose 4-arg form requires second argument to be a TileType scratch tile, got "
+                    << args[1]->GetType()->TypeName();
+  }
 
-  // Third argument is axis2 (ConstInt)
-  auto axis2_const = As<ConstInt>(args[2]);
-  CHECK(axis2_const) << "tile.transpose requires third argument (axis2) to be a ConstInt";
+  // axis1 argument is a ConstInt
+  auto axis1_const = As<ConstInt>(args[axis_base]);
+  CHECK(axis1_const) << "tile.transpose requires axis1 argument to be a ConstInt";
+
+  // axis2 argument is a ConstInt
+  auto axis2_const = As<ConstInt>(args[axis_base + 1]);
+  CHECK(axis2_const) << "tile.transpose requires axis2 argument to be a ConstInt";
 
   int axis1 = NormalizeAxis(static_cast<int>(axis1_const->value_), ndim);
   int axis2 = NormalizeAxis(static_cast<int>(axis2_const->value_), ndim);
@@ -349,9 +358,17 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> new_shape = input_shape;
   std::swap(new_shape[axis1], new_shape[axis2]);
 
-  // Return new TileType with transposed shape and same dtype
+  // Return new TileType with transposed shape and same dtype. Preserve the
+  // logical valid region under the same axis swap; it may be runtime-dynamic.
+  std::vector<ExprPtr> new_valid_shape = GetValidShape(tile_type);
+  if (new_valid_shape.size() == new_shape.size()) {
+    std::swap(new_valid_shape[axis1], new_valid_shape[axis2]);
+  } else {
+    new_valid_shape = new_shape;
+  }
+
   TileView tile_view;
-  tile_view.valid_shape = new_shape;
+  tile_view.valid_shape = new_valid_shape;
   return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
 }
 
@@ -430,9 +447,7 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
   // Inherit layout metadata (blayout, slayout, fractal, pad) from the target so that
   // the result type carries the correct tile_buf type annotation for codegen.
   TileView tile_view;
-  if (target_type->tile_view_.has_value()) {
-    tile_view = *target_type->tile_view_;
-  }
+  tile_view = target_type->tile_view_.value_or(TileView{});
   tile_view.valid_shape = target_type->shape_;
   return std::make_shared<TileType>(target_type->shape_, target_type->dtype_, std::nullopt, tile_view,
                                     target_type->memory_space_);
@@ -603,9 +618,7 @@ TypePtr DeduceTileScatterUpdateType(const std::vector<ExprPtr>& args,
   // Inherit tile_view (with valid_shape = input shape) and memory_space from input,
   // same pattern as tile.assemble — ensures tile.store can read valid_shape downstream.
   TileView tile_view;
-  if (input_type->tile_view_.has_value()) {
-    tile_view = *input_type->tile_view_;
-  }
+  tile_view = input_type->tile_view_.value_or(TileView{});
   if (tile_view.valid_shape.empty()) {
     tile_view.valid_shape = input_type->shape_;
   }
@@ -721,9 +734,7 @@ TypePtr DeduceTileSetValidShapeType(const std::vector<ExprPtr>& args,
   check_const_bound("valid_cols", args[2], tile_type->shape_[1]);
 
   TileView tile_view;
-  if (tile_type->tile_view_.has_value()) {
-    tile_view = *tile_type->tile_view_;
-  }
+  tile_view = tile_type->tile_view_.value_or(TileView{});
   tile_view.valid_shape = {args[1], args[2]};
 
   return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, std::nullopt, tile_view);
