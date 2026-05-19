@@ -255,6 +255,164 @@ def _preprocess_ptoas_output(content: str) -> str:
     return result
 
 
+def _collect_shape_dim_vars(expr: object) -> list[_ir_core.Var]:
+    """Collect Vars from a tensor shape expression (first-seen DFS order).
+
+    Mirror of ``CollectVarsFromExpr`` in ``src/codegen/pto/pto_codegen.cpp`` -- the
+    two collectors must walk the same node set in the same order so the trailing
+    index params emitted into MLIR / consumed by ptoas line up 1:1 with the
+    wrapper's forward-call argument list.
+
+    Dedup key on the *Python* side is ``Var.unique_id`` (see
+    ``_append_dynamic_dim_unpacking``) rather than ``id(...)``: binding-layer
+    wrappers can differ for the same underlying C++ Var. The C++ side dedups by
+    raw ``Var*`` because the IR holds the canonical shared_ptr graph.
+    """
+    if isinstance(expr, _ir_core.Var):
+        return [expr]
+    if isinstance(expr, _ir_core.BinaryExpr):
+        return _collect_shape_dim_vars(expr.left) + _collect_shape_dim_vars(expr.right)
+    if isinstance(expr, _ir_core.UnaryExpr):
+        return _collect_shape_dim_vars(expr.operand)
+    if isinstance(expr, _ir_core.Call):
+        out: list[_ir_core.Var] = []
+        for arg in expr.args:
+            out.extend(_collect_shape_dim_vars(arg))
+        return out
+    if isinstance(expr, _ir_core.TupleGetItemExpr):
+        return _collect_shape_dim_vars(expr.tuple)
+    if isinstance(expr, (_ir_core.ConstInt, _ir_core.ConstFloat, _ir_core.ConstBool)):
+        return []
+    raise TypeError(
+        f"Internal: _collect_shape_dim_vars encountered unsupported shape expression node "
+        f"{type(expr).__name__}; add explicit handling so dynamic-dim Vars are not silently dropped"
+    )
+
+
+def _const_int_from_shape_expr(expr: object) -> int | None:
+    if isinstance(expr, _ir_core.ConstInt):
+        return int(expr.value)
+    return None
+
+
+def _invert_var_plus_minus_const(
+    dim_expr: _ir_core.BinaryExpr, target_var: _ir_core.Var, shape_expr: str, *, subtract: bool
+) -> str | None:
+    left, right = dim_expr.left, dim_expr.right
+    if isinstance(left, _ir_core.Var) and left.same_as(target_var):
+        c = _const_int_from_shape_expr(right)
+        if c is None:
+            return None
+        return f"({shape_expr} + {c})" if subtract else f"({shape_expr} - {c})"
+    if isinstance(right, _ir_core.Var) and right.same_as(target_var):
+        c = _const_int_from_shape_expr(left)
+        if c is None:
+            return None
+        if subtract:
+            return f"({c} - {shape_expr})"
+        return f"({shape_expr} - {c})"
+    return None
+
+
+def _invert_var_mul_or_floordiv_const(
+    dim_expr: _ir_core.BinaryExpr, target_var: _ir_core.Var, shape_expr: str, *, floordiv: bool
+) -> str | None:
+    # ``Mul`` is commutative: both ``(var, c)`` and ``(c, var)`` invert to ``shape / c``.
+    # ``FloorDiv`` is non-commutative: only ``(var, c)`` inverts (to ``shape * c``);
+    # ``(c, var)`` is rejected because ``c // var`` is not uniquely invertible
+    # against the runtime shape (e.g. ``10 // var = 2`` admits var = 4 or 5).
+    left, right = dim_expr.left, dim_expr.right
+    if isinstance(left, _ir_core.Var) and left.same_as(target_var):
+        c = _const_int_from_shape_expr(right)
+        if c is None or c == 0:
+            return None
+        return f"({shape_expr} * {c})" if floordiv else f"({shape_expr} / {c})"
+    if not floordiv and isinstance(right, _ir_core.Var) and right.same_as(target_var):
+        c = _const_int_from_shape_expr(left)
+        if c is None or c == 0:
+            return None
+        return f"({shape_expr} / {c})"
+    return None
+
+
+def _invert_shape_dim_for_var(
+    dim_expr: object, target_var: _ir_core.Var, tensor_name: str, dim_idx: int
+) -> str | None:
+    """Return a C expression recovering target_var from shapes[dim_idx], or None if non-invertible."""
+    shape_expr = f"static_cast<int64_t>({tensor_name}_tensor->shapes[{dim_idx}])"
+    if isinstance(dim_expr, _ir_core.Var) and dim_expr.same_as(target_var):
+        return shape_expr
+    if isinstance(dim_expr, _ir_core.Add):
+        return _invert_var_plus_minus_const(dim_expr, target_var, shape_expr, subtract=False)
+    if isinstance(dim_expr, _ir_core.Sub):
+        return _invert_var_plus_minus_const(dim_expr, target_var, shape_expr, subtract=True)
+    if isinstance(dim_expr, _ir_core.Mul):
+        return _invert_var_mul_or_floordiv_const(dim_expr, target_var, shape_expr, floordiv=False)
+    if isinstance(dim_expr, _ir_core.FloorDiv):
+        return _invert_var_mul_or_floordiv_const(dim_expr, target_var, shape_expr, floordiv=True)
+    return None
+
+
+def _is_invertible_shape_dim_for_var(dim_expr: object, target_var: _ir_core.Var) -> bool:
+    """Return True iff ``_invert_shape_dim_for_var`` can recover ``target_var`` from this dim.
+
+    Pure predicate -- does not depend on tensor name / dim index. Use this when
+    comparing source candidates (so we don't allocate a throwaway C-string).
+    """
+    return _invert_shape_dim_for_var(dim_expr, target_var, "", 0) is not None
+
+
+def _append_dynamic_dim_unpacking(
+    tensor_params: list[_ir_core.Var],
+    used_c_names: set[str],
+    lines: list[str],
+    var_names: list[str],
+) -> None:
+    """Append C++ lines that recover dynamic shape Vars from runtime tensor shapes."""
+    dyn_var_order: list[_ir_core.Var] = []
+    dyn_var_best: dict[int, tuple[_ir_core.Var, str, int, object]] = {}
+    for param in tensor_params:
+        assert isinstance(param.type, _ir_core.TensorType)
+        for dim_idx, dim in enumerate(param.type.shape):
+            for dyn_var in _collect_shape_dim_vars(dim):
+                key = dyn_var.unique_id
+                if key not in dyn_var_best:
+                    dyn_var_order.append(dyn_var)
+                    dyn_var_best[key] = (dyn_var, param.name_hint, dim_idx, dim)
+                    continue
+                _, _, _, src_expr = dyn_var_best[key]
+                # Upgrade source if the previous one was non-invertible and this one is.
+                if not _is_invertible_shape_dim_for_var(
+                    src_expr, dyn_var
+                ) and _is_invertible_shape_dim_for_var(dim, dyn_var):
+                    dyn_var_best[key] = (dyn_var, param.name_hint, dim_idx, dim)
+
+    for dyn_var in dyn_var_order:
+        var_ref, source_tensor, source_dim_idx, source_expr = dyn_var_best[dyn_var.unique_id]
+        value_expr = _invert_shape_dim_for_var(source_expr, var_ref, source_tensor, source_dim_idx)
+        if value_expr is None:
+            raise ValueError(
+                f"Cannot recover dynamic dimension '{dyn_var.name_hint}' for kernel wrapper "
+                f"codegen: it only appears inside non-invertible shape expressions "
+                f"(seen as {source_tensor}.shapes[{source_dim_idx}] = {source_expr}). "
+                f"Wrapper extraction supports 'var' and single-var affine forms "
+                f"(var +/-/*// const_int) shape expressions; "
+                f"at least one tensor parameter must expose the variable in one of these "
+                f"forms so the runtime shape can be inverted back into the variable's value."
+            )
+        var_name = dyn_var.name_hint
+        if var_name in used_c_names:
+            suffix = 1
+            while f"{var_name}_{suffix}" in used_c_names:
+                suffix += 1
+            var_name = f"{var_name}_{suffix}"
+        used_c_names.add(var_name)
+        lines.append(f"    // Extract dynamic dim: {var_name}")
+        lines.append(f"    int64_t {var_name} = {value_expr};")
+        lines.append("")
+        var_names.append(var_name)
+
+
 def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False) -> tuple[str, list[str]]:
     """Generate C++ code to unpack ``int64_t* args`` into typed locals.
 
@@ -332,32 +490,17 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
         lines.append("")
         var_names.append(param_name)
 
-    # Extract dynamic dimension values from tensor structs (shapes[] holds current view shape at runtime).
-    # Deduplicate by IR variable identity (same_as), not by name_hint, so that
-    # distinct Var objects sharing a cosmetic name are never incorrectly merged.
-    seen_dyn_vars: list[_ir_core.Var] = []
+    # Extract dynamic dim values from tensor structs (shapes[] holds current view shape at runtime).
+    # Dedup by Var.unique_id (stable C++ identity) -- name_hint is cosmetic, and Python wrapper
+    # id() can differ across binding calls for the same underlying C++ Var.
+    # Tensor dims may be expressions (e.g. ``batch_padded * 128``); we recover the Var value by
+    # inverting the shape. The walk is two-phase: if a Var first appears in a non-invertible
+    # expression and only later in an invertible one, emit-on-first-sighting would pin it to
+    # the wrong tensor.
     used_c_names: set[str] = set(var_names)
     used_c_names.update(f"{p.name_hint}_tensor" for p in tensor_params)
     used_c_names.update(f"{p.name_hint}_conv" for p in scalar_params)
-    for param in tensor_params:
-        assert isinstance(param.type, _ir_core.TensorType)
-        for dim_idx, dim in enumerate(param.type.shape):
-            if isinstance(dim, _ir_core.Var) and not any(dim.same_as(v) for v in seen_dyn_vars):
-                seen_dyn_vars.append(dim)
-                var_name = dim.name_hint
-                if var_name in used_c_names:
-                    suffix = 1
-                    while f"{var_name}_{suffix}" in used_c_names:
-                        suffix += 1
-                    var_name = f"{var_name}_{suffix}"
-                used_c_names.add(var_name)
-                lines.append(f"    // Extract dynamic dim: {var_name}")
-                lines.append(
-                    f"    int64_t {var_name} = static_cast<int64_t>"
-                    f"({param.name_hint}_tensor->shapes[{dim_idx}]);"
-                )
-                lines.append("")
-                var_names.append(var_name)
+    _append_dynamic_dim_unpacking(tensor_params, used_c_names, lines, var_names)
 
     return "\n".join(lines), var_names
 

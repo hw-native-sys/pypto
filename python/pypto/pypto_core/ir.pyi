@@ -1135,6 +1135,15 @@ class Var(Expr):
     name_hint: Final[str]
     """Variable name hint (cosmetic label, not an identifier)."""
 
+    unique_id: Final[int]
+    """Process-unique identifier for this Var instance.
+
+    Monotonically increasing ID assigned at construction. Stable for the lifetime
+    of the process. Use as a dictionary key to deduplicate ``Var`` wrappers that
+    refer to the same underlying C++ object (more reliable than ``id(...)`` since
+    binding-layer wrappers may differ even when the underlying ``Var`` is shared).
+    """
+
     def __init__(self, name_hint: str, type: Type, span: Span) -> None:
         """Create a variable reference.
 

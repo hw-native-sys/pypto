@@ -81,6 +81,26 @@ def _get_dyn_incore_func():
     raise RuntimeError("No InCore function found in _DynKernel")
 
 
+def _get_dyn_expr_incore_func():
+    """Return transformed InCore function with shape dim expression (BATCH * 128)."""
+    span = ir.Span.unknown()
+    idx = DataType.INDEX
+    batch_var = ir.Var("BATCH", ir.ScalarType(idx), span)
+    dim_expr = ir.Mul(batch_var, ir.ConstInt(128, idx, span), idx, span)
+    tensor_ty = ir.TensorType([dim_expr, ir.ConstInt(128, idx, span)], DataType.BF16)
+
+    ib = IRBuilder()
+    with ib.function("dyn_expr_func", type=ir.FunctionType.InCore) as f:
+        q = f.param("q", tensor_ty)
+        out = f.param("out", tensor_ty)
+        q_tile = ib.let("q_tile", tile.load(q, [0, 0], [16, 128]))
+        ret = ib.let("ret", tile.store(q_tile, [0, 0], out))
+        f.return_type(tensor_ty)
+        ib.return_stmt(ret)
+
+    return f.get_result()
+
+
 def _get_mlir_code(result):
     """Normalize generate() result to MLIR string (support both str and dict)."""
     return result if isinstance(result, str) else "".join(result.values())
@@ -234,6 +254,19 @@ def test_pto_codegen_tensor_parameters():
     assert "shape = [%c64_index, %c64_index]" in mlir_code or "shape = [%c32_index, %c32_index]" in mlir_code
     assert "strides = " in mlir_code
     assert "!pto.tensor_view<?x?xf32>" in mlir_code
+
+
+def test_pto_codegen_collects_dynamic_var_from_shape_expr():
+    """Regression: dynamic var under shape expression must be appended as index arg."""
+    func = _get_dyn_expr_incore_func()
+    program = ir.Program([func], "dyn_expr_prog_checked", ir.Span.unknown())
+    mlir_code = _generate_mlir(program)
+
+    assert "func.func @dyn_expr_func(" in mlir_code
+    # q/out are tensor args (arg0/arg1); dynamic BATCH should be appended as arg2.
+    assert "%arg2: index" in mlir_code
+    # Shape's trailing static dim remains 128.
+    assert ", %c128_index]" in mlir_code
 
 
 def test_pto_codegen_alloc_tile():
@@ -830,6 +863,205 @@ class TestGenerateArgUnpacking:
         assert code.count("int64_t TH") == 1
         assert code.count("int64_t TW") == 1
 
+    def test_dynamic_tensor_expr_dim_extracts_base_var(self):
+        # Regression: for shape dim (BATCH * 128), wrapper should recover BATCH
+        # from runtime shape[0] as shapes[0] / 128.
+        func = _get_dyn_expr_incore_func()
+        code, names = _generate_arg_unpacking(func)
+        assert "int64_t BATCH = (static_cast<int64_t>(q_tensor->shapes[0]) / 128);" in code
+        assert names == ["q", "out", "BATCH"]
+
+    def test_dynamic_tensor_const_left_mul_extracts_var(self):
+        """Regression: shape dim (ConstInt * Var) must invert like (Var * ConstInt)."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        batch_var = ir.Var("BATCH", ir.ScalarType(idx), span)
+        dim = ir.Mul(ir.ConstInt(128, idx, span), batch_var, idx, span)
+        ty = ir.TensorType([dim, ir.ConstInt(64, idx, span)], DataType.BF16)
+
+        ib = IRBuilder()
+        with ib.function("dyn_const_left", type=ir.FunctionType.InCore) as f:
+            t = f.param("t", ty)
+            out = f.param("out", ty)
+            tile_t = ib.let("tile_t", tile.load(t, [0, 0], [16, 64]))
+            ret = ib.let("ret", tile.store(tile_t, [0, 0], out))
+            f.return_type(ty)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        code, names = _generate_arg_unpacking(func)
+        assert "int64_t BATCH = (static_cast<int64_t>(t_tensor->shapes[0]) / 128);" in code
+        assert names == ["t", "out", "BATCH"]
+
+    def test_dynamic_tensor_multi_var_shape_expr_collects_both(self):
+        """Regression: shape [BATCH, HEAD, static] must collect both dynamic Vars."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        batch_var = ir.Var("BATCH", ir.ScalarType(idx), span)
+        head_var = ir.Var("HEAD", ir.ScalarType(idx), span)
+        ty = ir.TensorType([batch_var, head_var, ir.ConstInt(64, idx, span)], DataType.BF16)
+
+        ib = IRBuilder()
+        with ib.function("dyn_multi_var", type=ir.FunctionType.InCore) as f:
+            t = f.param("t", ty)
+            out = f.param("out", ty)
+            tile_t = ib.let("tile_t", tile.load(t, [0, 0], [16, 64]))
+            ret = ib.let("ret", tile.store(tile_t, [0, 0], out))
+            f.return_type(ty)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        code, names = _generate_arg_unpacking(func)
+        assert "int64_t BATCH = static_cast<int64_t>(t_tensor->shapes[0]);" in code
+        assert "int64_t HEAD = static_cast<int64_t>(t_tensor->shapes[1]);" in code
+        assert names == ["t", "out", "BATCH", "HEAD"]
+
+    def test_dynamic_tensor_mixed_invertibility_prefers_invertible_source(self):
+        """Regression: when the same Var appears in two tensor shapes -- the first
+        non-invertible (Var + const) and the second invertible (Var * const) --
+        wrapper codegen must extract from the invertible one. Previously the
+        emission was done on first sighting and the later upgrade was dead code,
+        producing wrong runtime values."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        batch_var = ir.Var("BATCH", ir.ScalarType(idx), span)
+        bad_dim = ir.Mul(batch_var, batch_var, idx, span)
+        good_dim = ir.Mul(batch_var, ir.ConstInt(128, idx, span), idx, span)
+        bad_ty = ir.TensorType([bad_dim, ir.ConstInt(64, idx, span)], DataType.BF16)
+        good_ty = ir.TensorType([good_dim, ir.ConstInt(64, idx, span)], DataType.BF16)
+
+        ib = IRBuilder()
+        with ib.function("dyn_mixed_func", type=ir.FunctionType.InCore) as f:
+            # `a` exposes BATCH only via BATCH * BATCH (non-invertible).
+            f.param("a", bad_ty)
+            # `b` exposes BATCH via BATCH * 128 (invertible -- shape / 128).
+            b = f.param("b", good_ty)
+            out = f.param("out", good_ty)
+            b_tile = ib.let("b_tile", tile.load(b, [0, 0], [16, 64]))
+            ret = ib.let("ret", tile.store(b_tile, [0, 0], out))
+            f.return_type(good_ty)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        code, names = _generate_arg_unpacking(func)
+        # Must extract from `b`'s shape (invertible), not `a`'s shape (would be
+        # BATCH + 1, mis-assigned as BATCH if the buggy fallback were taken).
+        assert "int64_t BATCH = (static_cast<int64_t>(b_tensor->shapes[0]) / 128);" in code
+        assert "static_cast<int64_t>(a_tensor->shapes[0])" not in code
+        assert names == ["a", "b", "out", "BATCH"]
+
+    def test_dynamic_tensor_affine_ops_extract(self):
+        """Shape dims var+const, var-const, var*const, var//const all invert back to var."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        v_add = ir.Var("V_ADD", ir.ScalarType(idx), span)
+        v_sub = ir.Var("V_SUB", ir.ScalarType(idx), span)
+        v_mul = ir.Var("V_MUL", ir.ScalarType(idx), span)
+        v_div = ir.Var("V_DIV", ir.ScalarType(idx), span)
+        static = ir.ConstInt(64, idx, span)
+        ty_add = ir.TensorType([ir.Add(v_add, ir.ConstInt(2, idx, span), idx, span), static], DataType.BF16)
+        ty_sub = ir.TensorType([ir.Sub(v_sub, ir.ConstInt(3, idx, span), idx, span), static], DataType.BF16)
+        ty_mul = ir.TensorType([ir.Mul(v_mul, ir.ConstInt(4, idx, span), idx, span), static], DataType.BF16)
+        ty_div = ir.TensorType(
+            [ir.FloorDiv(v_div, ir.ConstInt(5, idx, span), idx, span), static], DataType.BF16
+        )
+
+        ib = IRBuilder()
+        with ib.function("dyn_affine_func", type=ir.FunctionType.InCore) as f:
+            a = f.param("a", ty_add)
+            f.param("b", ty_sub)
+            f.param("c", ty_mul)
+            f.param("d", ty_div)
+            out = f.param("out", ty_add)
+            t = ib.let("t", tile.load(a, [0, 0], [16, 64]))
+            ret = ib.let("ret", tile.store(t, [0, 0], out))
+            f.return_type(ty_add)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        code, names = _generate_arg_unpacking(func)
+        assert "int64_t V_ADD = (static_cast<int64_t>(a_tensor->shapes[0]) - 2);" in code
+        assert "int64_t V_SUB = (static_cast<int64_t>(b_tensor->shapes[0]) + 3);" in code
+        assert "int64_t V_MUL = (static_cast<int64_t>(c_tensor->shapes[0]) / 4);" in code
+        assert "int64_t V_DIV = (static_cast<int64_t>(d_tensor->shapes[0]) * 5);" in code
+        assert names == ["a", "b", "c", "d", "out", "V_ADD", "V_SUB", "V_MUL", "V_DIV"]
+
+    def test_dynamic_tensor_no_invertible_source_raises(self):
+        """Regression: if a Var only appears in non-invertible shape expressions
+        (e.g. ``BATCH * BATCH``), wrapper codegen must raise a clear error instead of
+        silently emitting ``BATCH = shapes[i]`` (wrong value and downstream OOB)."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        batch_var = ir.Var("BATCH", ir.ScalarType(idx), span)
+        bad_dim = ir.Mul(batch_var, batch_var, idx, span)
+        bad_ty = ir.TensorType([bad_dim, ir.ConstInt(64, idx, span)], DataType.BF16)
+
+        ib = IRBuilder()
+        with ib.function("dyn_bad_func", type=ir.FunctionType.InCore) as f:
+            a = f.param("a", bad_ty)
+            a_tile = ib.let("a_tile", tile.load(a, [0, 0], [16, 64]))
+            ret = ib.let("ret", a_tile)
+            f.return_type(bad_ty)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        with pytest.raises(ValueError, match="non-invertible"):
+            _generate_arg_unpacking(func)
+
+    def test_dynamic_tensor_const_left_add_sub_extracts_var(self):
+        """Reversal of operand order for Add/Sub: ``c + var`` and ``c - var`` must
+        invert symmetrically to ``var + c`` and ``var - c``.
+
+        - ``shape = c + var``   ->   ``var = shape - c``
+        - ``shape = c - var``   ->   ``var = c - shape``
+        """
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        v_add = ir.Var("V_CADD", ir.ScalarType(idx), span)
+        v_sub = ir.Var("V_CSUB", ir.ScalarType(idx), span)
+        static = ir.ConstInt(64, idx, span)
+        ty_add = ir.TensorType([ir.Add(ir.ConstInt(7, idx, span), v_add, idx, span), static], DataType.BF16)
+        ty_sub = ir.TensorType([ir.Sub(ir.ConstInt(9, idx, span), v_sub, idx, span), static], DataType.BF16)
+
+        ib = IRBuilder()
+        with ib.function("dyn_const_left_addsub", type=ir.FunctionType.InCore) as f:
+            a = f.param("a", ty_add)
+            f.param("b", ty_sub)
+            out = f.param("out", ty_add)
+            t = ib.let("t", tile.load(a, [0, 0], [16, 64]))
+            ret = ib.let("ret", tile.store(t, [0, 0], out))
+            f.return_type(ty_add)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        code, names = _generate_arg_unpacking(func)
+        assert "int64_t V_CADD = (static_cast<int64_t>(a_tensor->shapes[0]) - 7);" in code
+        assert "int64_t V_CSUB = (9 - static_cast<int64_t>(b_tensor->shapes[0]));" in code
+        assert names == ["a", "b", "out", "V_CADD", "V_CSUB"]
+
+    def test_dynamic_tensor_unary_expr_var_is_collected_and_non_invertible(self):
+        """Regression: ``Neg(var)`` and other UnaryExpr shape dims walk into the
+        collector (the Var ends up in the dyn-dim list) but the inverter has no
+        rule for them, so wrapper codegen must raise ``non-invertible`` rather
+        than silently fabricating a wrong recovery formula."""
+        span = ir.Span.unknown()
+        idx = DataType.INDEX
+        var = ir.Var("V_NEG", ir.ScalarType(idx), span)
+        dim = ir.Neg(var, idx, span)
+        ty = ir.TensorType([dim, ir.ConstInt(64, idx, span)], DataType.BF16)
+
+        ib = IRBuilder()
+        with ib.function("dyn_unary_func", type=ir.FunctionType.InCore) as f:
+            a = f.param("a", ty)
+            t = ib.let("t", tile.load(a, [0, 0], [16, 64]))
+            ret = ib.let("ret", t)
+            f.return_type(ty)
+            ib.return_stmt(ret)
+        func = f.get_result()
+
+        with pytest.raises(ValueError, match="non-invertible"):
+            _generate_arg_unpacking(func)
+
 
 class TestGenerateKernelWrapper:
     """Tests for _generate_kernel_wrapper."""
@@ -1094,6 +1326,52 @@ def test_pto_codegen_spmd_block_params_appended_with_named_ssas():
     spmd_idx_pos = signature_line.find("%__pypto_spmd_block_idx")
     assert arg0_pos != -1 and spmd_idx_pos != -1
     assert spmd_idx_pos > arg0_pos, f"SPMD param must come after user params: {signature_line}"
+
+
+_SPMD_BLOCK_ROWS = 128
+_ROWS = pl.dynamic("ROWS")
+
+
+@pl.program
+class _SpmdDynRowsProgram:
+    """pl.dynamic row dim with pl.spmd orchestration calling InCore (get_block_idx slice)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def spmd_kernel(
+        self,
+        x: pl.Tensor[[_ROWS, _SPMD_BLOCK_ROWS], pl.FP32],
+        out: pl.Out[pl.Tensor[[_ROWS, _SPMD_BLOCK_ROWS], pl.FP32]],
+    ) -> pl.Tensor[[_ROWS, _SPMD_BLOCK_ROWS], pl.FP32]:
+        bi = pl.tile.get_block_idx()
+        off = bi * _SPMD_BLOCK_ROWS
+        return pl.store(
+            pl.load(x, [off, 0], [_SPMD_BLOCK_ROWS, _SPMD_BLOCK_ROWS]),
+            [off, 0],
+            out,
+        )
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orch(
+        self,
+        x: pl.Tensor[[_ROWS, _SPMD_BLOCK_ROWS], pl.FP32],
+        out: pl.Out[pl.Tensor[[_ROWS, _SPMD_BLOCK_ROWS], pl.FP32]],
+    ) -> pl.Tensor[[_ROWS, _SPMD_BLOCK_ROWS], pl.FP32]:
+        with pl.spmd(4):
+            out = self.spmd_kernel(x, out)
+        return out
+
+
+def test_pto_codegen_spmd_pl_dynamic_rows_unpack():
+    """pl.spmd + pl.dynamic rows: pass-pipeline kernel must unpack ROWS from shapes[0]."""
+    spmd_func = _run_default_passes(_SpmdDynRowsProgram).get_function("spmd_kernel")
+    assert spmd_func is not None
+
+    code, names = _generate_arg_unpacking(spmd_func)
+    # After default passes, tensor params are SSA-renamed (e.g. x -> x__ssa_v0).
+    assert "int64_t ROWS = static_cast<int64_t>(x__ssa_v0_tensor->shapes[0]);" in code, (
+        f"expected ROWS from x__ssa_v0 shapes[0], got:\n{code}"
+    )
+    assert names == ["x__ssa_v0", "out__ssa_v0", "ROWS"]
 
 
 class TestGenerateSkipPtoas:

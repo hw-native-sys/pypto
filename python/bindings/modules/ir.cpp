@@ -689,6 +689,10 @@ void BindIR(nb::module_& m) {
       nb::init<const std::string&, const TypePtr&, const Span&>(), nb::arg("name_hint"), nb::arg("type"),
       nb::arg("span"),
       "Create a variable reference (memory reference is stored in ShapedType for Tensor/Tile types)");
+  var_class.def_prop_ro(
+      "unique_id", &Var::UniqueId,
+      "Process-unique identifier for this Var instance. Stable for the lifetime of the process; "
+      "use as a dictionary key to deduplicate Var wrappers that refer to the same underlying object.");
   BindFields<Var>(var_class);
 
   // IterArg - const shared_ptr

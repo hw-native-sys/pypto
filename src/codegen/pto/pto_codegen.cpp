@@ -115,6 +115,74 @@ bool HasDynamicTileValidShape(const std::shared_ptr<const ir::TileType>& tile_ty
   return valid_row_expr || valid_col_expr;
 }
 
+// Collect Vars referenced by a shape expression in first-seen order (for trailing
+// %argN: index in MLIR). Shape-expression inversion (recovering a Var from
+// runtime shapes[]) is implemented only in the Python kernel wrapper
+// (``_generate_arg_unpacking`` in python/pypto/backend/pto_backend.py);
+// ``_collect_shape_dim_vars`` there mirrors this node coverage and the two
+// collectors must walk the exact same node set in the same order so that
+// the trailing index params emitted into MLIR / consumed by ptoas line up
+// 1:1 with the wrapper's forward-call argument list.
+//
+// Dedup key: raw ``Var*`` is sound here because the IR holds the canonical
+// shared_ptr graph (each Var has exactly one address). The Python mirror
+// dedups by ``Var.unique_id`` instead because binding-layer wrappers can
+// differ for the same underlying C++ Var (see ``Var::unique_id`` binding).
+//
+// Unknown node kinds fail loudly: silently skipping them would recreate the
+// very bug this function exists to fix (lost dynamic-dim params in the kernel
+// signature) the next time a new Expr subclass is introduced in shapes.
+void CollectVarsFromExpr(const ExprPtr& expr, std::set<const ir::Var*>& seen, std::vector<VarPtr>& out) {
+  if (!expr) {
+    return;
+  }
+  if (auto var = As<ir::Var>(expr)) {
+    if (seen.insert(var.get()).second) {
+      out.push_back(var);
+    }
+    return;
+  }
+  if (auto binary = As<ir::BinaryExpr>(expr)) {
+    CollectVarsFromExpr(binary->left_, seen, out);
+    CollectVarsFromExpr(binary->right_, seen, out);
+    return;
+  }
+  if (auto unary = As<ir::UnaryExpr>(expr)) {
+    CollectVarsFromExpr(unary->operand_, seen, out);
+    return;
+  }
+  if (auto call = As<ir::Call>(expr)) {
+    for (const auto& arg : call->args_) {
+      CollectVarsFromExpr(arg, seen, out);
+    }
+    return;
+  }
+  if (auto tget = As<ir::TupleGetItemExpr>(expr)) {
+    CollectVarsFromExpr(tget->tuple_, seen, out);
+    return;
+  }
+  if (As<ir::ConstInt>(expr) || As<ir::ConstFloat>(expr) || As<ir::ConstBool>(expr)) {
+    return;
+  }
+  INTERNAL_UNREACHABLE_SPAN(expr->span_) << "CollectVarsFromExpr: unsupported shape expression node";
+}
+
+// Collect tensor-shape dyn Vars across a function's tensor params.
+// Used both to reserve %argN names upfront (so NewNamedTemp does not collide)
+// and to emit the trailing index params on the MLIR func.func signature.
+std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
+  std::vector<VarPtr> dyn_vars;
+  std::set<const ir::Var*> seen;
+  for (const auto& param : func->params_) {
+    if (auto tensor_type = As<TensorType>(param->GetType())) {
+      for (const auto& dim : tensor_type->shape_) {
+        CollectVarsFromExpr(dim, seen, dyn_vars);
+      }
+    }
+  }
+  return dyn_vars;
+}
+
 int GetGMPipeSlotCount(int dir_mask) {
   const int bidirectional = ir::core_affinity::kDirMaskC2V | ir::core_affinity::kDirMaskV2C;
   if (dir_mask == bidirectional) {
@@ -346,28 +414,19 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   fs_.Reset();
   fs_.current_function = func;
 
+  // Collect dyn-dim Vars from tensor-parameter shapes once. The same list
+  // drives both name reservation (Site A below) and the trailing %argN: index
+  // params on the MLIR signature (Site B further down) -- a single source of
+  // truth keeps the two in lockstep.
+  const std::vector<VarPtr> dyn_vars = CollectTensorShapeDynVars(func);
+
   // Reserve %argN names upfront so NewNamedTemp never collides with them
   for (size_t i = 0; i < func->params_.size(); i++) {
     fs_.used_ssa_names.insert("arg" + std::to_string(i));
   }
-  // Also reserve extra %argN for dynamic dimension parameters
-  {
-    size_t extra = 0;
-    for (const auto& param : func->params_) {
-      if (auto tensor_type = As<TensorType>(param->GetType())) {
-        std::set<const ir::Var*> seen;
-        for (const auto& dim : tensor_type->shape_) {
-          if (auto var = As<ir::Var>(dim)) {
-            if (seen.insert(GetVarKey(var)).second) {
-              extra++;
-            }
-          }
-        }
-      }
-    }
-    for (size_t i = 0; i < extra; i++) {
-      fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + i));
-    }
+  // Reserve extra %argN slots for the dyn-dim Vars (one per unique Var).
+  for (size_t i = 0; i < dyn_vars.size(); i++) {
+    fs_.used_ssa_names.insert("arg" + std::to_string(func->params_.size() + i));
   }
 
   BuildVarToMemRefMapping(func);
@@ -411,22 +470,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     }
   }
 
-  // Collect ordered unique dynamic dimension variables from tensor parameter shapes
-  std::vector<VarPtr> dyn_vars;
-  {
-    std::set<const ir::Var*> seen_dyn_vars;
-    for (const auto& param : func->params_) {
-      if (auto tensor_type = As<TensorType>(param->GetType())) {
-        for (const auto& dim : tensor_type->shape_) {
-          if (auto var = As<ir::Var>(dim)) {
-            if (seen_dyn_vars.insert(GetVarKey(var)).second) {
-              dyn_vars.push_back(var);
-            }
-          }
-        }
-      }
-    }
-  }
+  // ``dyn_vars`` was computed at the top of GenerateFunction; it carries the
+  // trailing %argN: index parameters in first-seen order.
 
   stream_ << "  func.func @" << func->name_ << "(";
 
