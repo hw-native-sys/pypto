@@ -22,7 +22,9 @@ This file currently covers the codegen path; execution dispatch lives in
 API lands.
 """
 
+import os
 import sys
+import traceback
 
 import pypto.language as pl
 import pytest
@@ -167,24 +169,56 @@ class TestL2MultiOrch:
 
         Skipped on hosts without a device (``--device`` unset) and under
         ``--codegen-only``, since both bypass real dispatch.
+
+        Runs the actual device dispatch in a forked child via
+        ``os.fork()``. An ``L2 Worker(level=2)`` device session leaves
+        global state in ``simpler`` / ``host_runtime.so`` (dlopen
+        handle, device context) that crashes the next test's L3
+        hierarchical chip-process fork inside
+        ``simpler.task_interface:init``. Isolating the device call in
+        a child process keeps the parent's runtime state clean for
+        subsequent tests (e.g. ``test_l3_distributed``) collected in
+        the same pytest session.
         """
         if not device_ids:
             pytest.skip("multi-orch on-device test needs at least one device")
         if test_config.codegen_only:
             pytest.skip("--codegen-only disables device execution")
 
+        # Compile in the parent so the build artefacts are available
+        # for inspection if the child fails. The actual device dispatch
+        # happens in the child to avoid polluting parent's runtime state.
         compiled = ir.compile(
             TwoL2AddSubProgram,
             output_dir=str(tmp_path),
             platform=test_config.platform,
         )
 
-        a = torch.full((128, 128), 2.0, dtype=torch.float32)
-        b = torch.full((128, 128), 3.0, dtype=torch.float32)
-        f_add = torch.zeros((128, 128), dtype=torch.float32)
+        result_path = tmp_path / "f_add.pt"
+        err_path = tmp_path / "err.txt"
 
-        compiled["chip_orch_add"](a, b, f_add, config=test_config)
+        pid = os.fork()
+        if pid == 0:
+            # Child: run the on-device dispatch and write the result.
+            # ``os._exit`` bypasses Python's atexit handlers so the
+            # parent's simpler runtime state is untouched.
+            try:
+                a = torch.full((128, 128), 2.0, dtype=torch.float32)
+                b = torch.full((128, 128), 3.0, dtype=torch.float32)
+                f_add = torch.zeros((128, 128), dtype=torch.float32)
+                compiled["chip_orch_add"](a, b, f_add, config=test_config)
+                torch.save(f_add, str(result_path))
+                os._exit(0)
+            except Exception:  # noqa: BLE001 — surface anything to parent
+                err_path.write_text(traceback.format_exc())
+                os._exit(1)
 
+        _, status = os.waitpid(pid, 0)
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            detail = err_path.read_text() if err_path.exists() else "(no traceback captured)"
+            pytest.fail(f"on-device child exited with status={status}\n{detail}")
+
+        f_add = torch.load(str(result_path))
         torch.testing.assert_close(f_add, torch.full((128, 128), 5.0, dtype=torch.float32))
 
 
