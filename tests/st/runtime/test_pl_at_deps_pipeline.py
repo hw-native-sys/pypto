@@ -277,8 +277,8 @@ class TestPlAtDepsSwimlane:
 #     Phase 3:  a30  a31  a32  a33    (each depends on ALL of phase 2)
 #
 # Every task writes a disjoint ``TILE_M``-row stripe of ``out``. The value of
-# these tests is in the SWIMLANE shape: array-carry multi-deps must produce
-# a fence keyed on ALL prior-phase tasks, not just the last-dispatched one.
+# these tests is in the SWIMLANE shape: compressed dummy barriers must still
+# fence on ALL prior-phase tasks, not just the last-dispatched one.
 # Same expectations as the pl.submit-variant ``TestPhaseFenceSwimlane``.
 # ---------------------------------------------------------------------------
 
@@ -312,8 +312,8 @@ def _build_phase_fence_program():
                 # TASK_ID]`` to hold one TaskId per branch slot — every
                 # parallel iter writes its own slot via ``tids[branch] = tid``
                 # (where ``tid`` is captured by ``as tid`` on the pl.at block),
-                # and ``deps=[tids]`` expands to N_BRANCHES guarded slot fills
-                # in the downstream block's ``set_dependencies`` array.
+                # and ``deps=[tids]`` is lowered through a dummy barrier whose
+                # fanin is one slot per branch of the previous phase.
                 # First phase has no prior-phase producer; ``pl.array.create``
                 # initialises every slot to ``PTO2TaskId::invalid()`` and the
                 # runtime fence skips invalid entries via ``is_valid()``.
@@ -410,10 +410,10 @@ def phase_fence_pl_at_swimlane_data(phase_fence_pl_at_swimlane_file: Path) -> di
 
 
 class TestPhaseFencePlAtSwimlane:
-    """Validate the array-carry multi-deps fence using the pl.at-deps interface.
+    """Validate the compressed phase-fence barrier using the pl.at-deps interface.
 
     Mirror of ``TestPhaseFenceSwimlane`` from the pl.submit-variant test —
-    the runtime DAG shape must be interface-independent.
+    the externally required phase ordering must be interface-independent.
     """
 
     def test_total_task_count(self, phase_fence_pl_at_swimlane_data: dict):
@@ -426,9 +426,9 @@ class TestPhaseFencePlAtSwimlane:
     def test_phase_fence_strict(self, phase_fence_pl_at_swimlane_data: dict):
         """Every block in phase N+1 starts AFTER every block in phase N ends.
 
-        Without array-carry multi-deps, only the *last-dispatched* phase-N
-        block would fence — a slower earlier-dispatched block could still be
-        running when phase N+1 begins.
+        Without a full phase fence, only the *last-dispatched* phase-N block
+        might fence — a slower earlier-dispatched block could still be running
+        when phase N+1 begins.
         """
         expected = _PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES
         tasks = phase_fence_pl_at_swimlane_data["tasks"]
@@ -447,21 +447,13 @@ class TestPhaseFencePlAtSwimlane:
                 f"ends at {n_end:.2f}us — multi-deps fence violated"
             )
 
-    def test_multi_deps_fanout_observed(self, phase_fence_pl_at_swimlane_data: dict):
-        """At least one block fans out to ``N_BRANCHES`` successors.
-
-        Same observability criterion as the pl.submit-variant test: with
-        array-carry codegen on a pl.at-deps block, the max ``fanout_count``
-        over the whole DAG should be ≥ ``N_BRANCHES``. A regression where
-        codegen only records the *last-dispatched* phase-N block as a dep
-        would cap the max fanout at 1.
-        """
+    def test_barrier_shape_allows_extra_dummy_tasks(self, phase_fence_pl_at_swimlane_data: dict):
+        """The compressed fence may add dummy tasks without dropping blocks."""
         tasks = phase_fence_pl_at_swimlane_data["tasks"]
-        max_fanout = max((t["fanout_count"] for t in tasks), default=0)
-        assert max_fanout >= _PHASE_FENCE_N_BRANCHES, (
-            f"max fanout across all tasks = {max_fanout}, expected ≥ {_PHASE_FENCE_N_BRANCHES} "
-            "(array-carry multi-deps means each phase-N block should fan out to all "
-            f"{_PHASE_FENCE_N_BRANCHES} phase-N+1 blocks)"
+        expected_blocks = _PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES
+        assert len(tasks) >= expected_blocks, (
+            f"expected at least {expected_blocks} kernel blocks plus optional dummy barriers, "
+            f"got {len(tasks)} total tasks"
         )
 
 

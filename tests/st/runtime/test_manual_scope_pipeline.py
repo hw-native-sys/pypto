@@ -341,9 +341,8 @@ def _build_phase_fence_program():
                 # branches in phase P. Use an explicit ``Array[N_BRANCHES,
                 # TASK_ID]`` to hold one TaskId per branch slot — every
                 # parallel iter writes its own slot, and ``deps=[tids]``
-                # expands to N_BRANCHES guarded slot fills in the
-                # downstream task's ``set_dependencies`` array (one per slot
-                # of the previous phase).
+                # is lowered through a dummy barrier whose fanin is one slot
+                # per branch of the previous phase.
                 # ``pl.array.create`` auto-initializes all slots to
                 # ``PTO2TaskId::invalid()``; the runtime fence skips
                 # invalid entries via ``is_valid()`` so the first phase
@@ -533,12 +532,11 @@ def phase_fence_auto_swimlane_data(phase_fence_auto_swimlane_file: Path) -> dict
 
 
 class TestPhaseFenceSwimlane:
-    """Validate the array-carry multi-deps fence in the runtime swimlane.
+    """Validate the compressed phase-fence barrier in the runtime swimlane.
 
-    The structural witness that array-carry codegen is doing the right
-    thing: each phase-N task fans out to ALL ``N_BRANCHES`` tasks of phase
-    N+1, so the runtime fence on phase N+1 waits for every phase-N task
-    to complete — not just the last-dispatched one.
+    Codegen may insert synthetic dummy tasks between adjacent phases, so the
+    swimlane witness focuses on the externally required phase ordering rather
+    than requiring direct all-to-all producer fanout.
     """
 
     def test_total_task_count(self, phase_fence_swimlane_data: dict):
@@ -553,9 +551,9 @@ class TestPhaseFenceSwimlane:
 
         Group all kernel_stripe tasks by start time into ``N_PHASES`` batches
         of ``N_BRANCHES`` and verify ``phase[N+1].min_start ≥ phase[N].max_end``.
-        Without array-carry multi-deps, only the *last-dispatched* phase-N
-        task would fence — a slower earlier-dispatched task could still be
-        running when phase N+1 begins.
+        Without a full phase fence, only the *last-dispatched* phase-N task
+        might fence — a slower earlier-dispatched task could still be running
+        when phase N+1 begins.
         """
         expected = _PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES
         tasks = phase_fence_swimlane_data["tasks"]
@@ -574,26 +572,13 @@ class TestPhaseFenceSwimlane:
                 f"ends at {n_end:.2f}us — multi-deps fence violated"
             )
 
-    def test_multi_deps_fanout_observed(self, phase_fence_swimlane_data: dict):
-        """At least one task fans out to ``N_BRANCHES`` successors.
-
-        With array-carry codegen, every task in phase N is depended on by
-        every task in phase N+1, so the maximum ``fanout_count`` over the
-        whole DAG should be ≥ ``N_BRANCHES``. A regression where codegen
-        only records the *last-dispatched* phase-N task as a dep would cap
-        the max fanout at 1.
-
-        The runtime may elide dep-edge records on the consumer side when a
-        downstream task is already free to run, so we don't require *every*
-        phase-N task to show fanout ``N_BRANCHES`` — observing the multi-
-        dep pattern on at least one task is sufficient evidence.
-        """
+    def test_barrier_shape_allows_extra_dummy_tasks(self, phase_fence_swimlane_data: dict):
+        """The compressed fence may add dummy tasks without dropping kernels."""
         tasks = phase_fence_swimlane_data["tasks"]
-        max_fanout = max((t["fanout_count"] for t in tasks), default=0)
-        assert max_fanout >= _PHASE_FENCE_N_BRANCHES, (
-            f"max fanout across all tasks = {max_fanout}, expected ≥ {_PHASE_FENCE_N_BRANCHES} "
-            "(array-carry multi-deps means each phase-N task should fan out to all "
-            f"{_PHASE_FENCE_N_BRANCHES} phase-N+1 tasks)"
+        expected_kernels = _PHASE_FENCE_N_PHASES * _PHASE_FENCE_N_BRANCHES
+        assert len(tasks) >= expected_kernels, (
+            f"expected at least {expected_kernels} kernel tasks plus optional dummy barriers, "
+            f"got {len(tasks)} total tasks"
         )
 
 

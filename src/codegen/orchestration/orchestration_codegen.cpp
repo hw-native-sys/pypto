@@ -726,6 +726,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
+    std::unordered_map<const Var*, std::string> pre_loop_phase_fence_barriers;
+    if (in_manual_scope_depth_ > 0 && for_stmt->kind_ == ForKind::Parallel) {
+      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+        const auto& iter_arg = for_stmt->iter_args_[i];
+        if (!iter_arg || !ForBodyHasManualDepOnArray(for_stmt->body_, iter_arg.get())) continue;
+        auto source = TryResolveExplicitPhaseFenceArrayForVar(iter_arg.get());
+        if (!source.has_value()) continue;
+        pre_loop_phase_fence_barriers[iter_arg.get()] = EmitPhaseFenceBarrier(*source);
+      }
+    }
+
+    active_phase_fence_barriers_.push_back(std::move(pre_loop_phase_fence_barriers));
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
@@ -766,7 +778,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
       slot_expr = "((" + loop_var + " - " + start_expr + ") / " + step_expr + ")";
     }
     current_loop_slot_exprs_.push_back(slot_expr);
+    std::unordered_map<const Var*, std::string> in_loop_phase_fence_barriers;
+    if (in_manual_scope_depth_ > 0 && for_stmt->kind_ != ForKind::Parallel) {
+      for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
+        const auto& iter_arg = for_stmt->iter_args_[i];
+        if (!iter_arg || !ForBodyHasManualDepOnArray(for_stmt->body_, iter_arg.get())) continue;
+        auto source = TryResolveExplicitPhaseFenceArrayForVar(iter_arg.get());
+        if (!source.has_value()) continue;
+        in_loop_phase_fence_barriers[iter_arg.get()] = EmitPhaseFenceBarrier(*source);
+      }
+    }
+    active_phase_fence_barriers_.push_back(std::move(in_loop_phase_fence_barriers));
     VisitStmt(for_stmt->body_);
+    active_phase_fence_barriers_.pop_back();
     current_loop_slot_exprs_.pop_back();
     current_return_vars_ = saved;
 
@@ -778,6 +802,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     PopCppScope();
     indent_ -= 4;
     code_ << Indent() << "}\n";
+    active_phase_fence_barriers_.pop_back();
   }
 
   void VisitStmt_(const RuntimeScopeStmtPtr& scope) override {
@@ -1114,6 +1139,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
  private:
+  struct PhaseFenceBarrierSource {
+    const Var* edge = nullptr;
+    std::vector<std::string> slot_names;
+    int64_t size = 0;
+  };
+
   std::string Indent() const { return std::string(indent_, ' '); }
 
   std::string GetCppType(const TypePtr& type) {
@@ -1522,7 +1553,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// of any auto-tracked deps the runtime infers from OverlapMap (final
   /// fanin = auto ∪ explicit), so this fires in both auto and manual scopes.
   /// No-op when there are no edges attached.
-  void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
+  void EmitManualDeps(const CallPtr& call, const std::string& task_var,
+                      const std::optional<std::string>& override_single_dep = std::nullopt) {
+    if (override_single_dep.has_value()) {
+      const std::string deps_arr = task_var + "_deps";
+      const std::string deps_cnt = task_var + "_deps_count";
+      code_ << Indent() << "PTO2TaskId " << deps_arr << "[1];\n";
+      code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
+      code_ << Indent() << "if (" << *override_single_dep << ".is_valid()) " << deps_arr << "[" << deps_cnt
+            << "++] = " << *override_single_dep << ";\n";
+      code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
+      return;
+    }
+
     const size_t dep_capacity = CountManualDeps(call);
     if (dep_capacity == 0) return;
     for (const auto& [k, v] : call->attrs_) {
@@ -1570,6 +1613,73 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
       break;
     }
+  }
+
+  std::optional<PhaseFenceBarrierSource> TryResolveExplicitPhaseFenceArray(const CallPtr& call) const {
+    if (in_manual_scope_depth_ <= 0) return std::nullopt;
+    for (const auto& [k, v] : call->attrs_) {
+      if (k != kAttrManualDepEdges) continue;
+      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+      if (edges == nullptr || edges->size() != 1 || !(*edges)[0]) return std::nullopt;
+      return TryResolveExplicitPhaseFenceArrayForVar((*edges)[0].get());
+    }
+    return std::nullopt;
+  }
+
+  std::optional<PhaseFenceBarrierSource> TryResolveExplicitPhaseFenceArrayForVar(const Var* edge) const {
+    if (in_manual_scope_depth_ <= 0 || edge == nullptr) return std::nullopt;
+    auto array_ty = As<ArrayType>(edge->GetType());
+    if (!array_ty || array_ty->dtype_ != DataType::TASK_ID) return std::nullopt;
+
+    auto array_it = array_carry_vars_.find(edge);
+    if (array_it == array_carry_vars_.end() || array_it->second.size <= 0) return std::nullopt;
+
+    auto task_id_it = manual_task_id_map_.find(edge);
+    if (task_id_it == manual_task_id_map_.end()) return std::nullopt;
+    const auto* slot_names = std::get_if<std::vector<std::string>>(&task_id_it->second);
+    if (slot_names == nullptr) return std::nullopt;
+    if (slot_names->size() != static_cast<size_t>(array_it->second.size)) return std::nullopt;
+
+    return PhaseFenceBarrierSource{edge, *slot_names, array_it->second.size};
+  }
+
+  std::string EmitPhaseFenceBarrier(const PhaseFenceBarrierSource& source) {
+    const int barrier_idx = phase_fence_barrier_counter_++;
+    const std::string task_var = "params_phase_fence_barrier_" + std::to_string(barrier_idx);
+    const std::string deps_arr = task_var + "_deps";
+    const std::string deps_cnt = task_var + "_deps_count";
+    const std::string outs_var = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_outs";
+    const std::string tid_name = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_tid";
+
+    code_ << "\n";
+    code_ << Indent() << "// Phase-fence barrier " << barrier_idx << ": compress " << source.size
+          << " upstream TaskIds into one dependency point\n";
+    EmitTaskParamsDecl(Indent(), task_var);
+    code_ << Indent() << "PTO2TaskId " << deps_arr << "[" << source.slot_names.size() << "];\n";
+    code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
+    for (const auto& name : source.slot_names) {
+      code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
+            << "++] = " << name << ";\n";
+    }
+    code_ << Indent() << "PTO2TaskId " << tid_name << " = PTO2TaskId::invalid();\n";
+    code_ << Indent() << "if (" << deps_cnt << " > 0) {\n";
+    indent_ += 4;
+    code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
+    code_ << Indent() << "TaskOutputTensors " << outs_var << " = rt_submit_dummy_task(" << task_var << ");\n";
+    code_ << Indent() << tid_name << " = " << outs_var << ".task_id();\n";
+    indent_ -= 4;
+    code_ << Indent() << "}\n";
+    return tid_name;
+  }
+
+  std::optional<std::string> ResolveActivePhaseFenceBarrierDep(const CallPtr& call) const {
+    auto source = TryResolveExplicitPhaseFenceArray(call);
+    if (!source.has_value() || source->edge == nullptr) return std::nullopt;
+    for (auto it = active_phase_fence_barriers_.rbegin(); it != active_phase_fence_barriers_.rend(); ++it) {
+      auto found = it->find(source->edge);
+      if (found != it->end()) return found->second;
+    }
+    return std::nullopt;
   }
 
   static constexpr size_t kMaxAllocTensorsArgs = 16;
@@ -1809,7 +1919,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // ``aicpu_orchestration_entry`` (see the DistributedTensor CommContext
     // pointers block) and named ``ext_<outer-arg-name>_ctx``.
     EmitDistTensorCtxScalars(call, callee_func, ind, task_var);
-    EmitManualDeps(call, task_var);
+    auto phase_fence_dep = ResolveActivePhaseFenceBarrierDep(call);
+    EmitManualDeps(call, task_var, phase_fence_dep);
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
@@ -1842,7 +1953,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
     EmitLaunchSpec(ind, task_var, spmd_func);
-    EmitManualDeps(call, task_var);
+    auto phase_fence_dep = ResolveActivePhaseFenceBarrierDep(call);
+    EmitManualDeps(call, task_var, phase_fence_dep);
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
@@ -1882,7 +1994,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
 
       EmitLaunchSpec(ind, task_var, launch_func);
-      EmitManualDeps(call, task_var);
+      auto phase_fence_dep = ResolveActivePhaseFenceBarrierDep(call);
+      EmitManualDeps(call, task_var, phase_fence_dep);
 
       std::string submit_expr =
           CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
@@ -1929,7 +2042,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
           << third_id << "};\n";
 
     EmitLaunchSpec(ind, task_var, launch_func);
-    EmitManualDeps(call, task_var);
+    auto phase_fence_dep = ResolveActivePhaseFenceBarrierDep(call);
+    EmitManualDeps(call, task_var, phase_fence_dep);
 
     std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
     EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call));
@@ -2332,6 +2446,32 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return finder.result;
   }
 
+  static bool ForBodyHasManualDepOnArray(const StmtPtr& body, const Var* target) {
+    class Finder : public IRVisitor {
+     public:
+      bool found = false;
+      const Var* target = nullptr;
+
+      void VisitExpr_(const CallPtr& call) override {
+        if (found) return;
+        for (const auto& [k, v] : call->attrs_) {
+          if (k != kAttrManualDepEdges) continue;
+          const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+          if (!edges || edges->size() != 1 || !(*edges)[0]) continue;
+          if ((*edges)[0].get() == target) {
+            found = true;
+            return;
+          }
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+    };
+    Finder finder;
+    finder.target = target;
+    finder.VisitStmt(body);
+    return finder.found;
+  }
+
   /// Determine the carry size for a TaskId iter_arg of ``for_stmt`` at slot
   /// ``idx``. Returns 0 when the iter_arg is scalar-carry.
   ///   * Parallel ForStmt with const trip count: carry size = trip count.
@@ -2377,7 +2517,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::string current_result_var_;
   std::vector<VarPtr> current_return_vars_;
   int task_counter_ = 0;
+  int phase_fence_barrier_counter_ = 0;
   int alloc_counter_ = 0;
+  std::vector<std::unordered_map<const Var*, std::string>> active_phase_fence_barriers_;
   /// Depth of nested ``RuntimeScopeStmt(manual=true)``. While > 0, the codegen
   /// suppresses the implicit ``PTO2_SCOPE()`` wrapper around ForStmt/IfStmt
   /// bodies (the runtime forbids nesting AUTO scope inside MANUAL).
