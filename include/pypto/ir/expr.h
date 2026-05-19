@@ -339,8 +339,13 @@ using IterArgPtr = std::shared_ptr<const IterArg>;
  * - OutputExisting:  Write into an already-existing tensor (skips OverlapMap,
  *                    keeps creator dependency) → add_output(tensor),
  *                    TensorArgType::OUTPUT_EXISTING
- * - NoDep:           No-dependency existing tensor (skips OverlapMap, no publish)
- *                    → add_no_dep, TensorArgType::NO_DEP
+ * - NoDep:           No-dependency existing tensor (skips OverlapMap lookup
+ *                    *and* publish). Legal regardless of the callee's
+ *                    ``ParamDirection`` (In / Out / InOut): the user opts the
+ *                    slot out of auto-dep tracking for both reads and writes
+ *                    by guaranteeing disjoint access out-of-band — e.g. paged
+ *                    KV-cache writes whose offset is data-dependent. → add_no_dep,
+ *                    TensorArgType::NO_DEP
  * - Scalar:          Non-tensor scalar argument → add_scalar (must follow all
  *                    tensors in the runtime arg list)
  */

@@ -1025,11 +1025,13 @@ class TestNoDepOverride:
             ir.ArgDirection.OutputExisting,
         ]
 
-    def test_no_dep_on_inout_param_rejected(self):
-        # The verifier forbids NoDep on Out/InOut params: NoDep is a read-only
-        # opt-out that would suppress producer registration if applied to a
-        # writer. ``derive_call_directions()`` runs the property verifier as
-        # post-condition, so the override surfaces as a build-time failure.
+    def test_no_dep_on_inout_param_accepted(self):
+        # ``NoDep`` is legal on callee ``InOut`` params: the user opts the slot
+        # out of OverlapMap tracking for both the read and the write side,
+        # asserting out-of-band that there is no RaW / WaW conflict on the
+        # slot. Typical use: paged-attention writes whose offset is
+        # data-dependent (so the compiler cannot prove disjointness) but are
+        # guaranteed disjoint by the runtime allocation protocol.
         @pl.program
         class P:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1049,5 +1051,42 @@ class TestNoDepOverride:
                 b = self.kernel(a, pl.no_dep(b))
                 return b
 
-        with pytest.raises(Exception, match="NoDep|InOut"):  # noqa: PT011
-            passes.derive_call_directions()(P)
+        new_prog = passes.derive_call_directions()(P)
+        calls = _user_calls(new_prog)
+        assert len(calls) == 1
+        # 0=a (Input), 1=b marked NoDep (overrides the auto-derived InOut).
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.NoDep]
+        # The post-pass verifier must also accept the resulting IR.
+        _verify_call_directions(new_prog)
+
+    def test_no_dep_on_out_param_accepted(self):
+        # ``NoDep`` is also legal on callee ``Out`` params (the write-side
+        # analogue of the InOut case). The auto-deriver would otherwise pick
+        # ``OutputExisting`` for a first writer at top level; the override
+        # forces ``NoDep`` and the verifier accepts it.
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ):
+                return b
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+            ):
+                b = self.kernel(a, pl.no_dep(b))
+                return b
+
+        new_prog = passes.derive_call_directions()(P)
+        calls = _user_calls(new_prog)
+        assert len(calls) == 1
+        # 0=a (Input), 1=b marked NoDep (overrides the auto-derived
+        # OutputExisting). The verifier must accept the resulting IR.
+        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.NoDep]
+        _verify_call_directions(new_prog)

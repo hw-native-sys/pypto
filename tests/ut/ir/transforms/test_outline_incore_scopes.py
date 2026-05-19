@@ -900,6 +900,89 @@ class TestOutlineNoDepArgs:
         assert dirs[1] == ir.ArgDirection.NoDep, f"expected NoDep at slot 1, got {dirs}"
         assert dirs[0] != ir.ArgDirection.NoDep, f"slot 0 should keep auto-direction, got {dirs}"
 
+    def test_outline_plus_derive_no_dep_on_mutated_capture(self):
+        """``pl.at(no_dep_args=[k])`` is legal when the scope body mutates ``k``
+        via ``pl.assemble`` — i.e. the synthesised kernel param direction for
+        ``k`` is ``InOut`` rather than ``In``.
+
+        Mirrors the qwen3-style paged-KV-cache pattern: ``k_cache`` and
+        ``v_cache`` are written at a data-dependent offset inside a parallel
+        fan-out, so the compiler cannot prove sibling writes are disjoint;
+        the user opts the slots out of OverlapMap tracking via
+        ``no_dep_args=`` because the runtime slot allocation protocol
+        guarantees disjointness.
+        """
+        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                k_cache: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[k_cache]):
+                    # The scope body writes into ``k_cache`` via pl.assemble —
+                    # the outliner infers ``InOut`` for the synthesised
+                    # callee's k_cache param. Without the relaxed Out+NoDep
+                    # rule, the post-pass verifier would reject the resulting
+                    # ``InOut`` (callee) + ``NoDep`` (call-site) combination.
+                    k_cache = pl.assemble(k_cache, x, [0])
+                return k_cache
+
+        with self._verify_only_ctx():
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+            After = passes.derive_call_directions()(After)
+
+        call = self._outlined_user_call(After)
+        # Locate the k_cache slot. SSA conversion renames k_cache to a
+        # ``k_cache__rv_N``-style version, so match by name prefix rather
+        # than exact identity. (Captured-Var order depends on outliner
+        # traversal — we don't pin the position.)
+        k_cache_idx = next(
+            (
+                i
+                for i, a in enumerate(call.args)
+                if isinstance(a, ir.Var) and (a.name_hint == "k_cache" or a.name_hint.startswith("k_cache"))
+            ),
+            None,
+        )
+        assert k_cache_idx is not None, (
+            f"k_cache not found in outlined call args: "
+            f"{[a.name_hint for a in call.args if isinstance(a, ir.Var)]}"
+        )
+
+        dirs = list(call.arg_directions)
+        # The marked tensor (k_cache) is forced to NoDep even though the
+        # synthesised callee declares it as InOut (because pl.assemble inside
+        # the body writes into it).
+        assert dirs[k_cache_idx] == ir.ArgDirection.NoDep, (
+            f"expected NoDep at k_cache slot {k_cache_idx}, got {dirs}"
+        )
+        # The synthesised callee classifies the mutated capture as InOut
+        # (asserted indirectly via the verifier below, which rejects
+        # NoDep on a callee `In` param if some sibling argument got
+        # re-classified).
+
+        # And the post-pass property verifier must accept the InOut+NoDep
+        # combination on the synthesised Call.
+        props = _core_passes.IRPropertySet()
+        props.insert(_core_passes.IRProperty.CallDirectionsResolved)
+        _core_passes.PropertyVerifierRegistry.verify_or_throw(props, After)
+
+        # Assert directly that the synthesised callee declares the marked
+        # param as InOut — this is the load-bearing precondition that makes
+        # this an InOut+NoDep test (rather than the trivial In+NoDep case
+        # covered by ``test_outline_plus_derive_marks_slot_no_dep``).
+        outlined = next(
+            f for gv, f in After.functions.items() if gv.name != "main"
+        )
+        assert outlined.param_directions[k_cache_idx] == ir.ParamDirection.InOut, (
+            f"expected InOut at outlined callee param {k_cache_idx}, "
+            f"got {list(outlined.param_directions)}"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

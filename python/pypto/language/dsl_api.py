@@ -1028,8 +1028,14 @@ def at(
             same tensor with ``pl.no_dep(t)`` at an explicit kernel call
             site — use this form when the kernel call is synthesised by
             the ``pl.at`` outliner and there is no syntactic call-arg slot
-            to wrap. Note: ``deps=`` takes TaskIds, while ``no_dep_args=``
-            takes tensors — they describe different things.
+            to wrap. Legal for both read-only captures and captures that
+            the scope body mutates via ``pl.assemble`` / ``pl.store`` (the
+            outliner classifies the latter as ``InOut`` on the synthesised
+            kernel, and ``NoDep`` overrides ``InOut`` just as it overrides
+            ``Input``); the user is asserting that sibling fan-outs touch
+            disjoint regions of the tensor and therefore do not need
+            OverlapMap dep tracking. Note: ``deps=`` takes TaskIds, while
+            ``no_dep_args=`` takes tensors — they describe different things.
         optimization: **Deprecated.** Use ``optimizations=[pl.auto_chunk]`` (or
             ``optimizations=[pl.auto_chunk, pl.split(mode)]``) instead.
         split: **Deprecated.** Use ``optimizations=[pl.split(mode)]`` instead.

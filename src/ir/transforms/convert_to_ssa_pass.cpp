@@ -977,8 +977,18 @@ class SSAConverter {
   }
 
   StmtPtr ConvertScope(const ScopeStmtPtr& op) {
-    auto body = ConvertStmt(op->body_);
+    // Substitute attrs (manual_dep_edges / task_id_var /
+    // arg_direction_overrides_vars) BEFORE converting the body. Body
+    // conversion advances ``cur_`` past any writes performed inside the
+    // scope, so substituting after would resolve attr Var references to
+    // post-body yield-result versions rather than to the SSA versions
+    // visible at scope entry. The latter is what the user wrote — e.g.
+    // ``with pl.at(..., no_dep_args=[k_cache])`` where ``k_cache`` names
+    // an outer loop iter_arg, the body then reassigns ``k_cache`` via
+    // ``pl.assemble``. The attr must point at the iter_arg, not the rebuilt
+    // ``k_cache__rv_*`` from the yielded body.
     auto subst = SubstScopeAttrs(op->attrs_);
+    auto body = ConvertStmt(op->body_);
     auto& new_attrs = subst.first;
     const bool attrs_changed = subst.second;
     if (body == op->body_ && !attrs_changed) return op;

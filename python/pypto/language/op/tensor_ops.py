@@ -155,14 +155,25 @@ def no_dep(tensor: Tensor) -> Tensor:
     into the IR Call's attrs. ``DeriveCallDirections`` then overwrites the
     auto-derived direction at that slot to NoDep.
 
-    Effect at runtime: the simpler runtime skips the OverlapMap dependency
-    lookup for this argument (creator retention only). Use when ordering
-    is guaranteed by other means and you want to avoid unnecessary
-    serialization that auto-dep would otherwise insert.
+    Effect at runtime: the simpler runtime skips both the OverlapMap
+    dependency lookup *and* the producer insert for this argument. The
+    marker is legal regardless of whether the callee declares the param
+    as ``In`` (read) or ``Out`` / ``InOut`` (write): the caller is
+    asserting out-of-band that there is no RaW / WaW / WaR conflict on
+    the slot — for example, paged-attention writes whose target offset
+    is data-dependent (so the compiler cannot prove disjointness) but
+    are guaranteed disjoint by the runtime allocation protocol.
 
     Only valid as a direct argument to a kernel call::
 
+        # Read-side override: shared_input is read-only at the callee, but
+        # auto-dep would otherwise serialise sibling fan-out reads.
         result = self.my_kernel(pl.no_dep(shared_input), output)
+
+        # Write-side override: the callee writes into k_cache via
+        # ``pl.assemble`` at a data-dependent offset; the user knows the
+        # offsets are disjoint across the parallel fan-out.
+        self.rope_kv_cache(q_proj, pl.no_dep(k_cache), pl.no_dep(v_cache))
 
     Outside a kernel call argument list it is a no-op (returns ``tensor``
     unchanged); the parser only injects the override at recognized call
