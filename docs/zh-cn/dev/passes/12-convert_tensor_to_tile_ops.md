@@ -79,6 +79,21 @@ InCore、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 /
 
 当 `tensor.slice` 的结果被 `tensor.matmul` 或 `tensor.matmul_acc` 使用时，slice 必须生成 Mat 空间的 tile 而非 Vec 空间。本 pass 预扫描此模式，并根据 matmul kwargs 中的转置标志（LHS 使用 `a_trans`，RHS 使用 `b_trans`）生成 `tile.load(Mat, transpose=...)`。
 
+## Transpose 下沉
+
+`tensor.transpose` 并非简单的 1:1 重命名为 `tile.transpose`，而是下沉为 **`tile.create` + 4-arg `tile.transpose(input, axis1, axis2, tmp)`**。PTO 后端的 `pto.ttrans` 指令要求一个 scratch 工作 tile（与源 tile 同 shape/同 dtype）；通过显式的 `tile.create` 为它分配，内存分配器才能在后端 codegen 之前给出真实的 UB 硬件地址（在 `--pto-level=level3` 下必需）。tmp 位于操作数列表的末尾，与用户面 DSL 签名 `pl.tile.transpose(tile, axis1, axis2, tmp_tile=None)` 自然对齐。
+
+```python
+# 转换前
+y = tensor.transpose(x, 0, 1)
+
+# 转换后
+transpose_tmp = pl.tile.create(x.shape, x.dtype, target_memory=x.memory_space)
+y_tile = pl.tile.transpose(x_tile, 0, 1, tmp_tile=transpose_tmp)
+```
+
+当用户调用 `pl.tile.transpose(tile, axis1, axis2)` 不传 `tmp_tile` 时，Python IR 构造层自动在末尾插入一个 `tile.create` 作为 tmp。
+
 ## 示例
 
 **转换前**：

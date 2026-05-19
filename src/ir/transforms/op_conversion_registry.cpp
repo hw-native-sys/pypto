@@ -163,7 +163,41 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
   RegisterSimple("tensor.expands", "tile.expands");
 
   RegisterSimple("tensor.reshape", "tile.reshape");
-  RegisterSimple("tensor.transpose", "tile.transpose");
+
+  // tensor.transpose → tile.create + tile.transpose(input, axis1, axis2, tmp). tmp is required
+  // by pto.ttrans; emitting it as a separate tile.create gives the memory allocator a chance
+  // to assign a real UB address before backend codegen (required at --pto-level=level3).
+  RegisterCustom(
+      "tensor.transpose",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        // The optional 4th tensor-level arg is valid_shape; it has no tile-level equivalent.
+        CHECK(args.size() == 3 || args.size() == 4)
+            << "tensor.transpose conversion expects 3 or 4 args (input, axis1, axis2[, valid_shape]), got "
+            << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& input = args[0];
+
+        auto input_tile_type = As<TileType>(input->GetType());
+        CHECK(input_tile_type)
+            << "tensor.transpose conversion: input must be TileType after memory promotion, got "
+            << input->GetType()->TypeName();
+
+        auto shape_tuple = std::make_shared<MakeTuple>(input_tile_type->shape_, span);
+        MemorySpace tmp_mem =
+            input_tile_type->memory_space_.has_value() ? *input_tile_type->memory_space_ : MemorySpace::Vec;
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", input_tile_type->dtype_},
+                                                                       {"target_memory", tmp_mem}};
+        auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+
+        auto tmp_var = std::make_shared<Var>("transpose_tmp", create_call->GetType(), span);
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(tmp_var, create_call, span));
+
+        auto transpose_call = op_reg.Create("tile.transpose", {input, args[1], args[2], tmp_var}, span);
+        return ConversionResult{std::move(prologue), transpose_call};
+      });
+
   RegisterSimple("tensor.concat", "tile.concat");
   RegisterSimple("tensor.set_validshape", "tile.set_validshape");
 

@@ -317,25 +317,33 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tile.transpose requires exactly 3 arguments: input tile, axis1, axis2
-  CHECK(args.size() == 3) << "tile.transpose requires exactly 3 arguments (input, axis1, axis2), but got "
-                          << args.size();
+  // tmp at the tail is a scratch buffer required by pto.ttrans (see MakeTileTransposeCodegenPTO).
+  CHECK(args.size() == 4)
+      << "tile.transpose requires exactly 4 arguments (input, axis1, axis2, tmp), but got " << args.size();
 
-  // First argument must be TileType
-  auto tile_type = As<TileType>(args[0]->GetType());
-  CHECK(tile_type) << "tile.transpose requires first argument to be a TileType, but got "
-                   << args[0]->GetType()->TypeName();
+  auto input_type = As<TileType>(args[0]->GetType());
+  CHECK(input_type) << "tile.transpose: first argument (input) must be TileType, but got "
+                    << args[0]->GetType()->TypeName();
 
-  const auto& input_shape = tile_type->shape_;
+  auto tmp_type = As<TileType>(args[3]->GetType());
+  CHECK(tmp_type) << "tile.transpose: fourth argument (tmp) must be TileType, but got "
+                  << args[3]->GetType()->TypeName();
+
+  CHECK(input_type->dtype_ == tmp_type->dtype_)
+      << "tile.transpose: tmp dtype must match input dtype, got input=" << input_type->dtype_.ToString()
+      << " tmp=" << tmp_type->dtype_.ToString();
+  CHECK(input_type->shape_.size() == tmp_type->shape_.size())
+      << "tile.transpose: tmp rank must match input rank, got input rank=" << input_type->shape_.size()
+      << " tmp rank=" << tmp_type->shape_.size();
+
+  const auto& input_shape = input_type->shape_;
   size_t ndim = input_shape.size();
 
   CHECK(ndim >= 2) << "tile.transpose requires at least 2 dimensions, but got " << ndim;
 
-  // Second argument is axis1 (ConstInt)
   auto axis1_const = As<ConstInt>(args[1]);
   CHECK(axis1_const) << "tile.transpose requires second argument (axis1) to be a ConstInt";
 
-  // Third argument is axis2 (ConstInt)
   auto axis2_const = As<ConstInt>(args[2]);
   CHECK(axis2_const) << "tile.transpose requires third argument (axis2) to be a ConstInt";
 
@@ -345,14 +353,12 @@ TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
   CHECK(axis1 != axis2) << "tile.transpose: axis1 and axis2 must be different, but got axis1=" << axis1
                         << ", axis2=" << axis2;
 
-  // Create new shape by swapping the specified dimensions
   std::vector<ExprPtr> new_shape = input_shape;
   std::swap(new_shape[axis1], new_shape[axis2]);
 
-  // Return new TileType with transposed shape and same dtype
   TileView tile_view;
   tile_view.valid_shape = new_shape;
-  return std::make_shared<TileType>(new_shape, tile_type->dtype_, std::nullopt, tile_view);
+  return std::make_shared<TileType>(new_shape, input_type->dtype_, std::nullopt, tile_view);
 }
 
 // ============================================================================
@@ -395,6 +401,7 @@ REGISTER_OP("tile.transpose")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("axis1", "First axis to swap (ConstInt)")
     .add_argument("axis2", "Second axis to swap (ConstInt)")
+    .add_argument("tmp", "Scratch tile (same shape/dtype as input) required by pto.ttrans")
     .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

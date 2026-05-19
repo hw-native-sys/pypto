@@ -84,6 +84,21 @@ already rewritten in Phase 1 / 2a.
 
 When `tensor.slice` feeds into `tensor.matmul` or `tensor.matmul_acc`, the slice must produce a Mat-space tile instead of a Vec-space tile. The pass pre-scans for this pattern and emits `tile.load(Mat, transpose=...)` with the transpose flag from the matmul kwargs (`a_trans` for LHS, `b_trans` for RHS).
 
+## Transpose Lowering
+
+`tensor.transpose` lowers to **`tile.create` + 4-arg `tile.transpose(input, axis1, axis2, tmp)`** rather than a 1:1 rename. The PTO `pto.ttrans` instruction requires a scratch workspace tile (same shape/dtype as the source) — emitting that scratch via an explicit `tile.create` lets the memory allocator assign it a real UB hardware address before backend codegen, which is mandatory at `--pto-level=level3`. The scratch lives at the **tail** of the operand list so the user-facing DSL signature `pl.tile.transpose(tile, axis1, axis2, tmp_tile=None)` reads naturally.
+
+```python
+# Before
+y = tensor.transpose(x, 0, 1)
+
+# After
+transpose_tmp = pl.tile.create(x.shape, x.dtype, target_memory=x.memory_space)
+y_tile = pl.tile.transpose(x_tile, 0, 1, tmp_tile=transpose_tmp)
+```
+
+When users call `pl.tile.transpose(tile, axis1, axis2)` without an explicit `tmp_tile`, the Python IR helper auto-inserts a `tile.create` as the trailing operand.
+
 ## Example
 
 **Before**:

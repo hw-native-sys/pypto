@@ -1439,19 +1439,22 @@ def reshape(tile: Tile, shape: Sequence[IntLike]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def transpose(tile: Tile, axis1: int, axis2: int) -> Tile:
+def transpose(tile: Tile, axis1: int, axis2: int, tmp_tile: Tile | None = None) -> Tile:
     """Transpose tile by swapping two axes.
 
     Args:
-        tile: Input tile
-        axis1: First axis to swap (supports negative indexing)
-        axis2: Second axis to swap (supports negative indexing)
+        tile: Input tile.
+        axis1: First axis to swap (supports negative indexing).
+        axis2: Second axis to swap (supports negative indexing).
+        tmp_tile: Optional pre-allocated scratch tile (same shape/dtype as ``tile``)
+            required by ``pto.ttrans``. Auto-emitted via ``pl.tile.create`` when omitted.
 
     Returns:
-        Tile wrapping the transpose operation
+        Tile wrapping the transpose operation.
     """
     tile_expr = tile.unwrap()
-    call_expr = _ir_ops.transpose(tile_expr, axis1, axis2)
+    tmp_expr = tmp_tile.unwrap() if tmp_tile is not None else None
+    call_expr = _ir_ops.transpose(tile_expr, axis1, axis2, tmp=tmp_expr)
     return Tile(expr=call_expr)
 
 

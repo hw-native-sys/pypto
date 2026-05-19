@@ -2166,36 +2166,47 @@ def reshape(
     return _ir_core.create_op_call("tile.reshape", args, {}, actual_span)
 
 
-def transpose(tile: Expr, axis1: int | ConstInt, axis2: int | ConstInt, span: Span | None = None) -> Call:
+def _normalize_axis_const(axis: int | ConstInt, span: Span, name: str) -> ConstInt:
+    """Normalize an axis argument (int or ConstInt) into a ConstInt(INDEX) expression."""
+    if isinstance(axis, ConstInt):
+        return axis
+    if isinstance(axis, int):
+        return ConstInt(axis, DataType.INDEX, span)
+    raise TypeError(f"{name} must be int or ConstInt, got {type(axis)}")
+
+
+def transpose(
+    tile: Expr,
+    axis1: int | ConstInt,
+    axis2: int | ConstInt,
+    tmp: Expr | None = None,
+    span: Span | None = None,
+) -> Call:
     """Transpose tile by swapping two axes.
 
     Args:
-        tile: Input tile expression
-        axis1: First axis to swap as an int or ConstInt (supports negative indexing)
-        axis2: Second axis to swap as an int or ConstInt (supports negative indexing)
-        span: Optional source span for debugging (auto-captured if not provided)
+        tile: Input tile expression (must be TileType).
+        axis1: First axis to swap (supports negative indexing).
+        axis2: Second axis to swap (supports negative indexing).
+        tmp: Optional pre-allocated scratch tile (same shape/dtype as ``tile``) required
+            by the ``pto.ttrans`` codegen. Auto-emitted via ``tile.create`` when omitted.
+        span: Optional source span (auto-captured if not provided).
 
     Returns:
-        Call expression for tile transpose
+        Call expression for tile transpose (operands: input, axis1, axis2, tmp).
     """
     actual_span = _get_span_or_capture(span)
-    if isinstance(axis1, ConstInt):
-        axis1_expr = axis1
-    elif isinstance(axis1, int):
-        axis1_expr = ConstInt(axis1, DataType.INDEX, actual_span)
-    else:
-        raise TypeError(f"axis1 must be int or ConstInt, got {type(axis1)}")
+    axis1_expr = _normalize_axis_const(axis1, actual_span, "axis1")
+    axis2_expr = _normalize_axis_const(axis2, actual_span, "axis2")
 
-    if isinstance(axis2, ConstInt):
-        axis2_expr = axis2
-    elif isinstance(axis2, int):
-        axis2_expr = ConstInt(axis2, DataType.INDEX, actual_span)
-    else:
-        raise TypeError(f"axis2 must be int or ConstInt, got {type(axis2)}")
+    if tmp is None:
+        input_type = tile.type
+        if not isinstance(input_type, _ir_core.TileType):
+            raise TypeError(f"tile.transpose: input must have TileType, got {type(input_type).__name__}")
+        target_memory = input_type.memory_space if input_type.memory_space is not None else MemorySpace.Vec
+        tmp = create(list(input_type.shape), input_type.dtype, target_memory, actual_span)
 
-    args = [tile, axis1_expr, axis2_expr]
-
-    return _ir_core.create_op_call("tile.transpose", args, {}, actual_span)
+    return _ir_core.create_op_call("tile.transpose", [tile, axis1_expr, axis2_expr, tmp], {}, actual_span)
 
 
 def set_validshape(

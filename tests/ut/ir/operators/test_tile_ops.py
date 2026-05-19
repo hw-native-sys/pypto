@@ -1405,6 +1405,27 @@ class TestTileSliceReshapeOps:
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
 
+    def test_tile_transpose_auto_tmp_inserted(self):
+        """tile.transpose auto-inserts a tile.create at args[3] when tmp is omitted."""
+        span = ir.Span.unknown()
+
+        dim8 = ir.ConstInt(8, DataType.INT32, span)
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        tile_type = ir.TileType([dim8, dim16], DataType.FP16)
+        tile_var = ir.Var("tile", tile_type, span)
+
+        call = tile.transpose(tile_var, 0, 1)
+
+        assert len(call.args) == 4
+        tmp_arg = call.args[3]
+        assert isinstance(tmp_arg, ir.Call)
+        assert tmp_arg.op.name == "tile.create"
+
+        tmp_type = tmp_arg.type
+        assert isinstance(tmp_type, ir.TileType)
+        assert tmp_type.dtype == DataType.FP16
+        assert len(tmp_type.shape) == 2
+
     def test_tile_set_validshape(self):
         """Test tile.set_validshape with constant valid dimensions."""
         span = ir.Span.unknown()

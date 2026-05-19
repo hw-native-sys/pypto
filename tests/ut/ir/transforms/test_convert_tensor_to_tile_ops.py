@@ -376,6 +376,25 @@ class TestConvertTensorToTileOps:
         )
         _assert_convert_equal(before, expected)
 
+    def test_transpose_emits_tile_create_plus_transpose(self):
+        """tensor.transpose lowers to tile.create + tile.transpose(input, axis1, axis2, tmp)."""
+        in_specs: list[InSpec] = [("x", [32, 64], DataType.FP16)]
+
+        def expected_body(ib, tiles):
+            tmp = ib.let("transpose_tmp", tile_ops.create([32, 64], DataType.FP16))
+            return ib.let("y_tile", tile_ops.transpose(tiles[0], 0, 1, tmp=tmp))
+
+        before = _make_before(
+            in_specs=in_specs,
+            out_shape=[64, 32],
+            out_dtype=DataType.FP16,
+            body=lambda ib, ins: ib.let("y", tensor_ops.transpose(ins[0], 0, 1)),
+        )
+        expected = _make_expected(
+            in_specs=in_specs, out_shape=[64, 32], out_dtype=DataType.FP16, body=expected_body
+        )
+        _assert_convert_equal(before, expected)
+
     def test_rsqrt_high_precision_conversion(self):
         """tensor.rsqrt(high_precision=True) allocates a tmp tile and lowers to 2-arg tile.rsqrt."""
         in_specs: list[InSpec] = [("x", [64], DataType.FP32)]

@@ -449,43 +449,20 @@ static std::string MakeTileSelCodegenPTO(const CallPtr& op, codegen::CodegenBase
   return "";
 }
 
-// pto.ttrans requires ins(%src, %tmp : tile_type, tile_type) where %tmp is a scratch
-// workspace tile (same type/shape as %src).
-//
-// Two IR forms are supported:
-//   3-arg form: tile.transpose(src, axis0, axis1)   -- axis ints; tmp allocated via AllocNewTileBuf
-//   4-arg form: tile.transpose(src, tmp, axis0, axis1) -- tmp pre-allocated in IR (preferred;
-//               ensures pto.alloc_tile receives a hardware address at --pto-level=level3).
-//
-// The 4-arg form is used by gather lowering (op_conversion_registry.cpp) so that the memory
-// allocator assigns a proper UB address to the tmp tile before codegen.
-// The 3-arg form is kept for FlattenTileNdTo2D which filters it out via batch_matmul_only_vars
-// before reaching the backend (so the AllocNewTileBuf fallback is rarely reached in practice).
+// pto.ttrans ins(%src, %tmp : tile_type, tile_type). IR form: tile.transpose(src, axis0, axis1, tmp).
+// tmp is pre-allocated by an IR-level tile.create so the memory allocator gives it a real UB
+// address before codegen (required at --pto-level=level3).
 static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3 || op->args_.size() == 4)
-      << "tile.transpose requires 3 or 4 arguments, got " << op->args_.size();
+  CHECK(op->args_.size() == 4) << "tile.transpose requires 4 arguments (src, axis0, axis1, tmp), got "
+                               << op->args_.size();
 
   std::string src_ssa = codegen.GetExprAsCode(op->args_[0]);
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
-
-  std::string tmp_ssa;
-  if (op->args_.size() == 4) {
-    // 4-arg form: args_[1] is the pre-allocated tmp tile with a proper hardware address.
-    tmp_ssa = codegen.GetExprAsCode(op->args_[1]);
-    // tmp was created by tile.create (same shape as src) and has a MemRef, so its type
-    // annotation is always available.  Use it as fallback when src_type is empty (e.g. when
-    // src is a ForStmt result var or a tile.reshape view that lacks a MemRef in codegen).
-    if (src_type.empty()) {
-      src_type = codegen.GetExprTypeAnnotation(op->args_[1]);
-    }
-  } else {
-    // 3-arg form fallback: allocate tmp via extra_alloc_tiles (no hardware addr; only safe if
-    // this code path is not reached at --pto-level=level3).
-    CHECK(!src_type.empty()) << "tile.transpose 3-arg form requires src to have a tile-buf type annotation; "
-                             << "use the 4-arg form (with pre-allocated tmp) when src is a ForStmt result or "
-                             << "tile.reshape view";
-    tmp_ssa = codegen.AllocNewTileBuf(src_type, "ttrans_tmp");
+  std::string tmp_ssa = codegen.GetExprAsCode(op->args_[3]);
+  // Fall back to tmp's annotation when src lacks a MemRef (ForStmt result var, tile.reshape view).
+  if (src_type.empty()) {
+    src_type = codegen.GetExprTypeAnnotation(op->args_[3]);
   }
 
   std::string result_target = codegen.GetCurrentResultTarget();

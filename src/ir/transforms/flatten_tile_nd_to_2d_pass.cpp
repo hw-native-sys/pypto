@@ -437,8 +437,11 @@ BatchOperandInfo NormalizeBatchMatmulOperand(const ExprPtr& operand_expr, const 
 
   if (auto transpose_call = ResolveBatchOperandTranspose(operand_expr, def_map)) {
     if (transpose_call->op_ && transpose_call->op_->name_ == "tile.transpose") {
-      CHECK(transpose_call->args_.size() == 3)
-          << "FlattenTileNdTo2D: tile.transpose inside tile.batch_matmul must have 3 arguments";
+      // batch_matmul lowering peels the transpose off; the tmp at args_[3] becomes dead and is DCE'd.
+      CHECK(transpose_call->args_.size() == 4)
+          << "FlattenTileNdTo2D: tile.transpose inside tile.batch_matmul must have 4 arguments "
+             "(input, axis1, axis2, tmp), got "
+          << transpose_call->args_.size();
 
       auto input_type = As<TileType>(transpose_call->args_[0]->GetType());
       CHECK(input_type) << "FlattenTileNdTo2D: tile.batch_matmul " << operand_name
@@ -665,7 +668,20 @@ BatchPageResult ExtractBatchPage(const BatchOperandInfo& info, const std::vector
   if (info.transpose && !(used_strategy1 && original_load_transpose)) {
     auto axis0 = std::make_shared<ConstInt>(0, DataType::INDEX, span);
     auto axis1 = std::make_shared<ConstInt>(1, DataType::INDEX, span);
-    auto transpose_call = op_registry.Create("tile.transpose", {current, axis0, axis1}, span);
+
+    auto cur_tile = As<TileType>(current->GetType());
+    INTERNAL_CHECK(cur_tile) << "FlattenTileNdTo2D: transpose operand must be TileType";
+    auto tmp_shape = std::make_shared<MakeTuple>(cur_tile->shape_, span);
+    MemorySpace tmp_mem = cur_tile->memory_space_.has_value() ? *cur_tile->memory_space_ : MemorySpace::Vec;
+    std::vector<std::pair<std::string, std::any>> tmp_kwargs = {
+        {"dtype", cur_tile->dtype_},
+        {"target_memory", tmp_mem},
+    };
+    auto tmp_create = op_registry.Create("tile.create", {tmp_shape}, tmp_kwargs, span);
+    auto tmp_var = std::make_shared<Var>(base_name + "_ttmp_" + suffix, tmp_create->GetType(), span);
+    page.stmts.push_back(std::make_shared<AssignStmt>(tmp_var, tmp_create, span));
+
+    auto transpose_call = op_registry.Create("tile.transpose", {current, axis0, axis1, tmp_var}, span);
     auto transpose_var = std::make_shared<Var>(base_name + "_t_" + suffix, transpose_call->GetType(), span);
     page.stmts.push_back(std::make_shared<AssignStmt>(transpose_var, transpose_call, span));
     current = transpose_var;
