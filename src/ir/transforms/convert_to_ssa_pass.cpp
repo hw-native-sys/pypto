@@ -299,7 +299,9 @@ class SSAConverter {
   }
 
   /// Substitute Var references stored in Call attrs that hold
-  /// ``std::vector<VarPtr>`` (currently only the manual_dep_edges family).
+  /// ``std::vector<VarPtr>`` (currently only ``manual_dep_edges`` on Call —
+  /// ``arg_direction_overrides_vars`` is scope-only and handled by the
+  /// separate ``SubstScopeAttrs`` path below).
   /// Returns a rebuilt attrs vector when any Var was rewritten, otherwise
   /// std::nullopt so the caller can keep the existing attrs vector verbatim.
   std::optional<std::vector<std::pair<std::string, std::any>>> SubstCallAttrs(
@@ -923,17 +925,17 @@ class SSAConverter {
   }
 
   /// Substitute Var-typed entries in a ScopeStmt's ``attrs_``
-  /// (``manual_dep_edges`` / ``task_id_var``). Returns the rebuilt attrs and a
-  /// flag indicating whether any entry was rewritten — mirrors the per-Call
-  /// ``SubstCallAttrs`` so SSA renaming propagates into scope-level attrs the
-  /// same way it does for Call attrs.
+  /// (``manual_dep_edges`` / ``task_id_var`` / ``arg_direction_overrides_vars``).
+  /// Returns the rebuilt attrs and a flag indicating whether any entry was
+  /// rewritten — mirrors the per-Call ``SubstCallAttrs`` so SSA renaming
+  /// propagates into scope-level attrs the same way it does for Call attrs.
   std::pair<std::vector<std::pair<std::string, std::any>>, bool> SubstScopeAttrs(
       const std::vector<std::pair<std::string, std::any>>& attrs) {
     bool changed = false;
     std::vector<std::pair<std::string, std::any>> out;
     out.reserve(attrs.size());
     for (const auto& [k, v] : attrs) {
-      if (k == kAttrManualDepEdges) {
+      if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars) {
         const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
         if (edges) {
           std::vector<VarPtr> new_edges;

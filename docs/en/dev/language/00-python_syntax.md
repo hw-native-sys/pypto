@@ -354,6 +354,7 @@ unit that fits your use case; combine if needed.
 | `with pl.manual_scope():` | per-region | Lowers to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`. Inside, the runtime never auto-tracks; the user must declare every required ordering edge explicitly (see Mechanism B). |
 | `pl.create_tensor([...], dtype=..., manual_dep=True)` | per-tensor lifetime | Every task that reads or writes this tensor skips `OverlapMap` lookup and insert for its **entire lifetime**, regardless of scope. Useful for scratch buffers that are managed entirely by explicit edges. |
 | `pl.no_dep(arg)` | per-call argument | At a kernel call site, the wrapped argument's `ArgDirection` becomes `NoDep` — auto-tracking ignores that slot **for this submission only**. No effect inside `pl.manual_scope` (the scope already disables auto-tracking). |
+| `with pl.at(..., no_dep_args=[t1, t2]):` | per-arg, on a `pl.at`-block | The `pl.at`-block analogue of `pl.no_dep(arg)`. The outliner makes the listed tensors arguments of the synthesised kernel call; `DeriveCallDirections` then forces those arg slots to `NoDep` — same effect as wrapping the tensors with `pl.no_dep(...)` at an explicit call site. Each entry must be a bare tensor name visible to the enclosing scope. Note: `no_dep_args=` takes **tensors**, while `deps=` takes **TaskIds** — same word "dep", different layer. |
 
 #### Mechanism B — declare explicit task→task edges (`deps=`)
 

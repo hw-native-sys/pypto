@@ -794,8 +794,37 @@ class ScopeOutliner : public IRMutator {
     //   * ``manual_dep_edges`` → attach verbatim to ``Call.attrs[manual_dep_edges]``
     //     (codegen's ``EmitManualDeps`` packs them into a stack
     //     ``PTO2TaskId[]`` and emits a single ``set_dependencies`` call).
+    //   * ``arg_direction_overrides_vars`` (from ``pl.at(no_dep_args=[...])``) →
+    //     translate the captured-Var list into positional indices into
+    //     ``call_args`` (using the ``input_vars`` order, which call_args
+    //     mirrors 1:1) and attach as ``Call.attrs[arg_direction_overrides]``.
+    //     ``DeriveCallDirections`` then overwrites those slots to
+    //     ``ArgDirection::NoDep`` — the same path as ``pl.no_dep(t)``
+    //     wrappers at explicit kernel call sites.
     VarPtr scope_task_id_var = op->GetAttr<VarPtr>(kAttrTaskIdVar);
     std::vector<VarPtr> scope_dep_edges = op->GetAttr<std::vector<VarPtr>>(kAttrManualDepEdges);
+    std::vector<VarPtr> scope_no_dep_vars = op->GetAttr<std::vector<VarPtr>>(kAttrArgDirOverrideVars);
+
+    std::vector<int32_t> arg_dir_override_indices;
+    if (!scope_no_dep_vars.empty()) {
+      std::unordered_map<const Var*, int32_t> input_var_to_idx;
+      input_var_to_idx.reserve(input_vars.size());
+      for (size_t i = 0; i < input_vars.size(); ++i) {
+        input_var_to_idx[input_vars[i].get()] = static_cast<int32_t>(i);
+      }
+      arg_dir_override_indices.reserve(scope_no_dep_vars.size());
+      for (const auto& v : scope_no_dep_vars) {
+        INTERNAL_CHECK_SPAN(v, op->span_)
+            << "Internal error: null Var in arg_direction_overrides_vars on outlined scope '"
+            << outlined_func_name << "'";
+        auto it = input_var_to_idx.find(v.get());
+        CHECK(it != input_var_to_idx.end())
+            << "pl.at(no_dep_args=[...]) references tensor '" << v->name_hint_
+            << "', which is not captured by the scope body. Only tensors actually "
+            << "read or written inside `with pl.at(...):` can appear in no_dep_args=.";
+        arg_dir_override_indices.push_back(it->second);
+      }
+    }
 
     // Determine call return type. When ``task_id_var`` is set, append the
     // TaskId element at the tail of the (already flat) return-type tuple so
@@ -818,10 +847,16 @@ class ScopeOutliner : public IRMutator {
       call_return_type = std::make_shared<TupleType>(effective_return_types);
     }
 
-    std::shared_ptr<Call> call_expr;
+    std::vector<std::pair<std::string, std::any>> call_attrs;
     if (!scope_dep_edges.empty()) {
-      std::vector<std::pair<std::string, std::any>> call_attrs;
       call_attrs.emplace_back(kAttrManualDepEdges, std::move(scope_dep_edges));
+    }
+    if (!arg_dir_override_indices.empty()) {
+      call_attrs.emplace_back(kAttrArgDirectionOverrides, std::move(arg_dir_override_indices));
+    }
+
+    std::shared_ptr<Call> call_expr;
+    if (!call_attrs.empty()) {
       call_expr = std::make_shared<Call>(
           global_var, call_args, std::vector<std::pair<std::string, std::any>>{}, std::move(call_attrs),
           call_return_type ? call_return_type : std::make_shared<UnknownType>(), op->span_);

@@ -702,6 +702,38 @@ inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
 inline constexpr const char* kAttrTaskIdVar = "task_id_var";
 
 /**
+ * @brief Reserved attr key set on a ``ScopeStmt`` by the DSL parser for
+ * ``pl.at(no_dep_args=[t1, t2])``. Holds ``std::vector<VarPtr>`` referencing
+ * outer-scope tensor Vars that should be marked ``ArgDirection::NoDep`` on
+ * the synthesised kernel Call.
+ *
+ * The outliner translates this list into positional indices into the
+ * synthesised Call's ``args_`` (using the captured-var order) and writes the
+ * result back as ``kAttrArgDirectionOverrides`` on the Call.
+ * ``DeriveCallDirections`` then consumes it exactly like the per-arg overrides
+ * produced by ``pl.no_dep(t)`` wrappers at explicit kernel call sites.
+ *
+ * Never appears on a ``Call`` — it is exclusively a scope-level marker.
+ */
+inline constexpr const char* kAttrArgDirOverrideVars = "arg_direction_overrides_vars";
+
+/**
+ * Build a copy of ``attrs`` with ``kAttrArgDirOverrideVars`` set to ``vars``.
+ * Replaces an existing entry if present; otherwise appends.
+ */
+inline std::vector<std::pair<std::string, std::any>> WithArgDirOverrideVarsAttr(
+    std::vector<std::pair<std::string, std::any>> attrs, std::vector<VarPtr> vars) {
+  for (auto& [k, v] : attrs) {
+    if (k == kAttrArgDirOverrideVars) {
+      v = std::move(vars);
+      return attrs;
+    }
+  }
+  attrs.emplace_back(kAttrArgDirOverrideVars, std::move(vars));
+  return attrs;
+}
+
+/**
  * Build a copy of ``attrs`` with ``kAttrManualDepEdges`` set to ``vars``.
  * Replaces an existing entry if present; otherwise appends.
  */

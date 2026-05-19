@@ -231,10 +231,10 @@ void IRVisitor::VisitStmt_(const WhileStmtPtr& op) {
 // Visit Var-typed entries in a ScopeStmt's ``attrs_``. Mirrors the Call.attrs
 // handling in VisitExpr_(CallPtr) so analyses (unused-var detection, SSA Var
 // liveness, etc.) see Var refs stashed on a ScopeStmt's ``manual_dep_edges`` /
-// ``task_id_var`` attrs.
+// ``task_id_var`` / ``arg_direction_overrides_vars`` attrs.
 void IRVisitor::VisitScopeAttrs(const ScopeStmtPtr& op) {
   for (const auto& [k, v] : op->attrs_) {
-    if (k == kAttrManualDepEdges) {
+    if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars) {
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
       if (!edges) continue;
       for (const auto& e : *edges) {

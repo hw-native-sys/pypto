@@ -12,6 +12,7 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 
 
 def _first_runtime_scope(stmt):
@@ -304,6 +305,142 @@ class TestManualScopeParsing:
                         # than silently pass the arity check.
                         (a, (b, c)), tid = pl.submit(self.k1, x)
                     return a
+
+
+class TestPlAtNoDepArgsParsing:
+    """``pl.at(no_dep_args=[t1, t2])`` marks scope-captured tensor args as NoDep."""
+
+    def test_no_dep_args_records_arg_direction_overrides_vars(self):
+        """The parser writes the resolved Var list to ScopeStmt.attrs[arg_direction_overrides_vars]."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                w: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[w]):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, w)
+                return y
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        stmts = list(fn.body.stmts) if isinstance(fn.body, ir.SeqStmts) else [fn.body]
+        scope = next(s for s in stmts if isinstance(s, ir.InCoreScopeStmt))
+        attrs = scope.attrs
+        assert "arg_direction_overrides_vars" in attrs
+        no_dep_vars = attrs["arg_direction_overrides_vars"]
+        assert len(no_dep_vars) == 1
+        assert no_dep_vars[0].name_hint == "w"
+        # deps= and task_id_var are independent paths; this scope uses neither.
+        assert "manual_dep_edges" not in attrs
+        assert "task_id_var" not in attrs
+
+    def test_no_dep_args_combines_with_deps_and_tid(self):
+        """``deps=``, ``no_dep_args=``, and ``as tid:`` are independent and may all appear."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                w: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="s1") as t1:
+                    a: pl.Tensor[[64], pl.FP32] = x
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="s2",
+                    deps=[t1],
+                    no_dep_args=[w],
+                ) as _t2:
+                    b: pl.Tensor[[64], pl.FP32] = pl.add(a, w)
+                return b
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        stmts = list(fn.body.stmts) if isinstance(fn.body, ir.SeqStmts) else [fn.body]
+        # Second pl.at is the fourth stmt (after placeholder + scope1 + placeholder for t2).
+        scope2 = next(s for s in stmts[2:] if isinstance(s, ir.InCoreScopeStmt) and s.name_hint == "s2")
+        attrs = scope2.attrs
+        assert "manual_dep_edges" in attrs
+        assert "task_id_var" in attrs
+        assert "arg_direction_overrides_vars" in attrs
+        assert len(attrs["arg_direction_overrides_vars"]) == 1
+        assert attrs["arg_direction_overrides_vars"][0].name_hint == "w"
+
+    def test_no_dep_args_rejects_non_list_literal(self):
+        with pytest.raises(ParserTypeError, match="must be a list literal"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.Opaque)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    nope = [x]  # noqa: F841
+                    with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=nope):
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    return y
+
+    def test_no_dep_args_rejects_non_name_entry(self):
+        with pytest.raises(ParserTypeError, match="bare tensor names"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.Opaque)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[pl.no_dep(x)]):
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    return y
+
+    def test_no_dep_args_rejects_unknown_name(self):
+        # `ghost` is intentionally undefined at the DSL level — the parser
+        # must raise a clear "unknown name" error rather than crash. The
+        # bare name never has to exist as a Python binding: @pl.program
+        # inspects the function source (ast.parse) rather than executing
+        # it, so static-checker noise about ``ghost`` is irrelevant here.
+        with pytest.raises(ParserTypeError, match="unknown name"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.Opaque)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.at(
+                        level=pl.Level.CORE_GROUP,
+                        no_dep_args=[ghost],  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+                    ):
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    return y
+
+    def test_no_dep_args_rejects_duplicate(self):
+        with pytest.raises(ParserTypeError, match="more than once"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.Opaque)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[x, x]):
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    return y
+
+    def test_no_dep_args_empty_list_is_noop(self):
+        """``no_dep_args=[]`` is tolerated and leaves the scope attrs clean."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[]):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        stmts = list(fn.body.stmts) if isinstance(fn.body, ir.SeqStmts) else [fn.body]
+        scope = next(s for s in stmts if isinstance(s, ir.InCoreScopeStmt))
+        assert "arg_direction_overrides_vars" not in scope.attrs
 
 
 if __name__ == "__main__":

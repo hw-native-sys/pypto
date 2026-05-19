@@ -805,5 +805,101 @@ class TestOutlineNamedIncoreScopes:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestOutlineNoDepArgs:
+    """``pl.at(no_dep_args=[t])`` lowering: ScopeStmt.attrs[arg_direction_overrides_vars]
+    is translated by the outliner into per-call positional indices stored as
+    ``Call.attrs[arg_direction_overrides]``, which DeriveCallDirections then
+    consumes to overwrite the auto-derived direction at each slot to NoDep.
+
+    These tests use a ``PassContext`` with only ``VerificationInstrument`` —
+    the default RoundtripInstrument runs print/reparse after every pass, but
+    the Call printer does not surface ``attrs[arg_direction_overrides]`` (a
+    pre-existing limitation also affecting ``pl.submit(..., deps=)``; see
+    ``test_flatten_call_expr_pass.TestFlattenPreservesAttrs`` for the same
+    workaround).
+    """
+
+    @staticmethod
+    def _outlined_user_call(program: ir.Program) -> ir.Call:
+        """Return the synthesised Call inside main that targets the outlined kernel."""
+        main = program.get_function("main")
+        assert main is not None
+        body = main.body
+        stmts = list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+        for s in stmts:
+            value = getattr(s, "value", None)
+            if isinstance(value, ir.Call) and isinstance(value.op, ir.GlobalVar):
+                return value
+            if isinstance(s, ir.EvalStmt) and isinstance(s.expr, ir.Call):
+                if isinstance(s.expr.op, ir.GlobalVar):
+                    return s.expr
+        raise AssertionError(f"no outlined kernel Call found in main, stmts={stmts}")
+
+    @staticmethod
+    def _verify_only_ctx():
+        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+        return _core_passes.PassContext(
+            [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+        )
+
+    def test_outline_translates_no_dep_args_to_indices(self):
+        """Captured-Var order → positional indices on the synthesised Call."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                w: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[w]):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, w)
+                return y
+
+        with self._verify_only_ctx():
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        call = self._outlined_user_call(After)
+        # Captured order: x first (referenced before w), w second.
+        # The outlined function's signature reflects that order, so the
+        # NoDep override for w lands at index 1.
+        overrides = call.attrs.get("arg_direction_overrides")
+        assert overrides == [1], f"expected [1], got {overrides!r}"
+        # The scope-level marker has been consumed — it must NOT survive on
+        # the synthesised Call (it is exclusively a ScopeStmt-level attr).
+        assert "arg_direction_overrides_vars" not in call.attrs
+
+    def test_outline_plus_derive_marks_slot_no_dep(self):
+        """Indices recorded by the outliner are consumed by DeriveCallDirections
+        to overwrite the slot's direction to ``ArgDirection.NoDep``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                w: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[w]):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, w)
+                return y
+
+        with self._verify_only_ctx():
+            After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+            After = passes.derive_call_directions()(After)
+
+        call = self._outlined_user_call(After)
+        dirs = list(call.arg_directions)
+        # The unmarked tensor (x) keeps its auto-derived direction (Input);
+        # the marked tensor (w) is forced to NoDep regardless of how the
+        # auto-deriver would otherwise classify it.
+        assert dirs[1] == ir.ArgDirection.NoDep, f"expected NoDep at slot 1, got {dirs}"
+        assert dirs[0] != ir.ArgDirection.NoDep, f"slot 0 should keep auto-direction, got {dirs}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

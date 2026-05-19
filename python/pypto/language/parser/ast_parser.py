@@ -296,6 +296,11 @@ class _AtKwargState:
     # ``deps=[tid1, tid2]`` AST kept verbatim; resolved into Var refs by the
     # caller once it has decided this scope opts into the manual_dep_edges path.
     deps_kw: "ast.keyword | None" = field(default=None)
+    # ``no_dep_args=[t1, t2]`` AST kept verbatim; resolved into outer-scope
+    # Var refs by the caller, written to
+    # ScopeStmt.attrs[arg_direction_overrides_vars], and translated into
+    # per-arg-index overrides by the outliner.
+    no_dep_args_kw: "ast.keyword | None" = field(default=None)
 
 
 class ASTParser:
@@ -2626,6 +2631,13 @@ class ASTParser:
                     span=self.span_tracker.get_span(kw),
                 )
             state.deps_kw = kw
+        elif kw.arg == "no_dep_args":
+            if state.no_dep_args_kw is not None:
+                raise ParserSyntaxError(
+                    "pl.at() got multiple values for argument 'no_dep_args'",
+                    span=self.span_tracker.get_span(kw),
+                )
+            state.no_dep_args_kw = kw
         elif kw.arg is None:
             raise ParserSyntaxError(
                 "Unsupported **kwargs in pl.at()",
@@ -2636,7 +2648,7 @@ class ASTParser:
             raise ParserSyntaxError(
                 f"Unknown keyword argument '{kw.arg}' in pl.at()",
                 span=self.span_tracker.get_span(kw),
-                hint="Supported arguments: level, role, optimizations, deps, name_hint",
+                hint="Supported arguments: level, role, optimizations, deps, no_dep_args, name_hint",
             )
 
     def _handle_at_optimizations_kw(self, kw: ast.keyword, state: "_AtKwargState") -> None:
@@ -3262,6 +3274,7 @@ class ASTParser:
         split_mode = state.split_mode
         name_hint = state.name_hint
         deps_kw = state.deps_kw
+        no_dep_args_kw = state.no_dep_args_kw
         assert level is not None  # _parse_at_kwargs raises if level is missing
         span = self.span_tracker.get_span(stmt)
 
@@ -3299,7 +3312,7 @@ class ASTParser:
         # an ``Array[N, TASK_ID]`` carry. ``with pl.at(...) as tid:`` binds a
         # fresh ``Scalar[TASK_ID]`` Var in the outer scope; the outliner
         # later wires it to ``TupleGetItem(call_lhs, last_idx)``.
-        scope_attrs = self._parse_at_meta(deps_kw, optional_vars, span)
+        scope_attrs = self._parse_at_meta(deps_kw, no_dep_args_kw, optional_vars, span)
 
         # ``with pl.at(...) as tid:`` allocates ``tid`` as an outer-scope Var
         # whose real definition is synthesised later by ``OutlineIncoreScopes``
@@ -3367,26 +3380,32 @@ class ASTParser:
     def _parse_at_meta(
         self,
         deps_kw: "ast.keyword | None",
+        no_dep_args_kw: "ast.keyword | None",
         optional_vars: "ast.expr | None",
         span: "ir.Span",
     ) -> "list[tuple[str, Any]] | None":
-        """Build the ScopeStmt ``attrs`` list from a ``pl.at(...)`` ``deps=`` kwarg
-        and a ``with ... as <tid>:`` capture target.
+        """Build the ScopeStmt ``attrs`` list from a ``pl.at(...)`` ``deps=`` /
+        ``no_dep_args=`` kwarg pair and a ``with ... as <tid>:`` capture target.
 
-        Returns ``None`` when neither is present, leaving the scope's ``attrs_``
+        Returns ``None`` when none are present, leaving the scope's ``attrs_``
         empty (the typical plain ``pl.at(...)`` case). Otherwise returns a list
-        with two reserved keys:
+        with up to three reserved keys:
 
           * ``manual_dep_edges``: ``list[VarPtr]`` — same shape as the
             ``pl.submit(..., deps=)`` attr; consumed by codegen via
             ``Arg::set_dependencies``.
           * ``task_id_var``: ``VarPtr`` — the outer-scope ``Scalar[TASK_ID]``
             Var the outliner binds to the producer TaskId tuple element.
+          * ``arg_direction_overrides_vars``: ``list[VarPtr]`` — outer-scope
+            tensor Vars whose corresponding arg slots on the synthesised Call
+            must be ``ArgDirection.NoDep``. The outliner translates this Var
+            list into positional indices using the captured-var order and
+            writes the result back as ``arg_direction_overrides`` on the Call.
 
         The ``tid`` Var is defined in the outer scope so subsequent statements
         (e.g. another ``pl.at(..., deps=[tid])``) can reference it.
         """
-        if deps_kw is None and optional_vars is None:
+        if deps_kw is None and no_dep_args_kw is None and optional_vars is None:
             return None
 
         attrs: list[tuple[str, Any]] = []
@@ -3395,9 +3414,15 @@ class ASTParser:
             dep_vars = self._parse_submit_deps_kwarg("pl.at()", [deps_kw], span)
             if dep_vars:
                 # Attr keys mirror the C++ ``kAttrManualDepEdges`` /
-                # ``kAttrTaskIdVar`` constants (include/pypto/ir/expr.h);
-                # passed as raw strings since they are not exposed to Python.
+                # ``kAttrTaskIdVar`` / ``kAttrArgDirOverrideVars`` constants
+                # (include/pypto/ir/expr.h); passed as raw strings since they
+                # are not exposed to Python.
                 attrs.append(("manual_dep_edges", dep_vars))
+
+        if no_dep_args_kw is not None:
+            no_dep_vars = self._parse_at_no_dep_args_kwarg(no_dep_args_kw)
+            if no_dep_vars:
+                attrs.append(("arg_direction_overrides_vars", no_dep_vars))
 
         if optional_vars is not None:
             if not isinstance(optional_vars, ast.Name):
@@ -3411,6 +3436,68 @@ class ASTParser:
             attrs.append(("task_id_var", tid_var))
 
         return attrs if attrs else None
+
+    def _parse_at_no_dep_args_kwarg(self, kw: "ast.keyword") -> list[ir.Var]:
+        """Resolve ``pl.at(no_dep_args=[t1, t2])`` entries to outer-scope tensor Vars.
+
+        Each entry must be a bare Name that resolves, via the surrounding
+        scope manager, to a Tensor-typed Var captured by the scope body. The
+        outliner later translates the returned Var list into positional
+        indices into the synthesised Call's ``args_``, then attaches them as
+        ``arg_direction_overrides`` so ``DeriveCallDirections`` overwrites
+        those slots to ``ArgDirection.NoDep`` — the same effect as
+        ``pl.no_dep(t)`` at an explicit kernel call site.
+
+        The kwarg is named ``no_dep_args=`` (not the more symmetric-looking
+        ``no_deps=``) because it describes *kernel-call argument slots*
+        that should skip auto-dep tracking — distinct from ``deps=`` on
+        the same call, which takes *producer TaskIds* and adds explicit
+        edges. Same word "dep", different layer; the ``_args`` suffix
+        flags that the entries are call-argument tensors, not TaskIds.
+
+        Returns an empty list for ``no_dep_args=[]`` so callers can treat
+        it as a no-op.
+        """
+        if not isinstance(kw.value, (ast.List, ast.Tuple)):
+            raise ParserTypeError(
+                "pl.at(no_dep_args=...) must be a list literal of tensor names",
+                span=self.span_tracker.get_span(kw),
+                hint="Use `no_dep_args=[t1, t2]` with bare tensor names captured by the scope body.",
+            )
+
+        resolved: list[ir.Var] = []
+        seen: set[int] = set()
+        for elt in kw.value.elts:
+            if not isinstance(elt, ast.Name):
+                raise ParserTypeError(
+                    "pl.at(no_dep_args=[...]) entries must be bare tensor names",
+                    span=self.span_tracker.get_span(elt),
+                    hint="Use `no_dep_args=[t]` where `t` is a tensor variable visible "
+                    "to the enclosing function scope.",
+                )
+            var = self.scope_manager.lookup_var(elt.id)
+            if var is None:
+                raise ParserTypeError(
+                    f"pl.at(no_dep_args=[...]) references unknown name '{elt.id}'",
+                    span=self.span_tracker.get_span(elt),
+                    hint="Each entry must resolve to a tensor visible in the enclosing function scope.",
+                )
+            if not isinstance(var.type, ir.TensorType):
+                raise ParserTypeError(
+                    f"pl.at(no_dep_args=[...]) entry '{elt.id}' is not a tensor (got type {var.type})",
+                    span=self.span_tracker.get_span(elt),
+                    hint="Only tensors can be marked NoDep; scalars and other "
+                    "types do not participate in dependency tracking.",
+                )
+            if id(var) in seen:
+                raise ParserTypeError(
+                    f"pl.at(no_dep_args=[...]) lists '{elt.id}' more than once",
+                    span=self.span_tracker.get_span(elt),
+                    hint="Each tensor may appear at most once in `no_dep_args=`.",
+                )
+            seen.add(id(var))
+            resolved.append(var)
+        return resolved
 
     def parse_with_statement(self, stmt: ast.With) -> None:
         """Parse with statement for scope contexts.
