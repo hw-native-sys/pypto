@@ -23,6 +23,7 @@ import pytest
 import torch
 from examples.kernels.matmul import matmul_acc_64
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
+from pypto.runtime.runner import RunConfig
 
 
 class TestMatmul(PTOTestCase):
@@ -471,15 +472,20 @@ _MATMUL_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64)]
 _TRANSPOSE_SHAPES = [(64, 64, 64), (128, 64, 128), (64, 128, 64), (32, 64, 32)]
 # Shapes chosen so AutoTileMatmulL0 must K-split (FP32, double-buffered L0a/b
 # = 32 KB effective): K=128 with N=128 exceeds L0b at k=128, forcing k=64 and
-# splitting the K-loop in two.  K-iter count is kept at 2 to stay within the
-# 1e-5 golden tolerance — deeper K (more iters) flakes due to FP32
-# accumulation order vs. reference (torch.matmul).
+# splitting the K-loop in two.  K-split accumulates in a different order than
+# the torch.matmul reference, so per-element FP32 rounding can drift by up to
+# ~K * eps_fp32 (≈1.5e-5 at K=128).  Golden tolerance is loosened to 1e-4 for
+# these shapes — see _AUTOL0_RTOL / _AUTOL0_ATOL below.
 _AUTOL0_SHAPES = [
     (64, 128, 128),
     (128, 128, 128),
     (128, 128, 64),
     (64, 128, 256),
 ]
+# Tolerance for AutoL0 K-split: HW reduces K=64 chunks in a different order
+# than torch's BLAS reference, so the strict 1e-5 default is too tight.
+_AUTOL0_RTOL = 1e-4
+_AUTOL0_ATOL = 1e-5
 # BF16 matmul mirroring qwen3_decode kv_proj/q_proj per-matmul shape
 # (BATCH=16, K_CHUNK=128, OUT_CHUNK=256). Same 2-iter K-loop, BF16 inputs +
 # FP32 accumulator.
@@ -534,14 +540,16 @@ class TestMatmulOperations:
     @pytest.mark.parametrize("m,k,n", _AUTOL0_SHAPES)
     def test_matmul_autol0(self, test_runner, platform, m, k, n):
         """Matmul on Mat-resident operands — exercises AutoTileMatmulL0 K-split."""
-        result = test_runner.run(TestMatmulAutoL0(m=m, k=k, n=n, platform=platform))
+        cfg = RunConfig(platform=platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
+        result = test_runner.run(TestMatmulAutoL0(m=m, k=k, n=n, platform=platform, config=cfg))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("m,k,n", _AUTOL0_BF16_SHAPES)
     def test_matmul_autol0_bf16(self, test_runner, platform, m, k, n):
         """BF16 matmul on Mat-resident operands — qwen3 kv_proj per-matmul shape."""
-        result = test_runner.run(TestMatmulAutoL0BF16(m=m, k=k, n=n, platform=platform))
+        cfg = RunConfig(platform=platform, rtol=_AUTOL0_RTOL, atol=_AUTOL0_ATOL)
+        result = test_runner.run(TestMatmulAutoL0BF16(m=m, k=k, n=n, platform=platform, config=cfg))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.skip(
