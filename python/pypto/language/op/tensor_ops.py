@@ -81,10 +81,9 @@ from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.ir.utils import _normalize_expr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TensorLayout
+from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, PtrType, TensorLayout
 
 from ..typing import IntLike, Scalar, Tensor
-from .tile_ops import MemRefType
 
 
 def _unwrap_rhs(rhs: int | float | Expr | Tensor | Scalar) -> int | float | Expr:
@@ -1267,11 +1266,15 @@ def gather(
 def alloc(
     memory_space: MemorySpace,
     size: int,
-) -> MemRefType:
+) -> PtrType:
     """Stub for the internal ``tensor.alloc`` IR operation.
 
     This function is never called in user-written DSL code. It is emitted
     by the C++ python-printer after the InitMemRef pass and must be
     importable so that the printed source is valid Python.
+
+    The result is a base ``Ptr`` (allocation identity token): the printer
+    annotates the assignment target as ``pl.Ptr``, matching the IR design
+    where ``tensor.alloc`` Calls carry ``PtrType``.
     """
-    return MemRefType()
+    return PtrType()

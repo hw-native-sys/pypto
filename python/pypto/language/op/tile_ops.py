@@ -135,7 +135,7 @@ from pypto.ir.op import tile_ops as _ir_ops
 from pypto.ir.utils import _get_span_or_capture, _normalize_expr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, TileLayout
+from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, PtrType, TileLayout
 
 from ..typing import IntLike, Scalar, Tensor, Tile
 from .system_ops import (  # noqa: F401
@@ -147,11 +147,15 @@ from .system_ops import (  # noqa: F401
 
 
 class MemRefType:
-    """Opaque sentinel type for alloc results in printed IR.
+    """Opaque sentinel type for ``MemRef``-typed variables in printed IR.
 
-    tile.alloc / tensor.alloc are internal IR operations created by the
-    InitMemRef and AllocateMemoryAddr passes.  This class exists solely so
-    that the Python code emitted by the C++ printer is valid Python.
+    The C++ printer emits ``pl.MemRefType`` as the annotation for a bare
+    ``MemRef`` variable (the SSA-edge type of a ``MemRef`` expression).  This
+    class exists solely so that the printed Python source is valid Python that
+    the text-parser can ``exec()``.
+
+    Note: this is *not* the type of a ``tile.alloc`` / ``tensor.alloc`` result —
+    those produce a base ``Ptr`` (``PtrType``); see :func:`alloc`.
     """
 
 
@@ -173,7 +177,7 @@ class MaskPattern:
 def alloc(
     memory_space: MemorySpace,
     size: int,
-) -> MemRefType:
+) -> PtrType:
     """Stub for the internal ``tile.alloc`` IR operation.
 
     This function is never called in user-written DSL code.  It is emitted
@@ -181,14 +185,18 @@ def alloc(
     passes and must be importable so that the printed source is valid Python
     that the text-parser can ``exec()``.
 
+    The result is a base ``Ptr`` (allocation identity token): the printer
+    annotates the assignment target as ``pl.Ptr``, matching the IR design
+    where ``tile.alloc`` / ``tensor.alloc`` Calls carry ``PtrType``.
+
     Args:
         memory_space: Target memory space (e.g. ``pl.Mem.Vec``)
         size: Allocation size in bytes
 
     Returns:
-        Opaque MemRefType sentinel (unused at runtime)
+        Opaque ``PtrType`` sentinel (unused at runtime)
     """
-    return MemRefType()
+    return PtrType()
 
 
 def _unwrap_rhs(rhs: int | float | Expr | Tile | Scalar) -> int | float | Expr:
