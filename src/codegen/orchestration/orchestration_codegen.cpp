@@ -1936,22 +1936,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     if (!callee) return;
 
-    auto call_arg_directions = call->GetArgDirections();
-    bool has_call_dirs = (call_arg_directions.size() == call->args_.size());
+    // Classify output slots by the callee's ``ParamDirection`` — not by the
+    // call-site ``ArgDirection``. A call-site ``pl.no_dep(t)`` /
+    // ``pl.at(no_dep_args=[t])`` rewrites a slot's ArgDirection to ``NoDep``
+    // regardless of whether the callee declared the param as Out / InOut.
+    // The slot is still a writer — the return tuple still carries the
+    // post-call value at that position, and downstream consumers referencing
+    // the SSA result still need a binding to the runtime output tensor.
+    // Mirrors ``GenerateSubmitReturnAliases`` (submit path).
     std::vector<size_t> out_indices;
-    if (has_call_dirs) {
-      for (size_t i = 0; i < call_arg_directions.size(); ++i) {
-        ArgDirection d = call_arg_directions[i];
-        if (d == ArgDirection::Output || d == ArgDirection::InOut || d == ArgDirection::OutputExisting) {
-          out_indices.push_back(i);
-        }
-      }
-    } else {
-      auto effective_dirs = GetEffectiveDirections(callee);
-      for (size_t i = 0; i < effective_dirs.size(); ++i) {
-        if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
-          out_indices.push_back(i);
-        }
+    auto effective_dirs = GetEffectiveDirections(callee);
+    for (size_t i = 0; i < effective_dirs.size(); ++i) {
+      if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
+        out_indices.push_back(i);
       }
     }
 
@@ -2034,23 +2031,21 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK_SPAN(callee != nullptr, call->span_)
         << "Internal error: submit callee '" << call->op_->name_ << "' not found";
 
-    // Kernel output param positions, in declared order.
+    // Kernel output param positions, in declared order. We classify by the
+    // callee's ``ParamDirection`` (not by the call-site ``ArgDirection``): a
+    // call-site ``pl.no_dep(t)`` / ``pl.at(no_dep_args=[t])`` rewrites a slot's
+    // ArgDirection to ``NoDep`` regardless of whether the callee declared the
+    // param as In or Out. The slot is still a writer — the return tuple still
+    // carries the post-call value at that position, and downstream consumers
+    // referencing the SSA result still need a binding to the runtime output
+    // tensor. Looking only at ``ArgDirection`` would drop those bindings and
+    // produce undeclared ``__rv_*`` symbols in the emitted code.
     auto call_arg_directions = call->GetArgDirections();
-    bool has_call_dirs = (call_arg_directions.size() == call->args_.size());
+    auto effective_dirs = GetEffectiveDirections(callee);
     std::vector<size_t> out_indices;
-    if (has_call_dirs) {
-      for (size_t i = 0; i < call_arg_directions.size(); ++i) {
-        ArgDirection d = call_arg_directions[i];
-        if (d == ArgDirection::Output || d == ArgDirection::InOut || d == ArgDirection::OutputExisting) {
-          out_indices.push_back(i);
-        }
-      }
-    } else {
-      auto effective_dirs = GetEffectiveDirections(callee);
-      for (size_t i = 0; i < effective_dirs.size(); ++i) {
-        if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
-          out_indices.push_back(i);
-        }
+    for (size_t i = 0; i < effective_dirs.size(); ++i) {
+      if (effective_dirs[i] == ParamDirection::Out || effective_dirs[i] == ParamDirection::InOut) {
+        out_indices.push_back(i);
       }
     }
 

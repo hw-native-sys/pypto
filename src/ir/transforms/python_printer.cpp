@@ -298,6 +298,12 @@ class IRPythonPrinter : public IRVisitor {
   // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
 
+  // Emit ``no_dep_args=[t1, t2]`` if the scope carries ``kAttrArgDirOverrideVars``;
+  // returns true when something was printed. Common to InCore/AutoInCore/
+  // Hierarchy scope printers so the parser can recover the marker after a
+  // print/reparse roundtrip.
+  bool PrintScopeNoDepsAttr(const ScopeStmtPtr& op);
+
   // Emit each leading comment line of `stmt` as `# <text>` above the stmt itself.
   // Assumes the current indent has already been written to the stream.
   void PrintLeadingComments(const StmtPtr& stmt);
@@ -1204,6 +1210,28 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
   }
 }
 
+// Surface ``ScopeStmt.attrs[arg_direction_overrides_vars]`` (set by
+// ``pl.at(no_dep_args=[t1, t2])``) as a trailing ``no_dep_args=[...]`` kwarg
+// so the roundtrip parser can recover it. Returns true when something was
+// printed.
+bool IRPythonPrinter::PrintScopeNoDepsAttr(const ScopeStmtPtr& op) {
+  for (const auto& [k, v] : op->attrs_) {
+    if (k != kAttrArgDirOverrideVars) continue;
+    const auto* vars = std::any_cast<std::vector<VarPtr>>(&v);
+    if (!vars || vars->empty()) continue;
+    stream_ << ", no_dep_args=[";
+    for (size_t i = 0; i < vars->size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      if ((*vars)[i]) {
+        stream_ << GetVarName((*vars)[i].get());
+      }
+    }
+    stream_ << "]";
+    return true;
+  }
+  return false;
+}
+
 void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   // Print as: with pl.at(level=pl.Level.X, role=pl.Role.Y, [name_hint="..."]):
   stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level." << LevelToString(op->level_);
@@ -1213,6 +1241,7 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }
+  PrintScopeNoDepsAttr(op);
   stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
@@ -1227,6 +1256,7 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }
+  PrintScopeNoDepsAttr(op);
   stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);
@@ -1244,6 +1274,7 @@ void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }
+  PrintScopeNoDepsAttr(op);
   stream_ << "):\n";
   IncreaseIndent();
   PrintStmtBlock(op->body_);

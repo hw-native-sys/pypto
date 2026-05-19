@@ -962,6 +962,7 @@ class AtContext:
         *,
         optimizations: list[Optimization] | None = None,
         deps: list[Any] | None = None,
+        no_dep_args: list[Any] | None = None,
         # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
         optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
         split: SplitMode | None = None,
@@ -971,6 +972,7 @@ class AtContext:
         self.role = role
         self.optimizations = optimizations
         self.deps = deps
+        self.no_dep_args = no_dep_args
         self.optimization = optimization
         self.split = split
         self.name_hint = name_hint
@@ -994,6 +996,7 @@ def at(
     *,
     optimizations: list[Optimization] | None = None,
     deps: list[Any] | None = None,
+    no_dep_args: list[Any] | None = None,
     # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
     optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
     split: SplitMode | None = None,
@@ -1019,6 +1022,29 @@ def at(
             written inline at the call site, since the DSL parser inspects
             the AST and does not accept dynamically built variables here.
             Entries are independent and may be combined.
+        deps: Optional explicit producer-edge list (TaskId Vars and/or
+            ``None`` sentinels). Lowered to the resulting Call's
+            ``manual_dep_edges`` attr, which codegen packs into a
+            ``set_dependencies(...)`` invocation. Operates at the *TaskId*
+            level — orthogonal to ``no_dep_args=``, which operates at the
+            *arg-slot* level on captured tensors.
+        no_dep_args: Optional list literal of outer-scope tensor names
+            captured by the scope body. Each entry must be a bare tensor
+            name; the parser resolves it to a Var, the outliner translates
+            the Var list into positional indices into the synthesised
+            Call's args, and ``DeriveCallDirections`` overwrites those
+            slots to ``ArgDirection.NoDep``. Equivalent to wrapping the
+            same tensor with ``pl.no_dep(t)`` at an explicit kernel call
+            site — use this form when the kernel call is synthesised by
+            the ``pl.at`` outliner and there is no syntactic call-arg slot
+            to wrap. Legal for both read-only captures and captures that
+            the scope body mutates via ``pl.assemble`` / ``pl.store`` (the
+            outliner classifies the latter as ``InOut`` on the synthesised
+            kernel, and ``NoDep`` overrides ``InOut`` just as it overrides
+            ``Input``); the user is asserting that sibling fan-outs touch
+            disjoint regions of the tensor and therefore do not need
+            OverlapMap dep tracking. Note: ``deps=`` takes TaskIds, while
+            ``no_dep_args=`` takes tensors — they describe different things.
         optimization: **Deprecated.** Use ``optimizations=[pl.auto_chunk]`` (or
             ``optimizations=[pl.auto_chunk, pl.split(mode)]``) instead.
         split: **Deprecated.** Use ``optimizations=[pl.split(mode)]`` instead.
@@ -1058,6 +1084,7 @@ def at(
         role,
         optimizations=optimizations,
         deps=deps,
+        no_dep_args=no_dep_args,
         optimization=optimization,
         split=split,
         name_hint=name_hint,

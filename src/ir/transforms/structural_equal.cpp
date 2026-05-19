@@ -640,6 +640,36 @@ class StructuralEqualImpl {
         const auto& rhs_dirs =
             AnyCast<std::vector<ArgDirection>>(rhs_val, "comparing kwarg: " + lhs[i].first);
         values_equal = VisitLeafField(lhs_dirs, rhs_dirs);
+      } else if (lhs_val.type() == typeid(std::vector<int32_t>)) {
+        // ``kAttrArgDirectionOverrides`` on synthesised Calls (the indices
+        // form, after the outliner translates ScopeStmt's
+        // ``kAttrArgDirOverrideVars``).
+        const auto& lhs_idxs = AnyCast<std::vector<int32_t>>(lhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& rhs_idxs = AnyCast<std::vector<int32_t>>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        values_equal = (lhs_idxs == rhs_idxs);
+      } else if (lhs_val.type() == typeid(std::vector<VarPtr>)) {
+        // ``kAttrManualDepEdges`` on Calls/ScopeStmts and
+        // ``kAttrArgDirOverrideVars`` on ScopeStmts both carry Var lists.
+        // Compare via the existing Var-mapping path so SSA-renamed Vars
+        // still match when the IR is otherwise equivalent.
+        const auto& lhs_vars = AnyCast<std::vector<VarPtr>>(lhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& rhs_vars = AnyCast<std::vector<VarPtr>>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        if (lhs_vars.size() != rhs_vars.size()) {
+          values_equal = false;
+        } else {
+          values_equal = true;
+          for (size_t j = 0; j < lhs_vars.size(); ++j) {
+            if (!Equal(lhs_vars[j], rhs_vars[j])) {
+              values_equal = false;
+              break;
+            }
+          }
+        }
+      } else if (lhs_val.type() == typeid(VarPtr)) {
+        // ``kAttrTaskIdVar`` on ScopeStmts.
+        const auto& lhs_var = AnyCast<VarPtr>(lhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& rhs_var = AnyCast<VarPtr>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        values_equal = Equal(lhs_var, rhs_var);
       } else if (lhs_val.type() == typeid(ExprPtr)) {
         const auto& lhs_expr = AnyCast<ExprPtr>(lhs_val, "comparing kwarg: " + lhs[i].first);
         const auto& rhs_expr = AnyCast<ExprPtr>(rhs_val, "comparing kwarg: " + lhs[i].first);

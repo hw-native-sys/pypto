@@ -299,7 +299,9 @@ class SSAConverter {
   }
 
   /// Substitute Var references stored in Call attrs that hold
-  /// ``std::vector<VarPtr>`` (currently only the manual_dep_edges family).
+  /// ``std::vector<VarPtr>`` (currently only ``manual_dep_edges`` on Call —
+  /// ``arg_direction_overrides_vars`` is scope-only and handled by the
+  /// separate ``SubstScopeAttrs`` path below).
   /// Returns a rebuilt attrs vector when any Var was rewritten, otherwise
   /// std::nullopt so the caller can keep the existing attrs vector verbatim.
   std::optional<std::vector<std::pair<std::string, std::any>>> SubstCallAttrs(
@@ -923,17 +925,17 @@ class SSAConverter {
   }
 
   /// Substitute Var-typed entries in a ScopeStmt's ``attrs_``
-  /// (``manual_dep_edges`` / ``task_id_var``). Returns the rebuilt attrs and a
-  /// flag indicating whether any entry was rewritten — mirrors the per-Call
-  /// ``SubstCallAttrs`` so SSA renaming propagates into scope-level attrs the
-  /// same way it does for Call attrs.
+  /// (``manual_dep_edges`` / ``task_id_var`` / ``arg_direction_overrides_vars``).
+  /// Returns the rebuilt attrs and a flag indicating whether any entry was
+  /// rewritten — mirrors the per-Call ``SubstCallAttrs`` so SSA renaming
+  /// propagates into scope-level attrs the same way it does for Call attrs.
   std::pair<std::vector<std::pair<std::string, std::any>>, bool> SubstScopeAttrs(
       const std::vector<std::pair<std::string, std::any>>& attrs) {
     bool changed = false;
     std::vector<std::pair<std::string, std::any>> out;
     out.reserve(attrs.size());
     for (const auto& [k, v] : attrs) {
-      if (k == kAttrManualDepEdges) {
+      if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars) {
         const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
         if (edges) {
           std::vector<VarPtr> new_edges;
@@ -975,8 +977,18 @@ class SSAConverter {
   }
 
   StmtPtr ConvertScope(const ScopeStmtPtr& op) {
-    auto body = ConvertStmt(op->body_);
+    // Substitute attrs (manual_dep_edges / task_id_var /
+    // arg_direction_overrides_vars) BEFORE converting the body. Body
+    // conversion advances ``cur_`` past any writes performed inside the
+    // scope, so substituting after would resolve attr Var references to
+    // post-body yield-result versions rather than to the SSA versions
+    // visible at scope entry. The latter is what the user wrote — e.g.
+    // ``with pl.at(..., no_dep_args=[k_cache])`` where ``k_cache`` names
+    // an outer loop iter_arg, the body then reassigns ``k_cache`` via
+    // ``pl.assemble``. The attr must point at the iter_arg, not the rebuilt
+    // ``k_cache__rv_*`` from the yielded body.
     auto subst = SubstScopeAttrs(op->attrs_);
+    auto body = ConvertStmt(op->body_);
     auto& new_attrs = subst.first;
     const bool attrs_changed = subst.second;
     if (body == op->body_ && !attrs_changed) return op;

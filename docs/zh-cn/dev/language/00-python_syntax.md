@@ -349,7 +349,8 @@ DSL 暴露**两套正交的机制**，用户可任意组合：
 | -------- | ---- | ---- |
 | `with pl.manual_scope():` | per-region | 下沉为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`。区域内 runtime 不做自动跟踪；用户需要的排序边必须通过机制 B 显式声明。 |
 | `pl.create_tensor([...], dtype=..., manual_dep=True)` | per-tensor 生命周期 | 任何读 / 写该 tensor 的 task 都**整生命周期**跳过 `OverlapMap` 的 lookup 和 insert，不受 scope 影响。适合那种"完全交给显式边管理"的 scratch buffer。 |
-| `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`——**仅本次提交**对该槽位不进入自动跟踪。在 `pl.manual_scope` 内没有意义（scope 已经全员退出）。 |
+| `pl.no_dep(arg)` | per-call 参数 | kernel 调用点上，被包装的参数其 `ArgDirection` 变为 `NoDep`——**仅本次提交**对该槽位不进入自动跟踪。不论 callee 把该槽位声明为 `In`、`Out` 还是 `InOut` 都合法：用户在带外（out-of-band）承诺该槽位不存在 RaW / WaW / WaR 冲突——例如 paged-attention 那种"写偏移是数据相关、但按分配协议保证不相交"的场景。在 `pl.manual_scope` 内没有意义（scope 已经全员退出）。 |
+| `with pl.at(..., no_dep_args=[t1, t2]):` | per-arg, 作用于 `pl.at`-块 | `pl.no_dep(arg)` 在 `pl.at`-块上的对应物。outliner 把列出的 tensor 作为合成 kernel call 的实参；`DeriveCallDirections` 随后把这些实参槽位标为 `NoDep`——和在显式 call 站点用 `pl.no_dep(...)` 等效。每一项必须是外层 scope 可见的张量名。In / Out / InOut 的适用范围与 `pl.no_dep(arg)` 相同：如果 scope 体里用 `pl.assemble` 写过这个 capture，outliner 会把合成 kernel 上该形参推断成 `InOut`，`no_dep_args=` 仍然把它覆盖为 `NoDep`（和覆盖 `In` 一样）。注意：`no_dep_args=` 接收**张量**，`deps=` 接收 **TaskId**——同一个 "dep"，作用在不同层。 |
 
 #### 机制 B——显式声明 task 间的边（`deps=`）
 

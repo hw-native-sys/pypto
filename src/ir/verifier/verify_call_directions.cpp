@@ -108,11 +108,19 @@ class CallDirectionChecker : public IRVisitor {
 
       if (i >= effective.size()) continue;
       ParamDirection cd = effective[i];
+      // ``NoDep`` is a user opt-out of OverlapMap tracking — the runtime
+      // performs no producer lookup *and* no producer insert for the slot.
+      // It is therefore legal regardless of whether the callee declares the
+      // param as read-only (In) or as a writer (Out / InOut): when the user
+      // can prove (out-of-band) that the writes are disjoint across siblings
+      // — e.g. the paged-attention pattern of writing slot ``slot_mapping[b]``
+      // per batch, where the offset is data-dependent and the compiler can
+      // therefore not prove disjointness — they may opt the slot out of
+      // auto-dep tracking via ``pl.no_dep(t)`` or
+      // ``pl.at(no_dep_args=[t])``. The verifier accepts NoDep on every
+      // tensor slot and leaves correctness to the user.
       if (cd == ParamDirection::In && is_tensor) {
         // Allow Input (default) or NoDep (caller-site override via pl.no_dep).
-        // Both are read-only at the runtime level; NoDep additionally skips
-        // OverlapMap dep tracking. NoDep is forbidden on Out/InOut params
-        // because it would suppress producer registration for a writer.
         if (d != ArgDirection::Input && d != ArgDirection::NoDep) {
           std::ostringstream oss;
           oss << "tensor argument at index " << i << " has " << ArgDirectionToString(d)
@@ -121,7 +129,8 @@ class CallDirectionChecker : public IRVisitor {
           return;
         }
       } else if (cd == ParamDirection::InOut && is_tensor) {
-        if (d != ArgDirection::InOut) {
+        // Allowed: InOut (default) or NoDep (caller-site override).
+        if (d != ArgDirection::InOut && d != ArgDirection::NoDep) {
           std::ostringstream oss;
           oss << "tensor argument at index " << i << " has " << ArgDirectionToString(d)
               << " but callee param direction is InOut";
@@ -129,8 +138,10 @@ class CallDirectionChecker : public IRVisitor {
           return;
         }
       } else if (cd == ParamDirection::Out && is_tensor) {
-        // Allowed: Output / OutputExisting / InOut (WAW promotion).
-        if (d != ArgDirection::Output && d != ArgDirection::OutputExisting && d != ArgDirection::InOut) {
+        // Allowed: Output / OutputExisting / InOut (WAW promotion) / NoDep
+        // (caller-site override).
+        if (d != ArgDirection::Output && d != ArgDirection::OutputExisting && d != ArgDirection::InOut &&
+            d != ArgDirection::NoDep) {
           std::ostringstream oss;
           oss << "tensor argument at index " << i << " has " << ArgDirectionToString(d)
               << " but callee param direction is Out";

@@ -106,9 +106,9 @@ class IRVisitor : public IRFunctor<void> {
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override;
 
   /// Visit Var-typed entries in a ScopeStmt's ``attrs_``
-  /// (``manual_dep_edges`` / ``task_id_var``). Called from the per-subclass
-  /// visitors so analyses (unused-var detection, SSA Var liveness) see Var
-  /// refs stashed on the scope.
+  /// (``manual_dep_edges`` / ``task_id_var`` / ``arg_direction_overrides_vars``).
+  /// Called from the per-subclass visitors so analyses (unused-var detection,
+  /// SSA Var liveness) see Var refs stashed on the scope.
   void VisitScopeAttrs(const ScopeStmtPtr& op);
   void VisitStmt_(const SpmdScopeStmtPtr& op) override;
   void VisitStmt_(const RuntimeScopeStmtPtr& op) override;

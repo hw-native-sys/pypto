@@ -108,10 +108,11 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
   StmtPtr VisitStmt_(const HierarchyScopeStmtPtr& op) override;
 
   /// Rewrite Var-typed entries in a ScopeStmt's ``attrs_`` (``manual_dep_edges``
-  /// / ``task_id_var``). Returns the rewritten attrs along with a flag indicating
-  /// whether any entry actually changed. Called from the per-subclass mutators
-  /// so SSA renaming / type remapping propagates into scope attrs the way it
-  /// already does for ``Call.attrs``.
+  /// / ``task_id_var`` / ``arg_direction_overrides_vars``). Returns the
+  /// rewritten attrs along with a flag indicating whether any entry actually
+  /// changed. Called from the per-subclass mutators so SSA renaming / type
+  /// remapping propagates into scope attrs the way it already does for
+  /// ``Call.attrs``.
   std::pair<std::vector<std::pair<std::string, std::any>>, bool> MutateScopeAttrs(
       const std::vector<std::pair<std::string, std::any>>& attrs);
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override;

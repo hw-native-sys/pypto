@@ -151,10 +151,10 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       kwargs.emplace_back(key, nb::cast<double>(item.second));
     } else if (nb::isinstance<nb::list>(item.second) || nb::isinstance<nb::tuple>(item.second)) {
       // Lists/tuples carry exactly one element type, dispatched by attr key:
-      //   - kAttrArgDirections          -> vector<ArgDirection>
-      //   - kAttrArgDirectionOverrides  -> vector<int32_t>
+      //   - kAttrArgDirections             -> vector<ArgDirection>
+      //   - kAttrArgDirectionOverrides     -> vector<int32_t>
       //   - kAttrManualDepEdges /
-      //     kAttrUserManualDepEdges     -> vector<VarPtr>
+      //     kAttrArgDirOverrideVars        -> vector<VarPtr>
       // Inferring from the first element would silently accept mismatched
       // payloads (e.g. ``manual_dep_edges=[1]``) and fail later in codegen
       // instead of raising at parse time.
@@ -173,7 +173,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
           idxs.push_back(static_cast<int32_t>(v));
         }
         kwargs.emplace_back(key, std::move(idxs));
-      } else if (key == kAttrManualDepEdges) {
+      } else if (key == kAttrManualDepEdges || key == kAttrArgDirOverrideVars) {
         std::vector<VarPtr> vars;
         for (auto elem : seq) {
           if (!nb::isinstance<Var>(elem)) {
