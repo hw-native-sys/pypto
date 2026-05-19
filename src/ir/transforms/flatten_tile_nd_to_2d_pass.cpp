@@ -1557,6 +1557,22 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         new_args.push_back(Substitute(arg, ctx.var_map));
       }
 
+      // If the (substituted) tile operand is still >2D — e.g. a user-written
+      // ``pl.reshape(tile_2d, [B, 1, D])`` to feed ``pl.assemble`` into a
+      // rank>2 tensor view — insert a ``tile.reshape`` to flatten it to 2D.
+      // Codegen for ``tile.store`` requires a 2D tile; the original N-rank
+      // shape still flows through as the ``shapes`` partition operand built
+      // below from ``orig_tile_type``.
+      auto tile_arg_type = As<TileType>(new_args[0]->GetType());
+      if (tile_arg_type && tile_arg_type->shape_.size() > 2) {
+        auto [merged, last] = ComputeMergedShape(tile_arg_type->shape_, "tile.store tile operand");
+        auto reshape_shape = MakeShapeTupleFromInts({merged, last}, span);
+        auto reshape_call = op_registry.Create("tile.reshape", {new_args[0], reshape_shape}, span);
+        auto flat_var = std::make_shared<Var>("flat_tile", reshape_call->GetType(), span);
+        result.push_back(std::make_shared<AssignStmt>(flat_var, reshape_call, span));
+        new_args[0] = flat_var;
+      }
+
       auto out_tensor_type = As<TensorType>(new_args[2]->GetType());
       if (orig_tile_type && out_tensor_type && out_tensor_type->shape_.size() > 2) {
         // Inject the original tensor-rank partition shape tuple as the 4th argument.

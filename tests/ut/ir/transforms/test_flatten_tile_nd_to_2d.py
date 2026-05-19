@@ -806,6 +806,81 @@ class TestFlattenTileNdTo2DMultiOutput:
 
 
 # ----------------------------------------------------------------------------
+# User-introduced rank-raising tile.reshape feeding tile.store (#1400)
+# ----------------------------------------------------------------------------
+
+
+class TestFlattenTileNdTo2DReshapedStore:
+    """`pl.reshape(tile_2d, [..., 1, ...])` feeding `pl.assemble` into an N-D view.
+
+    The user writes a 2D tile, then explicitly raises its rank via
+    `pl.reshape` to match the N-D target tensor view's offsets (typical
+    ``pl.assemble(out_3d, tile_3d, [0, s, 0])`` MTP/scatter pattern). The
+    flatten pass must normalize the rank>2 tile back to 2D before the
+    `tile.store`, while preserving the N-rank shape as the `shapes`
+    partition operand for codegen.
+    """
+
+    def test_2d_tile_reshape_to_3d_then_store(self):
+        """`tile.load(2D) -> tile.reshape([B, 1, D]) -> tile.store(3D tensor)`."""
+        B, S, D = 4, 2, 8
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[B, D], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[B, S, D], pl.FP32]],
+            ) -> pl.Tensor[[B, S, D], pl.FP32]:
+                x_tile: pl.Tile[[B, D], pl.FP32] = pl.load(x, [0, 0], [B, D])
+                r3: pl.Tile[[B, 1, D], pl.FP32] = pl.tile.reshape(x_tile, [B, 1, D])
+                out_0: pl.Tensor[[B, S, D], pl.FP32] = pl.store(r3, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[B, D], pl.FP32]) -> pl.Tensor[[B, S, D], pl.FP32]:
+                out_0: pl.Tensor[[B, S, D], pl.FP32] = pl.create_tensor([B, S, D], dtype=pl.FP32)
+                y: pl.Tensor[[B, S, D], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        ib = IRBuilder()
+        with ib.program("main") as prog:
+            incore_gvar = prog.declare_function("main_incore_0")
+            prog.declare_function("main")
+
+            with ib.function("main_incore_0", type=ir.FunctionType.InCore) as f:
+                x = f.param("x", ir.TensorType([B, D], DataType.FP32))
+                out_0 = f.param(
+                    "out_0", ir.TensorType([B, S, D], DataType.FP32), direction=ir.ParamDirection.Out
+                )
+                f.return_type(ir.TensorType([B, S, D], DataType.FP32))
+                # 2D tile.load is unchanged by the pass.
+                x_tile = ib.let("x_tile", tile_ops.load(x, [0, 0], [B, D]))
+                # The user's explicit rank-raising reshape is preserved.
+                r3 = ib.let("r3", tile_ops.reshape(x_tile, [B, 1, D]))
+                # The pass-inserted ``tile.reshape`` flattens the >2D tile operand of
+                # ``tile.store`` back to 2D; codegen requires a 2D tile while the
+                # original 3D shape flows through as the ``shapes`` partition operand.
+                flat = ib.let("flat_tile", tile_ops.reshape(r3, [B, D]))
+                out_r = ib.let("out_0", tile_ops.store(flat, [0, 0, 0], out_0, [B, 1, D]))
+                ib.return_stmt(out_r)
+            prog.add_function(f.get_result())
+
+            with ib.function("main") as f:
+                x = f.param("x", ir.TensorType([B, D], DataType.FP32))
+                f.return_type(ir.TensorType([B, S, D], DataType.FP32))
+                out_0 = ib.let("out_0", tensor_ops.create([B, S, D], DataType.FP32))
+                y = ib.let("y", ir.Call(incore_gvar, [x, out_0], ir.Span.unknown()))
+                ib.return_stmt(y)
+            prog.add_function(f.get_result())
+        Expected = prog.get_result()
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+# ----------------------------------------------------------------------------
 # Pass property declarations and TileOps2D verifier
 # ----------------------------------------------------------------------------
 
