@@ -1553,3 +1553,88 @@ def gather_compare(
         count_dtype=count_dtype,
         span=span,
     )
+
+
+# ============================================================================
+# Scatter Operation
+# ============================================================================
+
+
+def scatter(  # noqa: PLR0913
+    input: Expr,
+    dim: int | None = None,
+    index: Expr | None = None,
+    src: Expr | None = None,
+    *,
+    mask_pattern: int | None = None,
+    dst: Expr | None = None,
+    span: Span | None = None,
+) -> Call:
+    """Scatter rows of ``src`` into ``input`` (tensor-level) — index or mask form.
+
+    Index form (``dim`` + ``index`` + ``src``) → ``tensor.scatter``::
+
+        output = input
+        for i in range(src.shape[0]):
+            output[index[i, 0], :] = src[i, :]
+
+        MVP limitation: rank-2 input with ``dim`` in ``{0, -2}`` only.
+
+    Mask form (``mask_pattern=<int>`` + ``dst``) → ``tensor.scatter_mask``:
+        write each row of ``input`` into the columns of ``dst`` selected by the
+        hardware mask pattern. ``dst.cols`` equals ``input.cols * stride``
+        (stride = 2 for P0101/P1010, 4 for P0001..P1000, 1 for P1111).
+        Targeted at A3 / CPU-sim style backends — A5 rejects this form.
+
+    Args:
+        input: Base tensor (TensorType, 2D).
+        dim: (index form) Axis along which to scatter. MVP accepts 0 or -2.
+        index: (index form) Per-row destination indices (TensorType, INT16/INT32).
+        src: (index form) Source rows tensor (same dtype as ``input``).
+        mask_pattern: (mask form, keyword-only) Mask selector in [1, 7].
+        dst: (mask form, keyword-only) Destination tensor (rewritten on mask
+            positions; same bit width as ``input``).
+        span: Optional source span (auto-captured if not provided).
+
+    Returns:
+        Call expression whose result type is the post-scatter tensor.
+    """
+    actual_span = _get_span_or_capture(span)
+    is_index = dim is not None or index is not None or src is not None
+    is_mask = mask_pattern is not None or dst is not None
+    if is_index and is_mask:
+        raise ValueError(
+            "scatter() index form (dim, index, src) and mask form (mask_pattern, dst) "
+            "are mutually exclusive; do not mix kwargs from different forms"
+        )
+    if is_mask:
+        if mask_pattern is None or dst is None:
+            raise ValueError("scatter() mask form requires both mask_pattern and dst")
+        return _ir_core.create_op_call(
+            "tensor.scatter_mask", [input, dst], {"mask_pattern": mask_pattern}, actual_span
+        )
+    if not is_index:
+        raise ValueError(
+            "scatter() requires (dim, index, src) for index form, or "
+            "(mask_pattern=<int>, dst=...) for mask form"
+        )
+    if dim is None or index is None or src is None:
+        raise ValueError("scatter() index form requires dim, index and src")
+    return _ir_core.create_op_call("tensor.scatter", [input, index, src], {"dim": dim}, actual_span)
+
+
+def scatter_mask(
+    input: Expr,
+    dst: Expr,
+    mask_pattern: int,
+    span: Span | None = None,
+) -> Call:
+    """Parser-roundtrip entry for the mask form (printed op name ``tensor.scatter_mask``).
+
+    The tensor DSL layer only exposes the unified ``scatter``; this IR-builder
+    function exists so round-trip parsing of printed ``pl.tensor.scatter_mask(...)``
+    calls (which appear in pass dumps but never in user code) still works via
+    ``_dispatch_ir_builder_op``. Prefer ``scatter(input, mask_pattern=..., dst=...)``
+    in user code.
+    """
+    return scatter(input, mask_pattern=mask_pattern, dst=dst, span=span)

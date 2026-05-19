@@ -918,6 +918,77 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
   return "";
 }
 
+// Helper for tile.scatter (TSCATTER index form, DPS):
+//   pto.tscatter ins(%src, %indexes : src_ty, idx_ty) outs(%dst : dst_ty)
+//
+// IR surface: 3-input op (src, indexes, dst) marked
+// set_output_reuses_input(2) — the AssignStmt LHS aliases `dst` so
+// GetCurrentResultTarget() returns the same SSA as args_[2].
+static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "tile.scatter requires 3 arguments (src, indexes, dst), but got "
+                               << op->args_.size();
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string idx = codegen.GetExprAsCode(op->args_[1]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string idx_type = codegen.GetExprTypeAnnotation(op->args_[1]);
+
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  oss << "pto.tscatter ins(" << src << ", " << idx;
+  if (!src_type.empty() || !idx_type.empty()) {
+    oss << " : " << src_type << ", " << idx_type;
+  }
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
+  return "";
+}
+
+// Helper for tile.scatter_mask (TSCATTER mask form, DPS):
+//   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty)
+//                outs(%dst : dst_ty)
+//
+// IR surface: 2-input op (src, dst) + mask_pattern attr; dst aliased via
+// set_output_reuses_input(1). Mask form is targeted at A3 / CPU-sim style
+// backends; A5 rejects it on the PTOAS side.
+static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 2) << "tile.scatter_mask requires 2 arguments (src, dst), but got "
+                               << op->args_.size();
+
+  int pattern = op->GetKwarg<int>("mask_pattern");
+  CHECK(pattern >= 1 && pattern < static_cast<int>(mask_patterns.size()))
+      << "tile.scatter_mask mask_pattern out of range: " << pattern;
+
+  std::string src = codegen.GetExprAsCode(op->args_[0]);
+  std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  std::ostringstream oss;
+  oss << "pto.tscatter ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern)
+      << ">}";
+  if (!src_type.empty()) {
+    oss << " : " << src_type;
+  }
+  oss << ") outs(" << dst;
+  if (!dst_type.empty()) {
+    oss << " : " << dst_type;
+  }
+  oss << ")";
+
+  codegen.Emit(oss.str());
+  return "";
+}
+
 // Helper function for MrgSort format2: emits pto.tmrgsort
 // Supports 2-4 way merge. tmp is the last ins operand and carries the
 // {exhausted} attribute; outs holds dst plus a synthesized executed vector
@@ -2085,7 +2156,9 @@ static const SimpleOpEntry kSimpleOps[] = {
     // Gather/scatter operations
     {"tile.gather",          "pto.tgather",          3},
     {"tile.gatherb",         "pto.tgatherb",         2},
-    {"tile.scatter",         "pto.tscatter",         2},
+    // tile.scatter and tile.scatter_mask are registered with custom codegen
+    // handlers below (DPS — dst is in `args_[2]` for scatter / `args_[1]` for
+    // scatter_mask, aliased to the result via set_output_reuses_input).
     // Partial reduction operations
     {"tile.partadd",         "pto.tpartadd",         2},
     {"tile.partmax",         "pto.tpartmax",         2},
@@ -2939,6 +3012,15 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   // tile.scatter_update: update input rows at scatter indices with src rows
   reg("tile.scatter_update", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeScatterUpdateCodegenPTO(op, codegen);
+  });
+  // tile.scatter (TSCATTER index form, DPS): 3-input op (src, indexes, dst).
+  reg("tile.scatter", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeScatterCodegenPTO(op, codegen);
+  });
+  // tile.scatter_mask (TSCATTER mask form, DPS): 2-input op (src, dst) +
+  // maskPattern attr. A3 / CPU-sim style backends only.
+  reg("tile.scatter_mask", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeScatterMaskCodegenPTO(op, codegen);
   });
   // tile.mrgsort_format2 (TMRGSORT format2): all inputs and output must be row_major per ISA
   if (exclude_ops.count("tile.mrgsort_format2") == 0) {

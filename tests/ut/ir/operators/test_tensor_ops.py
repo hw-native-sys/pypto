@@ -2760,6 +2760,139 @@ def test_tensor_gather_rejects_mixed_index_and_mask():
         ir.op.tensor.gather(inp, dim=-1, index=idx, mask_pattern=1)
 
 
+# Tensor scatter tests
+
+
+def _make_scatter_inputs(
+    dtype: DataType = DataType.FP32,
+    idx_dtype: DataType = DataType.INT32,
+    rows: int = 16,
+    cols: int = 8,
+    k: int = 4,
+):
+    span = ir.Span.unknown()
+    M = ir.ConstInt(rows, DataType.INT32, span)
+    N = ir.ConstInt(cols, DataType.INT32, span)
+    K = ir.ConstInt(k, DataType.INT32, span)
+    one = ir.ConstInt(1, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([M, N], dtype), span)
+    idx = ir.Var("idx", ir.TensorType([K, one], idx_dtype), span)
+    src = ir.Var("src", ir.TensorType([K, N], dtype), span)
+    return inp, idx, src
+
+
+def test_tensor_scatter_basic():
+    """tensor.scatter output preserves input shape and dtype."""
+    inp, idx, src = _make_scatter_inputs()
+    call = ir.op.tensor.scatter(inp, dim=0, index=idx, src=src)
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.scatter"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+    dims = [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)]
+    assert dims == [16, 8]
+
+
+def test_tensor_scatter_negative_dim():
+    """dim=-2 is accepted as an alias for dim=0."""
+    inp, idx, src = _make_scatter_inputs()
+    call = ir.op.tensor.scatter(inp, dim=-2, index=idx, src=src)
+    assert call.op.name == "tensor.scatter"
+
+
+def test_tensor_scatter_rejects_unsupported_dim():
+    """MVP only supports dim=0 / dim=-2."""
+    inp, idx, src = _make_scatter_inputs()
+    with pytest.raises(Exception, match=r"dim=0"):
+        ir.op.tensor.scatter(inp, dim=1, index=idx, src=src)
+
+
+def test_tensor_scatter_rejects_dtype_mismatch():
+    """src dtype must match input dtype."""
+    inp, idx, _ = _make_scatter_inputs(dtype=DataType.FP32)
+    span = ir.Span.unknown()
+    K = ir.ConstInt(4, DataType.INT32, span)
+    N = ir.ConstInt(8, DataType.INT32, span)
+    src_wrong = ir.Var("src_bad", ir.TensorType([K, N], DataType.FP16), span)
+    with pytest.raises(Exception, match=r"src dtype"):
+        ir.op.tensor.scatter(inp, dim=0, index=idx, src=src_wrong)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "wrong_idx_dtype"),
+    [
+        (DataType.FP32, DataType.INT16),
+        (DataType.FP16, DataType.INT32),
+        (DataType.INT8, DataType.INT32),
+    ],
+    ids=["fp32-needs-i32", "fp16-needs-i16", "i8-needs-i16"],
+)
+def test_tensor_scatter_rejects_index_size_mismatch(dtype, wrong_idx_dtype):
+    """index element width must follow the input-dtype-size matching rule."""
+    inp, _, src = _make_scatter_inputs(dtype=dtype)
+    span = ir.Span.unknown()
+    K = ir.ConstInt(4, DataType.INT32, span)
+    one = ir.ConstInt(1, DataType.INT32, span)
+    idx_wrong = ir.Var("idx_bad", ir.TensorType([K, one], wrong_idx_dtype), span)
+    with pytest.raises(Exception, match=r"index dtype"):
+        ir.op.tensor.scatter(inp, dim=0, index=idx_wrong, src=src)
+
+
+def test_tensor_scatter_mask_p0101_doubles_last_dim():
+    """tensor.scatter(input, mask_pattern=1, dst=...) — P0101 stride 2 → dst cols == 2 * input cols."""
+    span = ir.Span.unknown()
+    R = ir.ConstInt(4, DataType.INT32, span)
+    C = ir.ConstInt(8, DataType.INT32, span)
+    C2 = ir.ConstInt(16, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP32), span)
+    dst = ir.Var("dst", ir.TensorType([R, C2], DataType.FP32), span)
+    call = ir.op.tensor.scatter(inp, mask_pattern=1, dst=dst)
+    assert call.op.name == "tensor.scatter_mask"
+    rt = call.type
+    assert isinstance(rt, ir.TensorType)
+    assert rt.dtype == DataType.FP32
+    assert isinstance(rt.shape[1], ir.ConstInt) and rt.shape[1].value == 16
+
+
+def test_tensor_scatter_mask_p1111_keeps_last_dim():
+    span = ir.Span.unknown()
+    R = ir.ConstInt(4, DataType.INT32, span)
+    C = ir.ConstInt(16, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP32), span)
+    dst = ir.Var("dst", ir.TensorType([R, C], DataType.FP32), span)
+    call = ir.op.tensor.scatter(inp, mask_pattern=7, dst=dst)
+    assert call.op.name == "tensor.scatter_mask"
+
+
+def test_tensor_scatter_mask_rejects_bad_pattern():
+    span = ir.Span.unknown()
+    R = ir.ConstInt(4, DataType.INT32, span)
+    C = ir.ConstInt(8, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP32), span)
+    dst = ir.Var("dst", ir.TensorType([R, C], DataType.FP32), span)
+    with pytest.raises(Exception, match=r"mask_pattern in \[1, 7\]"):
+        ir.op.tensor.scatter(inp, mask_pattern=42, dst=dst)
+
+
+def test_tensor_scatter_mask_rejects_col_expansion_mismatch():
+    """dst.cols must equal input.cols * stride."""
+    span = ir.Span.unknown()
+    R = ir.ConstInt(4, DataType.INT32, span)
+    C = ir.ConstInt(8, DataType.INT32, span)
+    Cwrong = ir.ConstInt(24, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP32), span)
+    dst = ir.Var("dst_bad", ir.TensorType([R, Cwrong], DataType.FP32), span)
+    with pytest.raises(Exception, match=r"mask_pattern=1"):
+        ir.op.tensor.scatter(inp, mask_pattern=1, dst=dst)
+
+
+def test_tensor_scatter_rejects_mixed_index_and_mask():
+    inp, idx, src = _make_scatter_inputs()
+    with pytest.raises(ValueError, match=r"mutually exclusive"):
+        ir.op.tensor.scatter(inp, dim=0, index=idx, src=src, mask_pattern=1)
+
+
 class TestTensorCiOp:
     """Tests for tensor.ci (contiguous integer sequence)."""
 

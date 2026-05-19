@@ -92,6 +92,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterReductionOps();
   RegisterSortOps();
   RegisterGatherOps();
+  RegisterScatterOps();
   RegisterCmpOps();
 }
 
@@ -1332,6 +1333,70 @@ void OpConversionRegistry::RegisterGatherOps() {
         return ConversionResult{std::move(prologue), tile_call};
       },
       std::move(gc_input_reqs));
+}
+
+// ============================================================================
+// Scatter lowering (mirror of gather, no compare-form).
+//
+// tensor.scatter (index form, MVP — rank-2, dim=0/-2):
+//   The framework auto-bridges (input, index, src) to Vec tiles via input_reqs.
+//   We swap the arg order to match the tile-level DPS signature (src, indexes,
+//   dst) and emit a single tile.scatter. The result Var inherits dst's storage;
+//   the surrounding pass wraps the tile result in a tile.store to the output
+//   tensor param.
+//
+// tensor.scatter_mask: same idea, simple (input, dst) → (src, dst) re-wire.
+// ============================================================================
+
+void OpConversionRegistry::RegisterScatterOps() {
+  std::unordered_map<size_t, InputSpaceReq> scatter_input_reqs = {
+      {0, {MemorySpace::Vec, std::nullopt}},
+      {1, {MemorySpace::Vec, std::nullopt}},
+      {2, {MemorySpace::Vec, std::nullopt}},
+  };
+  RegisterCustom(
+      "tensor.scatter",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 3) << "tensor.scatter conversion expects 3 args (input, index, src), got "
+                                << args.size();
+
+        // Validate dim — MVP supports dim=0 only (per-row row-scatter).
+        int dim_val = GetKwargOr<int>(kwargs, "dim", 0);
+        auto input_tile = As<TileType>(args[0]->GetType());
+        CHECK(input_tile) << "tensor.scatter conversion: input must be Vec tile after bridge, got "
+                          << args[0]->GetType()->TypeName();
+        const int rank = static_cast<int>(input_tile->shape_.size());
+        const int norm_dim = dim_val < 0 ? dim_val + rank : dim_val;
+        CHECK(rank == 2 && norm_dim == 0)
+            << "tensor.scatter conversion currently supports rank-2 input with dim=0 (or dim=-2) only, got "
+            << "rank=" << rank << " dim=" << dim_val;
+
+        auto& op_reg = OpRegistry::GetInstance();
+        // tile.scatter signature: (src, indexes, dst) — re-wire from the
+        // tensor-level (input, index, src) order. `input` is the DPS dst.
+        auto tile_call = op_reg.Create("tile.scatter", {args[2], args[1], args[0]}, span);
+        return ConversionResult{tile_call};
+      },
+      std::move(scatter_input_reqs));
+
+  std::unordered_map<size_t, InputSpaceReq> scatter_mask_input_reqs = {
+      {0, {MemorySpace::Vec, std::nullopt}},
+      {1, {MemorySpace::Vec, std::nullopt}},
+  };
+  RegisterCustom(
+      "tensor.scatter_mask",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 2) << "tensor.scatter_mask conversion expects 2 args (input, dst), got "
+                                << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+        // tile.scatter_mask signature: (src, dst) + mask_pattern attr. The
+        // converter's args[0] (input) maps to src, args[1] (dst) to dst.
+        auto tile_call = op_reg.Create("tile.scatter_mask", {args[0], args[1]}, kwargs, span);
+        return ConversionResult{tile_call};
+      },
+      std::move(scatter_mask_input_reqs));
 }
 
 // ============================================================================

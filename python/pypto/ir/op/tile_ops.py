@@ -2515,6 +2515,65 @@ def gather_compare(
 
 
 # ============================================================================
+# Scatter Operations
+# ============================================================================
+
+
+def scatter(
+    src: Expr,
+    indexes: Expr,
+    dst: Expr,
+    span: Span | None = None,
+) -> Call:
+    """Scatter rows from ``src`` into ``dst`` at per-row destination indices.
+
+    Computes ``dst[indexes[i, 0], j] = src[i, j]``. Maps to PTOAS ``pto.tscatter``
+    index form. The op is DPS — ``dst`` is rewritten in place and the call's
+    return value aliases ``dst``.
+
+    Args:
+        src: Source tile (FP16/FP32/BF16/INT8/INT16/INT32, 2D)
+        indexes: Per-row destination index tile (INT16 or INT32; one row per src row)
+        dst: Destination tile (same dtype as src; rewritten in-place via DPS)
+        span: Optional source span
+
+    Returns:
+        Call expression aliasing the post-scatter ``dst`` tile.
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.scatter", [src, indexes, dst], {}, actual_span)
+
+
+def scatter_mask(
+    src: Expr,
+    dst: Expr,
+    mask_pattern: int,
+    span: Span | None = None,
+) -> Call:
+    """Scatter ``src`` rows into mask-marked columns of ``dst`` (mask form).
+
+    Maps to PTOAS ``pto.tscatter`` mask form. DPS — ``dst`` is rewritten in place
+    on mask-selected positions and the call result aliases ``dst``.
+
+    This form is targeted at A3 / CPU-sim style backends; A5 rejects it.
+
+    Args:
+        src: Source tile (compact rows, same bit-width as ``dst``)
+        dst: Destination tile (rewritten on positions selected by ``mask_pattern``)
+        mask_pattern: Mask pattern selector (1-7).
+            1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
+        span: Optional source span
+
+    Returns:
+        Call expression aliasing the post-scatter ``dst`` tile.
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call(
+        "tile.scatter_mask", [src, dst], {"mask_pattern": mask_pattern}, actual_span
+    )
+
+
+# ============================================================================
 # Merge Sort Operations
 # ============================================================================
 
