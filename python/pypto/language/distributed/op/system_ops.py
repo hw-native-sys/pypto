@@ -9,7 +9,8 @@
 
 """``pld.system.*`` — distributed system-level op DSL wrappers.
 
-System-level ops cover host-only queries and CommContext scalar accessors:
+System-level ops cover host-only queries, CommContext scalar accessors, and
+cross-rank synchronisation primitives:
 
 * :func:`world_size` — host-only scalar returning the number of devices in the
   current distributed execution. Returns a :class:`Scalar` wrapping an
@@ -18,6 +19,9 @@ System-level ops cover host-only queries and CommContext scalar accessors:
 * :func:`get_comm_ctx` — lift a :class:`pld.DistributedTensor` to its
   :class:`pld.CommCtx` handle. The op verifier (C++) refuses any argument
   that is not :class:`ir.DistributedTensorType`.
+* :func:`notify` / :func:`wait` — cross-rank TNOTIFY / TWAIT on a window-bound
+  signal matrix. Side-effect-only; the C++ verifier refuses a plain
+  :class:`pl.Tensor` target.
 * :func:`rank` / :func:`nranks` — CommContext scalar reads (``INT32``). The
   op verifier rejects any argument whose type is not :class:`ir.CommCtxType`.
 
@@ -29,12 +33,16 @@ Typical use sites for ``world_size``:
   ``pld.tensor.window(buf, [pld.world_size()], dtype=pl.INT32)``
 """
 
+from collections.abc import Sequence
+
 from pypto.ir.op.distributed import system_ops as _ir_system
-from pypto.language.typing import Scalar
+from pypto.language.typing import IntLike, Scalar
+from pypto.language.typing.tensor import Tensor
+from pypto.pypto_core.ir import Call, NotifyOp, WaitCmp
 
 from ..typing.comm_ctx import CommCtx
 from ..typing.distributed_tensor import DistributedTensor
-from ._utils import _unwrap
+from ._utils import _normalize_intlike, _unwrap
 
 
 def world_size() -> Scalar:
@@ -101,4 +109,51 @@ def nranks(ctx: CommCtx) -> Scalar:
     return Scalar(expr=_ir_system.nranks(_unwrap(ctx)))
 
 
-__all__ = ["get_comm_ctx", "nranks", "rank", "world_size"]
+def notify(
+    target: Tensor,
+    *,
+    peer: IntLike,
+    offsets: Sequence[IntLike],
+    value: IntLike,
+    op: NotifyOp,
+) -> Call:
+    """Cross-rank notify: deposit ``value`` at the peer rank's slot of ``target``.
+
+    Side-effect-only (the returned Call carries ``UnknownType``). Lowers to
+    ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + TNOTIFY`` at
+    codegen.
+
+    Args:
+        target: Window-bound :class:`pld.DistributedTensor` signal matrix. The
+            C++ verifier refuses a plain :class:`pl.Tensor`.
+        peer: Peer rank index (kwarg-only).
+        offsets: Offsets into the remote slice, one per ``target`` dimension.
+        value: Scalar payload to deposit at the peer slot.
+        op: :class:`pld.NotifyOp` selecting atomic-add vs set semantics.
+    """
+    return _ir_system.notify(_unwrap(target), _unwrap(peer), _normalize_intlike(offsets), _unwrap(value), op)
+
+
+def wait(
+    signal: Tensor,
+    *,
+    offsets: Sequence[IntLike],
+    expected: IntLike,
+    cmp: WaitCmp,
+) -> Call:
+    """Cross-rank wait: block until the local slot of ``signal`` matches ``cmp(expected)``.
+
+    Side-effect-only (the returned Call carries ``UnknownType``). Lowers to
+    TWAIT at codegen.
+
+    Args:
+        signal: Window-bound :class:`pld.DistributedTensor` signal matrix. The
+            C++ verifier refuses a plain :class:`pl.Tensor`.
+        offsets: Offsets into the local slice, one per ``signal`` dimension.
+        expected: Scalar threshold value to compare against.
+        cmp: :class:`pld.WaitCmp` selecting equality vs greater-or-equal.
+    """
+    return _ir_system.wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
+
+
+__all__ = ["get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]

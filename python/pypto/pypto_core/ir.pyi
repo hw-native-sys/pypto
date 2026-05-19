@@ -1144,6 +1144,25 @@ DYNAMIC_DIM: Final[int]
 Used to indicate dimensions with runtime-determined sizes.
 """
 
+class _CommLayoutModule:
+    """Compile-time locked CommContext field offsets consumed by distributed codegen.
+
+    Values mirror `offsetof(::CommContext, ...)` on the runtime header and are
+    pinned by `static_assert` in `include/pypto/codegen/distributed/comm_layout.h`.
+    Treat any drift between these constants and the literals embedded in emitted
+    CommRemotePtr kernels as a runtime/codegen ABI break.
+    """
+
+    RANK_ID_OFFSET: Final[int]
+    RANK_NUM_OFFSET: Final[int]
+    WINDOWS_IN_OFFSET: Final[int]
+    WINDOWS_OUT_OFFSET: Final[int]
+    WINDOW_SLOT_STRIDE: Final[int]
+    COMM_CTX_SIZE: Final[int]
+
+comm_layout: _CommLayoutModule
+"""Submodule mirroring the runtime CommContext layout pinned in C++."""
+
 ScalarExprType = Expr | int | float
 
 class Var(Expr):
@@ -2074,6 +2093,32 @@ class SplitMode(enum.Enum):
 
     LEFT_RIGHT = 2
     """Split horizontally (width halved)."""
+
+class NotifyOp(enum.IntEnum):
+    """Cross-rank notify semantics for ``pld.system.notify`` (TNOTIFY).
+
+    Stored as ``int`` in op kwargs; the C++ deducer validates the int falls
+    within this enum's range.
+    """
+
+    AtomicAdd = 0
+    """Atomically add value to peer rank's signal slot."""
+
+    Set = 1
+    """Non-atomic store of value to peer rank's signal slot."""
+
+class WaitCmp(enum.IntEnum):
+    """Cross-rank wait predicate for ``pld.system.wait`` (TWAIT).
+
+    Stored as ``int`` in op kwargs; the C++ deducer validates the int falls
+    within this enum's range.
+    """
+
+    Eq = 0
+    """Block until ``*signal_slot == expected``."""
+
+    Ge = 1
+    """Block until ``*signal_slot >= expected``."""
 
 class ScopeStmt(Stmt):
     """Scope statement: marks a region with specific execution context (abstract base).

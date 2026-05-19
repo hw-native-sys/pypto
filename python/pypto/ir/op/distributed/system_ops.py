@@ -8,7 +8,8 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """IR builders for distributed system-level ops (``pld.system.world_size``,
-``pld.system.get_comm_ctx``, ``pld.system.rank`` / ``pld.system.nranks``).
+``pld.system.get_comm_ctx``, ``pld.system.rank`` / ``pld.system.nranks``,
+``pld.system.notify`` / ``pld.system.wait``).
 
 Mirror of :mod:`pypto.ir.op.system_ops` for the distributed namespace —
 exposes the registered C++ ops as Python builders. The DSL layer in
@@ -17,10 +18,13 @@ exposes the registered C++ ops as Python builders. The DSL layer in
 ``pld.<op>`` unified dispatch.
 """
 
-from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, Span
+from collections.abc import Sequence
 
-from ...utils import _get_span_or_capture
+from pypto.pypto_core import DataType
+from pypto.pypto_core import ir as _ir_core
+from pypto.pypto_core.ir import Call, NotifyOp, Span, WaitCmp
+
+from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
 def world_size(*, span: Span | None = None) -> Call:
@@ -62,4 +66,54 @@ def nranks(ctx: _ir_core.Expr, *, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("pld.system.nranks", [ctx], {}, actual_span)
 
 
-__all__ = ["get_comm_ctx", "nranks", "rank", "world_size"]
+def notify(
+    target: _ir_core.Expr,
+    peer: int | _ir_core.Expr,
+    offsets: Sequence[int | _ir_core.Expr] | _ir_core.MakeTuple,
+    value: int | _ir_core.Expr,
+    op: NotifyOp,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.system.notify(target, peer, offsets, value)`` Call.
+
+    Cross-rank notify: deposit ``value`` at ``peer``'s slot of the
+    window-bound signal matrix ``target``. ``op`` (:class:`ir.NotifyOp`)
+    selects atomic-add vs set semantics and is packed as an ``int`` attr.
+    Side-effect only — the result is an ``UnknownType`` Call. The verifier
+    rejects a non-:class:`ir.DistributedTensorType` ``target``.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    value_expr = _normalize_expr(value, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call(
+        "pld.system.notify", [target, peer_expr, offsets_tuple, value_expr], {"op": int(op)}, actual_span
+    )
+
+
+def wait(
+    signal: _ir_core.Expr,
+    offsets: Sequence[int | _ir_core.Expr] | _ir_core.MakeTuple,
+    expected: int | _ir_core.Expr,
+    cmp: WaitCmp,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.system.wait(signal, offsets, expected)`` Call.
+
+    Cross-rank wait: block until the local slot of ``signal`` satisfies
+    ``cmp`` against ``expected``. ``cmp`` (:class:`ir.WaitCmp`) selects
+    eq vs ge and is packed as an ``int`` attr. Side-effect only — the
+    result is an ``UnknownType`` Call. The verifier rejects a
+    non-:class:`ir.DistributedTensorType` ``signal``.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    offsets_tuple = _to_make_tuple(offsets, actual_span)
+    expected_expr = _normalize_expr(expected, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call(
+        "pld.system.wait", [signal, offsets_tuple, expected_expr], {"cmp": int(cmp)}, actual_span
+    )
+
+
+__all__ = ["get_comm_ctx", "notify", "nranks", "rank", "wait", "world_size"]

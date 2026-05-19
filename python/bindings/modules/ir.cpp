@@ -30,9 +30,11 @@
 #include <vector>
 
 #include "../module.h"
+#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/common.h"
 #include "pypto/core/error.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -127,6 +129,12 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<SplitMode>(item.second)) {
       // Cast enum to int for storage
       kwargs.emplace_back(key, static_cast<int>(nb::cast<SplitMode>(item.second)));
+    } else if (nb::isinstance<NotifyOp>(item.second)) {
+      // Cast enum to int for storage — pld.system.notify reads as int
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<NotifyOp>(item.second)));
+    } else if (nb::isinstance<WaitCmp>(item.second)) {
+      // Cast enum to int for storage — pld.system.wait reads as int
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<WaitCmp>(item.second)));
     } else if (nb::isinstance<PadValue>(item.second)) {
       kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
     } else if (nb::isinstance<LoopOrigin>(item.second)) {
@@ -623,6 +631,20 @@ void BindIR(nb::module_& m) {
 
   // Dynamic dimension constant
   ir.attr("DYNAMIC_DIM") = kDynamicDim;
+
+  // Compile-time locked CommContext field offsets consumed by distributed
+  // codegen. Values come from offsetof(::CommContext, ...) and are pinned by
+  // static_assert in include/pypto/codegen/distributed/comm_layout.h. Exposed
+  // to Python so unit tests can assert no drift between bindings and the
+  // literal numbers that codegen embeds into emitted CommRemotePtr kernels.
+  nb::module_ comm_layout_mod = ir.def_submodule(
+      "comm_layout", "Compile-time locked CommContext field offsets consumed by distributed codegen.");
+  comm_layout_mod.attr("RANK_ID_OFFSET") = pypto::codegen::distributed::comm_layout::kRankIdOffset;
+  comm_layout_mod.attr("RANK_NUM_OFFSET") = pypto::codegen::distributed::comm_layout::kRankNumOffset;
+  comm_layout_mod.attr("WINDOWS_IN_OFFSET") = pypto::codegen::distributed::comm_layout::kWindowsInOffset;
+  comm_layout_mod.attr("WINDOWS_OUT_OFFSET") = pypto::codegen::distributed::comm_layout::kWindowsOutOffset;
+  comm_layout_mod.attr("WINDOW_SLOT_STRIDE") = pypto::codegen::distributed::comm_layout::kWindowSlotStride;
+  comm_layout_mod.attr("COMM_CTX_SIZE") = pypto::codegen::distributed::comm_layout::kCommCtxSize;
 
   // OpRegistry
   ir.def(
@@ -1224,6 +1246,23 @@ void BindIR(nb::module_& m) {
       .value("UP_DOWN", SplitMode::UpDown, "Split vertically (height halved)")
       .value("LEFT_RIGHT", SplitMode::LeftRight, "Split horizontally (width halved)")
       .export_values();
+
+  // NotifyOp / WaitCmp enums — payload of the pld.system.notify / pld.system.wait
+  // ops. Stored as `int` in kwargs (see CreateKwargsFromPyDict dispatch); the C++
+  // op deducer validates the int against the enum range. Defined nb::is_arithmetic
+  // so user code can mix the enum with int literals where needed (e.g. masks).
+  // No `.export_values()`: members like `Eq` / `Ge` / `Set` would shadow the IR
+  // operator classes (ir.Eq, ir.Ge) and the built-in Python `Set` exposed at the
+  // ir module level. Users access them as `ir.NotifyOp.AtomicAdd` etc.
+  nb::enum_<NotifyOp>(ir, "NotifyOp", nb::is_arithmetic(),
+                      "Cross-rank notify semantics for pld.system.notify (TNOTIFY)")
+      .value("AtomicAdd", NotifyOp::kAtomicAdd, "Atomically add value to peer's signal slot")
+      .value("Set", NotifyOp::kSet, "Non-atomic store of value to peer's signal slot");
+
+  nb::enum_<WaitCmp>(ir, "WaitCmp", nb::is_arithmetic(),
+                     "Cross-rank wait predicate for pld.system.wait (TWAIT)")
+      .value("Eq", WaitCmp::kEq, "Block until *signal_slot == expected")
+      .value("Ge", WaitCmp::kGe, "Block until *signal_slot >= expected");
 
   // ScopeStmt - abstract base class for all scope statements (issue #1047).
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(

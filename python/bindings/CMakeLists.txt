@@ -54,10 +54,14 @@ set_target_properties(${LIBRARY_NAME} PROPERTIES
 # expression for multi-config generator compatibility.
 target_compile_definitions(${LIBRARY_NAME} PRIVATE $<$<CONFIG:Debug>:PYPTO_DEBUG>)
 
-# Link with libbacktrace and msgpack
+# Link with libbacktrace and msgpack.
+# runtime/src/common is added so distributed codegen can consume the runtime
+# ABI header `platform_comm/comm_context.h` for compile-time layout asserts
+# (see include/pypto/codegen/distributed/comm_layout.h).
 target_include_directories(${LIBRARY_NAME} PRIVATE
     ${LIBBACKTRACE_INSTALL_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/runtime/src/common
 )
 target_link_libraries(${LIBRARY_NAME} PRIVATE
     libbacktrace

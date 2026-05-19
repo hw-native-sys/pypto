@@ -113,6 +113,7 @@ set(PYPTO_SOURCES
     src/ir/op/distributed/world_size.cpp
     src/ir/op/distributed/remote_load.cpp
     src/ir/op/distributed/get_comm_ctx.cpp
+    src/ir/op/distributed/system.cpp
     src/ir/op/tensor_ops/broadcast.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tensor_ops/matmul.cpp

@@ -49,6 +49,18 @@ inline std::optional<MemRefPtr> GetTypeMemRef(const TypePtr& type) {
 
 inline TypePtr CloneTypeWithMemRef(const TypePtr& type, const std::optional<MemRefPtr>& memref,
                                    std::optional<MemorySpace> tile_memory_space_override = std::nullopt) {
+  // DistributedTensorType inherits TensorType: dispatch on it first so the
+  // returned clone preserves the subclass identity (including the
+  // window_buffer_ back-reference). Without this guard the more generic
+  // ``TensorType`` branch below would silently downgrade DistributedTensor
+  // params during memref/SSA rebuilds — by codegen time the var's type would
+  // become plain TensorType and the cross-rank op codegen would lose the
+  // ``DistributedTensorType`` kind discriminator (see N6 plan §codegen).
+  if (auto dist_type = std::dynamic_pointer_cast<const DistributedTensorType>(type)) {
+    return std::make_shared<DistributedTensorType>(dist_type->shape_, dist_type->dtype_, memref,
+                                                   dist_type->tensor_view_, dist_type->window_buffer_);
+  }
+
   if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
     return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, memref,
                                         tensor_type->tensor_view_);
@@ -125,6 +137,20 @@ inline TypePtr CloneTypeWithMemRefAndRemapExprs(
     std::optional<MemorySpace> tile_memory_space_override = std::nullopt) {
   const bool memref_changed = GetTypeMemRef(type) != memref;
   bool changed = memref_changed;
+
+  // DistributedTensorType clone path: matches the comment on
+  // CloneTypeWithMemRef above. Distinct from the TensorType branch so the
+  // window_buffer_ back-reference and the kind discriminator survive an
+  // InitMemRef / SSA rebuild.
+  if (auto dist_type = std::dynamic_pointer_cast<const DistributedTensorType>(type)) {
+    auto new_shape = RemapTypeExprVector(dist_type->shape_, remap_expr, changed);
+    auto new_tensor_view = RemapTensorViewExprs(dist_type->tensor_view_, remap_expr, changed);
+    if (!changed) {
+      return type;
+    }
+    return std::make_shared<DistributedTensorType>(std::move(new_shape), dist_type->dtype_, memref,
+                                                   std::move(new_tensor_view), dist_type->window_buffer_);
+  }
 
   if (auto tensor_type = std::dynamic_pointer_cast<const TensorType>(type)) {
     auto new_shape = RemapTypeExprVector(tensor_type->shape_, remap_expr, changed);

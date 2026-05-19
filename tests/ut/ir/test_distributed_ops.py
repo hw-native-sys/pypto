@@ -401,5 +401,93 @@ def test_comm_ctx_nranks_rejects_non_comm_ctx_arg():
         ir.create_op_call("pld.system.nranks", [not_ctx], {}, span)
 
 
+# ---------------------------------------------------------------------------
+# pld.system.notify / pld.system.wait ops (N6 cross-rank sync)
+# ---------------------------------------------------------------------------
+
+
+def test_notify_returns_unknown_type():
+    """Positive: notify is side-effect-only — result is UnknownType."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    offsets = _make_shape_tuple([0], span)
+    value = ir.Var("v", ir.ScalarType(DataType.INT32), span)
+
+    call = ir.create_op_call(
+        "pld.system.notify",
+        [target, peer, offsets, value],
+        {"op": ir.NotifyOp.AtomicAdd},
+        span,
+    )
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_notify_rejects_plain_tensor_target():
+    """Negative: a plain pl.Tensor target is refused — must be window-bound."""
+    span = ir.Span.unknown()
+    plain = ir.Var("x", ir.TensorType([ir.ConstInt(4, DataType.INT64, span)], DataType.INT32), span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    offsets = _make_shape_tuple([0], span)
+    value = ir.Var("v", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(Exception, match="DistributedTensor"):
+        ir.create_op_call(
+            "pld.system.notify",
+            [plain, peer, offsets, value],
+            {"op": ir.NotifyOp.Set},
+            span,
+        )
+
+
+def test_notify_rejects_mismatched_offsets_rank():
+    """Negative: offsets rank must match target rank."""
+    span = ir.Span.unknown()
+    target = _make_distributed_tensor_var("signal", [4, 2], DataType.INT32, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    bad_offsets = _make_shape_tuple([0], span)  # 1-D, target is 2-D
+    value = ir.Var("v", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(Exception, match="offsets rank"):
+        ir.create_op_call(
+            "pld.system.notify",
+            [target, peer, bad_offsets, value],
+            {"op": ir.NotifyOp.AtomicAdd},
+            span,
+        )
+
+
+def test_wait_returns_unknown_type():
+    """Positive: wait is side-effect-only — result is UnknownType."""
+    span = ir.Span.unknown()
+    signal = _make_distributed_tensor_var("signal", [4], DataType.INT32, span)
+    offsets = _make_shape_tuple([0], span)
+    expected = ir.Var("e", ir.ScalarType(DataType.INT32), span)
+
+    call = ir.create_op_call(
+        "pld.system.wait",
+        [signal, offsets, expected],
+        {"cmp": ir.WaitCmp.Ge},
+        span,
+    )
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_wait_rejects_plain_tensor_signal():
+    """Negative: a plain pl.Tensor signal is refused — must be window-bound."""
+    span = ir.Span.unknown()
+    plain = ir.Var("x", ir.TensorType([ir.ConstInt(4, DataType.INT64, span)], DataType.INT32), span)
+    offsets = _make_shape_tuple([0], span)
+    expected = ir.Var("e", ir.ScalarType(DataType.INT32), span)
+
+    with pytest.raises(Exception, match="DistributedTensor"):
+        ir.create_op_call(
+            "pld.system.wait",
+            [plain, offsets, expected],
+            {"cmp": ir.WaitCmp.Eq},
+            span,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

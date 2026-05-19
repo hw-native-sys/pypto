@@ -345,6 +345,39 @@ class PTOCodegen : public CodegenBase {
    */
   [[nodiscard]] std::string GetSpmdBlockNumArgSSA() const { return fs_.spmd_block_num_arg; }
 
+  /**
+   * @brief SSA name of the CommContext pointer arg appended for a
+   * DistributedTensor param.
+   *
+   * N6 distributed codegen appends one ``!pto.ptr<i64>`` arg per
+   * DistributedTensor parameter at the end of the func.func signature
+   * (after explicit tensor/scalar params, before dynamic-shape ``index``
+   * params). The mapping ``dist_tensor_var → ctx_ssa`` lets the
+   * pld.tile.remote_load / pld.system.notify / pld.system.wait codegen
+   * recover the matching context pointer.
+   *
+   * @param dist_var DistributedTensor parameter variable.
+   * @return SSA name (e.g. ``%arg7``), or empty string if @p dist_var is
+   *         not a DistributedTensor param of the current function.
+   */
+  [[nodiscard]] std::string GetCommCtxSSAFor(const ir::Var* dist_var) const;
+
+  /**
+   * @brief Name of the module-level ``@CommRemotePtr_<dtype>`` helper.
+   *
+   * Distributed remote ops (``pld.tile.remote_load`` / ``pld.system.notify``)
+   * lower their per-call peer-pointer arithmetic to a ``func.call`` of a
+   * module-level helper that performs the CommContext field reads and
+   * pointer offset math. Emitting it once per dtype keeps each call site to
+   * a single line and matches the inline ``CommRemotePtr<T_>`` template in
+   * the runtime header.
+   *
+   * @param dtype Element dtype of the DistributedTensor (e.g. ``FP16``,
+   *              ``INT32``).
+   * @return Helper function name (e.g. ``CommRemotePtr_f16``).
+   */
+  [[nodiscard]] static std::string GetCommRemotePtrFuncName(const DataType& dtype);
+
   /// Increase/decrease the current indentation level (used by op codegen helpers that emit scf.for blocks)
   void IncreaseIndent() { indent_level_++; }
   void DecreaseIndent() { indent_level_--; }
@@ -443,6 +476,26 @@ class PTOCodegen : public CodegenBase {
    * @brief Collect deterministic GM slot buffer byte offsets for frontend pipe ids in a module.
    */
   void PrepareGMSlotBufferLayout(const ir::ProgramPtr& program);
+
+  /**
+   * @brief Walk the program and collect distinct DistributedTensor element
+   *        dtypes consumed by ``pld.tile.remote_load`` / ``pld.system.notify``.
+   *
+   * One ``@CommRemotePtr_<dtype>`` helper is emitted per distinct dtype at
+   * module scope (see :func:`EmitCommRemotePtrHelpers`). ``pld.system.wait``
+   * is local-only and does not need a peer-pointer helper.
+   */
+  void CollectRemotePtrDtypes(const ir::ProgramPtr& program);
+
+  /**
+   * @brief Emit one ``func.func @CommRemotePtr_<dtype>`` per dtype collected
+   *        in :func:`CollectRemotePtrDtypes`, written at module scope before
+   *        any user function. Each helper performs the runtime CommContext
+   *        field reads and pointer offset math that ``EmitCommRemotePtr``
+   *        (see ``src/backend/common/pto_ops_common.cpp``) calls via
+   *        ``func.call`` from the per-op lowering.
+   */
+  void EmitCommRemotePtrHelpers();
 
   /**
    * @brief Build variable identity to MemRef mapping from function body
@@ -557,6 +610,13 @@ class PTOCodegen : public CodegenBase {
     std::string spmd_block_idx_arg;
     std::string spmd_block_num_arg;
 
+    /// Mapping from DistributedTensor parameter Var → CommContext pointer
+    /// arg SSA name. Populated in GenerateFunction when appending the
+    /// trailing ``!pto.ptr<i64>`` ctx params. Consumed by
+    /// pld.tile.remote_load / pld.system.notify / pld.system.wait codegen
+    /// to recover the per-tensor CommContext pointer.
+    std::map<const ir::Var*, std::string> dist_tensor_to_ctx;
+
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
 
@@ -598,6 +658,7 @@ class PTOCodegen : public CodegenBase {
 
       spmd_block_idx_arg.clear();
       spmd_block_num_arg.clear();
+      dist_tensor_to_ctx.clear();
 
       current_expr_value.clear();
       yield_buffer.clear();
@@ -611,6 +672,14 @@ class PTOCodegen : public CodegenBase {
   std::ostringstream stream_;
   int indent_level_ = 0;
   std::map<std::pair<int, int>, int64_t> gm_slot_buffer_offsets_;
+
+  /// DistributedTensor element dtypes (encoded as their MLIR type string
+  /// e.g. ``f16``) that are consumed by ``pld.tile.remote_load`` /
+  /// ``pld.system.notify`` somewhere in the module. Each one drives a single
+  /// ``@CommRemotePtr_<dtype>`` helper emission at module scope. Populated
+  /// by :func:`CollectRemotePtrDtypes` and consumed by
+  /// :func:`EmitCommRemotePtrHelpers`.
+  std::set<std::string> remote_ptr_dtype_mlir_strs_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 
