@@ -157,9 +157,18 @@ jobs:
         timeout-minutes: 15
         run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed
 
+      - name: Test multi-orch L2 (isolated pytest invocation)
+        # A ``Worker(level=2)`` device session currently leaves runtime
+        # state that hangs / segfaults the next ``Worker(level=3)``
+        # init in the same Python process (simpler-side state
+        # isolation bug). Running this file in its own pytest process
+        # keeps the L2 leak from poisoning ``test_l3_distributed``.
+        timeout-minutes: 3
+        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938
+
       - name: Test distributed system tests
         timeout-minutes: 5
-        run: pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938
+        run: pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938 --ignore=tests/st/distributed/test_l2_multi_orch.py
 
       - name: Test swimlane output
         run: |
