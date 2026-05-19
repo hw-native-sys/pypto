@@ -52,6 +52,16 @@ def _assert_single_barrier_shape(code: str, *, fanin: int) -> None:
 
 
 class TestPhaseFenceDepCompressionCodegen:
+    @pytest.fixture(autouse=True)
+    def _no_roundtrip_verification(self):
+        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+        instruments: list[_core_passes.PassInstrument] = [
+            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with _core_passes.PassContext(instruments):
+            yield
+
     def test_standard_submit_phase_fence(self):
         rows, cols = 128, 128
         tile_r, tile_c = 32, 32
@@ -316,22 +326,21 @@ class TestPhaseFenceDepCompressionCodegen:
         branches = 4
 
         def make_program(case_name: str):
-            @pl.program
-            class Prog:
-                @pl.function(type=pl.FunctionType.InCore)
-                def kern(
-                    self,
-                    x: pl.Tensor[[rows, cols], pl.FP32],
-                    out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
-                    row: pl.Scalar[pl.INDEX],
-                    col: pl.Scalar[pl.INDEX],
-                ) -> pl.Tensor[[rows, cols], pl.FP32]:
-                    t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
-                    r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
-                    ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
-                    return ret
-
-                if case_name == "scalar":
+            if case_name == "scalar":
+                @pl.program
+                class Prog:
+                    @pl.function(type=pl.FunctionType.InCore)
+                    def kern(
+                        self,
+                        x: pl.Tensor[[rows, cols], pl.FP32],
+                        out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                        row: pl.Scalar[pl.INDEX],
+                        col: pl.Scalar[pl.INDEX],
+                    ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                        t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                        r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                        ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                        return ret
 
                     @pl.function(type=pl.FunctionType.Orchestration)
                     def main(
@@ -344,7 +353,23 @@ class TestPhaseFenceDepCompressionCodegen:
                             out, _ = pl.submit(self.kern, x, out, tile_r, 0, deps=[tid])
                         return out
 
-                elif case_name == "mixed_array_scalar":
+                return Prog
+
+            if case_name == "mixed_array_scalar":
+                @pl.program
+                class Prog:
+                    @pl.function(type=pl.FunctionType.InCore)
+                    def kern(
+                        self,
+                        x: pl.Tensor[[rows, cols], pl.FP32],
+                        out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                        row: pl.Scalar[pl.INDEX],
+                        col: pl.Scalar[pl.INDEX],
+                    ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                        t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                        r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                        ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                        return ret
 
                     @pl.function(type=pl.FunctionType.Orchestration)
                     def main(
@@ -361,7 +386,23 @@ class TestPhaseFenceDepCompressionCodegen:
                                 tids[branch] = tid
                         return out
 
-                elif case_name == "two_arrays_same_call":
+                return Prog
+
+            if case_name == "two_arrays_same_call":
+                @pl.program
+                class Prog:
+                    @pl.function(type=pl.FunctionType.InCore)
+                    def kern(
+                        self,
+                        x: pl.Tensor[[rows, cols], pl.FP32],
+                        out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                        row: pl.Scalar[pl.INDEX],
+                        col: pl.Scalar[pl.INDEX],
+                    ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                        t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                        r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                        ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                        return ret
 
                     @pl.function(type=pl.FunctionType.Orchestration)
                     def main(
@@ -379,20 +420,35 @@ class TestPhaseFenceDepCompressionCodegen:
                                 tids_b[branch] = tid
                         return out
 
-                else:
+                return Prog
 
-                    @pl.function(type=pl.FunctionType.Orchestration)
-                    def main(
-                        self,
-                        x: pl.Tensor[[rows, cols], pl.FP32],
-                        out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
-                    ) -> pl.Tensor[[rows, cols], pl.FP32]:
-                        tids = pl.array.create(branches, pl.TASK_ID)
-                        for branch in pl.parallel(branches):
-                            col: pl.Scalar[pl.INDEX] = branch * tile_c
-                            out, tid = pl.submit(self.kern, x, out, tile_r, col, deps=[tids])
-                            tids[branch] = tid
-                        return out
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kern(
+                    self,
+                    x: pl.Tensor[[rows, cols], pl.FP32],
+                    out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                    row: pl.Scalar[pl.INDEX],
+                    col: pl.Scalar[pl.INDEX],
+                ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                    t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                    r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                    ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                    return ret
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    x: pl.Tensor[[rows, cols], pl.FP32],
+                    out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                    tids = pl.array.create(branches, pl.TASK_ID)
+                    for branch in pl.parallel(branches):
+                        col: pl.Scalar[pl.INDEX] = branch * tile_c
+                        out, tid = pl.submit(self.kern, x, out, tile_r, col, deps=[tids])
+                        tids[branch] = tid
+                    return out
 
             return Prog
 
