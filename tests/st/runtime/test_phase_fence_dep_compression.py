@@ -16,6 +16,7 @@ finish.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,15 @@ _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output"
 _BRANCHES = 4
 _TILE_M = 32
 _BIG_N = 32
+_EXTRA_SWIMLANE_ENV = "PYPTO_PHASE_FENCE_EXTRA_SWIMLANE"
+
+
+def _require_extra_swimlane_case(label: str) -> None:
+    if os.environ.get(_EXTRA_SWIMLANE_ENV) != "1":
+        pytest.skip(
+            f"{label} is a manual profiling witness; set {_EXTRA_SWIMLANE_ENV}=1 "
+            "and run this test node by itself"
+        )
 
 
 def _assert_flattened_stage_strict(swimlane_data: dict, *, stages: int, branches: int) -> None:
@@ -286,8 +296,20 @@ class TestPhaseFenceDepCompressionSwimlane:
     def test_submit_three_level_strict(self, submit_three_level_swimlane: dict):
         _assert_flattened_stage_strict(submit_three_level_swimlane, stages=2 * 3, branches=_BRANCHES)
 
-    def test_submit_four_level_strict(self):
-        pytest.skip("avoid repeated L2 perf collector initialization in one pytest process")
+    def test_submit_four_level_strict(self, test_runner):
+        _require_extra_swimlane_case("four-level submit swimlane")
+        path = _new_swimlane_file(
+            test_runner,
+            _submit_case(epochs=2, layers=2, phases=2, name="phase_fence_submit_4l_swimlane"),
+            label="four-level submit phase-fence",
+        )
+        _assert_flattened_stage_strict(json.loads(path.read_text()), stages=2 * 2 * 2, branches=_BRANCHES)
 
-    def test_pl_at_three_level_strict(self):
-        pytest.skip("avoid repeated L2 perf collector initialization in one pytest process")
+    def test_pl_at_three_level_strict(self, test_runner):
+        _require_extra_swimlane_case("three-level pl.at swimlane")
+        path = _new_swimlane_file(
+            test_runner,
+            _pl_at_case(epochs=2, phases=3, name="phase_fence_pl_at_3l_swimlane"),
+            label="three-level pl.at phase-fence",
+        )
+        _assert_flattened_stage_strict(json.loads(path.read_text()), stages=2 * 3, branches=_BRANCHES)
