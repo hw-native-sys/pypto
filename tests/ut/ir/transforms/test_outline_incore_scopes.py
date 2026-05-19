@@ -975,12 +975,9 @@ class TestOutlineNoDepArgs:
         # param as InOut — this is the load-bearing precondition that makes
         # this an InOut+NoDep test (rather than the trivial In+NoDep case
         # covered by ``test_outline_plus_derive_marks_slot_no_dep``).
-        outlined = next(
-            f for gv, f in After.functions.items() if gv.name != "main"
-        )
+        outlined = next(f for gv, f in After.functions.items() if gv.name != "main")
         assert outlined.param_directions[k_cache_idx] == ir.ParamDirection.InOut, (
-            f"expected InOut at outlined callee param {k_cache_idx}, "
-            f"got {list(outlined.param_directions)}"
+            f"expected InOut at outlined callee param {k_cache_idx}, got {list(outlined.param_directions)}"
         )
 
 

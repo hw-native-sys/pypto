@@ -12,6 +12,7 @@
 #ifndef PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 #define PYPTO_IR_TRANSFORMS_UTILS_SCOPE_OUTLINE_UTILS_H_
 
+#include <algorithm>
 #include <any>
 #include <cstddef>
 #include <memory>
@@ -824,6 +825,13 @@ class ScopeOutliner : public IRMutator {
             << "read or written inside `with pl.at(...):` can appear in no_dep_args=.";
         arg_dir_override_indices.push_back(it->second);
       }
+      // Sort so the attr is order-independent: ``DeriveCallDirections``
+      // applies overrides as a set (writes to ``dirs[idx]`` are idempotent),
+      // so two programs that differ only in user-provided / capture-order
+      // ordering describe the same NoDep slot set. Sorted indices make
+      // ``structural_equal``'s order-sensitive vector comparison report
+      // semantic equality naturally and keep IR dumps deterministic.
+      std::sort(arg_dir_override_indices.begin(), arg_dir_override_indices.end());
     }
 
     // Determine call return type. When ``task_id_var`` is set, append the

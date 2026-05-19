@@ -3579,5 +3579,95 @@ class TestManualScopeCodegen:
         assert ".set_dependencies(" in code, code
 
 
+class TestTupleReturnNoDepAliasing:
+    """``GenerateTupleReturnAliases`` must classify output slots by the
+    callee's ``ParamDirection`` — same convention as the submit path. If it
+    classified by call-site ``ArgDirection`` instead, a ``pl.no_dep(out)``
+    on a tuple-return non-submit Call would drop the alias for that slot
+    (``NoDep`` is excluded from the writer set), and downstream uses of the
+    tuple-element SSA var would emit undeclared ``__rv_*`` symbols.
+    """
+
+    def test_no_dep_on_tuple_out_param_preserves_alias(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class TupleNoDepProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_pair(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                out_s: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                out_d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Tensor[[16, 16], pl.FP32]]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                s: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                d: pl.Tile[[16, 16], pl.FP32] = pl.sub(a_tile, b_tile)
+                rs: pl.Tensor[[16, 16], pl.FP32] = pl.store(s, [0, 0], out_s)
+                rd: pl.Tensor[[16, 16], pl.FP32] = pl.store(d, [0, 0], out_d)
+                return rs, rd
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_consume(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                result: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                x: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                y: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                # ``pl.no_dep(y)`` rewrites the y slot's ArgDirection to NoDep
+                # on a multi-output (tuple-returning) non-submit call. The
+                # codegen must still treat y as a writer — otherwise the
+                # downstream `kernel_consume(x, y, ...)` would reference an
+                # undeclared y.
+                x, y = self.kernel_pair(a, b, x, pl.no_dep(y))
+                result = self.kernel_consume(x, y, result)
+                return result
+
+        # Same trick as ``test_flatten_call_expr_pass.TestFlattenPreservesAttrs``
+        # / ``TestOutlineNoDepArgs``: ``derive_call_directions`` produces a
+        # Call whose ``attrs[arg_directions]`` includes a NoDep slot; the
+        # printer does not surface that attr, so the default
+        # RoundtripInstrument check fails. Use VerificationInstrument only.
+        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+        ctx = _core_passes.PassContext(
+            [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+        )
+        with ctx:
+            code = _generate_orch_code(TupleNoDepProgram)
+
+        # The y slot must be marked NoDep on the kernel_pair call.
+        assert "add_no_dep(" in code, (
+            f"expected add_no_dep(...) on the NoDep y slot of kernel_pair; generated code:\n{code}"
+        )
+        # Both x and y must have aliases bound (otherwise the consume call
+        # below would reference undeclared symbols). The aliasing path uses
+        # ``from_tensor_arg(...)`` on the args array.
+        assert code.count("from_tensor_arg(") >= 2, (
+            "expected at least two from_tensor_arg(...) bindings (one per "
+            f"tuple element); generated code:\n{code}"
+        )
+        # Both tasks must submit.
+        assert code.count("rt_submit_aiv_task") == 2, code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
