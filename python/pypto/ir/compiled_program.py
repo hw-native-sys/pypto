@@ -178,16 +178,24 @@ def _validate_device_tensor(arg: DeviceTensor, info: _ParamInfo) -> None:
     Raises:
         TypeError: when shape or dtype disagrees with ``info``.
 
-    Static IR shapes are compared exactly; dynamic dims (any ``-1`` in
-    ``info.shape``) are skipped.  Dtypes that the runtime can't map to
-    torch are also skipped.
+    Rank is always enforced. Each static dim in ``info.shape`` is
+    checked individually, so partially-dynamic signatures like
+    ``[128, -1]`` still reject a tensor with the wrong leading
+    dimension. Dynamic dims (``-1``) are skipped. Dtypes that the
+    runtime can't map to torch are also skipped.
     """
-    if info.shape is not None and all(d >= 0 for d in info.shape):
-        expected_shape = tuple(info.shape)
-        if expected_shape != arg.shape:
+    if info.shape is not None:
+        if len(info.shape) != len(arg.shape):
             raise TypeError(
-                f"Parameter {info.name!r} expects shape {expected_shape}; got DeviceTensor shape {arg.shape}"
+                f"Parameter {info.name!r} expects rank {len(info.shape)} "
+                f"(shape {tuple(info.shape)}); got DeviceTensor shape {arg.shape}"
             )
+        for expected_dim, actual_dim in zip(info.shape, arg.shape, strict=True):
+            if expected_dim >= 0 and expected_dim != actual_dim:
+                raise TypeError(
+                    f"Parameter {info.name!r} expects shape {tuple(info.shape)}; "
+                    f"got DeviceTensor shape {arg.shape}"
+                )
     expected_dtype = _to_torch_dtype(info.dtype)
     if expected_dtype is not None and arg.dtype != expected_dtype:
         raise TypeError(
@@ -379,9 +387,16 @@ class CompiledProgram:
         # ``skip_ptoas=True`` builds — actually calling a sub-callable
         # without ``kernel_config.py`` fails cleanly inside
         # ``execute_compiled`` with a ``FileNotFoundError``.
+        #
+        # Skip detection for distributed (L3+) builds: those also lay
+        # out ``next_levels/<chip_task>/`` but expose a single canonical
+        # entry point via ``orchestration/host_orch.py`` and must be
+        # invoked through ``CompiledProgram.__call__`` directly, not
+        # via subscript dispatch.
         self._sub_chip_dirs: dict[str, Path] = {}
+        has_host_orch = (self._output_dir / "orchestration" / "host_orch.py").is_file()
         next_levels = self._output_dir / "next_levels"
-        if next_levels.is_dir():
+        if next_levels.is_dir() and not has_host_orch:
             for child in sorted(next_levels.iterdir()):
                 if child.is_dir() and (child / "orchestration").is_dir():
                     self._sub_chip_dirs[child.name] = child

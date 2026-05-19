@@ -150,7 +150,7 @@ class TestL2MultiOrch:
             compiled(a, a, a)
 
         # 5) Unknown orch name raises KeyError listing what *is* available
-        with pytest.raises(KeyError, match="chip_orch_add.*chip_orch_sub"):
+        with pytest.raises(KeyError, match=r"chip_orch_add.*chip_orch_sub"):
             compiled["chip_orch_missing"]
 
         # 6) Unknown attribute that doesn't shadow an orch falls through to the
