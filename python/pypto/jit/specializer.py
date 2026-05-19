@@ -667,40 +667,120 @@ class _BodyTransformer(ast.NodeTransformer):
                 result.append(visited)
         return result or [ast.Pass()]
 
-    def _scan_for_rebinds(self, statements: list[ast.stmt]) -> list[str]:
-        """Scan a body for variable names that would trigger alpha-renaming.
+    @staticmethod
+    def _names_by_ctx(node: ast.AST, ctx_type: type) -> set[str]:
+        """Collect ``Name`` ids appearing under the given context (Load/Store)."""
+        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ctx_type)}
 
-        Returns variable names that are already in ``_assign_count`` and whose
-        first assignment was at the same scope depth as the current depth.
-        These need bridge assignments (``x_v1 = x``) before entering the scope
-        so that loop-carried reads inside the body resolve to the new alias.
+    def _collect_upward_exposed(
+        self, statements: list[ast.stmt], written: set[str], exposed: set[str]
+    ) -> None:
+        """Record names *read before being written* within ``statements``.
+
+        A name whose first appearance (in execution order) is a read is
+        *upward-exposed* — live on entry to this body, hence a genuine
+        loop-carried value.  A name first written is a fresh body-local.
+        ``_classify_loop_locals`` uses this to tell genuine carries apart
+        from fresh per-loop locals that merely share a name with a sibling
+        scope's local: a write-before-read name in a sibling loop is a new
+        variable, and bridging it (``x_v1 = x``) would emit a read of ``x``
+        outside its defining scope.
+
+        ``written`` and ``exposed`` are accumulators threaded through nested
+        bodies so execution order is respected across compound statements.
+
+        Comprehension/lambda-scoped names are intentionally not tracked: they
+        are never statement-level assignments, so they never enter
+        ``_assign_count`` and are never rebind candidates in
+        ``_classify_loop_locals``.
         """
-        rebind_vars: list[str] = []
-        seen: set[str] = set()
         for stmt in statements:
-            # Check direct single-target assignments
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                # RHS is evaluated before the target binds.
+                if stmt.value is not None:
+                    exposed.update(self._names_by_ctx(stmt.value, ast.Load) - written)
+                targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                for tgt in targets:
+                    # Subscript/attribute targets read their base (``t[i] = ...``).
+                    exposed.update(self._names_by_ctx(tgt, ast.Load) - written)
+                    written.update(self._names_by_ctx(tgt, ast.Store))
+            elif isinstance(stmt, ast.AugAssign):
+                exposed.update(self._names_by_ctx(stmt.value, ast.Load) - written)
+                # ``x += v`` reads then writes ``x``.
+                tgt_names = self._names_by_ctx(stmt.target, ast.Store)
+                exposed.update(tgt_names - written)
+                written.update(tgt_names)
+            elif isinstance(stmt, ast.For):
+                exposed.update(self._names_by_ctx(stmt.iter, ast.Load) - written)
+                written.update(self._names_by_ctx(stmt.target, ast.Store))
+                self._collect_upward_exposed(stmt.body, written, exposed)
+                self._collect_upward_exposed(stmt.orelse, written, exposed)
+            elif isinstance(stmt, ast.If):
+                exposed.update(self._names_by_ctx(stmt.test, ast.Load) - written)
+                self._collect_upward_exposed(stmt.body, written, exposed)
+                self._collect_upward_exposed(stmt.orelse, written, exposed)
+            elif isinstance(stmt, ast.With):
+                for item in stmt.items:
+                    exposed.update(self._names_by_ctx(item.context_expr, ast.Load) - written)
+                    if item.optional_vars is not None:
+                        written.update(self._names_by_ctx(item.optional_vars, ast.Store))
+                self._collect_upward_exposed(stmt.body, written, exposed)
+            else:
+                # Expr / Return / Assert / ... — pure reads.
+                exposed.update(self._names_by_ctx(stmt, ast.Load) - written)
+
+    def _classify_loop_locals(self, statements: list[ast.stmt]) -> tuple[list[str], list[str]]:
+        """Classify same-depth name collisions in a loop body into ``(carried, fresh)``.
+
+        A name is considered only if it (1) is already in ``_assign_count`` and
+        (2) had its first assignment at the current scope depth — i.e. it
+        collides with an existing same-depth binding.  Such a name is:
+
+        - *carried* — a genuine loop-carried rebind — when it is upward-exposed
+          (read before written) in the body.  It needs a bridge assignment
+          (``x_v1 = x``) so the carried value threads across the loop boundary.
+        - *fresh* — a new body-local that merely reuses a sibling scope's name
+          (both sit at the same ``_scope_depth``).  It must be neither bridged
+          (the source ``x`` would be read outside its defining scope) nor
+          renamed (the alias would be undefined when the loop runs zero times).
+
+        Depth alone cannot tell these apart — two sibling loop bodies share a
+        depth.  ``visit_For`` drops *fresh* names from the rename bookkeeping so
+        the body re-declares them cleanly, exactly how the ``@pl.program``
+        parser scopes sibling loop bodies.
+        """
+        carried: list[str] = []
+        fresh: list[str] = []
+        seen: set[str] = set()
+        # Names read before written in the body — the only valid bridge sources.
+        exposed: set[str] = set()
+        self._collect_upward_exposed(statements, set(), exposed)
+        for stmt in statements:
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
                 target = stmt.targets[0]
-                if isinstance(target, ast.Name):
-                    name = target.id
-                    if (
-                        name not in seen
-                        and name in self._assign_count
-                        and self._scope_depth == self._assign_depth.get(name, -1)
-                    ):
-                        rebind_vars.append(name)
-                        seen.add(name)
-            # Check annotated assignments
+                name = target.id if isinstance(target, ast.Name) else None
             elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 name = stmt.target.id
-                if (
-                    name not in seen
-                    and name in self._assign_count
-                    and self._scope_depth == self._assign_depth.get(name, -1)
-                ):
-                    rebind_vars.append(name)
-                    seen.add(name)
-        return rebind_vars
+            else:
+                name = None
+            if name is None or name in seen:
+                continue
+            if name in self._assign_count and self._scope_depth == self._assign_depth.get(name, -1):
+                seen.add(name)
+                (carried if name in exposed else fresh).append(name)
+        return carried, fresh
+
+    def _forget_rename_bookkeeping(self, name: str) -> None:
+        """Drop all rename bookkeeping for ``name``.
+
+        After this call ``name`` is unknown to the renamer, so the next
+        assignment to it is treated as a first binding (no rename, no bridge).
+        Used to discard sibling-scope locals — fresh loop-body locals and
+        then-branch locals — that must not leak into a sibling scope.
+        """
+        self._assign_count.pop(name, None)
+        self._assign_depth.pop(name, None)
+        self._var_renames.pop(name, None)
 
     def _make_bridge_assignments(self, rebind_vars: list[str]) -> list[ast.stmt]:
         """Create bridge assignments (``x_v1 = x``) and apply renames for each variable.
@@ -734,19 +814,24 @@ class _BodyTransformer(ast.NodeTransformer):
     def visit_For(self, node: ast.For) -> ast.stmt | list[ast.stmt]:
         """Visit For loop, incrementing scope depth for its body.
 
-        Before entering the body, scan for variables that would be rebound at
-        the same depth.  For each such variable, insert a bridge assignment
-        (``x_v1 = x``) before the loop and apply the rename so that both LHS
-        and RHS inside the loop body use the new alias.  This preserves
-        loop-carried semantics when two parallel for loops assign to the same
-        variable.
+        Before entering the body, classify same-depth name collisions
+        (:meth:`_classify_loop_locals`).  A *carried* name gets a bridge
+        assignment (``x_v1 = x``) before the loop plus a rename inside it,
+        preserving loop-carried semantics across two sibling loops.  A *fresh*
+        name — a new body-local that merely reuses a sibling loop's name — is
+        dropped from the rename bookkeeping so the body re-declares it cleanly:
+        neither bridged nor renamed.
         """
         node.iter = self.visit(node.iter)
         self._scope_depth += 1
-        # Scan for rebinds and insert bridge assignments before the loop
-        rebind_vars = self._scan_for_rebinds(node.body)
+        carried, fresh = self._classify_loop_locals(node.body)
         self._scope_depth -= 1
-        bridges = self._make_bridge_assignments(rebind_vars)
+        # Carried names: bridge + rename so the carried value threads across.
+        bridges = self._make_bridge_assignments(carried)
+        # Fresh names: forget the same-depth sibling binding so the body's
+        # assignment is treated as a first binding (no rename, no bridge).
+        for name in fresh:
+            self._forget_rename_bookkeeping(name)
         self._scope_depth += 1
         node.body = self._visit_scoped_body(node.body)
         self._scope_depth -= 1
@@ -755,16 +840,29 @@ class _BodyTransformer(ast.NodeTransformer):
         return node
 
     def visit_If(self, node: ast.If) -> ast.stmt:
-        """Visit If statement, incrementing scope depth for both branches.
+        """Visit If; treat the two branches as mutually-exclusive sibling scopes.
 
-        If-branch assignments are loop-carried in the Parser's view (variables
-        leak to outer scope via exit_scope(leak_vars=True)) so they must NOT be
-        alpha-renamed at this layer — the Parser and ConvertToSSA handle them.
+        A name first-assigned inside the then-branch is branch-local: the
+        else-branch can never *read* it, so an else-branch assignment of the
+        same name is a fresh local, not a rebind.  Drop then-branch-introduced
+        names before visiting the else-branch so it re-declares them cleanly —
+        no cross-branch rename.  Without this the else-branch assignment is
+        treated as a same-depth rebind (then/else share one ``_scope_depth``)
+        and aliased to ``x_v1``, which is then read out of its defining branch.
+
+        This mirrors :meth:`_classify_loop_locals` for sibling loops.  Per-branch
+        leaks and the conditional merge are handled by the Parser
+        (``exit_scope(leak_vars=True)``) and ConvertToSSA, as for ``@pl.program``.
         """
         node.test = self.visit(node.test)
         self._scope_depth += 1
+        before = set(self._assign_count)
         node.body = self._visit_scoped_body(node.body)
         if node.orelse:
+            # then-branch locals are invisible to the else-branch: forget them
+            # so a same-named else-branch assignment is a fresh first binding.
+            for name in set(self._assign_count) - before:
+                self._forget_rename_bookkeeping(name)
             node.orelse = self._visit_scoped_body(node.orelse)
         self._scope_depth -= 1
         return node

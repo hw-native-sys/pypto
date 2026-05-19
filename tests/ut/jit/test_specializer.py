@@ -847,7 +847,15 @@ class TestVariableRebinding:
         assert "y = x_v1" in out
 
     def test_parallel_for_simple_rebind(self):
-        """Two parallel for loops with simple (non-loop-carried) rebinding."""
+        """Two sibling for loops, each a *fresh* (non-loop-carried) local of the
+        same name, are left untouched.
+
+        ``x`` is written before it is read in each loop body, so it is a fresh
+        per-loop local — not a carried value.  The renamer must NOT bridge it:
+        a bridge ``x_v1 = x`` would read loop ``i``'s local outside loop ``i``.
+        Both loops keep ``x`` and ``y`` reads it directly; the parser scopes
+        the sibling bodies, exactly as for a hand-written ``@pl.program``.
+        """
         src = """
             def f():
                 for i in range(n):
@@ -857,8 +865,92 @@ class TestVariableRebinding:
                 y = x
         """
         out = self._transform(src)
-        assert "x_v1 = x" in out
-        assert "y = x_v1" in out
+        assert "x_v1" not in out  # fresh local — neither bridged nor renamed
+        assert "y = x" in out  # reads the leaked `x` directly, no bridge
+
+    def test_parallel_for_carried_rebind(self):
+        """A genuine carry across sibling loops still gets a bridge.
+
+        Loop ``j`` reads ``acc`` (the value loop ``i`` left) before writing it
+        — even though the write ``acc = tmp`` is staged through a temporary and
+        is not self-referential.  ``acc`` is upward-exposed, so the renamer must
+        bridge it (``acc_v1 = acc``) to thread the carried value across the
+        loop boundary.
+        """
+        src = """
+            def f():
+                for i in range(n):
+                    acc = seed
+                for j in range(m):
+                    tmp = some_op(acc)
+                    acc = tmp
+                y = acc
+        """
+        out = self._transform(src)
+        assert "acc_v1 = acc" in out  # carried value bridged across the boundary
+        assert "y = acc_v1" in out
+
+    def test_sibling_loops_reuse_inner_local_no_bridge(self):
+        """Regression: a loop-local reused across sibling loops is not bridged.
+
+        Mirrors the qwen3 decode attention kernel — per-stage SPMD loops each
+        declare a fresh inner index of the same name.  Before the fix the
+        renamer emitted a bridge ``row_v1 = row`` that read ``row`` outside its
+        defining loop, which ``ConvertToSSA`` rejects with "used outside its
+        defining scope".
+        """
+        src = """
+            def f(a, out):
+                for gi in pl.spmd(4):
+                    for sb in pl.range(2):
+                        row = sb * 8
+                        out = pl.assemble(out, a, [row, 0])
+                for gi in pl.spmd(4):
+                    for sb in pl.range(2):
+                        row = sb * 8 + 16
+                        out = pl.assemble(out, a, [row, 0])
+                return out
+        """
+        out = self._transform(src)
+        assert "row_v1" not in out  # fresh inner local — no bridge, no rename
+
+    def test_if_else_branch_rebind(self):
+        """The same name assigned in both branches of an if/else is left alone.
+
+        then/else are mutually exclusive sibling scopes — the else-branch can
+        never read the then-branch's local, so its assignment is a fresh
+        binding, not a rebind.  Aliasing the else-branch to ``vlen_v1`` would
+        leave ``vlen_v1`` undefined whenever the then-branch runs.
+        """
+        src = """
+            def f(is_last, a, b):
+                if is_last:
+                    vlen = a
+                else:
+                    vlen = b
+                use(vlen)
+        """
+        out = self._transform(src)
+        assert "vlen_v1" not in out  # no cross-branch alias
+        assert "use(vlen)" in out
+
+    def test_if_branch_local_intra_rebind_kept(self):
+        """A branch-local rebound *within* one branch still gets versioned.
+
+        ``x`` is assigned twice inside the same then-branch — a genuine
+        straight-line rebind — so the second write is aliased to ``x_v1`` and
+        the post-if read follows it.  Only *cross-branch* reuse is exempt.
+        """
+        src = """
+            def f(c):
+                if c:
+                    x = 1
+                    x = 2
+                use(x)
+        """
+        out = self._transform(src)
+        assert "x_v1 = 2" in out  # intra-branch rebind still versioned
+        assert "use(x_v1)" in out
 
     def test_single_for_loop_carried_unchanged(self):
         """A single for loop with loop-carried variable is NOT renamed."""
