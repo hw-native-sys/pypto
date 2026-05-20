@@ -189,9 +189,7 @@ class TestPagedAttentionSpmdKernels:
                 64,
                 8192,
                 32768,
-                marks=pytest.mark.xfail(
-                    reason="flaky: run_prepared failed with code 507018", strict=False
-                ),
+                marks=pytest.mark.xfail(reason="flaky: run_prepared failed with code 507018", strict=False),
             ),
             pytest.param(
                 64,
@@ -200,9 +198,7 @@ class TestPagedAttentionSpmdKernels:
                 64,
                 8192,
                 32768,
-                marks=pytest.mark.xfail(
-                    reason="flaky: run_prepared failed with code 507018", strict=False
-                ),
+                marks=pytest.mark.xfail(reason="flaky: run_prepared failed with code 507018", strict=False),
             ),
             # (4, 16, 128, 128, [512, 4096, 8192, 768], 32768),
         ],
