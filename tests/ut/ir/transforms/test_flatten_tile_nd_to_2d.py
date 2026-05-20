@@ -1636,28 +1636,62 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
         return prog.get_result()
 
     @staticmethod
-    def _collect_calls_recursive(stmt: ir.Stmt) -> list[ir.Call]:
-        """Collect every Call across top-level + nested ScopeStmt/ForStmt/IfStmt bodies."""
+    def _collect_calls_recursive(node) -> list[ir.Call]:
+        """Recursively collect every ``ir.Call`` reachable from ``node``.
+
+        Walks all container-like Stmt subtypes (SeqStmts, ScopeStmt, ForStmt,
+        WhileStmt, IfStmt, EvalStmt, AssignStmt) and recurses into Expr
+        positions (AssignStmt value, EvalStmt expr, control-flow conditions /
+        loop bounds / iter_arg inits, nested Call args) so a Call buried
+        inside an expression or condition is not missed. IR is a tree of Stmts
+        with shared Var leaves; no visited-set is needed since Var/leaf nodes
+        cannot contain further Calls and Stmt nesting is acyclic.
+        """
         out: list[ir.Call] = []
 
-        def walk(s):
-            if isinstance(s, ir.SeqStmts):
-                for inner in s.stmts:
-                    walk(inner)
-            elif isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call):
-                out.append(s.value)
-            elif isinstance(s, ir.ForStmt):
-                walk(s.body)
-            elif isinstance(s, ir.WhileStmt):
-                walk(s.body)
-            elif isinstance(s, ir.IfStmt):
-                walk(s.then_body)
-                if s.else_body is not None:
-                    walk(s.else_body)
-            elif isinstance(s, ir.ScopeStmt):
-                walk(s.body)
+        def walk(n):
+            if n is None:
+                return
 
-        walk(stmt)
+            # Expressions
+            if isinstance(n, ir.Call):
+                out.append(n)
+                for arg in n.args:
+                    walk(arg)
+                return
+            if isinstance(n, ir.IterArg):
+                walk(n.initValue)
+                return
+
+            # Statements
+            if isinstance(n, ir.SeqStmts):
+                for s in n.stmts:
+                    walk(s)
+            elif isinstance(n, ir.AssignStmt):
+                walk(n.value)
+            elif isinstance(n, ir.EvalStmt):
+                walk(n.expr)
+            elif isinstance(n, ir.ForStmt):
+                walk(n.start)
+                walk(n.stop)
+                walk(n.step)
+                for ia in n.iter_args:
+                    walk(ia)
+                walk(n.body)
+            elif isinstance(n, ir.WhileStmt):
+                walk(n.condition)
+                for ia in n.iter_args:
+                    walk(ia)
+                walk(n.body)
+            elif isinstance(n, ir.IfStmt):
+                walk(n.condition)
+                walk(n.then_body)
+                if n.else_body is not None:
+                    walk(n.else_body)
+            elif isinstance(n, ir.ScopeStmt):
+                walk(n.body)
+
+        walk(node)
         return out
 
     def test_batch_two_acc_unrolls_without_acc_roundtrip_moves(self):
