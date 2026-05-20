@@ -180,8 +180,11 @@ class TestPagedAttentionSpmdKernels:
         [
             (256, 16, 128, 128, 8192, 32768),
             # These two large-context SPMD shapes intermittently crash the
-            # device worker with `run_prepared failed with code 507018`.
-            # Marked xfail (non-strict) until the flaky runtime crash is fixed.
+            # device worker with `run_prepared failed with code 507018`. The
+            # crash poisons the shared worker, so every subsequent device test
+            # fails with `prepare_callable 507899` — xfail is not enough because
+            # the test still executes and corrupts the worker. Skip outright
+            # until the flaky runtime crash is fixed.
             pytest.param(
                 256,
                 64,
@@ -189,7 +192,7 @@ class TestPagedAttentionSpmdKernels:
                 64,
                 8192,
                 32768,
-                marks=pytest.mark.xfail(reason="flaky: run_prepared failed with code 507018", strict=False),
+                marks=pytest.mark.skip(reason="flaky: run_prepared 507018 poisons the shared worker"),
             ),
             pytest.param(
                 64,
@@ -198,7 +201,7 @@ class TestPagedAttentionSpmdKernels:
                 64,
                 8192,
                 32768,
-                marks=pytest.mark.xfail(reason="flaky: run_prepared failed with code 507018", strict=False),
+                marks=pytest.mark.skip(reason="flaky: run_prepared 507018 poisons the shared worker"),
             ),
             # (4, 16, 128, 128, [512, 4096, 8192, 768], 32768),
         ],
