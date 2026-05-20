@@ -380,10 +380,22 @@ std::vector<StmtPtr> FinalizeTpopTfrees(const std::vector<StmtPtr>& stmts, core_
   std::vector<StmtPtr> result;
   result.reserve(normalized_inputs.size() + deferred_tfrees.size());
   for (size_t i = 0; i < normalized_inputs.size(); ++i) {
+    auto deferred_it = deferred_tfrees.find(i);
+    const bool has_deferred = deferred_it != deferred_tfrees.end();
+    // A YieldStmt is the mandatory terminator of a control-flow body — nothing
+    // may follow it. When a tpop tile's last use is the yield itself (the body
+    // carries the tile out as a return value), emit the deferred tfree *before*
+    // the yield so the yield stays the body tail. Appending it after would
+    // break the "body ends with YieldStmt" invariant and crash downstream
+    // passes such as Simplify's StripTrailingYield.
+    const bool is_terminator = As<YieldStmt>(normalized_inputs[i]) != nullptr;
+    if (has_deferred && is_terminator) {
+      result.insert(result.end(), deferred_it->second.begin(), deferred_it->second.end());
+    }
     if (!remove_existing_tfree[i]) {
       result.push_back(normalized_inputs[i]);
     }
-    if (auto deferred_it = deferred_tfrees.find(i); deferred_it != deferred_tfrees.end()) {
+    if (has_deferred && !is_terminator) {
       result.insert(result.end(), deferred_it->second.begin(), deferred_it->second.end());
     }
   }

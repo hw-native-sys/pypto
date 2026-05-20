@@ -55,6 +55,18 @@ def _run_pipeline_from_tensor(program: ir.Program) -> ir.Program:
         )
 
 
+def _op_name(stmt: ir.Stmt) -> str:
+    """Return the op name of an AssignStmt/EvalStmt Call, or '' for anything else."""
+    call = None
+    if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+        call = stmt.value
+    elif isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call):
+        call = stmt.expr
+    if call is not None and isinstance(call.op, ir.Op):
+        return call.op.name
+    return ""
+
+
 def test_v2c_boundary_uses_nz_layout_on_a2a3():
     """On Ascend910B, cross-core push needs no layout adaptation on the AIV side.
 
@@ -301,6 +313,74 @@ def test_accumulator_with_tile_create_classifies_as_pure_aic():
     assert compute_funcs[0].func_type == ir.FunctionType.AIC, (
         f"expected FunctionType.AIC, got {compute_funcs[0].func_type}"
     )
+
+
+def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
+    """Regression for issue #1413.
+
+    When a cross-core tile's last use is the ``YieldStmt`` that carries it out
+    of an ``if`` branch, ExpandMixedKernel's tpop/tfree finalizer must emit the
+    ``tfree_to_aic`` *before* the yield. A ``YieldStmt`` is the mandatory
+    terminator of a control-flow body with return values, so appending the
+    tfree after it produced a malformed branch (``tpop; yield; tfree``) that
+    later crashed Simplify's ``StripTrailingYield`` with
+    "control-flow body tail must be YieldStmt when return_vars is non-empty".
+
+    Both branches of the ``if`` do cube work whose Vec-moved result is the
+    branch's carried value, so after the AIC/AIV split each AIV branch reduces
+    to ``tpop_from_aic`` -> ``tfree_to_aic`` -> ``yield``.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore)
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            w: pl.Tensor[[128, 128], pl.BF16],
+            flag: pl.Scalar[pl.INT32],
+            out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+        ) -> pl.Tensor[[16, 128], pl.FP32]:
+            if flag == 0:
+                a_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                a_left = pl.move(a_mat, target_memory=pl.MemorySpace.Left)
+                b_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                b_right = pl.move(b_mat, target_memory=pl.MemorySpace.Right)
+                z = pl.matmul(a_left, b_right)
+                acc = pl.move(z, target_memory=pl.MemorySpace.Vec)
+            else:
+                a_mat2 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                a_left2 = pl.move(a_mat2, target_memory=pl.MemorySpace.Left)
+                b_mat2 = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                b_right2 = pl.move(b_mat2, target_memory=pl.MemorySpace.Right)
+                z2 = pl.matmul(a_left2, b_right2)
+                acc = pl.move(z2, target_memory=pl.MemorySpace.Vec)
+            out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc, [0, 0], out_0)
+            return out_0
+
+    aiv = _run_pipeline(Before).get_function("main_incore_0_aiv")
+    assert aiv is not None, "expand should produce an AIV function"
+
+    if_stmts = [s for s in ir.flatten_to_stmts(aiv.body) if isinstance(s, ir.IfStmt)]
+    assert len(if_stmts) == 1, f"expected one AIV if-statement, got {len(if_stmts)}"
+    if_stmt = if_stmts[0]
+
+    for label, branch in (("then", if_stmt.then_body), ("else", if_stmt.else_body)):
+        assert branch is not None, f"{label} branch must exist"
+        stmts = ir.flatten_to_stmts(branch)
+        # The branch carries a result, so it must still end with the YieldStmt.
+        assert isinstance(stmts[-1], ir.YieldStmt), (
+            f"{label} branch must end with YieldStmt, got {type(stmts[-1]).__name__} "
+            f"(tfree appended after the yield => malformed body)"
+        )
+        # The popped tile is freed immediately *before* that yield.
+        assert _op_name(stmts[-2]) == "system.tfree_to_aic", (
+            f"{label} branch must emit tfree_to_aic right before the yield, got {_op_name(stmts[-2])!r}"
+        )
+        # Sanity: the branch opens with the matching tpop.
+        assert _op_name(stmts[0]) == "tile.tpop_from_aic", (
+            f"{label} branch should open with tile.tpop_from_aic, got {_op_name(stmts[0])!r}"
+        )
 
 
 if __name__ == "__main__":
