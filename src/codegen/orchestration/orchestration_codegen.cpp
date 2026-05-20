@@ -719,6 +719,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
+    PushCppScope();
 
     // Inside a MANUAL scope, the runtime forbids nested AUTO scope, so we
     // omit the implicit ``PTO2_SCOPE()`` wrapper around the loop body.
@@ -726,6 +727,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (emit_implicit_scope) {
       code_ << Indent() << "PTO2_SCOPE() {\n";
       indent_ += 4;
+      PushCppScope();
     }
 
     auto saved = current_return_vars_;
@@ -759,9 +761,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     current_return_vars_ = saved;
 
     if (emit_implicit_scope) {
+      PopCppScope();
       indent_ -= 4;
       code_ << Indent() << "}\n";
     }
+    PopCppScope();
     indent_ -= 4;
     code_ << Indent() << "}\n";
   }
@@ -769,6 +773,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitStmt_(const RuntimeScopeStmtPtr& scope) override {
     code_ << Indent() << "PTO2_SCOPE(" << (scope->manual_ ? "PTO2ScopeMode::MANUAL" : "") << ") {\n";
     indent_ += 4;
+    PushCppScope();
     decltype(manual_task_id_map_) saved_map;
     decltype(array_carry_vars_) saved_array_carry;
     if (scope->manual_) {
@@ -784,6 +789,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       manual_task_id_map_ = std::move(saved_map);
       array_carry_vars_ = std::move(saved_array_carry);
     }
+    PopCppScope();
     indent_ -= 4;
     code_ << Indent() << "}\n";
   }
@@ -1919,7 +1925,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string out_arg = TryGetVarName(call->args_[arg_idx]);
     if (!out_arg.empty() && alias_name != out_arg) {
       std::string out_name = GetExternalTensorName(out_arg);
-      if (mutable_tensor_names_.count(alias_name)) {
+      if (IsMutableTensorNameInCurrentScope(alias_name)) {
         code_ << Indent() << alias_name << " = " << out_name << ";\n";
       } else {
         code_ << Indent() << "const Tensor& " << alias_name << " = " << out_name << ";\n";
@@ -1929,8 +1935,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void RegisterMutableTensorName(const std::string& cpp_type, const std::string& emit_name) {
     if (cpp_type == "Tensor") {
-      mutable_tensor_names_.insert(emit_name);
+      mutable_tensor_name_scopes_.back().insert(emit_name);
     }
+  }
+
+  bool IsMutableTensorNameInCurrentScope(const std::string& emit_name) const {
+    return !mutable_tensor_name_scopes_.empty() && mutable_tensor_name_scopes_.back().count(emit_name);
+  }
+
+  void PushCppScope() { mutable_tensor_name_scopes_.emplace_back(); }
+
+  void PopCppScope() {
+    INTERNAL_CHECK(!mutable_tensor_name_scopes_.empty()) << "Internal error: C++ scope stack underflow";
+    mutable_tensor_name_scopes_.pop_back();
   }
 
   void GenerateSingleReturnAlias(const CallPtr& call, const std::string& var_name) {
@@ -2102,10 +2119,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void VisitScopedBranchBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
     indent_ += 4;
+    PushCppScope();
     bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
     if (emit_implicit_scope) {
       code_ << Indent() << "PTO2_SCOPE() {\n";
       indent_ += 4;
+      PushCppScope();
     }
 
     auto saved = current_return_vars_;
@@ -2114,9 +2133,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     current_return_vars_ = saved;
 
     if (emit_implicit_scope) {
+      PopCppScope();
       indent_ -= 4;
       code_ << Indent() << "}\n";
     }
+    PopCppScope();
     indent_ -= 4;
   }
 
@@ -2353,10 +2374,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int64_t size;
   };
   std::unordered_map<const Var*, ArrayCarryEntry> array_carry_vars_;
-  /// Names of mutable Tensor values declared in C++ as locals.
-  /// Later tuple-output alias emission must assign these names instead of
-  /// redeclaring them as ``const Tensor&`` aliases.
-  std::unordered_set<std::string> mutable_tensor_names_;
+  /// Names of mutable Tensor values declared in each generated C++ block.
+  /// Tuple-output alias emission must avoid redeclaring names already declared
+  /// in the same block, but must not treat outer-block declarations as aliases:
+  /// C++ shadowing is valid and sometimes required to avoid rebinding an outer
+  /// loop-carried Tensor too early.
+  std::vector<std::unordered_set<std::string>> mutable_tensor_name_scopes_{{}};
   /// Stack of 0-based slot expressions for the enclosing ForStmts. Pushed
   /// when entering a ForStmt body and popped on exit. Used by ``YieldStmt``
   /// to emit ``arr[<slot>] = value`` for Parallel inner array writes. The
