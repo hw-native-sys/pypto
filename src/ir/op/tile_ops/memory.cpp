@@ -93,8 +93,11 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
                           << " requires 4 arguments (tensor, offsets, shapes, valid_shapes), but got "
                           << args.size();
 
-  // First argument must be TensorType
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  // First argument must be a tensor-shaped source. AsTensorTypeLike accepts
+  // both plain TensorType and DistributedTensorType — the latter lets a kernel
+  // locally load its own window slice (e.g. read back a signal cell after a
+  // pld.system.wait barrier), mirroring tile.store's DistributedTensor dst.
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 

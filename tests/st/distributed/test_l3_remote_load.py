@@ -68,15 +68,15 @@ def _build_ring_shuffle_program():
         @pl.function(type=pl.FunctionType.InCore)
         def ring_step(
             self,
-            inp: pl.Tensor[[SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
-            data: pld.DistributedTensor[[SIZE], pl.FP32],
-            signal: pld.DistributedTensor[[1], pl.INT32],
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            data: pld.DistributedTensor[[1, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[SIZE], pl.FP32]:
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             # Phase 1: stage-in — local input → this rank's window slice.
-            local = pl.load(inp, [0], [SIZE])
-            _ = pl.store(local, [0], data)
+            local = pl.load(inp, [0, 0], [1, SIZE])
+            _ = pl.store(local, [0, 0], data)
 
             # Phase 2: signal that this rank has staged, then wait for the peer's
             # stage to land. AtomicAdd on a single signal cell is sufficient for
@@ -85,44 +85,44 @@ def _build_ring_shuffle_program():
             pld.system.notify(
                 target=signal,
                 peer=peer,
-                offsets=[0],
+                offsets=[0, 0],
                 value=1,
                 op=pld.NotifyOp.AtomicAdd,
             )
             pld.system.wait(
                 signal=signal,
-                offsets=[0],
+                offsets=[0, 0],
                 expected=1,
                 cmp=pld.WaitCmp.Ge,
             )
 
             # Phase 3: read the peer's slice via the cross-rank load.
-            recv = pld.tile.remote_load(data, peer=peer, offsets=[0], shape=[SIZE])
-            return pl.store(recv, [0], out)
+            recv = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, SIZE])
+            return pl.store(recv, [0, 0], out)
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
-            inp: pl.Tensor[[SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[SIZE], pl.FP32]],
-            data: pld.DistributedTensor[[SIZE], pl.FP32],
-            signal: pld.DistributedTensor[[1], pl.INT32],
+            inp: pl.Tensor[[1, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            data: pld.DistributedTensor[[1, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
             peer: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[SIZE], pl.FP32]:
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             return self.ring_step(inp, out, data, signal, peer)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(
             self,
-            inputs: pl.Tensor[[2, SIZE], pl.FP32],
-            outputs: pl.Out[pl.Tensor[[2, SIZE], pl.FP32]],
-        ) -> pl.Tensor[[2, SIZE], pl.FP32]:
-            data_buf = pld.alloc_window_buffer(SIZE * 4)  # SIZE × FP32 (4 bytes)
-            signal_buf = pld.alloc_window_buffer(4)  # 1 × INT32
+            inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
+            data_buf = pld.alloc_window_buffer(SIZE * 4)  # 1×SIZE × FP32 (4 bytes)
+            signal_buf = pld.alloc_window_buffer(4)  # 1×1 × INT32
 
             for r in pl.range(pld.world_size()):
-                data = pld.window(data_buf, [SIZE], dtype=pl.FP32)
-                signal = pld.window(signal_buf, [1], dtype=pl.INT32)
+                data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
                 # Ring partner: rank r reads from peer = (r + 1) % nranks.
                 self.chip_orch(inputs[r], outputs[r], data, signal, (r + 1) % pld.world_size(), device=r)
             return outputs
@@ -161,11 +161,11 @@ class TestL3RemoteLoad:
         # contain rank 1's input (peer=1) and vice versa.
         inputs = torch.stack(
             [
-                torch.arange(SIZE, dtype=torch.float32),
-                torch.arange(100.0, 100.0 + SIZE, dtype=torch.float32),
+                torch.arange(SIZE, dtype=torch.float32).reshape(1, SIZE),
+                torch.arange(100.0, 100.0 + SIZE, dtype=torch.float32).reshape(1, SIZE),
             ]
         )
-        outputs = torch.zeros((2, SIZE), dtype=torch.float32)
+        outputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
 
         compiled(inputs, outputs)
 
