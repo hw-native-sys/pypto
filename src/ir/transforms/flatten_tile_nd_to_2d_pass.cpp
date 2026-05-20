@@ -1051,45 +1051,26 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
   CHECK(acc_cols_const->value_ == rhs_cols) << "FlattenTileNdTo2D: tile.batch_matmul_acc acc cols "
                                             << acc_cols_const->value_ << " != N(" << rhs_cols << ")";
 
-  // tile.matmul_acc requires its acc input to be in MemorySpace::Acc. The
-  // upstream tile.batch_matmul lowering moves its result to Vec for the
-  // tile.assemble path, so the acc operand here may arrive as Vec. Insert an
-  // explicit tile.move(acc, target_memory=Acc) when the memory space is
-  // resolved and not already Acc; remember the original space so we can move
-  // the matmul_acc result back to it at the end (preserves the iter_arg /
-  // consumer memory-space contract — e.g. when the accumulator is a loop
-  // iter_arg initialised from a Vec tile, the next iteration must see Vec
-  // again).
+  // Memory-space concerns (Vec/Acc round-trips on the acc operand, retargetable
+  // producer promotion of the loop-carried tile.create, and matching TileView
+  // layout refresh) belong to InferTileMemorySpace (pass 17, runs immediately
+  // after this pass). See:
+  //   * DemandCollector — propagates the matmul_acc Acc input_constraint back
+  //     through inherit-input ops.
+  //   * TileMemorySpaceAnalyzer::VisitStmt_(ForStmtPtr) — explicitly
+  //     back-propagates the yield's memory space to the iter_arg AND its
+  //     initValue (covering the dummy tile.create dummy-acc-init pattern in
+  //     issue #1235).
+  //   * TileMemorySpaceMutator::VisitStmt_(AssignStmtPtr) — rewrites the
+  //     retargetable producer's target_memory kwarg and refreshes its
+  //     TileView via GetImplicitTileView.
+  // FlattenTileNdTo2D's job here is purely the shape lowering: pass the acc
+  // operand through and emit 2D tile.matmul_acc (and per-batch
+  // tile.slice/tile.assemble in the general path). Any required tile.move
+  // calls are inserted by InferTileMemorySpace's MoveCollector. This avoids
+  // the cross-core Vec→Acc move that previously failed verification in mixed
+  // CUBE/VECTOR kernels (issue #1235).
   VarPtr current_acc = acc_var;
-  std::optional<MemorySpace> original_acc_memory;
-  if (acc_type->memory_space_.has_value() && *acc_type->memory_space_ != MemorySpace::Acc) {
-    original_acc_memory = acc_type->memory_space_;
-    std::vector<std::pair<std::string, std::any>> move_kw = {{"target_memory", MemorySpace::Acc}};
-    auto move = op_registry.Create("tile.move", {current_acc}, move_kw, span);
-    auto moved = std::make_shared<Var>(current_acc->name_hint_ + "_acc", move->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(moved, move, span));
-    current_acc = moved;
-  }
-
-  // Move the final accumulator back to its original memory space (typically
-  // Vec when the acc came from a tile.assemble produced by LowerBatchMatmul).
-  // No-op when original_acc_memory is unset (acc was already in Acc) or when
-  // the value already lives in the right space.
-  auto move_back_if_needed = [&](VarPtr value) -> VarPtr {
-    if (!original_acc_memory.has_value()) return value;
-    auto value_type = As<TileType>(value->GetType());
-    if (value_type && value_type->memory_space_.has_value() &&
-        *value_type->memory_space_ == *original_acc_memory) {
-      return value;
-    }
-    std::vector<std::pair<std::string, std::any>> move_kw = {
-        {"target_memory", *original_acc_memory},
-    };
-    auto move = op_registry.Create("tile.move", {value}, move_kw, span);
-    auto restored = std::make_shared<Var>(value->name_hint_ + "_back", move->GetType(), span);
-    out.stmts.push_back(std::make_shared<AssignStmt>(restored, move, span));
-    return restored;
-  };
 
   // Fast path: batch_count == 1. The acc is already [M, N] and per-batch slicing
   // would be identity. Emit a single tile.matmul_acc directly. This also avoids
@@ -1112,7 +1093,7 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
     auto matmul_acc = op_registry.Create("tile.matmul_acc", {current_acc, lhs_page.var, rhs_page.var}, span);
     auto new_acc = std::make_shared<Var>(current_acc->name_hint_, matmul_acc->GetType(), span);
     out.stmts.push_back(std::make_shared<AssignStmt>(new_acc, matmul_acc, span));
-    out.output_var = move_back_if_needed(new_acc);
+    out.output_var = new_acc;
     return out;
   }
 
@@ -1147,7 +1128,7 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
     out.stmts.push_back(std::make_shared<AssignStmt>(current_acc, assemble, span));
   }
 
-  out.output_var = move_back_if_needed(current_acc);
+  out.output_var = current_acc;
   return out;
 }
 

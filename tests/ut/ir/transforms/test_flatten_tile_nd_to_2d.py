@@ -1599,15 +1599,12 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
     accumulator).
     """
 
-    def test_batch_two_acc_unrolls_with_slice_assemble_and_memory_round_trip(self):
-        """batch=2 ``tile.batch_matmul_acc`` unrolls into 2 tile.matmul_acc + slice/assemble.
+    @staticmethod
+    def _build_batch_two_acc_program() -> ir.Program:
+        """batch=2 tensor.matmul (init) → tensor.matmul_acc (final) → assemble.
 
-        The accumulator is produced by an upstream batch=2 ``tensor.matmul``
-        (which itself takes the general ``LowerBatchMatmul`` path), so the
-        post-flatten acc lives in Vec memory. ``LowerBatchMatmulAcc`` must
-        therefore (a) move the acc to Acc before each per-batch
-        ``tile.matmul_acc``, (b) slice/assemble in Acc, and (c) move the final
-        acc back to Vec to preserve the iter-arg / consumer memory contract.
+        Constructed once and reused by the flatten-only test and the
+        flatten+infer end-to-end test.
         """
         ib = IRBuilder()
         with ib.program("main") as prog:
@@ -1636,8 +1633,45 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
                 out_r = ib.let("out_0", tensor_ops.assemble(out_p, acc_final, [0, 0, 0]))
                 ib.return_stmt(out_r)
             prog.add_function(f.get_result())
-        before = prog.get_result()
+        return prog.get_result()
 
+    @staticmethod
+    def _collect_calls_recursive(stmt: ir.Stmt) -> list[ir.Call]:
+        """Collect every Call across top-level + nested ScopeStmt/ForStmt/IfStmt bodies."""
+        out: list[ir.Call] = []
+
+        def walk(s):
+            if isinstance(s, ir.SeqStmts):
+                for inner in s.stmts:
+                    walk(inner)
+            elif isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call):
+                out.append(s.value)
+            elif isinstance(s, ir.ForStmt):
+                walk(s.body)
+            elif isinstance(s, ir.WhileStmt):
+                walk(s.body)
+            elif isinstance(s, ir.IfStmt):
+                walk(s.then_body)
+                if s.else_body is not None:
+                    walk(s.else_body)
+            elif isinstance(s, ir.ScopeStmt):
+                walk(s.body)
+
+        walk(stmt)
+        return out
+
+    def test_batch_two_acc_unrolls_without_acc_roundtrip_moves(self):
+        """batch=2 ``tile.batch_matmul_acc`` unrolls into 2 tile.matmul_acc +
+        slice/assemble — no Vec→Acc / Acc→Vec round-trip on the accumulator.
+
+        ``LowerBatchMatmulAcc`` no longer emits any memory-space moves on the
+        loop-carried accumulator — that responsibility belongs to
+        ``InferTileMemorySpace`` (pass 17). The remaining ``tile.move`` calls in
+        this single-pass output come from ``LowerBatchMatmul`` (the
+        non-accumulating variant) staging per-batch matmul results into a Vec
+        assembly buffer, which is an orthogonal concern.
+        """
+        before = self._build_batch_two_acc_program()
         after = passes.flatten_tile_nd_to_2d()(passes.convert_tensor_to_tile_ops()(before))
         fn = after.get_function("main_incore_0")
         assert fn is not None
@@ -1657,21 +1691,156 @@ class TestFlattenTileNdTo2DBatchMatmulAcc:
         assert names.count("tile.matmul") == 2
         assert names.count("tile.matmul_acc") == 2
 
-        # The general path uses tile.slice + tile.assemble around the per-batch
-        # matmul_acc to read/write each [M, N] band of the [batch*M, N] acc.
-        # It also emits a tile.move(target_memory=Acc) before the matmul_acc
-        # block (Vec→Acc) and a tile.move(target_memory=Vec) after it
-        # (Acc→Vec) to keep the loop-carried acc in its original Vec space.
+        # General path still uses slice/assemble around per-batch matmul_acc.
         assert "tile.slice" in names
         assert "tile.assemble" in names
-        moves = [c for c in calls if c.op.name == "tile.move"]
-        move_targets = [c.kwargs.get("target_memory") for c in moves]
-        assert pl.MemorySpace.Acc in move_targets, (
-            f"expected a tile.move to Acc on the acc operand, got targets={move_targets}"
+
+        # Core invariant (issue #1235): LowerBatchMatmulAcc no longer emits any
+        # tile.move targeting Acc. The remaining moves (target=Vec) come from
+        # LowerBatchMatmul staging per-batch matmul results, not from the
+        # accumulator round-trip path.
+        move_targets = [c.kwargs.get("target_memory") for c in calls if c.op.name == "tile.move"]
+        assert pl.MemorySpace.Acc not in move_targets, (
+            f"FlattenTileNdTo2D must not emit tile.move(target_memory=Acc) on "
+            f"the batch_matmul_acc accumulator — that belongs to "
+            f"InferTileMemorySpace. Got move_targets={move_targets}"
         )
-        assert pl.MemorySpace.Vec in move_targets, (
-            "expected a tile.move back to Vec to preserve original acc memory space, "
-            f"got targets={move_targets}"
+
+    def test_batch_two_acc_end_to_end_with_infer_memory_inserts_required_moves(self):
+        """End-to-end ``flatten + infer_tile_memory_space``: ``MoveCollector``
+        inserts the needed Vec→Acc move(s) on the per-batch acc slices.
+
+        After flatten alone the acc slices are in the same memory space as the
+        upstream batch_matmul output (Vec). ``InferTileMemorySpace`` Phase 2
+        sees that ``tile.matmul_acc`` demands ``Acc`` for its acc operand and
+        inserts the matching ``tile.move(target_memory=Acc)``.
+        """
+        before = self._build_batch_two_acc_program()
+        after = passes.infer_tile_memory_space()(
+            passes.flatten_tile_nd_to_2d()(passes.convert_tensor_to_tile_ops()(before))
+        )
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+        calls = self._collect_calls_recursive(fn.body)
+        names = [c.op.name for c in calls]
+
+        # Sanity: batch ops still gone, slice/assemble preserved.
+        assert "tile.batch_matmul" not in names
+        assert "tile.batch_matmul_acc" not in names
+        assert "tile.slice" in names
+        assert "tile.assemble" in names
+
+        # InferTileMemorySpace must have inserted at least one tile.move to Acc
+        # to satisfy tile.matmul_acc's input_constraints[0] = {Acc}.
+        move_targets = [c.kwargs.get("target_memory") for c in calls if c.op.name == "tile.move"]
+        assert pl.MemorySpace.Acc in move_targets, (
+            f"InferTileMemorySpace should insert a Vec→Acc move on matmul_acc's "
+            f"acc input. Got move_targets={move_targets}"
+        )
+
+    def test_singleton_batch_create_iter_arg_no_inline_move_after_flatten(self):
+        """Issue #1235 regression: 3D ``pl.tile.create([1, M, N])`` carried
+        through ``iter_arg`` into a batch=1 ``pl.tile.batch_matmul_acc`` must
+        flatten without any inline ``tile.move`` (no cross-core Vec→Acc).
+        """
+        T, K, N = 16, 128, 64
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                h: pl.Tensor[[T, K], pl.BF16],
+                w: pl.Tensor[[1, N, K], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[1, T, N], pl.FP32]],
+            ) -> pl.Tensor[[1, T, N], pl.FP32]:
+                acc_init = pl.tile.create([1, T, N], dtype=pl.FP32)
+                for _, (acc,) in pl.range(2, init_values=(acc_init,)):
+                    lhs = pl.tile.load(h, [0, 0], [T, K], target_memory=pl.Mem.Mat)
+                    rhs = pl.tile.load(w, [0, 0, 0], [1, N, K], target_memory=pl.Mem.Mat, transpose=True)
+                    acc_next = pl.tile.batch_matmul_acc(acc, lhs, rhs)
+                    acc_final = pl.yield_(acc_next)
+                out_0 = pl.tile.store(acc_final, [0, 0, 0], out_0)
+                return out_0
+
+        after = passes.flatten_tile_nd_to_2d()(Before)
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+        calls = self._collect_calls_recursive(fn.body)
+        names = [c.op.name for c in calls]
+
+        # batch_matmul_acc was unrolled into a single 2D matmul_acc (batch=1 fast path).
+        assert "tile.batch_matmul_acc" not in names
+        assert names.count("tile.matmul_acc") == 1
+
+        # Core invariant: no Vec/Acc round-trip emitted by FlattenTileNdTo2D.
+        # This is what previously triggered "cross-core move destination must
+        # be Vec, Mat, Left, or Right, got Acc" in mixed CUBE/VECTOR kernels.
+        assert "tile.move" not in names, (
+            f"FlattenTileNdTo2D must not emit tile.move around the singleton "
+            f"batch matmul_acc accumulator. Got call sequence: {names}"
+        )
+
+    def test_singleton_batch_create_iter_arg_acc_promoted_after_infer(self):
+        """Issue #1235 end-to-end: ``flatten + infer_tile_memory_space`` promotes
+        the dummy ``tile.create`` accumulator init to ``target_memory=Acc`` via
+        the existing ForStmt back-propagation in ``InferTileMemorySpace``.
+
+        Validates that the principled separation of concerns works: the dummy
+        ``tile.create`` defaults to Vec at the DSL layer, flatten passes the
+        shape lowering through untouched, and infer rewrites the kwarg + the
+        TileView to Acc — with zero ``tile.move`` calls anywhere in the
+        function body.
+        """
+        T, K, N = 16, 128, 64
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                h: pl.Tensor[[T, K], pl.BF16],
+                w: pl.Tensor[[1, N, K], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[1, T, N], pl.FP32]],
+            ) -> pl.Tensor[[1, T, N], pl.FP32]:
+                acc_init = pl.tile.create([1, T, N], dtype=pl.FP32)
+                for _, (acc,) in pl.range(2, init_values=(acc_init,)):
+                    lhs = pl.tile.load(h, [0, 0], [T, K], target_memory=pl.Mem.Mat)
+                    rhs = pl.tile.load(w, [0, 0, 0], [1, N, K], target_memory=pl.Mem.Mat, transpose=True)
+                    acc_next = pl.tile.batch_matmul_acc(acc, lhs, rhs)
+                    acc_final = pl.yield_(acc_next)
+                out_0 = pl.tile.store(acc_final, [0, 0, 0], out_0)
+                return out_0
+
+        after = passes.infer_tile_memory_space()(passes.flatten_tile_nd_to_2d()(Before))
+        fn = after.get_function("main_incore_0")
+        assert fn is not None
+        body = cast(ir.SeqStmts, fn.body)
+        top_level = [
+            stmt.value
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call)
+        ]
+        creates = [c for c in top_level if c.op.name == "tile.create"]
+        assert len(creates) == 1, f"expected exactly one tile.create, got {len(creates)}"
+        assert creates[0].kwargs.get("target_memory") == pl.MemorySpace.Acc, (
+            f"InferTileMemorySpace should back-propagate the matmul_acc Acc "
+            f"requirement onto the dummy tile.create init. Got kwargs="
+            f"{dict(creates[0].kwargs)}"
+        )
+
+        # No tile.move targeting Acc anywhere — the accumulator chain (create →
+        # iter_arg → matmul_acc.acc) is already promoted to Acc by Phase 1
+        # back-propagation, so there is no Vec→Acc move on the accumulator.
+        # MoveCollector still inserts Mat→Left and Mat→Right moves on the
+        # lhs/rhs operands to satisfy tile.matmul_acc's input_constraints[1,2];
+        # those are unrelated to issue #1235.
+        all_calls = self._collect_calls_recursive(fn.body)
+        all_move_targets = [c.kwargs.get("target_memory") for c in all_calls if c.op.name == "tile.move"]
+        assert pl.MemorySpace.Acc not in all_move_targets, (
+            f"the dummy create accumulator chain must not require any Vec→Acc "
+            f"move after flatten+infer (back-propagation should land the create "
+            f"directly in Acc). Got move_targets={all_move_targets}"
         )
 
 
