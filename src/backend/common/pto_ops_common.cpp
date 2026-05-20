@@ -316,7 +316,7 @@ static std::string EmitFlatOffsetSSAFromValues(const std::vector<std::string>& i
     if (auto c = As<ir::ConstInt>(shape[i])) {
       dim_ssa = codegen.GetOrEmitConstant(c->value_, DataType::INDEX);
     } else {
-      dim_ssa = codegen.GetExprAsCode(shape[i]);
+      dim_ssa = codegen.EmitCastToIndex(shape[i], codegen.GetExprAsCode(shape[i]));
     }
 
     std::string mul = codegen.NewNamedTemp(name_hint + "_mul");
@@ -1380,24 +1380,6 @@ static std::string MakeTileAllocCodegenPTO(const CallPtr& op, codegen::CodegenBa
   return "";  // No MLIR emission - pto.alloc_tile generated from MemRefs in TileTypes
 }
 
-// Compute a row-major flat offset string from a MakeTuple of indices and the shape of the container.
-static std::string ComputeFlatOffsetPTO(const ir::MakeTuplePtr& indices_tuple,
-                                        const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen) {
-  const auto& indices = indices_tuple->elements_;
-  INTERNAL_CHECK_SPAN(indices.size() == shape.size(), indices_tuple->span_)
-      << "Index count (" << indices.size() << ") must match shape rank (" << shape.size() << ")";
-
-  std::ostringstream idx_oss;
-  for (size_t i = 0; i < indices.size(); ++i) {
-    if (i > 0) idx_oss << " + ";
-    idx_oss << codegen.GetExprAsCode(indices[i]);
-    for (size_t j = i + 1; j < shape.size(); ++j) {
-      idx_oss << " * " << codegen.GetExprAsCode(shape[j]);
-    }
-  }
-  return idx_oss.str();
-}
-
 // Get or emit a flat offset SSA value for a MakeTuple of indices and shape.
 static std::string GetFlatOffsetSSA(const ir::MakeTuplePtr& indices_tuple,
                                     const std::vector<ir::ExprPtr>& shape, codegen::PTOCodegen& codegen) {
@@ -1429,7 +1411,16 @@ static std::string GetFlatOffsetSSA(const ir::MakeTuplePtr& indices_tuple,
     return codegen.GetOrEmitConstant(flat_offset, DataType::INDEX);
   }
 
-  return ComputeFlatOffsetPTO(indices_tuple, shape, codegen);
+  std::vector<std::string> index_ssa;
+  index_ssa.reserve(indices.size());
+  for (const auto& index : indices) {
+    if (auto c = As<ir::ConstInt>(index)) {
+      index_ssa.push_back(codegen.GetOrEmitConstant(c->value_, DataType::INDEX));
+      continue;
+    }
+    index_ssa.push_back(codegen.EmitCastToIndex(index, codegen.GetExprAsCode(index)));
+  }
+  return EmitFlatOffsetSSAFromValues(index_ssa, shape, codegen, "flat_offset");
 }
 
 // Helper function for tile.read (indices -> flat offset -> pto.tgetval)

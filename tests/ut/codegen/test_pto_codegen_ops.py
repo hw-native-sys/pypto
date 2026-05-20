@@ -698,6 +698,128 @@ class TestTileReadWriteOffsetCodegen:
         assert "pto.tsetval" in mlir
         assert "11" in mlir
 
+    def test_tile_read_variable_2d(self):
+        """2D tile [4, 8], tile.read(t, [row, col]) with variable indices -> arith.muli/arith.addi SSA."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[4, 8], pl.FP32],
+                config: pl.Tensor[[2], pl.INT64],
+                dst: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                t: pl.Tile[[4, 8], pl.FP32] = pl.load(src, [0, 0], [4, 8])
+                row: pl.Scalar[pl.INT64] = pl.read(config, [0])
+                col: pl.Scalar[pl.INT64] = pl.read(config, [1])
+                val: pl.Scalar[pl.FP32] = pl.tile.read(t, [row, col])
+                pl.tile.write(t, [0, 0], val)
+                return pl.store(t, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgetval" in mlir, f"Expected pto.tgetval for tile.read, got:\n{mlir}"
+        assert "arith.muli" in mlir, f"Expected arith.muli for dynamic flat offset, got:\n{mlir}"
+        assert "arith.addi" in mlir, f"Expected arith.addi for dynamic flat offset, got:\n{mlir}"
+        assert "arith.index_cast" in mlir, f"Expected arith.index_cast for INT64 -> index, got:\n{mlir}"
+
+    def test_tile_write_variable_2d(self):
+        """2D tile.write with variable indices emits arith.muli/arith.addi SSA."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[4, 8], pl.FP32],
+                config: pl.Tensor[[2], pl.INT64],
+                dst: pl.Tensor[[4, 8], pl.FP32],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                t: pl.Tile[[4, 8], pl.FP32] = pl.load(src, [0, 0], [4, 8])
+                row: pl.Scalar[pl.INT64] = pl.read(config, [0])
+                col: pl.Scalar[pl.INT64] = pl.read(config, [1])
+                val: pl.Scalar[pl.FP32] = pl.tile.read(t, [0, 0])
+                pl.tile.write(t, [row, col], val)
+                return pl.store(t, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tsetval" in mlir, f"Expected pto.tsetval for tile.write, got:\n{mlir}"
+        assert "arith.muli" in mlir, f"Expected arith.muli for dynamic flat offset, got:\n{mlir}"
+        assert "arith.addi" in mlir, f"Expected arith.addi for dynamic flat offset, got:\n{mlir}"
+
+    def test_tile_read_variable_2d_dynamic_i64_shape_stride(self):
+        """2D tile.read with an i64 runtime shape dim must cast the stride operand to index."""
+
+        span = ir.Span.unknown()
+        rows = ir.Var("rows", ir.ScalarType(pl.INT64), span)
+        cols = ir.Var("cols", ir.ScalarType(pl.INT64), span)
+        row = ir.Var("row", ir.ScalarType(pl.INT64), span)
+        col = ir.Var("col", ir.ScalarType(pl.INT64), span)
+        memref = ir.MemRef(ir.MemorySpace.Vec, ir.ConstInt(0, pl.INT64, span), 128 * 128 * 4, 0)
+        tile_view = ir.TileView(valid_shape=[rows, cols])
+        tile_type = ir.TileType([rows, cols], pl.FP32, memref, tile_view, ir.MemorySpace.Vec)
+        tile = ir.Var("tile", tile_type, span)
+        val = ir.Var("val", ir.ScalarType(pl.FP32), span)
+        indices = ir.MakeTuple([row, col], span)
+        read_call = ir.Call(ir.Op("tile.read"), [tile, indices], {}, ir.ScalarType(pl.FP32), span)
+        body = ir.SeqStmts([ir.AssignStmt(val, read_call, span)], span)
+        func = ir.Function(
+            "dynamic_shape_tile_read",
+            [
+                (tile, ir.ParamDirection.In),
+                (rows, ir.ParamDirection.In),
+                (cols, ir.ParamDirection.In),
+                (row, ir.ParamDirection.In),
+                (col, ir.ParamDirection.In),
+            ],
+            [],
+            body,
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir = codegen.PTOCodegen().generate(ir.Program([func], "dynamic_shape_tile_read_program", span))
+
+        assert "pto.tgetval" in mlir, f"Expected pto.tgetval for tile.read, got:\n{mlir}"
+        assert "arith.muli" in mlir, f"Expected arith.muli for dynamic flat offset, got:\n{mlir}"
+        assert "arith.addi" in mlir, f"Expected arith.addi for dynamic flat offset, got:\n{mlir}"
+        assert "%cols_idx = arith.index_cast" in mlir, f"Expected i64 shape dim cast to index, got:\n{mlir}"
+        assert "%cols_idx" in next(
+            (line for line in mlir.splitlines() if "arith.muli" in line and "flat_offset_mul" in line),
+            "",
+        ), f"Expected dynamic stride multiply to use the casted cols index, got:\n{mlir}"
+
+    def test_tile_read_variable_2d_partial(self):
+        """2D tile [1, 8], tile.read(t, [0, col]) with variable col -> arith.muli/arith.addi still emitted.
+
+        Even though the row index is constant 0, the index tuple has 2 elements so
+        EmitFlatOffsetSSAFromValues computes offset = 0 * 8 + col via arith.muli/arith.addi.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[1, 8], pl.FP32],
+                config: pl.Tensor[[1], pl.INT64],
+                dst: pl.Tensor[[1, 8], pl.FP32],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                t: pl.Tile[[1, 8], pl.FP32] = pl.load(src, [0, 0], [1, 8])
+                col: pl.Scalar[pl.INT64] = pl.read(config, [0])
+                val: pl.Scalar[pl.FP32] = pl.tile.read(t, [0, col])
+                pl.tile.write(t, [0, 0], val)
+                return pl.store(t, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tgetval" in mlir, f"Expected pto.tgetval for tile.read, got:\n{mlir}"
+        # 2D index [0, col] has 2 elements, so EmitFlatOffsetSSAFromValues still
+        # emits arith.muli/arith.addi (offset = 0 * stride + col).
+        assert "arith.muli" in mlir, f"Expected arith.muli for 2D partial-constant index, got:\n{mlir}"
+        assert "arith.addi" in mlir, f"Expected arith.addi for 2D partial-constant index, got:\n{mlir}"
+
 
 class TestBroadcastOpsCodegen:
     """Tests for broadcast (expand) operations PTO code generation."""
