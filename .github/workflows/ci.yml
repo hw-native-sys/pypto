@@ -102,6 +102,9 @@ jobs:
         -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
         -e DEVICE_ID
         -e DEVICE_RANGE
+        -e PTO2_RING_HEAP
+        -e PTO2_RING_TASK_WINDOW
+        -e PTO2_RING_DEP_POOL
     steps:
       - uses: actions/checkout@v4
         with:
@@ -210,6 +213,9 @@ jobs:
         -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
         -e DEVICE_ID
         -e DEVICE_RANGE
+        -e PTO2_RING_HEAP
+        -e PTO2_RING_TASK_WINDOW
+        -e PTO2_RING_DEP_POOL
     steps:
       - uses: actions/checkout@v4
         with:

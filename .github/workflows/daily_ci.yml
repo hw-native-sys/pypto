@@ -23,6 +23,9 @@ jobs:
         -v /dev:/dev
         -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
         -e DEVICE_ID
+        -e PTO2_RING_HEAP
+        -e PTO2_RING_TASK_WINDOW
+        -e PTO2_RING_DEP_POOL
 
     steps:
       - uses: actions/checkout@v4
