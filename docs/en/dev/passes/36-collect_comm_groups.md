@@ -22,7 +22,7 @@ the IR types so downstream codegen has O(1) access.
 ## Position in the pipeline
 
 ```text
-…  →  DeriveCallDirections  →  CollectCommGroups  →  Simplify (final)
+... -> DeriveCallDirections -> AutoDeriveTaskDependencies -> CollectCommGroups -> Simplify (final)
 ```
 
 The pass runs at the very end of the default pipeline, immediately before the

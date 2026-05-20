@@ -21,7 +21,7 @@
 ## 流水线位置
 
 ```text
-…  →  DeriveCallDirections  →  CollectCommGroups  →  Simplify（最末）
+... -> DeriveCallDirections -> AutoDeriveTaskDependencies -> CollectCommGroups -> Simplify（最末）
 ```
 
 本 pass 跑在默认 pipeline 的最末尾、最后一次 `Simplify` 之前。从

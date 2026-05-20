@@ -155,6 +155,12 @@ def _is_per_element_task_id_read(expr: ir.Expr) -> bool:
     return isinstance(arr_type, ir.ArrayType) and arr_type.dtype == DataType.TASK_ID
 
 
+@dataclass
+class _CallAttrMetadata:
+    arg_directions: list[ir.ArgDirection] | None = None
+    compiler_manual_dep_edges: list[ir.Var] = field(default_factory=list)
+
+
 def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
     """Fold a slice extent when both bounds are compile-time constants."""
     upper_value = _const_int_value(upper)
@@ -4397,9 +4403,8 @@ class ASTParser:
         if func_obj is not None:
             self._validate_call_arg_count(method_name, func_obj, len(arg_nodes), span)
 
-        arg_directions = self._extract_arg_directions_from_attrs(method_name, keywords, len(arg_nodes), span)
-        if arg_directions is None:
-            arg_directions = []
+        attr_metadata = self._extract_call_attrs(method_name, keywords, len(arg_nodes), span)
+        arg_directions = attr_metadata.arg_directions or []
         # Detect ``pl.no_dep(...)`` wrappers at call-arg positions and collect
         # their indices for the arg_direction_overrides attr.
         unwrapped_args, no_dep_indices = self._strip_no_dep_wrappers(arg_nodes)
@@ -4427,6 +4432,7 @@ class ASTParser:
             arg_directions=arg_directions,
             no_dep_indices=no_dep_indices,
             user_dep_vars=user_dep_vars,
+            compiler_dep_vars=attr_metadata.compiler_manual_dep_edges,
             device_expr=device_expr,
             augment_task_id=as_submit,
         )
@@ -4770,6 +4776,7 @@ class ASTParser:
         arg_directions: list[ir.ArgDirection] | None = None,
         no_dep_indices: list[int] | None = None,
         user_dep_vars: list[ir.Var] | None = None,
+        compiler_dep_vars: list[ir.Var] | None = None,
         device_expr: ir.Expr | None = None,
         augment_task_id: bool = False,
     ) -> ir.Expr:
@@ -4799,6 +4806,11 @@ class ASTParser:
                 Stored directly as ``attrs['manual_dep_edges']``; codegen
                 emits a ``set_dependencies(arr, count)`` call built from the
                 entries (array entries expand to one slot each).
+            compiler_dep_vars: Optional list of TaskId Vars derived by compiler
+                passes and round-tripped through
+                ``attrs['compiler_manual_dep_edges']``. These remain separate
+                from user-written ``deps=`` until orchestration codegen merges
+                and deduplicates the two provenance streams.
             device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
                 on an Orchestration dispatch call. Stored under
                 ``attrs['device']`` so the comm-collection pass can recover
@@ -4825,6 +4837,9 @@ class ASTParser:
         if user_dep_vars:
             attrs = attrs or {}
             attrs["manual_dep_edges"] = list(user_dep_vars)
+        if compiler_dep_vars:
+            attrs = attrs or {}
+            attrs["compiler_manual_dep_edges"] = list(compiler_dep_vars)
         if device_expr is not None:
             attrs = attrs or {}
             attrs["device"] = device_expr
@@ -4936,21 +4951,28 @@ class ASTParser:
                     hint=hint,
                 )
 
-    def _extract_arg_directions_from_attrs(
+    def _extract_call_attrs(
         self,
         method_name: str,
         keywords: list[ast.keyword],
         arg_count: int,
         span: ir.Span,
-    ) -> list[ir.ArgDirection] | None:
-        """Extract ``arg_directions`` from an ``attrs={"arg_directions": [...]}`` kwarg.
+    ) -> _CallAttrMetadata:
+        """Extract compiler-facing call attrs from an ``attrs={...}`` kwarg.
 
         Recognized form::
 
-            self.kernel(x, y, attrs={"arg_directions": [pl.adir.input, pl.adir.output]})
+            self.kernel(
+                x,
+                y,
+                attrs={
+                    "arg_directions": [pl.adir.input, pl.adir.output],
+                    "compiler_manual_dep_edges": [producer_tid],
+                },
+            )
 
-        The list elements must be bare attribute references of the form
-        ``pl.adir.<name>`` where ``<name>`` is a valid direction marker.
+        ``arg_directions`` entries must be bare ``pl.adir.<name>`` references.
+        ``compiler_manual_dep_edges`` entries must be TaskId variables.
 
         Args:
             method_name: Name of the cross-function method being called (used
@@ -4961,18 +4983,17 @@ class ASTParser:
             span: Source span of the call (used for error reporting).
 
         Returns:
-            The parsed direction vector, or ``None`` when no ``attrs=`` keyword
-            argument is present.
+            Parsed metadata. Empty metadata is returned when ``attrs=`` is absent.
 
         Raises:
             ParserSyntaxError / ParserTypeError: If the ``attrs=`` value does
-                not match the expected shape or uses an unknown direction name.
+                not match the expected shape.
         """
         from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
 
         attrs_kw: ast.keyword | None = next((kw for kw in keywords if kw.arg == "attrs"), None)
         if attrs_kw is None:
-            return None
+            return _CallAttrMetadata()
 
         if not isinstance(attrs_kw.value, ast.Dict):
             raise ParserTypeError(
@@ -4982,48 +5003,71 @@ class ASTParser:
             )
 
         directions: list[ir.ArgDirection] | None = None
+        compiler_edges: list[ir.Var] = []
         for key_node, value_node in zip(attrs_kw.value.keys, attrs_kw.value.values):
             if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
                 raise ParserSyntaxError(
                     f"'attrs=' on call to '{method_name}' must use string-literal keys",
                     span=self.span_tracker.get_span(key_node) if key_node else span,
                 )
-            if key_node.value != "arg_directions":
+            if key_node.value == "arg_directions":
+                if not isinstance(value_node, ast.List):
+                    raise ParserTypeError(
+                        f"attrs['arg_directions'] on call to '{method_name}' must be a list literal",
+                        span=self.span_tracker.get_span(value_node),
+                    )
+                parsed: list[ir.ArgDirection] = []
+                for elt in value_node.elts:
+                    if not (
+                        isinstance(elt, ast.Attribute)
+                        and isinstance(elt.value, ast.Attribute)
+                        and elt.value.attr == "adir"
+                        and isinstance(elt.value.value, ast.Name)
+                        and elt.value.value.id == "pl"
+                    ):
+                        raise ParserSyntaxError(
+                            f"attrs['arg_directions'] on call to '{method_name}' must contain "
+                            "'pl.adir.<name>' references only",
+                            span=self.span_tracker.get_span(elt),
+                        )
+                    if elt.attr not in NAME_TO_DIRECTION:
+                        raise ParserSyntaxError(
+                            f"Unknown call-site direction marker 'pl.adir.{elt.attr}' "
+                            f"in call to '{method_name}'",
+                            span=self.span_tracker.get_span(elt),
+                            hint=("Valid markers: " + ", ".join(f"pl.adir.{n}" for n in NAME_TO_DIRECTION)),
+                        )
+                    parsed.append(NAME_TO_DIRECTION[elt.attr])
+                directions = parsed
+                continue
+
+            if key_node.value == "compiler_manual_dep_edges":
+                if not isinstance(value_node, ast.List):
+                    raise ParserTypeError(
+                        f"attrs['compiler_manual_dep_edges'] on call to '{method_name}' "
+                        "must be a list literal",
+                        span=self.span_tracker.get_span(value_node),
+                    )
+                parsed_edges: list[ir.Var] = []
+                for elt in value_node.elts:
+                    expr = self.parse_expression(elt)
+                    if not isinstance(expr, ir.Var) or not _is_dep_var_type(expr.type):
+                        raise ParserTypeError(
+                            f"attrs['compiler_manual_dep_edges'] on call to '{method_name}' "
+                            f"must contain TaskId variables, got '{ast.unparse(elt)}'",
+                            span=self.span_tracker.get_span(elt),
+                            hint="Use TaskId variables bound by `_, tid = pl.submit(...)`.",
+                        )
+                    parsed_edges.append(expr)
+                compiler_edges = parsed_edges
+                continue
+
+            if key_node.value not in {"arg_directions", "compiler_manual_dep_edges"}:
                 raise ParserSyntaxError(
                     f"Unsupported attrs key '{key_node.value}' on call to '{method_name}'",
                     span=self.span_tracker.get_span(key_node),
-                    hint="Only 'arg_directions' is currently recognized",
+                    hint="Recognized keys: 'arg_directions', 'compiler_manual_dep_edges'",
                 )
-            if not isinstance(value_node, ast.List):
-                raise ParserTypeError(
-                    f"attrs['arg_directions'] on call to '{method_name}' must be a list literal",
-                    span=self.span_tracker.get_span(value_node),
-                )
-            parsed: list[ir.ArgDirection] = []
-            for elt in value_node.elts:
-                if not (
-                    isinstance(elt, ast.Attribute)
-                    and isinstance(elt.value, ast.Attribute)
-                    and elt.value.attr == "adir"
-                    and isinstance(elt.value.value, ast.Name)
-                    and elt.value.value.id == "pl"
-                ):
-                    raise ParserSyntaxError(
-                        f"attrs['arg_directions'] on call to '{method_name}' must contain "
-                        "'pl.adir.<name>' references only",
-                        span=self.span_tracker.get_span(elt),
-                    )
-                if elt.attr not in NAME_TO_DIRECTION:
-                    raise ParserSyntaxError(
-                        f"Unknown call-site direction marker 'pl.adir.{elt.attr}' in call to '{method_name}'",
-                        span=self.span_tracker.get_span(elt),
-                        hint=("Valid markers: " + ", ".join(f"pl.adir.{n}" for n in NAME_TO_DIRECTION)),
-                    )
-                parsed.append(NAME_TO_DIRECTION[elt.attr])
-            directions = parsed
-
-        if directions is None:
-            return []
 
         if directions and len(directions) != arg_count:
             raise ParserTypeError(
@@ -5031,7 +5075,7 @@ class ASTParser:
                 f"'{method_name}' must match positional arg count ({arg_count})",
                 span=span,
             )
-        return directions
+        return _CallAttrMetadata(directions, compiler_edges)
 
     @staticmethod
     def _validate_call_arg_count(func_name: str, func: ir.Function, got: int, span: ir.Span) -> None:

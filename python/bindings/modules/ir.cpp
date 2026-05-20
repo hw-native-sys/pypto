@@ -165,6 +165,7 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
       //   - kAttrArgDirections             -> vector<ArgDirection>
       //   - kAttrArgDirectionOverrides     -> vector<int32_t>
       //   - kAttrManualDepEdges /
+      //     kAttrCompilerManualDepEdges /
       //     kAttrArgDirOverrideVars        -> vector<VarPtr>
       // Inferring from the first element would silently accept mismatched
       // payloads (e.g. ``manual_dep_edges=[1]``) and fail later in codegen
@@ -184,7 +185,8 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
           idxs.push_back(static_cast<int32_t>(v));
         }
         kwargs.emplace_back(key, std::move(idxs));
-      } else if (key == kAttrManualDepEdges || key == kAttrArgDirOverrideVars) {
+      } else if (key == kAttrManualDepEdges || key == kAttrCompilerManualDepEdges ||
+                 key == kAttrArgDirOverrideVars) {
         std::vector<VarPtr> vars;
         for (auto elem : seq) {
           if (!nb::isinstance<Var>(elem)) {

@@ -84,6 +84,7 @@ struct PassProperties {
 | FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | FuseCreateAssembleToSlice | — | — | — |
 | DeriveCallDirections | SplitIncoreOrch | CallDirectionsResolved | — |
+| AutoDeriveTaskDependencies | SplitIncoreOrch, CallDirectionsResolved | CallDirectionsResolved | — |
 | CollectCommGroups | — | CommGroupsCollected | — |
 | Simplify | — | — | — |
 
@@ -391,8 +392,9 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 19. [`FoldNoOpReshape`](32-fold_no_op_reshape.md)
 20. [`FuseCreateAssembleToSlice`](33-fuse_create_assemble_to_slice.md)
 21. [`DeriveCallDirections`](34-derive_call_directions.md)
-22. [`CollectCommGroups`](35-collect_comm_groups.md)（分布式：构造 WindowBuffer 并写 Program.comm_groups_；无通信程序为 no-op）
-23. `Simplify`
+22. [`AutoDeriveTaskDependencies`](35-auto_derive_task_dependencies.md)（manual scope 编译器依赖；auto scope 为 no-op）
+23. [`CollectCommGroups`](36-collect_comm_groups.md)（分布式：构造 WindowBuffer 并写 Program.comm_groups_；无通信程序为 no-op）
+24. `Simplify`
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

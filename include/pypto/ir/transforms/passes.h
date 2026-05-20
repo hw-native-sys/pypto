@@ -687,6 +687,23 @@ Pass FuseCreateAssembleToSlice();
 Pass DeriveCallDirections();
 
 /**
+ * @brief Derive explicit task-to-task dependency edges inside manual runtime
+ *        scopes.
+ *
+ * Walks ``RuntimeScopeStmt(manual=true)`` regions only. For each submit-style
+ * Call that has a producer ``Scalar[TASK_ID]`` tuple element, computes a
+ * conservative storage access summary from ``arg_directions`` and attaches
+ * RAW/WAR/WAW hazards against prior calls in the same manual scope under
+ * ``Call.attrs["compiler_manual_dep_edges"]``. User-provided
+ * ``manual_dep_edges`` remain authoritative and separate; codegen merges both
+ * attrs before emitting ``Arg::set_dependencies``.
+ *
+ * Requirements:
+ *   - Call directions resolved (run DeriveCallDirections first)
+ */
+Pass AutoDeriveTaskDependencies();
+
+/**
  * @brief Fold no-op tile.reshape assignments into Var-to-Var assignments
  *
  * After LegalizePTOBufferReuse, two TileType variables can share the same

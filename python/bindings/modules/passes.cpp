@@ -500,6 +500,12 @@ void BindPass(nb::module_& m) {
              "Post-condition: ``IRProperty::CallDirectionsResolved``. The integrity of\n"
              "the produced ``Call.attrs['arg_directions']`` is verified automatically by the\n"
              "``CallDirectionsResolved`` PropertyVerifier (no separate verify pass).");
+  passes.def("auto_derive_task_dependencies", &pass::AutoDeriveTaskDependencies,
+             "Derive compiler-owned manual-scope task dependency edges.\n\n"
+             "Runs after derive_call_directions and writes "
+             "Call.attrs['compiler_manual_dep_edges'] inside manual runtime scopes. "
+             "User-provided Call.attrs['manual_dep_edges'] remain separate; orchestration "
+             "codegen merges both attrs before emitting Arg::set_dependencies.");
   // Bind DiagnosticSeverity enum
   nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")
       .value("Error", DiagnosticSeverity::Error, "Error that must be fixed")

@@ -693,9 +693,19 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
 inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
 
 /**
+ * @brief Reserved attr key for compiler-derived task dependency edges.
+ *
+ * Value type matches ``kAttrManualDepEdges``: ``std::vector<VarPtr>``.
+ * Entries are ``Scalar[TASK_ID]`` or ``Array[N, TASK_ID]`` Vars. The
+ * ``AutoDeriveTaskDependencies`` pass writes this attr inside manual runtime
+ * scopes. Codegen merges it with user-provided ``manual_dep_edges`` while
+ * keeping the two sources distinguishable in IR.
+ */
+inline constexpr const char* kAttrCompilerManualDepEdges = "compiler_manual_dep_edges";
+
+/**
  * @brief Reserved attr key for the producer-TaskId Var captured by a
  * ``with pl.at(...) as tid:`` block.
- *
  * Set by the parser as a key on the enclosing ``ScopeStmt``'s ``attrs_``
  * (``InCoreScopeStmt`` / ``AutoInCoreScopeStmt`` / ``HierarchyScopeStmt``).
  * Value type: ``VarPtr`` — a fresh ``Scalar[TASK_ID]`` Var allocated in the
@@ -959,6 +969,22 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
   }
   return std::make_shared<Call>(submit->op_, submit->args_, submit->kwargs_, std::move(attrs),
                                 submit->GetType(), submit->span_);
+}
+
+/**
+ * Build a copy of ``attrs`` with ``kAttrCompilerManualDepEdges`` set to
+ * ``vars``. Replaces an existing entry if present; otherwise appends.
+ */
+inline std::vector<std::pair<std::string, std::any>> WithCompilerManualDepEdgesAttr(
+    std::vector<std::pair<std::string, std::any>> attrs, std::vector<VarPtr> vars) {
+  for (auto& [k, v] : attrs) {
+    if (k == kAttrCompilerManualDepEdges) {
+      v = std::move(vars);
+      return attrs;
+    }
+  }
+  attrs.emplace_back(kAttrCompilerManualDepEdges, std::move(vars));
+  return attrs;
 }
 
 /**

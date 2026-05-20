@@ -3472,6 +3472,44 @@ class TestManualScopeCodegen:
         assert "params_t2_deps[params_t2_deps_count++] = b_tid;" in code
         assert "params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);" in code
 
+    def test_manual_scope_merges_user_and_compiler_deps(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def unrelated(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    produced, producer_tid = pl.submit(self.fill, scratch)
+                    _unused, user_tid = pl.submit(self.unrelated, scratch)
+                    out, _ = pl.submit(self.consume, produced, deps=[user_tid])
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "PTO2TaskId params_t2_deps[2];" in code
+        assert "params_t2_deps[params_t2_deps_count++] = user_tid;" in code
+        assert "params_t2_deps[params_t2_deps_count++] = producer_tid;" in code
+        assert code.count("params_t2.set_dependencies(") == 1
+
     def test_auto_scope_does_not_emit_task_id_capture(self):
         """Sanity: plain ``self.kernel(...)`` in auto scope stays fire-and-forget."""
         backend.reset_for_testing()

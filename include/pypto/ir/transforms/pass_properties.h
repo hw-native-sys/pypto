@@ -246,13 +246,18 @@ inline const PassProperties kCanonicalizeIOOrderProperties{
 // PropertyVerifierRegistry), so PassPipeline auto-verifies it whenever this
 // pass produces the property — no separate verify pass is needed.
 
-// DeriveCallDirections also performs manual-scope lowering as Phase 2 (the
-// former DeriveManualScopeDeps pass). Phase 2 reads the arg_directions
-// populated by Phase 1 and writes the per-Call ``manual_dep_edges`` attr
-// inside ``RuntimeScopeStmt(manual=true)`` regions; codegen reads that attr
-// directly, so no separate IRProperty is needed.
 inline const PassProperties kDeriveCallDirectionsProperties{.required = {IRProperty::SplitIncoreOrch},
                                                             .produced = {IRProperty::CallDirectionsResolved}};
+
+// -- Automatic manual-scope task dependency pass -----------------------------
+//
+// Reads ``Call.attrs_["arg_directions"]`` and writes
+// ``Call.attrs_["compiler_manual_dep_edges"]`` inside manual runtime scopes.
+// The pass preserves CallDirectionsResolved because it does not rewrite call
+// args or direction attrs.
+inline const PassProperties kAutoDeriveTaskDependenciesProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::CallDirectionsResolved},
+    .produced = {IRProperty::CallDirectionsResolved}};
 
 // -- No-op tile.reshape folding pass -----------------------------------------
 

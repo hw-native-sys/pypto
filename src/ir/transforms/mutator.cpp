@@ -342,7 +342,7 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   auto new_type = RemapTypeViaVisitor(op->GetType());
   bool type_changed = (new_type.get() != op->GetType().get());
 
-  // Var-typed attrs (manual_dep_edges family) reference Vars defined elsewhere
+  // Var-typed dependency attrs reference Vars defined elsewhere
   // in the IR; if those Vars get remapped (e.g. a fresh Var minted by the base
   // ``VisitExpr_(VarPtr)`` because a type field embedded another Var), the
   // attr entries must be rewritten too — otherwise they dangle to the
@@ -351,7 +351,8 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
   bool attrs_changed = false;
   new_attrs.reserve(op->attrs_.size());
   for (const auto& [k, v] : op->attrs_) {
-    if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars) {
+    if (k == kAttrManualDepEdges || k == kAttrCompilerManualDepEdges ||
+        k == kAttrArgDirOverrideVars) {
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
       if (edges) {
         std::vector<VarPtr> new_edges;
@@ -883,7 +884,8 @@ std::pair<std::vector<std::pair<std::string, std::any>>, bool> IRMutator::Mutate
   new_attrs.reserve(attrs.size());
   bool any_changed = false;
   for (const auto& [k, v] : attrs) {
-    if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars) {
+    if (k == kAttrManualDepEdges || k == kAttrCompilerManualDepEdges ||
+        k == kAttrArgDirOverrideVars) {
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
       if (edges) {
         std::vector<VarPtr> new_edges;

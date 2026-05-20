@@ -98,7 +98,7 @@ class PassManager:
     PassManager maintains a sequence of Pass instances for different optimization
     strategies and executes them in order on a given Program. It delegates to
     a C++ PassPipeline for execution. Instrumentation (verification, logging)
-    is handled by PassContext — see passes.PassContext.
+    is handled by PassContext �?see passes.PassContext.
 
     Usage:
         # Get a pre-configured strategy
@@ -156,7 +156,7 @@ class PassManager:
             ("CanonicalizeIOOrder", lambda: passes.canonicalize_io_order()),
             # MaterializeTensorStrides fills empty stride slots on every
             # TensorView with packed canonical strides (RFC #1300 §2.4).
-            # Active in the default pipeline starting at P6 — by this point
+            # Active in the default pipeline starting at P6 �?by this point
             # LowerTransposeLoadParamLayout has produced canonical-form DN
             # parameters, so the materialized strides match the IR shape
             # without going through the legacy `dn_swap` codegen path.
@@ -168,7 +168,8 @@ class PassManager:
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
             ("DeriveCallDirections", lambda: passes.derive_call_directions()),
-            # Trace pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r)
+            ("AutoDeriveTaskDependencies", lambda: passes.auto_derive_task_dependencies()),
+            # Trace pld.tensor.alloc_window_buffer -> pld.tensor.window -> dispatch(device=r)
             # in each host_orch and materialise WindowBuffer +
             # Program.comm_groups_. Runs at the end of the pipeline because
             # nothing between InlineFunctions and here touches the host_orch
