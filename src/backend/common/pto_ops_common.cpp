@@ -953,8 +953,12 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
 }
 
 // Helper for tile.scatter_mask (TSCATTER mask form, DPS):
-//   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty)
-//                outs(%dst : dst_ty)
+//   pto.tscatter ins(%src : src_ty) outs(%dst : dst_ty)
+//                {maskPattern = #pto.mask_pattern<Pxxxx>}
+//
+// Unlike pto.tgather's mask form (which carries maskPattern inside ins()),
+// pto.tscatter only accepts SSA operands in ins() — the maskPattern must be a
+// trailing op attribute dict (same placement as gather_compare's cmpMode).
 //
 // IR surface: 2-input op (dst, src) + mask_pattern attr; dst aliased via
 // set_output_reuses_input(0). Mask form is targeted at A3 / CPU-sim style
@@ -974,8 +978,7 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
 
   std::ostringstream oss;
-  oss << "pto.tscatter ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern)
-      << ">}";
+  oss << "pto.tscatter ins(" << src;
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
@@ -983,7 +986,7 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
   if (!dst_type.empty()) {
     oss << " : " << dst_type;
   }
-  oss << ")";
+  oss << ") {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern) << ">}";
 
   codegen.Emit(oss.str());
   return "";
