@@ -733,6 +733,112 @@ class TestTileReductionOps:
         ir_str = str(Program)
         assert "tile.min" in ir_str
 
+    # ------------------------------------------------------------------
+    # Issue #1401: reduction tile ops must inherit TileView.valid_shape
+    # from their input along non-reduced dims. Without this, chains like
+    #   pl.slice(..., valid_shape=[4, 32]) -> tile.cast -> tile.mul -> tile.row_sum
+    # cause codegen to emit trowsum with valid_row = physical_rows (e.g. 8)
+    # against a tcvt/tmul that only wrote `valid_row = 4` rows, picking up
+    # uninitialised LB residue on the unwritten rows.
+    # ------------------------------------------------------------------
+
+    def _make_sliced_tile_with_valid_shape(self, valid_rows=4, valid_cols=32):
+        """Helper: returns a tile-typed Call with valid_shape=[valid_rows, valid_cols]."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(32, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        src_var = ir.Var("src", src_type, span)
+        return tile.slice(src_var, [8, 32], [0, 0], valid_shape=[valid_rows, valid_cols])
+
+    def test_tile_row_sum_inherits_input_valid_shape(self):
+        """tile.row_sum output valid_shape must mirror input on the kept dim (issue #1401)."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
+        span = ir.Span.unknown()
+        tmp_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(1, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        tmp_var = ir.Var("tmp", tmp_type, span)
+
+        call = tile.row_sum(sliced, tmp_var)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        # Output: [rows=4 (kept, inherited from input valid_shape), 1 (reduced)]
+        assert len(valid_shape) == 2
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 4
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 1
+
+    def test_tile_row_max_inherits_input_valid_shape(self):
+        """tile.row_max must inherit valid_shape from input (issue #1401)."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
+        span = ir.Span.unknown()
+        tmp_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(1, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        tmp_var = ir.Var("tmp", tmp_type, span)
+        call = tile.row_max(sliced, tmp_var)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 4
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 1
+
+    def test_tile_col_sum_inherits_input_valid_shape(self):
+        """tile.col_sum output valid_shape must mirror input on the kept dim (issue #1401)."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=16)
+        # col_sum takes 1 arg
+        call = tile.col_sum(sliced)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        # Output: [1 (reduced), cols=16 (kept, inherited from input valid_shape)]
+        assert len(valid_shape) == 2
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 1
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 16
+
+    def test_tile_col_max_inherits_input_valid_shape(self):
+        """tile.col_max must inherit valid_shape from input (issue #1401)."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=16)
+        call = tile.col_max(sliced)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 1
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 16
+
+    def test_tile_sum_axis_keepdim_inherits_input_valid_shape(self):
+        """tile.sum(axis=1, keepdim=True) must inherit valid_shape (issue #1401)."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
+        call = tile.sum(sliced, axis=1, keepdim=True)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        # Output: [rows=4 (kept), 1 (reduced with keepdim)]
+        assert len(valid_shape) == 2
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 4
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 1
+
+    def test_tile_sum_axis_no_keepdim_inherits_input_valid_shape(self):
+        """tile.sum(axis=1, keepdim=False) drops the reduced dim; kept dim inherits valid_shape."""
+        sliced = self._make_sliced_tile_with_valid_shape(valid_rows=4, valid_cols=32)
+        call = tile.sum(sliced, axis=1, keepdim=False)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        # Output: [rows=4 (kept)] — reduced dim is dropped entirely
+        assert len(valid_shape) == 1
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 4
+
 
 class TestTileBroadcastOps:
     """Test suite for tile-level broadcast operators."""

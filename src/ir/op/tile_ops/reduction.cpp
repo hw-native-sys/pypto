@@ -35,6 +35,7 @@
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/type_inference.h"
 
 namespace pypto {
 namespace ir {
@@ -91,26 +92,27 @@ TypePtr DeduceTileReductionType(const std::vector<ExprPtr>& args,
     return std::make_shared<ScalarType>(tile_type->dtype_);
   }
 
-  // Build output shape
+  // Source of truth for valid_shape — falls back to physical shape when the
+  // input has no TileView populated (issue #1401).
+  const auto input_valid = GetValidShape(tile_type);
+
+  // Build output shape and valid_shape together: the reduction rule applies
+  // identically to both — physical dims drive the static shape, the input's
+  // valid extents drive the output's valid extents.
   std::vector<ExprPtr> output_shape;
-  if (keepdim) {
-    // When keepdim is true, keep all dimensions but set reduced axes to 1
-    for (int64_t i = 0; i < input_ndim; ++i) {
-      if (reduce_axes.find(i) != reduce_axes.end()) {
-        // Reduced axis: set to 1
+  std::vector<ExprPtr> output_valid;
+  output_shape.reserve(input_ndim);
+  output_valid.reserve(input_ndim);
+  for (int64_t i = 0; i < input_ndim; ++i) {
+    const bool is_reduced = reduce_axes.find(i) != reduce_axes.end();
+    if (is_reduced) {
+      if (keepdim) {
         output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
-      } else {
-        // Keep this dimension
-        output_shape.push_back(input_shape[i]);
+        output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
       }
-    }
-  } else {
-    // When keepdim is false, remove reduced axes
-    for (int64_t i = 0; i < input_ndim; ++i) {
-      if (reduce_axes.find(i) == reduce_axes.end()) {
-        // Keep this dimension
-        output_shape.push_back(input_shape[i]);
-      }
+    } else {
+      output_shape.push_back(input_shape[i]);
+      output_valid.push_back(input_valid[i]);
     }
   }
 
@@ -121,8 +123,9 @@ TypePtr DeduceTileReductionType(const std::vector<ExprPtr>& args,
 
   // Return TileType with reduced shape
   TileView tile_view;
-  tile_view.valid_shape = output_shape;
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
+  tile_view.valid_shape = std::move(output_valid);
+  return std::make_shared<TileType>(std::move(output_shape), tile_type->dtype_, std::nullopt,
+                                    std::move(tile_view));
 }
 
 // Type deduction for row reduction operations (reduces along last axis with keepdim=True)
@@ -148,10 +151,19 @@ TypePtr DeduceTileRowReductionType(const std::vector<ExprPtr>& args,
   // Output shape is [...batch_dims, rows, 1] - reduce along last axis with keepdim=True
   std::vector<ExprPtr> output_shape(input_shape.begin(), input_shape.end() - 1);
   output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
+
+  // Inherit valid_shape from the input along the non-reduced dims so that
+  // downstream codegen emits trowsum with the correct valid_row (issue #1401).
+  // The reduced (last) dim collapses to 1 in the output.
+  const auto input_valid = GetValidShape(tile_type);
+  std::vector<ExprPtr> output_valid(input_valid.begin(), input_valid.end() - 1);
+  output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
+
   TileView tile_view;
   tile_view.blayout = TileLayout::col_major;
-  tile_view.valid_shape = output_shape;
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
+  tile_view.valid_shape = std::move(output_valid);
+  return std::make_shared<TileType>(std::move(output_shape), tile_type->dtype_, std::nullopt,
+                                    std::move(tile_view));
 }
 
 // Type deduction for column reduction operations (reduces along first axis with keepdim=True)
@@ -174,10 +186,20 @@ TypePtr DeduceTileColReductionType(const std::vector<ExprPtr>& args,
   std::vector<ExprPtr> output_shape;
   output_shape.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
   output_shape.insert(output_shape.end(), input_shape.begin() + 1, input_shape.end());
+
+  // Inherit valid_shape from the input along the non-reduced dims so that
+  // downstream codegen emits tcolsum with the correct valid_col (issue #1401).
+  // The reduced (first) dim is always 1 in the output.
+  const auto input_valid = GetValidShape(tile_type);
+  std::vector<ExprPtr> output_valid;
+  output_valid.push_back(std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()));
+  output_valid.insert(output_valid.end(), input_valid.begin() + 1, input_valid.end());
+
   TileView tile_view;
   tile_view.blayout = TileLayout::row_major;
-  tile_view.valid_shape = output_shape;
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
+  tile_view.valid_shape = std::move(output_valid);
+  return std::make_shared<TileType>(std::move(output_shape), tile_type->dtype_, std::nullopt,
+                                    std::move(tile_view));
 }
 
 // ============================================================================
