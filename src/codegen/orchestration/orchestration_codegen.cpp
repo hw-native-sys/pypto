@@ -742,6 +742,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (!ShouldEmitPhaseFenceBarrier(source->size, consumer_count)) continue;
         pre_loop_phase_fence_barriers[iter_arg.get()] = EmitPhaseFenceBarrier(*source);
       }
+      for (const Var* dep_array : CollectDirectManualDepArrays(for_stmt->body_)) {
+        if (!dep_array || BodyUpdatesArray(for_stmt->body_, dep_array, /*descend_into_for=*/false) ||
+            pre_loop_phase_fence_barriers.count(dep_array)) {
+          continue;
+        }
+        auto source = TryResolveExplicitPhaseFenceArrayForVar(dep_array);
+        if (!source.has_value()) continue;
+        const int64_t consumer_count = loop_trip_count * CountManualDepConsumersOnArray(for_stmt->body_, dep_array);
+        if (!ShouldEmitPhaseFenceBarrier(source->size, consumer_count)) continue;
+        pre_loop_phase_fence_barriers[dep_array] = EmitPhaseFenceBarrier(*source);
+      }
     }
 
     active_phase_fence_barriers_.push_back(std::move(pre_loop_phase_fence_barriers));
@@ -797,6 +808,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
         const int64_t consumer_count = CountManualDepConsumersOnArray(for_stmt->body_, iter_arg.get());
         if (!ShouldEmitPhaseFenceBarrier(source->size, consumer_count)) continue;
         in_loop_phase_fence_barriers[iter_arg.get()] = EmitPhaseFenceBarrier(*source);
+      }
+      for (const Var* dep_array : CollectDirectManualDepArrays(for_stmt->body_)) {
+        if (!dep_array || BodyUpdatesArray(for_stmt->body_, dep_array, /*descend_into_for=*/false) ||
+            in_loop_phase_fence_barriers.count(dep_array)) {
+          continue;
+        }
+        auto source = TryResolveExplicitPhaseFenceArrayForVar(dep_array);
+        if (!source.has_value()) continue;
+        const int64_t consumer_count = CountManualDepConsumersOnArray(for_stmt->body_, dep_array);
+        if (!ShouldEmitPhaseFenceBarrier(source->size, consumer_count)) continue;
+        in_loop_phase_fence_barriers[dep_array] = EmitPhaseFenceBarrier(*source);
       }
     }
     active_phase_fence_barriers_.push_back(std::move(in_loop_phase_fence_barriers));
@@ -2486,6 +2508,66 @@ class OrchestrationStmtCodegen : public CodegenBase {
           }
         }
         IRVisitor::VisitExpr_(call);
+      }
+    };
+    Finder finder;
+    finder.target = target;
+    finder.descend_into_for = descend_into_for;
+    finder.VisitStmt(body);
+    return finder.found;
+  }
+
+  static std::vector<const Var*> CollectDirectManualDepArrays(const StmtPtr& body) {
+    class Collector : public IRVisitor {
+     public:
+      std::vector<const Var*> arrays;
+      std::unordered_set<const Var*> seen;
+
+      void VisitStmt_(const ForStmtPtr&) override {
+        // Nested loops form their own candidate scopes.
+      }
+
+      void VisitExpr_(const CallPtr& call) override {
+        for (const auto& [k, v] : call->attrs_) {
+          if (k != kAttrManualDepEdges) continue;
+          const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+          if (!edges || edges->size() != 1 || !(*edges)[0]) continue;
+          auto array_ty = As<ArrayType>((*edges)[0]->GetType());
+          if (!array_ty || array_ty->dtype_ != DataType::TASK_ID) continue;
+          const Var* edge = (*edges)[0].get();
+          if (seen.insert(edge).second) arrays.push_back(edge);
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+    };
+    Collector collector;
+    collector.VisitStmt(body);
+    return collector.arrays;
+  }
+
+  static bool BodyUpdatesArray(const StmtPtr& body, const Var* target, bool descend_into_for = true) {
+    class Finder : public IRVisitor {
+     public:
+      bool found = false;
+      const Var* target = nullptr;
+      bool descend_into_for = true;
+
+      void VisitStmt_(const ForStmtPtr& f) override {
+        if (found || !descend_into_for) return;
+        IRVisitor::VisitStmt_(f);
+      }
+
+      void VisitStmt_(const AssignStmtPtr& assign) override {
+        if (found) return;
+        auto call = As<Call>(assign->value_);
+        if (call && call->op_->name_ == "array.update_element" && !call->args_.empty()) {
+          auto base = AsVarLike(call->args_[0]);
+          if (base && base.get() == target) {
+            found = true;
+            return;
+          }
+        }
+        IRVisitor::VisitStmt_(assign);
       }
     };
     Finder finder;
