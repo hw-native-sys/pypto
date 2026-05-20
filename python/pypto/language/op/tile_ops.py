@@ -2132,8 +2132,7 @@ def mrgsort(
         )
     if tmp is None:
         raise ValueError(
-            "mrgsort() format2 requires tmp; "
-            "use mrgsort(src0, src1[, src2[, src3]], tmp=<tile>)"
+            "mrgsort() format2 requires tmp; use mrgsort(src0, src1[, src2[, src3]], tmp=<tile>)"
         )
     call_expr = _ir_ops.mrgsort(
         src0.unwrap(),

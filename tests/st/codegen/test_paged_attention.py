@@ -198,6 +198,10 @@ class SoftmaxPrepareUnalignedTestCase(PTOTestCase):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        # pij output is BF16, so single-ULP rounding differences from the
+        # reference are expected; the default 1e-5 tolerance is far too tight.
+        self.config.atol = 2e-2
+        self.config.rtol = 2e-2
         self.num_heads = num_heads
         self.block_size = block_size
         self.valid_len = valid_len
