@@ -95,6 +95,20 @@ kernels while the secondary sync lane avoids real DMA/compute work.
 > **Note**: This pass is part of the default tile optimization pipeline. You can also invoke it explicitly via
 > `passes.expand_mixed_kernel()(program)` when debugging or building a custom pass pipeline.
 
+### Cross-lane GM dependency check
+
+When splitting a mixed-root scope, the pass refuses input where one lane's `tile.store` writes a GM tensor that the other lane's `tile.load` then reads back inside the same scope. Such a pattern would split into AIC and AIV kernels sharing a GM region with no cross-lane fence (no `tile.move` boundary, so no `tpush`/`tpop` is inserted), producing a real data race on device.
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+    raw = pl.matmul(q, k, out_dtype=pl.FP32)        # AIC -> Acc
+    scratch = pl.assemble(scratch, raw, [0, 0])     # AIC tile.store -> GM
+    chunk = scratch[0:16, :]                         # AIV tile.load <- same GM tensor (unsafe!)
+    out = pl.assemble(out, pl.cast(chunk, target_type=pl.BF16), [0, 0])
+```
+
+This compiles to a `ValueError` with the offending tensor name, the store / load source locations, and a pointer to upstream issue [#1433](https://github.com/hw-native-sys/pypto/issues/1433) (where proper cross-lane sync insertion is tracked). The fix is to split the scope so the producing and consuming lanes live in separate `pl.at` blocks — scope boundaries provide the necessary synchronisation. `decode_layer.py` in `pypto-lib` uses this structure for Flash Attention (`qk_matmul` / `softmax` / `sv_matmul` / `online_softmax`).
+
 ## API
 
 | C++ | Python | Level |

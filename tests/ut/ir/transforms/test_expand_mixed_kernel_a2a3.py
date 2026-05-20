@@ -383,5 +383,50 @@ def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
         )
 
 
+def test_cross_lane_gm_dependency_rejected():
+    """ExpandMixedKernel must refuse a mixed-root scope that reads back a
+    GM tensor written by the other lane via tile.store / tile.load.
+
+    Splitting such a body produces AIC and AIV kernels that share the GM
+    region with no cross-lane fence (no tile.move, so no tpush/tpop is
+    inserted). The two lanes race on the shared tensor and produce
+    non-deterministic device output. The pass surfaces this loudly so
+    silent corruption is impossible. Tracked by upstream issue #1433.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def fused_main(
+            self,
+            q: pl.Tensor[[16, 128], pl.BF16],
+            k: pl.Tensor[[128, 128], pl.BF16],
+            out: pl.Out[pl.Tensor[[16, 128], pl.BF16]],
+        ) -> pl.Tensor[[16, 128], pl.BF16]:
+            scratch = pl.create_tensor([16, 128], dtype=pl.FP32)
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+                name_hint="fa_scope",
+            ):
+                # AIC: matmul -> assemble into GM scratch.
+                raw = pl.matmul(q, k, b_trans=True, out_dtype=pl.FP32)
+                scratch = pl.assemble(scratch, raw, [0, 0])
+                # AIV: read same GM scratch back as a vec tile -> store to out.
+                chunk = scratch[0:16, :]
+                chunk_bf16 = pl.cast(pl.mul(chunk, 1.0), target_type=pl.BF16)
+                out = pl.assemble(out, chunk_bf16, [0, 0])
+            return out
+
+    with pytest.raises(ValueError) as exc_info:
+        ir.compile(Before)
+
+    msg = str(exc_info.value)
+    assert "cross-lane GM dependency" in msg
+    assert "fa_scope" in msg
+    assert "AIC tile.store" in msg and "AIV tile.load" in msg
+    assert "1433" in msg
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -95,6 +95,20 @@ replay 路径强制为 `valid_shape=[0, 0]`，同时屏蔽可见的 `tile.store`
 > **注意**：该 Pass 已经在默认 tile 优化流水线中启用。调试问题或自定义 PassPipeline 时，也可以通过
 > `passes.expand_mixed_kernel()(program)` 显式调用。
 
+### 跨 lane GM 依赖检查
+
+拆分 mixed-root scope 时，若一条 lane 的 `tile.store` 把张量写入 GM，而另一条 lane 在同一 scope 内通过 `tile.load` 读回同一张量，该 Pass 会拒绝该输入。这种模式拆出的 AIC / AIV kernel 共享 GM 区域却没有跨 lane fence（不存在 `tile.move` 边界，自然也不会插入 `tpush`/`tpop`），在设备上会产生真实的数据竞态。
+
+```python
+with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+    raw = pl.matmul(q, k, out_dtype=pl.FP32)        # AIC -> Acc
+    scratch = pl.assemble(scratch, raw, [0, 0])     # AIC tile.store -> GM
+    chunk = scratch[0:16, :]                         # AIV tile.load <- 同一 GM 张量（不安全！）
+    out = pl.assemble(out, pl.cast(chunk, target_type=pl.BF16), [0, 0])
+```
+
+编译时会抛出 `ValueError`，错误信息包含违规张量名、`tile.store` / `tile.load` 的源码位置，以及指向上游 issue [#1433](https://github.com/hw-native-sys/pypto/issues/1433) 的链接（跨 lane 自动同步插入功能在该 issue 跟踪）。修复方式是把该 scope 拆成多个 `pl.at` 块，让生产者和消费者分别位于不同的 scope 中——scope 边界天然提供所需的跨 lane 同步。`pypto-lib` 中 `decode_layer.py` 的 Flash Attention 就采用此结构（`qk_matmul` / `softmax` / `sv_matmul` / `online_softmax` 各自独立 scope）。
+
 ## API
 
 | C++ | Python | 级别 |
