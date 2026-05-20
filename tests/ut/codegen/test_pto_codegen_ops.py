@@ -2039,7 +2039,12 @@ class TestScatterCodegen:
         return codegen_instance.generate(single)
 
     def test_tile_scatter_index_form_codegen(self):
-        """tile.scatter emits pto.tscatter ins(src, idx) outs(dst) with dst aliased."""
+        """tile.scatter emits pto.tscatter ins(src, idx) outs(dst) with dst aliased.
+
+        ``indexes`` is the per-element *flattened* destination index tile, so it
+        has the same [rows, cols] shape as ``src`` (pto.tscatter writes
+        dst.flat[idx[i, j]] = src[i, j]).
+        """
 
         @pl.program
         class Prog:
@@ -2048,12 +2053,12 @@ class TestScatterCodegen:
                 self,
                 dst_in: pl.Tensor[[16, 32], pl.FP32],
                 src: pl.Tensor[[4, 32], pl.FP32],
-                idx: pl.Tensor[[4, 1], pl.INT32],
+                idx: pl.Tensor[[4, 32], pl.INT32],
                 out: pl.Tensor[[16, 32], pl.FP32],
             ) -> pl.Tensor[[16, 32], pl.FP32]:
                 dst_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(dst_in, [0, 0], [16, 32])
                 src_tile: pl.Tile[[4, 32], pl.FP32] = pl.load(src, [0, 0], [4, 32])
-                idx_tile: pl.Tile[[4, 1], pl.INT32] = pl.load(idx, [0, 0], [4, 1])
+                idx_tile: pl.Tile[[4, 32], pl.INT32] = pl.load(idx, [0, 0], [4, 32])
                 scattered: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter(dst_tile, src_tile, idx_tile)
                 return pl.store(scattered, [0, 0], out)
 

@@ -937,6 +937,16 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
 
+  // DPS in-place contract: tile.scatter is set_output_reuses_input(0), so the
+  // result buffer must alias the `dst` input tile (args_[0]). Otherwise the
+  // tscatter writes a freshly-allocated tile and the rows it does not touch are
+  // never initialized with `dst`'s values. PTOCodegen guarantees this by
+  // binding the result var to the input SSA (ShouldAliasScatterResultToInput).
+  std::string input_ssa = codegen.GetExprAsCode(op->args_[0]);
+  INTERNAL_CHECK(!dst.empty() && dst == input_ssa)
+      << "Internal error: tile.scatter result SSA must alias the dst input tile SSA, got dst=" << dst
+      << ", input=" << input_ssa;
+
   std::ostringstream oss;
   oss << "pto.tscatter ins(" << src << ", " << idx;
   if (!src_type.empty() || !idx_type.empty()) {
@@ -976,6 +986,14 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[1]);
   std::string dst = codegen.GetCurrentResultTarget();
   std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+
+  // DPS in-place contract (mirror of tile.scatter): result must alias the `dst`
+  // input tile (args_[0]) so mask-marked columns are written in-place and the
+  // unselected columns keep `dst`'s values.
+  std::string input_ssa = codegen.GetExprAsCode(op->args_[0]);
+  INTERNAL_CHECK(!dst.empty() && dst == input_ssa)
+      << "Internal error: tile.scatter_mask result SSA must alias the dst input tile SSA, got dst=" << dst
+      << ", input=" << input_ssa;
 
   std::ostringstream oss;
   oss << "pto.tscatter ins(" << src;

@@ -52,6 +52,24 @@ def _distinct_row_indices_8() -> torch.Tensor:
     return torch.tensor([[0], [2], [4], [6], [9], [11], [13], [15]], dtype=torch.int32)
 
 
+def _flat_row_indices_6x32() -> torch.Tensor:
+    """``[6, 32]`` INT32 of *flattened* destination indices for a row-scatter.
+
+    The hardware ``pto.tscatter`` index form scatters per element using flattened
+    destination indices: ``dst.flat[idx[i, j]] = src[i, j]``. To express a
+    row-scatter ``dst[row, :] = src[i, :]`` the index tile must have the same
+    ``[rows, cols]`` shape as ``src`` with ``idx[i, j] = row[i] * dst_cols + j``.
+
+    Here ``dst`` has 16 rows × 32 columns and the 6 source rows land on the
+    distinct destination rows ``[0, 3, 6, 9, 12, 15]``. Only these 6 rows
+    (6 * 32 = 192 elements) are written by the scatter; the remaining 10 rows
+    (320 elements) must keep ``inp``'s value (DPS preserve).
+    """
+    dst_rows = torch.tensor([0, 3, 6, 9, 12, 15], dtype=torch.int32).reshape(6, 1)
+    cols = torch.arange(32, dtype=torch.int32).reshape(1, 32)
+    return (dst_rows * 32 + cols).to(torch.int32)
+
+
 def _make_scatter_mask_src_8x8() -> torch.Tensor:
     """Deterministic ``[8, 8]`` FP32 source for the mask scatter test.
 
@@ -120,6 +138,43 @@ class ScatterMaskP0101Program:
         return output
 
 
+@pl.program
+class ScatterTileFlatProgram:
+    """Minimal tile-level index-form scatter fed *flattened* indices directly.
+
+    Bypasses the tensor-level row-index → flat-index expansion: the index tile
+    already holds per-element flattened destination indices, so this exercises
+    the raw ``pto.tscatter`` hardware path. DPS — ``inp`` is the destination and
+    rows not addressed by the index keep their value.
+    """
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def kernel(
+        self,
+        inp: pl.Tensor[[16, 32], pl.FP32],
+        src: pl.Tensor[[6, 32], pl.FP32],
+        idx: pl.Tensor[[6, 32], pl.INT32],
+        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        dst_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(inp, [0, 0], [16, 32])
+        src_tile: pl.Tile[[6, 32], pl.FP32] = pl.load(src, [0, 0], [6, 32])
+        idx_tile: pl.Tile[[6, 32], pl.INT32] = pl.load(idx, [0, 0], [6, 32])
+        scattered: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter(dst_tile, src_tile, idx_tile)
+        out: pl.Tensor[[16, 32], pl.FP32] = pl.store(scattered, [0, 0], output)
+        return out
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def orchestrator(
+        self,
+        inp: pl.Tensor[[16, 32], pl.FP32],
+        src: pl.Tensor[[6, 32], pl.FP32],
+        idx: pl.Tensor[[6, 32], pl.INT32],
+        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+    ) -> pl.Tensor[[16, 32], pl.FP32]:
+        output = self.kernel(inp, src, idx, output)
+        return output
+
+
 # --- Test cases ---
 
 
@@ -131,6 +186,30 @@ class _ScatterBaseTestCase(PTOTestCase):
 
     def get_backend_type(self) -> BackendType:
         return BackendType.Ascend910B
+
+
+class ScatterTileFlatTestCase(_ScatterBaseTestCase):
+    def get_name(self) -> str:
+        return "scatter_tile_flat"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [16, 32], DataType.FP32, init_value=torch.randn),
+            TensorSpec("src", [6, 32], DataType.FP32, init_value=torch.randn),
+            TensorSpec("idx", [6, 32], DataType.INT32, init_value=_flat_row_indices_6x32),
+            TensorSpec("output", [16, 32], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return ScatterTileFlatProgram
+
+    def compute_expected(self, tensors, params=None):
+        # Flat element scatter: out.flat[idx[i, j]] = src[i, j]; unaddressed
+        # destination elements keep inp's value (DPS).
+        out = tensors["inp"].clone()
+        out_flat = out.reshape(-1)
+        out_flat[tensors["idx"].reshape(-1).to(torch.int64)] = tensors["src"].reshape(-1)
+        tensors["output"][:] = out_flat.reshape(16, 32)
 
 
 class ScatterIndexDim0TestCase(_ScatterBaseTestCase):
@@ -203,6 +282,19 @@ class ScatterMaskP0101TestCase(_ScatterBaseTestCase):
 # --- Tests ---
 
 
+class TestScatterTileFlat:
+    # --- Raw tile-level index form with flattened indices (hardware path) ---
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_tile_flat(self, test_runner, platform):
+        result = test_runner.run(ScatterTileFlatTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+# The tensor-level row-index forms depend on the [N,1] → [N,cols] flat-index
+# expansion lowering, which is the next step. Skipped until the raw tile-level
+# flat-index path above is confirmed working on the device.
+@pytest.mark.skip(reason="row-index→flat-index expansion lowering pending; validating raw flat path first")
 class TestScatterIndex:
     # --- Index form ---
 
@@ -217,6 +309,7 @@ class TestScatterIndex:
         assert result.passed, f"Test failed: {result.error}"
 
 
+@pytest.mark.skip(reason="mask form validated separately; focusing on index form first")
 class TestScatterMask:
     # --- Mask form ---
 

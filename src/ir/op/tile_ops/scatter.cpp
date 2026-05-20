@@ -96,9 +96,13 @@ TypePtr MakeScatterResultType(const std::shared_ptr<const TileType>& dst_type) {
 // Args (3 inputs):
 //   dst     : destination tile (in/out via DPS), must have the same dtype
 //             and column count as `src`
-//   src     : source tile, [rows, cols]   (rows scatter)
-//   indexes : per-row destination indices (rows count = src rows;
-//             dtype constrained by the element-size matching rule)
+//   src     : source tile, [rows, cols]
+//   indexes : per-element *flattened* destination indices, same [rows, cols]
+//             shape as `src` (dtype constrained by the element-size matching
+//             rule). pto.tscatter writes dst.flat[indexes[i, j]] = src[i, j],
+//             so a row-scatter dst[r, :] = src[i, :] is expressed with
+//             indexes[i, j] = r * dst_cols + j. The tensor.scatter lowering
+//             builds these flat indices from the user's [N, 1] row indices.
 //
 // Result: TileType matching `dst` (aliased via set_output_reuses_input(0)).
 //

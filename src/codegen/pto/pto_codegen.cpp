@@ -195,9 +195,19 @@ int GetGMPipeSlotCount(int dir_mask) {
   return 0;
 }
 
-bool ShouldAliasScatterUpdateResultToInput(const AssignStmtPtr& stmt) {
+// DPS scatter family: each op is `set_output_reuses_input(0)` with `dst`/`input`
+// as arg 0, so the result must be written in-place into the input tile rather
+// than a freshly-allocated result tile. tile.scatter / tile.scatter_mask need
+// the same in-place aliasing tile.scatter_update relies on — otherwise the
+// emitted tscatter targets an uninitialized tile and the DPS rows that are not
+// written lose their `input` values.
+bool IsInPlaceScatterFamilyOp(const std::string& op_name) {
+  return op_name == "tile.scatter_update" || op_name == "tile.scatter" || op_name == "tile.scatter_mask";
+}
+
+bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {
   auto call = As<ir::Call>(stmt->value_);
-  if (!call || call->op_->name_ != "tile.scatter_update" || call->args_.empty()) {
+  if (!call || !IsInPlaceScatterFamilyOp(call->op_->name_) || call->args_.empty()) {
     return false;
   }
 
@@ -1341,7 +1351,7 @@ void PTOCodegen::EmitExtraAllocTiles() {
 void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
   const bool is_set_validshape = call && call->op_->name_ == "tile.set_validshape";
-  const bool alias_scatter_result_to_input = ShouldAliasScatterUpdateResultToInput(op);
+  const bool alias_scatter_result_to_input = ShouldAliasScatterResultToInput(op);
   const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
@@ -1360,7 +1370,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         if (alias_scatter_result_to_input) {
           result_buf = GetExprAsCode(call->args_[0]);
           INTERNAL_CHECK(!result_buf.empty())
-              << "Internal error: tile.scatter_update result must alias the input tile SSA";
+              << "Internal error: " << call->op_->name_ << " result must alias the input tile SSA";
           BindVarToMlir(op->var_, result_buf);
         } else {
           // Prefer per-var SSA name from fs_.var_to_mlir (set during per-var alloc binding)

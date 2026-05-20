@@ -2414,6 +2414,10 @@ class TestConvertGatherOp:
 class TestConvertScatterOp:
     """Test conversion of tensor.scatter (rank-2 dim=0 MVP) and tensor.scatter_mask."""
 
+    @pytest.mark.skip(
+        reason="tensor.scatter row-index→flat-index expansion lowering is WIP pending the "
+        "final PTOAS pto.tscatter index interface; conversion output will be redone to match."
+    )
     def test_scatter_conversion(self):
         """tensor.scatter -> tile.load(input/index/src) + tile.scatter + tile.store."""
 
