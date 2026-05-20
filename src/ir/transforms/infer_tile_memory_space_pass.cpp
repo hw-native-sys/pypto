@@ -651,6 +651,19 @@ class TileMemorySpaceMutator : public IRMutator {
         }
       }
 
+      // ISA constraint on the Acc→Vec data path: the destination tile is ND
+      // (row_major, none_box). The hardware cube→vec pipe (tpush_to_aiv /
+      // tpop_from_aic) un-fractalizes the data during transfer, so the tile
+      // arriving in Vec is physically ND regardless of the source's NZ form
+      // in Acc. Label the move's dst accordingly so downstream consumers see
+      // the correct layout without a redundant repair tmov.
+      auto producer_mem_it = var_memory_.find(var);
+      if (producer_mem_it != var_memory_.end() && producer_mem_it->second == MemorySpace::Acc &&
+          key.second == MemorySpace::Vec) {
+        required_blayout = TileLayout::row_major;
+        required_slayout = TileLayout::none_box;
+      }
+
       InsertMoveStmt(stmts, var, key.second, span, required_blayout, required_slayout);
       changed = true;
     }

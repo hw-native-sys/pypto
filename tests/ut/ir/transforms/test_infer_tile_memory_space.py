@@ -477,18 +477,15 @@ class TestInferTileMemorySpaceOtherOps:
                     y_mat, target_memory=pl.MemorySpace.Right
                 )
                 z_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(x_left, y_right)
-                z_tile_V: pl.Tile[
-                    [16, 128],
-                    pl.FP32,
-                    pl.MemorySpace.Vec,
-                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
-                ] = pl.move(z_tile, target_memory=pl.MemorySpace.Vec)
-                w_tile: pl.Tile[
-                    [16, 128],
-                    pl.FP32,
-                    pl.MemorySpace.Vec,
-                    pl.TileView(blayout=pl.TileLayout.col_major, slayout=pl.TileLayout.row_major),
-                ] = pl.tile.add(z_tile_V, z_tile_V)
+                # ISA constraint: Acc→Vec data path lands ND in Vec; the inserted
+                # move pins blayout=row_major, slayout=none_box on its kwargs.
+                z_tile_V: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                w_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tile.add(z_tile_V, z_tile_V)
                 out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(w_tile, [0, 0], out_0)
                 return out_0
 
