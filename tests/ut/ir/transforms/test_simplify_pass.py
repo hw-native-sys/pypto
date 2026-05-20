@@ -1321,10 +1321,9 @@ class TestTileCastFolding:
     """
 
     def test_eliminates_same_dtype_cast(self):
-        """``tile.cast(x, target_type=dtype(x))`` simplifies — the Call is
-        replaced with the source Var, leaving an alias-assign that downstream
-        DCE will clean up later. We assert by scanning that no ``tile.cast``
-        Call survives after Simplify."""
+        """``tile.cast(x, target_type=dtype(x))`` simplifies — the Call AND the
+        bound LHS alias-assign both drop; downstream uses of the LHS resolve
+        to the source Var directly via var_remap_."""
 
         @pl.program
         class Before:
@@ -1341,13 +1340,22 @@ class TestTileCastFolding:
                 out: pl.Tensor[[16, 32], pl.FP32] = pl.store(t_out, [0, 0], out)
                 return out
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                x: pl.Tensor[[16, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                t_in: pl.Tile[[16, 32], pl.FP32] = pl.load(
+                    x, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec
+                )
+                out: pl.Tensor[[16, 32], pl.FP32] = pl.store(t_in, [0, 0], out)
+                return out
+
         after = passes.simplify()(Before)
-        for func in after.functions.values():
-            for stmt in TestAsLayoutFolding._iter_stmts(func.body):
-                if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
-                    assert stmt.value.op.name != "tile.cast", (
-                        f"same-dtype tile.cast should fold, but found: {stmt}"
-                    )
+        ir.assert_structural_equal(after, Expected)
 
     def test_preserves_cross_dtype_cast(self):
         """Cross-dtype cast (FP16→FP32) is real conversion and must survive."""

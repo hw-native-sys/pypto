@@ -215,6 +215,20 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
       }
     }
 
+    // Tile alias-fold: when a Call-based simplification (e.g. SimplifyTileCast)
+    // turned the RHS into the source Var, record the substitution via
+    // var_remap_ so downstream uses resolve directly to the source, and drop
+    // this now-trivial assign by returning an empty SeqStmts. The surrounding
+    // SeqStmts::Flatten skips empty inner nodes, so the alias leaves no trace.
+    if (As<TileType>(new_type) && multi_assigned_.find(op->var_.get()) == multi_assigned_.end()) {
+      if (auto rhs_var = std::dynamic_pointer_cast<const Var>(new_value)) {
+        if (rhs_var.get() != new_var.get()) {
+          var_remap_[op->var_.get()] = rhs_var;
+          return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
+        }
+      }
+    }
+
     if (new_value.get() == op->value_.get() && new_var.get() == op->var_.get()) return op;
     auto result = MutableCopy(op);
     result->var_ = new_var;
