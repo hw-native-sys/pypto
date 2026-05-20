@@ -243,6 +243,82 @@ def _build_sibling_loops_program():
     return SiblingLoopPhaseFence
 
 
+def _build_multiloop_chain_program():
+    branches = _BRANCHES
+    consumers = _BRANCHES
+    range_consumers = 2
+    tile_m = _TILE_M
+    big_n = _BIG_N
+    big_m = (2 * branches + 2 * consumers + 2 * range_consumers) * tile_m
+
+    @pl.program
+    class MultiLoopChainPhaseFence:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row_offset, 0], [tile_m, big_n])
+            result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, 1.0)
+            ret: pl.Tensor[[big_m, big_n], pl.FP32] = pl.store(result, [row_offset, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k2(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row_offset, 0], [tile_m, big_n])
+            result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, 1.0)
+            ret: pl.Tensor[[big_m, big_n], pl.FP32] = pl.store(result, [row_offset, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k3(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row_offset, 0], [tile_m, big_n])
+            result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, 1.0)
+            ret: pl.Tensor[[big_m, big_n], pl.FP32] = pl.store(result, [row_offset, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            with pl.manual_scope():
+                tids = pl.array.create(branches, pl.TASK_ID)
+                tids2 = pl.array.create(consumers, pl.TASK_ID)
+                for r1 in pl.range(2):
+                    for p in pl.parallel(branches):
+                        row: pl.Scalar[pl.INDEX] = (r1 * branches + p) * tile_m
+                        out, tid = pl.submit(self.k1, data, row, out, deps=[tids])
+                        tids[p] = tid
+                for r2 in pl.range(2):
+                    for p in pl.parallel(consumers):
+                        row: pl.Scalar[pl.INDEX] = (2 * branches + r2 * consumers + p) * tile_m
+                        out, tid2 = pl.submit(self.k2, data, row, out, deps=[tids])
+                        tids2[p] = tid2
+                for r3 in pl.range(2):
+                    for p in pl.range(range_consumers):
+                        row: pl.Scalar[pl.INDEX] = (
+                            2 * branches + 2 * consumers + r3 * range_consumers + p
+                        ) * tile_m
+                        out, _ = pl.submit(self.k3, data, row, out, deps=[tids2])
+            return out
+
+    return MultiLoopChainPhaseFence
+
+
 class _PhaseFenceCase(PTOTestCase):
     __test__ = False
 
@@ -311,6 +387,16 @@ def _sibling_loops_case(*, platform: str | None = None):
     )
 
 
+def _multiloop_chain_case(*, platform: str | None = None):
+    rows = (2 * _BRANCHES + 2 * _BRANCHES + 2 * 2) * _TILE_M
+    return _PhaseFenceCase(
+        "phase_fence_multiloop_chain",
+        _build_multiloop_chain_program,
+        rows=rows,
+        platform=platform,
+    )
+
+
 class TestPhaseFenceDepCompressionCorrectness:
     @pytest.fixture(autouse=True)
     def _skip_when_collecting_l2_swimlane(self, test_runner):
@@ -347,6 +433,11 @@ class TestPhaseFenceDepCompressionCorrectness:
     def test_sibling_loops_correctness(self, test_runner, platform):
         result = test_runner.run(_sibling_loops_case(platform=platform))
         assert result.passed, f"sibling-loop phase-fence failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_multiloop_chain_correctness(self, test_runner, platform):
+        result = test_runner.run(_multiloop_chain_case(platform=platform))
+        assert result.passed, f"multi-loop chain phase-fence failed: {result.error}"
 
 
 @pytest.fixture(scope="module")
