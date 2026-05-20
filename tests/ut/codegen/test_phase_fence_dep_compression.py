@@ -328,6 +328,90 @@ class TestPhaseFenceDepCompressionCodegen:
             "for (int64_t r3 =",
         )
 
+    def test_dense_mixed_phase_graph_miniature(self):
+        rows, cols = 1536, 128
+        tile_r, tile_c = 32, 32
+        branches = 4
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, 1.0)
+                ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.manual_scope():
+                    tids_a = pl.array.create(branches, pl.TASK_ID)
+                    tids_b = pl.array.create(branches, pl.TASK_ID)
+                    for group in pl.parallel(2):
+                        tids_local = pl.array.create(branches, pl.TASK_ID)
+                        for step in pl.range(2):
+                            for deep_phase in pl.range(2):
+                                for lane in pl.parallel(branches):
+                                    row_local: pl.Scalar[pl.INDEX] = (
+                                        (((group * 2 + step) * 2 + deep_phase) * branches + lane) * tile_r
+                                    )
+                                    col_local: pl.Scalar[pl.INDEX] = lane * tile_c
+                                    out, tid_local = pl.submit(
+                                        self.kern, x, out, row_local, col_local, deps=[tids_local]
+                                    )
+                                    tids_local[lane] = tid_local
+                    for phase in pl.range(2):
+                        for p in pl.parallel(branches):
+                            row_a: pl.Scalar[pl.INDEX] = ((16 + phase * 2 * branches + p) * tile_r)
+                            col: pl.Scalar[pl.INDEX] = p * tile_c
+                            out, tid_a = pl.submit(self.kern, x, out, row_a, col, deps=[tids_a])
+                            tids_a[p] = tid_a
+
+                            row_b: pl.Scalar[pl.INDEX] = ((16 + phase * 2 * branches + branches + p) * tile_r)
+                            out, tid_b = pl.submit(self.kern, x, out, row_b, col, deps=[tids_b])
+                            tids_b[p] = tid_b
+
+                    for p2 in pl.parallel(branches):
+                        row_cross: pl.Scalar[pl.INDEX] = ((32 + p2) * tile_r)
+                        col_cross: pl.Scalar[pl.INDEX] = p2 * tile_c
+                        out, _ = pl.submit(self.kern, x, out, row_cross, col_cross, deps=[tids_a])
+
+                    prev = tids_a[0]
+                    out, _ = pl.submit(self.kern, x, out, 36 * tile_r, 0, deps=[prev])
+                    out, _ = pl.submit(self.kern, x, out, 37 * tile_r, 0, deps=[tids_b])
+                return out
+
+        code = _compile_program(Prog)
+        assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 3, code
+        assert "PTO2TaskId params_phase_fence_barrier_0_deps[4];" in code, code
+        assert "PTO2TaskId params_phase_fence_barrier_1_deps[4];" in code, code
+        assert "PTO2TaskId params_phase_fence_barrier_2_deps[4];" in code, code
+        assert len(re.findall(r"PTO2TaskId params_t\d+_deps\[4\];", code)) >= 2, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+        _assert_ordered(
+            code,
+            "for (int64_t group =",
+            "for (int64_t step =",
+            "for (int64_t deep_phase =",
+            "rt_submit_dummy_task(params_phase_fence_barrier_0)",
+            "for (int64_t lane =",
+            "for (int64_t phase =",
+            "rt_submit_dummy_task(params_phase_fence_barrier_1)",
+            "rt_submit_dummy_task(params_phase_fence_barrier_2)",
+            "for (int64_t p =",
+            "for (int64_t p2 =",
+        )
+
     def test_nested_parallel_does_not_emit_outer_dummy_barrier(self):
         rows, cols = 256, 128
         tile_r, tile_c = 16, 32

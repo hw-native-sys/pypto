@@ -31,6 +31,13 @@ _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output"
 _BRANCHES = 4
 _TILE_M = 32
 _BIG_N = 32
+_DENSE_BIG_N = 128
+_DENSE_PHASES = 2
+_DENSE_GROUPS = 2
+_DENSE_STEPS = 2
+_DENSE_DEEP_PHASES = 2
+_DENSE_CORRECTNESS_BRANCHES = 4
+_DENSE_SWIMLANE_BRANCHES = 8
 _EXTRA_SWIMLANE_ENV = "PYPTO_PHASE_FENCE_EXTRA_SWIMLANE"
 
 
@@ -86,6 +93,11 @@ def _assert_multiloop_chain_shape(swimlane_data: dict) -> None:
         f"multi-loop downstream stage starts at {after_k1_start:.2f}us before final k1 stage "
         f"ends at {k1_stage1_end:.2f}us"
     )
+
+
+def _assert_dense_mixed_shape(swimlane_data: dict, *, branches: int) -> None:
+    expected = _dense_mixed_task_bands(branches=branches)
+    _assert_min_task_count(swimlane_data, expected=expected)
 
 
 def _new_swimlane_file(test_runner, case: PTOTestCase, *, label: str) -> Path:
@@ -354,14 +366,141 @@ def _build_multiloop_chain_program():
     return MultiLoopChainPhaseFence
 
 
+def _dense_mixed_task_bands(*, branches: int) -> int:
+    return (
+        2 * branches
+        + _DENSE_PHASES * 2 * branches
+        + _DENSE_GROUPS * _DENSE_STEPS * _DENSE_DEEP_PHASES * 2 * branches
+        + _DENSE_STEPS * 2 * branches
+        + 4
+        + 2 * branches
+    )
+
+
+def _build_dense_mixed_phase_graph_program(*, branches: int):
+    tile_m = _TILE_M
+    big_n = _DENSE_BIG_N
+    phases = _DENSE_PHASES
+    groups = _DENSE_GROUPS
+    steps = _DENSE_STEPS
+    deep_phases = _DENSE_DEEP_PHASES
+    big_m = _dense_mixed_task_bands(branches=branches) * tile_m
+
+    @pl.program
+    class DenseMixedPhaseGraph:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel_stripe(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row_offset, 0], [tile_m, big_n])
+            result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, 1.0)
+            ret: pl.Tensor[[big_m, big_n], pl.FP32] = pl.store(result, [row_offset, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            with pl.manual_scope():
+                tids_a = pl.array.create(branches, pl.TASK_ID)
+                tids_b = pl.array.create(branches, pl.TASK_ID)
+                tids_c = pl.array.create(branches, pl.TASK_ID)
+                tids_d = pl.array.create(branches, pl.TASK_ID)
+
+                for p in pl.parallel(branches):
+                    row_a: pl.Scalar[pl.INDEX] = p * tile_m
+                    out, tid_a = pl.submit(self.kernel_stripe, data, row_a, out)
+                    tids_a[p] = tid_a
+                    row_b: pl.Scalar[pl.INDEX] = (branches + p) * tile_m
+                    out, tid_b = pl.submit(self.kernel_stripe, data, row_b, out)
+                    tids_b[p] = tid_b
+
+                stage1_base: pl.Scalar[pl.INDEX] = 2 * branches
+                for phase in pl.range(phases):
+                    phase_base: pl.Scalar[pl.INDEX] = stage1_base + phase * 2 * branches
+                    for p in pl.parallel(branches):
+                        row_a2: pl.Scalar[pl.INDEX] = (phase_base + p) * tile_m
+                        out, tid_a2 = pl.submit(self.kernel_stripe, data, row_a2, out, deps=[tids_a])
+                        tids_a[p] = tid_a2
+                        row_b2: pl.Scalar[pl.INDEX] = (phase_base + branches + p) * tile_m
+                        out, tid_b2 = pl.submit(self.kernel_stripe, data, row_b2, out, deps=[tids_b])
+                        tids_b[p] = tid_b2
+
+                stage2a_base: pl.Scalar[pl.INDEX] = stage1_base + phases * 2 * branches
+                for group in pl.parallel(groups):
+                    tids_local_c = pl.array.create(branches, pl.TASK_ID)
+                    tids_local_d = pl.array.create(branches, pl.TASK_ID)
+                    for step in pl.range(steps):
+                        for deep_phase in pl.range(deep_phases):
+                            nested_base: pl.Scalar[pl.INDEX] = (
+                                stage2a_base
+                                + (((group * steps + step) * deep_phases + deep_phase) * 2 * branches)
+                            )
+                            for lane in pl.parallel(branches):
+                                row_local_c: pl.Scalar[pl.INDEX] = (nested_base + lane) * tile_m
+                                out, tid_local_c = pl.submit(
+                                    self.kernel_stripe, data, row_local_c, out, deps=[tids_local_c]
+                                )
+                                tids_local_c[lane] = tid_local_c
+                                row_local_d: pl.Scalar[pl.INDEX] = (nested_base + branches + lane) * tile_m
+                                out, tid_local_d = pl.submit(
+                                    self.kernel_stripe, data, row_local_d, out, deps=[tids_local_d]
+                                )
+                                tids_local_d[lane] = tid_local_d
+
+                stage2b_base: pl.Scalar[pl.INDEX] = stage2a_base + groups * steps * deep_phases * 2 * branches
+                for step in pl.range(steps):
+                    step_base2: pl.Scalar[pl.INDEX] = stage2b_base + step * 2 * branches
+                    for p in pl.parallel(branches):
+                        row_cross_a: pl.Scalar[pl.INDEX] = (step_base2 + p) * tile_m
+                        out, tid_c = pl.submit(self.kernel_stripe, data, row_cross_a, out, deps=[tids_a])
+                        tids_c[p] = tid_c
+                        row_cross_b: pl.Scalar[pl.INDEX] = (step_base2 + branches + p) * tile_m
+                        out, tid_d = pl.submit(self.kernel_stripe, data, row_cross_b, out, deps=[tids_b])
+                        tids_d[p] = tid_d
+
+                stage3_base: pl.Scalar[pl.INDEX] = stage2b_base + steps * 2 * branches
+                for r in pl.range(2):
+                    prev_c = tids_c[0]
+                    row_scalar: pl.Scalar[pl.INDEX] = (stage3_base + r * 2) * tile_m
+                    out, _ = pl.submit(self.kernel_stripe, data, row_scalar, out, deps=[prev_c])
+                    row_single: pl.Scalar[pl.INDEX] = (stage3_base + r * 2 + 1) * tile_m
+                    out, _ = pl.submit(self.kernel_stripe, data, row_single, out, deps=[tids_d])
+
+                stage4_base: pl.Scalar[pl.INDEX] = stage3_base + 4
+                for p in pl.parallel(branches):
+                    row_final_c: pl.Scalar[pl.INDEX] = (stage4_base + p) * tile_m
+                    out, _ = pl.submit(self.kernel_stripe, data, row_final_c, out, deps=[tids_c])
+                    row_final_d: pl.Scalar[pl.INDEX] = (stage4_base + branches + p) * tile_m
+                    out, _ = pl.submit(self.kernel_stripe, data, row_final_d, out, deps=[tids_d])
+            return out
+
+    return DenseMixedPhaseGraph
+
+
 class _PhaseFenceCase(PTOTestCase):
     __test__ = False
 
-    def __init__(self, name: str, program_builder, *, rows: int, platform: str | None = None, config=None):
+    def __init__(
+        self,
+        name: str,
+        program_builder,
+        *,
+        rows: int,
+        cols: int = _BIG_N,
+        platform: str | None = None,
+        config=None,
+    ):
         super().__init__(config, platform=platform)
         self._name = name
         self._program_builder = program_builder
         self._rows = rows
+        self._cols = cols
 
     def get_name(self) -> str:
         return self._name
@@ -371,8 +510,8 @@ class _PhaseFenceCase(PTOTestCase):
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("data", [self._rows, _BIG_N], DataType.FP32, init_value=torch.randn),
-            TensorSpec("out", [self._rows, _BIG_N], DataType.FP32, init_value=0.0, is_output=True),
+            TensorSpec("data", [self._rows, self._cols], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [self._rows, self._cols], DataType.FP32, init_value=0.0, is_output=True),
         ]
 
     def get_program(self) -> Any:
@@ -432,6 +571,17 @@ def _multiloop_chain_case(*, platform: str | None = None):
     )
 
 
+def _dense_mixed_case(*, branches: int = _DENSE_CORRECTNESS_BRANCHES, platform: str | None = None):
+    rows = _dense_mixed_task_bands(branches=branches) * _TILE_M
+    return _PhaseFenceCase(
+        f"phase_fence_dense_mixed_n{branches}",
+        lambda: _build_dense_mixed_phase_graph_program(branches=branches),
+        rows=rows,
+        cols=_DENSE_BIG_N,
+        platform=platform,
+    )
+
+
 class TestPhaseFenceDepCompressionCorrectness:
     @pytest.fixture(autouse=True)
     def _skip_when_collecting_l2_swimlane(self, test_runner):
@@ -474,19 +624,29 @@ class TestPhaseFenceDepCompressionCorrectness:
         result = test_runner.run(_multiloop_chain_case(platform=platform))
         assert result.passed, f"multi-loop chain phase-fence failed: {result.error}"
 
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_dense_mixed_phase_graph_correctness(self, test_runner, platform):
+        result = test_runner.run(_dense_mixed_case(platform=platform))
+        assert result.passed, f"dense mixed phase-fence failed: {result.error}"
+
 
 @pytest.fixture(scope="module")
-def multiloop_chain_swimlane(test_runner) -> dict:
+def dense_mixed_swimlane(test_runner) -> dict:
     return _new_swimlane_json(
         test_runner,
-        _multiloop_chain_case(),
-        label="multi-loop chain phase-fence",
+        _dense_mixed_case(branches=_DENSE_SWIMLANE_BRANCHES),
+        label="dense mixed phase-fence",
     )
 
 
 class TestPhaseFenceDepCompressionSwimlane:
-    def test_multiloop_chain_default(self, multiloop_chain_swimlane: dict):
-        _assert_multiloop_chain_shape(multiloop_chain_swimlane)
+    def test_dense_mixed_default(self, dense_mixed_swimlane: dict):
+        _assert_dense_mixed_shape(dense_mixed_swimlane, branches=_DENSE_SWIMLANE_BRANCHES)
+
+    def test_multiloop_chain_default(self, test_runner):
+        _require_extra_swimlane_case("multi-loop chain swimlane")
+        data = _new_swimlane_json(test_runner, _multiloop_chain_case(), label="multi-loop chain phase-fence")
+        _assert_multiloop_chain_shape(data)
 
     def test_submit_three_level_strict(self, test_runner):
         _require_extra_swimlane_case("three-level submit swimlane")
