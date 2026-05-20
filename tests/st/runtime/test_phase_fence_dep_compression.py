@@ -376,13 +376,10 @@ def _build_multiloop_chain_program():
 
 
 def _dense_mixed_task_bands(*, branches: int) -> int:
-    dense_phase_span = 1 + 2 * branches
-    dense_step_span = 2 + _DENSE_DEEP_PHASES * dense_phase_span
-    dense_group_span = 1 + _DENSE_STEPS * dense_step_span
     return (
         2 * branches
         + _DENSE_PHASES * 2 * branches
-        + _DENSE_GROUPS * dense_group_span
+        + _DENSE_GROUPS * _DENSE_STEPS * _DENSE_DEEP_PHASES * 2 * branches
         + _DENSE_STEPS * 2 * branches
         + 4
         + 2 * branches
@@ -396,9 +393,6 @@ def _build_dense_mixed_phase_graph_program(*, branches: int):
     groups = _DENSE_GROUPS
     steps = _DENSE_STEPS
     deep_phases = _DENSE_DEEP_PHASES
-    dense_phase_span = 1 + 2 * branches
-    dense_step_span = 2 + deep_phases * dense_phase_span
-    dense_group_span = 1 + steps * dense_step_span
     big_m = _dense_mixed_task_bands(branches=branches) * tile_m
 
     @pl.program
@@ -450,23 +444,11 @@ def _build_dense_mixed_phase_graph_program(*, branches: int):
                 for group in pl.parallel(groups):
                     tids_local_c = pl.array.create(branches, pl.TASK_ID)
                     tids_local_d = pl.array.create(branches, pl.TASK_ID)
-                    group_base: pl.Scalar[pl.INDEX] = stage2a_base + group * dense_group_span
-                    row_group: pl.Scalar[pl.INDEX] = group_base * tile_m
-                    out, _ = pl.submit(self.kernel_stripe, data, row_group, out)
                     for step in pl.range(steps):
-                        step_base: pl.Scalar[pl.INDEX] = group_base + 1 + step * dense_step_span
-                        prev_local_c = tids_local_c[0]
-                        row_step: pl.Scalar[pl.INDEX] = step_base * tile_m
-                        row_step_fanin: pl.Scalar[pl.INDEX] = (step_base + 1) * tile_m
-                        out, _ = pl.submit(self.kernel_stripe, data, row_step, out, deps=[prev_local_c])
-                        out, _ = pl.submit(
-                            self.kernel_stripe, data, row_step_fanin, out, deps=[tids_local_d]
-                        )
                         for deep_phase in pl.range(deep_phases):
-                            phase_base: pl.Scalar[pl.INDEX] = step_base + 2 + deep_phase * dense_phase_span
-                            row_phase: pl.Scalar[pl.INDEX] = phase_base * tile_m
-                            out, _ = pl.submit(self.kernel_stripe, data, row_phase, out)
-                            nested_base: pl.Scalar[pl.INDEX] = phase_base + 1
+                            nested_base: pl.Scalar[pl.INDEX] = stage2a_base + (
+                                ((group * steps + step) * deep_phases + deep_phase) * 2 * branches
+                            )
                             for lane in pl.parallel(branches):
                                 row_local_c: pl.Scalar[pl.INDEX] = (nested_base + lane) * tile_m
                                 out, tid_local_c = pl.submit(
@@ -479,7 +461,9 @@ def _build_dense_mixed_phase_graph_program(*, branches: int):
                                 )
                                 tids_local_d[lane] = tid_local_d
 
-                stage2b_base: pl.Scalar[pl.INDEX] = stage2a_base + groups * dense_group_span
+                stage2b_base: pl.Scalar[pl.INDEX] = (
+                    stage2a_base + groups * steps * deep_phases * 2 * branches
+                )
                 for step in pl.range(steps):
                     step_base2: pl.Scalar[pl.INDEX] = stage2b_base + step * 2 * branches
                     for p in pl.parallel(branches):

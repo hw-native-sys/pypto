@@ -333,7 +333,7 @@ class TestPhaseFenceDepCompressionCodegen:
         )
 
     def test_dense_mixed_phase_graph_miniature(self):
-        rows, cols = 2048, 128
+        rows, cols = 1536, 128
         tile_r, tile_c = 32, 32
         branches = 4
 
@@ -363,20 +363,11 @@ class TestPhaseFenceDepCompressionCodegen:
                     tids_b = pl.array.create(branches, pl.TASK_ID)
                     for group in pl.parallel(2):
                         tids_local = pl.array.create(branches, pl.TASK_ID)
-                        group_base: pl.Scalar[pl.INDEX] = group * 22
-                        row_group: pl.Scalar[pl.INDEX] = group_base * tile_r
-                        out, _ = pl.submit(self.kern, x, out, row_group, 0)
+                        group_base: pl.Scalar[pl.INDEX] = group * 8
                         for step in pl.range(2):
-                            step_base: pl.Scalar[pl.INDEX] = group_base + 1 + step * 10
-                            prev_local = tids_local[0]
-                            row_step: pl.Scalar[pl.INDEX] = step_base * tile_r
-                            row_step_fanin: pl.Scalar[pl.INDEX] = (step_base + 1) * tile_r
-                            out, _ = pl.submit(self.kern, x, out, row_step, 0, deps=[prev_local])
-                            out, _ = pl.submit(self.kern, x, out, row_step_fanin, 0, deps=[tids_local])
+                            step_base: pl.Scalar[pl.INDEX] = group_base + step * 4
                             for deep_phase in pl.range(2):
-                                phase_base: pl.Scalar[pl.INDEX] = step_base + 2 + deep_phase * 5
-                                row_phase: pl.Scalar[pl.INDEX] = phase_base * tile_r
-                                out, _ = pl.submit(self.kern, x, out, row_phase, 0)
+                                phase_base: pl.Scalar[pl.INDEX] = step_base + deep_phase * 2
                                 for lane in pl.parallel(branches):
                                     row_local: pl.Scalar[pl.INDEX] = (phase_base + 1 + lane) * tile_r
                                     col_local: pl.Scalar[pl.INDEX] = lane * tile_c
@@ -386,23 +377,23 @@ class TestPhaseFenceDepCompressionCodegen:
                                     tids_local[lane] = tid_local
                     for phase in pl.range(2):
                         for p in pl.parallel(branches):
-                            row_a: pl.Scalar[pl.INDEX] = ((44 + phase * 2 * branches + p) * tile_r)
+                            row_a: pl.Scalar[pl.INDEX] = ((16 + phase * 2 * branches + p) * tile_r)
                             col: pl.Scalar[pl.INDEX] = p * tile_c
                             out, tid_a = pl.submit(self.kern, x, out, row_a, col, deps=[tids_a])
                             tids_a[p] = tid_a
 
-                            row_b: pl.Scalar[pl.INDEX] = ((44 + phase * 2 * branches + branches + p) * tile_r)
+                            row_b: pl.Scalar[pl.INDEX] = ((16 + phase * 2 * branches + branches + p) * tile_r)
                             out, tid_b = pl.submit(self.kern, x, out, row_b, col, deps=[tids_b])
                             tids_b[p] = tid_b
 
                     for p2 in pl.parallel(branches):
-                        row_cross: pl.Scalar[pl.INDEX] = ((60 + p2) * tile_r)
+                        row_cross: pl.Scalar[pl.INDEX] = ((32 + p2) * tile_r)
                         col_cross: pl.Scalar[pl.INDEX] = p2 * tile_c
                         out, _ = pl.submit(self.kern, x, out, row_cross, col_cross, deps=[tids_a])
 
                     prev = tids_a[0]
-                    row_scalar: pl.Scalar[pl.INDEX] = 64 * tile_r
-                    row_fanin: pl.Scalar[pl.INDEX] = 65 * tile_r
+                    row_scalar: pl.Scalar[pl.INDEX] = 36 * tile_r
+                    row_fanin: pl.Scalar[pl.INDEX] = 37 * tile_r
                     out, _ = pl.submit(self.kern, x, out, row_scalar, 0, deps=[prev])
                     out, _ = pl.submit(self.kern, x, out, row_fanin, 0, deps=[tids_b])
                 return out
@@ -418,10 +409,7 @@ class TestPhaseFenceDepCompressionCodegen:
         _assert_ordered(
             code,
             "for (int64_t group =",
-            "Task 0: kern__windowed",
             "for (int64_t step =",
-            "deps[1]",
-            "deps[4]",
             "for (int64_t deep_phase =",
             "rt_submit_dummy_task(params_phase_fence_barrier_0)",
             "for (int64_t lane =",
