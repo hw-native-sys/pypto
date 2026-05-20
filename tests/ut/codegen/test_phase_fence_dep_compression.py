@@ -215,6 +215,92 @@ class TestPhaseFenceDepCompressionCodegen:
         _assert_single_barrier_shape(code, fanin=branches)
         assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
 
+    def test_nested_parallel_does_not_emit_outer_dummy_barrier(self):
+        rows, cols = 256, 128
+        tile_r, tile_c = 16, 32
+        outer_branches = 2
+        inner_branches = 4
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.manual_scope():
+                    tids = pl.array.create(inner_branches, pl.TASK_ID)
+                    for outer in pl.parallel(outer_branches):
+                        for inner in pl.parallel(inner_branches):
+                            row: pl.Scalar[pl.INDEX] = (outer * inner_branches + inner) * tile_r
+                            col: pl.Scalar[pl.INDEX] = inner * tile_c
+                            out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
+                            tids[inner] = tid
+                return out
+
+        code = _compile_program(Prog)
+        _assert_single_barrier_shape(code, fanin=inner_branches)
+        assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
+
+    def test_parallel_range_parallel_does_not_emit_outer_dummy_barrier(self):
+        rows, cols = 256, 128
+        tile_r, tile_c = 16, 32
+        outer_branches = 2
+        phases = 2
+        inner_branches = 4
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.manual_scope():
+                    tids = pl.array.create(inner_branches, pl.TASK_ID)
+                    for outer in pl.parallel(outer_branches):
+                        for phase in pl.range(phases):
+                            for inner in pl.parallel(inner_branches):
+                                row: pl.Scalar[pl.INDEX] = (
+                                    (outer * phases + phase) * inner_branches + inner
+                                ) * tile_r
+                                col: pl.Scalar[pl.INDEX] = inner * tile_c
+                                out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
+                                tids[inner] = tid
+                return out
+
+        code = _compile_program(Prog)
+        _assert_single_barrier_shape(code, fanin=inner_branches)
+        assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
+
     def test_two_independent_arrays_emit_independent_barriers(self):
         rows, cols = 256, 128
         tile_r, tile_c = 32, 32

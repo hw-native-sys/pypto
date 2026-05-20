@@ -730,7 +730,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (in_manual_scope_depth_ > 0 && for_stmt->kind_ == ForKind::Parallel) {
       for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
         const auto& iter_arg = for_stmt->iter_args_[i];
-        if (!iter_arg || !ForBodyHasManualDepOnArray(for_stmt->body_, iter_arg.get())) continue;
+        if (!iter_arg || !ForBodyHasManualDepOnArray(for_stmt->body_, iter_arg.get(),
+                                                     /*descend_into_for=*/false)) {
+          continue;
+        }
         auto source = TryResolveExplicitPhaseFenceArrayForVar(iter_arg.get());
         if (!source.has_value()) continue;
         pre_loop_phase_fence_barriers[iter_arg.get()] = EmitPhaseFenceBarrier(*source);
