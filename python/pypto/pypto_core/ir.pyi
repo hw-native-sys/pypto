@@ -1150,7 +1150,7 @@ class _CommLayoutModule:
     Values mirror `offsetof(::CommContext, ...)` on the runtime header and are
     pinned by `static_assert` in `include/pypto/codegen/distributed/comm_layout.h`.
     Treat any drift between these constants and the literals embedded in emitted
-    CommRemotePtr kernels as a runtime/codegen ABI break.
+    CommRemoteOffset kernels as a runtime/codegen ABI break.
     """
 
     RANK_ID_OFFSET: Final[int]

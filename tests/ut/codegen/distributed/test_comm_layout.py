@@ -10,7 +10,7 @@
 """Compile-time CommContext layout pin test.
 
 The runtime `CommContext` struct (runtime/src/common/platform_comm/comm_context.h)
-is consumed by emitted distributed kernels via the inline `CommRemotePtr` helper,
+is consumed by emitted distributed kernels via the `CommRemoteOffset` helper,
 which indexes the struct using literal byte offsets. PyPTO codegen mirrors those
 offsets in `include/pypto/codegen/distributed/comm_layout.h` and pins them with
 `static_assert`. This test re-asserts the same literals from Python so a runtime

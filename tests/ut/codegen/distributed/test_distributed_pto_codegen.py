@@ -14,15 +14,23 @@ Covers the InCore PTO codegen for ``pld.tile.remote_load``,
 
 - CommContext ``!pto.ptr<i64>`` parameter is appended at the end of the
   ``func.func`` signature, one per ``DistributedTensor`` IR param.
-- One module-level ``func.func @CommRemotePtr_<dtype>`` helper is emitted
-  per distinct DistributedTensor element dtype consumed by remote ops; the
-  per-op lowering at the call site becomes a single
-  ``func.call @CommRemotePtr_<dtype>(...)``.
-- The CommRemotePtr helper's byte-offset literals are pinned to the
-  constants in ``include/pypto/codegen/distributed/comm_layout.h``.
-- ``pto.addptr`` (inside the helper) produces a peer ``!pto.ptr<dtype>``;
-  a fresh ``pto.make_tensor_view`` + ``pto.partition_view`` (at the call
-  site, on the returned peer pointer) builds the peer view.
+- One module-level ``func.func @CommRemoteOffset_<dtype>`` helper is
+  emitted per distinct element dtype consumed by remote ops. The helper
+  reads the CommContext field, computes the byte→element delta between
+  the local rank's window slice and the peer's slice, and returns it as
+  an ``index``. Each remote-op call site is a single
+  ``func.call @CommRemoteOffset_<dtype>(ctx, peer) -> index`` followed by
+  ``pto.addptr`` + ``pto.make_tensor_view`` in the user kernel.
+- ``pto.addptr`` and ``pto.make_tensor_view`` MUST live at the call site,
+  not in the helper: PTOAS verifies per-function that ``addptr`` directly
+  feeds ``make_tensor_view`` / ``initialize_l2g2l_pipe(gm_addr)`` /
+  ``load|store_scalar``, AND ``make_tensor_view`` lowers to a strided
+  memref whose layout cannot be encoded in a ``!pto.tensor_view<…>``
+  return type — so the view cannot be returned across a func boundary
+  either. Returning the offset is the only shape that satisfies both
+  constraints while still sharing the CommContext reads.
+- The helper's byte-offset literals are pinned to the constants in
+  ``include/pypto/codegen/distributed/comm_layout.h``.
 - ``pto.tload`` (remote_load), ``pto.comm.tnotify`` (notify) and
   ``pto.comm.twait`` (wait) consume the partition views with the PTOAS
   attribute spellings (``notifyOp = #pto<notify_op …>`` and
@@ -125,8 +133,8 @@ def _split_module(mlir: str) -> dict[str, str]:
     return funcs
 
 
-def test_remote_load_emits_func_call_to_module_level_helper():
-    """remote_load lowers to a func.call to a module-level CommRemotePtr_<dtype>."""
+def test_remote_load_emits_func_call_to_offset_helper_with_addptr_at_call_site():
+    """remote_load lowers to func.call @CommRemoteOffset_<dtype> + addptr + make_tensor_view at call site."""
 
     @pl.program
     class P:
@@ -143,33 +151,44 @@ def test_remote_load_emits_func_call_to_module_level_helper():
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
 
-    # The CommRemotePtr_f16 helper is emitted once at module scope.
-    assert "CommRemotePtr_f16" in funcs, f"Expected @CommRemotePtr_f16 in module, got {list(funcs)}"
-    helper = funcs["CommRemotePtr_f16"]
-    assert "func.func @CommRemotePtr_f16(%ctx: !pto.ptr<i64>" in helper
-    assert "%local_ptr: !pto.ptr<f16>" in helper
-    assert "%peer: index) -> !pto.ptr<f16>" in helper
-    # Helper does the scalar arithmetic — load_scalar + addptr + return.
+    # Helper signature: (ctx, peer) → index. No local_ptr arg, no addptr,
+    # no make_tensor_view inside — those live at the call site.
+    helper_name = "CommRemoteOffset_f16"
+    assert helper_name in funcs, f"Expected @{helper_name} in module, got {list(funcs)}"
+    helper = funcs[helper_name]
+    assert f"func.func @{helper_name}(%ctx: !pto.ptr<i64>, %peer: index) -> index" in helper, helper
+    # Helper body: load_scalar reads + arith + divsi + return %delems : index.
     assert helper.count("pto.load_scalar") >= 3, helper  # rankId + 2 window slots
-    assert "pto.addptr %local_ptr" in helper
-    assert "return %peer_ptr : !pto.ptr<f16>" in helper
+    assert "arith.divsi" in helper
+    assert "return %delems : index" in helper, helper
+    # Critically, none of the addptr / make_tensor_view forbidden ops appear
+    # inside the helper — both must stay at the call site to satisfy
+    # PTOAS's same-func constraints (see module docstring).
+    assert "pto.addptr" not in helper, "addptr must NOT live in the helper"
+    assert "pto.make_tensor_view" not in helper, "make_tensor_view must NOT live in the helper"
 
-    # The kernel only invokes the helper via func.call — no inline scalar
-    # CommRemotePtr arithmetic should remain at the call site.
+    # The kernel calls the helper to get the offset, then emits addptr +
+    # make_tensor_view locally so PTOAS sees the addptr→make_tensor_view
+    # chain within a single func.func.
     kernel = funcs["kernel"]
-    assert "func.call @CommRemotePtr_f16(" in kernel
-    assert "pto.load_scalar" not in kernel, (
-        "CommRemotePtr scalar arithmetic must live in the helper, not inline"
+    assert f"func.call @{helper_name}(" in kernel
+    assert "(!pto.ptr<i64>, index) -> index" in kernel, kernel
+    assert "pto.addptr" in kernel, "addptr must live at the call site"
+    # The addptr's direct downstream is a make_tensor_view in the same
+    # func — that's what makes PTOAS happy.
+    addptr_line_idx = next(i for i, line in enumerate(kernel.splitlines()) if "pto.addptr" in line)
+    # The next non-trivial line should be a make_tensor_view (allowing one
+    # arith.muli in between for the dynamic stride[0] computation).
+    following = "\n".join(kernel.splitlines()[addptr_line_idx + 1 : addptr_line_idx + 4])
+    assert "pto.make_tensor_view" in following, (
+        f"addptr must be followed shortly by make_tensor_view, but next lines were:\n{following}"
     )
-    # Peer view + tload still happen in the kernel body, against the helper's result.
-    assert "pto.make_tensor_view" in kernel
-    peer_pview = [line for line in kernel.splitlines() if "_peer_pview" in line and "partition_view" in line]
-    assert peer_pview, f"Missing peer partition_view in kernel body:\n{kernel}"
-    assert "pto.tload" in kernel
+    # The local CommContext scalar arithmetic must stay inside the helper.
+    assert "pto.load_scalar" not in kernel, "CommContext scalar reads belong in the helper"
 
 
-def test_one_comm_remote_ptr_helper_per_dtype():
-    """The module emits a distinct @CommRemotePtr_<dtype> helper per used dtype."""
+def test_one_comm_remote_offset_helper_per_dtype():
+    """The module emits a distinct @CommRemoteOffset_<dtype> helper per element dtype."""
 
     @pl.program
     class P:
@@ -187,17 +206,17 @@ def test_one_comm_remote_ptr_helper_per_dtype():
 
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
-    # f16 (data) + i32 (signal) — one helper per element dtype consumed by a
+    # f16 (data) + i32 (signal) — one helper per dtype consumed by a
     # cross-rank op (notify counts; wait stays local-only).
-    assert "CommRemotePtr_f16" in funcs
-    assert "CommRemotePtr_i32" in funcs
-    # The element-size constant inside each helper matches the helper's dtype.
-    assert "arith.constant 2 : i64" in funcs["CommRemotePtr_f16"]
-    assert "arith.constant 4 : i64" in funcs["CommRemotePtr_i32"]
+    assert "CommRemoteOffset_f16" in funcs
+    assert "CommRemoteOffset_i32" in funcs
+    # The element-size constant inside each helper matches the dtype.
+    assert "arith.constant 2 : i64" in funcs["CommRemoteOffset_f16"]
+    assert "arith.constant 4 : i64" in funcs["CommRemoteOffset_i32"]
 
 
 def test_remote_load_uses_comm_layout_constants():
-    """CommRemotePtr helper literal offsets equal the comm_layout::k* values."""
+    """CommRemoteOffset helper literal offsets equal the comm_layout::k* values."""
 
     @pl.program
     class P:
@@ -213,13 +232,13 @@ def test_remote_load_uses_comm_layout_constants():
 
     mlir = _generate_mlir(P)
     funcs = _split_module(mlir)
-    helper = funcs["CommRemotePtr_f16"]
+    helper = funcs["CommRemoteOffset_f16"]
 
     layout = ir.comm_layout
     rank_idx_unit = layout.RANK_ID_OFFSET // layout.WINDOW_SLOT_STRIDE  # 16 / 8 = 2
     win_idx_unit = layout.WINDOWS_IN_OFFSET // layout.WINDOW_SLOT_STRIDE  # 32 / 8 = 4
 
-    # The CommRemotePtr scaffolding references the rank-slot offset and the
+    # The helper scaffolding references the rank-slot offset and the
     # windowsIn-array base in *u64-units*, derived from comm_layout constants.
     assert f"arith.constant {rank_idx_unit} : index" in helper
     assert f"arith.constant {win_idx_unit} : index" in helper

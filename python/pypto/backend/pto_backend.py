@@ -490,6 +490,22 @@ def _generate_arg_unpacking(func: _ir_core.Function, *, uses_spmd: bool = False)
         lines.append("")
         var_names.append(param_name)
 
+    # Unpack one trailing __gm__ int64_t* CommContext pointer per DistributedTensor
+    # param. Mirrors the func.func signature emitted by PTOCodegen
+    # (src/codegen/pto/pto_codegen.cpp around the dist_tensor_to_ctx loop): one
+    # `!pto.ptr<i64>` arg per DistributedTensor at the end of the regular params,
+    # before any dynamic-dim trailing args. The L2 orch threads the matching
+    # `add_scalar(ctx)` slots into the dispatch payload in IR-param order.
+    dist_tensor_params = [p for p in tensor_params if isinstance(p.type, _ir_core.DistributedTensorType)]
+    ctx_start_idx = scalar_start_idx + len(scalar_params)
+    for k, param in enumerate(dist_tensor_params):
+        ctx_name = f"{param.name_hint}_ctx"
+        arg_idx = ctx_start_idx + k
+        lines.append(f"    // Unpack CommContext for DistributedTensor: {param.name_hint}")
+        lines.append(f"    __gm__ int64_t* {ctx_name} = reinterpret_cast<__gm__ int64_t*>(args[{arg_idx}]);")
+        lines.append("")
+        var_names.append(ctx_name)
+
     # Extract dynamic dim values from tensor structs (shapes[] holds current view shape at runtime).
     # Dedup by Var.unique_id (stable C++ identity) -- name_hint is cosmetic, and Python wrapper
     # id() can differ across binding calls for the same underlying C++ Var.

@@ -354,18 +354,21 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   fs_.body_section.str("");
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
-  remote_ptr_dtype_mlir_strs_.clear();
+  remote_offset_dtype_mlir_strs_.clear();
   PrepareGMSlotBufferLayout(program);
-  CollectRemotePtrDtypes(program);
+  CollectRemoteOffsetDtypes(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
   stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"} {\n";
 
-  // Emit one `@CommRemotePtr_<dtype>` helper per distributed element dtype
-  // referenced in this module. Distributed remote ops in user functions
-  // lower to `func.call`s of these helpers — see EmitCommRemotePtr in
-  // src/backend/common/pto_ops_common.cpp.
-  EmitCommRemotePtrHelpers();
+  // Emit one `@CommRemoteOffset_<dtype>` helper per element dtype
+  // referenced by distributed remote ops in this module. The helper
+  // returns the peer-vs-local element offset (an `index`); call sites
+  // emit `pto.addptr` + `pto.make_tensor_view` on the returned offset
+  // inside the user kernel so PTOAS's per-func "addptr must feed
+  // make_tensor_view" check is satisfied locally — see EmitCommRemoteView
+  // (call-site emitter) in src/backend/common/pto_ops_common.cpp.
+  EmitCommRemoteOffsetHelpers();
 
   for (const auto& [gvar, func] : program->functions_) {
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
@@ -430,11 +433,11 @@ void PTOCodegen::PrepareGMSlotBufferLayout(const ProgramPtr& program) {
 }
 
 // ========================================================================
-// Distributed N6: CommRemotePtr helper emission
+// Distributed N6: CommRemoteOffset helper emission
 // ========================================================================
 
-std::string PTOCodegen::GetCommRemotePtrFuncName(const DataType& dtype) {
-  return "CommRemotePtr_" + DataTypeToMLIR(dtype);
+std::string PTOCodegen::GetCommRemoteOffsetFuncName(const DataType& dtype) {
+  return "CommRemoteOffset_" + DataTypeToMLIR(dtype);
 }
 
 namespace {
@@ -442,9 +445,9 @@ namespace {
 // Walks every function body in the program and accumulates the
 // DistributedTensor element-dtype (MLIR string) consumed by each
 // ``pld.tile.remote_load`` / ``pld.system.notify`` call.
-class RemotePtrDtypeCollector : public ir::IRVisitor {
+class RemoteOffsetDtypeCollector : public ir::IRVisitor {
  public:
-  explicit RemotePtrDtypeCollector(std::set<std::string>* dtypes) : dtypes_(dtypes) {}
+  explicit RemoteOffsetDtypeCollector(std::set<std::string>* dtypes) : dtypes_(dtypes) {}
 
  protected:
   void VisitExpr_(const ir::CallPtr& op) override {
@@ -465,8 +468,8 @@ class RemotePtrDtypeCollector : public ir::IRVisitor {
 
 }  // namespace
 
-void PTOCodegen::CollectRemotePtrDtypes(const ProgramPtr& program) {
-  RemotePtrDtypeCollector collector(&remote_ptr_dtype_mlir_strs_);
+void PTOCodegen::CollectRemoteOffsetDtypes(const ProgramPtr& program) {
+  RemoteOffsetDtypeCollector collector(&remote_offset_dtype_mlir_strs_);
   for (const auto& [gvar, func] : program->functions_) {
     (void)gvar;
     if (func->body_) {
@@ -475,8 +478,8 @@ void PTOCodegen::CollectRemotePtrDtypes(const ProgramPtr& program) {
   }
 }
 
-void PTOCodegen::EmitCommRemotePtrHelpers() {
-  if (remote_ptr_dtype_mlir_strs_.empty()) return;
+void PTOCodegen::EmitCommRemoteOffsetHelpers() {
+  if (remote_offset_dtype_mlir_strs_.empty()) return;
 
   namespace cl = codegen::distributed::comm_layout;
   // CommContext field indices, expressed in u64 slots (one ``pto.load_scalar``
@@ -487,7 +490,7 @@ void PTOCodegen::EmitCommRemotePtrHelpers() {
   const int64_t k_win_idx = static_cast<int64_t>(cl::kWindowsInOffset / cl::kWindowSlotStride);
 
   const std::string body_indent = std::string(4, ' ');
-  for (const std::string& dtype_str : remote_ptr_dtype_mlir_strs_) {
+  for (const std::string& dtype_str : remote_offset_dtype_mlir_strs_) {
     // Element size in bytes — used to convert the raw byte delta between
     // local_base and peer_base into an element offset for ``pto.addptr``.
     // The MLIR type string already encodes the dtype, but we don't have a
@@ -507,12 +510,15 @@ void PTOCodegen::EmitCommRemotePtrHelpers() {
       CHECK(false) << "Distributed remote ops only support byte-sized element types, got MLIR dtype "
                    << dtype_str;
     }
+    const std::string func_name = "CommRemoteOffset_" + dtype_str;
 
-    const std::string func_name = "CommRemotePtr_" + dtype_str;
-    const std::string ptr_type = "!pto.ptr<" + dtype_str + ">";
-
-    stream_ << "  func.func @" << func_name << "(%ctx: !pto.ptr<i64>, %local_ptr: " << ptr_type
-            << ", %peer: index) -> " << ptr_type << " {\n";
+    // Helper signature: (ctx, peer) → index. Returns the peer-vs-local
+    // element offset; the call site applies ``pto.addptr`` to its own
+    // ``%local_ptr`` and then ``pto.make_tensor_view`` (both must live in
+    // the kernel's func, since PTOAS requires ``addptr`` to feed
+    // ``make_tensor_view`` locally and the ``make_tensor_view`` lowering
+    // produces a strided memref that cannot cross a func boundary).
+    stream_ << "  func.func @" << func_name << "(%ctx: !pto.ptr<i64>, %peer: index) -> index {\n";
     stream_ << body_indent << "%c_r = arith.constant " << k_rank_idx << " : index\n";
     stream_ << body_indent << "%c_w = arith.constant " << k_win_idx << " : index\n";
     // Read rankId (the low 32 bits of the (rankId, rankNum) 8-byte slot at
@@ -532,9 +538,7 @@ void PTOCodegen::EmitCommRemotePtrHelpers() {
     stream_ << body_indent << "%esize = arith.constant " << elem_size_bytes << " : i64\n";
     stream_ << body_indent << "%delems_i = arith.divsi %dbytes, %esize : i64\n";
     stream_ << body_indent << "%delems = arith.index_cast %delems_i : i64 to index\n";
-    stream_ << body_indent << "%peer_ptr = pto.addptr %local_ptr, %delems : " << ptr_type << " -> "
-            << ptr_type << "\n";
-    stream_ << body_indent << "return %peer_ptr : " << ptr_type << "\n";
+    stream_ << body_indent << "return %delems : index\n";
     stream_ << "  }\n";
   }
 }

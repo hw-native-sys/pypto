@@ -296,6 +296,30 @@ inline VarPtr AsVarLike(const ExprPtr& expr) {
   return nullptr;
 }
 
+/**
+ * @brief Cast a type to TensorTypePtr if it is a TensorType or
+ *        DistributedTensorType.
+ *
+ * As<TensorType>() uses exact ObjectKind matching and won't match
+ * DistributedTensorType (which inherits from TensorType but carries its
+ * own ObjectKind — see .claude/rules/ir-kind-traits.md). This utility
+ * matches both, so op verifiers that accept any tensor-shaped value as
+ * a source / destination (e.g. pl.load / pl.store) can use a single
+ * cast instead of branching on the kind.
+ *
+ * TileType and ArrayType are intentionally excluded — they are
+ * ShapedType peers, not TensorType subclasses. Use As<ShapedType>()
+ * when you want the wider union.
+ */
+inline TensorTypePtr AsTensorTypeLike(const TypePtr& type) {
+  if (!type) return nullptr;
+  auto kind = type->GetKind();
+  if (kind == ObjectKind::TensorType || kind == ObjectKind::DistributedTensorType) {
+    return std::static_pointer_cast<const TensorType>(type);
+  }
+  return nullptr;
+}
+
 }  // namespace ir
 }  // namespace pypto
 

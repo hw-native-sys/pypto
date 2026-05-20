@@ -363,20 +363,36 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetCommCtxSSAFor(const ir::Var* dist_var) const;
 
   /**
-   * @brief Name of the module-level ``@CommRemotePtr_<dtype>`` helper.
+   * @brief Name of the module-level ``@CommRemoteOffset_<dtype>`` helper.
    *
    * Distributed remote ops (``pld.tile.remote_load`` / ``pld.system.notify``)
-   * lower their per-call peer-pointer arithmetic to a ``func.call`` of a
-   * module-level helper that performs the CommContext field reads and
-   * pointer offset math. Emitting it once per dtype keeps each call site to
-   * a single line and matches the inline ``CommRemotePtr<T_>`` template in
-   * the runtime header.
+   * lower their per-call peer-rank addressing to a ``func.call`` of a
+   * per-dtype module-level helper that returns the **element offset**
+   * (``index``) between the local rank's window slice and the peer
+   * rank's slice. The call site then does
+   * ``pto.addptr %local_ptr, %delems`` followed by ``pto.make_tensor_view``
+   * — keeping ``addptr`` and ``make_tensor_view`` co-located in the user
+   * kernel's ``func.func``, which is what PTOAS's per-func lowering check
+   * (``addptr must feed make_tensor_view / initialize_l2g2l_pipe(gm_addr)
+   * / load|store_scalar``) requires.
+   *
+   * The helper cannot return the peer **pointer** (addptr → func.return
+   * is rejected by PTOAS) and cannot return the **tensor view** (the
+   * view's lowered memref is strided whenever strides are SSA operands,
+   * but ``!pto.tensor_view<…>`` source syntax cannot encode strided
+   * layout, so the func boundary always lowers to plain memref → type
+   * mismatch). Returning the **offset** is the minimum-fanout shape that
+   * shares the CommContext field reads + element-size division across
+   * call sites while leaving both forbidden ops at the call site.
+   *
+   * Helper is keyed only on dtype — the only dtype-dependent code in the
+   * body is the element-size constant fed to ``arith.divsi``.
    *
    * @param dtype Element dtype of the DistributedTensor (e.g. ``FP16``,
    *              ``INT32``).
-   * @return Helper function name (e.g. ``CommRemotePtr_f16``).
+   * @return Helper function name (e.g. ``CommRemoteOffset_f16``).
    */
-  [[nodiscard]] static std::string GetCommRemotePtrFuncName(const DataType& dtype);
+  [[nodiscard]] static std::string GetCommRemoteOffsetFuncName(const DataType& dtype);
 
   /// Increase/decrease the current indentation level (used by op codegen helpers that emit scf.for blocks)
   void IncreaseIndent() { indent_level_++; }
@@ -478,24 +494,28 @@ class PTOCodegen : public CodegenBase {
   void PrepareGMSlotBufferLayout(const ir::ProgramPtr& program);
 
   /**
-   * @brief Walk the program and collect distinct DistributedTensor element
-   *        dtypes consumed by ``pld.tile.remote_load`` / ``pld.system.notify``.
+   * @brief Walk the program and collect distinct DistributedTensor
+   *        element dtypes consumed by ``pld.tile.remote_load`` /
+   *        ``pld.system.notify``.
    *
-   * One ``@CommRemotePtr_<dtype>`` helper is emitted per distinct dtype at
-   * module scope (see :func:`EmitCommRemotePtrHelpers`). ``pld.system.wait``
-   * is local-only and does not need a peer-pointer helper.
+   * One ``@CommRemoteOffset_<dtype>`` helper is emitted per distinct
+   * dtype at module scope (see :func:`EmitCommRemoteOffsetHelpers`).
+   * ``pld.system.wait`` is local-only and does not need a peer helper.
    */
-  void CollectRemotePtrDtypes(const ir::ProgramPtr& program);
+  void CollectRemoteOffsetDtypes(const ir::ProgramPtr& program);
 
   /**
-   * @brief Emit one ``func.func @CommRemotePtr_<dtype>`` per dtype collected
-   *        in :func:`CollectRemotePtrDtypes`, written at module scope before
-   *        any user function. Each helper performs the runtime CommContext
-   *        field reads and pointer offset math that ``EmitCommRemotePtr``
-   *        (see ``src/backend/common/pto_ops_common.cpp``) calls via
-   *        ``func.call`` from the per-op lowering.
+   * @brief Emit one ``func.func @CommRemoteOffset_<dtype>`` per dtype
+   *        collected in :func:`CollectRemoteOffsetDtypes`, written at
+   *        module scope before any user function. Each helper performs
+   *        the runtime CommContext field reads and the byte→element
+   *        division, returning the peer-vs-local element offset as
+   *        ``index``. The call site does ``pto.addptr`` + the trailing
+   *        ``pto.make_tensor_view`` inside the user kernel so PTOAS's
+   *        per-func lowering check (``addptr must feed make_tensor_view``)
+   *        is satisfied locally.
    */
-  void EmitCommRemotePtrHelpers();
+  void EmitCommRemoteOffsetHelpers();
 
   /**
    * @brief Build variable identity to MemRef mapping from function body
@@ -673,13 +693,13 @@ class PTOCodegen : public CodegenBase {
   int indent_level_ = 0;
   std::map<std::pair<int, int>, int64_t> gm_slot_buffer_offsets_;
 
-  /// DistributedTensor element dtypes (encoded as their MLIR type string
-  /// e.g. ``f16``) that are consumed by ``pld.tile.remote_load`` /
-  /// ``pld.system.notify`` somewhere in the module. Each one drives a single
-  /// ``@CommRemotePtr_<dtype>`` helper emission at module scope. Populated
-  /// by :func:`CollectRemotePtrDtypes` and consumed by
-  /// :func:`EmitCommRemotePtrHelpers`.
-  std::set<std::string> remote_ptr_dtype_mlir_strs_;
+  /// MLIR dtype strings of DistributedTensors consumed by
+  /// ``pld.tile.remote_load`` / ``pld.system.notify`` somewhere in the
+  /// module. Each one drives a single ``@CommRemoteOffset_<dtype>``
+  /// helper emission at module scope. Populated by
+  /// :func:`CollectRemoteOffsetDtypes` and consumed by
+  /// :func:`EmitCommRemoteOffsetHelpers`.
+  std::set<std::string> remote_offset_dtype_mlir_strs_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 

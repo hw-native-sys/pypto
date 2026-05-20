@@ -205,7 +205,7 @@ std::vector<size_t> CollectOutParamIndices(const FunctionPtr& func) {
 bool IsTensorTypedArg(const ExprPtr& arg) {
   TypePtr ty = arg ? arg->GetType() : TypePtr{};
   if (!ty) return false;
-  return As<TensorType>(ty) || As<TupleType>(ty);
+  return AsTensorTypeLike(ty) || As<TupleType>(ty);
 }
 
 /// Info about an InCore function's Out params and their return mappings.

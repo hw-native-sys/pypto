@@ -152,7 +152,8 @@ REGISTER_OP("pld.system.notify")
     .set_description(
         "Cross-rank notify: write `value` to the peer rank's slot of a window-bound "
         "DistributedTensor signal matrix. `op` selects between atomic-add and set semantics. "
-        "Lowers to CommRemotePtr(ctx, signal+offset, peer) + TNOTIFY at codegen.")
+        "Lowers to CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + partition_view + TNOTIFY at "
+        "codegen.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor signal matrix")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")

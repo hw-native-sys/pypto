@@ -824,7 +824,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         for (const auto& v : y->value_) {
           auto var = AsVarLike(v);
           if (!var) continue;
-          if (!As<TensorType>(var->GetType())) continue;
+          if (!AsTensorTypeLike(var->GetType())) continue;
           auto it = emit_name_map_.find(var.get());
           if (it == emit_name_map_.end()) continue;
           return GetExternalTensorName(it->second);
@@ -1106,7 +1106,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // TensorType: use ``Tensor`` so default-constructible declarations are
     // legal (C++ rejects ``auto x;`` without init). Yield/Assign downstream
     // will rebind it.
-    if (As<TensorType>(type)) return "Tensor";
+    if (AsTensorTypeLike(type)) return "Tensor";
     // ArrayType has split declaration syntax (``dtype name[N]``) — there's no
     // single "type expression" that names a C array. Callers that need to
     // emit a Var of ArrayType always go through array.create's op codegen,
@@ -1467,6 +1467,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "Arg " << task_var << ";\n";
   }
 
+  /// Emit one ``params_t.add_scalar(ext_<outer_arg>_ctx)`` per DistributedTensor
+  /// formal of the callee, in IR-param order. The L1 kernel (PTOCodegen) appends
+  /// one ``!pto.ptr<i64>`` arg per DistributedTensor at the tail of the func.func
+  /// signature; the L2 orch must thread the matching CommContext ``uint64_t`` into
+  /// the dispatch payload by add_scalar'ing the outer-scope ``ext_<name>_ctx``
+  /// variable (unpacked once in ``aicpu_orchestration_entry``).
+  void EmitDistTensorCtxScalars(const CallPtr& call, const FunctionPtr& callee_func, const std::string& ind,
+                                const std::string& task_var) {
+    for (size_t i = 0; i < callee_func->params_.size() && i < call->args_.size(); ++i) {
+      if (!As<DistributedTensorType>(callee_func->params_[i]->GetType())) continue;
+      std::string outer_arg_name = TryGetVarName(call->args_[i]);
+      INTERNAL_CHECK_SPAN(!outer_arg_name.empty(), call->span_)
+          << "Internal error: DistributedTensor arg " << i << " of call to '" << callee_func->name_
+          << "' is not a bound variable — required to thread the matching CommContext scalar.";
+      code_ << ind << task_var << ".add_scalar(" << GetExternalTensorName(outer_arg_name) << "_ctx);\n";
+    }
+  }
+
   /// Emit explicit dependency wiring for a kernel ``Call``: a fixed-size
   /// ``PTO2TaskId <task>_deps[K]`` stack array filled with the valid producer
   /// TaskIds from ``Call.attrs["manual_dep_edges"]``, followed by a single
@@ -1623,7 +1641,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   bool ShapeDependsOnLocalVars(const CallPtr& call,
                                const std::unordered_set<const Var*>& locally_defined) const {
-    auto result_type = As<TensorType>(call->GetType());
+    auto result_type = AsTensorTypeLike(call->GetType());
     if (!result_type) {
       return false;
     }
@@ -1766,6 +1784,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
+    // For each DistributedTensor formal of the callee, append the matching
+    // outer ext_<name>_ctx scalar so the L1 kernel's trailing CommContext
+    // ptr arg gets populated. The outer ctx variable is unpacked in
+    // ``aicpu_orchestration_entry`` (see the DistributedTensor CommContext
+    // pointers block) and named ``ext_<outer-arg-name>_ctx``.
+    EmitDistTensorCtxScalars(call, callee_func, ind, task_var);
     EmitManualDeps(call, task_var);
 
     std::string submit_expr =
@@ -2389,13 +2413,22 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     ScalarTypePtr scalar_type;
   };
   std::vector<ScalarParamInfo> scalar_params;
+  // Names of DistributedTensor params (in IR-param order). Each needs a
+  // trailing CommContext ``uint64_t`` slot unpacked from ``orch_args.scalar(...)``
+  // and forwarded as a trailing ``add_scalar(ext_<name>_ctx)`` to the L1
+  // kernel dispatch (matching the trailing ``!pto.ptr<i64>`` args appended
+  // by PTOCodegen for DistributedTensor params).
+  std::vector<std::string> dist_tensor_param_names;
   for (const auto& var : func->params_) {
     std::string emit_name = GetSSABaseName(var->name_hint_);
     emit_name_map[var.get()] = emit_name;
     param_name_set.insert(emit_name);
-    if (As<TensorType>(var->GetType())) {
+    if (AsTensorTypeLike(var->GetType())) {
       param_name_to_orch_index[emit_name] = tensor_param_count;
       tensor_param_count++;
+      if (As<DistributedTensorType>(var->GetType())) {
+        dist_tensor_param_names.push_back(emit_name);
+      }
     } else if (auto stype = As<ScalarType>(var->GetType())) {
       scalar_params.push_back({emit_name, stype});
     }
@@ -2410,7 +2443,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     }
   }
 
-  int expected_arg_count = tensor_param_count + static_cast<int>(scalar_params.size());
+  int expected_arg_count = tensor_param_count + static_cast<int>(scalar_params.size()) +
+                           static_cast<int>(dist_tensor_param_names.size());
 
   std::ostringstream oss;
 
@@ -2436,7 +2470,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << "    // External tensors\n";
   int orch_idx = 0;
   for (const auto& var : func->params_) {
-    auto tensor_type = As<TensorType>(var->GetType());
+    auto tensor_type = AsTensorTypeLike(var->GetType());
     if (tensor_type) {
       std::string name = auto_name::GetCompatibleBaseName(var->name_hint_);
       oss << GenerateMakeTensorExternal(name, orch_idx, tensor_type, stmt_codegen);
@@ -2449,6 +2483,15 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     for (size_t i = 0; i < scalar_params.size(); ++i) {
       oss << GenerateScalarUnpack(scalar_params[i].emit_name, static_cast<int>(i),
                                   scalar_params[i].scalar_type);
+    }
+  }
+
+  if (!dist_tensor_param_names.empty()) {
+    oss << "\n    // DistributedTensor CommContext pointers\n";
+    int ctx_scalar_idx = static_cast<int>(scalar_params.size());
+    for (const auto& name : dist_tensor_param_names) {
+      oss << "    uint64_t ext_" << name << "_ctx = orch_args.scalar(" << ctx_scalar_idx << ");\n";
+      ctx_scalar_idx++;
     }
   }
 

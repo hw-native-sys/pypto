@@ -25,7 +25,7 @@ namespace comm_layout {
 // Field offsets and size of the runtime CommContext struct. The values come
 // from `offsetof(::CommContext, ...)` on the runtime header, then the
 // static_asserts below pin them to the literal numbers that distributed
-// codegen embeds into the emitted CommRemotePtr() inline function.
+// codegen embeds into the emitted CommRemoteOffset() helper function.
 //
 // If the runtime CommContext layout ever shifts (field reorder, insert, type
 // change), pypto's `cmake --build` fails here — codegen would otherwise

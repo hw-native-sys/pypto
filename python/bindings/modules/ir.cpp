@@ -636,7 +636,7 @@ void BindIR(nb::module_& m) {
   // codegen. Values come from offsetof(::CommContext, ...) and are pinned by
   // static_assert in include/pypto/codegen/distributed/comm_layout.h. Exposed
   // to Python so unit tests can assert no drift between bindings and the
-  // literal numbers that codegen embeds into emitted CommRemotePtr kernels.
+  // literal numbers that codegen embeds into emitted CommRemoteOffset kernels.
   nb::module_ comm_layout_mod = ir.def_submodule(
       "comm_layout", "Compile-time locked CommContext field offsets consumed by distributed codegen.");
   comm_layout_mod.attr("RANK_ID_OFFSET") = pypto::codegen::distributed::comm_layout::kRankIdOffset;

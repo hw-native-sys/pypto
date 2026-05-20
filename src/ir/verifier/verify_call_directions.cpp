@@ -36,7 +36,7 @@ using ::pypto::codegen::IsBuiltinOp;
 bool IsTensorTypedArg(const ExprPtr& arg) {
   TypePtr ty = arg ? arg->GetType() : TypePtr{};
   if (!ty) return false;
-  if (As<TensorType>(ty)) return true;
+  if (AsTensorTypeLike(ty)) return true;
   if (As<TupleType>(ty)) return true;
   return false;
 }

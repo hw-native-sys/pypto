@@ -35,7 +35,7 @@ def remote_load(
 
     Mirrors :func:`pl.tile.load` at the user-visible surface, but the source
     is a *remote* slice of a window-bound :class:`pld.DistributedTensor`.
-    Address translation happens at codegen time via ``CommRemotePtr``.
+    Address translation happens at codegen via ``CommRemoteOffset`` + addptr + make_tensor_view.
 
     Args:
         target: A window-bound :class:`pld.DistributedTensor` (any rank, any

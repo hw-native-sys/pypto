@@ -224,8 +224,12 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
                        << " requires second argument to be a tuple (offsets), but got "
                        << args[1]->GetType()->TypeName();
 
-  // Third argument must be the output tensor
-  auto output_tensor_type = As<TensorType>(args[2]->GetType());
+  // Third argument must be the output tensor. AsTensorTypeLike accepts both
+  // plain TensorType and DistributedTensorType — the latter is needed for the
+  // N6 stage-in pattern where a kernel writes a local tile into its own
+  // window-bound DistributedTensor slice (e.g. ring-shuffle Phase 1 in
+  // tests/st/distributed/test_l3_remote_load.py).
+  auto output_tensor_type = AsTensorTypeLike(args[2]->GetType());
   CHECK(output_tensor_type) << "The operator " << op_name
                             << " requires third argument to be a TensorType, but got "
                             << args[2]->GetType()->TypeName();

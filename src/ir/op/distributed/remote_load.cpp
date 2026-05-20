@@ -17,7 +17,7 @@
  * :class:`DistributedTensorType` into a local tile. Mirrors ``tile.load``
  * at the IR level (positional ``offsets`` / ``shape`` tuples + TileType
  * result), but the source is a *remote* slice — the address translation
- * is realised at codegen time by ``CommRemotePtr(ctx, local_ptr, peer)``.
+ * is realised at codegen time by ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view``.
  *
  * IR signature::
  *
@@ -74,7 +74,7 @@ TypePtr DeduceRemoteLoadType(const std::vector<ExprPtr>& args,
 
   // peer must be a scalar (integer rank index). Allow any ScalarType — dtype
   // narrowing to integer is handled at codegen time when emitting the
-  // CommRemotePtr scalar arithmetic.
+  // CommRemoteOffset scalar arithmetic.
   CHECK(IsA<ScalarType>(args[1]->GetType()))
       << "pld.tile.remote_load peer must be a scalar (rank index), got " << args[1]->GetType()->TypeName();
 
@@ -113,7 +113,7 @@ REGISTER_OP("pld.tile.remote_load")
         "Load a region of the peer rank's slice of a window-bound DistributedTensor "
         "into a local tile. Mirrors tile.load at the IR level but the source is a "
         "remote slice — address translation is realised at codegen via "
-        "CommRemotePtr(ctx, local_ptr, peer).")
+        "CommRemoteOffset(ctx, peer) + addptr + make_tensor_view.")
     .set_op_category("DistributedOp")
     .add_argument("target", "Window-bound DistributedTensor (DistributedTensorType)")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")

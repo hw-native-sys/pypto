@@ -2974,5 +2974,51 @@ class TestTileCiOp:
         assert pl.tile.arange is pl.tile.ci
 
 
+class TestTileStoreDistributedDest:
+    """``tile.store`` accepts ``DistributedTensorType`` as the destination.
+
+    N6 stage-in pattern: a kernel writes a local tile into its own
+    window-bound DistributedTensor slice (e.g. ring-shuffle Phase 1 in
+    tests/st/distributed/test_l3_remote_load.py). The verifier reaches
+    DistributedTensorType through AsTensorTypeLike since
+    DistributedTensorType inherits from TensorType but carries its own
+    ObjectKind — exact-match As<TensorType>() would miss it.
+    """
+
+    def test_pl_store_into_distributed_tensor_parses(self):
+        """``pl.store(tile, [0], dist_tensor)`` parses and types as the dst."""
+        import pypto.language.distributed as pld  # noqa: PLC0415
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def stage_in(
+                self,
+                src: pl.Tensor[[64], pl.FP32],
+                dst: pld.DistributedTensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local: pl.Tile[[64], pl.FP32] = pl.load(src, [0], [64])
+                return pl.store(local, [0], dst)
+
+        ir_str = str(Program)
+        assert "tile.store" in ir_str
+
+    def test_tile_store_rejects_non_tensor_dst(self):
+        """Regression: a Tile destination is still rejected by the verifier."""
+
+        with pytest.raises(Exception, match="requires third argument to be a TensorType"):
+
+            @pl.program
+            class _Program:
+                @pl.function(type=pl.FunctionType.InCore)
+                def main(
+                    self,
+                    a: pl.Tensor[[128, 128], pl.FP32],
+                ) -> pl.Tensor[[128, 128], pl.FP32]:
+                    tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(a, [0, 0], [32, 32])
+                    # Wrong: dst must be a (Distributed)TensorType, not a Tile.
+                    return pl.store(tile_a, [0, 0], tile_a)  # pyright: ignore[reportArgumentType]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
