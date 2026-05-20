@@ -689,10 +689,12 @@ class _BodyTransformer(ast.NodeTransformer):
         ``written`` and ``exposed`` are accumulators threaded through nested
         bodies so execution order is respected across compound statements.
 
-        Comprehension/lambda-scoped names are intentionally not tracked: they
-        are never statement-level assignments, so they never enter
-        ``_assign_count`` and are never rebind candidates in
-        ``_classify_loop_locals``.
+        Names bound only inside a comprehension or lambda are not
+        statement-level assignments, so they never enter ``_assign_count`` and
+        are never ``_classify_loop_locals`` candidates.  ``_names_by_ctx`` does
+        walk into those nested scopes, but only statement *targets* feed
+        ``written`` here — a comprehension/lambda local can at most leak a
+        harmless extra entry into ``exposed``, never affecting classification.
         """
         for stmt in statements:
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
@@ -717,8 +719,17 @@ class _BodyTransformer(ast.NodeTransformer):
                 self._collect_upward_exposed(stmt.orelse, written, exposed)
             elif isinstance(stmt, ast.If):
                 exposed.update(self._names_by_ctx(stmt.test, ast.Load) - written)
-                self._collect_upward_exposed(stmt.body, written, exposed)
-                self._collect_upward_exposed(stmt.orelse, written, exposed)
+                # then/else are alternative paths: analyze each from the same
+                # incoming ``written`` so a read in one branch is not masked by
+                # a write in the other.  A name is exposed if read-before-write
+                # on either path; it is definitely written after the ``if``
+                # only if written on both (no ``else`` → no definite write).
+                then_written = set(written)
+                self._collect_upward_exposed(stmt.body, then_written, exposed)
+                if stmt.orelse:
+                    else_written = set(written)
+                    self._collect_upward_exposed(stmt.orelse, else_written, exposed)
+                    written.update(then_written & else_written)
             elif isinstance(stmt, ast.With):
                 for item in stmt.items:
                     exposed.update(self._names_by_ctx(item.context_expr, ast.Load) - written)
@@ -756,18 +767,23 @@ class _BodyTransformer(ast.NodeTransformer):
         exposed: set[str] = set()
         self._collect_upward_exposed(statements, set(), exposed)
         for stmt in statements:
-            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                target = stmt.targets[0]
-                name = target.id if isinstance(target, ast.Name) else None
-            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-                name = stmt.target.id
+            if isinstance(stmt, ast.Assign):
+                targets = stmt.targets
+            elif isinstance(stmt, ast.AnnAssign):
+                targets = [stmt.target]
             else:
-                name = None
-            if name is None or name in seen:
                 continue
-            if name in self._assign_count and self._scope_depth == self._assign_depth.get(name, -1):
-                seen.add(name)
-                (carried if name in exposed else fresh).append(name)
+            # Collect every stored name — covers plain, tuple-unpacking
+            # (``x, y = ...``) and chained (``a = b = ...``) targets.
+            # Subscript/attribute targets contribute nothing: their base is a
+            # Load, not a rebind.
+            for target in targets:
+                for name in self._names_by_ctx(target, ast.Store):
+                    if name in seen:
+                        continue
+                    if name in self._assign_count and self._scope_depth == self._assign_depth.get(name, -1):
+                        seen.add(name)
+                        (carried if name in exposed else fresh).append(name)
         return carried, fresh
 
     def _forget_rename_bookkeeping(self, name: str) -> None:

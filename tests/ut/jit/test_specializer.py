@@ -939,18 +939,20 @@ class TestVariableRebinding:
 
         ``x`` is assigned twice inside the same then-branch — a genuine
         straight-line rebind — so the second write is aliased to ``x_v1`` and
-        the post-if read follows it.  Only *cross-branch* reuse is exempt.
+        the in-branch read follows it.  Only *cross-branch* reuse is exempt.
+        The read is kept inside the branch so ``x`` is defined on every path
+        that reaches it.
         """
         src = """
             def f(c):
                 if c:
                     x = 1
                     x = 2
-                use(x)
+                    use(x)
         """
         out = self._transform(src)
         assert "x_v1 = 2" in out  # intra-branch rebind still versioned
-        assert "use(x_v1)" in out
+        assert "use(x_v1)" in out  # in-branch read follows the rename
 
     def test_single_for_loop_carried_unchanged(self):
         """A single for loop with loop-carried variable is NOT renamed."""
