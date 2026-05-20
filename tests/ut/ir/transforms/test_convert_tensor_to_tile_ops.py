@@ -2068,7 +2068,7 @@ class TestConvertSortOps:
         _assert_convert_equal(before, expected)
 
     def test_mrgsort_format2_conversion(self):
-        """tensor.mrgsort(s0..s3) -> tile.loads + tile.create(tmp/executed) + tile.mrgsort_format2 + store."""
+        """tensor.mrgsort(s0..s3) -> tile.loads + tile.create(tmp) + tile.mrgsort_format2 + store."""
 
         @pl.program
         class Before:
@@ -2110,9 +2110,8 @@ class TestConvertSortOps:
                 s2_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(s2, [0, 0], [1, 128])
                 s3_tile: pl.Tile[[1, 128], pl.FP32] = pl.load(s3, [0, 0], [1, 128])
                 mrgsort2_tmp: pl.Tile[[1, 512], pl.FP32] = pl.tile.create([1, 512], dtype=pl.FP32)
-                mrgsort2_executed: pl.Tile[[1, 4], pl.INT16] = pl.tile.create([1, 4], dtype=pl.INT16)
                 out_tile: pl.Tile[[1, 512], pl.FP32] = pl.tile.mrgsort(
-                    s0_tile, s1_tile, s2_tile, s3_tile, mrgsort2_tmp, mrgsort2_executed
+                    s0_tile, s1_tile, s2_tile, s3_tile, mrgsort2_tmp
                 )
                 out_store: pl.Tensor[[1, 512], pl.FP32] = pl.store(out_tile, [0, 0], out_0)
                 return out_store

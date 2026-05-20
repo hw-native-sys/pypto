@@ -121,15 +121,18 @@ REGISTER_OP("tile.sort32")
 TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs,
                               const std::string& op_name) {
-  // Arg layout: (src0, ..., srcN-1, tmp, executed)
-  //   2-way: 4 args  (src0, src1, tmp, executed)
-  //   3-way: 5 args  (src0, src1, src2, tmp, executed)
-  //   4-way: 6 args  (src0, src1, src2, src3, tmp, executed)
-  CHECK(args.size() >= 4 && args.size() <= 6)
-      << "The operator " << op_name << " requires 4-6 arguments (2-4 srcs + tmp + executed), but got "
-      << args.size();
+  // Arg layout: (src0, ..., srcN-1, tmp)
+  //   2-way: 3 args  (src0, src1, tmp)
+  //   3-way: 4 args  (src0, src1, src2, tmp)
+  //   4-way: 5 args  (src0, src1, src2, src3, tmp)
+  //
+  // The PTO ISA exposes the per-way "executed" status as a vector<4xi16>
+  // output of pto.tmrgsort, not as a tile operand. Codegen synthesizes that
+  // vector directly; no IR-level executed tile is needed.
+  CHECK(args.size() >= 3 && args.size() <= 5)
+      << "The operator " << op_name << " requires 3-5 arguments (2-4 srcs + tmp), but got " << args.size();
 
-  size_t n_srcs = args.size() - 2;
+  size_t n_srcs = args.size() - 1;
 
   // src0: sorted input tile (f16 or f32)
   auto src0_type = As<TileType>(args[0]->GetType());
@@ -149,15 +152,10 @@ TypePtr DeduceTileMrgSortType(const std::vector<ExprPtr>& args,
         << " has " << src_type->dtype_.ToString() << " (expected " << src0_type->dtype_.ToString() << ")";
   }
 
-  // tmp workspace tile (second-to-last arg)
+  // tmp workspace tile (last arg)
   auto tmp_type = As<TileType>(args[n_srcs]->GetType());
   CHECK(tmp_type) << "The operator " << op_name << " requires argument " << n_srcs
                   << " (tmp) to be a TileType, but got " << args[n_srcs]->GetType()->TypeName();
-
-  // executed status tile (last arg)
-  auto exc_type = As<TileType>(args[n_srcs + 1]->GetType());
-  CHECK(exc_type) << "The operator " << op_name << " requires argument " << (n_srcs + 1)
-                  << " (executed) to be a TileType, but got " << args[n_srcs + 1]->GetType()->TypeName();
 
   // kwarg: exhausted (bool, default false)
   [[maybe_unused]] bool exhausted = GetKwarg<bool>(kwargs, "exhausted", false);
@@ -173,21 +171,19 @@ REGISTER_OP("tile.mrgsort_format2")
     .set_op_category("TileOp")
     .set_description(
         "Merge sort 2-4 sorted lists, format2 (maps to pto.tmrgsort). "
-        "Args: (src0, src1[, src2[, src3]], tmp, executed). "
-        "2-way: 4 args, 3-way: 5 args, 4-way: 6 args.")
+        "Args: (src0, src1[, src2[, src3]], tmp). "
+        "2-way: 3 args, 3-way: 4 args, 4-way: 5 args.")
     .add_argument("src0", "First sorted input tile (FP16 or FP32)")
     .add_argument("src1", "Second sorted input tile")
     .add_argument("tmp_or_src2", "Third sorted input tile (3/4-way) or tmp workspace (2-way)")
-    .add_argument("executed_or_src3", "Fourth sorted input tile (4-way), tmp (3-way), or executed (2-way)")
-    .add_argument("tmp", "(3/4-way only) Temporary workspace tile")
-    .add_argument("executed", "(4-way only) Exhaustion status output tile")
+    .add_argument("tmp_or_src3", "Fourth sorted input tile (4-way) or tmp workspace (3-way)")
+    .add_argument("tmp", "(4-way only) Temporary workspace tile")
     .set_attr<bool>("exhausted")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_input_memory(3, MemorySpace::Vec)
     .set_input_memory(4, MemorySpace::Vec)
-    .set_input_memory(5, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
     .not_inplace_safe()
     .f_deduce_type([](const std::vector<ExprPtr>& args,

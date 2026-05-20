@@ -2519,7 +2519,6 @@ def mrgsort(
     src2: Expr | None = None,
     src3: Expr | None = None,
     tmp: Expr | None = None,
-    executed: Expr | None = None,
     exhausted: bool = False,
     *,
     block_len: int | Expr | None = None,
@@ -2537,7 +2536,6 @@ def mrgsort(
         src2: (format2, optional) Third sorted input tile (3-way or 4-way).
         src3: (format2, optional) Fourth sorted input tile (4-way only).
         tmp: (format2) Temporary workspace tile, must be passed as keyword arg for 2/3-way.
-        executed: (format2) Exhaustion status tile (written by hardware), keyword arg for 2/3-way.
         exhausted: (format2) If True, marks inputs as exhausted (default: False).
         block_len: (format1, keyword-only) Run length, must be multiple of 64.
         span: Optional source span for debugging.
@@ -2548,9 +2546,9 @@ def mrgsort(
     actual_span = _get_span_or_capture(span)
     if block_len is not None:
         # format1: single-list merge sort (pto.tmrgsort format1)
-        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+        if any(arg is not None for arg in (src1, src2, src3, tmp)):
             raise ValueError(
-                "mrgsort() format1 (block_len=...) and format2 (src1, ..., tmp, executed) "
+                "mrgsort() format1 (block_len=...) and format2 (src1, ..., tmp) "
                 "are mutually exclusive; do not pass format2 arguments with block_len"
             )
         # PTO ISA requires block_len as i32. The parser may emit ConstInt with INDEX dtype,
@@ -2566,25 +2564,25 @@ def mrgsort(
     if src1 is None:
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, "
-            "or at least (src0, src1, tmp=<tile>, executed=<tile>) for format2"
+            "or at least (src0, src1, tmp=<tile>) for format2"
         )
     if src2 is None and src3 is not None:
         raise ValueError("mrgsort() format2 requires src2 when src3 is provided")
-    if tmp is None or executed is None:
+    if tmp is None:
         raise ValueError(
-            "mrgsort() format2 requires tmp and executed to be provided as keyword arguments; "
-            "use mrgsort(src0, src1[, src2[, src3]], tmp=<tile>, executed=<tile>)"
+            "mrgsort() format2 requires tmp to be provided as a keyword argument; "
+            "use mrgsort(src0, src1[, src2[, src3]], tmp=<tile>)"
         )
     kwargs: dict[str, Any] = {"exhausted": exhausted}
     if src2 is None:
         # 2-way merge
-        args = [src0, src1, tmp, executed]
+        args = [src0, src1, tmp]
     elif src3 is None:
         # 3-way merge
-        args = [src0, src1, src2, tmp, executed]
+        args = [src0, src1, src2, tmp]
     else:
         # 4-way merge
-        args = [src0, src1, src2, src3, tmp, executed]
+        args = [src0, src1, src2, src3, tmp]
     return _ir_core.create_op_call("tile.mrgsort_format2", args, kwargs, actual_span)
 
 
@@ -2599,21 +2597,20 @@ def mrgsort_format1(src0: Expr, block_len: int | Expr, span: Span | None = None)
 def mrgsort_format2(*args: Expr, exhausted: bool = False, span: Span | None = None) -> Call:
     """2-4 way merge sort (format2). Used by the parser for roundtrip fidelity.
 
-    Positional args: ``(src0, src1[, src2[, src3]], tmp, executed)``
-    The last 2 positional args are always ``tmp`` and ``executed``.
+    Positional args: ``(src0, src1[, src2[, src3]], tmp)``
+    The last positional arg is always ``tmp``.
 
-    Prefer ``mrgsort(src0, src1[, src2[, src3]], tmp=<tile>, executed=<tile>)`` in user code.
+    Prefer ``mrgsort(src0, src1[, src2[, src3]], tmp=<tile>)`` in user code.
     """
-    if len(args) < 4 or len(args) > 6:
+    if len(args) < 3 or len(args) > 5:
         raise ValueError(
-            f"mrgsort_format2() requires 4-6 positional arguments "
-            f"(src0, src1[, src2[, src3]], tmp, executed), got {len(args)}"
+            f"mrgsort_format2() requires 3-5 positional arguments "
+            f"(src0, src1[, src2[, src3]], tmp), got {len(args)}"
         )
-    srcs = args[:-2]
-    tmp = args[-2]
-    executed = args[-1]
+    srcs = args[:-1]
+    tmp = args[-1]
     src0 = srcs[0]
     src1 = srcs[1]
     src2 = srcs[2] if len(srcs) > 2 else None
     src3 = srcs[3] if len(srcs) > 3 else None
-    return mrgsort(src0, src1, src2, src3, tmp=tmp, executed=executed, exhausted=exhausted, span=span)
+    return mrgsort(src0, src1, src2, src3, tmp=tmp, exhausted=exhausted, span=span)

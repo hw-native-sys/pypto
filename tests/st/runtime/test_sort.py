@@ -17,7 +17,8 @@ interleaved (value, index) pairs:
   - Sorted indices are stored inside dst at odd positions (u32 bits in f32 memory).
 
 TMRGSORT format2 merges 4 pre-sorted lists into a single sorted output:
-  - ins(src0, src1, src2, src3 {exhausted}) outs(dst, tmp, executed)
+  - ins(src0, src1, src2, src3, tmp {exhausted}) outs(dst, executed: vector<4xi16>)
+  - executed is a hardware status vector emitted by codegen, not an IR tile.
 
 To read back indices as integers on the host side, use:
     values, indices = extract_sort32_results(output_f32)
@@ -377,7 +378,7 @@ class MrgSort2WayFP32Program:
             right_m1 = pl.tensor.mrgsort(right_s32, block_len=64)
             right_sorted = pl.tensor.mrgsort(right_m1, block_len=256)
 
-            # Format2 2-way merge: tmp/executed are synthesized by the conversion pass.
+            # Format2 2-way merge: tmp is synthesized by the conversion pass.
             merged = pl.tensor.mrgsort(left_sorted, right_sorted)
 
             # Extract sorted values (even columns) and indices (odd columns, reinterpret as UINT32).

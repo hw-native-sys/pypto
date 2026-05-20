@@ -2045,7 +2045,6 @@ def mrgsort(
     src1: Tile,
     *,
     tmp: Tile,
-    executed: Tile,
     exhausted: bool = ...,
 ) -> Tile: ...
 
@@ -2057,7 +2056,6 @@ def mrgsort(
     src2: Tile,
     *,
     tmp: Tile,
-    executed: Tile,
     exhausted: bool = ...,
 ) -> Tile: ...
 
@@ -2069,7 +2067,6 @@ def mrgsort(
     src2: Tile,
     src3: Tile,
     tmp: Tile,
-    executed: Tile,
     exhausted: bool = ...,
 ) -> Tile: ...
 
@@ -2080,7 +2077,6 @@ def mrgsort(
     src2: Tile | None = None,
     src3: Tile | None = None,
     tmp: Tile | None = None,
-    executed: Tile | None = None,
     exhausted: bool = False,
     *,
     block_len: int | Scalar | None = None,
@@ -2093,16 +2089,16 @@ def mrgsort(
     Format1 usage (keyword block_len):
         out = mrgsort(src, block_len=64)
 
-    Format2 2-way usage (keyword tmp and executed):
-        out = mrgsort(src0, src1, tmp=tmp_tile, executed=exec_tile)
-        out = mrgsort(src0, src1, tmp=tmp_tile, executed=exec_tile, exhausted=True)
+    Format2 2-way usage (keyword tmp):
+        out = mrgsort(src0, src1, tmp=tmp_tile)
+        out = mrgsort(src0, src1, tmp=tmp_tile, exhausted=True)
 
     Format2 3-way usage:
-        out = mrgsort(src0, src1, src2, tmp=tmp_tile, executed=exec_tile)
+        out = mrgsort(src0, src1, src2, tmp=tmp_tile)
 
-    Format2 4-way usage (6 positional args):
-        out = mrgsort(src0, src1, src2, src3, tmp, executed)
-        out = mrgsort(src0, src1, src2, src3, tmp, executed, exhausted=True)
+    Format2 4-way usage (5 positional args):
+        out = mrgsort(src0, src1, src2, src3, tmp)
+        out = mrgsort(src0, src1, src2, src3, tmp, exhausted=True)
 
     Args:
         src0: For format1: input tile with pre-sorted runs (FP16 or FP32).
@@ -2112,8 +2108,6 @@ def mrgsort(
         src3: (format2, optional) Fourth sorted input tile (4-way only).
         tmp: (format2) Temporary workspace tile (same shape as output).
               Pass as keyword arg for 2-way and 3-way.
-        executed: (format2) Exhaustion status tile written by hardware (shape [1, 4] INT16).
-                  Pass as keyword arg for 2-way and 3-way.
         exhausted: (format2) If True, marks inputs as exhausted (default: False).
         block_len: (format1, keyword-only) Run length, must be multiple of 64.
 
@@ -2122,9 +2116,9 @@ def mrgsort(
     """
     if block_len is not None:
         # format1: single-list merge sort
-        if any(arg is not None for arg in (src1, src2, src3, tmp, executed)):
+        if any(arg is not None for arg in (src1, src2, src3, tmp)):
             raise ValueError(
-                "mrgsort() format1 (block_len=...) and format2 (src1, ..., tmp, executed) "
+                "mrgsort() format1 (block_len=...) and format2 (src1, ..., tmp) "
                 "are mutually exclusive; do not pass format2 arguments with block_len"
             )
         block_len_expr = block_len.unwrap() if isinstance(block_len, Scalar) else block_len
@@ -2134,12 +2128,12 @@ def mrgsort(
     if src1 is None:
         raise ValueError(
             "mrgsort() requires either block_len=<int> for format1, "
-            "or at least (src0, src1, tmp=<tile>, executed=<tile>) for format2"
+            "or at least (src0, src1, tmp=<tile>) for format2"
         )
-    if tmp is None or executed is None:
+    if tmp is None:
         raise ValueError(
-            "mrgsort() format2 requires tmp and executed; "
-            "use mrgsort(src0, src1[, src2[, src3]], tmp=<tile>, executed=<tile>)"
+            "mrgsort() format2 requires tmp; "
+            "use mrgsort(src0, src1[, src2[, src3]], tmp=<tile>)"
         )
     call_expr = _ir_ops.mrgsort(
         src0.unwrap(),
@@ -2147,7 +2141,6 @@ def mrgsort(
         src2.unwrap() if src2 is not None else None,
         src3.unwrap() if src3 is not None else None,
         tmp=tmp.unwrap(),
-        executed=executed.unwrap(),
         exhausted=exhausted,
     )
     return Tile(expr=call_expr)

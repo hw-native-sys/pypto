@@ -104,10 +104,9 @@ REGISTER_OP("tensor.sort32")
 // tensor.mrgsort_format2 — 2-4 way merge sort (tensor-level).
 //
 // Unlike the tile-level op, the tensor-level mrgsort_format2 only takes source
-// tiles: the `tmp` scratch and `executed` status tiles are synthesized as
-// local Vec tile.create calls during ConvertTensorToTileOps. This keeps tiny
-// scratch (e.g. 1×4 INT16 executed) off the GM boundary, where they would
-// otherwise hit PTO tile alignment constraints (Cols * sizeof(dtype) % 32 == 0).
+// tiles: the `tmp` scratch tile is synthesized as a local Vec tile.create call
+// during ConvertTensorToTileOps. The per-way "executed" status is a
+// vector<4xi16> output emitted directly by codegen, not an IR tile operand.
 // ============================================================================
 
 TypePtr DeduceTensorMrgSortType(const std::vector<ExprPtr>& args,
@@ -179,8 +178,8 @@ REGISTER_OP("tensor.mrgsort_format2")
     .set_description(
         "Merge sort 2-4 sorted lists, format2 (tensor-level). "
         "Args: (src0, src1[, src2[, src3]]). "
-        "The scratch tmp and executed tiles required by tile.mrgsort_format2 are "
-        "synthesized during conversion — users do not pass them at the tensor level.")
+        "The scratch tmp tile required by tile.mrgsort_format2 is synthesized "
+        "during conversion — users do not pass it at the tensor level.")
     .add_argument("src0", "First sorted input tensor (FP16 or FP32)")
     .add_argument("src1", "Second sorted input tensor")
     .add_argument("src2", "(3/4-way only) Third sorted input tensor")

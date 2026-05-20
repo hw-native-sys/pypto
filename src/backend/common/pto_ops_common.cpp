@@ -921,7 +921,8 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
 
 // Helper function for MrgSort format2: emits pto.tmrgsort
 // Supports 2-4 way merge. tmp is the last ins operand and carries the
-// {exhausted} attribute; outs holds dst plus the synthesized executed vector:
+// {exhausted} attribute; outs holds dst plus a synthesized executed vector
+// (vector<4xi16>) — the executed status is not an IR-level tile operand:
 //   2-way: ins(src0, src1, tmp {exhausted} : src_types..., tmp_type)
 //          outs(dst, executed : dst_type, vector<4xi16>)
 //   3-way: ins(src0, src1, src2, tmp {exhausted} : ...) outs(dst, executed : ...)
@@ -929,11 +930,11 @@ static std::string MakeGatherCompareCodegenPTO(const CallPtr& op, codegen::Codeg
 static std::string MakeMrgSortCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                          codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() >= 4 && op->args_.size() <= 6)
-      << "Operation:[" << pto_op_name << "] requires 4-6 arguments (2-4 srcs + tmp + executed), but got "
+  CHECK(op->args_.size() >= 3 && op->args_.size() <= 5)
+      << "Operation:[" << pto_op_name << "] requires 3-5 arguments (2-4 srcs + tmp), but got "
       << op->args_.size();
 
-  size_t n_srcs = op->args_.size() - 2;
+  size_t n_srcs = op->args_.size() - 1;
 
   std::vector<std::string> srcs, src_types;
   for (size_t i = 0; i < n_srcs; ++i) {
