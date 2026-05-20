@@ -197,6 +197,75 @@ class TestAutoDeriveTaskDependencies:
         assert len(edges) == 1
         assert edges[0].name_hint == "producer_tid"
 
+    def test_if_yield_return_var_keeps_storage_lineage(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                cond: pl.Scalar[pl.BOOL],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    produced, producer_tid = pl.submit(self.fill, scratch)
+                    if cond:
+                        selected = pl.yield_(produced)
+                    else:
+                        selected = pl.yield_(produced)
+                    out, _ = pl.submit(self.consume, selected)
+                return out
+
+        out = _run_auto_deps(Prog)
+        consume_call = _user_calls(out, "consume")[0]
+        edges = _compiler_edges(consume_call)
+        assert len(edges) == 1
+        assert edges[0].name_hint == "producer_tid"
+
+    def test_memref_may_alias_adds_compiler_edge(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 0, 256)]],
+            ) -> pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 0, 256)]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                x: pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 128, 256)],
+            ) -> pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 128, 256)]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                left: pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 0, 256)],
+                right: pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 128, 256)],
+            ) -> pl.Tensor[[64], pl.FP32, pl.MemRef("shared_ddr", 128, 256)]:
+                with pl.manual_scope():
+                    _produced, producer_tid = pl.submit(self.fill, left)
+                    out, _ = pl.submit(self.consume, right)
+                return out
+
+        out = _run_auto_deps(Prog)
+        consume_call = _user_calls(out, "consume")[0]
+        edges = _compiler_edges(consume_call)
+        assert len(edges) == 1
+        assert edges[0].name_hint == "producer_tid"
+
     def test_prior_hazard_without_producer_task_id_reports_user_error(self):
         @pl.program
         class Prog:

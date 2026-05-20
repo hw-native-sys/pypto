@@ -24,6 +24,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/memref.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
@@ -109,7 +110,7 @@ class StorageRootAnalysis : public IRVisitor {
   void Initialize(const std::vector<VarPtr>& params) {
     for (const auto& param : params) {
       if (param && IsTensorType(param->GetType())) {
-        roots_[param.get()] = param.get();
+        RegisterVarRoot(param, param.get());
       }
     }
   }
@@ -121,14 +122,40 @@ class StorageRootAnalysis : public IRVisitor {
     return it != roots_.end() ? it->second : nullptr;
   }
 
+  bool MayAlias(const Var* lhs, const Var* rhs) const {
+    if (!lhs || !rhs) return false;
+    if (lhs == rhs) return true;
+    auto lhs_it = root_memrefs_.find(lhs);
+    auto rhs_it = root_memrefs_.find(rhs);
+    if (lhs_it == root_memrefs_.end() || rhs_it == root_memrefs_.end()) return false;
+    return MemRef::MayAlias(lhs_it->second, rhs_it->second);
+  }
+
  protected:
+  void VisitStmt_(const IfStmtPtr& op) override {
+    IRVisitor::VisitStmt_(op);
+    if (!op || op->return_vars_.empty() || !op->else_body_.has_value()) return;
+
+    auto then_yield = GetTrailingYield(op->then_body_);
+    auto else_yield = GetTrailingYield(op->else_body_.value());
+    if (!then_yield || !else_yield) return;
+
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (i >= then_yield->value_.size() || i >= else_yield->value_.size()) break;
+      const Var* then_root = ResolveExpr(then_yield->value_[i]);
+      const Var* else_root = ResolveExpr(else_yield->value_[i]);
+      if (!then_root || then_root != else_root) continue;
+      RegisterVarRoot(op->return_vars_[i], then_root);
+    }
+  }
+
   void VisitStmt_(const ForStmtPtr& op) override {
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       const Var* root = ResolveExpr(op->iter_args_[i]->initValue_);
       if (!root) continue;
-      roots_[op->iter_args_[i].get()] = root;
+      RegisterVarRoot(op->iter_args_[i], root);
       if (i < op->return_vars_.size()) {
-        roots_[op->return_vars_[i].get()] = root;
+        RegisterVarRoot(op->return_vars_[i], root);
       }
     }
     IRVisitor::VisitStmt_(op);
@@ -138,9 +165,9 @@ class StorageRootAnalysis : public IRVisitor {
     for (size_t i = 0; i < op->iter_args_.size(); ++i) {
       const Var* root = ResolveExpr(op->iter_args_[i]->initValue_);
       if (!root) continue;
-      roots_[op->iter_args_[i].get()] = root;
+      RegisterVarRoot(op->iter_args_[i], root);
       if (i < op->return_vars_.size()) {
-        roots_[op->return_vars_[i].get()] = root;
+        RegisterVarRoot(op->return_vars_[i], root);
       }
     }
     IRVisitor::VisitStmt_(op);
@@ -163,17 +190,17 @@ class StorageRootAnalysis : public IRVisitor {
     if (auto call = As<Call>(op->value_)) {
       const std::string& op_name = call->op_->name_;
       if (op_name == "tensor.create") {
-        roots_[op->var_.get()] = op->var_.get();
+        RegisterVarRoot(op->var_, op->var_.get());
       } else if (op_name == "tensor.slice") {
         if (!call->args_.empty()) {
           if (const Var* root = ResolveExpr(call->args_[0])) {
-            roots_[op->var_.get()] = root;
+            RegisterVarRoot(op->var_, root);
           }
         }
       } else if (op_name == "tensor.assemble") {
         if (!call->args_.empty()) {
           if (const Var* root = ResolveExpr(call->args_[0])) {
-            roots_[op->var_.get()] = root;
+            RegisterVarRoot(op->var_, root);
           }
         }
       } else if (!IsBuiltinOp(op_name)) {
@@ -181,7 +208,7 @@ class StorageRootAnalysis : public IRVisitor {
         if (As<TupleType>(call->GetType())) {
           tuple_roots_[op->var_.get()] = std::move(out_roots);
         } else if (!out_roots.empty() && out_roots[0]) {
-          roots_[op->var_.get()] = out_roots[0];
+          RegisterVarRoot(op->var_, out_roots[0]);
         }
       }
     } else if (auto tuple_get = As<TupleGetItemExpr>(op->value_)) {
@@ -189,17 +216,38 @@ class StorageRootAnalysis : public IRVisitor {
         auto it = tuple_roots_.find(tuple_var.get());
         if (it != tuple_roots_.end() && tuple_get->index_ >= 0 &&
             tuple_get->index_ < static_cast<int>(it->second.size()) && it->second[tuple_get->index_]) {
-          roots_[op->var_.get()] = it->second[tuple_get->index_];
+          RegisterVarRoot(op->var_, it->second[tuple_get->index_]);
         }
       }
     } else if (const Var* root = ResolveExpr(op->value_)) {
-      roots_[op->var_.get()] = root;
+      RegisterVarRoot(op->var_, root);
     }
 
     IRVisitor::VisitStmt_(op);
   }
 
  private:
+  static YieldStmtPtr GetTrailingYield(const StmtPtr& stmt) {
+    if (auto yield = As<YieldStmt>(stmt)) return yield;
+    auto seq = As<SeqStmts>(stmt);
+    if (!seq || seq->stmts_.empty()) return nullptr;
+    return As<YieldStmt>(seq->stmts_.back());
+  }
+
+  static MemRefPtr GetShapedMemRef(const TypePtr& type) {
+    auto shaped = As<ShapedType>(type);
+    if (!shaped || !shaped->memref_.has_value()) return nullptr;
+    return shaped->memref_.value();
+  }
+
+  void RegisterVarRoot(const VarPtr& var, const Var* root) {
+    if (!var || !root) return;
+    roots_[var.get()] = root;
+    if (const auto memref = GetShapedMemRef(var->GetType())) {
+      root_memrefs_.try_emplace(root, memref);
+    }
+  }
+
   std::vector<const Var*> CollectCallOutputRoots(const CallPtr& call) const {
     auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
     if (!callee) return {};
@@ -214,6 +262,7 @@ class StorageRootAnalysis : public IRVisitor {
 
   ProgramPtr program_;
   std::unordered_map<const Var*, const Var*> roots_;
+  std::unordered_map<const Var*, MemRefPtr> root_memrefs_;
   std::unordered_map<const Var*, std::vector<const Var*>> tuple_roots_;
 };
 
@@ -292,7 +341,7 @@ class AutoDepMutator : public IRMutator {
     auto user_edges = GetDepAttr(call, kAttrManualDepEdges);
     for (const auto& access : accesses) {
       for (const auto& prior : prior_stack_.back()) {
-        if (access.root == nullptr || access.root != prior.root) continue;
+        if (access.root == nullptr || !storage_ || !storage_->MayAlias(access.root, prior.root)) continue;
         if (!HasHazard(access.kind, prior.kind)) continue;
         CHECK(prior.task_id_var)
             << "manual_scope auto-deps requires a producer TaskId for a prior call that writes storage read "
