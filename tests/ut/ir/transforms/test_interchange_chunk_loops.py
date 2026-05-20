@@ -16,6 +16,7 @@ Test strategy:
 """
 
 import re
+from collections.abc import Callable
 
 import pypto.language as pl
 import pytest
@@ -1271,6 +1272,196 @@ class TestNameHintPropagation:
 
         After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
         self._assert_all_incore_have_hint(After, "remainder_hint")
+
+
+def _is_block_idx_assign(stmt: ir.Stmt) -> bool:
+    if not isinstance(stmt, ir.AssignStmt):
+        return False
+    call = stmt.value
+    if isinstance(call, ir.Call) and isinstance(call.op, ir.Op):
+        return call.op.name == "tile.get_block_idx"
+    return False
+
+
+def _walk_stmt_subtree(node: ir.Stmt, visit: Callable[[ir.Stmt], None]) -> None:
+    """Visit ``node`` and recursively walk nested statement containers."""
+    visit(node)
+    if isinstance(node, ir.SeqStmts):
+        for child in node.stmts:
+            _walk_stmt_subtree(child, visit)
+    elif isinstance(node, ir.ScopeStmt):
+        _walk_stmt_subtree(node.body, visit)
+    elif isinstance(node, ir.ForStmt):
+        _walk_stmt_subtree(node.body, visit)
+    elif isinstance(node, ir.WhileStmt):
+        _walk_stmt_subtree(node.body, visit)
+    elif isinstance(node, ir.IfStmt):
+        _walk_stmt_subtree(node.then_body, visit)
+        if node.else_body is not None:
+            _walk_stmt_subtree(node.else_body, visit)
+
+
+def _find_spmd_scope(func: ir.Function) -> ir.SpmdScopeStmt:
+    found: list[ir.SpmdScopeStmt] = []
+
+    def visit(node: ir.Stmt) -> None:
+        if isinstance(node, ir.SpmdScopeStmt):
+            found.append(node)
+
+    _walk_stmt_subtree(func.body, visit)
+    assert len(found) == 1, f"expected exactly one SpmdScopeStmt, got {len(found)}"
+    return found[0]
+
+
+def _find_incore_whose_body_starts_with_block_idx(stmt: ir.Stmt) -> ir.InCoreScopeStmt | None:
+    if isinstance(stmt, ir.InCoreScopeStmt):
+        if _is_block_idx_assign(_first_stmt_in_block(stmt.body)):
+            return stmt
+    if isinstance(stmt, ir.SeqStmts):
+        for child in stmt.stmts:
+            found = _find_incore_whose_body_starts_with_block_idx(child)
+            if found is not None:
+                return found
+    if isinstance(stmt, ir.ScopeStmt):
+        return _find_incore_whose_body_starts_with_block_idx(stmt.body)
+    if isinstance(stmt, ir.ForStmt):
+        return _find_incore_whose_body_starts_with_block_idx(stmt.body)
+    if isinstance(stmt, ir.WhileStmt):
+        return _find_incore_whose_body_starts_with_block_idx(stmt.body)
+    if isinstance(stmt, ir.IfStmt):
+        found = _find_incore_whose_body_starts_with_block_idx(stmt.then_body)
+        if found is not None:
+            return found
+        if stmt.else_body is not None:
+            return _find_incore_whose_body_starts_with_block_idx(stmt.else_body)
+    return None
+
+
+def _first_stmt_in_block(stmt: ir.Stmt) -> ir.Stmt:
+    if isinstance(stmt, ir.SeqStmts) and stmt.stmts:
+        return stmt.stmts[0]
+    return stmt
+
+
+def _block_idx_is_sibling_before_incore(spmd_body: ir.Stmt) -> bool:
+    """True when ``tile.get_block_idx`` is a direct seq child before an InCore sibling."""
+    if isinstance(spmd_body, ir.AutoInCoreScopeStmt):
+        spmd_body = spmd_body.body
+    if isinstance(spmd_body, ir.InCoreScopeStmt):
+        return False
+    if not isinstance(spmd_body, ir.SeqStmts):
+        return False
+    stmts = spmd_body.stmts
+    if len(stmts) < 2 or not _is_block_idx_assign(stmts[0]):
+        return False
+    for index, stmt in enumerate(stmts):
+        if isinstance(stmt, ir.InCoreScopeStmt):
+            return index > 0
+    return False
+
+
+class TestSpmdBlockIdxPreludeMerge:
+    """``InterchangeChunkLoops`` merges leading ``tile.get_block_idx`` prelude into the
+    first ``InCoreScopeStmt`` directly under ``SpmdScopeStmt`` (pass-9 behavior).
+    """
+
+    def test_interchange_merges_block_idx_into_first_incore_under_spmd(self):
+        """After interchange, block index binding lives inside the first InCore, not as a
+        sibling ahead of it under the Spmd body."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4):
+                    with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
+                        for j in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
+                            offset = i * 128
+                            tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                            out = pl.store(tile_a, [offset, 0], out)
+                return out
+
+        # Pass verification/roundtrip off: Spmd+AutoInCore IR after interchange does
+        # not always satisfy default post-pass checks for this orchestration shape.
+        with passes.PassContext([]):
+            prepared = _prepare_for_interchange(Before)
+            main_func = list(prepared.functions.values())[0]
+            before_spmd = _find_spmd_scope(main_func)
+
+            After = passes.interchange_chunk_loops()(prepared)
+            after_spmd = _find_spmd_scope(list(After.functions.values())[0])
+
+        assert before_spmd.body is not after_spmd.body, "interchange should rewrite the Spmd body"
+        assert not _block_idx_is_sibling_before_incore(after_spmd.body), (
+            "tile.get_block_idx prelude should be merged into the first InCore, "
+            "not left as a sibling before it"
+        )
+
+        incore = _find_incore_whose_body_starts_with_block_idx(after_spmd.body)
+        assert incore is not None, (
+            "expected an InCore under Spmd whose body starts with tile.get_block_idx after merge"
+        )
+
+    def test_merged_spmd_incore_prints_as_nested_with_blocks(self):
+        """Printer regression: after the prelude-merge rewrite, the IR must
+        still print as ``with pl.spmd(...):`` containing ``with pl.at(...):``.
+
+        The merge wraps the rewritten Spmd body in a single-element SeqStmts so
+        the Python printer emits the nested ``with`` shape. Any printer change
+        that flattens single-element sequences could silently break this and
+        emit the prelude as siblings outside the InCore again.
+
+        Roundtrip verification is disabled inside this test because intermediate
+        passes produce a ``SpmdScopeStmt(InCoreScopeStmt(...))`` shape that
+        the printer currently emits as ``with pl.spmd(...):`` with a non-call
+        body — a form the parser rejects. That's a separate printer bug (see
+        KNOWN_ISSUES.md). We only assert the *final* printed form here.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4):
+                    with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
+                        for j in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
+                            offset = i * 128
+                            tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                            out = pl.store(tile_a, [offset, 0], out)
+                return out
+
+        # Override the autouse PassContext with an empty instrument set so the
+        # intermediate-pass roundtrip (which trips a separate printer bug) does
+        # not preempt the assertions below.
+        with passes.PassContext([]):
+            After = passes.interchange_chunk_loops()(_prepare_for_interchange(Before))
+        main_func = list(After.functions.values())[0]
+        printed = python_print(main_func)
+
+        # Both scope markers should appear, and pl.at must be nested under pl.spmd.
+        spmd_line = next(
+            (i for i, line in enumerate(printed.splitlines()) if "pl.spmd(" in line),
+            -1,
+        )
+        at_line = next(
+            (i for i, line in enumerate(printed.splitlines()) if "pl.at(level=pl.Level.CORE_GROUP" in line),
+            -1,
+        )
+        assert spmd_line >= 0, f"expected 'pl.spmd(' in printed output:\n{printed}"
+        assert at_line >= 0, (
+            f"expected nested 'pl.at(level=pl.Level.CORE_GROUP' in printed output:\n{printed}"
+        )
+        assert at_line > spmd_line, (
+            f"pl.at(level=...) must appear after pl.spmd(...) in printed output:\n{printed}"
+        )
 
 
 if __name__ == "__main__":

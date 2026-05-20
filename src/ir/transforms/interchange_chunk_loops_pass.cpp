@@ -161,6 +161,15 @@ static bool IsPureScalarAssignment(const StmtPtr& stmt) {
   return false;
 }
 
+static bool IsTileGetBlockIdxAssign(const StmtPtr& stmt) {
+  auto assign = As<AssignStmt>(stmt);
+  if (!assign) return false;
+  auto call = As<Call>(assign->value_);
+  if (!call) return false;
+  auto op = As<Op>(call->op_);
+  return op && op->name_ == "tile.get_block_idx";
+}
+
 static bool ContainsChunkLoop(const StmtPtr& stmt) {
   if (!stmt) return false;
 
@@ -332,6 +341,15 @@ class InterchangeChunkLoopsMutator : public IRMutator {
     current_split_ = prev_split;
     current_name_hint_ = prev_name_hint;
     return new_body;
+  }
+
+  StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
+    auto new_body = VisitStmt(op->body_);
+    auto merged_body = ForceBlockIdxInsideLeadingInCore(new_body, op->span_);
+    if (merged_body.get() == op->body_.get()) return op;
+    auto copy = MutableCopy(op);
+    copy->body_ = merged_body;
+    return copy;
   }
 
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
@@ -584,6 +602,61 @@ class InterchangeChunkLoopsMutator : public IRMutator {
       return std::make_shared<InCoreScopeStmt>(split, name_hint, body, span);
     }
     return body;
+  }
+
+  /**
+   * @brief Merge leading block-idx scalar prelude into the first InCore scope in Spmd.
+   *
+   * Invariant we rely on: the for-form of ``pl.spmd`` lowers to
+   * ``SpmdScopeStmt(body=InCoreScopeStmt(...))`` and the inner InCore body
+   * starts with ``i = tile.get_block_idx()`` followed by per-block scalar
+   * derivations (e.g. ``offset = i * 128``). After SSA + flatten, these
+   * appear in the IR as a sequence of pure scalar AssignStmts.
+   *
+   * Merge is performed only when the prelude is **uninterrupted**:
+   *
+   *   [Assign(tile.get_block_idx), Assign(scalar...)*, InCoreScope, ...]
+   * ->
+   *   [InCoreScope(Assign(tile.get_block_idx), Assign(scalar...)*, <old_body>), ...]
+   *
+   * If a non-scalar stmt (e.g. a tensor compute op) appears between the
+   * ``tile.get_block_idx`` assignment and the first InCore, the merge is
+   * skipped: pulling only the scalar prefix into the InCore would change
+   * the visibility/outline boundary of the intervening tensor op.
+   *
+   * Returns ``body`` unchanged when the pattern does not match.
+   */
+  static StmtPtr ForceBlockIdxInsideLeadingInCore(const StmtPtr& body, const Span& span) {
+    auto seq = As<SeqStmts>(body);
+    if (!seq || seq->stmts_.size() < 2) return body;
+
+    size_t prefix_end = 0;
+    while (prefix_end < seq->stmts_.size() && IsPureScalarAssignment(seq->stmts_[prefix_end])) {
+      ++prefix_end;
+    }
+    if (prefix_end == 0 || prefix_end >= seq->stmts_.size()) return body;
+    if (!IsTileGetBlockIdxAssign(seq->stmts_[0])) return body;
+
+    auto first_incore = As<InCoreScopeStmt>(seq->stmts_[prefix_end]);
+    if (!first_incore) return body;
+
+    std::vector<StmtPtr> merged_stmts;
+    merged_stmts.reserve(prefix_end + 1);
+    for (size_t i = 0; i < prefix_end; ++i) merged_stmts.push_back(seq->stmts_[i]);
+    merged_stmts.push_back(first_incore->body_);
+    auto merged_incore_body = SeqStmts::Flatten(std::move(merged_stmts), span);
+    auto merged_incore = MutableCopy(first_incore);
+    merged_incore->body_ = merged_incore_body;
+
+    std::vector<StmtPtr> rewritten;
+    rewritten.reserve(seq->stmts_.size() - prefix_end);
+    rewritten.push_back(merged_incore);
+    for (size_t i = prefix_end + 1; i < seq->stmts_.size(); ++i) {
+      rewritten.push_back(seq->stmts_[i]);
+    }
+    // Keep SeqStmts wrapper (do not flatten single stmt), so Python printer
+    // preserves `with pl.spmd(...):` + nested `with pl.at(...):` shape.
+    return std::make_shared<SeqStmts>(std::move(rewritten), span);
   }
 
   /**

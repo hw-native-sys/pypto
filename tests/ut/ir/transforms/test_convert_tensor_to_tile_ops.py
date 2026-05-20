@@ -2345,6 +2345,49 @@ class TestWrapperForwardPropagation:
         assert inner_call is not None and before_inner_call is not None
         assert len(inner_call.args) == len(before_inner_call.args)
 
+    def test_wrapper_return_types_preserved_after_propagation(self):
+        """Wrapper's ``return_types_`` is preserved (not overwritten with the inner
+        callee's). The forward propagator mirrors Out *params* on the wrapper and
+        rewrites the inner call to push extra Out args — it must not redeclare the
+        wrapper's return signature, since non-transparent wrappers may construct
+        tuple returns whose shape differs from the inner callee's.
+
+        Common-case guard: the wrapper here just forwards ``return self.kernel(x)``,
+        so its return arity (1) must stay 1 after propagation.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
+            def wrapper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.kernel(x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.wrapper(x)
+                return y
+
+        before_wrapper = Before.get_function("wrapper")
+        assert before_wrapper is not None
+        before_return_types = list(before_wrapper.return_types)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        after_wrapper = After.get_function("wrapper")
+        assert after_wrapper is not None
+        after_return_types = list(after_wrapper.return_types)
+
+        # Arity is preserved: a single-return wrapper stays a single-return wrapper.
+        assert len(after_return_types) == len(before_return_types) == 1
+        # The declared return type is structurally what the wrapper declared,
+        # not the inner callee's post-transform store-call type.
+        assert ir.structural_equal(after_return_types[0], before_return_types[0])
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

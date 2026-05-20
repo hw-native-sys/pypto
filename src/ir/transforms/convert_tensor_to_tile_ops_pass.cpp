@@ -1553,7 +1553,12 @@ WrapperTransformResult PropagateOutputsThroughWrapper(
       << "Wrapper forward propagation identified a forwarded call in " << func->name_
       << " but could not rewrite it (call not in AssignStmt RHS form expected by outlining invariant)";
 
-  std::vector<TypePtr> new_return_types = incore_func->return_types_;
+  // Keep wrapper's declared returns. The forwarded inner call may be rewritten
+  // to pass extra output tensors, but non-transparent wrappers can still
+  // construct additional return values (e.g. scalar + tensor tuples). Forcing
+  // wrapper return_types_ to match the inner callee can invalidate existing
+  // TupleGetItem users at call-sites.
+  std::vector<TypePtr> new_return_types = func->return_types_;
   auto new_func =
       std::make_shared<Function>(func->name_, new_params, new_dirs, new_return_types, new_body, func->span_,
                                  func->func_type_, func->level_, func->role_, func->attrs_);

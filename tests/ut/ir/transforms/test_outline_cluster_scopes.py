@@ -365,6 +365,35 @@ class TestOutlineClusterScopes:
         After = passes.outline_cluster_scopes()(After)
         ir.assert_structural_equal(After, Expected)
 
+    def test_outline_spmd_for_loop_uses_name_hint_on_incore(self):
+        """``for ... in pl.spmd(..., name_hint=...)`` names the outlined InCore kernel."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, name_hint="q_proj_spmd"):
+                    offset = i * 128
+                    tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(tile_a, [offset, 0], out)
+                return out
+
+        Before = passes.convert_to_ssa()(Before)
+        after_incore = passes.outline_incore_scopes()(Before)
+        incore_names = {
+            f.name for f in after_incore.functions.values() if f.func_type == ir.FunctionType.InCore
+        }
+        assert "q_proj" in incore_names
+        assert not any(n.startswith("main_incore_") for n in incore_names)
+
+        after_spmd = passes.outline_cluster_scopes()(after_incore)
+        spmd_names = {f.name for f in after_spmd.functions.values() if f.func_type == ir.FunctionType.Spmd}
+        assert "q_proj_spmd" in spmd_names
+
     def test_outline_spmd_for_loop_marks_assemble_dest_as_inout(self):
         """`for n0 in pl.spmd(N): out = pl.assemble(out, slice, [n0, ...])`
         must make `out` an InOut parameter on both the outlined InCore and

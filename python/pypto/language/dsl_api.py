@@ -859,10 +859,12 @@ class SpmdContext:
         core_num: int | _ir.Expr,
         sync_start: bool = False,
         name_hint: str = "",
+        optimizations: list[Optimization] | None = None,
     ) -> None:
         self.core_num = core_num
         self.sync_start = sync_start
         self.name_hint = name_hint
+        self.optimizations = optimizations
 
     def __enter__(self) -> None:
         pass
@@ -889,6 +891,7 @@ def spmd(
     *,
     sync_start: bool = False,
     name_hint: str = "",
+    optimizations: list[Optimization] | None = None,
 ) -> SpmdContext:
     """Dispatch a kernel with SPMD (Single Program Multiple Data) multi-block execution.
 
@@ -908,6 +911,12 @@ def spmd(
        tile/tensor ops work without a separate ``@pl.function(type=InCore)``
        declaration.
 
+    Optional ``optimizations=[pl.split(mode)]`` applies to the inner InCore scope
+    (auto-generated for the for-form, wrapped around the call for the with-form).
+    ``pl.auto_chunk`` is not supported on ``pl.spmd`` — use
+    ``pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])`` inside
+    the loop body for chunked parallel loops.
+
     Args:
         core_num: Number of blocks for SPMD dispatch. Positional; accepts a
             Python ``int`` or any ``ir.Expr`` of integer type. Closure-captured
@@ -916,6 +925,8 @@ def spmd(
             through to codegen unchanged.
         sync_start: If True, all blocks start execution simultaneously (default: False).
         name_hint: Optional name hint for the outlined function.
+        optimizations: Optional list literal containing only ``pl.split(mode)``
+            entries (the parser inspects the AST).
 
     Returns:
         Context manager / loop iterator for the SPMD scope.
@@ -932,6 +943,10 @@ def spmd(
         ...     tile_b = pl.load(b, [offset, 0], [128, 128])
         ...     out = pl.store(pl.add(tile_a, tile_b), [offset, 0], out)
         >>>
+        >>> # With-form with split hint on the inner InCore wrapper
+        >>> with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+        ...     out = self.kernel(a, b, out)
+        >>>
         >>> # SPMD inside cluster (mixed kernel)
         >>> with pl.cluster():
         ...     with pl.spmd(4, sync_start=True):
@@ -941,7 +956,12 @@ def spmd(
         raise ValueError(f"core_num must be a positive integer or ir.Expr, got {core_num!r}")
     if isinstance(core_num, int) and core_num <= 0:
         raise ValueError(f"core_num must be a positive integer, got {core_num!r}")
-    return SpmdContext(core_num=core_num, sync_start=sync_start, name_hint=name_hint)
+    return SpmdContext(
+        core_num=core_num,
+        sync_start=sync_start,
+        name_hint=name_hint,
+        optimizations=optimizations,
+    )
 
 
 class AtContext:

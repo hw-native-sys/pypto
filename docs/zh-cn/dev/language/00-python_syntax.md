@@ -323,11 +323,26 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(MODE)])` | `AutoInCore` | AutoInCore + split 提示（条目独立） |
 | `pl.at(level=pl.Level.HOST)`（或任意非 `CORE_GROUP` 级别） | `Hierarchy` | 分布式层级作用域 |
 | `pl.cluster()` | `Cluster` | AIC+AIV 协同调度组 |
+| `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd`（for-form 内嵌 `InCore`） | SPMD 多 block 派发——见 [pl.spmd](#plspmd-多-block-派发) |
+| `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | split 提示作用于内层 InCore（两种形式均适用） |
 | `pl.manual_scope()` | `Runtime(manual=true)` | 由用户管理任务排序的 orchestrator 区域——见[手工依赖原语](#手工依赖原语) |
 | `pl.incore()` *(已弃用)* | `InCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP)` |
 | `pl.auto_incore(split=...)` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(...)])` |
 | `pl.at(..., optimization=pl.chunked_loop_optimizer[(split=...)])` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(..., optimizations=[pl.auto_chunk, pl.split(...)])` |
 | `pl.at(..., split=...)` *(已弃用)* | `InCore` | 请改用 `pl.at(..., optimizations=[pl.split(...)])` |
+
+#### `pl.spmd` 多 block 派发
+
+`pl.spmd(N)` 把一个 kernel 派发到 `N` 个 block。两种形式：
+
+- `with pl.spmd(N): kernel(...)` —— body 必须是对一个已声明 InCore kernel 的单次调用。
+- `for i in pl.spmd(N): ...` —— 循环变量绑定到每个 block 的索引（`pl.tile.get_block_idx()`）；body 自动外包成一段隐式 InCore 区域。
+
+可选 `optimizations=[pl.split(MODE)]`（**不支持** `pl.auto_chunk`；chunk 循环请在内层使用 `pl.at(..., optimizations=[pl.auto_chunk])`）：
+
+| 条目 | 适用形式 | 作用 |
+| ---- | -------- | ---- |
+| `pl.split(MODE)` | 两种均适用 | 给内层 InCore 设置 `split_` 字段（跨核数据搬运提示，由 `ExpandMixedKernel` / `LegalizePtoBufferReuse` 消费）。with-form 会在原 call 外多包一层 `InCoreScopeStmt` 来承载该字段。 |
 
 示例参见 [语言指南](../../user/01-language_guide.md#incore-作用域)。
 
