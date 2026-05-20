@@ -24,6 +24,8 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/any_cast.h"
+#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/ir_mutator_with_analyzer.h"
@@ -151,8 +153,12 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
     auto call = std::dynamic_pointer_cast<const Call>(base);
-    if (call && call->op_ && call->op_->name_ == "tensor.as_layout") {
-      base = SimplifyAsLayout(call);
+    if (call && call->op_) {
+      if (call->op_->name_ == "tensor.as_layout") {
+        base = SimplifyAsLayout(call);
+      } else if (call->op_->name_ == "tile.cast") {
+        base = SimplifyTileCast(call);
+      }
     }
     auto new_type = SimplifyType(base->GetType());
     if (new_type.get() == base->GetType().get()) return base;
@@ -544,6 +550,37 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   /// a Var bound to the inner Call (not the inner Call inline), so naive
   /// pointer inspection cannot see across the binding. A dedicated SSA-aware
   /// chain optimizer can be added if real pipelines produce such chains.
+  /// Fold `tile.cast(x, target_type=T, mode=...)` to `x` when `T == dtype(x)`.
+  /// Hardware `pto.tcvt` is designed for cross-dtype conversion; on same-dtype
+  /// (e.g. FP32→FP32) the instruction can corrupt values rather than acting as
+  /// an identity copy, so eliminating the call entirely is both an optimization
+  /// and a correctness fix.
+  ExprPtr SimplifyTileCast(const std::shared_ptr<const Call>& call) {
+    if (call->args_.size() != 1) return call;
+    auto src = call->args_[0];
+    auto src_type = As<TileType>(src->GetType());
+    if (!src_type) return call;
+
+    // tile.cast accepts target_type as either DataType or int — mirror the
+    // dual-form lookup that DeduceTileCastType uses.
+    bool found = false;
+    DataType target_dtype{};
+    for (const auto& [key, value] : call->kwargs_) {
+      if (key != "target_type") continue;
+      if (value.type() == typeid(DataType)) {
+        target_dtype = AnyCast<DataType>(value, "tile.cast target_type");
+        found = true;
+      } else if (value.type() == typeid(int)) {
+        target_dtype = static_cast<DataType>(AnyCast<int>(value, "tile.cast target_type"));
+        found = true;
+      }
+      break;
+    }
+    if (!found) return call;
+    if (src_type->dtype_ != target_dtype) return call;
+    return src;
+  }
+
   ExprPtr SimplifyAsLayout(const std::shared_ptr<const Call>& call) {
     if (call->args_.size() != 1) return call;
     auto src = call->args_[0];

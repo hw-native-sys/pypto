@@ -1306,5 +1306,77 @@ class TestAsLayoutFolding:
         assert isinstance(last, ir.Call) and last.op.name == "tensor.as_layout"
 
 
+# ============================================================================
+# tile.cast same-dtype folding
+# ============================================================================
+
+
+class TestTileCastFolding:
+    """Simplify drops same-dtype ``tile.cast`` calls.
+
+    Hardware ``pto.tcvt`` is designed for cross-dtype conversion; emitting it
+    for a same-dtype cast (e.g. FP32→FP32 with mode=NONE) can corrupt values
+    rather than acting as an identity copy. Folding the call at the IR layer
+    keeps the codegen from ever seeing it.
+    """
+
+    def test_eliminates_same_dtype_cast(self):
+        """``tile.cast(x, target_type=dtype(x))`` simplifies — the Call is
+        replaced with the source Var, leaving an alias-assign that downstream
+        DCE will clean up later. We assert by scanning that no ``tile.cast``
+        Call survives after Simplify."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                x: pl.Tensor[[16, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                t_in: pl.Tile[[16, 32], pl.FP32] = pl.load(
+                    x, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec
+                )
+                t_out: pl.Tile[[16, 32], pl.FP32] = pl.tile.cast(t_in, target_type=pl.FP32, mode="none")
+                out: pl.Tensor[[16, 32], pl.FP32] = pl.store(t_out, [0, 0], out)
+                return out
+
+        after = passes.simplify()(Before)
+        for func in after.functions.values():
+            for stmt in TestAsLayoutFolding._iter_stmts(func.body):
+                if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+                    assert stmt.value.op.name != "tile.cast", (
+                        f"same-dtype tile.cast should fold, but found: {stmt}"
+                    )
+
+    def test_preserves_cross_dtype_cast(self):
+        """Cross-dtype cast (FP16→FP32) is real conversion and must survive."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                x: pl.Tensor[[16, 32], pl.FP16],
+                out: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                t_in: pl.Tile[[16, 32], pl.FP16] = pl.load(
+                    x, [0, 0], [16, 32], target_memory=pl.MemorySpace.Vec
+                )
+                t_out: pl.Tile[[16, 32], pl.FP32] = pl.tile.cast(t_in, target_type=pl.FP32, mode="none")
+                out: pl.Tensor[[16, 32], pl.FP32] = pl.store(t_out, [0, 0], out)
+                return out
+
+        after = passes.simplify()(Before)
+        # The cast must still be present after simplify — verify by scanning.
+        found_cast = False
+        for func in after.functions.values():
+            for stmt in TestAsLayoutFolding._iter_stmts(func.body):
+                if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+                    if stmt.value.op.name == "tile.cast":
+                        found_cast = True
+        assert found_cast, "cross-dtype tile.cast should survive Simplify"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
