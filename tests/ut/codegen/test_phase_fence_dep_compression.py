@@ -51,6 +51,12 @@ def _assert_single_barrier_shape(code: str, *, fanin: int) -> None:
     assert not re.search(rf"PTO2TaskId params_t\d+_deps\[{fanin}\];", code), code
 
 
+def _assert_ordered(code: str, *needles: str) -> None:
+    positions = [code.find(needle) for needle in needles]
+    assert all(pos >= 0 for pos in positions), code
+    assert positions == sorted(positions), code
+
+
 class TestPhaseFenceDepCompressionCodegen:
     @pytest.fixture(autouse=True)
     def _no_roundtrip_verification(self):
@@ -255,6 +261,12 @@ class TestPhaseFenceDepCompressionCodegen:
         code = _compile_program(Prog)
         _assert_single_barrier_shape(code, fanin=inner_branches)
         assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
+        _assert_ordered(
+            code,
+            "for (int64_t outer =",
+            "rt_submit_dummy_task(params_phase_fence_barrier_0)",
+            "for (int64_t inner =",
+        )
 
     def test_parallel_range_parallel_does_not_emit_outer_dummy_barrier(self):
         rows, cols = 256, 128
@@ -299,6 +311,136 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         _assert_single_barrier_shape(code, fanin=inner_branches)
+        assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
+        _assert_ordered(
+            code,
+            "for (int64_t outer =",
+            "for (int64_t phase =",
+            "rt_submit_dummy_task(params_phase_fence_barrier_0)",
+            "for (int64_t inner =",
+        )
+
+    def test_array_fanin_to_single_consumer_does_not_emit_dummy_barrier(self):
+        rows, cols = 128, 128
+        tile_r, tile_c = 32, 32
+        branches = 4
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.manual_scope():
+                    tids = pl.array.create(branches, pl.TASK_ID)
+                    for phase in pl.range(2):
+                        producer_row: pl.Scalar[pl.INDEX] = phase * tile_r
+                        consumer_row: pl.Scalar[pl.INDEX] = (phase + 2) * tile_r
+                        for branch in pl.parallel(branches):
+                            col: pl.Scalar[pl.INDEX] = branch * tile_c
+                            out, tid = pl.submit(self.kern, x, out, producer_row, col)
+                            tids[branch] = tid
+                        out, _ = pl.submit(self.kern, x, out, consumer_row, 0, deps=[tids])
+                return out
+
+        code = _compile_program(Prog)
+        assert "rt_submit_dummy_task" not in code, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+
+    def test_two_by_two_low_benefit_phase_fence_does_not_emit_dummy_barrier(self):
+        rows, cols = 128, 128
+        tile_r, tile_c = 32, 32
+        branches = 2
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.manual_scope():
+                    tids = pl.array.create(branches, pl.TASK_ID)
+                    for phase in pl.range(2):
+                        row: pl.Scalar[pl.INDEX] = phase * tile_r
+                        for branch in pl.parallel(branches):
+                            col: pl.Scalar[pl.INDEX] = branch * tile_c
+                            out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
+                            tids[branch] = tid
+                return out
+
+        code = _compile_program(Prog)
+        assert "rt_submit_dummy_task" not in code, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[2\];", code), code
+
+    def test_if_consumer_remains_compressible_when_profitable(self):
+        rows, cols = 128, 128
+        tile_r, tile_c = 32, 32
+        branches = 4
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kern(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
+                ret: pl.Tensor[[rows, cols], pl.FP32] = pl.store(r, [row, col], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[rows, cols], pl.FP32],
+                out: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                with pl.manual_scope():
+                    tids = pl.array.create(branches, pl.TASK_ID)
+                    for phase in pl.range(2):
+                        row: pl.Scalar[pl.INDEX] = phase * tile_r
+                        for branch in pl.parallel(branches):
+                            if branch >= 0:
+                                col: pl.Scalar[pl.INDEX] = branch * tile_c
+                                out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
+                                tids[branch] = tid
+                return out
+
+        code = _compile_program(Prog)
+        _assert_single_barrier_shape(code, fanin=branches)
         assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
 
     def test_two_independent_arrays_emit_independent_barriers(self):

@@ -728,6 +728,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     std::unordered_map<const Var*, std::string> pre_loop_phase_fence_barriers;
     if (in_manual_scope_depth_ > 0 && for_stmt->kind_ == ForKind::Parallel) {
+      const int64_t loop_trip_count = EvalConstTripCount(for_stmt);
       for (size_t i = 0; i < for_stmt->iter_args_.size(); ++i) {
         const auto& iter_arg = for_stmt->iter_args_[i];
         if (!iter_arg || !ForBodyHasManualDepOnArray(for_stmt->body_, iter_arg.get(),
@@ -736,6 +737,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
         auto source = TryResolveExplicitPhaseFenceArrayForVar(iter_arg.get());
         if (!source.has_value()) continue;
+        const int64_t consumer_count =
+            loop_trip_count * CountManualDepConsumersOnArray(for_stmt->body_, iter_arg.get());
+        if (!ShouldEmitPhaseFenceBarrier(source->size, consumer_count)) continue;
         pre_loop_phase_fence_barriers[iter_arg.get()] = EmitPhaseFenceBarrier(*source);
       }
     }
@@ -790,6 +794,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         }
         auto source = TryResolveExplicitPhaseFenceArrayForVar(iter_arg.get());
         if (!source.has_value()) continue;
+        const int64_t consumer_count = CountManualDepConsumersOnArray(for_stmt->body_, iter_arg.get());
+        if (!ShouldEmitPhaseFenceBarrier(source->size, consumer_count)) continue;
         in_loop_phase_fence_barriers[iter_arg.get()] = EmitPhaseFenceBarrier(*source);
       }
     }
@@ -1149,6 +1155,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::vector<std::string> slot_names;
     int64_t size = 0;
   };
+
+  // Minimum explicit-edge savings required before inserting an extra dummy
+  // barrier. A value of 1 means "only compress when N * X > N + X"; keep this
+  // local so future tuning does not need to thread a new public option.
+  static constexpr int64_t kPhaseFenceMinEstimatedEdgeSavings = 1;
 
   std::string Indent() const { return std::string(indent_, ' '); }
 
@@ -2482,6 +2493,40 @@ class OrchestrationStmtCodegen : public CodegenBase {
     finder.descend_into_for = descend_into_for;
     finder.VisitStmt(body);
     return finder.found;
+  }
+
+  static int64_t CountManualDepConsumersOnArray(const StmtPtr& body, const Var* target) {
+    class Counter : public IRVisitor {
+     public:
+      int64_t count = 0;
+      const Var* target = nullptr;
+
+      void VisitStmt_(const ForStmtPtr&) override {
+        // Nested loops form their own candidate scopes; counting through them
+        // would overestimate the current scope's fanout and recreate outer
+        // dummy barriers.
+      }
+
+      void VisitExpr_(const CallPtr& call) override {
+        for (const auto& [k, v] : call->attrs_) {
+          if (k != kAttrManualDepEdges) continue;
+          const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+          if (!edges || edges->size() != 1 || !(*edges)[0]) continue;
+          if ((*edges)[0].get() == target) ++count;
+        }
+        IRVisitor::VisitExpr_(call);
+      }
+    };
+    Counter counter;
+    counter.target = target;
+    counter.VisitStmt(body);
+    return counter.count;
+  }
+
+  static bool ShouldEmitPhaseFenceBarrier(int64_t producer_count, int64_t consumer_count) {
+    if (producer_count <= 0 || consumer_count <= 0) return false;
+    const int64_t estimated_saving = producer_count * consumer_count - (producer_count + consumer_count);
+    return estimated_saving >= kPhaseFenceMinEstimatedEdgeSavings;
   }
 
   /// Determine the carry size for a TaskId iter_arg of ``for_stmt`` at slot
