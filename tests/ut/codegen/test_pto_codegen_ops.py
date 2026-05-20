@@ -2016,5 +2016,84 @@ class TestTensorAssembleAtomicCodegen:
             self._generate_mlir(Prog)
 
 
+class TestScatterCodegen:
+    """Tests for tile.scatter / tile.scatter_mask PTO code generation (DPS).
+
+    Both forms map to pto.tscatter and are destination-passing-style: the
+    destination tile is the first operand and the result aliases it via
+    set_output_reuses_input(0). Codegen must therefore emit the dst (the result
+    target) inside outs(...) and the remaining operands inside ins(...).
+    """
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_tile_scatter_index_form_codegen(self):
+        """tile.scatter emits pto.tscatter ins(src, idx) outs(dst) with dst aliased."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst_in: pl.Tensor[[16, 32], pl.FP32],
+                src: pl.Tensor[[4, 32], pl.FP32],
+                idx: pl.Tensor[[4, 1], pl.INT32],
+                out: pl.Tensor[[16, 32], pl.FP32],
+            ) -> pl.Tensor[[16, 32], pl.FP32]:
+                dst_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(dst_in, [0, 0], [16, 32])
+                src_tile: pl.Tile[[4, 32], pl.FP32] = pl.load(src, [0, 0], [4, 32])
+                idx_tile: pl.Tile[[4, 1], pl.INT32] = pl.load(idx, [0, 0], [4, 1])
+                scattered: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter(dst_tile, src_tile, idx_tile)
+                return pl.store(scattered, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tscatter_lines = [line for line in mlir.splitlines() if "pto.tscatter" in line]
+        assert len(tscatter_lines) == 1, f"Expected exactly one pto.tscatter, got:\n{mlir}"
+        line = tscatter_lines[0]
+        assert "ins(" in line and "outs(" in line, (
+            f"pto.tscatter must use the ins(...) outs(...) DPS form, got:\n{line}"
+        )
+
+    def test_tile_scatter_mask_form_codegen(self):
+        """tile.scatter_mask emits pto.tscatter with a maskPattern attribute (DPS)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst_in: pl.Tensor[[4, 16], pl.FP32],
+                src: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Tensor[[4, 16], pl.FP32],
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                dst_tile: pl.Tile[[4, 16], pl.FP32] = pl.load(dst_in, [0, 0], [4, 16])
+                src_tile: pl.Tile[[4, 8], pl.FP32] = pl.load(src, [0, 0], [4, 8])
+                scattered: pl.Tile[[4, 16], pl.FP32] = pl.tile.scatter_mask(
+                    dst_tile, src_tile, mask_pattern=pl.tile.MaskPattern.P0101
+                )
+                return pl.store(scattered, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tscatter_lines = [line for line in mlir.splitlines() if "pto.tscatter" in line]
+        assert len(tscatter_lines) == 1, f"Expected exactly one pto.tscatter, got:\n{mlir}"
+        line = tscatter_lines[0]
+        assert "maskPattern" in line and "P0101" in line, (
+            f"mask form must emit a #pto.mask_pattern<P0101> attribute, got:\n{line}"
+        )
+        assert "ins(" in line and "outs(" in line, (
+            f"pto.tscatter mask form must use the ins(...) outs(...) DPS form, got:\n{line}"
+        )
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -2030,29 +2030,29 @@ def gather_compare(
     )
 
 
-def scatter(src: Tile, indexes: Tile, dst: Tile) -> Tile:
+def scatter(dst: Tile, src: Tile, indexes: Tile) -> Tile:
     """Scatter rows from ``src`` into ``dst`` at per-row destination indices.
 
     Computes ``dst[indexes[i, 0], j] = src[i, j]``. Maps to PTOAS ``pto.tscatter``
-    index form. The op is DPS — ``dst`` is rewritten in place and the returned
-    Tile aliases the same buffer. For the hardware mask-pattern variant, use
-    :func:`scatter_mask`.
+    index form. The op is DPS — ``dst`` is the first (in/out) argument, rewritten
+    in place, and the returned Tile aliases the same buffer. For the hardware
+    mask-pattern variant, use :func:`scatter_mask`.
 
     Args:
+        dst: Destination tile (same dtype as ``src``; rewritten in-place).
         src: Source tile (FP16/FP32/BF16/INT8/INT16/INT32, 2D)
         indexes: Per-row destination index tile (INT16 or INT32). The element
             width must match ``dst``: 4-byte dst → INT32, 2-byte dst → INT16,
             1-byte dst → INT16.
-        dst: Destination tile (same dtype as ``src``; rewritten in-place).
 
     Returns:
         Tile aliasing the post-scatter ``dst`` tile.
     """
-    call_expr = _ir_ops.scatter(src.unwrap(), indexes.unwrap(), dst.unwrap())
+    call_expr = _ir_ops.scatter(dst.unwrap(), src.unwrap(), indexes.unwrap())
     return Tile(expr=call_expr)
 
 
-def scatter_mask(src: Tile, dst: Tile, mask_pattern: int) -> Tile:
+def scatter_mask(dst: Tile, src: Tile, mask_pattern: int) -> Tile:
     """Scatter ``src`` rows into mask-marked columns of ``dst`` (mask form).
 
     For each row, the elements of ``src`` are written into the columns of
@@ -2061,8 +2061,8 @@ def scatter_mask(src: Tile, dst: Tile, mask_pattern: int) -> Tile:
     This form is intended for A3 / CPU-sim style backends; A5 rejects it.
 
     Args:
-        src: Source tile (compact rows; same bit-width as ``dst``)
         dst: Destination tile (rewritten on positions selected by ``mask_pattern``)
+        src: Source tile (compact rows; same dtype as ``dst``)
         mask_pattern: Mask pattern selector (1-7), see :class:`MaskPattern`.
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111
 
@@ -2070,9 +2070,9 @@ def scatter_mask(src: Tile, dst: Tile, mask_pattern: int) -> Tile:
         Tile aliasing the post-scatter ``dst`` tile.
 
     Examples:
-        out = scatter_mask(src, dst, mask_pattern=pl.tile.MaskPattern.P0101)
+        out = scatter_mask(dst, src, mask_pattern=pl.tile.MaskPattern.P0101)
     """
-    call_expr = _ir_ops.scatter_mask(src.unwrap(), dst.unwrap(), mask_pattern)
+    call_expr = _ir_ops.scatter_mask(dst.unwrap(), src.unwrap(), mask_pattern)
     return Tile(expr=call_expr)
 
 

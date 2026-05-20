@@ -2973,9 +2973,9 @@ class TestTileScatterOps:
         dst_type = ir.TileType(_const_dims(span, 16, 32), dtype)
 
         call = tile.scatter(
+            ir.Var("dst", dst_type, span),
             ir.Var("src", src_type, span),
             ir.Var("idx", idx_type, span),
-            ir.Var("dst", dst_type, span),
         )
 
         assert isinstance(call, ir.Call)
@@ -2995,9 +2995,9 @@ class TestTileScatterOps:
 
         with pytest.raises(ValueError, match="dst dtype"):
             tile.scatter(
+                ir.Var("dst", dst_type, span),
                 ir.Var("src", src_type, span),
                 ir.Var("idx", idx_type, span),
-                ir.Var("dst", dst_type, span),
             )
 
     @pytest.mark.parametrize(
@@ -3018,9 +3018,9 @@ class TestTileScatterOps:
 
         with pytest.raises(ValueError, match="requires indexes dtype"):
             tile.scatter(
+                ir.Var("dst", dst_type, span),
                 ir.Var("src", src_type, span),
                 ir.Var("idx", idx_type, span),
-                ir.Var("dst", dst_type, span),
             )
 
     def test_tile_scatter_rejects_unsupported_dtype(self):
@@ -3030,11 +3030,12 @@ class TestTileScatterOps:
         idx_type = ir.TileType(_const_dims(span, 4, 1), DataType.INT32)
         dst_type = ir.TileType(_const_dims(span, 16, 32), DataType.UINT32)
 
-        with pytest.raises(ValueError, match="src dtype"):
+        # dst is the first operand (DPS), so its dtype is validated first.
+        with pytest.raises(ValueError, match="dst dtype"):
             tile.scatter(
+                ir.Var("dst", dst_type, span),
                 ir.Var("src", src_type, span),
                 ir.Var("idx", idx_type, span),
-                ir.Var("dst", dst_type, span),
             )
 
     def test_tile_scatter_rejects_col_mismatch(self):
@@ -3046,9 +3047,9 @@ class TestTileScatterOps:
 
         with pytest.raises(ValueError, match=r"src.shape\[1\] == dst.shape\[1\]"):
             tile.scatter(
+                ir.Var("dst", dst_type, span),
                 ir.Var("src", src_type, span),
                 ir.Var("idx", idx_type, span),
-                ir.Var("dst", dst_type, span),
             )
 
     def test_tile_scatter_rejects_index_row_mismatch(self):
@@ -3060,9 +3061,9 @@ class TestTileScatterOps:
 
         with pytest.raises(ValueError, match=r"indexes.shape\[0\] == src.shape\[0\]"):
             tile.scatter(
+                ir.Var("dst", dst_type, span),
                 ir.Var("src", src_type, span),
                 ir.Var("idx", idx_type, span),
-                ir.Var("dst", dst_type, span),
             )
 
 
@@ -3087,8 +3088,8 @@ class TestTileScatterMaskOps:
         dst_type = ir.TileType(_const_dims(span, 4, dst_cols), DataType.FP32)
 
         call = tile.scatter_mask(
-            ir.Var("src", src_type, span),
             ir.Var("dst", dst_type, span),
+            ir.Var("src", src_type, span),
             pattern,
         )
 
@@ -3107,8 +3108,8 @@ class TestTileScatterMaskOps:
 
         with pytest.raises(ValueError, match=r"mask_pattern in range \[1, 7\]"):
             tile.scatter_mask(
-                ir.Var("src", src_type, span),
                 ir.Var("dst", dst_type, span),
+                ir.Var("src", src_type, span),
                 42,
             )
 
@@ -3121,21 +3122,25 @@ class TestTileScatterMaskOps:
 
         with pytest.raises(ValueError, match="mask_pattern=1"):
             tile.scatter_mask(
-                ir.Var("src", src_type, span),
                 ir.Var("dst", dst_type, span),
+                ir.Var("src", src_type, span),
                 1,
             )
 
-    def test_tile_scatter_mask_rejects_bit_width_mismatch(self):
-        """tile.scatter_mask requires equal-bit-width src and dst dtypes."""
-        span = ir.Span.unknown()
-        src_type = ir.TileType(_const_dims(span, 4, 8), DataType.FP32)
-        dst_type = ir.TileType(_const_dims(span, 4, 16), DataType.FP16)
+    def test_tile_scatter_mask_rejects_dtype_mismatch(self):
+        """tile.scatter_mask requires dst and src to have the exact same dtype.
 
-        with pytest.raises(ValueError, match="same bit width"):
+        Equal bit width is not sufficient — FP16 and INT16 are both 16-bit but
+        the scatter spec mandates identical element types (no reinterpretation).
+        """
+        span = ir.Span.unknown()
+        src_type = ir.TileType(_const_dims(span, 4, 8), DataType.FP16)
+        dst_type = ir.TileType(_const_dims(span, 4, 16), DataType.INT16)
+
+        with pytest.raises(ValueError, match="same dtype"):
             tile.scatter_mask(
-                ir.Var("src", src_type, span),
                 ir.Var("dst", dst_type, span),
+                ir.Var("src", src_type, span),
                 1,
             )
 

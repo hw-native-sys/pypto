@@ -24,6 +24,7 @@
 #include <any>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -93,13 +94,13 @@ TypePtr MakeScatterResultType(const std::shared_ptr<const TileType>& dst_type) {
 // ============================================================================
 //
 // Args (3 inputs):
+//   dst     : destination tile (in/out via DPS), must have the same dtype
+//             and column count as `src`
 //   src     : source tile, [rows, cols]   (rows scatter)
 //   indexes : per-row destination indices (rows count = src rows;
 //             dtype constrained by the element-size matching rule)
-//   dst     : destination tile (in/out via DPS), must have the same dtype
-//             and column count as `src`
 //
-// Result: TileType matching `dst` (aliased via set_output_reuses_input(2)).
+// Result: TileType matching `dst` (aliased via set_output_reuses_input(0)).
 //
 // Semantics: dst[indexes[i, 0], j] = src[i, j]   for i in [0, src_rows)
 
@@ -107,31 +108,31 @@ static TypePtr DeduceTileScatterType(const std::vector<ExprPtr>& args,
                                      const std::vector<std::pair<std::string, std::any>>& /*kwargs*/,
                                      const std::string& op_name) {
   CHECK(args.size() == 3) << "The operator " << op_name
-                          << " requires 3 arguments (src, indexes, dst), but got " << args.size();
+                          << " requires 3 arguments (dst, src, indexes), but got " << args.size();
 
-  auto src_type = As<TileType>(args[0]->GetType());
-  CHECK(src_type) << "The operator " << op_name << " requires src to be a TileType, but got "
-                  << args[0]->GetType()->TypeName();
-  CHECK(IsScatterElementDtype(src_type->dtype_))
-      << "The operator " << op_name << " requires src dtype in {I8, I16, I32, FP16, FP32, BF16}, but got "
-      << src_type->dtype_.ToString();
-
-  auto idx_type = As<TileType>(args[1]->GetType());
-  CHECK(idx_type) << "The operator " << op_name << " requires indexes to be a TileType, but got "
-                  << args[1]->GetType()->TypeName();
-  CHECK(IsScatterIndexDtype(idx_type->dtype_))
-      << "The operator " << op_name << " requires indexes dtype in {INT16, INT32}, but got "
-      << idx_type->dtype_.ToString();
-
-  auto dst_type = As<TileType>(args[2]->GetType());
+  auto dst_type = As<TileType>(args[0]->GetType());
   CHECK(dst_type) << "The operator " << op_name << " requires dst to be a TileType, but got "
-                  << args[2]->GetType()->TypeName();
+                  << args[0]->GetType()->TypeName();
   CHECK(IsScatterElementDtype(dst_type->dtype_))
       << "The operator " << op_name << " requires dst dtype in {I8, I16, I32, FP16, FP32, BF16}, but got "
       << dst_type->dtype_.ToString();
+
+  auto src_type = As<TileType>(args[1]->GetType());
+  CHECK(src_type) << "The operator " << op_name << " requires src to be a TileType, but got "
+                  << args[1]->GetType()->TypeName();
+  CHECK(IsScatterElementDtype(src_type->dtype_))
+      << "The operator " << op_name << " requires src dtype in {I8, I16, I32, FP16, FP32, BF16}, but got "
+      << src_type->dtype_.ToString();
   CHECK(dst_type->dtype_ == src_type->dtype_)
       << "The operator " << op_name << " requires dst dtype (" << dst_type->dtype_.ToString()
       << ") to match src dtype (" << src_type->dtype_.ToString() << ")";
+
+  auto idx_type = As<TileType>(args[2]->GetType());
+  CHECK(idx_type) << "The operator " << op_name << " requires indexes to be a TileType, but got "
+                  << args[2]->GetType()->TypeName();
+  CHECK(IsScatterIndexDtype(idx_type->dtype_))
+      << "The operator " << op_name << " requires indexes dtype in {INT16, INT32}, but got "
+      << idx_type->dtype_.ToString();
 
   CheckScatterDtypeSizing(dst_type->dtype_, idx_type->dtype_, op_name);
 
@@ -167,14 +168,14 @@ REGISTER_OP("tile.scatter")
     .set_description(
         "Scatter rows from src into dst at per-row destination indices "
         "(maps to pto.tscatter index form; DPS: dst is in/out)")
+    .add_argument("dst", "Destination tile (same dtype as src; rewritten in-place via DPS)")
     .add_argument("src", "Source tile (FP16/FP32/BF16/INT8/INT16/INT32, 2D)")
     .add_argument("indexes", "Per-row destination index tile (INT16 or INT32; one row per src row)")
-    .add_argument("dst", "Destination tile (same dtype as src; rewritten in-place via DPS)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
-    .set_output_reuses_input(2)
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterType(args, kwargs, "tile.scatter");
@@ -185,8 +186,8 @@ REGISTER_OP("tile.scatter")
 // ============================================================================
 //
 // Args (2 inputs):
-//   src : source tile (compact rows)
 //   dst : destination tile (DPS, written via the mask pattern)
+//   src : source tile (compact rows)
 //
 // Attrs:
 //   mask_pattern : 1-7 (P0101 / P1010 / P0001 / P0010 / P0100 / P1000 / P1111)
@@ -199,25 +200,25 @@ REGISTER_OP("tile.scatter")
 static TypePtr DeduceTileScatterMaskType(const std::vector<ExprPtr>& args,
                                          const std::vector<std::pair<std::string, std::any>>& kwargs,
                                          const std::string& op_name) {
-  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (src, dst), but got "
+  CHECK(args.size() == 2) << "The operator " << op_name << " requires 2 arguments (dst, src), but got "
                           << args.size();
 
-  auto src_type = As<TileType>(args[0]->GetType());
-  CHECK(src_type) << "The operator " << op_name << " requires src to be a TileType, but got "
-                  << args[0]->GetType()->TypeName();
-  CHECK(IsScatterElementDtype(src_type->dtype_))
-      << "The operator " << op_name << " requires src dtype in {I8, I16, I32, FP16, FP32, BF16}, but got "
-      << src_type->dtype_.ToString();
-
-  auto dst_type = As<TileType>(args[1]->GetType());
+  auto dst_type = As<TileType>(args[0]->GetType());
   CHECK(dst_type) << "The operator " << op_name << " requires dst to be a TileType, but got "
-                  << args[1]->GetType()->TypeName();
+                  << args[0]->GetType()->TypeName();
   CHECK(IsScatterElementDtype(dst_type->dtype_))
       << "The operator " << op_name << " requires dst dtype in {I8, I16, I32, FP16, FP32, BF16}, but got "
       << dst_type->dtype_.ToString();
-  CHECK(src_type->dtype_.GetBit() == dst_type->dtype_.GetBit())
-      << "The operator " << op_name << " requires src and dst to have the same bit width, got "
-      << src_type->dtype_.ToString() << " vs " << dst_type->dtype_.ToString();
+
+  auto src_type = As<TileType>(args[1]->GetType());
+  CHECK(src_type) << "The operator " << op_name << " requires src to be a TileType, but got "
+                  << args[1]->GetType()->TypeName();
+  CHECK(IsScatterElementDtype(src_type->dtype_))
+      << "The operator " << op_name << " requires src dtype in {I8, I16, I32, FP16, FP32, BF16}, but got "
+      << src_type->dtype_.ToString();
+  CHECK(dst_type->dtype_ == src_type->dtype_)
+      << "The operator " << op_name << " requires dst and src to have the same dtype, got "
+      << dst_type->dtype_.ToString() << " vs " << src_type->dtype_.ToString();
 
   CHECK(src_type->shape_.size() == 2 && dst_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D src/dst tiles, but got src rank "
@@ -261,13 +262,13 @@ REGISTER_OP("tile.scatter_mask")
         "Scatter src rows into dst columns selected by a hardware mask pattern "
         "(maps to pto.tscatter mask form; DPS: dst is in/out). "
         "Targeted at A3 / CPU-sim style backends — A5 rejects this form.")
-    .add_argument("src", "Source tile (compact rows; same dtype-bit-width as dst)")
     .add_argument("dst", "Destination tile (DPS; columns are rewritten on mask-marked positions)")
+    .add_argument("src", "Source tile (compact rows; same dtype as dst)")
     .set_attr<int>("mask_pattern")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_output_memory(MemorySpace::Vec)
-    .set_output_reuses_input(1)
+    .set_output_reuses_input(0)
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTileScatterMaskType(args, kwargs, "tile.scatter_mask");

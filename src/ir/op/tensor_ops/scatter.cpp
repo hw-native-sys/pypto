@@ -185,8 +185,8 @@ static TypePtr DeduceTensorScatterMaskType(const std::vector<ExprPtr>& args,
   CHECK(IsScatterElementDtype(dst_type->dtype_))
       << "The operator " << op_name << " requires dst dtype in {I8, I16, I32, FP16, FP32, BF16}, but got "
       << dst_type->dtype_.ToString();
-  CHECK(input_type->dtype_.GetBit() == dst_type->dtype_.GetBit())
-      << "The operator " << op_name << " requires input and dst dtypes to have the same bit width, got "
+  CHECK(input_type->dtype_ == dst_type->dtype_)
+      << "The operator " << op_name << " requires input and dst to have the same dtype, got "
       << input_type->dtype_.ToString() << " vs " << dst_type->dtype_.ToString();
 
   CHECK(input_type->shape_.size() == 2 && dst_type->shape_.size() == 2)

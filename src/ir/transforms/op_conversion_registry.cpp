@@ -1340,12 +1340,12 @@ void OpConversionRegistry::RegisterGatherOps() {
 //
 // tensor.scatter (index form, MVP — rank-2, dim=0/-2):
 //   The framework auto-bridges (input, index, src) to Vec tiles via input_reqs.
-//   We swap the arg order to match the tile-level DPS signature (src, indexes,
-//   dst) and emit a single tile.scatter. The result Var inherits dst's storage;
-//   the surrounding pass wraps the tile result in a tile.store to the output
-//   tensor param.
+//   We swap the arg order to match the tile-level DPS signature (dst, src,
+//   indexes) and emit a single tile.scatter. The result Var inherits dst's
+//   storage; the surrounding pass wraps the tile result in a tile.store to the
+//   output tensor param.
 //
-// tensor.scatter_mask: same idea, simple (input, dst) → (src, dst) re-wire.
+// tensor.scatter_mask: same idea, simple (input, dst) → (dst, src) re-wire.
 // ============================================================================
 
 void OpConversionRegistry::RegisterScatterOps() {
@@ -1373,9 +1373,9 @@ void OpConversionRegistry::RegisterScatterOps() {
             << "rank=" << rank << " dim=" << dim_val;
 
         auto& op_reg = OpRegistry::GetInstance();
-        // tile.scatter signature: (src, indexes, dst) — re-wire from the
+        // tile.scatter signature: (dst, src, indexes) — re-wire from the
         // tensor-level (input, index, src) order. `input` is the DPS dst.
-        auto tile_call = op_reg.Create("tile.scatter", {args[2], args[1], args[0]}, span);
+        auto tile_call = op_reg.Create("tile.scatter", {args[0], args[2], args[1]}, span);
         return ConversionResult{tile_call};
       },
       std::move(scatter_input_reqs));
@@ -1391,9 +1391,9 @@ void OpConversionRegistry::RegisterScatterOps() {
         CHECK(args.size() == 2) << "tensor.scatter_mask conversion expects 2 args (input, dst), got "
                                 << args.size();
         auto& op_reg = OpRegistry::GetInstance();
-        // tile.scatter_mask signature: (src, dst) + mask_pattern attr. The
-        // converter's args[0] (input) maps to src, args[1] (dst) to dst.
-        auto tile_call = op_reg.Create("tile.scatter_mask", {args[0], args[1]}, kwargs, span);
+        // tile.scatter_mask signature: (dst, src) + mask_pattern attr. The
+        // converter's args[1] (dst) maps to dst, args[0] (input) to src.
+        auto tile_call = op_reg.Create("tile.scatter_mask", {args[1], args[0]}, kwargs, span);
         return ConversionResult{tile_call};
       },
       std::move(scatter_mask_input_reqs));

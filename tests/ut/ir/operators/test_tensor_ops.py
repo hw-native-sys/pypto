@@ -2887,6 +2887,22 @@ def test_tensor_scatter_mask_rejects_col_expansion_mismatch():
         ir.op.tensor.scatter(inp, mask_pattern=1, dst=dst)
 
 
+def test_tensor_scatter_mask_rejects_dtype_mismatch():
+    """Mask form requires input and dst to share the exact dtype.
+
+    Equal bit width (FP16 vs INT16) is rejected — the scatter spec mandates
+    identical element types, with no reinterpretation across dtypes.
+    """
+    span = ir.Span.unknown()
+    R = ir.ConstInt(4, DataType.INT32, span)
+    C = ir.ConstInt(8, DataType.INT32, span)
+    C2 = ir.ConstInt(16, DataType.INT32, span)
+    inp = ir.Var("inp", ir.TensorType([R, C], DataType.FP16), span)
+    dst = ir.Var("dst", ir.TensorType([R, C2], DataType.INT16), span)
+    with pytest.raises(Exception, match=r"same dtype"):
+        ir.op.tensor.scatter(inp, mask_pattern=1, dst=dst)
+
+
 def test_tensor_scatter_rejects_mixed_index_and_mask():
     inp, idx, src = _make_scatter_inputs()
     with pytest.raises(ValueError, match=r"mutually exclusive"):

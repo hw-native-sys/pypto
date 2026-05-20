@@ -1593,7 +1593,7 @@ def scatter(  # noqa: PLR0913
         src: (index form) Source rows tensor (same dtype as ``input``).
         mask_pattern: (mask form, keyword-only) Mask selector in [1, 7].
         dst: (mask form, keyword-only) Destination tensor (rewritten on mask
-            positions; same bit width as ``input``).
+            positions; same dtype as ``input``).
         span: Optional source span (auto-captured if not provided).
 
     Returns:
