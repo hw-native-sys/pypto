@@ -12,7 +12,9 @@
 #ifndef PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_ANALYSIS_H_
 #define PYPTO_CODEGEN_ORCHESTRATION_ORCHESTRATION_ANALYSIS_H_
 
+#include <cstddef>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -137,6 +139,28 @@ class VarLineageCollector : public ir::IRVisitor {
 
   ir::ProgramPtr program_;
 };
+
+/// Find which Out/InOut parameter index a callee function actually returns.
+///
+/// Walks the callee's body to locate the topmost ReturnStmt, then traces the
+/// returned value (the first element of ``ret.value_``) back through SSA
+/// rebinds (``var = pl.assemble(var, ...)`` chains, ForStmt iter args) to a
+/// source Param. The returned index points into ``callee->params_`` of the
+/// Param that the return ultimately came from.
+///
+/// Returns ``std::nullopt`` when:
+///   - callee is null or has no body
+///   - no ReturnStmt is reachable in the top-level body
+///   - the return value cannot be resolved to a single Param (e.g., a fresh
+///     value not derived from any parameter)
+///
+/// Use case: orchestration alias generation for kernels that declare multiple
+/// ``pl.Out[...]`` parameters (typically the real output + GM scratch
+/// passed-through) but expose only one return value at the Python call
+/// site. Without this trace, the codegen falls back to the *first* Out
+/// parameter, which silently aliases the kernel's result SSA to a scratch
+/// tensor.
+std::optional<size_t> FindReturnedParamIndex(const ir::FunctionPtr& callee, const ir::ProgramPtr& program);
 
 /// Compute effective param directions for a Group function.
 ///

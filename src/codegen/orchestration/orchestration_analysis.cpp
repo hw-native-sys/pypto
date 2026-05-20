@@ -11,6 +11,7 @@
 
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -277,8 +278,15 @@ void VarLineageCollector::VisitStmt_(const AssignStmtPtr& assign) {
         if (callee->func_type_ == FunctionType::Group || callee->func_type_ == FunctionType::Spmd) {
           effective_dirs = ComputeGroupEffectiveDirections(callee, program_);
         }
+        // Prefer tracing through the Out/InOut arg the callee actually
+        // returns (multi-Out kernels would otherwise be mis-traced to the
+        // first Out, leaking scratch-buffer lineage onto the result Var).
+        std::optional<size_t> returned_idx = FindReturnedParamIndex(callee, program_);
         for (size_t i = 0; i < effective_dirs.size() && i < call->args_.size(); ++i) {
           if (effective_dirs[i] != ParamDirection::Out && effective_dirs[i] != ParamDirection::InOut) {
+            continue;
+          }
+          if (returned_idx.has_value() && i != *returned_idx) {
             continue;
           }
           if (auto arg_var = AsVarLike(call->args_[i])) {
@@ -305,6 +313,156 @@ const Var* VarLineageCollector::ResolveExpr(const ExprPtr& expr) const {
     return ResolveVar(var.get());
   }
   return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// FindReturnedParamIndex
+// ---------------------------------------------------------------------------
+
+// Walk the callee body collecting per-var defining AssignStmts and
+// ReturnStmt locations. The callee body may not contain a top-level
+// ReturnStmt (e.g. Group wrappers produced by the outliner end with the
+// inner kernel call); in that case the function falls back to nullopt.
+namespace {
+
+class ReturnAndDefCollector : public IRVisitor {
+ public:
+  ReturnStmtPtr first_return;
+  std::unordered_map<const Var*, AssignStmtPtr> var_def;
+
+ protected:
+  void VisitStmt_(const ReturnStmtPtr& ret) override {
+    if (!first_return) first_return = ret;
+  }
+  void VisitStmt_(const AssignStmtPtr& assign) override {
+    if (assign->var_) {
+      var_def.emplace(assign->var_.get(), assign);
+    }
+    IRVisitor::VisitStmt_(assign);
+  }
+};
+
+// Forward declaration: lineage walk for a returned value uses both the
+// passed-in lineage map and a small inline tracer for builtin
+// tensor.assemble / tile.store rules + user-call returned-param recursion.
+const Var* TraceReturnedToParam(const ExprPtr& root_expr, const ReturnAndDefCollector& collector,
+                                const VarLineageCollector& lineage, const ProgramPtr& program,
+                                std::unordered_set<const Var*>& visited);
+
+const Var* TraceVarToParam(const Var* var, const ReturnAndDefCollector& collector,
+                           const VarLineageCollector& lineage, const ProgramPtr& program,
+                           std::unordered_set<const Var*>& visited) {
+  if (!var) return nullptr;
+  if (!visited.insert(var).second) return nullptr;
+
+  // VarLineageCollector already handles ForStmt iter args, var-to-var
+  // assigns and user-call lineage; check it first.
+  auto lin_it = lineage.var_to_param.find(var);
+  if (lin_it != lineage.var_to_param.end()) {
+    return lin_it->second;
+  }
+
+  // Builtin tensor / tile output-side ops produce a fresh SSA var bound
+  // to an existing GM tensor (the kernel's Out parameter); follow that
+  // target arg manually since VarLineageCollector does not propagate
+  // through builtin op calls.
+  auto def_it = collector.var_def.find(var);
+  if (def_it == collector.var_def.end()) return nullptr;
+
+  const auto& assign = def_it->second;
+  if (auto rhs_var = AsVarLike(assign->value_)) {
+    return TraceVarToParam(rhs_var.get(), collector, lineage, program, visited);
+  }
+  if (auto call = As<Call>(assign->value_)) {
+    const std::string& op_name = call->op_->name_;
+    // tensor.assemble(target, tile, offset) -> aliases target (args[0]).
+    if (op_name == "tensor.assemble" && !call->args_.empty()) {
+      return TraceReturnedToParam(call->args_[0], collector, lineage, program, visited);
+    }
+    // tile.store(value, indices, target) -> aliases target (args[2]).
+    if (op_name == "tile.store" && call->args_.size() >= 3) {
+      return TraceReturnedToParam(call->args_[2], collector, lineage, program, visited);
+    }
+    // tensor.set_validshape(target, rows, cols) -> aliases target.
+    if (op_name == "tensor.set_validshape" && !call->args_.empty()) {
+      return TraceReturnedToParam(call->args_[0], collector, lineage, program, visited);
+    }
+  }
+  return nullptr;
+}
+
+const Var* TraceReturnedToParam(const ExprPtr& root_expr, const ReturnAndDefCollector& collector,
+                                const VarLineageCollector& lineage, const ProgramPtr& program,
+                                std::unordered_set<const Var*>& visited) {
+  if (auto var = AsVarLike(root_expr)) {
+    return TraceVarToParam(var.get(), collector, lineage, program, visited);
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+std::optional<size_t> FindReturnedParamIndex(const FunctionPtr& callee, const ProgramPtr& program) {
+  // Cycle guard + memoization: the helper is invoked transitively by
+  // VarLineageCollector when a callee body itself contains user-function
+  // calls. Each level rebuilds a full ReturnAndDefCollector and
+  // VarLineageCollector over the callee body — without memoization the
+  // worst-case cost cascades to O(N^d) when nested d levels deep. The
+  // result depends only on the callee body (independent of caller
+  // context), so a thread_local Function* -> result cache collapses
+  // repeat visits and bounds total work to O(sum_i N_i) for distinct
+  // callees touched in one top-level invocation. The cache lives
+  // alongside call_stack and is cleared when the outermost call
+  // unwinds, so it never crosses unrelated compilations on the same
+  // thread.
+  thread_local std::vector<const Function*> call_stack;
+  thread_local std::unordered_map<const Function*, std::optional<size_t>> memo;
+
+  if (!callee) return std::nullopt;
+  if (std::find(call_stack.begin(), call_stack.end(), callee.get()) != call_stack.end()) {
+    return std::nullopt;
+  }
+  if (auto it = memo.find(callee.get()); it != memo.end()) {
+    return it->second;
+  }
+  call_stack.push_back(callee.get());
+  bool is_top_level = call_stack.size() == 1;
+  struct RecursionGuard {
+    std::vector<const Function*>& stack;
+    std::unordered_map<const Function*, std::optional<size_t>>& memo_ref;
+    bool top_level;
+    ~RecursionGuard() {
+      stack.pop_back();
+      if (top_level) memo_ref.clear();
+    }
+  } guard{call_stack, memo, is_top_level};
+
+  auto record = [&](std::optional<size_t> result) -> std::optional<size_t> {
+    memo.emplace(callee.get(), result);
+    return result;
+  };
+
+  if (!callee->body_) return record(std::nullopt);
+
+  ReturnAndDefCollector collector;
+  collector.VisitStmt(callee->body_);
+  if (!collector.first_return || collector.first_return->value_.empty()) {
+    return record(std::nullopt);
+  }
+
+  VarLineageCollector lineage(program);
+  lineage.Initialize(callee->params_);
+  lineage.VisitStmt(callee->body_);
+
+  std::unordered_set<const Var*> visited;
+  const Var* root =
+      TraceReturnedToParam(collector.first_return->value_[0], collector, lineage, program, visited);
+  if (!root) return record(std::nullopt);
+
+  for (size_t i = 0; i < callee->params_.size(); ++i) {
+    if (callee->params_[i].get() == root) return record(i);
+  }
+  return record(std::nullopt);
 }
 
 // ---------------------------------------------------------------------------

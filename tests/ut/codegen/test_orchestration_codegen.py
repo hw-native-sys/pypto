@@ -2273,6 +2273,113 @@ class TestTensorReadWriteOffsetCodegen:
         assert "params_t0.launch_spec.set_block_num(4);" in code
         assert "params_t0.launch_spec.set_require_sync_start(true);" in code
 
+    def test_spmd_mixed_multi_out_single_return_alias_targets_actual_return(self):
+        """SPMD mixed kernel with multiple Out params + single return must alias the
+        call-site result SSA to the Out parameter that the kernel actually returns,
+        not the first Out (which would route downstream consumers into a scratch
+        buffer).
+
+        Regression for the multi-Out SPMD mixed-kernel orchestration codegen bug
+        where ``GenerateSingleReturnAlias`` always picked ``out_indices[0]``: a
+        downstream kernel reading the SPMD result would silently see the first
+        Out's storage (e.g. a per-block scratch tensor) instead of the actual
+        accumulator. The fix tracks ``ReturnStmt`` value lineage back through
+        the callee body to the source Param and uses that index for the alias.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdMultiOutSingleReturnProgram:
+            # Mixed kernel with multiple Out params: a scratch buffer (1st Out)
+            # and the real result (2nd Out, the one that the kernel returns).
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(bias, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_bias = pl.load(bias, [0, 0], [64, 64])
+                tile_out = pl.add(tile_mm, tile_bias)
+                scratch = pl.store(tile_mm, [0, 0], scratch)
+                out = pl.store(tile_out, [0, 0], out)
+                return out
+
+            # Downstream kernel consumes the SPMD result so the SSA alias is
+            # forced into existence; if the bug regresses, this consumer reads
+            # the scratch buffer instead of `out`.
+            @pl.function(type=pl.FunctionType.InCore)
+            def consumer(
+                self,
+                in_buf: pl.Tensor[[64, 64], pl.FP32],
+                final: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile = pl.load(in_buf, [0, 0], [64, 64])
+                final = pl.store(tile, [0, 0], final)
+                return final
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                scratch: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                final: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.kernel(a, bias, scratch, out)
+                final = self.consumer(out, final)
+                return final
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            transformed = passes.expand_mixed_kernel()(
+                passes.infer_tile_memory_space()(
+                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiOutSingleReturnProgram))
+                )
+            )
+
+        code = _generate_orch_code(transformed)
+
+        # The mixed SPMD dispatch and the downstream consumer must be present.
+        assert "MixedKernels mixed_0" in code, f"Expected mixed-kernel dispatch:\n{code}"
+        assert "params_t0.launch_spec.set_block_num(4);" in code
+
+        # The downstream consumer must read from the kernel's actual return
+        # value (``ext_out``), not from the scratch buffer (``ext_scratch``).
+        # Pre-fix, the multi-Out aliasing bug made the SPMD result SSA point
+        # at ``ext_scratch`` (the first Out), and the consumer's first input
+        # was rewritten to read from scratch.
+        consumer_input_lines = [line for line in code.splitlines() if "params_t1.add_input" in line]
+        assert consumer_input_lines, f"Expected a consumer task reading the SPMD result, got:\n{code}"
+        first_consumer_input = consumer_input_lines[0]
+        assert "ext_out" in first_consumer_input, (
+            "Downstream consumer of a multi-Out SPMD mixed kernel should read the "
+            "returned Out param (ext_out). "
+            f"Got: {first_consumer_input}\n\nFull code:\n{code}"
+        )
+        assert "ext_scratch" not in first_consumer_input, (
+            "Downstream consumer is reading from the scratch buffer (multi-Out "
+            f"aliasing bug):\n{first_consumer_input}\n\nFull code:\n{code}"
+        )
+
+        # If the codegen emits an explicit SSA alias for the SPMD result,
+        # it must bind to ext_out and never to ext_scratch.
+        out_alias_lines = [
+            line for line in code.splitlines() if line.lstrip().startswith("const Tensor& out__")
+        ]
+        for line in out_alias_lines:
+            assert "ext_out" in line and "ext_scratch" not in line, (
+                f"SSA alias for the multi-Out SPMD result must bind to ext_out:\n{line}\n\nFull code:\n{code}"
+            )
+
     def test_spmd_multi_assemble(self):
         """SPMD multi-output call with assemble should preserve both OutputExisting tuple aliases."""
         backend.reset_for_testing()

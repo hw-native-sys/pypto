@@ -469,14 +469,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
             }
           }
           // (c) Calls with output_existing/inout args (e.g. InCore kernels):
-          // the result aliases the FIRST output-side arg, mirroring the codegen
-          // alias `const Tensor& result = args[out_idx];` emitted later by
-          // GenerateSingleReturnAlias / GenerateTupleReturnAliases. If that arg
-          // is in an iter_arg's class, the result is in the class too.
+          // the result aliases the Out/InOut arg the callee actually
+          // returns, mirroring the codegen alias
+          // `const Tensor& result = args[out_idx];` emitted later by
+          // GenerateSingleReturnAlias / GenerateTupleReturnAliases. If that
+          // arg is in an iter_arg's class, the result is in the class too.
+          // For kernels with multiple Out params (e.g. real result + GM
+          // scratch passed through pl.spmd mixed dispatch), tracing the
+          // ReturnStmt back to its Param avoids aliasing the result to an
+          // arbitrary scratch tensor.
           auto call_dirs = call->GetArgDirections();
           if (call_dirs.size() == call->args_.size()) {
+            FunctionPtr call_callee = program_->GetFunction(call->op_->name_);
+            std::optional<size_t> returned_idx = FindReturnedParamIndex(call_callee, program_);
             for (size_t a = 0; a < call_dirs.size(); ++a) {
               if (call_dirs[a] != ArgDirection::OutputExisting && call_dirs[a] != ArgDirection::InOut) {
+                continue;
+              }
+              if (returned_idx.has_value() && a != *returned_idx) {
                 continue;
               }
               auto out_arg = AsVarLike(call->args_[a]);
@@ -487,7 +497,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
                   changed = true;
                 }
               }
-              break;  // only the first output-side arg is the alias target
+              break;  // alias to the single returned output-side arg
             }
           }
         }
@@ -1923,9 +1933,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     if (!callee) return;
     auto out_indices = CollectOutIndices(callee);
-    if (!out_indices.empty()) {
-      EmitTensorAlias(var_name, call, out_indices[0]);
-    }
+    if (out_indices.empty()) return;
+    // Find the Out/InOut parameter that the callee's ReturnStmt actually
+    // returns. When the kernel declares multiple Out params (e.g., a real
+    // result plus per-block GM scratch tensors used by a pl.spmd-dispatched
+    // mixed kernel), out_indices[0] is the scratch buffer and aliasing the
+    // call site SSA to it would route every downstream consumer into the
+    // scratch instead of the actual result. Fall back to out_indices[0] only
+    // when the return cannot be traced back to a Param.
+    auto returned_idx = FindReturnedParamIndex(callee, program_);
+    size_t param_idx = returned_idx.value_or(out_indices[0]);
+    EmitTensorAlias(var_name, call, param_idx);
   }
 
   void GenerateTupleReturnAliases(const CallPtr& call) {
