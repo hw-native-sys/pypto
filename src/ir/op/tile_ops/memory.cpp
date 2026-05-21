@@ -173,7 +173,20 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
       }
     } else if (auto last_dim = As<ConstInt>(shapes_tuple->elements_.back());
                last_dim && last_dim->value_ == 1) {
-      tile_view.blayout = TileLayout::col_major;
+      // ColMajor is only emitted when the source tensor is DN-equivalent:
+      // either explicitly DN-tagged in the IR, or naturally column-vector
+      // shaped (innermost dim is constant 1) — the latter is the case the
+      // codegen forces to DN in EmitMakeTensorViews. For a generic ND source
+      // sliced down to a [..., 1] window, leaving the tile RowMajor keeps
+      // TLOAD on the same-layout (ND2ND) path. See issue #1230.
+      bool source_ends_in_one = false;
+      if (!tensor_type->shape_.empty()) {
+        auto src_last = As<ConstInt>(tensor_type->shape_.back());
+        source_ends_in_one = src_last && src_last->value_ == 1;
+      }
+      if (source_is_dn || source_ends_in_one) {
+        tile_view.blayout = TileLayout::col_major;
+      }
     }
   }
 

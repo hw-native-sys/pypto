@@ -2474,6 +2474,62 @@ class TestTileLoadOp:
         # Just verifying it builds without error
         assert Prog is not None
 
+    def test_load_col_slice_from_nd_keeps_row_major(self):
+        """Regression for #1230: a [..., 1] load shape from a non-column-vector
+        ND source must keep RowMajor BLayout. Otherwise the runtime TLOAD
+        rejects the resulting ColMajor-vs-ND mismatch (isSameLayout fails)."""
+        span = ir.Span.unknown()
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        # Source `[16, 4]` ND tensor — innermost dim is 4, not 1, so the
+        # codegen will leave it ND.
+        tensor_type = ir.TensorType([dim16, dim4], DataType.FP32)
+        tensor = ir.Var("post_2d", tensor_type, span)
+
+        # Load shape `[16, 1]` — ends in 1, but the source is NOT
+        # column-vector-shaped, so the tile must stay RowMajor for TLOAD's
+        # ND2ND path to be valid.
+        call = tile.load(tensor, [0, 0], [16, 1], target_memory=ir.MemorySpace.Vec)
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.get_effective_tile_view().blayout == ir.TileLayout.row_major
+
+    def test_load_from_column_vector_param_uses_col_major(self):
+        """Regression guard for the column-vector parameter path: loading a
+        [B, N, 1]-shaped source (innermost dim 1) must still produce ColMajor,
+        since the codegen tags such parameters as DN at MakeTensorView time."""
+        span = ir.Span.unknown()
+        dimB = ir.ConstInt(8, DataType.INT32, span)
+        dimN = ir.ConstInt(16, DataType.INT32, span)
+        dim1 = ir.ConstInt(1, DataType.INT32, span)
+        tensor_type = ir.TensorType([dimB, dimN, dim1], DataType.FP32)
+        tensor = ir.Var("col_vec", tensor_type, span)
+
+        call = tile.load(tensor, [0, 0, 0], [8, 16, 1], target_memory=ir.MemorySpace.Vec)
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.get_effective_tile_view().blayout == ir.TileLayout.col_major
+
+    def test_load_from_dn_tagged_tensor_uses_col_major(self):
+        """Regression guard for the DN-tagged source path: loading from a
+        tensor whose IR-level TensorView.layout is DN must produce ColMajor
+        (TLOAD's DN2DN path)."""
+        span = ir.Span.unknown()
+        dim16 = ir.ConstInt(16, DataType.INT32, span)
+        dim4 = ir.ConstInt(4, DataType.INT32, span)
+        # Explicit DN tag with packed canonical DN strides for [16, 4].
+        view = ir.TensorView([1, 16], ir.TensorLayout.DN)
+        tensor_type = ir.TensorType([dim16, dim4], DataType.FP32, None, view)
+        tensor = ir.Var("dn_src", tensor_type, span)
+
+        call = tile.load(tensor, [0, 0], [16, 1], target_memory=ir.MemorySpace.Vec)
+        tile_type = call.type
+
+        assert isinstance(tile_type, ir.TileType)
+        assert tile_type.get_effective_tile_view().blayout == ir.TileLayout.col_major
+
 
 class TestTileCreateOp:
     """Tests for tile.create layout inference."""
