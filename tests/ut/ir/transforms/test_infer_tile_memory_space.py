@@ -1138,6 +1138,121 @@ class TestAutoMoveInsertion:
         After = passes.infer_tile_memory_space()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_matmul_auto_moves_acc_through_mat_to_left(self):
+        """Cube output (Acc) consumed as another matmul's Left input must be
+        routed Acc -> Mat -> Left.
+
+        Hardware constraint: a2a3 mem_graph declares
+            mem_graph[Acc] = {Mat, DDR}
+        in `src/backend/common/soc.cpp` -- no direct edge from Acc to Left or
+        Right. PTOAS's `TMovOp::verify` enforces the same set: Acc->Left is
+        not in `okPair` and is rejected at codegen with
+        "expects a supported tmov address-space pair for this target".
+
+        When a producer's TileType.memory_space_ is Acc and a downstream
+        op requires the value in Left, InsertMoveStmt must split the move
+        into two legal hops: Acc -> Mat (in mem_graph) then Mat -> Left
+        (in mem_graph). Without the intermediate hop, codegen emits a
+        direct Acc->Left `tile.move` that PTOAS rejects.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Tensor[[128, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                a_mat: pl.Tile[[16, 128], pl.FP32] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_mat: pl.Tile[[128, 128], pl.FP32] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                # First matmul: `ab` lives in Acc (matmul output_memory=Acc).
+                ab: pl.Tile[[16, 128], pl.FP32] = pl.matmul(a_mat, b_mat)
+                c_mat: pl.Tile[[128, 128], pl.FP32] = pl.load(
+                    c, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                # Second matmul consumes `ab` as Left. The pass must route
+                # Acc -> Mat -> Left, not emit a direct Acc -> Left tile.move.
+                abc: pl.Tile[[16, 128], pl.FP32] = pl.matmul(ab, c_mat)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(abc, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                r: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, c, out_0)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Tensor[[128, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                a_mat: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Mat] = pl.load(
+                    a, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                b_mat: pl.Tile[[128, 128], pl.FP32, pl.MemorySpace.Mat] = pl.load(
+                    b, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                # Auto-inserted moves for the first matmul (Mat -> Left/Right).
+                a_L: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Left] = pl.move(
+                    a_mat, target_memory=pl.MemorySpace.Left
+                )
+                b_R: pl.Tile[[128, 128], pl.FP32, pl.MemorySpace.Right] = pl.move(
+                    b_mat, target_memory=pl.MemorySpace.Right
+                )
+                ab: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(a_L, b_R)
+                c_mat: pl.Tile[[128, 128], pl.FP32, pl.MemorySpace.Mat] = pl.load(
+                    c, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat
+                )
+                # The fix: Acc -> Mat -> Left chain for the second matmul lhs
+                # (arg 0), because direct Acc -> Left is not in `mem_graph`.
+                # Pass inserts moves in arg order, so the lhs chain comes
+                # before the rhs single-hop move.
+                ab_M: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Mat] = pl.move(
+                    ab, target_memory=pl.MemorySpace.Mat
+                )
+                ab_L: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Left] = pl.move(
+                    ab_M, target_memory=pl.MemorySpace.Left
+                )
+                # Auto-inserted Mat -> Right for the second matmul rhs (arg 1).
+                c_R: pl.Tile[[128, 128], pl.FP32, pl.MemorySpace.Right] = pl.move(
+                    c_mat, target_memory=pl.MemorySpace.Right
+                )
+                abc: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(ab_L, c_R)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(abc, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[16, 128], pl.FP32],
+                b: pl.Tensor[[128, 128], pl.FP32],
+                c: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                r: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(a, b, c, out_0)
+                return r
+
+        After = passes.infer_tile_memory_space()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_matmul_moves_are_inserted_at_first_consumer(self):
         """Auto-inserted moves should be materialized at first constrained use.
 
