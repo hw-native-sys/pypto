@@ -266,13 +266,16 @@ class CodegenEffectiveUseCollector : public var_collectors::VarDefUseCollector {
 class OrchestrationStmtCodegen : public CodegenBase {
  public:
   explicit OrchestrationStmtCodegen(const ProgramPtr& prog, std::map<std::string, int>* func_ids,
-                                    std::map<std::string, CoreType>* core_types, int* next_id,
+                                    std::map<std::string, CoreType>* core_types,
+                                    std::map<std::string, std::vector<std::string>>* func_signatures,
+                                    int* next_id,
                                     std::unordered_map<const Var*, std::string> param_to_emit_name,
                                     std::set<std::string> param_name_set,
                                     std::map<std::string, int> param_name_to_orch_index)
       : program_(prog),
         func_name_to_id_(func_ids),
         func_name_to_core_type_(core_types),
+        func_name_to_signature_(func_signatures),
         next_func_id_(next_id),
         emit_name_map_(std::move(param_to_emit_name)),
         param_name_set_(std::move(param_name_set)),
@@ -1283,6 +1286,43 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return {ArgDirection::Output, ci_var};
   }
 
+  // Map an IR ArgDirection to the runtime ArgDirection enum name used by the
+  // CoreCallable signature (simpler.task_interface.ArgDirection). The runtime
+  // enum only distinguishes SCALAR / IN / OUT / INOUT; NoDep tensors are
+  // emitted as INOUT so the tensor dump captures them at both stages.
+  static const char* ArgDirectionToRuntimeName(ArgDirection dir) {
+    switch (dir) {
+      case ArgDirection::Input:
+        return "IN";
+      case ArgDirection::Output:
+      case ArgDirection::OutputExisting:
+        return "OUT";
+      case ArgDirection::InOut:
+      case ArgDirection::NoDep:
+        return "INOUT";
+      case ArgDirection::Scalar:
+        return "SCALAR";
+    }
+    INTERNAL_CHECK(false) << "Internal error: unexpected ArgDirection value";
+    return "";
+  }
+
+  // Record a kernel's runtime ArgDirection signature in task-payload order.
+  // The signature is taken from the same ParamEntry vector that emits the
+  // add_input/output/inout/scalar payload calls, so its non-SCALAR entries
+  // line up 1:1 with the payload tensors that the runtime tensor dump walks.
+  // func_id is name-deduped, so we record once per kernel (first call wins).
+  void RecordKernelSignature(const std::string& func_name, const std::vector<ParamEntry>& params) {
+    auto [it, inserted] = func_name_to_signature_->try_emplace(func_name);
+    if (!inserted) {
+      return;
+    }
+    it->second.reserve(params.size());
+    for (const auto& p : params) {
+      it->second.emplace_back(ArgDirectionToRuntimeName(p.direction));
+    }
+  }
+
   std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
     std::vector<ParamEntry> params;
     const std::string& callee_name = callee_func->name_;
@@ -1890,6 +1930,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
 
     auto params = BuildTaskParams(call, callee_func);
+    RecordKernelSignature(callee_name, params);
 
     std::string ind = Indent();
     std::string task_var = "params_t" + std::to_string(task_counter_);
@@ -1928,6 +1969,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     int func_id = GetOrCreateFuncId(callee_name, func_name_to_id_, next_func_id_);
     auto params = BuildWrapperReorderedParams(call, spmd_func, info.inner_call, info.inner_callee);
+    RecordKernelSignature(callee_name, params);
 
     std::string ind = Indent();
     std::string task_var = "params_t" + std::to_string(task_counter_);
@@ -1967,6 +2009,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
           << "Internal error: no inner call found in AIV-only Group '" << group_name << "'";
       auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee);
+      RecordKernelSignature(info.aiv_name, params);
 
       std::string ind = Indent();
       std::string task_var = "params_t" + std::to_string(task_counter_);
@@ -2005,6 +2048,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
         << "Internal error: no inner call found in MixedKernels Group '" << group_name << "'";
     auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee);
+    RecordKernelSignature(info.aic_name, params);
+    RecordKernelSignature(info.aiv_name, params);
 
     int aic_id = GetOrCreateFuncId(info.aic_name, func_name_to_id_, next_func_id_);
     int aiv_id = GetOrCreateFuncId(info.aiv_name, func_name_to_id_, next_func_id_);
@@ -2481,6 +2526,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   const ProgramPtr& program_;
   std::map<std::string, int>* func_name_to_id_;
   std::map<std::string, CoreType>* func_name_to_core_type_;
+  std::map<std::string, std::vector<std::string>>* func_name_to_signature_;
   int* next_func_id_;
   std::unordered_map<const Var*, std::string> emit_name_map_;
   std::set<std::string> declared_var_names_;
@@ -2564,6 +2610,7 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   std::map<std::string, int> func_name_to_id;
   std::map<std::string, CoreType> func_name_to_core_type;
+  std::map<std::string, std::vector<std::string>> func_name_to_signature;
   int next_func_id = 0;
 
   OrchestrationInfoCollector info_collector;
@@ -2624,9 +2671,9 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
 
   std::ostringstream oss;
 
-  OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type, &next_func_id,
-                                        std::move(emit_name_map), std::move(param_name_set),
-                                        std::move(param_name_to_orch_index));
+  OrchestrationStmtCodegen stmt_codegen(program, &func_name_to_id, &func_name_to_core_type,
+                                        &func_name_to_signature, &next_func_id, std::move(emit_name_map),
+                                        std::move(param_name_set), std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
   stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
@@ -2682,7 +2729,8 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";
 
-  return OrchestrationResult{oss.str(), std::move(func_name_to_id), std::move(func_name_to_core_type)};
+  return OrchestrationResult{oss.str(), std::move(func_name_to_id), std::move(func_name_to_core_type),
+                             std::move(func_name_to_signature)};
 }
 
 }  // namespace codegen
