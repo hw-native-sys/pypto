@@ -922,6 +922,9 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
+        assert "PTO2TaskId params_t0_deps[1];" in code, code
+        assert "if (prev.is_valid()) params_t0_deps[params_t0_deps_count++] = prev;" in code, code
+        assert "params_t0.set_dependencies(params_t0_deps, params_t0_deps_count);" in code, code
 
     def test_updated_array_dep_in_same_parallel_body_falls_back(self):
         rows, cols = 128, 128
