@@ -2461,21 +2461,14 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
                            dst_peer_view.view_type_str, partition_type, zero_offsets, size_ssa, codegen);
 
   // src: local tensor_view + full-slice partition_view (no peer arithmetic).
+  // Use the shared helper for the source view type so it matches the dynamic-dim
+  // tensor_view SSA that GetOrCreateTensorView emits (mirroring dst's peer view
+  // and every other tensor-view op in this file); a hand-rolled static-shape
+  // string would mismatch that SSA's type.
   std::string src_local_view = codegen.GetOrCreateTensorView(src_var);
-  std::ostringstream src_view_type;
-  src_view_type << "!pto.tensor_view<";
-  for (size_t i = 0; i < rank; ++i) {
-    if (i > 0) src_view_type << "x";
-    if (auto ci = As<ir::ConstInt>(src_dist->shape_[i])) {
-      src_view_type << ci->value_;
-    } else {
-      src_view_type << "?";
-    }
-  }
-  src_view_type << "x" << dtype_str << ">";
-  std::string src_pview =
-      EmitPartitionViewPTO(src_var->name_hint_ + "_local", src_local_view, src_view_type.str(),
-                           partition_type, zero_offsets, size_ssa, codegen);
+  std::string src_view_type = codegen.GetTensorViewTypeString(src_dist.get());
+  std::string src_pview = EmitPartitionViewPTO(src_var->name_hint_ + "_local", src_local_view, src_view_type,
+                                               partition_type, zero_offsets, size_ssa, codegen);
 
   // Synthesise a VEC staging tile_buf sized to the 2-D-flattened transfer:
   // rows = product of leading dims, cols = innermost dim (rank-1 -> 1xN).
