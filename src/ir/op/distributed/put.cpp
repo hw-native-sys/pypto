@@ -52,7 +52,6 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
-#include "pypto/core/error.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -64,17 +63,6 @@ namespace pypto {
 namespace ir {
 
 namespace {
-
-template <typename T>
-T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
-           const std::string& op_name) {
-  for (const auto& [k, v] : kwargs) {
-    if (k == key) {
-      return AnyCast<T>(v, "kwarg key: " + key);
-    }
-  }
-  throw ValueError("Missing kwarg '" + key + "' on " + op_name);
-}
 
 TypePtr DeducePutType(const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -119,7 +107,7 @@ TypePtr DeducePutType(const std::vector<ExprPtr>& args,
                                   << i << " differs (dst=" << d->value_ << ", src=" << s->value_ << ")";
   }
 
-  auto atomic_value = GetKwarg<int>(kwargs, "atomic", "pld.tensor.put");
+  auto atomic_value = GetRequiredKwarg<int>(kwargs, "atomic", "pld.tensor.put");
   CHECK(atomic_value == static_cast<int>(AtomicType::kNone) ||
         atomic_value == static_cast<int>(AtomicType::kAdd))
       << "pld.tensor.put atomic must be AtomicType.None_ or AtomicType.Add (got int " << atomic_value << ")";

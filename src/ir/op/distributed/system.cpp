@@ -48,8 +48,6 @@
 #include <utility>
 #include <vector>
 
-#include "pypto/core/any_cast.h"
-#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
@@ -61,17 +59,6 @@ namespace pypto {
 namespace ir {
 
 namespace {
-
-template <typename T>
-T GetKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
-           const std::string& op_name) {
-  for (const auto& [k, v] : kwargs) {
-    if (k == key) {
-      return AnyCast<T>(v, "kwarg key: " + key);
-    }
-  }
-  throw ValueError("Missing kwarg '" + key + "' on " + op_name);
-}
 
 void CheckOffsetsRankMatchesTarget(const MakeTuplePtr& offsets_tuple, size_t target_rank,
                                    const std::string& op_name) {
@@ -106,7 +93,7 @@ TypePtr DeduceNotifyType(const std::vector<ExprPtr>& args,
 
   // Validate `op` kwarg falls in the NotifyOp range — codegen casts back
   // without a separate guard.
-  auto op_value = GetKwarg<int>(kwargs, "op", "pld.system.notify");
+  auto op_value = GetRequiredKwarg<int>(kwargs, "op", "pld.system.notify");
   CHECK(op_value == static_cast<int>(NotifyOp::kAtomicAdd) || op_value == static_cast<int>(NotifyOp::kSet))
       << "pld.system.notify op must be NotifyOp.AtomicAdd or NotifyOp.Set (got int " << op_value << ")";
 
@@ -135,7 +122,7 @@ TypePtr DeduceWaitType(const std::vector<ExprPtr>& args,
   CHECK(IsA<ScalarType>(args[2]->GetType()))
       << "pld.system.wait expected must be a scalar, got " << args[2]->GetType()->TypeName();
 
-  auto cmp_value = GetKwarg<int>(kwargs, "cmp", "pld.system.wait");
+  auto cmp_value = GetRequiredKwarg<int>(kwargs, "cmp", "pld.system.wait");
   CHECK(cmp_value == static_cast<int>(WaitCmp::kEq) || cmp_value == static_cast<int>(WaitCmp::kGe))
       << "pld.system.wait cmp must be WaitCmp.Eq or WaitCmp.Ge (got int " << cmp_value << ")";
 

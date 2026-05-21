@@ -631,6 +631,34 @@ void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
                     const std::string& op_name);
 
 /**
+ * @brief Read a required kwarg by key from a deducer kwargs list, throwing if absent.
+ *
+ * Unlike `Call::GetKwarg` (which returns a default when the key is missing and
+ * operates on an already-constructed Call), this is for op type-deduction
+ * sites (`f_deduce_type`) that receive the raw kwargs vector before any Call
+ * exists and treat the kwarg as mandatory. Shared by the distributed op
+ * deducers (`pld.tensor.put`, `pld.system.notify`, `pld.system.wait`) so the
+ * lookup-or-throw logic is defined once.
+ *
+ * @tparam T Expected type of the kwarg value
+ * @param kwargs Keyword arguments (metadata) passed to the deducer
+ * @param key Kwarg key to read
+ * @param op_name Operator name, used in the error message
+ * @return The kwarg value cast to T
+ * @throws ValueError if the key is absent
+ */
+template <typename T>
+T GetRequiredKwarg(const std::vector<std::pair<std::string, std::any>>& kwargs, const std::string& key,
+                   const std::string& op_name) {
+  for (const auto& [k, v] : kwargs) {
+    if (k == key) {
+      return AnyCast<T>(v, "kwarg key: " + key);
+    }
+  }
+  throw ValueError("Missing kwarg '" + key + "' on " + op_name);
+}
+
+/**
  * @brief Helper macro for operator registration
  *
  * Use this macro to register operators in initialization code:
