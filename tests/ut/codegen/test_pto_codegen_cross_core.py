@@ -586,29 +586,28 @@ class TestCrossCoreTpushTpopCodegen:
             "func_type",
             "memory_space",
             "split",
-            "transport_valid_shape",
         ),
         [
-            (
-                "tile.tpush_to_aiv",
-                ir.FunctionType.AIC,
-                ir.MemorySpace.Acc,
-                1,
-                ", %arg1, %c16_index :",
-            ),
-            (
-                "tile.tpush_to_aic",
-                ir.FunctionType.AIV,
-                ir.MemorySpace.Vec,
-                2,
-                ", %c16_index, %arg2 :",
-            ),
+            ("tile.tpush_to_aiv", ir.FunctionType.AIC, ir.MemorySpace.Acc, 1),
+            ("tile.tpush_to_aic", ir.FunctionType.AIV, ir.MemorySpace.Vec, 2),
         ],
     )
-    def test_split_tpush_uses_full_non_split_transport_dim(
-        self, tpush_op_name, func_type, memory_space, split, transport_valid_shape
+    def test_split_tpush_uses_full_box_transport_dims(
+        self, tpush_op_name, func_type, memory_space, split
     ):
-        """Split tpush keeps logical validShape but transports a full non-split dimension."""
+        """Split tpush transports the full producer box on BOTH axes.
+
+        Narrowing the split axis to the user's logical valid_shape on the
+        producer side leaves consumer subblocks reading uninitialised slot
+        memory — especially on LEFT_RIGHT splits, where the partial
+        producer write fails to populate the slot column range subblock 0
+        reads. The transport set_validshape must therefore reset both axes
+        to the box shape; consumer-side localisation through
+        LocalizeValidDimForSplit clamps the logical valid_shape back to
+        the truthful per-subblock extent. See
+        src/backend/common/pto_ops_common.cpp::EmitSplitTpushTransportValidShape.
+        """
+        transport_valid_shape = ", %c16_index, %c16_index :"
         span = ir.Span.unknown()
 
         src = ir.Var("src", ir.TensorType([16, 16], pl.FP32), span)
