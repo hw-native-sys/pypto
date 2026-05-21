@@ -60,8 +60,7 @@ def _assert_flattened_stage_strict(swimlane_data: dict, *, stages: int, branches
         end_i = max(t["end_time_us"] for t in grouped[i])
         start_next = min(t["start_time_us"] for t in grouped[i + 1])
         assert start_next >= end_i, (
-            f"flattened stage {i + 1} starts at {start_next:.2f}us before stage {i} "
-            f"ends at {end_i:.2f}us"
+            f"flattened stage {i + 1} starts at {start_next:.2f}us before stage {i} ends at {end_i:.2f}us"
         )
 
 
@@ -461,9 +460,7 @@ def _build_dense_mixed_phase_graph_program(*, branches: int):
                                 )
                                 tids_local_d[lane] = tid_local_d
 
-                stage2b_base: pl.Scalar[pl.INDEX] = (
-                    stage2a_base + groups * steps * deep_phases * 2 * branches
-                )
+                stage2b_base: pl.Scalar[pl.INDEX] = stage2a_base + groups * steps * deep_phases * 2 * branches
                 for step in pl.range(steps):
                     step_base2: pl.Scalar[pl.INDEX] = stage2b_base + step * 2 * branches
                     for p in pl.parallel(branches):
@@ -558,7 +555,9 @@ def _pl_at_case(*, epochs: int, phases: int, name: str, platform: str | None = N
 
 def _reset_case(*, platform: str | None = None):
     rows = 2 * 2 * _BRANCHES * _TILE_M
-    return _PhaseFenceCase("phase_fence_reset_per_outer", _build_reset_per_outer_program, rows=rows, platform=platform)
+    return _PhaseFenceCase(
+        "phase_fence_reset_per_outer", _build_reset_per_outer_program, rows=rows, platform=platform
+    )
 
 
 def _sibling_loops_case(*, platform: str | None = None):
@@ -596,7 +595,9 @@ class TestPhaseFenceDepCompressionCorrectness:
     @pytest.fixture(autouse=True)
     def _skip_when_collecting_l2_swimlane(self, test_runner):
         if test_runner.config.enable_l2_swimlane:
-            pytest.skip("correctness cases run without --enable-l2-swimlane; swimlane mode runs profiling witnesses")
+            pytest.skip(
+                "correctness cases run without --enable-l2-swimlane; swimlane mode runs profiling witnesses"
+            )
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_submit_three_level_correctness(self, test_runner, platform):

@@ -127,7 +127,9 @@ class TestPhaseFenceDepCompressionCodegen:
                         for branch in pl.parallel(branches):
                             col: pl.Scalar[pl.INDEX] = branch * tile_c
                             with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase_tile", deps=[tids]) as tid:
-                                t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(x, [row, col], [tile_r, tile_c])
+                                t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(
+                                    x, [row, col], [tile_r, tile_c]
+                                )
                                 r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
                                 out = pl.store(r, [row, col], out)
                             tids[branch] = tid
@@ -377,17 +379,17 @@ class TestPhaseFenceDepCompressionCodegen:
                                     tids_local[lane] = tid_local
                     for phase in pl.range(2):
                         for p in pl.parallel(branches):
-                            row_a: pl.Scalar[pl.INDEX] = ((16 + phase * 2 * branches + p) * tile_r)
+                            row_a: pl.Scalar[pl.INDEX] = (16 + phase * 2 * branches + p) * tile_r
                             col: pl.Scalar[pl.INDEX] = p * tile_c
                             out, tid_a = pl.submit(self.kern, x, out, row_a, col, deps=[tids_a])
                             tids_a[p] = tid_a
 
-                            row_b: pl.Scalar[pl.INDEX] = ((16 + phase * 2 * branches + branches + p) * tile_r)
+                            row_b: pl.Scalar[pl.INDEX] = (16 + phase * 2 * branches + branches + p) * tile_r
                             out, tid_b = pl.submit(self.kern, x, out, row_b, col, deps=[tids_b])
                             tids_b[p] = tid_b
 
                     for p2 in pl.parallel(branches):
-                        row_cross: pl.Scalar[pl.INDEX] = ((32 + p2) * tile_r)
+                        row_cross: pl.Scalar[pl.INDEX] = (32 + p2) * tile_r
                         col_cross: pl.Scalar[pl.INDEX] = p2 * tile_c
                         out, _ = pl.submit(self.kern, x, out, row_cross, col_cross, deps=[tids_a])
 
@@ -752,6 +754,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         def make_program(case_name: str):
             if case_name == "scalar":
+
                 @pl.program
                 class Prog:
                     @pl.function(type=pl.FunctionType.InCore)
@@ -781,6 +784,7 @@ class TestPhaseFenceDepCompressionCodegen:
                 return Prog
 
             if case_name == "mixed_array_scalar":
+
                 @pl.program
                 class Prog:
                     @pl.function(type=pl.FunctionType.InCore)
@@ -814,6 +818,7 @@ class TestPhaseFenceDepCompressionCodegen:
                 return Prog
 
             if case_name == "two_arrays_same_call":
+
                 @pl.program
                 class Prog:
                     @pl.function(type=pl.FunctionType.InCore)
