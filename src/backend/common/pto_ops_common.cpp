@@ -42,10 +42,8 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
-#include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/scalar_expr.h"
-#include "pypto/ir/stmt.h"
 #include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/transforms/utils/memref_utils.h"
 #include "pypto/ir/type.h"
@@ -2403,6 +2401,102 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   return "";
 }
 
+// pld.tensor.put(dst, peer, src, *, atomic) — synchronous cross-rank bulk write
+// of the local slice `src` into the peer rank's slice of `dst`. dst and src
+// share dtype and (verified) static shape. Lowers to:
+//   delems   = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
+//   dst_ptr  = pto.addptr <dst_local_ptr>, delems
+//   dst_view = pto.make_tensor_view dst_ptr, shape=..., strides=...
+//   dst_pv   = pto.partition_view dst_view,  offsets=[0,..], sizes=<shape>
+//   src_pv   = pto.partition_view <src_local_view>, offsets=[0,..], sizes=<shape>
+//   %stage   = pto.alloc_tile : !pto.tile_buf<loc=vec, ...>     (auto-allocated)
+//   pto.comm.tput(dst_pv, src_pv, buf(%stage)
+//       : <ptype>, <ptype>, <stage_type>) {atomicType = #pto<atomic_type (atomic_none|atomic_add)>}
+//
+// The VEC staging tile is synthesised here (the user never sees it): TPUT
+// copies GM->GM through a VEC bounce buffer, so codegen sizes one ping tile to
+// the (2-D flattened) transfer extent. PTOAS validates the staging type
+// against the partition views — a mismatch surfaces there rather than as
+// silently garbled DMA.
+static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "pld.tensor.put requires 3 arguments (dst, peer, src), got "
+                               << op->args_.size();
+
+  // dst: remote (peer-addressed) DistributedTensor destination.
+  auto dst_binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.tensor.put");
+
+  // src: local DistributedTensor source — reuses the local tensor_view created
+  // by EmitMakeTensorViews (no peer arithmetic, like wait's signal).
+  auto src_var = AsVarLike(op->args_[2]);
+  CHECK(src_var) << "pld.tensor.put src must be a Var-like expression";
+  auto src_dist = As<ir::DistributedTensorType>(src_var->GetType());
+  CHECK(src_dist) << "pld.tensor.put src must be DistributedTensorType, got "
+                  << src_var->GetType()->TypeName();
+
+  const int atomic_int = op->GetKwarg<int>("atomic", 0);
+  CHECK(atomic_int == static_cast<int>(ir::AtomicType::kNone) ||
+        atomic_int == static_cast<int>(ir::AtomicType::kAdd))
+      << "pld.tensor.put atomic kwarg must encode AtomicType::kNone or kAdd, got " << atomic_int;
+  const std::string atomic_attr =
+      atomic_int == static_cast<int>(ir::AtomicType::kAdd) ? "atomic_add" : "atomic_none";
+
+  const auto& shape = dst_binding.type->shape_;
+  const size_t rank = shape.size();
+  INTERNAL_CHECK_SPAN(rank >= 1, op->span_) << "pld.tensor.put requires rank >= 1";
+  const std::string dtype_str = codegen.GetTypeString(dst_binding.type->dtype_);
+
+  // Full-slice partition views: offsets all-zero, sizes = full shape. dst and
+  // src share the same partition_tensor_view type (same dtype + static shape).
+  std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+  std::vector<std::string> zero_offsets(rank, c0);
+  std::vector<std::string> size_ssa = GetSizeCodes(shape, codegen);
+  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(shape), dtype_str);
+
+  // dst: CommRemoteOffset + addptr + make_tensor_view at the call site, then
+  // a full-slice partition_view.
+  auto dst_peer_view = EmitCommRemoteView(dst_binding, op->args_[1], codegen);
+  std::string dst_pview =
+      EmitPartitionViewPTO(dst_binding.var->name_hint_ + "_peer", dst_peer_view.ssa,
+                           dst_peer_view.view_type_str, partition_type, zero_offsets, size_ssa, codegen);
+
+  // src: local tensor_view + full-slice partition_view (no peer arithmetic).
+  std::string src_local_view = codegen.GetOrCreateTensorView(src_var);
+  std::ostringstream src_view_type;
+  src_view_type << "!pto.tensor_view<";
+  for (size_t i = 0; i < rank; ++i) {
+    if (i > 0) src_view_type << "x";
+    if (auto ci = As<ir::ConstInt>(src_dist->shape_[i])) {
+      src_view_type << ci->value_;
+    } else {
+      src_view_type << "?";
+    }
+  }
+  src_view_type << "x" << dtype_str << ">";
+  std::string src_pview =
+      EmitPartitionViewPTO(src_var->name_hint_ + "_local", src_local_view, src_view_type.str(),
+                           partition_type, zero_offsets, size_ssa, codegen);
+
+  // Synthesise a VEC staging tile_buf sized to the 2-D-flattened transfer:
+  // rows = product of leading dims, cols = innermost dim (rank-1 -> 1xN).
+  int64_t cols = codegen.GetConstIntValue(shape[rank - 1]);
+  int64_t rows = 1;
+  for (size_t i = 0; i + 1 < rank; ++i) {
+    rows *= codegen.GetConstIntValue(shape[i]);
+  }
+  std::string stage_type = codegen::FormatTileBufTypeString(
+      "vec", dtype_str, rows, cols, ir::TileLayout::row_major, ir::TileLayout::none_box,
+      /*fractal=*/512, ir::PadValue::null, /*v_row=*/rows, /*v_col=*/cols);
+  std::string stage = codegen.AllocNewTileBuf(stage_type, "tput_stage");
+
+  std::ostringstream tput;
+  tput << "pto.comm.tput(" << dst_pview << ", " << src_pview << ", buf(" << stage << ") : " << partition_type
+       << ", " << partition_type << ", " << stage_type << ") {atomicType = #pto<atomic_type " << atomic_attr
+       << ">}";
+  codegen.Emit(tput.str());
+  return "";
+}
+
 // ============================================================================
 // On-core array (ArrayType) -> !pto.local_array lowering helpers
 // ============================================================================
@@ -2693,9 +2787,10 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.store", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileStoreCodegenPTO(op, codegen);
   });
-  // Distributed N6 ops — cross-rank tile load + per-rank signal notify/wait.
-  // See MakeRemoteLoadCodegenPTO / MakeNotifyCodegenPTO / MakeWaitCodegenPTO
-  // for the emitted MLIR shape. Cross-rank ops lower to a single
+  // Distributed N6 ops — cross-rank tile load + per-rank signal notify/wait +
+  // synchronous bulk put. See MakeRemoteLoadCodegenPTO / MakeNotifyCodegenPTO /
+  // MakeWaitCodegenPTO / MakePutCodegenPTO for the emitted MLIR shape.
+  // Cross-rank ops lower to a single
   // ``func.call @CommRemoteOffset_<dtype>`` against a module-level helper
   // emitted by PTOCodegen::EmitCommRemoteOffsetHelpers; the helper returns
   // the peer-vs-local element offset (``index``) and the call site emits
@@ -2710,6 +2805,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeNotifyCodegenPTO(op, codegen); });
   reg("pld.system.wait",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeWaitCodegenPTO(op, codegen); });
+  reg("pld.tensor.put",
+      [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakePutCodegenPTO(op, codegen); });
   reg("tile.transpose", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileTransposeCodegenPTO(op, codegen);
   });

@@ -19,8 +19,9 @@ Sub-modules (one per op category):
 
 * :mod:`.system_ops` — host queries and CommContext accessors
   (``world_size``, ``get_comm_ctx``, ``rank``, ``nranks``).
-* :mod:`.tensor_ops` — CommGroup window-buffer allocation and view
-  materialisation (``alloc_window_buffer``, ``window``).
+* :mod:`.tensor_ops` — CommGroup window-buffer allocation, view
+  materialisation, and the cross-rank tensor write
+  (``alloc_window_buffer``, ``window``, ``put``).
 * :mod:`.tile_ops` — cross-rank tile ops (``remote_load``, ...).
 """
 

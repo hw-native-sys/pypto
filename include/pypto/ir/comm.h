@@ -25,10 +25,15 @@ namespace ir {
 // - kEq : block until *signal_slot == expected.
 // - kGe : block until *signal_slot >= expected.
 //
+// AtomicType selects the device-side combine mode of pld.system.put (TPUT):
+// - kNone : plain remote store — overwrite the peer's destination slice.
+// - kAdd  : atomically add the source data into the peer's destination slice.
+//
 // Underlying integer values are part of the IR ABI: they are stored as the
 // `int` kwarg payload of the corresponding ops (`op` for notify, `cmp` for
-// wait) and cast back to the enum at codegen time. Insert new variants only
-// at the end so existing IR / cached programs keep their meaning.
+// wait, `atomic` for put) and cast back to the enum at codegen time. Insert
+// new variants only at the end so existing IR / cached programs keep their
+// meaning.
 enum class NotifyOp : int {
   kAtomicAdd = 0,
   kSet = 1,
@@ -37,6 +42,11 @@ enum class NotifyOp : int {
 enum class WaitCmp : int {
   kEq = 0,
   kGe = 1,
+};
+
+enum class AtomicType : int {
+  kNone = 0,
+  kAdd = 1,
 };
 
 }  // namespace ir

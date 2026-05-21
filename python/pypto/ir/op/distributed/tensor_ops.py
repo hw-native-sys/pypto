@@ -7,7 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""IR builders for ``pld.tensor.alloc_window_buffer`` and ``pld.tensor.window``.
+"""IR builders for ``pld.tensor.alloc_window_buffer`` / ``pld.tensor.window`` /
+``pld.tensor.put``.
 
 These are the raw IR-layer equivalents of :func:`pypto.ir.op.tile_ops.load`
 and friends: they take ``ir.Expr`` arguments, normalize them to the shapes
@@ -21,9 +22,9 @@ from collections.abc import Sequence
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, Expr, Span
+from pypto.pypto_core.ir import AtomicType, Call, Expr, Span
 
-from ...utils import _get_span_or_capture, _to_make_tuple
+from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
 def alloc_window_buffer(size: int | Expr, *, name: str, span: Span | None = None) -> Call:
@@ -69,4 +70,28 @@ def window(
     return _ir_core.create_op_call("pld.tensor.window", [buf, shape_tuple], {"dtype": dtype}, actual_span)
 
 
-__all__ = ["alloc_window_buffer", "window"]
+def put(
+    dst: Expr,
+    peer: int | Expr,
+    src: Expr,
+    atomic: AtomicType,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.put(dst, peer, src)`` Call.
+
+    Cross-rank put: synchronously write the local window-bound DistributedTensor
+    ``src`` into ``peer``'s slice of the window-bound DistributedTensor ``dst``.
+    ``atomic`` (:class:`ir.AtomicType`) selects plain-store vs atomic-add and is
+    packed as an ``int`` attr. Side-effect only — the result is an
+    ``UnknownType`` Call. The verifier rejects a non-:class:`ir.DistributedTensorType`
+    ``dst`` / ``src`` and requires both to share element type and static shape.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call(
+        "pld.tensor.put", [dst, peer_expr, src], {"atomic": int(atomic)}, actual_span
+    )
+
+
+__all__ = ["alloc_window_buffer", "put", "window"]

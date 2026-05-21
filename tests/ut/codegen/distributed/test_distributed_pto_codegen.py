@@ -325,5 +325,56 @@ def test_notify_value_type_matches_value_ir_dtype():
     assert "!pto.partition_tensor_view<1x1xi32>" in tnotify_line
 
 
+def test_put_emits_comm_tput_with_attr_and_staging_tile():
+    """put codegen emits pto.comm.tput with #pto<atomic_type …> attr + a VEC staging tile."""
+
+    @pl.program
+    class PNone:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(dst, peer=peer, src=src, atomic=pld.AtomicType.None_)
+
+    mlir = _generate_mlir(PNone)
+    tput_line = next(line for line in mlir.splitlines() if "pto.comm.tput(" in line)
+    # Plain-store combine mode.
+    assert "#pto<atomic_type atomic_none>" in tput_line
+    # dst (peer-addressed) and src (local) full-slice partition views, same type.
+    assert tput_line.count("!pto.partition_tensor_view<16x64xf16>") == 2
+    # A VEC staging tile_buf is synthesised and threaded through buf(...).
+    assert "buf(" in tput_line
+    assert "!pto.tile_buf<loc=vec" in mlir
+    # dst is peer-addressed (CommRemoteOffset + addptr); src is local (no addptr
+    # needed for its own view).
+    assert "func.call @CommRemoteOffset_f16" in mlir
+    assert "pto.addptr" in mlir
+    assert "_peer_pview" in mlir
+    assert "_local_pview" in mlir
+
+
+def test_put_atomic_add_variant():
+    """put with AtomicType.Add lowers to the atomic_add combine attr."""
+
+    @pl.program
+    class PAdd:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[128], pl.FP32],
+            src: pld.DistributedTensor[[128], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.put(dst, peer=peer, src=src, atomic=pld.AtomicType.Add)
+
+    mlir_add = _generate_mlir(PAdd)
+    assert "#pto<atomic_type atomic_add>" in mlir_add
+    # 1-D [128] transfer flattens to a 1x128 VEC staging tile.
+    assert "!pto.partition_tensor_view<128xf32>" in mlir_add
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -40,6 +40,14 @@ def _get_func(program: ir.Program, name: str) -> ir.Function:
     return program.functions[gvar]
 
 
+def _iter_stmts(stmt: ir.Stmt):
+    """Yield ``stmt`` and every nested statement (flattening ``SeqStmts``)."""
+    yield stmt
+    if isinstance(stmt, ir.SeqStmts):
+        for s in stmt.stmts:
+            yield from _iter_stmts(s)
+
+
 def _find_calls_in_func(func: ir.Function, op_name: str) -> list[ir.Call]:
     found: list[ir.Call] = []
 

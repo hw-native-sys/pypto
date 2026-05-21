@@ -135,6 +135,9 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const nb::dict& 
     } else if (nb::isinstance<WaitCmp>(item.second)) {
       // Cast enum to int for storage — pld.system.wait reads as int
       kwargs.emplace_back(key, static_cast<int>(nb::cast<WaitCmp>(item.second)));
+    } else if (nb::isinstance<AtomicType>(item.second)) {
+      // Cast enum to int for storage — pld.tensor.put reads as int
+      kwargs.emplace_back(key, static_cast<int>(nb::cast<AtomicType>(item.second)));
     } else if (nb::isinstance<PadValue>(item.second)) {
       kwargs.emplace_back(key, nb::cast<PadValue>(item.second));
     } else if (nb::isinstance<LoopOrigin>(item.second)) {
@@ -1263,6 +1266,11 @@ void BindIR(nb::module_& m) {
                      "Cross-rank wait predicate for pld.system.wait (TWAIT)")
       .value("Eq", WaitCmp::kEq, "Block until *signal_slot == expected")
       .value("Ge", WaitCmp::kGe, "Block until *signal_slot >= expected");
+
+  nb::enum_<AtomicType>(ir, "AtomicType", nb::is_arithmetic(),
+                        "Cross-rank remote-write combine mode for pld.tensor.put (TPUT)")
+      .value("None_", AtomicType::kNone, "Plain remote store — overwrite the peer's destination slice")
+      .value("Add", AtomicType::kAdd, "Atomically add the source data into the peer's destination slice");
 
   // ScopeStmt - abstract base class for all scope statements (issue #1047).
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(

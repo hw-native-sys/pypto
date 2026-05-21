@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""``pld.tensor.alloc_window_buffer`` / ``pld.tensor.window`` — DSL wrappers for CommGroup windows.
+"""``pld.tensor.alloc_window_buffer`` / ``pld.tensor.window`` / ``pld.tensor.put`` — DSL wrappers.
 
 Layout mirrors the ``tile.alloc`` / ``MemRef`` / ``TileType`` triple:
 
@@ -17,6 +17,10 @@ Layout mirrors the ``tile.alloc`` / ``MemRef`` / ``TileType`` triple:
   in an :class:`ir.WindowBuffer` Var subclass.
 * ``window`` lifts that Ptr handle into a :class:`ir.DistributedTensorType`
   view by specifying the per-rank ``shape`` and ``dtype``.
+* ``put`` is a synchronous cross-rank bulk write (HCCL TPUT): both ``dst`` and
+  ``src`` are window-bound :class:`pld.DistributedTensor` (GM/tensor-level)
+  views — the VEC staging tile that TPUT bounces through is synthesised at
+  codegen, so it stays a tensor-level op rather than a tile-level one.
 
 ``alloc_window_buffer`` is intercepted at the AssignStmt level by the parser
 so the buffer's ``name`` kwarg can be derived from the LHS — the body of that
@@ -30,7 +34,7 @@ from pypto.ir.op.distributed import tensor_ops as _ir_tensor
 from pypto.language.typing import IntLike, Ptr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import AtomicType, Call, Expr
 
 from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap
@@ -110,4 +114,44 @@ def window(
     return DistributedTensor(expr=call)
 
 
-__all__ = ["alloc_window_buffer", "window"]
+def put(
+    dst: DistributedTensor,
+    peer: IntLike,
+    src: DistributedTensor,
+    *,
+    atomic: AtomicType = AtomicType.None_,
+) -> Call:
+    """Cross-rank put: write the local slice ``src`` into the peer rank's slice of ``dst``.
+
+    Side-effect-only (the returned Call carries ``UnknownType``). Lowers to
+    ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + partition_view +
+    a synthesised VEC staging tile + TPUT`` at codegen. Both operands are
+    GM/tensor-level window views (the staging tile is internal), so this is a
+    ``pld.tensor`` op, paired with the GM-to-GM TGET rather than the
+    tile-producing ``pld.tile.remote_load``.
+
+    ``dst`` / ``peer`` / ``src`` are positional-or-keyword so the printed IR
+    (which emits them positionally) round-trips through the parser; ``atomic``
+    stays keyword-only because it lowers to an IR attr (printed as
+    ``atomic=<int>``), mirroring ``pld.system.notify``'s ``op``.
+
+    Args:
+        dst: Window-bound :class:`pld.DistributedTensor` destination (the peer
+            rank's slice). The C++ verifier refuses a plain :class:`pl.Tensor`.
+        peer: Peer rank index.
+        src: Window-bound :class:`pld.DistributedTensor` source (the local
+            rank's slice); must share element type and static shape with ``dst``.
+        atomic: :class:`pld.AtomicType` selecting plain-store
+            (``AtomicType.None_``, the default) vs atomic-add
+            (``AtomicType.Add``) combine semantics (keyword-only).
+    """
+    dst_expr = _unwrap(dst)
+    src_expr = _unwrap(src)
+    for role, expr in (("dst", dst_expr), ("src", src_expr)):
+        if not isinstance(expr, Expr) or not isinstance(expr.type, _ir.DistributedTensorType):
+            got = _ir.python_print_type(expr.type) if isinstance(expr, Expr) else type(expr).__name__
+            raise TypeError(f"pld.tensor.put expects a DistributedTensor {role} (window-bound); got {got}")
+    return _ir_tensor.put(dst_expr, _unwrap(peer), src_expr, atomic)
+
+
+__all__ = ["alloc_window_buffer", "put", "window"]
