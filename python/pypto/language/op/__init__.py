@@ -235,9 +235,9 @@ __all__ = [
     "full",
     "scatter_update",
     "sin",
-    "sort32",
-    "mrgsort",
     "gather",
+    "mrgsort",
+    "sort32",
     # Promoted system ops
     "aic_initialize_pipe",
     "aiv_initialize_pipe",
