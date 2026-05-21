@@ -237,9 +237,9 @@ void CollectCVBoundaryMoves(const std::vector<StmtPtr>& stmts,
 struct CrossLaneGmDep {
   StmtPtr store_stmt;
   StmtPtr load_stmt;
-  VarPtr tensor_var;       // The tile.store result var that the load reads.
-  CoreAffinity store_side; // Lane of the producing tile.store.
-  CoreAffinity load_side;  // Lane of the consuming tile.load.
+  VarPtr tensor_var;        // The tile.store result var that the load reads.
+  CoreAffinity store_side;  // Lane of the producing tile.store.
+  CoreAffinity load_side;   // Lane of the consuming tile.load.
 };
 
 /// Detect "AIC tile.store -> GM tensor T; AIV tile.load <- T" (and the reverse)
@@ -254,6 +254,12 @@ struct CrossLaneGmDep {
 /// This walker collects each such offending (store, load) pair. The caller
 /// raises a user-facing error so the unsafe pattern fails loudly at compile
 /// time instead of silently producing non-deterministic device output.
+///
+/// Scope: currently limited to `tile.store` / `tile.load` (the contiguous
+/// pattern user code emits via `pl.assemble` + bracket-slice). Indexed GM
+/// transfers via `tile.mscatter` / `tile.mgather` can in principle exhibit
+/// the same race; they are not covered here and are tracked alongside the
+/// proper sync-insertion fix in upstream issue #1433.
 void DetectCrossLaneGmDeps(const std::vector<StmtPtr>& stmts,
                            const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                            std::unordered_map<const Var*, std::pair<StmtPtr, CoreAffinity>>& store_outputs,
@@ -272,8 +278,7 @@ void DetectCrossLaneGmDeps(const std::vector<StmtPtr>& stmts,
           const auto& op_name = opnode->name_;
           const CoreAffinity here = stmt_affinity(stmt.get());
           // Only CUBE/VECTOR producers/consumers can race; SHARED/MIXED do not.
-          const bool here_is_lane =
-              (here == CoreAffinity::CUBE) || (here == CoreAffinity::VECTOR);
+          const bool here_is_lane = (here == CoreAffinity::CUBE) || (here == CoreAffinity::VECTOR);
 
           if (op_name == "tile.store" && call->args_.size() >= 3 && here_is_lane) {
             // Record the result Var so a later tile.load on the other lane can
@@ -287,8 +292,8 @@ void DetectCrossLaneGmDeps(const std::vector<StmtPtr>& stmts,
             if (auto src_var = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
               auto found = store_outputs.find(src_var.get());
               if (found != store_outputs.end() && found->second.second != here) {
-                deps.push_back(CrossLaneGmDep{found->second.first, stmt, src_var,
-                                              found->second.second, here});
+                deps.push_back(
+                    CrossLaneGmDep{found->second.first, stmt, src_var, found->second.second, here});
               }
             }
           }
@@ -573,20 +578,19 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       const auto& first = cross_lane_deps.front();
       const std::string producer = (first.store_side == CoreAffinity::CUBE) ? "AIC" : "AIV";
       const std::string consumer = (first.load_side == CoreAffinity::CUBE) ? "AIC" : "AIV";
-      CHECK(false)
-          << "ExpandMixedKernel: unsafe cross-lane GM dependency in mixed-root scope '"
-          << func->name_ << "' at " << first.load_stmt->span_.to_string() << ": " << producer
-          << " tile.store -> tensor '" << first.tensor_var->name_hint_ << "' (at "
-          << first.store_stmt->span_.to_string() << ") is read by " << consumer
-          << " tile.load on the same tensor SSA with no fence "
-          << "between the two lanes. " << cross_lane_deps.size()
-          << " such dependency(ies) detected in this scope. Cross-lane data exchange via GM "
-          << "scratch tensors inside one pl.at scope is unsafe today — pl.range only orders "
-          << "instructions within one lane, not across the AIC/AIV split. Restructure the "
-          << "scope into separate pl.at scopes (one per data-flow phase, like decode_layer.py "
-          << "does for qk_matmul / softmax / sv_matmul / online_softmax), so scope boundaries "
-          << "provide the cross-lane synchronisation. Tracking issue: "
-          << "https://github.com/hw-native-sys/pypto/issues/1433.";
+      CHECK(false) << "ExpandMixedKernel: unsafe cross-lane GM dependency in mixed-root scope '"
+                   << func->name_ << "' at " << first.load_stmt->span_.to_string() << ": " << producer
+                   << " tile.store -> tensor '" << first.tensor_var->name_hint_ << "' (at "
+                   << first.store_stmt->span_.to_string() << ") is read by " << consumer
+                   << " tile.load on the same tensor SSA with no fence "
+                   << "between the two lanes. " << cross_lane_deps.size()
+                   << " such dependency(ies) detected in this scope. Cross-lane data exchange via GM "
+                   << "scratch tensors inside one pl.at scope is unsafe today — pl.range only orders "
+                   << "instructions within one lane, not across the AIC/AIV split. Restructure the "
+                   << "scope into separate pl.at scopes (one per data-flow phase, like decode_layer.py "
+                   << "does for qk_matmul / softmax / sv_matmul / online_softmax), so scope boundaries "
+                   << "provide the cross-lane synchronisation. Tracking issue: "
+                   << "https://github.com/hw-native-sys/pypto/issues/1433.";
     }
   }
 
