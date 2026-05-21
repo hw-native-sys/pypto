@@ -25,7 +25,7 @@ namespace ir {
 // - kEq : block until *signal_slot == expected.
 // - kGe : block until *signal_slot >= expected.
 //
-// AtomicType selects the device-side combine mode of pld.system.put (TPUT):
+// AtomicType selects the device-side combine mode of pld.tensor.put (TPUT):
 // - kNone : plain remote store — overwrite the peer's destination slice.
 // - kAdd  : atomically add the source data into the peer's destination slice.
 //

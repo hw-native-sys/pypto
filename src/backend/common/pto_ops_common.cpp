@@ -2418,6 +2418,12 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
 // the (2-D flattened) transfer extent. PTOAS validates the staging type
 // against the partition views — a mismatch surfaces there rather than as
 // silently garbled DMA.
+// VEC staging tile_buf fractal for the TPUT lowering. 512 is the codebase-wide
+// default tile_buf fractal (see TileTypeComponents::fractal in
+// include/pypto/codegen/pto/pto_type_utils.h and tile_buf_signature.h); the
+// staging tile carries no special layout requirement, so it inherits that default.
+static constexpr uint64_t kTputVecStagingFractal = 512;
+
 static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 3) << "pld.tensor.put requires 3 arguments (dst, peer, src), got "
@@ -2479,7 +2485,7 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   }
   std::string stage_type = codegen::FormatTileBufTypeString(
       "vec", dtype_str, rows, cols, ir::TileLayout::row_major, ir::TileLayout::none_box,
-      /*fractal=*/512, ir::PadValue::null, /*v_row=*/rows, /*v_col=*/cols);
+      kTputVecStagingFractal, ir::PadValue::null, /*v_row=*/rows, /*v_col=*/cols);
   std::string stage = codegen.AllocNewTileBuf(stage_type, "tput_stage");
 
   std::ostringstream tput;
