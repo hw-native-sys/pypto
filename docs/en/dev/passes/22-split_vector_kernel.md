@@ -218,7 +218,7 @@ both paths).
 
 | Constraint | Why |
 | ---------- | --- |
-| Even split-axis box dim (or dynamic dim with `// 2`) | `ComputeHalfDimSize` raises if a `ConstInt` split-axis box dim is odd; users with odd extents should pad the box and narrow with `set_validshape` (see "Handling odd extents" below). Dynamic dims emit `MakeFloorDiv(dim, 2)` |
+| Even split-axis box dim (or dynamic dim with `// 2`) | `ComputeHalfDimSize` raises if a `ConstInt` split-axis box dim is odd; users with odd extents should pad the full box to a multiple of `2 * innerDim` (so the halved subblock box stays innerDim-aligned) and narrow with `set_validshape` — see "Handling odd extents" below. Dynamic dims emit `MakeFloorDiv(dim, 2)` |
 | Conflicting function-level vs cross-core split modes | `ResolveSplitMode` raises `ValueError` |
 | Conflicting cross-core split kwargs in one body | `CrossCoreSplitCollector` raises `ValueError` |
 | Reduce on the split axis is rejected | `IsReduceOnSplitAxis` raises — partial reduction in a single subblock is semantically incorrect |
@@ -229,24 +229,26 @@ both paths).
 
 ## Handling odd extents on the split axis
 
-The box dim that `SplitVectorKernel` halves must be an even `ConstInt` —
-PTOAS additionally requires the box dim to be a multiple of `innerCols` /
-`innerRows` (16 for fractal=1024 / Acc, `32 / sizeof(dtype)` for fractal=512
-depending on layout). To ship an odd extent (e.g. `M = 17` rows or
-`N = 17` cols), the user pads the tile box to the next valid multiple and
-records the truthful extent via `pl.tile.set_validshape`. The pass then
-halves the padded box on the AIV side, and `LocalizeValidDimForSplit`
-clamps the user's odd `valid_shape` against the halved physical extent so
-each subblock writes only its share of the truthful region back to GM.
-The transport (`tpush_to_aiv` / `tpop_from_aic`) carries the full padded
-box so both halves of the consumer receive complete data — see the
-`tpush` transport-valid-shape logic in
-`src/backend/common/pto_ops_common.cpp` (`EmitSplitTpushTransportValidShape`).
+The box dim that `SplitVectorKernel` halves must be an even `ConstInt`, and
+PTOAS additionally requires *both* the full box and the **halved subblock
+box** to be multiples of `innerCols` / `innerRows` (16 for fractal=1024 /
+Acc, `32 / sizeof(dtype)` for fractal=512 depending on layout). The full
+padded box therefore needs to be a multiple of `2 * innerDim`. To ship an
+odd extent (e.g. `M = 17` rows or `N = 17` cols), the user pads the tile
+box to the next such multiple and records the truthful extent via
+`pl.tile.set_validshape`. The pass then halves the padded box on the AIV
+side, and `LocalizeValidDimForSplit` clamps the user's odd `valid_shape`
+against the halved physical extent so each subblock writes only its share
+of the truthful region back to GM. The transport (`tpush_to_aiv` /
+`tpop_from_aic`) carries the full padded box so both halves of the
+consumer receive complete data — see the `tpush` transport-valid-shape
+logic in `src/backend/common/pto_ops_common.cpp`
+(`EmitSplitTpushTransportValidShape`).
 
 ```python
 # Producer: declare a padded box, then narrow with set_validshape.
-# For FP32 → Acc (fractal=1024) the box dim must be a multiple of 16; we use
-# 32 here so each subblock receives an aligned half (16).
+# For FP32 → Acc (fractal=1024, innerDim=16) the full box must be a multiple
+# of 2*innerDim=32 so the halved subblock box (16) is still aligned.
 acc: pl.Tile[[32, COLS], pl.FP32] = pl.matmul(a_left, b_right)
 narrowed: pl.Tile[
     [32, COLS], pl.FP32, pl.Mem.Acc,

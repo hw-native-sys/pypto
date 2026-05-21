@@ -207,7 +207,7 @@ Ascend910B（或任意
 
 | 约束 | 原因 |
 | ---- | ---- |
-| 拆分轴的 box 维度必须是偶数（动态维度走 `// 2`） | `ComputeHalfDimSize` 对奇数 `ConstInt` 的 box 维度直接抛错；如需奇数 extent，可将 box 维度 pad 到 `innerDim` 倍数并通过 `set_validshape` 记录真实值（详见下文"拆分轴奇数 extent 的处理"）。动态维度发出 `MakeFloorDiv(dim, 2)` |
+| 拆分轴的 box 维度必须是偶数（动态维度走 `// 2`） | `ComputeHalfDimSize` 对奇数 `ConstInt` 的 box 维度直接抛错；如需奇数 extent，需将完整 box 维度 pad 到 `2 * innerDim` 的倍数（这样减半后的 subblock box 仍是 innerDim 的倍数），并通过 `set_validshape` 记录真实值 —— 详见下文"拆分轴奇数 extent 的处理"。动态维度发出 `MakeFloorDiv(dim, 2)` |
 | 函数级与跨核 op `split=` 模式冲突 | `ResolveSplitMode` 抛 `ValueError` |
 | 函数体内多个跨核 op 的 `split=` 不一致 | `CrossCoreSplitCollector` 抛 `ValueError` |
 | split 轴上的 reduce 被禁止 | `IsReduceOnSplitAxis` 抛错 —— 单 subblock 内的部分 reduce 语义不正确 |
@@ -218,20 +218,21 @@ Ascend910B（或任意
 
 ## 拆分轴奇数 extent 的处理
 
-`SplitVectorKernel` 减半的 box 维度必须是偶数 `ConstInt`，且 PTOAS 进一步要求该 box 维度
-为 `innerCols` / `innerRows`（fractal=1024 / Acc 时为 16，fractal=512 时按布局取
-`32 / sizeof(dtype)`）的倍数。要承载奇数 extent（例如 `M = 17` 行或 `N = 17` 列），
-用户需将 tile 的 box 维度 pad 到下一个合法倍数，并通过 `pl.tile.set_validshape` 记录真实
-extent。Pass 在 AIV 侧将 padded box 减半，`LocalizeValidDimForSplit` 会根据用户写下的
-奇数 `valid_shape` 与减半后的物理 extent 做钳位，确保每个 subblock 只把它负责的真实区域
-写回 GM。跨核传输（`tpush_to_aiv` / `tpop_from_aic`）始终携带完整 padded box，让消费者
-两个 subblock 都拿到完整数据 —— 详见
+`SplitVectorKernel` 减半的 box 维度必须是偶数 `ConstInt`，且 PTOAS 要求 *完整 box* 与
+*减半后的 subblock box* 都是 `innerCols` / `innerRows`（fractal=1024 / Acc 时为 16，
+fractal=512 时按布局取 `32 / sizeof(dtype)`）的倍数 —— 因此完整 padded box 实际需要是
+`2 * innerDim` 的倍数。要承载奇数 extent（例如 `M = 17` 行或 `N = 17` 列），用户需将
+tile 的 box 维度 pad 到下一个 `2 * innerDim` 倍数，并通过 `pl.tile.set_validshape`
+记录真实 extent。Pass 在 AIV 侧将 padded box 减半，`LocalizeValidDimForSplit` 会根据
+用户写下的奇数 `valid_shape` 与减半后的物理 extent 做钳位，确保每个 subblock 只把它
+负责的真实区域写回 GM。跨核传输（`tpush_to_aiv` / `tpop_from_aic`）始终携带完整
+padded box，让消费者两个 subblock 都拿到完整数据 —— 详见
 `src/backend/common/pto_ops_common.cpp` 中的 `EmitSplitTpushTransportValidShape` 实现。
 
 ```python
 # 生产者：声明 padded box，再用 set_validshape 收窄到真实 extent。
-# 对 FP32 → Acc（fractal=1024），box 维度需要是 16 的倍数；这里用 32，每个 subblock
-# 得到对齐的一半（16）。
+# 对 FP32 → Acc（fractal=1024，innerDim=16），完整 box 需要是 2*innerDim=32 的倍数，
+# 这样减半后的 subblock box（16）仍是对齐的。
 acc: pl.Tile[[32, COLS], pl.FP32] = pl.matmul(a_left, b_right)
 narrowed: pl.Tile[
     [32, COLS], pl.FP32, pl.Mem.Acc,

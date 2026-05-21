@@ -190,9 +190,10 @@ ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
     if ((ci->value_ % 2) != 0) {
       throw pypto::ValueError(
           "SplitVectorKernel requires an even split dimension, got " + std::to_string(ci->value_) +
-          ". Pad the tile box to a multiple of the producer's innerDim (e.g. 16 "
-          "for Acc fractal=1024 or 32/elem_bytes for fractal=512) and use "
-          "pl.tile.set_validshape(...) with the original odd extent.");
+          ". Pad the tile box such that the halved dimension stays a multiple of the producer's "
+          "innerDim — i.e. pad the full box to a multiple of (2 * innerDim) (e.g. 32 for Acc "
+          "fractal=1024, or 64/elem_bytes for fractal=512) — and use pl.tile.set_validshape(...) "
+          "with the original odd extent.");
     }
     return std::make_shared<ConstInt>(ci->value_ / 2, ci->dtype(), ci->span_);
   }
