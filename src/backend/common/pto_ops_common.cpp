@@ -1644,15 +1644,17 @@ static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCod
     return false;
   }
 
+  // The transport must carry the full box for both subblocks to receive
+  // complete data: each subblock reads its half of the slot regardless of the
+  // user-declared valid_shape. Narrowing valid_shape on the producer side
+  // before tpush would leave the non-split axis under-written and (on LR
+  // splits in particular) make even subblock 0 see zeros for the cells the
+  // producer skipped. Localization back to the user's logical valid happens
+  // on the consumer side via LocalizeValidDimForSplit.
   const auto& shape = source_tile_type->shape_;
   const auto& valid_shape = tile_view.valid_shape;
-  ExprPtr transport_row = valid_shape[0];
-  ExprPtr transport_col = valid_shape[1];
-  if (split == 1) {
-    transport_col = shape[1];
-  } else if (split == 2) {
-    transport_row = shape[0];
-  }
+  ExprPtr transport_row = shape[0];
+  ExprPtr transport_col = shape[1];
 
   if (IsSameDimExpr(transport_row, valid_shape[0]) && IsSameDimExpr(transport_col, valid_shape[1])) {
     return false;

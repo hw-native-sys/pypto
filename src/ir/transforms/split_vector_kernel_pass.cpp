@@ -179,11 +179,20 @@ bool IsReduceOnSplitAxis(const CallPtr& call, int split_dim) {
   return false;
 }
 
+// Half-dim computation. Throws on odd ConstInt because silently floor-dividing
+// odd dims would drop data, and reliably padding the box requires
+// producer/consumer/slot-size co-ordination that lives outside this pass.
+// Users who need odd extents should pad the tile box to a multiple of the
+// producer's innerDim and narrow back with pl.tile.set_validshape; see
+// docs/en/dev/passes/22-split_vector_kernel.md.
 ExprPtr ComputeHalfDimSize(const ExprPtr& dim_size) {
   if (auto ci = std::dynamic_pointer_cast<const ConstInt>(dim_size)) {
     if ((ci->value_ % 2) != 0) {
-      throw pypto::ValueError("SplitVectorKernel requires an even split dimension, got " +
-                              std::to_string(ci->value_));
+      throw pypto::ValueError(
+          "SplitVectorKernel requires an even split dimension, got " + std::to_string(ci->value_) +
+          ". Pad the tile box to a multiple of the producer's innerDim (e.g. 16 "
+          "for Acc fractal=1024 or 32/elem_bytes for fractal=512) and use "
+          "pl.tile.set_validshape(...) with the original odd extent.");
     }
     return std::make_shared<ConstInt>(ci->value_ / 2, ci->dtype(), ci->span_);
   }
