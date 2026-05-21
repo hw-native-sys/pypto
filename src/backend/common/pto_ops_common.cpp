@@ -2404,6 +2404,46 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
 }
 
 // ============================================================================
+// On-core array (ArrayType) -> !pto.local_array lowering helpers
+// ============================================================================
+
+// Emit a value SSA whose MLIR type matches the array's element dtype. The IR's
+// array.update_element verifier permits an `index`-typed value into an integer
+// array (and vice-versa), so the C++ orchestration path relies on implicit
+// conversion. PTO/MLIR is strictly typed, so any dtype mismatch is bridged with
+// an explicit arith cast here (index_cast for index<->int, trunci/extsi/extui
+// for int width changes).
+static std::string EmitLocalArrayValue(codegen::PTOCodegen& codegen, const ir::ExprPtr& value,
+                                       DataType target) {
+  std::string ssa = codegen.GetExprAsCode(value);
+  auto value_type = ir::As<ScalarType>(value->GetType());
+  if (!value_type || value_type->dtype_ == target) {
+    return ssa;
+  }
+  DataType src = value_type->dtype_;
+  std::string mlir_op;
+  if (src == DataType::INDEX || target == DataType::INDEX) {
+    mlir_op = "arith.index_cast";
+  } else if (src.GetBit() > target.GetBit()) {
+    mlir_op = "arith.trunci";
+  } else if (src.GetBit() < target.GetBit()) {
+    mlir_op = src.IsUnsignedInt() ? "arith.extui" : "arith.extsi";
+  } else {
+    // Same bit width but distinct dtype (signed vs unsigned, e.g. i32 vs ui32):
+    // no arith width/index cast applies, yet the operand type must still match
+    // the element dtype. Bridge with the MLIR escape-hatch cast. Unreachable for
+    // verifier-valid IR (array.update_element requires equal dtypes for
+    // non-index values), but keeps the operand well-typed rather than silently
+    // emitting a mistyped value.
+    mlir_op = "builtin.unrealized_conversion_cast";
+  }
+  std::string out = codegen.NewTemp();
+  codegen.Emit(out + " = " + mlir_op + " " + ssa + " : " + codegen.GetTypeString(src) + " to " +
+               codegen.GetTypeString(target));
+  return out;
+}
+
+// ============================================================================
 // RegisterPTOOps: Register all standard PTO ops to the given backend
 // ============================================================================
 
@@ -2430,6 +2470,54 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     if (exclude_ops.count(op_name) > 0) return;
     backend.RegisterOp(op_name).f_codegen(std::move(fn));
   };
+
+  // On-core arrays (ArrayType) -> PTOAS stack-local arrays. The IR's
+  // SSA-functional update_element semantics are realized in place: PTOCodegen's
+  // AssignStmt dispatch aliases an array.update_element result Var to the input
+  // array's SSA name BEFORE invoking the codegen below, so the emitted
+  // pto.local_array_set mutates the same `pto.declare_local_array` storage.
+  reg("array.create", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 1) << "array.create requires 1 argument (extent)";
+    auto array_type = ir::As<ir::ArrayType>(op->GetType());
+    CHECK(array_type) << "array.create must return ArrayType";
+    std::string result = codegen.GetCurrentResultTarget();
+    INTERNAL_CHECK_SPAN(!result.empty(), op->span_) << "array.create requires an assignment target";
+    codegen.Emit(result + " = pto.declare_local_array -> " +
+                 codegen::FormatLocalArrayTypeString(*array_type));
+    return std::string("");
+  });
+
+  reg("array.get_element", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 2) << "array.get_element requires 2 arguments (array, index)";
+    auto array_type = ir::As<ir::ArrayType>(op->args_[0]->GetType());
+    CHECK(array_type) << "array.get_element first argument must be an ArrayType";
+    std::string result = codegen.GetCurrentResultTarget();
+    INTERNAL_CHECK_SPAN(!result.empty(), op->span_) << "array.get_element requires an assignment target";
+    std::string arr = codegen.GetExprAsCode(op->args_[0]);
+    std::string idx = EmitIndexOperand(codegen, op->args_[1], "array.get_element index");
+    codegen.Emit(result + " = pto.local_array_get " + arr + "[" + idx +
+                 "] : " + codegen::FormatLocalArrayTypeString(*array_type) + " -> " +
+                 codegen::DataTypeToMLIR(array_type->dtype_));
+    return std::string("");
+  });
+
+  reg("array.update_element", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+    auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 3) << "array.update_element requires 3 arguments (array, index, value)";
+    auto array_type = ir::As<ir::ArrayType>(op->args_[0]->GetType());
+    CHECK(array_type) << "array.update_element first argument must be an ArrayType";
+    // arr resolves to the input array's SSA; the AssignStmt dispatch has already
+    // aliased the result Var to this name, so the write is in place.
+    std::string arr = codegen.GetExprAsCode(op->args_[0]);
+    std::string idx = EmitIndexOperand(codegen, op->args_[1], "array.update_element index");
+    std::string value = EmitLocalArrayValue(codegen, op->args_[2], array_type->dtype_);
+    codegen.Emit("pto.local_array_set " + arr + "[" + idx + "], " + value + " : " +
+                 codegen::FormatLocalArrayTypeString(*array_type) + ", " +
+                 codegen::DataTypeToMLIR(array_type->dtype_));
+    return std::string("");
+  });
 
   // Helper for zero-arg i64 query ops that need index_cast (get_subblock_idx, get_block_idx, etc.)
   auto reg_i64_to_index_op = [&](const char* tile_op, const char* pto_op) {

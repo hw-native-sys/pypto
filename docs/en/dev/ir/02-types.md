@@ -223,16 +223,22 @@ arr: pl.Array[16, pl.INT32]
 
 **Operations:**
 
-| Op | Semantics | Lowering |
-| -- | --------- | -------- |
-| `array.create(N, dtype)` | Allocate stack-local array | `dtype arr[N] = {0};` |
-| `array.get_element(arr, i)` → `Scalar` | Read element `i` | `dtype v = arr[i];` |
-| `array.update_element(arr, i, v)` → `Array` | Functional update (SSA-pure) | `arr[i] = v;` (in-place; codegen aliases LHS to input) |
+| Op | Semantics | Orchestration (C++) | InCore (`.pto`) |
+| -- | --------- | ------------------- | --------------- |
+| `array.create(N, dtype)` | Allocate stack-local array | `dtype arr[N] = {0};` | `pto.declare_local_array -> !pto.local_array<NxT>` |
+| `array.get_element(arr, i)` → `Scalar` | Read element `i` | `dtype v = arr[i];` | `pto.local_array_get arr[i] : !pto.local_array<NxT> -> T` |
+| `array.update_element(arr, i, v)` → `Array` | Functional update (SSA-pure) | `arr[i] = v;` (alias LHS to input) | `pto.local_array_set arr[i], v : !pto.local_array<NxT>, T` |
 
 `array.update_element` is the SSA-functional equivalent of `tensor.assemble`:
 it returns a new SSA value of `ArrayType` representing "the array with element
-i replaced by v". Codegen aliases the result Var to the input array's storage,
-emitting in-place writes — no copy.
+i replaced by v". Both codegen paths alias the result Var to the input array's
+storage, emitting in-place writes — no copy.
+
+The InCore path mirrors PTOAS's stack-local array triad
+(`pto.declare_local_array` / `pto.local_array_get` / `pto.local_array_set`).
+Subscripts are lowered to MLIR `index` (`arith.index_cast` when the source is
+not already `index`), and the `set` value is cast to the element dtype `T` when
+it differs (the verifier permits an `index`-typed value into an integer array).
 
 **DSL indexing sugar:**
 

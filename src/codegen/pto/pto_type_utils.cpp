@@ -61,6 +61,17 @@ std::string DataTypeToMLIR(DataType dtype) {
   }
 }
 
+std::string FormatLocalArrayTypeString(const ir::ArrayType& array_type) {
+  auto extent = As<ir::ConstInt>(array_type.extent());
+  CHECK(extent) << "array element extent must be a compile-time ConstInt for incore codegen";
+  CHECK(array_type.dtype_ != DataType::TASK_ID)
+      << "TASK_ID arrays are an orchestration-only construct (runtime dependency tracking) "
+         "and cannot be lowered to an incore !pto.local_array";
+  std::ostringstream oss;
+  oss << "!pto.local_array<" << extent->value_ << "x" << DataTypeToMLIR(array_type.dtype_) << ">";
+  return oss.str();
+}
+
 std::string MemorySpaceToMLIR(ir::MemorySpace space) {
   if (space == ir::MemorySpace::DDR) {
     return "gm";

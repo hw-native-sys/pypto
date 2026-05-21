@@ -28,6 +28,14 @@ std::string DataTypeToMLIR(DataType dtype);
 /// Convert MemorySpace to PTO address space string (e.g., Vec -> "vec", DDR -> "gm")
 std::string MemorySpaceToMLIR(ir::MemorySpace space);
 
+/// Format a `!pto.local_array<NxT>` type string for an on-core ArrayType.
+///
+/// Mirrors PTOAS's `!pto.local_array<shape x elementType>` (the
+/// `LocalArrayType` def in the PTOAS `PTOTypeDefs.td`). The extent must be a compile-time
+/// `ConstInt` and the element dtype must be a scalar integer/float — the same
+/// `ArrayType` v1 constraints enforced by its constructor.
+std::string FormatLocalArrayTypeString(const ir::ArrayType& array_type);
+
 /// Convert TileLayout to its string name (e.g., row_major -> "row_major")
 const char* TileLayoutToStr(ir::TileLayout layout);
 

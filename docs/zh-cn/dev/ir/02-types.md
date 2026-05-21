@@ -216,15 +216,20 @@ arr: pl.Array[16, pl.INT32]
 
 **操作:**
 
-| Op | 语义 | 下降 |
-| -- | ---- | ---- |
-| `array.create(N, dtype)` | 分配栈数组 | `dtype arr[N] = {0};` |
-| `array.get_element(arr, i)` → `Scalar` | 读元素 `i` | `dtype v = arr[i];` |
-| `array.update_element(arr, i, v)` → `Array` | 函数式更新(SSA-pure) | `arr[i] = v;`(原地;codegen 把 LHS 别名到入参) |
+| Op | 语义 | Orchestration(C++) | InCore（`.pto`） |
+| -- | ---- | ------------------ | ---------------- |
+| `array.create(N, dtype)` | 分配栈数组 | `dtype arr[N] = {0};` | `pto.declare_local_array -> !pto.local_array<NxT>` |
+| `array.get_element(arr, i)` → `Scalar` | 读元素 `i` | `dtype v = arr[i];` | `pto.local_array_get arr[i] : !pto.local_array<NxT> -> T` |
+| `array.update_element(arr, i, v)` → `Array` | 函数式更新(SSA-pure) | `arr[i] = v;`(LHS 别名到入参) | `pto.local_array_set arr[i], v : !pto.local_array<NxT>, T` |
 
 `array.update_element` 是 `tensor.assemble` 的 SSA-functional 等价物:返回一个新的
-`ArrayType` SSA 值,表示"原数组中第 i 个元素被替换为 v"。codegen 把结果 Var
-别名到入参数组的存储,emit 原地写入 —— 不复制。
+`ArrayType` SSA 值,表示"原数组中第 i 个元素被替换为 v"。两条 codegen 路径都把结果
+Var 别名到入参数组的存储,emit 原地写入 —— 不复制。
+
+InCore 路径对齐 PTOAS 的栈数组三件套（`pto.declare_local_array` /
+`pto.local_array_get` / `pto.local_array_set`)。下标统一下降为 MLIR `index`（源类型
+非 `index` 时插入 `arith.index_cast`)，`set` 的值在与元素 dtype `T` 不一致时也会被
+cast（verifier 允许把 `index` 类型的值写入整型数组)。
 
 **DSL 下标糖:**
 

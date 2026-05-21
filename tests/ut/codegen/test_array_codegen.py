@@ -427,5 +427,216 @@ def test_nested_seq_parallel_int_array_carry_codegen():
     assert f"{arr}[branch] = branch;" in code, code
 
 
+# ============================================================================
+# InCore (.pto) codegen — ArrayType lowers to PTOAS !pto.local_array
+# ============================================================================
+
+
+def _generate_pto(program_cls) -> str:
+    """Run the Default pass pipeline + PTOCodegen on the first function.
+
+    Mirrors PTOAS's on-core stack array ops: ``array.create`` ->
+    ``pto.declare_local_array``, ``array.get_element`` -> ``pto.local_array_get``,
+    ``array.update_element`` -> ``pto.local_array_set``.
+    """
+    from pypto import backend  # noqa: PLC0415
+    from pypto.backend import BackendType  # noqa: PLC0415
+    from pypto.ir.pass_manager import OptimizationStrategy, PassManager  # noqa: PLC0415
+
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    optimized = pm.run_passes(program_cls)
+    funcs = list(optimized.functions.values())
+    assert funcs, "program has no functions"
+    single = ir.Program([funcs[0]], funcs[0].name, optimized.span)
+    return codegen.PTOCodegen().generate(single)
+
+
+def test_incore_array_declare_set_get_lower_to_local_array():
+    """Constant-index set/get/read-back lower to declare/set/get on the same SSA."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            arr = pl.array.create(8, pl.INT32)
+            arr[0] = 5
+            arr[1] = arr[0]  # get result flows in as the set value (in-place rebind)
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            o: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+            return o
+
+    mlir = _generate_pto(Prog)
+    # One declaration with the PTOAS local_array type.
+    decl = [ln for ln in mlir.splitlines() if "pto.declare_local_array" in ln]
+    assert len(decl) == 1, mlir
+    assert "-> !pto.local_array<8xi32>" in decl[0], mlir
+    array_ssa = decl[0].split("=")[0].strip()
+
+    # set / get / set all reference the SAME array SSA — update_element is lowered
+    # to in-place mutation, not a copy.
+    set_lines = [ln for ln in mlir.splitlines() if "pto.local_array_set" in ln]
+    get_lines = [ln for ln in mlir.splitlines() if "pto.local_array_get" in ln]
+    assert len(set_lines) == 2, mlir
+    assert len(get_lines) == 1, mlir
+    for ln in set_lines + get_lines:
+        assert array_ssa in ln, ln
+        assert ": !pto.local_array<8xi32>" in ln, ln
+    assert get_lines[0].rstrip().endswith("-> i32"), get_lines[0]
+    # The get rvalue is the value operand of the second set.
+    get_result = get_lines[0].split("=")[0].strip()
+    assert get_result in set_lines[1], (get_lines[0], set_lines[1])
+
+
+def test_incore_array_dynamic_index_casts_to_index_and_value_to_elem_dtype():
+    """A loop-var (index) subscript and an index-typed value both get arith casts."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            arr = pl.array.create(8, pl.INT32)
+            for i in pl.range(8):
+                arr[i] = i  # index-typed value into an i32 array
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            o: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+            return o
+
+    mlir = _generate_pto(Prog)
+    set_line = next(ln for ln in mlir.splitlines() if "pto.local_array_set" in ln)
+    # Subscript is the raw loop index (already `index`-typed → no extra cast),
+    # value is index-cast to i32 to match the element dtype.
+    assert "arith.index_cast" in mlir and " to i32" in mlir, mlir
+    assert ": !pto.local_array<8xi32>, i32" in set_line, set_line
+
+
+def test_incore_array_if_else_assignment_shares_one_backing():
+    """Writing the array in both if/else branches mutates one backing array.
+
+    The merged value is NOT an scf.if result — both branches `local_array_set`
+    the same `declare_local_array` SSA, and the read after the IfStmt resolves
+    to it.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self,
+            cond_t: pl.Tensor[[1, 8], pl.INT32],
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            cond_tile: pl.Tile[[1, 8], pl.INT32] = pl.load(cond_t, [0, 0], [1, 8])
+            c: pl.Scalar[pl.INT32] = pl.tile.read(cond_tile, [0, 0])
+            arr = pl.array.create(4, pl.INT32)
+            if c > 0:
+                arr[0] = c
+            else:
+                arr[0] = 1
+            sel: pl.Scalar[pl.INT32] = arr[0]
+            row: pl.Scalar[pl.INDEX] = pl.cast(sel, pl.INDEX)
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            return pl.store(t, [row, 0], out)
+
+    mlir = _generate_pto(Prog)
+    # Exactly one declaration; the array carries no scf.if result.
+    decl = [ln for ln in mlir.splitlines() if "pto.declare_local_array" in ln]
+    assert len(decl) == 1, mlir
+    array_ssa = decl[0].split("=")[0].strip()
+    if_line = next(ln for ln in mlir.splitlines() if "scf.if" in ln)
+    assert "->" not in if_line, f"array must not become an scf.if result: {if_line}"
+    # Both branches write the SAME backing array.
+    set_lines = [ln for ln in mlir.splitlines() if "pto.local_array_set" in ln]
+    assert len(set_lines) == 2, mlir
+    assert all(array_ssa in ln for ln in set_lines), set_lines
+    # The post-if read resolves to the same array.
+    get_line = next(ln for ln in mlir.splitlines() if "pto.local_array_get" in ln)
+    assert array_ssa in get_line, get_line
+
+
+def test_incore_array_nested_if_in_loop_shares_one_backing():
+    """An if-assignment nested in a loop still targets one backing array."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self,
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            arr = pl.array.create(8, pl.INT32)
+            for i in pl.range(8):
+                if i < 4:
+                    arr[i] = i
+                else:
+                    arr[i] = 0
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            return pl.store(t, [0, 0], out)
+
+    mlir = _generate_pto(Prog)
+    decl = [ln for ln in mlir.splitlines() if "pto.declare_local_array" in ln]
+    assert len(decl) == 1, mlir
+    array_ssa = decl[0].split("=")[0].strip()
+    lines = mlir.splitlines()
+    # scf.for encloses an scf.if with two array writes on the same backing array.
+    assert any("scf.for" in ln for ln in lines), mlir
+    assert any("scf.if" in ln for ln in lines), mlir
+    set_lines = [ln for ln in lines if "pto.local_array_set" in ln]
+    assert len(set_lines) == 2, mlir
+    assert all(array_ssa in ln for ln in set_lines), set_lines
+
+
+def test_incore_array_loop_build_then_dynamic_read():
+    """A loop fills the array; a later dynamic read drives the store offset."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self,
+            idx_t: pl.Tensor[[1, 8], pl.INT32],
+            x: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Tensor[[16, 16], pl.FP32],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            arr = pl.array.create(8, pl.INT32)
+            for i in pl.range(8):
+                arr[i] = i
+            idx_tile: pl.Tile[[1, 8], pl.INT32] = pl.load(idx_t, [0, 0], [1, 8])
+            j: pl.Scalar[pl.INT32] = pl.tile.read(idx_tile, [0, 0])
+            sel: pl.Scalar[pl.INT32] = arr[j]
+            row: pl.Scalar[pl.INDEX] = pl.cast(sel, pl.INDEX)
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(x, [0, 0], [16, 16])
+            return pl.store(t, [row, 0], out)
+
+    mlir = _generate_pto(Prog)
+    decl = [ln for ln in mlir.splitlines() if "pto.declare_local_array" in ln]
+    assert len(decl) == 1, mlir
+    array_ssa = decl[0].split("=")[0].strip()
+    # Loop-body write and the post-loop dynamic read both target one array.
+    set_line = next(ln for ln in mlir.splitlines() if "pto.local_array_set" in ln)
+    get_line = next(ln for ln in mlir.splitlines() if "pto.local_array_get" in ln)
+    assert array_ssa in set_line and array_ssa in get_line, (set_line, get_line)
+    # The read index used by local_array_get is the dynamic tile.read scalar,
+    # cast to index — assert the cast appears right before the get, not anywhere.
+    import re  # noqa: PLC0415
+
+    lines = mlir.splitlines()
+    get_pos = next(i for i, ln in enumerate(lines) if "pto.local_array_get" in ln)
+    get_ctx = "\n".join(lines[max(0, get_pos - 4) : get_pos + 1])
+    assert re.search(r"arith\.index_cast .* to index", get_ctx), get_ctx
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

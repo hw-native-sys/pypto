@@ -151,6 +151,11 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         std::string ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
                                                fields.valid_row_ssa, fields.valid_col_ssa);
         BindVarToMlir(return_var, ret_name);
+      } else if (As<ir::ArrayType>(return_var->GetType())) {
+        // On-core arrays are mutated in place: both branches write the SAME
+        // backing `pto.declare_local_array`, so the merged value is NOT an
+        // scf.if result. returns_via_scf stays false; the return var is bound to
+        // the shared branch-yield SSA after both branches emit (see below).
       } else {
         INTERNAL_CHECK_SPAN(false, op->span_)
             << "Internal error: unsupported IfStmt return_var type for " << return_var->name_hint_;
@@ -167,6 +172,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     }
     indent_level_++;
 
+    // For ArrayType return vars (kept out of scf.if results), capture the
+    // backing-array SSA that the branches yield so it can be bound to the merged
+    // return var after both branches emit. Both branches yield the same SSA
+    // because every array.update_element aliases the input backing array.
+    std::vector<std::string> array_return_ssa(op->return_vars_.size());
+
     auto emit_branch = [&](const StmtPtr& body, const char* branch_name) {
       fs_.yield_buffer.clear();
       VisitStmt(body);
@@ -180,7 +191,19 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
         if (returns_via_scf[i]) {
           scalar_yields.push_back(branch_yields[i]);
-          continue;
+        } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType())) {
+          // In-place backing-array SSA; bound to the return var after the
+          // branches. Both branches must agree on the same storage SSA (every
+          // array.update_element aliases the one backing array) — assert it so a
+          // future divergence can't silently bind to the last-emitted branch.
+          if (array_return_ssa[i].empty()) {
+            array_return_ssa[i] = branch_yields[i];
+          } else {
+            INTERNAL_CHECK_SPAN(array_return_ssa[i] == branch_yields[i], op->span_)
+                << "Internal error: IfStmt array return_var '" << op->return_vars_[i]->name_hint_
+                << "' yields different backing-array SSAs across branches: " << array_return_ssa[i] << " vs "
+                << branch_yields[i];
+          }
         }
         // Tile return_vars: MemoryReuse ensures branch yields share the return_var's
         // canonical MemRef (same physical address). No codegen-level tmov needed —
@@ -207,6 +230,17 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     emit_branch(*else_body, "else");
     indent_level_--;
     Emit("}");
+
+    // Bind ArrayType return vars to the shared backing-array SSA both branches
+    // mutated in place. Reads after the IfStmt then resolve to that array.
+    for (size_t i = 0; i < op->return_vars_.size(); ++i) {
+      if (As<ir::ArrayType>(op->return_vars_[i]->GetType())) {
+        INTERNAL_CHECK_SPAN(!array_return_ssa[i].empty(), op->span_)
+            << "Internal error: array IfStmt return_var '" << op->return_vars_[i]->name_hint_
+            << "' has no branch-yield SSA";
+        BindVarToMlir(op->return_vars_[i], array_return_ssa[i]);
+      }
+    }
   }
 }
 

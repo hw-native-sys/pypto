@@ -212,6 +212,16 @@ bool ShouldAliasScatterUpdateResultToInput(const AssignStmtPtr& stmt) {
   return result_memref && input_memref && result_memref->base_.get() == input_memref->base_.get();
 }
 
+// `array.update_element` is SSA-functional in the IR (returns a fresh
+// ArrayType value), but on-core arrays lower to a single `pto.declare_local_array`
+// that is mutated in place. Aliasing the result Var to the input array's SSA
+// name lets the emitted `pto.local_array_set` write the same storage — no copy.
+bool ShouldAliasArrayUpdateResultToInput(const AssignStmtPtr& stmt) {
+  auto call = As<ir::Call>(stmt->value_);
+  return call && call->op_->name_ == "array.update_element" && !call->args_.empty() &&
+         As<ir::ArrayType>(stmt->var_->GetType());
+}
+
 const auto& FlattenBody = transform_utils::FlattenToStmts;
 
 // Collects `<var> = TupleGetItemExpr(tuple_var, i)` AssignStmts. IRVisitor
@@ -1332,6 +1342,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   auto call = As<ir::Call>(op->value_);
   const bool is_set_validshape = call && call->op_->name_ == "tile.set_validshape";
   const bool alias_scatter_result_to_input = ShouldAliasScatterUpdateResultToInput(op);
+  const bool alias_array_update_to_input = ShouldAliasArrayUpdateResultToInput(op);
 
   if (auto tile_type = ir::GetTileTypeWithMemRef(op->var_->GetType())) {
     if (!is_set_validshape && fs_.tpop_result_vars.count(op->var_.get()) == 0 &&
@@ -1363,6 +1374,14 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
         result_tile_type = tile_type;
       } else if (auto tile_type = As<TileType>(op->var_->GetType())) {
         result_tile_type = tile_type;
+      } else if (alias_array_update_to_input) {
+        // array.update_element: alias the result Var to the input array's SSA so
+        // the emitted pto.local_array_set mutates the same declare_local_array
+        // storage in place (mirrors the SSA-functional -> in-place lowering).
+        result_buf = GetExprAsCode(call->args_[0]);
+        INTERNAL_CHECK_SPAN(!result_buf.empty(), op->span_)
+            << "Internal error: array.update_element result must alias the input array SSA";
+        BindVarToMlir(op->var_, result_buf);
       } else {
         // Pre-allocate a %-prefixed SSA name for non-tile backend ops (e.g., scalar
         // results like tile.getval, or i32 results like reserve_buffer / import_peer_buffer).

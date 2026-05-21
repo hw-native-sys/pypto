@@ -50,6 +50,26 @@ def default_pass_manager():
 
 
 @pytest.fixture(autouse=True)
+def _reset_backend_singleton():
+    """Reset the process-global backend singleton around every unit test.
+
+    The backend type can only be set once per process (``set_backend_type``
+    rejects a change once set). Tests that call ``ir.compile`` / codegen without
+    explicitly choosing a backend rely on a clean singleton, so a sibling test
+    that left e.g. ``Ascend950`` set would make them fail with "Backend type
+    already set" — an order-dependent flake under pytest-xdist. Resetting before
+    and after each test makes every test start from a clean slate regardless of
+    scheduling. Tests that set a backend (inline or via ``ascend_backend``) are
+    unaffected: the reset runs first, then their own set wins.
+    """
+    _backend.reset_for_testing()
+    try:
+        yield
+    finally:
+        _backend.reset_for_testing()
+
+
+@pytest.fixture(autouse=True)
 def pass_verification_context():
     """Enable pass verification and optional roundtrip checking for all pass executions.
 
