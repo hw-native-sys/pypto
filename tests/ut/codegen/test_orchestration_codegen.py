@@ -280,6 +280,15 @@ class TestOrchestration:
         assert "kernel_add" in result.func_name_to_id
         assert "kernel_add" in result.func_name_to_core_type
 
+        # The kernel's ArgDirection signature is exported so kernel_config.py can
+        # build a non-empty CoreCallable signature (issue #1458 — required for
+        # the runtime tensor dump to match the task payload tensor_count).
+        signature = result.func_name_to_signature["kernel_add"]
+        assert all(d in {"IN", "OUT", "INOUT", "SCALAR"} for d in signature)
+        # a, b, output are all tensors -> 3 non-SCALAR entries == payload tensors.
+        non_scalar = [d for d in signature if d != "SCALAR"]
+        assert len(non_scalar) == 3
+
     def test_independent_tasks(self):
         """Test codegen with independent tasks (no dependencies needed)."""
         backend.reset_for_testing()

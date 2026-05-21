@@ -686,6 +686,7 @@ def _generate_config_file(
     orch_func_name: str,
     func_name_to_id: dict[str, int],
     func_name_to_core_type: dict[str, _ir_core.CoreType],
+    func_name_to_signature: dict[str, list[str]] | None = None,
     *,
     block_dim: int | None = None,
 ) -> str:
@@ -696,7 +697,18 @@ def _generate_config_file(
     simpler runtime's own default applies at dispatch time; simpler
     validates the value against device capacity and rejects
     over-capacity requests with a clear error rather than hanging.
+
+    ``func_name_to_signature`` maps each kernel name to its runtime
+    ``ArgDirection`` names ("IN"/"OUT"/"INOUT"/"SCALAR"), in task-payload
+    (tensors-first) order. When present, each KERNELS entry gains a
+    ``"signature"`` field of ``ArgDirection`` members so the runtime builds a
+    non-empty CoreCallable signature — required for the tensor dump to match
+    the task payload tensor_count. Kernels without an entry fall back to an
+    empty signature (the pre-existing behavior).
     """
+    func_name_to_signature = func_name_to_signature or {}
+    has_signatures = any(func_name_to_signature.values())
+
     runtime_lines = [
         "RUNTIME_CONFIG = {",
         '\t"runtime": "tensormap_and_ringbuffer",',
@@ -706,10 +718,18 @@ def _generate_config_file(
         runtime_lines.append(f'\t"block_dim": {block_dim},')
     runtime_lines.append("}\n")
 
-    lines = [
+    header = [
         "# Kernel and Orchestration Configuration\n",
         "from pathlib import Path\n",
-        "_ROOT_DIR = Path(__file__).parent\n",
+    ]
+    # ArgDirection is only imported when at least one kernel has a signature,
+    # so configs for kernels without directions stay import-free.
+    if has_signatures:
+        header.append("from simpler.task_interface import ArgDirection as _D\n")
+    header.append("_ROOT_DIR = Path(__file__).parent\n")
+
+    lines = [
+        *header,
         "# Runtime configuration for tensormap_and_ringbuffer.",
         "# This runtime requires 4 AICPU threads (3 schedulers + 1 orchestrator on thread 3).",
         "# block_dim is only emitted when the user passes compile(block_dim=...);",
@@ -725,12 +745,18 @@ def _generate_config_file(
     for name, func_id in sorted(func_name_to_id.items(), key=lambda x: x[1]):
         core_type = func_name_to_core_type[name]
         ct_str = "aiv" if core_type == _ir_core.CoreType.VECTOR else "aic"
-        lines.append(
+        entry = (
             f'\t{{"func_id": {func_id}, '
             f'"name": "{name}", '
             f'"source": str(_ROOT_DIR / "kernels" / "{ct_str}" / "{name}.cpp"), '
-            f'"core_type": "{ct_str}"}},'
+            f'"core_type": "{ct_str}"'
         )
+        signature = func_name_to_signature.get(name)
+        if signature:
+            sig_str = ", ".join(f"_D.{d}" for d in signature)
+            entry += f', "signature": [{sig_str}]'
+        entry += "},"
+        lines.append(entry)
 
     lines.append("]")
     return "\n".join(lines) + "\n"
@@ -1332,6 +1358,7 @@ def _generate_single_chip(
                     orch_func.name,
                     orch_result.func_name_to_id,
                     orch_result.func_name_to_core_type,
+                    orch_result.func_name_to_signature,
                     block_dim=block_dim,
                 )
         except Exception as e:
