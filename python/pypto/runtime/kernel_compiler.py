@@ -25,7 +25,7 @@ simpler_setup (issue #1064), this file can be deleted and callers can
 
 import importlib.util
 
-from simpler_setup import KernelCompiler as _SimplerKernelCompiler
+from simpler_setup import KernelCompiler as _SimplerKernelCompiler  # pyright: ignore[reportMissingImports]
 
 
 class KernelCompiler(_SimplerKernelCompiler):
