@@ -206,8 +206,7 @@ class TestL3SubWorkerOverride:
 
         expected = torch.full((128, 128), 5.0, dtype=torch.float32)
         assert torch.allclose(host_f, expected, rtol=1e-5, atol=1e-5), (
-            f"compute wrong: expected f = a + b = 5.0, "
-            f"got max diff {(host_f - expected).abs().max().item()}"
+            f"compute wrong: expected f = a + b = 5.0, got max diff {(host_f - expected).abs().max().item()}"
         )
         assert marker[0].item() == 1.0, (
             "override sub-worker did not run — the generated `verify` placeholder "

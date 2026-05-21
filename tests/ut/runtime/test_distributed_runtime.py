@@ -225,7 +225,7 @@ class TestLifecycle:
 class TestSubWorkerOverrides:
     def test_override_reaches_register(self, patched_setup):
         m = patched_setup
-        placeholder, real = object(), object()
+        placeholder, real = object(), MagicMock()
         m["load_subs"].return_value = {"sample_and_prepare": placeholder}
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
@@ -253,7 +253,7 @@ class TestSubWorkerOverrides:
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
         with pytest.raises(ValueError, match="not sub-workers"):
-            DistributedRuntime(compiled, sub_worker_overrides={"typo": object()})
+            DistributedRuntime(compiled, sub_worker_overrides={"typo": MagicMock()})
 
 
 class TestMergeSubWorkerOverrides:
@@ -267,7 +267,7 @@ class TestMergeSubWorkerOverrides:
     def test_valid_override_replaces(self):
         from pypto.runtime.distributed_runner import _merge_sub_worker_overrides  # noqa: PLC0415
 
-        placeholder, real, other = object(), object(), object()
+        placeholder, real, other = object(), MagicMock(), object()
         loaded = {"a": placeholder, "b": other}
         merged = _merge_sub_worker_overrides(loaded, {"a": real})
         assert merged == {"a": real, "b": other}
@@ -276,7 +276,7 @@ class TestMergeSubWorkerOverrides:
         from pypto.runtime.distributed_runner import _merge_sub_worker_overrides  # noqa: PLC0415
 
         with pytest.raises(ValueError, match=r"not sub-workers.*Available sub-workers"):
-            _merge_sub_worker_overrides({"a": object()}, {"b": object()})
+            _merge_sub_worker_overrides({"a": object()}, {"b": MagicMock()})
 
 
 class TestOneShotRegression:

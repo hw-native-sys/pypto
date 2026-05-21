@@ -282,9 +282,7 @@ def _load_sub_worker_fns(output_dir: Path) -> dict[str, Any]:
     return sub_worker_fns
 
 
-def _build_chip_bootstrap(
-    output_dir: Path, dc: DistributedConfig
-) -> tuple[list[Any] | None, str | None]:
+def _build_chip_bootstrap(output_dir: Path, dc: DistributedConfig) -> tuple[list[Any] | None, str | None]:
     """Build per-chip comm bootstrap configs from the AOT comm manifest.
 
     Comm-less programs (no CommGroup declared) have no manifest and return
@@ -593,8 +591,7 @@ class DistributedRuntime(DeviceMemoryHandle):
         orch = getattr(self._w, "_orch", None)
         if orch is None:
             raise RuntimeError(
-                "DistributedRuntime worker has no active orchestrator; the chip "
-                "hierarchy was not started."
+                "DistributedRuntime worker has no active orchestrator; the chip hierarchy was not started."
             )
         return orch
 

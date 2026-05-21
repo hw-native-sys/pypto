@@ -67,7 +67,10 @@ def test_device_tensor_produces_child_memory_true():
 
 
 def test_continuous_tensor_passes_through():
-    from pypto.runtime.task_interface import ContinuousTensor, torch_dtype_to_datatype  # noqa: PLC0415
+    from pypto.runtime.task_interface import (  # noqa: PLC0415
+        ContinuousTensor,  # pyright: ignore[reportAttributeAccessIssue]
+        torch_dtype_to_datatype,  # pyright: ignore[reportAttributeAccessIssue]
+    )
     from pypto.runtime.tensor_arg import make_tensor_arg  # noqa: PLC0415
 
     ct = ContinuousTensor.make(0x1000, (4,), torch_dtype_to_datatype(torch.float32), child_memory=True)
