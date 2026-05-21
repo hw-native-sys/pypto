@@ -2701,6 +2701,15 @@ class TestTensorCiOp:
     def test_top_level_arange_is_tensor_ci(self):
         assert pl.arange is pl.tensor.ci
 
+    def test_top_level_sort32_is_tensor_sort32(self):
+        assert pl.sort32 is pl.tensor.sort32
+
+    def test_top_level_mrgsort_is_tensor_mrgsort(self):
+        assert pl.mrgsort is pl.tensor.mrgsort
+
+    def test_top_level_gather_is_tensor_gather(self):
+        assert pl.gather is pl.tensor.gather
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

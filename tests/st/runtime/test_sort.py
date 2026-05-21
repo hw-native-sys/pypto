@@ -287,6 +287,42 @@ class MrgSort1DynFP32TensorValIdxProgram:
 
 
 @pl.program
+class MrgSort1DynFP32TopLevelProgram:
+    """Top-level-alias counterpart of ``MrgSort1DynFP32TensorValIdxProgram``.
+
+    Identical sort32 → 3× mrgsort format1 → P0101/P1010 mask-gather pipeline,
+    but written with the promoted top-level aliases ``pl.sort32`` / ``pl.mrgsort``
+    / ``pl.gather`` instead of the ``pl.tensor.*`` namespace forms. Verifies the
+    aliases lower exactly like their ``pl.tensor.*`` originals.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        src: pl.Tensor[[1, 2048], pl.FP32],
+        idx: pl.Tensor[[1, 2048], pl.UINT32],
+        val_output: pl.Out[pl.Tensor[[1, 2048], pl.FP32]],
+        idx_output: pl.Out[pl.Tensor[[1, 2048], pl.UINT32]],
+    ) -> tuple[pl.Tensor[[1, 2048], pl.FP32], pl.Tensor[[1, 2048], pl.UINT32]]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+        ):
+            sorted_t = pl.sort32(src, idx)
+            for i, (acc,) in pl.range(3, init_values=(sorted_t,)):
+                block_len = 1 << (6 + i * 2)
+                merged = pl.mrgsort(acc, block_len=block_len)
+                result = pl.yield_(merged)
+            # P0101 → sorted values (FP32 at even positions).
+            vals = pl.gather(result, mask_pattern=pl.tile.MaskPattern.P0101)
+            # P1010 + output_dtype=UINT32 → bit-reinterpret odd-position bits into UINT32.
+            sorted_idx = pl.gather(result, mask_pattern=pl.tile.MaskPattern.P1010, output_dtype=pl.UINT32)
+            val_output = pl.assemble(val_output, vals, [0, 0])
+            idx_output = pl.assemble(idx_output, sorted_idx, [0, 0])
+        return val_output, idx_output
+
+
+@pl.program
 class MrgSort1DynFP32Program:
     """Sort 64×32-element blocks (2048 values) with sort32, then merge with
     3 iterations of mrgsort format1 using dynamic block_len computed from loop index.
@@ -596,6 +632,39 @@ class MrgSort1DynFP32TensorValIdxTestCase(PTOTestCase):
         tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
 
 
+class MrgSort1DynFP32TopLevelTestCase(PTOTestCase):
+    """Top-level-alias counterpart of ``MrgSort1DynFP32TensorValIdxTestCase``.
+
+    Exercises the promoted ``pl.sort32`` / ``pl.mrgsort`` / ``pl.gather`` aliases
+    in a single program and checks both sorted values and original indices.
+    """
+
+    def get_name(self) -> str:
+        return "mrgsort1_dyn_fp32_toplevel"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("src", [1, 2048], DataType.FP32, init_value=_make_src_1x2048),
+            TensorSpec("idx", [1, 2048], DataType.UINT32, init_value=_make_idx_1x2048),
+            TensorSpec("val_output", [1, 2048], DataType.FP32, is_output=True),
+            TensorSpec("idx_output", [1, 2048], DataType.UINT32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return MrgSort1DynFP32TopLevelProgram
+
+    def compute_expected(self, tensors, params=None):
+        """Sorted values and permuted original indices for the 2048-element input."""
+        src = tensors["src"].flatten()
+        idx = tensors["idx"].flatten()
+        _, global_order = torch.sort(src, descending=True)
+        tensors["val_output"][:] = src[global_order].unsqueeze(0)
+        tensors["idx_output"][:] = idx[global_order].unsqueeze(0)
+
+
 class MrgSort2WayFP32TestCase(PTOTestCase):
     """Test sort32 → format1 (per 512-element half) → format2 2-way merge pipeline.
 
@@ -799,6 +868,12 @@ class TestSort:
     def test_mrgsort1_dyn_fp32_tensor_val_idx(self, test_runner, platform):
         """Tensor-level sort32 + mrgsort + P0101/P1010 mask-gather: returns values and indices."""
         result = test_runner.run(MrgSort1DynFP32TensorValIdxTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_mrgsort1_dyn_fp32_toplevel(self, test_runner, platform):
+        """Top-level pl.sort32 / pl.mrgsort / pl.gather aliases: returns values and indices."""
+        result = test_runner.run(MrgSort1DynFP32TopLevelTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)

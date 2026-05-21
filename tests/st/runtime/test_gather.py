@@ -120,6 +120,24 @@ class GatherRank2LastDimProgram:
 
 
 @pl.program
+class GatherRank2LastDimTopLevelProgram:
+    """Same as ``GatherRank2LastDimProgram`` but uses the promoted top-level
+    ``pl.gather`` alias instead of ``pl.tensor.gather``."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[4, 16], pl.FP32],
+        idx: pl.Tensor[[4, 8], pl.INT32],
+        output: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+    ) -> pl.Tensor[[4, 8], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.gather(inp, dim=-1, index=idx)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
 class GatherRank2SmallerLeadingProgram:
     """Rank-2 + dim=-1 with ``index.shape[0] (=2) < input.shape[0] (=4)``."""
 
@@ -338,6 +356,32 @@ class GatherRank2LastDimTestCase(_GatherBaseTestCase):
         tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
 
 
+class GatherRank2LastDimTopLevelTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_rank2_last_dim_toplevel"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [4, 16], DataType.FP32, init_value=torch.randn),
+            TensorSpec(
+                "idx",
+                [4, 8],
+                DataType.INT32,
+                init_value=lambda: _rand_indices(0, 16, (4, 8)),
+            ),
+            TensorSpec("output", [4, 8], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherRank2LastDimTopLevelProgram
+
+    def compute_expected(self, tensors, params=None):
+        # torch.gather semantics: out[b, k] = inp[b, idx[b, k]]
+        inp = tensors["inp"]
+        idx = tensors["idx"].to(torch.int64)
+        tensors["output"][:] = torch.gather(inp, dim=-1, index=idx)
+
+
 class GatherRank2SmallerLeadingTestCase(_GatherBaseTestCase):
     def get_name(self) -> str:
         return "gather_rank2_smaller_leading"
@@ -544,6 +588,12 @@ class TestGatherIndex:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_rank2_last_dim(self, test_runner, platform):
         result = test_runner.run(GatherRank2LastDimTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_rank2_last_dim_toplevel(self, test_runner, platform):
+        """Top-level pl.gather alias (index form) matches pl.tensor.gather."""
+        result = test_runner.run(GatherRank2LastDimTopLevelTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)

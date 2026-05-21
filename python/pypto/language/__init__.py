@@ -94,7 +94,20 @@ from .op.system_ops import (
     tpush_to_aic,
     tpush_to_aiv,
 )
-from .op.tensor_ops import assemble, cos, create_tensor, dim, expand_clone, full, no_dep, scatter_update, sin
+from .op.tensor_ops import (
+    assemble,
+    cos,
+    create_tensor,
+    dim,
+    expand_clone,
+    full,
+    gather,
+    mrgsort,
+    no_dep,
+    scatter_update,
+    sin,
+    sort32,
+)
 from .op.tensor_ops import ci as arange
 from .op.tile_ops import (
     MemRefType,
@@ -378,6 +391,9 @@ __all__ = [
     "scatter_update",
     "sin",
     "arange",
+    "sort32",
+    "mrgsort",
+    "gather",
     "ChunkConfig",
     "ChunkPolicy",
     "FunctionType",
