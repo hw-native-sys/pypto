@@ -17,7 +17,7 @@ import json
 import os
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +26,7 @@ import torch
 
 from pypto.ir.comm_manifest import COMM_MANIFEST_FILENAME, COMM_MANIFEST_VERSION
 
+from .device_memory import DeviceMemoryHandle
 from .device_tensor import DeviceTensor
 
 if TYPE_CHECKING:
@@ -343,6 +344,27 @@ def _register_callables(
     return sub_ids, chip_cids
 
 
+def _merge_sub_worker_overrides(
+    loaded: dict[str, Any], overrides: dict[str, Callable[..., Any]] | None
+) -> dict[str, Any]:
+    """Merge user sub-worker overrides onto the codegen-loaded set (by name).
+
+    Each override replaces the generated placeholder for an existing sub-worker.
+    Overriding a name the program does not declare is rejected: it would register
+    an unused callable while the generated orchestrator kept calling the
+    placeholder (a silent no-op the caller almost never intends — usually a typo).
+    """
+    if not overrides:
+        return loaded
+    unknown = sorted(set(overrides) - set(loaded))
+    if unknown:
+        raise ValueError(
+            f"sub_worker_overrides names {unknown} are not sub-workers of this "
+            f"program. Available sub-workers: {sorted(loaded)}."
+        )
+    return {**loaded, **overrides}
+
+
 def _make_call_config(dc: DistributedConfig) -> Any:
     """Build a simpler ``CallConfig`` from the distributed config."""
     from simpler.task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
@@ -466,7 +488,7 @@ def execute_distributed(
                 pass
 
 
-class DistributedRuntime:
+class DistributedRuntime(DeviceMemoryHandle):
     """Reusable L3 execution handle: prepare once, dispatch many.
 
     Holds an initialized simpler ``Worker(level=3)`` plus all setup artifacts
@@ -489,6 +511,11 @@ class DistributedRuntime:
     (its ``init`` source must likewise be a pre-``prepare`` shared tensor) and
     mixed in. This mirrors the runtime's ``child_memory`` example.
 
+    ``sub_worker_overrides`` replaces a generated sub-worker placeholder (matched
+    by name) with a caller-supplied callable — e.g. a real sampling closure in
+    place of the codegen stub. Each name must be a sub-worker the program
+    declares; an unknown name raises ``ValueError``.
+
     Obtain via :meth:`DistributedCompiledProgram.prepare`. Use as a context
     manager (recommended) or call :meth:`close` when done::
 
@@ -506,12 +533,19 @@ class DistributedRuntime:
 
     __test__ = False
 
-    def __init__(self, compiled: DistributedCompiledProgram, config: Any = None) -> None:
+    def __init__(
+        self,
+        compiled: DistributedCompiledProgram,
+        config: Any = None,
+        *,
+        sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
+    ) -> None:
         del config  # reserved for future per-runtime overrides
         dc = compiled._distributed_config
         self._chip_callables, runtime_name = _assemble_chip_callables(compiled)
         self._entry_fn, alloc_fn = _load_orch_entry(compiled.output_dir)
         sub_worker_fns = _load_sub_worker_fns(compiled.output_dir)
+        sub_worker_fns = _merge_sub_worker_overrides(sub_worker_fns, sub_worker_overrides)
         chip_bootstrap_configs, self._rootinfo_path = _build_chip_bootstrap(compiled.output_dir, dc)
 
         num_sub = max(dc.num_sub_workers, len(sub_worker_fns))
@@ -584,69 +618,32 @@ class DistributedRuntime:
         self._require_open("copy_from")
         self._orch().copy_from(worker_id, dst_host_ptr, src_dev_ptr, nbytes)
 
-    def alloc_tensor(
-        self,
-        shape: Sequence[int],
-        dtype: torch.dtype,
-        *,
-        init: torch.Tensor | None = None,
-        worker_id: int = 0,
-    ) -> DeviceTensor:
-        """Allocate a worker-resident buffer and (optionally) upload host data.
+    # ``alloc_tensor`` / ``free_tensor`` are inherited from DeviceMemoryHandle.
+    # Only the two behaviours that genuinely differ from L2 are overridden below:
+    # the readiness guard (open vs. closed) and the host-init upload policy (the
+    # upload runs in a forked chip worker, so no defensive copy is possible).
 
-        Returns a :class:`~pypto.runtime.DeviceTensor` valid for this runtime's
-        Worker until :meth:`free_tensor` or :meth:`close`.
+    _WORKER_KIND = "chip worker"
 
-        The upload (``copy_to``) runs **inside the forked chip worker**, so when
-        *init* is given it must be a CPU, contiguous, shared-memory tensor
-        allocated **before** :meth:`DistributedCompiledProgram.prepare` (call
-        ``.share_memory_()``) — only then does the chip child inherit the host
-        mapping and read the right bytes. Unlike the L2 ``Worker.alloc_tensor``
-        we cannot make a defensive ``.cpu().contiguous()`` copy here: that copy
-        would live only in the parent and be invisible to the child.
-        """
-        self._require_open("alloc_tensor")
-        if worker_id != 0:
+    def _require_ready(self, op: str) -> None:
+        # DeviceMemoryHandle hook: device-memory ops are valid until close().
+        self._require_open(op)
+
+    def _prepare_init(self, init: torch.Tensor) -> torch.Tensor:
+        # DeviceMemoryHandle hook: the upload (``copy_to``) runs **inside the
+        # forked chip worker**, so ``init`` must be a CPU, contiguous,
+        # shared-memory tensor allocated **before**
+        # :meth:`DistributedCompiledProgram.prepare` (call ``.share_memory_()``).
+        # Unlike L2 we cannot make a defensive ``.cpu().contiguous()`` copy: that
+        # copy would live only in the parent and be invisible to the child.
+        if not (init.is_shared() and init.is_contiguous() and init.device.type == "cpu"):
             raise ValueError(
-                "DistributedRuntime.alloc_tensor currently only supports worker_id=0. "
-                "Use malloc/copy_to directly if you need a different chip worker."
+                "DistributedRuntime.alloc_tensor(init=...) requires a CPU, contiguous, "
+                "shared-memory tensor allocated BEFORE prepare() (call .share_memory_()). "
+                "The upload runs in the forked chip worker, which can only read host "
+                "memory it inherited at fork."
             )
-        shape_t = tuple(int(d) for d in shape)
-        if any(d < 0 for d in shape_t):
-            raise ValueError(f"shape must contain only non-negative dimensions, got {shape_t}")
-        n_elems = 1
-        for d in shape_t:
-            n_elems *= d
-        nbytes = n_elems * torch.tensor([], dtype=dtype).element_size()
-        ptr = self.malloc(nbytes, worker_id=worker_id)
-        try:
-            if init is not None:
-                if init.dtype != dtype or tuple(init.shape) != shape_t:
-                    raise ValueError(
-                        f"init must have shape={shape_t} dtype={dtype}, "
-                        f"got shape={tuple(init.shape)} dtype={init.dtype}"
-                    )
-                if not (init.is_shared() and init.is_contiguous() and init.device.type == "cpu"):
-                    raise ValueError(
-                        "DistributedRuntime.alloc_tensor(init=...) requires a CPU, contiguous, "
-                        "shared-memory tensor allocated BEFORE prepare() (call .share_memory_()). "
-                        "The upload runs in the forked chip worker, which can only read host "
-                        "memory it inherited at fork."
-                    )
-                self.copy_to(ptr, init.data_ptr(), nbytes, worker_id=worker_id)
-            return DeviceTensor(ptr, shape_t, dtype)
-        except Exception:
-            self.free(ptr, worker_id=worker_id)
-            raise
-
-    def free_tensor(self, t: DeviceTensor, *, worker_id: int = 0) -> None:
-        """Release a buffer previously returned by :meth:`alloc_tensor`."""
-        if worker_id != 0:
-            raise ValueError(
-                "DistributedRuntime.free_tensor currently only supports worker_id=0. "
-                "Use free directly if you need a different chip worker."
-            )
-        self.free(t.data_ptr, worker_id=worker_id)
+        return init
 
     # ------------------------------------------------------------------
     # Dispatch

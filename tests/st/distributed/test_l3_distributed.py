@@ -164,5 +164,74 @@ class TestL3Dependency:
         )
 
 
+class TestL3SubWorkerOverride:
+    """``prepare(sub_worker_overrides=...)`` swaps a generated sub-worker for a closure."""
+
+    def test_prepare_overrides_verify_sub_worker(self, test_config, device_ids):
+        """The override closure runs in place of the generated ``verify`` placeholder.
+
+        Reuses ``L3DependencyProgram`` (host_orch → chip add → ``verify`` sub-worker).
+        Proof the override took effect: the closure writes a sentinel into a
+        shared-memory marker that the generated ``verify`` never touches, so a
+        non-zero marker after dispatch means our closure ran — not the stub.
+        """
+        from pypto.runtime.distributed_runner import _tensor_from_continuous  # noqa: PLC0415
+
+        compiled = ir.compile(
+            L3DependencyProgram,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:1],
+                num_sub_workers=1,
+                block_dim=3,
+                aicpu_thread_num=4,
+            ),
+        )
+
+        # Shared-memory IO + marker, allocated BEFORE prepare() so the forked
+        # chip / sub workers inherit the host mappings.
+        host_a = torch.full((128, 128), 2.0, dtype=torch.float32).share_memory_()
+        host_b = torch.full((128, 128), 3.0, dtype=torch.float32).share_memory_()
+        host_f = torch.zeros((128, 128), dtype=torch.float32).share_memory_()
+        # marker[0]: 1.0 once the override runs; marker[1]: the f[0] it observed.
+        marker = torch.zeros(2, dtype=torch.float32).share_memory_()
+
+        def override_verify(args):
+            f = _tensor_from_continuous(args.tensor(0))
+            marker[0] = 1.0
+            marker[1] = float(f.reshape(-1)[0].item())
+
+        with compiled.prepare(sub_worker_overrides={"verify": override_verify}) as rt:
+            rt(host_a, host_b, host_f)
+
+        expected = torch.full((128, 128), 5.0, dtype=torch.float32)
+        assert torch.allclose(host_f, expected, rtol=1e-5, atol=1e-5), (
+            f"compute wrong: expected f = a + b = 5.0, "
+            f"got max diff {(host_f - expected).abs().max().item()}"
+        )
+        assert marker[0].item() == 1.0, (
+            "override sub-worker did not run — the generated `verify` placeholder "
+            "ran instead (marker left untouched)"
+        )
+        assert abs(marker[1].item() - 5.0) < 1e-5, (
+            f"override observed wrong f value: {marker[1].item()} (expected 5.0)"
+        )
+
+    def test_prepare_rejects_unknown_override_name(self, test_config, device_ids):
+        """An override naming a non-existent sub-worker fails fast with a clear error."""
+        compiled = ir.compile(
+            L3DependencyProgram,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:1],
+                num_sub_workers=1,
+                block_dim=3,
+                aicpu_thread_num=4,
+            ),
+        )
+        with pytest.raises(ValueError, match="not sub-workers"):
+            compiled.prepare(sub_worker_overrides={"nonexistent": lambda args: None})
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", *sys.argv[1:]])

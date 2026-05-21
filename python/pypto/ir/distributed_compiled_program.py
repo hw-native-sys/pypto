@@ -17,6 +17,7 @@ through simpler's distributed runtime (Worker level=3)::
 """
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -240,7 +241,12 @@ class DistributedCompiledProgram:
         outputs = [coerced[i] for i in output_indices]
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
 
-    def prepare(self, config: Any = None) -> "DistributedRuntime":
+    def prepare(
+        self,
+        config: Any = None,
+        *,
+        sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
+    ) -> "DistributedRuntime":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
         Runs the expensive setup (``compile_and_assemble``, generated-module
@@ -261,6 +267,11 @@ class DistributedCompiledProgram:
 
         Args:
             config: Optional run configuration (reserved; currently unused).
+            sub_worker_overrides: Replace a generated sub-worker placeholder
+                (matched by name) with your own callable — e.g. a real sampling
+                closure in place of the codegen stub. Each name must be a
+                sub-worker the program declares; an unknown name raises
+                ``ValueError``.
 
         Returns:
             A :class:`DistributedRuntime`; use it as a context manager or call
@@ -268,7 +279,7 @@ class DistributedCompiledProgram:
         """
         from pypto.runtime.distributed_runner import DistributedRuntime  # noqa: PLC0415
 
-        return DistributedRuntime(self, config)
+        return DistributedRuntime(self, config, sub_worker_overrides=sub_worker_overrides)
 
     @staticmethod
     def _build_full_args(input_args, param_infos, output_indices):

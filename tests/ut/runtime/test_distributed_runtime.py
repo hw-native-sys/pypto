@@ -222,6 +222,63 @@ class TestLifecycle:
             rt(DeviceTensor(0x1000, (16, 16), torch.float32))
 
 
+class TestSubWorkerOverrides:
+    def test_override_reaches_register(self, patched_setup):
+        m = patched_setup
+        placeholder, real = object(), object()
+        m["load_subs"].return_value = {"sample_and_prepare": placeholder}
+        compiled = _fake_compiled([_param("a", [8, 8])], [])
+
+        rt = DistributedRuntime(compiled, sub_worker_overrides={"sample_and_prepare": real})
+
+        # _register_callables(w, sub_worker_fns, chip_callables): arg[1] is the merged set.
+        passed = m["register"].call_args.args[1]
+        assert passed == {"sample_and_prepare": real}
+        rt.close()
+
+    def test_no_override_passes_loaded_unchanged(self, patched_setup):
+        m = patched_setup
+        loaded = {"sample_and_prepare": object()}
+        m["load_subs"].return_value = loaded
+        compiled = _fake_compiled([_param("a", [8, 8])], [])
+
+        rt = DistributedRuntime(compiled)
+
+        assert m["register"].call_args.args[1] == loaded
+        rt.close()
+
+    def test_override_unknown_name_raises(self, patched_setup):
+        m = patched_setup
+        m["load_subs"].return_value = {"sample_and_prepare": object()}
+        compiled = _fake_compiled([_param("a", [8, 8])], [])
+
+        with pytest.raises(ValueError, match="not sub-workers"):
+            DistributedRuntime(compiled, sub_worker_overrides={"typo": object()})
+
+
+class TestMergeSubWorkerOverrides:
+    def test_none_overrides_returns_loaded_identity(self):
+        from pypto.runtime.distributed_runner import _merge_sub_worker_overrides  # noqa: PLC0415
+
+        loaded = {"a": object()}
+        assert _merge_sub_worker_overrides(loaded, None) is loaded
+        assert _merge_sub_worker_overrides(loaded, {}) is loaded
+
+    def test_valid_override_replaces(self):
+        from pypto.runtime.distributed_runner import _merge_sub_worker_overrides  # noqa: PLC0415
+
+        placeholder, real, other = object(), object(), object()
+        loaded = {"a": placeholder, "b": other}
+        merged = _merge_sub_worker_overrides(loaded, {"a": real})
+        assert merged == {"a": real, "b": other}
+
+    def test_unknown_name_raises_listing_available(self):
+        from pypto.runtime.distributed_runner import _merge_sub_worker_overrides  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match=r"not sub-workers.*Available sub-workers"):
+            _merge_sub_worker_overrides({"a": object()}, {"b": object()})
+
+
 class TestOneShotRegression:
     """The one-shot execute_distributed path still works after helper extraction."""
 
