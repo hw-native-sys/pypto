@@ -204,6 +204,84 @@ class TestTensorExpandClone(PTOTestCase):
             raise ValueError(f"Unsupported broadcast_dim: {self.broadcast_dim}")
 
 
+class TestRowExpandMulFromNdColumnSlice(PTOTestCase):
+    """Regression for #1230: row_expand_mul with a column slice of a non-column-vector ND tensor.
+
+    Reproduces the ``pl.slice(post_2d, [T, 1], [0, h])`` pattern that used to be
+    lowered to a ``ColMajor`` Vec tile from an ``ND`` GM view, failing the
+    runtime TLOAD ``isSameLayout`` check (ND2ND/DN2DN/NZ2NZ only) on real a2a3.
+    With the fix, the slice keeps RowMajor and rides ND2ND.
+    """
+
+    __test__ = False
+
+    def __init__(
+        self,
+        t: int = 16,
+        d: int = 64,
+        hc: int = 4,
+        col_idx: int = 2,
+        *,
+        platform: str | None = None,
+        config=None,
+    ):
+        super().__init__(config, platform=platform)
+        self.T = t
+        self.D = d
+        self.HC = hc
+        self.col_idx = col_idx
+
+    def get_name(self) -> str:
+        return f"row_expand_mul_nd_col_slice_T{self.T}_D{self.D}_HC{self.HC}_h{self.col_idx}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [self.T, self.D], DataType.FP32, init_value=torch.randn),
+            TensorSpec("w", [self.T, self.HC], DataType.FP32, init_value=torch.randn),
+            TensorSpec("y", [self.T, self.D], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        T, D, HC = self.T, self.D, self.HC
+        col_idx = self.col_idx
+
+        @pl.program
+        class RowExpandMulFromNdColumnSliceProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[T, D], pl.FP32],
+                w: pl.Tensor[[T, HC], pl.FP32],
+                y: pl.Out[pl.Tensor[[T, D], pl.FP32]],
+            ) -> pl.Tensor[[T, D], pl.FP32]:
+                x_tile: pl.Tile[[T, D], pl.FP32] = pl.load(x, [0, 0], [T, D])
+                # The bug: loading a [T, 1] slice from a non-column-vector ND
+                # tensor previously emitted a ColMajor tile.load against an ND
+                # GM view, which the a2a3 runtime rejects at incore compile
+                # time. (Equivalent to the issue's ``pl.slice(post_2d, [T, 1],
+                # ...)`` pattern after ConvertTensorToTileOps lowering.)
+                w_col: pl.Tile[[T, 1], pl.FP32] = pl.load(w, [0, col_idx], [T, 1])
+                y_tile: pl.Tile[[T, D], pl.FP32] = pl.tile.row_expand_mul(x_tile, w_col)
+                out: pl.Tensor[[T, D], pl.FP32] = pl.store(y_tile, [0, 0], y)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[T, D], pl.FP32],
+                w: pl.Tensor[[T, HC], pl.FP32],
+                y: pl.Out[pl.Tensor[[T, D], pl.FP32]],
+            ) -> pl.Tensor[[T, D], pl.FP32]:
+                y = self.kernel(x, w, y)
+                return y
+
+        return RowExpandMulFromNdColumnSliceProgram
+
+    def compute_expected(self, tensors, params=None):
+        # y[i, j] = x[i, j] * w[i, col_idx]
+        tensors["y"][:] = tensors["x"] * tensors["w"][:, self.col_idx : self.col_idx + 1]
+
+
 class TestBroadcastOperations:
     """Test suite for tile broadcast operations."""
 
@@ -228,6 +306,17 @@ class TestBroadcastOperations:
         if platform in ("a5", "a5sim") and broadcast_dim == 2:
             pytest.skip("Skip broadcast_dim=2 for Ascend 950 due to pto-isa bug.")
         result = test_runner.run(TestTensorExpandClone(broadcast_dim=broadcast_dim, platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("col_idx", [0, 1, 2, 3])
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_row_expand_mul_from_nd_column_slice(self, test_runner, platform, col_idx):
+        """Regression for #1230: row_expand_mul fed by a column slice of a [T, HC] ND tensor.
+
+        Sweep ``col_idx`` so the inner offset is non-zero (stresses partition_view
+        ND2ND TLOAD on a non-leading column).
+        """
+        result = test_runner.run(TestRowExpandMulFromNdColumnSlice(col_idx=col_idx, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
