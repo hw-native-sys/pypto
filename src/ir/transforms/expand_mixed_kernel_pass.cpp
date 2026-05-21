@@ -294,6 +294,184 @@ TileView BuildCrossCoreTransferView(MemorySpace dest_ms, const TileView& origina
   return PassContext::Current()->GetBackendHandler()->BuildCrossCoreTransferView(dest_ms, original_view);
 }
 
+// ============================================================================
+// GM-Mediated Cross-Lane Dependency Detection (issue #1433)
+// ============================================================================
+//
+// A tile.store to a GM tensor on one lane (e.g. AIC) followed by a tile.load
+// from the same GM tensor on the other lane (e.g. AIV) is a genuine cross-core
+// data dependency, but neither op is a tile.move, so CollectCVBoundaryMoves
+// never records it. Without a fence the two split kernels race on the shared
+// GM region (see issue #1433). We detect such pairs and emit a pure-
+// synchronisation tpush/tpop handshake: the data still flows through GM
+// unchanged, while the consumer's tpop blocks until the producer's tpush
+// (sequenced after the store) completes, establishing the missing
+// happens-before edge. The popped tile is a fence token, freed immediately by
+// FinalizeTpopTfrees. BuildAutomaticPipeSetup then injects the pipe setup just
+// as it does for tile.move boundaries.
+
+struct GmSyncPush {
+  CoreSide producer_side;
+  ExprPtr push_tile;
+};
+
+struct GmSyncPop {
+  CoreSide consumer_side;
+  TypePtr pop_tile_type;
+  std::string token_name;
+};
+
+std::string GetCallOpName(const CallPtr& call) {
+  if (!call) return "";
+  auto op = std::dynamic_pointer_cast<const Op>(call->op_);
+  return op ? op->name_ : "";
+}
+
+/// Resolve a tensor SSA Var to its origin (the parameter / create result it
+/// derives from) by following tile.store result -> store destination chains.
+/// A tile.store's result is a fresh SSA version of the destination tensor, so
+/// the loaded version and the stored version may differ; resolving to a common
+/// origin lets us match them.
+const Var* ResolveTensorOrigin(const Var* var,
+                               const std::unordered_map<const Var*, const Var*>& store_result_to_dest) {
+  std::unordered_set<const Var*> seen;
+  while (var) {
+    auto it = store_result_to_dest.find(var);
+    if (it == store_result_to_dest.end()) break;
+    if (!seen.insert(var).second) break;  // guard against cycles
+    var = it->second;
+  }
+  return var;
+}
+
+/// Detect GM-mediated cross-lane store/load pairs and populate the sync maps.
+///
+/// Conservative for deadlock-freedom: a handshake is emitted only when, for a
+/// given GM tensor origin, there is exactly one producer-lane store, and at
+/// least one opposite-lane load that lives in the *same structural body*
+/// (identified by a per-body id assigned during the walk) and appears after the
+/// store. Sharing a body guarantees the tpush and tpop execute the same number
+/// of times (same loop trip count / same conditional branch), so the ring
+/// buffer cannot deadlock. Pairs split across different loops or branches are
+/// left untouched.
+void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
+                             const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
+                             std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
+                             std::map<const Stmt*, GmSyncPop>& gm_sync_pops) {
+  // Pass 1: build tensor origin chains from tile.store results.
+  std::unordered_map<const Var*, const Var*> store_result_to_dest;
+  std::function<void(const std::vector<StmtPtr>&)> build_origins = [&](const std::vector<StmtPtr>& ss) {
+    for (const auto& stmt : ss) {
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+        auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+        if (GetCallOpName(call) == "tile.store" && call->args_.size() >= 3) {
+          if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
+            store_result_to_dest[assign->var_.get()] = dest.get();
+          }
+        }
+      }
+      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+        build_origins(FlattenBody(for_stmt->body_));
+      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+        build_origins(FlattenBody(if_stmt->then_body_));
+        if (if_stmt->else_body_.has_value()) build_origins(FlattenBody(*if_stmt->else_body_));
+      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+        build_origins(FlattenBody(while_stmt->body_));
+      }
+    }
+  };
+  build_origins(stmts);
+
+  // Pass 2: collect cross-lane store/load records, tagged with a structural
+  // body id and a program-order index.
+  struct AccessRec {
+    const Stmt* stmt;
+    const Var* origin;
+    CoreSide side;
+    CallPtr call;
+    int body_id;
+    size_t order;
+  };
+  std::vector<AccessRec> stores;
+  std::vector<AccessRec> loads;
+  size_t order_counter = 0;
+  int next_body_id = 1;  // 0 == function top level
+  std::function<void(const std::vector<StmtPtr>&, int)> collect = [&](const std::vector<StmtPtr>& ss,
+                                                                      int body_id) {
+    for (const auto& stmt : ss) {
+      auto aff_it = stmt_map.find(stmt.get());
+      CoreAffinity aff = (aff_it != stmt_map.end()) ? aff_it->second : CoreAffinity::SHARED;
+      if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+        auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+        const std::string name = GetCallOpName(call);
+        const bool single_lane = (aff == CoreAffinity::CUBE || aff == CoreAffinity::VECTOR);
+        if (single_lane && name == "tile.store" && call->args_.size() >= 3) {
+          if (auto dest = std::dynamic_pointer_cast<const Var>(call->args_[2])) {
+            const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
+            stores.push_back({stmt.get(), ResolveTensorOrigin(dest.get(), store_result_to_dest), side, call,
+                              body_id, order_counter++});
+          }
+        } else if (single_lane && name == "tile.load" && !call->args_.empty()) {
+          if (auto src = std::dynamic_pointer_cast<const Var>(call->args_[0])) {
+            const CoreSide side = (aff == CoreAffinity::CUBE) ? CoreSide::AIC : CoreSide::AIV;
+            loads.push_back({stmt.get(), ResolveTensorOrigin(src.get(), store_result_to_dest), side, call,
+                             body_id, order_counter++});
+          }
+        }
+      }
+      if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+        collect(FlattenBody(for_stmt->body_), next_body_id++);
+      } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+        collect(FlattenBody(if_stmt->then_body_), next_body_id++);
+        if (if_stmt->else_body_.has_value()) collect(FlattenBody(*if_stmt->else_body_), next_body_id++);
+      } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+        collect(FlattenBody(while_stmt->body_), next_body_id++);
+      }
+    }
+  };
+  collect(stmts, 0);
+
+  // Pass 3: pair a unique producer store with the first matching consumer load.
+  // Bucket stores and loads by origin first so the matching stays linear in the
+  // number of GM accesses (rather than rescanning all stores/loads per store).
+  std::unordered_map<const Var*, std::vector<const AccessRec*>> stores_by_origin;
+  std::unordered_map<const Var*, std::vector<const AccessRec*>> loads_by_origin;
+  for (const auto& store : stores) {
+    if (store.origin) stores_by_origin[store.origin].push_back(&store);
+  }
+  for (const auto& load : loads) {
+    if (load.origin) loads_by_origin[load.origin].push_back(&load);
+  }
+
+  for (const auto& [origin, origin_stores] : stores_by_origin) {
+    if (origin_stores.size() != 1) continue;  // require a unique producer store
+    const AccessRec& store = *origin_stores.front();
+
+    const AccessRec* chosen = nullptr;
+    auto loads_it = loads_by_origin.find(origin);
+    if (loads_it == loads_by_origin.end()) continue;
+    for (const AccessRec* load : loads_it->second) {
+      if (load->side == store.side) continue;        // same lane: no fence needed
+      if (load->body_id != store.body_id) continue;  // different body: skip (count match unproven)
+      if (load->order <= store.order) continue;      // load must follow the store
+      if (chosen == nullptr || load->order < chosen->order) chosen = load;
+    }
+    if (chosen == nullptr) continue;
+
+    auto src_tile_type = std::dynamic_pointer_cast<const TileType>(store.call->args_[0]->GetType());
+    if (!src_tile_type) continue;  // need a TileType for cross-core slot sizing
+
+    const CoreSide consumer_side = chosen->side;
+    const MemorySpace consumer_mem = GetBoundaryTpopMemory(consumer_side);
+    auto pop_tile_type = std::make_shared<TileType>(src_tile_type->shape_, src_tile_type->dtype_,
+                                                    std::nullopt, std::nullopt, consumer_mem);
+    std::string token_name = origin->name_hint_ + "_gm_sync";
+
+    gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0]};
+    gm_sync_pops[chosen->stmt] = GmSyncPop{consumer_side, pop_tile_type, std::move(token_name)};
+  }
+}
+
 /// Build the body for one core side (AIC or AIV), filtering statements by affinity
 /// and replacing CV boundary moves with TPUSH/TPOP ops.
 /// tpop_var_remap collects dest_var and (when source_tile is a Var) source_tile pointers
@@ -305,7 +483,9 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                                    const std::map<const Stmt*, CVBoundaryMove>& boundary_moves,
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
-                                   std::unordered_set<const Var*>& superseded_tpop_vars) {
+                                   std::unordered_set<const Var*>& superseded_tpop_vars,
+                                   const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
+                                   const std::map<const Stmt*, GmSyncPop>& gm_sync_pops) {
   const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
@@ -410,23 +590,41 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     }
 
     if (affinity == keep_affinity || affinity == CoreAffinity::SHARED) {
+      // GM cross-lane sync (issue #1433): on the consumer lane, emit a fence
+      // tpop just before the load that reads the shared GM tensor. The popped
+      // tile is unused; FinalizeTpopTfrees frees it right after.
+      if (auto pop_it = gm_sync_pops.find(stmt.get());
+          pop_it != gm_sync_pops.end() && side == pop_it->second.consumer_side) {
+        const auto& info = pop_it->second;
+        auto pop_var = std::make_shared<Var>(info.token_name, info.pop_tile_type, stmt->span_);
+        result.push_back(std::make_shared<AssignStmt>(
+            pop_var, CreateTpop(pop_op, info.pop_tile_type, stmt->span_, /*kwargs=*/{}), stmt->span_));
+      }
       result.push_back(stmt);
+      // GM cross-lane sync: on the producer lane, emit the matching tpush just
+      // after the store that writes the shared GM tensor.
+      if (auto push_it = gm_sync_pushes.find(stmt.get());
+          push_it != gm_sync_pushes.end() && side == push_it->second.producer_side) {
+        result.push_back(std::make_shared<EvalStmt>(
+            CreateTpush(push_op, push_it->second.push_tile, stmt->span_), stmt->span_));
+      }
     } else if (affinity == CoreAffinity::MIXED) {
       // Recurse into compound statements, building pruned copies
       if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
         auto new_body = BuildCoreBody(side, FlattenBody(for_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
         auto new_for = MutableCopy(for_stmt);
         new_for->body_ = MakeBody(new_body, for_stmt->span_);
         result.push_back(new_for);
       } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
         auto new_then = BuildCoreBody(side, FlattenBody(if_stmt->then_body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
         std::optional<StmtPtr> new_else;
         const auto& else_body = if_stmt->else_body_;
         if (else_body.has_value()) {
-          auto new_else_stmts = BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves,
-                                              tpop_var_remap, superseded_tpop_vars);
+          auto new_else_stmts =
+              BuildCoreBody(side, FlattenBody(*else_body), stmt_map, boundary_moves, tpop_var_remap,
+                            superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
           new_else = MakeBody(new_else_stmts, if_stmt->span_);
         }
         auto new_if = MutableCopy(if_stmt);
@@ -435,7 +633,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
         result.push_back(new_if);
       } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
         auto new_body = BuildCoreBody(side, FlattenBody(while_stmt->body_), stmt_map, boundary_moves,
-                                      tpop_var_remap, superseded_tpop_vars);
+                                      tpop_var_remap, superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = MakeBody(new_body, while_stmt->span_);
         result.push_back(new_while);
@@ -479,6 +677,12 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   std::map<const Stmt*, CVBoundaryMove> boundary_moves;
   CollectCVBoundaryMoves(stmts, boundary_moves, tpop_defs);
 
+  // Detect GM-mediated cross-lane store/load dependencies (issue #1433) that
+  // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
+  std::map<const Stmt*, GmSyncPush> gm_sync_pushes;
+  std::map<const Stmt*, GmSyncPop> gm_sync_pops;
+  CollectGmCrossLaneSyncs(stmts, stmt_map, gm_sync_pushes, gm_sync_pops);
+
   // Build definition map from original body for init value fixup (#533)
   std::unordered_map<const Var*, StmtPtr> original_def_map;
   BuildDefMap(stmts, original_def_map);
@@ -492,8 +696,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   // Build AIC body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aic_tpop_remap;
-  auto aic_stmts =
-      BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap, superseded_tpop_vars);
+  auto aic_stmts = BuildCoreBody(CoreSide::AIC, stmts, stmt_map, boundary_moves, aic_tpop_remap,
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
 
   // Remove ReturnStmt from AIC (AIC doesn't return values)
   std::vector<StmtPtr> aic_stmts_no_return;
@@ -507,8 +711,8 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
-  auto aiv_stmts =
-      BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap, superseded_tpop_vars);
+  auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
+                                 superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
   auto aiv_final =
       FinalizeTpopTfrees(FinalizeSplitCoreBody(aiv_stmts, original_def_map), CoreSide::AIV, aiv_tpop_remap);
 

@@ -48,6 +48,19 @@ Ascend910B (a2a3) — cross-core transfer goes through GM → Mat, and Mat only 
 
 On both backends, the AIV push side (V→C) inserts a `tile.move` before `tpush_to_aic` to convert the source tile into the required fractal layout. The `tile.move` helper (`CreateMove`) propagates `blayout`/`slayout` kwargs when the result type carries a TileView.
 
+### GM-mediated cross-lane dependencies
+
+A `tile.move` is not the only way data crosses the CV boundary. When one lane writes a GM tensor with `tile.store` and the other lane reads the same tensor with `tile.load`, the data crosses *through GM*. Because neither op is a `tile.move`, CV-boundary detection misses the dependency, and without a fence the two split kernels race on the shared GM region (issue #1433).
+
+`CollectGmCrossLaneSyncs` detects these store/load pairs and emits a **pure-synchronisation** handshake: the data still flows through GM unchanged, while a `tpush` (producer, right after the store) and a matching `tpop` (consumer, right before the load) establish the missing happens-before edge. The popped tile is a fence token, freed immediately by `FinalizeTpopTfrees`; `BuildAutomaticPipeSetup` then injects the same pipe setup as for `tile.move` boundaries.
+
+| Producer (writes GM) | AIC side | AIV side |
+| -------------------- | -------- | -------- |
+| Cube store → Vector load | `tile.store ...; tpush_to_aiv(stored_tile)` | `tok = tpop_from_aic(); tfree_to_aic(tok); tile.load ...` |
+| Vector store → Cube load | `tok = tpop_from_aiv(); tfree_to_aiv(tok); tile.load ...` | `tile.store ...; tpush_to_aic(stored_tile)` |
+
+To stay deadlock-free, a handshake is emitted only when (1) the GM origin tensor has exactly one producer-lane store, (2) the opposite-lane load lives in the **same structural body** (same loop/branch, so the `tpush`/`tpop` execute the same number of times), and (3) the store precedes the load. Pairs split across different loops or branches are left untouched.
+
 When split kernels contain cross-core `tpush`/`tpop`, the pass also prepends the required frontend pipe setup automatically:
 
 - `system.reserve_buffer(...)` on the consumer side
@@ -121,6 +134,10 @@ Phase 2 — Expand each InCore function F:
   1. Recursively classify affinity of all statements (including inside loops/conditionals)
   2. Detect CV boundary moves: tile.move ops crossing cube↔vector memory spaces
      (recorded in a separate boundary_moves map, not as a distinct affinity)
+  2a. Detect GM-mediated cross-lane store/load pairs (CollectGmCrossLaneSyncs):
+      a tile.store on one lane + a tile.load on the other from the same GM
+      tensor origin, scheduled as a tpush/tpop sync fence (see "GM-mediated
+      cross-lane dependencies" above)
   3. If not mixed (no CUBE ops or no VECTOR ops, and no boundary moves):
      convert FunctionType to AIC (pure Cube) or AIV (pure Vector / shared-only)
   4. Build AIC body: keep CUBE + SHARED stmts, prune VECTOR, recurse into MIXED loops

@@ -274,6 +274,114 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
     ir.assert_structural_equal(After, Expected)
 
 
+def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
+    """Regression for issue #1433.
+
+    A mixed root that exchanges data AIC -> AIV through a GM scratch tensor
+    (``tile.store`` on the cube lane, ``tile.load`` from the same tensor on the
+    vector lane) used to split into AIC/AIV kernels with no cross-core fence,
+    leaving them racing on the shared GM region. ExpandMixedKernel must now
+    detect the GM-mediated dependency and emit a tpush/tpop handshake (plus the
+    automatic pipe setup) so the AIV load happens-after the AIC store.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def gm_relay(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            scratch: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            # AIC lane: matmul, then store the cube result into GM scratch.
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_acc = pl.matmul(x_left, y_right)
+            scratch = pl.store(z_acc, [0, 0], scratch)
+            # AIV lane: read the same GM scratch back, elementwise, store out.
+            chunk = pl.load(scratch, [0, 0], [16, 64], target_memory=pl.MemorySpace.Vec)
+            chunk = pl.exp(chunk)
+            out = pl.store(chunk, [0, 0], out)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        def gm_relay_aic(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            scratch: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ):
+            gm_relay_c2v_slot_buffer_import = pl.import_peer_buffer(
+                name="gm_relay_c2v_slot_buffer", peer_func="gm_relay_aiv"
+            )
+            pl.aic_initialize_pipe(
+                gm_relay_c2v_slot_buffer_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=4096,
+            )
+            x_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat: pl.Tile[[128, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat
+            )
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_acc = pl.matmul(x_left, y_right)
+            # Fresh local (underscore-prefixed: unused by design, the store result
+            # is consumed by no later op on the AIC lane) so the binding matches the
+            # pass-emitted SSA store-result var structurally.
+            _scratch_stored: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_acc, [0, 0], scratch)
+            pl.tpush_to_aiv(z_acc, split=0)
+
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        def gm_relay_aiv(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            scratch: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            gm_relay_c2v_slot_buffer = pl.reserve_buffer(name="gm_relay_c2v_slot_buffer", size=32768, base=-1)
+            pl.aiv_initialize_pipe(
+                gm_relay_c2v_slot_buffer,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=4096,
+            )
+            sync_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+            pl.tfree_to_aic(sync_tile)
+            chunk: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                scratch, [0, 0], [16, 64], target_memory=pl.MemorySpace.Vec
+            )
+            chunk_exp = pl.exp(chunk)
+            out_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(chunk_exp, [0, 0], out)
+            return out_store
+
+        @pl.function(type=pl.FunctionType.Group, attrs={"split": pl.SplitMode.UP_DOWN})
+        def gm_relay(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            scratch: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            self.gm_relay_aic(x, y, scratch, out)
+            result: pl.Tensor[[16, 64], pl.FP32] = self.gm_relay_aiv(x, y, scratch, out)
+            return result
+
+    After = _run_pipeline(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
 def test_accumulator_with_tile_create_classifies_as_pure_aic():
     """Regression for issue #1083.
 
