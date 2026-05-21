@@ -560,7 +560,20 @@ class TileMemorySpaceMutator : public IRMutator {
         auto synced_type =
             std::make_shared<TileType>(new_tile_type->shape_, new_tile_type->dtype_, new_tile_type->memref_,
                                        new_tile_type->tile_view_, old_tile_type->memory_space_);
-        auto synced_var = std::make_shared<Var>(new_var->name_hint_, std::move(synced_type), new_var->span_);
+        // When the producing Call's result type still lacks the resolved memory
+        // space, rebuild it so the RHS Call and the LHS Var agree. Retargetable
+        // producers (tile.load / tile.create) are already promoted above via
+        // their target_memory kwarg; this covers tile producers with no such
+        // kwarg (e.g. pld.tile.remote_load), whose deduced TileType keeps
+        // memory_space unset. Without it the Var carries the inferred space but
+        // the Call does not, so a print->parse roundtrip — which re-derives the
+        // Call type from the LHS annotation — sees a memory_space presence
+        // mismatch on body[*].value.type.
+        if (new_tile_type->memory_space_ != old_tile_type->memory_space_) {
+          new_value = std::make_shared<Call>(new_call->op_, new_call->args_, new_call->kwargs_, synced_type,
+                                             new_call->span_);
+        }
+        auto synced_var = std::make_shared<Var>(new_var->name_hint_, synced_type, new_var->span_);
         var_cache_[op->var_] = synced_var;
         new_var = synced_var;
       }

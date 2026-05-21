@@ -159,7 +159,10 @@ def test_remote_load_rejects_zero_positional():
                 return data  # type: ignore[return-value]
 
 
-def test_remote_load_rejects_extra_positional():
+def test_remote_load_rejects_too_many_positional():
+    # remote_load(target, peer, offsets, shape) is positional-or-keyword (mirrors
+    # pl.tile.load) so the printed IR round-trips; a 5th positional arg is still
+    # rejected.
     with pytest.raises(Exception, match="positional argument"):
 
         @pl.program
@@ -170,12 +173,32 @@ def test_remote_load_rejects_extra_positional():
                 data: pld.DistributedTensor[[64], pl.FP32],
                 peer: pl.Scalar[pl.INT32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                t = pld.tile.remote_load(data, peer, offsets=[0], shape=[32])  # type: ignore[call-arg]  # noqa: F841
+                t = pld.tile.remote_load(data, peer, [0], [32], 99)  # type: ignore[call-arg]  # noqa: F841
                 return data  # type: ignore[return-value]
 
 
+def test_remote_load_accepts_positional_args():
+    # The printer emits positional args (data, peer, offsets, shape); the parser
+    # must accept that form for the print->parse roundtrip to hold.
+    @pl.program
+    class P:
+        @pl.function
+        def kernel(
+            self,
+            data: pld.DistributedTensor[[64], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            t = pld.tile.remote_load(data, peer, [0], [32])  # noqa: F841
+            return data  # type: ignore[return-value]
+
+    func = next(iter(P.functions.values()))
+    call = _find_call(func, "pld.tile.remote_load")
+    assert call is not None
+    assert len(call.args) == 4
+
+
 def test_remote_load_rejects_missing_peer():
-    with pytest.raises(Exception, match="keyword-only argument"):
+    with pytest.raises(Exception, match="required positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -189,7 +212,7 @@ def test_remote_load_rejects_missing_peer():
 
 
 def test_remote_load_rejects_missing_offsets():
-    with pytest.raises(Exception, match="keyword-only argument"):
+    with pytest.raises(Exception, match="required positional argument"):
 
         @pl.program
         class P:  # noqa: F841
@@ -204,7 +227,7 @@ def test_remote_load_rejects_missing_offsets():
 
 
 def test_remote_load_rejects_missing_shape():
-    with pytest.raises(Exception, match="keyword-only argument"):
+    with pytest.raises(Exception, match="required positional argument"):
 
         @pl.program
         class P:  # noqa: F841

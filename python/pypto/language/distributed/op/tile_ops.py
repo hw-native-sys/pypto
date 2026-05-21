@@ -26,7 +26,6 @@ from ._utils import _normalize_intlike, _unwrap
 
 def remote_load(
     target: DistributedTensor,
-    *,
     peer: IntLike,
     offsets: Sequence[IntLike],
     shape: Sequence[IntLike],
@@ -37,11 +36,15 @@ def remote_load(
     is a *remote* slice of a window-bound :class:`pld.DistributedTensor`.
     Address translation happens at codegen via ``CommRemoteOffset`` + addptr + make_tensor_view.
 
+    All arguments are positional-or-keyword (mirroring :func:`pl.tile.load`),
+    so the printed IR — which emits them positionally — round-trips through
+    the parser. Callers may still pass them by keyword for readability.
+
     Args:
         target: A window-bound :class:`pld.DistributedTensor` (any rank, any
             dtype). The C++ verifier refuses plain :class:`pl.Tensor` here
             (precise ObjectKind match on :class:`ir.DistributedTensorType`).
-        peer: Peer rank index (kwarg-only). Accepts an ``int`` literal, a DSL
+        peer: Peer rank index. Accepts an ``int`` literal, a DSL
             ``Scalar``, or a raw ``ir.Expr`` (e.g. ``pld.rank(ctx) + 1``).
         offsets: Offsets into the remote slice, one per ``target`` dimension.
         shape: Per-dimension shape of the tile to load. Determines the output

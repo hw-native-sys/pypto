@@ -111,10 +111,10 @@ def nranks(ctx: CommCtx) -> Scalar:
 
 def notify(
     target: Tensor,
-    *,
     peer: IntLike,
     offsets: Sequence[IntLike],
     value: IntLike,
+    *,
     op: NotifyOp,
 ) -> Call:
     """Cross-rank notify: deposit ``value`` at the peer rank's slot of ``target``.
@@ -123,22 +123,28 @@ def notify(
     ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + TNOTIFY`` at
     codegen.
 
+    ``target`` / ``peer`` / ``offsets`` / ``value`` are positional-or-keyword
+    so the printed IR (which emits them positionally) round-trips through the
+    parser; ``op`` stays keyword-only because it lowers to an IR attr (printed
+    as ``op=<int>``), mirroring ``pld.tensor.window``'s ``dtype``.
+
     Args:
         target: Window-bound :class:`pld.DistributedTensor` signal matrix. The
             C++ verifier refuses a plain :class:`pl.Tensor`.
-        peer: Peer rank index (kwarg-only).
+        peer: Peer rank index.
         offsets: Offsets into the remote slice, one per ``target`` dimension.
         value: Scalar payload to deposit at the peer slot.
-        op: :class:`pld.NotifyOp` selecting atomic-add vs set semantics.
+        op: :class:`pld.NotifyOp` selecting atomic-add vs set semantics
+            (keyword-only).
     """
     return _ir_system.notify(_unwrap(target), _unwrap(peer), _normalize_intlike(offsets), _unwrap(value), op)
 
 
 def wait(
     signal: Tensor,
-    *,
     offsets: Sequence[IntLike],
     expected: IntLike,
+    *,
     cmp: WaitCmp,
 ) -> Call:
     """Cross-rank wait: block until the local slot of ``signal`` matches ``cmp(expected)``.
@@ -146,12 +152,17 @@ def wait(
     Side-effect-only (the returned Call carries ``UnknownType``). Lowers to
     TWAIT at codegen.
 
+    ``signal`` / ``offsets`` / ``expected`` are positional-or-keyword so the
+    printed IR round-trips through the parser; ``cmp`` stays keyword-only
+    because it lowers to an IR attr (printed as ``cmp=<int>``).
+
     Args:
         signal: Window-bound :class:`pld.DistributedTensor` signal matrix. The
             C++ verifier refuses a plain :class:`pl.Tensor`.
         offsets: Offsets into the local slice, one per ``signal`` dimension.
         expected: Scalar threshold value to compare against.
-        cmp: :class:`pld.WaitCmp` selecting equality vs greater-or-equal.
+        cmp: :class:`pld.WaitCmp` selecting equality vs greater-or-equal
+            (keyword-only).
     """
     return _ir_system.wait(_unwrap(signal), _normalize_intlike(offsets), _unwrap(expected), cmp)
 

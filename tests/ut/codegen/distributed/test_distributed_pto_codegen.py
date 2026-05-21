@@ -43,7 +43,6 @@ import pytest
 from pypto import backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-from pypto.pypto_core import passes as _passes
 
 
 @pytest.fixture(autouse=True)
@@ -52,20 +51,6 @@ def _setup_backend():
     backend.set_backend_type(BackendType.Ascend910B)
     yield
     backend.reset_for_testing()
-
-
-@pytest.fixture(autouse=True)
-def _basic_verification_context():
-    """Override ``ut/conftest.py`` to skip the print/parse roundtrip check.
-
-    The DSL parser for ``pld.tile.remote_load`` / ``pld.system.notify`` /
-    ``pld.system.wait`` only accepts the kwarg form, but the IR printer emits
-    them as positional Call args (no per-op printer hook). Roundtrip
-    verification would fail every pass even though the in-memory IR is
-    correct; property verification still runs.
-    """
-    with _passes.PassContext([_passes.VerificationInstrument(_passes.VerificationMode.BEFORE_AND_AFTER)]):
-        yield
 
 
 def _generate_mlir(program_cls) -> str:
