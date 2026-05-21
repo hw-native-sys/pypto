@@ -64,10 +64,10 @@ def test_jit_spmd_with_form():
 
     @jit.incore
     def add_kernel(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
-        with pl.at(level=pl.Level.CORE_GROUP):
-            tile_a = pl.load(a, [0, 0], [64, 128])
-            tile_b = pl.load(b, [0, 0], [64, 128])
-            c = pl.store(pl.add(tile_a, tile_b), [0, 0], c)
+        # @jit.incore already establishes the InCore context — no pl.at needed.
+        tile_a = pl.load(a, [0, 0], [64, 128])
+        tile_b = pl.load(b, [0, 0], [64, 128])
+        c = pl.store(pl.add(tile_a, tile_b), [0, 0], c)
         return c
 
     @jit
