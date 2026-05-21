@@ -323,10 +323,13 @@ def _redirect_prog_build_dir(request, tmp_path, monkeypatch):
     precompile pipeline already passes an explicit ``output_dir`` and so is
     unaffected by ``PYPTO_PROG_BUILD_DIR``.
 
-    Skipped when ``--save-kernels`` is set, where the user explicitly wants
-    generated artifacts preserved under ``build_output/``.
+    When ``--save-kernels`` is set the user wants artifacts preserved under
+    ``build_output/``, so redirection is skipped — and any ``PYPTO_PROG_BUILD_DIR``
+    inherited from the outer environment is cleared so the default base
+    genuinely stays ``build_output``.
     """
     if request.config.getoption("--save-kernels"):
+        monkeypatch.delenv("PYPTO_PROG_BUILD_DIR", raising=False)
         return
     monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "build_output"))
 
