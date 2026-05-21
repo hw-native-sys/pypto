@@ -70,6 +70,19 @@ def _reset_backend_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _redirect_prog_build_dir(tmp_path, monkeypatch):
+    """Redirect ir.compile() / @pl.jit artifacts into pytest's per-test tmp dir.
+
+    Without an explicit ``output_dir``, ``ir.compile()`` writes generated
+    kernels and pass dumps to ``build_output/<name>_<timestamp>`` relative to
+    the working directory. Under pytest that accumulates stale directories in
+    the repo / build tree. Pointing ``PYPTO_PROG_BUILD_DIR`` at ``tmp_path``
+    keeps every test's artifacts isolated and auto-cleaned by pytest.
+    """
+    monkeypatch.setenv("PYPTO_PROG_BUILD_DIR", str(tmp_path / "build_output"))
+
+
+@pytest.fixture(autouse=True)
 def pass_verification_context():
     """Enable pass verification and optional roundtrip checking for all pass executions.
 

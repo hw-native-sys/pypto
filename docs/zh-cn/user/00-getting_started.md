@@ -189,7 +189,7 @@ print(f"Generated code in: {output_dir}")
 | 参数 | 默认值 | 说明 |
 | ---- | ------ | ---- |
 | `program` | （必需） | 要编译的 `ir.Program` |
-| `output_dir` | `None` → `build_output/<name>_<timestamp>` | 代码生成、报告及（开启 dump 时）各 pass IR 的输出目录 |
+| `output_dir` | `None` → `<base>/<name>_<timestamp>` | 代码生成、报告及（开启 dump 时）各 pass IR 的输出目录。`<base>` 取自 `PYPTO_PROG_BUILD_DIR` 环境变量，未设置时为 `build_output` |
 | `strategy` | `OptimizationStrategy.Default` | Pass 流水线预设（`Default` 或 `DebugTileOptimization`） |
 | `dump_passes` | `True` | 为 `True` 时，在每个 pass 后将 IR 快照写入 `output_dir/passes_dump/` |
 | `backend_type` | `BackendType.Ascend910B` | Pass 与代码生成的目标硬件（`Ascend910B` 或 `Ascend950`） |

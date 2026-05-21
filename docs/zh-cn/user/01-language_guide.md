@@ -544,7 +544,7 @@ output_dir = ir.compile(
 | `backend_type` | `BackendType.Ascend910B`、`BackendType.Ascend950` | Pass 与代码生成的目标硬件（从 `pypto.backend` 导入 `BackendType`） |
 | `dump_passes` | `True`/`False` | 为 `True` 时在每个 pass 后将 IR 快照写入 `<output_dir>/passes_dump/`（默认 `True`） |
 | `skip_ptoas` | `True`/`False` | 跳过 ptoas；只生成原始 `.pto`（MLIR），不生成已编译的 C++ 包装代码（默认 `False`） |
-| `output_dir` | 路径或 `None` | `None` 时使用 `build_output/<program_name>_<timestamp>`；目录按需创建 |
+| `output_dir` | 路径或 `None` | `None` 时使用 `<base>/<program_name>_<timestamp>`，其中 `<base>` 取自 `PYPTO_PROG_BUILD_DIR` 环境变量，未设置时为 `build_output`；目录按需创建 |
 | `verification_level` | `None`、`ir.VerificationLevel.NONE`、`BASIC` | `None` 表示使用默认（`BASIC`，或由环境变量 `PYPTO_VERIFY_LEVEL` 覆盖）；否则显式指定校验级别 |
 
 ### 优化流水线

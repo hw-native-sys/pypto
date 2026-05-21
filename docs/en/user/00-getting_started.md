@@ -189,7 +189,7 @@ print(f"Generated code in: {output_dir}")
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `program` | (required) | The `ir.Program` to compile |
-| `output_dir` | `None` → `build_output/<name>_<timestamp>` | Directory for codegen, reports, and (when dumping) pass IR |
+| `output_dir` | `None` → `<base>/<name>_<timestamp>` | Directory for codegen, reports, and (when dumping) pass IR. `<base>` is the `PYPTO_PROG_BUILD_DIR` env var, or `build_output` if unset |
 | `strategy` | `OptimizationStrategy.Default` | Pass pipeline preset (`Default` or `DebugTileOptimization`) |
 | `dump_passes` | `True` | When `True`, write IR snapshots under `output_dir/passes_dump/` after each pass |
 | `backend_type` | `BackendType.Ascend910B` | Target hardware for passes and codegen (`Ascend910B` or `Ascend950`) |

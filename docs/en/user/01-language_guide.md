@@ -558,7 +558,7 @@ output_dir = ir.compile(
 | `backend_type` | `BackendType.Ascend910B`, `BackendType.Ascend950` | Target hardware for passes and codegen (`import BackendType` from `pypto.backend`) |
 | `dump_passes` | `True`/`False` | If `True`, write IR snapshots under `<output_dir>/passes_dump/` after each pass (default `True`) |
 | `skip_ptoas` | `True`/`False` | Skip the ptoas step; emit raw `.pto` (MLIR) instead of compiled C++ wrappers (default `False`) |
-| `output_dir` | path or `None` | If `None`, uses `build_output/<program_name>_<timestamp>`; directory is created as needed |
+| `output_dir` | path or `None` | If `None`, uses `<base>/<program_name>_<timestamp>`, where `<base>` is the `PYPTO_PROG_BUILD_DIR` env var or `build_output` if unset; directory is created as needed |
 | `verification_level` | `None`, `ir.VerificationLevel.NONE`, `BASIC` | `None` = use default (`BASIC`, or override via `PYPTO_VERIFY_LEVEL`). Otherwise set explicit verification level |
 
 ### Optimization Pipeline

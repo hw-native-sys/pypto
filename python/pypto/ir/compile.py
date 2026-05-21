@@ -75,7 +75,10 @@ def compile(  # noqa: PLR0913
 
     Args:
         program: Input Program to compile
-        output_dir: Output directory (default: build_output/<program_name>_<timestamp>)
+        output_dir: Output directory. When None, defaults to
+            ``<base>/<program_name>_<timestamp>``, where ``<base>`` is the
+            ``PYPTO_PROG_BUILD_DIR`` environment variable if set, else
+            ``build_output``. Tests point this env var at a temp dir.
         strategy: Optimization strategy to use (default: Default)
         dump_passes: Whether to dump IR after each pass (default: True)
         backend_type: Backend type for passes and codegen (default: Ascend910B)
@@ -127,7 +130,8 @@ def compile(  # noqa: PLR0913
 
     if output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join("build_output", f"{program.name}_{timestamp}")
+        base = os.environ.get("PYPTO_PROG_BUILD_DIR", "build_output")
+        output_dir = os.path.join(base, f"{program.name}_{timestamp}")
 
     os.makedirs(output_dir, exist_ok=True)
 
