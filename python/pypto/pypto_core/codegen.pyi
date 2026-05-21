@@ -9,7 +9,7 @@
 # pylint: disable=unused-argument
 """Code generation module for converting IR to PTO assembly (PTOCodegen)."""
 
-from pypto.pypto_core.ir import CoreType, Function, Program
+from pypto.pypto_core.ir import CoreType, Expr, Function, Program, Var
 
 class PTOCodegen:
     """Code generator that transforms PyPTO IR to PTO assembly (.pto format).
@@ -96,10 +96,27 @@ def infer_function_core_type(func: Function) -> CoreType:
         CoreType.CUBE or CoreType.VECTOR
     """
 
+def collect_vars_from_shape_expr(expr: Expr) -> list[Var]:
+    """Collect Vars from a tensor-shape expression in first-seen DFS order.
+
+    Used by the Python kernel-wrapper codegen to recover dynamic dims from
+    ``tensor->shapes[]``. The same walk drives the trailing ``%argN: index``
+    params emitted onto the ``func.func`` signature, so the wrapper and the
+    compiled function stay in lockstep by construction (single source of
+    truth).
+
+    Args:
+        expr: Tensor-shape expression (a dim from ``TensorType.shape``).
+
+    Returns:
+        Vars in first-seen DFS order, deduped within this single call.
+    """
+
 __all__ = [
     "PTOCodegen",
     "DistributedCodegen",
     "OrchestrationResult",
+    "collect_vars_from_shape_expr",
     "generate_orchestration",
     "infer_function_core_type",
 ]

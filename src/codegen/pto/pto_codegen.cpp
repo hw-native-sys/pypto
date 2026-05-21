@@ -116,23 +116,23 @@ bool HasDynamicTileValidShape(const std::shared_ptr<const ir::TileType>& tile_ty
 }
 
 // Collect Vars referenced by a shape expression in first-seen order (for trailing
-// %argN: index in MLIR). Shape-expression inversion (recovering a Var from
-// runtime shapes[]) is implemented only in the Python kernel wrapper
-// (``_generate_arg_unpacking`` in python/pypto/backend/pto_backend.py);
-// ``_collect_shape_dim_vars`` there mirrors this node coverage and the two
-// collectors must walk the exact same node set in the same order so that
-// the trailing index params emitted into MLIR / consumed by ptoas line up
-// 1:1 with the wrapper's forward-call argument list.
+// %argN: index in MLIR). Single source of truth: both the in-translation-unit
+// caller ``CollectTensorShapeDynVars`` (driving the trailing index params on the
+// emitted ``func.func`` signature) and the Python kernel-wrapper codegen
+// (recovering a Var from runtime ``tensor->shapes[]`` inside
+// ``_generate_arg_unpacking`` in python/pypto/backend/pto_backend.py) go through
+// this walker. The Python side reaches it via the public ``CollectVarsFromShapeExpr``
+// wrapper exposed through the codegen nanobind binding
+// ``collect_vars_from_shape_expr``. There is no Python-side mirror to keep in sync.
 //
 // Dedup key: raw ``Var*`` is sound here because the IR holds the canonical
-// shared_ptr graph (each Var has exactly one address). The Python mirror
-// dedups by ``Var.unique_id`` instead because binding-layer wrappers can
-// differ for the same underlying C++ Var (see ``Var::unique_id`` binding).
+// shared_ptr graph (each Var has exactly one address).
 //
 // Unknown node kinds fail loudly: silently skipping them would recreate the
 // very bug this function exists to fix (lost dynamic-dim params in the kernel
 // signature) the next time a new Expr subclass is introduced in shapes.
-void CollectVarsFromExpr(const ExprPtr& expr, std::set<const ir::Var*>& seen, std::vector<VarPtr>& out) {
+void CollectVarsFromShapeExprImpl(const ExprPtr& expr, std::set<const ir::Var*>& seen,
+                                  std::vector<VarPtr>& out) {
   if (!expr) {
     return;
   }
@@ -143,28 +143,28 @@ void CollectVarsFromExpr(const ExprPtr& expr, std::set<const ir::Var*>& seen, st
     return;
   }
   if (auto binary = As<ir::BinaryExpr>(expr)) {
-    CollectVarsFromExpr(binary->left_, seen, out);
-    CollectVarsFromExpr(binary->right_, seen, out);
+    CollectVarsFromShapeExprImpl(binary->left_, seen, out);
+    CollectVarsFromShapeExprImpl(binary->right_, seen, out);
     return;
   }
   if (auto unary = As<ir::UnaryExpr>(expr)) {
-    CollectVarsFromExpr(unary->operand_, seen, out);
+    CollectVarsFromShapeExprImpl(unary->operand_, seen, out);
     return;
   }
   if (auto call = As<ir::Call>(expr)) {
     for (const auto& arg : call->args_) {
-      CollectVarsFromExpr(arg, seen, out);
+      CollectVarsFromShapeExprImpl(arg, seen, out);
     }
     return;
   }
   if (auto tget = As<ir::TupleGetItemExpr>(expr)) {
-    CollectVarsFromExpr(tget->tuple_, seen, out);
+    CollectVarsFromShapeExprImpl(tget->tuple_, seen, out);
     return;
   }
   if (As<ir::ConstInt>(expr) || As<ir::ConstFloat>(expr) || As<ir::ConstBool>(expr)) {
     return;
   }
-  INTERNAL_UNREACHABLE_SPAN(expr->span_) << "CollectVarsFromExpr: unsupported shape expression node";
+  INTERNAL_UNREACHABLE_SPAN(expr->span_) << "CollectVarsFromShapeExpr: unsupported shape expression node";
 }
 
 // Collect tensor-shape dyn Vars across a function's tensor params.
@@ -176,7 +176,7 @@ std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
   for (const auto& param : func->params_) {
     if (auto tensor_type = As<TensorType>(param->GetType())) {
       for (const auto& dim : tensor_type->shape_) {
-        CollectVarsFromExpr(dim, seen, dyn_vars);
+        CollectVarsFromShapeExprImpl(dim, seen, dyn_vars);
       }
     }
   }
@@ -242,6 +242,13 @@ class TupleConsumerCollector : public ir::IRVisitor {
 };
 
 }  // namespace
+
+std::vector<VarPtr> CollectVarsFromShapeExpr(const ExprPtr& expr) {
+  std::vector<VarPtr> out;
+  std::set<const ir::Var*> seen;
+  CollectVarsFromShapeExprImpl(expr, seen, out);
+  return out;
+}
 
 // Visitor to collect all MemRef objects from TileType variables. Also
 // piggy-backs SPMD block-identity detection (tile.get_block_idx /
