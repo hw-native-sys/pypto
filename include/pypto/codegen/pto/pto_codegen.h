@@ -44,6 +44,31 @@ struct TpopResultInfo {
 };
 
 /**
+ * @brief Collect Vars referenced by a tensor-shape expression, in first-seen DFS order.
+ *
+ * Used by:
+ *   - PTOCodegen, to emit trailing `%argN: index` params on `func.func` signatures
+ *     (see `CollectTensorShapeDynVars` in pto_codegen.cpp).
+ *   - The Python kernel-wrapper codegen, to recover dynamic dims from
+ *     `tensor->shapes[]` and forward them to the inner call in matching positional
+ *     order. This is the single source of truth shared by both paths: the wrapper
+ *     and the compiled function signature stay in lockstep by construction.
+ *
+ * Supported node kinds: Var / BinaryExpr / UnaryExpr / Call / TupleGetItemExpr /
+ * ConstInt / ConstFloat / ConstBool. Any other expression kind triggers an
+ * INTERNAL_CHECK failure. Adding a new shape-expressible `Expr` subclass requires
+ * updating only this function.
+ *
+ * Dedup key: raw `Var*` (sound because the IR holds the canonical shared_ptr
+ * graph, so each Var has exactly one address). The dedup scope is this single
+ * call; cross-expression dedup is the caller's responsibility.
+ *
+ * @param expr Tensor-shape expression (a dim from `TensorType::shape_`).
+ * @return Vars in first-seen DFS order, deduped within this single call.
+ */
+std::vector<ir::VarPtr> CollectVarsFromShapeExpr(const ir::ExprPtr& expr);
+
+/**
  * @brief PTO MLIR code generator
  *
  * Generates PTO-ISA MLIR format code from PyPTO IR Program.

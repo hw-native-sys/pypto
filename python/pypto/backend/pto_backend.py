@@ -255,40 +255,6 @@ def _preprocess_ptoas_output(content: str) -> str:
     return result
 
 
-def _collect_shape_dim_vars(expr: object) -> list[_ir_core.Var]:
-    """Collect Vars from a tensor shape expression (first-seen DFS order).
-
-    Mirror of ``CollectVarsFromExpr`` in ``src/codegen/pto/pto_codegen.cpp`` -- the
-    two collectors must walk the same node set in the same order so the trailing
-    index params emitted into MLIR / consumed by ptoas line up 1:1 with the
-    wrapper's forward-call argument list.
-
-    Dedup key on the *Python* side is ``Var.unique_id`` (see
-    ``_append_dynamic_dim_unpacking``) rather than ``id(...)``: binding-layer
-    wrappers can differ for the same underlying C++ Var. The C++ side dedups by
-    raw ``Var*`` because the IR holds the canonical shared_ptr graph.
-    """
-    if isinstance(expr, _ir_core.Var):
-        return [expr]
-    if isinstance(expr, _ir_core.BinaryExpr):
-        return _collect_shape_dim_vars(expr.left) + _collect_shape_dim_vars(expr.right)
-    if isinstance(expr, _ir_core.UnaryExpr):
-        return _collect_shape_dim_vars(expr.operand)
-    if isinstance(expr, _ir_core.Call):
-        out: list[_ir_core.Var] = []
-        for arg in expr.args:
-            out.extend(_collect_shape_dim_vars(arg))
-        return out
-    if isinstance(expr, _ir_core.TupleGetItemExpr):
-        return _collect_shape_dim_vars(expr.tuple)
-    if isinstance(expr, (_ir_core.ConstInt, _ir_core.ConstFloat, _ir_core.ConstBool)):
-        return []
-    raise TypeError(
-        f"Internal: _collect_shape_dim_vars encountered unsupported shape expression node "
-        f"{type(expr).__name__}; add explicit handling so dynamic-dim Vars are not silently dropped"
-    )
-
-
 def _const_int_from_shape_expr(expr: object) -> int | None:
     if isinstance(expr, _ir_core.ConstInt):
         return int(expr.value)
@@ -368,13 +334,23 @@ def _append_dynamic_dim_unpacking(
     lines: list[str],
     var_names: list[str],
 ) -> None:
-    """Append C++ lines that recover dynamic shape Vars from runtime tensor shapes."""
+    """Append C++ lines that recover dynamic shape Vars from runtime tensor shapes.
+
+    The per-expression walk is delegated to ``codegen.collect_vars_from_shape_expr``,
+    the same C++ helper that drives the trailing ``%argN: index`` params on the
+    emitted ``func.func`` signature -- so the wrapper's forward-call argument
+    order is in lockstep with the compiled kernel by construction.
+
+    Dedup across dims/params uses ``Var.unique_id`` (stable C++ identity) because
+    Python binding wrappers can differ for the same underlying C++ Var; the
+    per-call dedup inside ``collect_vars_from_shape_expr`` uses raw ``Var*``.
+    """
     dyn_var_order: list[_ir_core.Var] = []
     dyn_var_best: dict[int, tuple[_ir_core.Var, str, int, object]] = {}
     for param in tensor_params:
         assert isinstance(param.type, _ir_core.TensorType)
         for dim_idx, dim in enumerate(param.type.shape):
-            for dyn_var in _collect_shape_dim_vars(dim):
+            for dyn_var in _codegen_core.collect_vars_from_shape_expr(dim):
                 key = dyn_var.unique_id
                 if key not in dyn_var_best:
                     dyn_var_order.append(dyn_var)

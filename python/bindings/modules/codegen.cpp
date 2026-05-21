@@ -83,6 +83,17 @@ void BindCodegen(nb::module_& m) {
                      "    func: The function to infer core type for\n\n"
                      "Returns:\n"
                      "    CoreType.CUBE or CoreType.VECTOR");
+
+  codegen_module.def("collect_vars_from_shape_expr", &CollectVarsFromShapeExpr, nb::arg("expr"),
+                     "Collect Vars from a tensor-shape expression in first-seen DFS order.\n\n"
+                     "Used by the Python kernel-wrapper codegen to recover dynamic dims from "
+                     "`tensor->shapes[]`. The same walk drives the trailing `%argN: index` params "
+                     "emitted onto the `func.func` signature, so the wrapper and the compiled "
+                     "function stay in lockstep by construction (single source of truth).\n\n"
+                     "Args:\n"
+                     "    expr: Tensor-shape expression (a dim from TensorType.shape).\n\n"
+                     "Returns:\n"
+                     "    list[Var]: Vars in first-seen DFS order, deduped within this single call.");
 }
 
 }  // namespace python
