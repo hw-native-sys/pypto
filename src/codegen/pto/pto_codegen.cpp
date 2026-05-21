@@ -74,16 +74,6 @@ namespace transform_utils = ir::transform_utils;
 
 namespace {
 
-// Treat both ``TensorType`` and ``DistributedTensorType`` as tensors at the
-// PTO codegen layer. ``As<TensorType>`` is a strict ObjectKind match (per
-// kind-trait rules) and returns null for ``DistributedTensorType``; the
-// fallback to ``std::dynamic_pointer_cast`` picks up the inherited
-// ``TensorType`` so signature / view emission works for both kinds.
-std::shared_ptr<const ir::TensorType> AsTensorOrDist(const ir::TypePtr& type) {
-  if (auto t = As<TensorType>(type)) return t;
-  return std::dynamic_pointer_cast<const ir::TensorType>(type);
-}
-
 bool IsSameDimExpr(const ExprPtr& lhs, const ExprPtr& rhs) {
   if (lhs == rhs) {
     return true;
@@ -354,7 +344,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   fs_.body_section.str("");
   fs_.body_section.clear();
   gm_slot_buffer_offsets_.clear();
-  remote_offset_dtype_mlir_strs_.clear();
+  remote_offset_dtypes_.clear();
   PrepareGMSlotBufferLayout(program);
   CollectRemoteOffsetDtypes(program);
 
@@ -443,11 +433,11 @@ std::string PTOCodegen::GetCommRemoteOffsetFuncName(const DataType& dtype) {
 namespace {
 
 // Walks every function body in the program and accumulates the
-// DistributedTensor element-dtype (MLIR string) consumed by each
+// DistributedTensor element DataType consumed by each
 // ``pld.tile.remote_load`` / ``pld.system.notify`` call.
 class RemoteOffsetDtypeCollector : public ir::IRVisitor {
  public:
-  explicit RemoteOffsetDtypeCollector(std::set<std::string>* dtypes) : dtypes_(dtypes) {}
+  explicit RemoteOffsetDtypeCollector(std::set<DataType, DtypeCodeLess>* dtypes) : dtypes_(dtypes) {}
 
  protected:
   void VisitExpr_(const ir::CallPtr& op) override {
@@ -456,20 +446,20 @@ class RemoteOffsetDtypeCollector : public ir::IRVisitor {
           << "Internal error: " << op->op_->name_ << " expects DistributedTensor as first arg";
       auto dist_type = ir::As<ir::DistributedTensorType>(op->args_[0]->GetType());
       if (dist_type) {
-        dtypes_->insert(codegen::DataTypeToMLIR(dist_type->dtype_));
+        dtypes_->insert(dist_type->dtype_);
       }
     }
     ir::IRVisitor::VisitExpr_(op);
   }
 
  private:
-  std::set<std::string>* dtypes_;
+  std::set<DataType, DtypeCodeLess>* dtypes_;
 };
 
 }  // namespace
 
 void PTOCodegen::CollectRemoteOffsetDtypes(const ProgramPtr& program) {
-  RemoteOffsetDtypeCollector collector(&remote_offset_dtype_mlir_strs_);
+  RemoteOffsetDtypeCollector collector(&remote_offset_dtypes_);
   for (const auto& [gvar, func] : program->functions_) {
     (void)gvar;
     if (func->body_) {
@@ -479,7 +469,7 @@ void PTOCodegen::CollectRemoteOffsetDtypes(const ProgramPtr& program) {
 }
 
 void PTOCodegen::EmitCommRemoteOffsetHelpers() {
-  if (remote_offset_dtype_mlir_strs_.empty()) return;
+  if (remote_offset_dtypes_.empty()) return;
 
   namespace cl = codegen::distributed::comm_layout;
   // CommContext field indices, expressed in u64 slots (one ``pto.load_scalar``
@@ -490,27 +480,20 @@ void PTOCodegen::EmitCommRemoteOffsetHelpers() {
   const int64_t k_win_idx = static_cast<int64_t>(cl::kWindowsInOffset / cl::kWindowSlotStride);
 
   const std::string body_indent = std::string(4, ' ');
-  for (const std::string& dtype_str : remote_offset_dtype_mlir_strs_) {
+  for (const DataType& dtype : remote_offset_dtypes_) {
     // Element size in bytes — used to convert the raw byte delta between
     // local_base and peer_base into an element offset for ``pto.addptr``.
-    // The MLIR type string already encodes the dtype, but we don't have a
-    // direct dtype name → bit-width helper from the type string alone,
-    // so map back via the small set of dtypes legalised here. Bit widths
-    // are pinned in include/pypto/core/dtype.h.
-    int64_t elem_size_bytes = 0;
-    if (dtype_str == "f16" || dtype_str == "bf16" || dtype_str == "i16" || dtype_str == "ui16") {
-      elem_size_bytes = 2;
-    } else if (dtype_str == "f32" || dtype_str == "i32" || dtype_str == "ui32") {
-      elem_size_bytes = 4;
-    } else if (dtype_str == "i64" || dtype_str == "ui64") {
-      elem_size_bytes = 8;
-    } else if (dtype_str == "i8" || dtype_str == "ui8") {
-      elem_size_bytes = 1;
-    } else {
-      CHECK(false) << "Distributed remote ops only support byte-sized element types, got MLIR dtype "
-                   << dtype_str;
-    }
-    const std::string func_name = "CommRemoteOffset_" + dtype_str;
+    // Derived directly from the DataType bit width (pinned in
+    // include/pypto/core/dtype.h); any byte-sized dtype already known to
+    // DataTypeToMLIR is handled without a per-dtype branch here. Sub-byte
+    // dtypes (bool / 4-bit) have no whole-byte element stride, so cross-rank
+    // addressing is rejected.
+    const size_t elem_bits = dtype.GetBit();
+    CHECK(elem_bits >= 8 && elem_bits % 8 == 0)
+        << "Distributed remote ops only support byte-sized element types, got " << dtype.ToString() << " ("
+        << elem_bits << " bits)";
+    const int64_t elem_size_bytes = static_cast<int64_t>(elem_bits / 8);
+    const std::string func_name = GetCommRemoteOffsetFuncName(dtype);
 
     // Helper signature: (ctx, peer) → index. Returns the peer-vs-local
     // element offset; the call site applies ``pto.addptr`` to its own
@@ -631,11 +614,11 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // PTOParam dispatches args as [tensors..., scalars...] regardless of function
   // signature order, so the MLIR function signature must match that layout.
   // DistributedTensorType inherits TensorType and uses the same `!pto.ptr<T>`
-  // signature slot — fold it into the tensor partition via AsTensorOrDist.
+  // signature slot — fold it into the tensor partition via ir::AsTensorTypeLike.
   std::vector<size_t> tensor_param_indices;
   std::vector<size_t> scalar_param_indices;
   for (size_t i = 0; i < func->params_.size(); i++) {
-    if (AsTensorOrDist(func->params_[i]->GetType())) {
+    if (ir::AsTensorTypeLike(func->params_[i]->GetType())) {
       tensor_param_indices.push_back(i);
     } else {
       scalar_param_indices.push_back(i);
@@ -662,7 +645,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     if (!first_param) stream_ << ", ";
     first_param = false;
     const auto& param = func->params_[tensor_param_indices[j]];
-    auto tensor_type = AsTensorOrDist(param->GetType());
+    auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     stream_ << "%arg" << j << ": !pto.ptr<" << GetTypeString(tensor_type->dtype_) << ">";
   }
   for (size_t j = 0; j < scalar_param_indices.size(); j++) {
@@ -737,7 +720,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   // Parameters are already bound; non-param tile vars are bound above in per-var SSA binding
 
   for (const auto& var : func->params_) {
-    if (auto tensor_type = AsTensorOrDist(var->GetType())) {
+    if (auto tensor_type = ir::AsTensorTypeLike(var->GetType())) {
       // Skip tensor view for GM slot buffer workspace parameter (raw pointer, no view needed)
       if (var->name_hint_ == "__gm_pipe_buffer") {
         RecordGMSlotBufferSSA(GetVarName(var), tensor_type->dtype_);
@@ -862,7 +845,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   // the IR-declared layout, so the codegen forces DN + ``[1, M]`` strides
   // here to match what PTOAS expects.
   for (const auto& param : func->params_) {
-    auto tensor_type = AsTensorOrDist(param->GetType());
+    auto tensor_type = ir::AsTensorTypeLike(param->GetType());
     if (!tensor_type) continue;
     if (param->name_hint_ == "__gm_pipe_buffer") continue;  // GM slot buffer is a raw pointer
 

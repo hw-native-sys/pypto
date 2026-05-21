@@ -98,7 +98,8 @@ TypePtr DeduceTileLoadType(const std::vector<ExprPtr>& args,
   // locally load its own window slice (e.g. read back a signal cell after a
   // pld.system.wait barrier), mirroring tile.store's DistributedTensor dst.
   auto tensor_type = AsTensorTypeLike(args[0]->GetType());
-  CHECK(tensor_type) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+  CHECK(tensor_type) << "The operator " << op_name
+                     << " requires first argument to be a TensorType or DistributedTensorType, but got "
                      << args[0]->GetType()->TypeName();
 
   // Second argument must be TupleType (offsets)
@@ -233,9 +234,10 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
   // window-bound DistributedTensor slice (e.g. ring-shuffle Phase 1 in
   // tests/st/distributed/test_l3_remote_load.py).
   auto output_tensor_type = AsTensorTypeLike(args[2]->GetType());
-  CHECK(output_tensor_type) << "The operator " << op_name
-                            << " requires third argument to be a TensorType, but got "
-                            << args[2]->GetType()->TypeName();
+  CHECK(output_tensor_type)
+      << "The operator " << op_name
+      << " requires third argument to be a TensorType or DistributedTensorType, but got "
+      << args[2]->GetType()->TypeName();
 
   // Optional fourth argument (when 4 args total) must be a shapes tuple
   if (args.size() == 4) {

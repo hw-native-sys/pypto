@@ -43,6 +43,13 @@ struct TpopResultInfo {
   std::optional<int> pipe_id;
 };
 
+/// Order distinct DataTypes by their internal code so containers keyed on
+/// DataType (e.g. the CommRemoteOffset helper dtype set) iterate
+/// deterministically.
+struct DtypeCodeLess {
+  bool operator()(const DataType& a, const DataType& b) const { return a.Code() < b.Code(); }
+};
+
 /**
  * @brief PTO MLIR code generator
  *
@@ -693,13 +700,15 @@ class PTOCodegen : public CodegenBase {
   int indent_level_ = 0;
   std::map<std::pair<int, int>, int64_t> gm_slot_buffer_offsets_;
 
-  /// MLIR dtype strings of DistributedTensors consumed by
+  /// Element DataTypes of DistributedTensors consumed by
   /// ``pld.tile.remote_load`` / ``pld.system.notify`` somewhere in the
   /// module. Each one drives a single ``@CommRemoteOffset_<dtype>``
-  /// helper emission at module scope. Populated by
-  /// :func:`CollectRemoteOffsetDtypes` and consumed by
-  /// :func:`EmitCommRemoteOffsetHelpers`.
-  std::set<std::string> remote_offset_dtype_mlir_strs_;
+  /// helper emission at module scope. Storing the DataType (not the MLIR
+  /// string) lets the emitter derive both the MLIR type name and the
+  /// element byte size via ``DataType`` accessors, instead of mapping a
+  /// string back to a size. Populated by :func:`CollectRemoteOffsetDtypes`
+  /// and consumed by :func:`EmitCommRemoteOffsetHelpers`.
+  std::set<DataType, DtypeCodeLess> remote_offset_dtypes_;
 
   const backend::Backend* backend_;  ///< Backend instance for querying op info
 
