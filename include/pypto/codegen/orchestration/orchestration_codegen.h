@@ -14,6 +14,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 #include "pypto/ir/function.h"
 #include "pypto/ir/pipe.h"
@@ -31,6 +32,11 @@ struct OrchestrationResult {
   std::string code;                                            ///< Generated C++ orchestration code
   std::map<std::string, int> func_name_to_id;                  ///< Kernel function name -> ID mapping
   std::map<std::string, ir::CoreType> func_name_to_core_type;  ///< Kernel function name -> core type
+  /// Kernel function name -> runtime ArgDirection name list ("IN"/"OUT"/
+  /// "INOUT"/"SCALAR"), in task-payload (tensors-first) order. Consumed by
+  /// kernel_config.py to set each CoreCallable signature so the runtime tensor
+  /// dump's per-subtask tensor-arg count matches the task payload tensor_count.
+  std::map<std::string, std::vector<std::string>> func_name_to_signature;
 };
 
 /**
