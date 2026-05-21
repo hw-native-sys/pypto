@@ -237,6 +237,23 @@ class GatherMaskP0101Program:
 
 
 @pl.program
+class GatherMaskP0101TopLevelProgram:
+    """Same as ``GatherMaskP0101Program`` but uses the promoted top-level
+    ``pl.gather`` alias (mask form) instead of ``pl.tensor.gather``."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[8, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[8, 8], pl.FP32]],
+    ) -> pl.Tensor[[8, 8], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.gather(inp, mask_pattern=pl.tile.MaskPattern.P0101)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
 class GatherMaskOutputDtypeProgram:
     """Mask-form gather (P1010) with ``output_dtype=UINT32``.
 
@@ -503,6 +520,24 @@ class GatherMaskP0101TestCase(_GatherBaseTestCase):
         tensors["output"][:] = tensors["inp"][:, 0::2]
 
 
+class GatherMaskP0101TopLevelTestCase(_GatherBaseTestCase):
+    def get_name(self) -> str:
+        return "gather_mask_p0101_toplevel"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("inp", [8, 16], DataType.FP32, init_value=_make_gather_mask_src_8x16),
+            TensorSpec("output", [8, 8], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return GatherMaskP0101TopLevelProgram
+
+    def compute_expected(self, tensors, params=None):
+        # P0101 selects positions 0, 2, 4, ..., 14 of each row.
+        tensors["output"][:] = tensors["inp"][:, 0::2]
+
+
 class GatherMaskOutputDtypeTestCase(_GatherBaseTestCase):
     def get_name(self) -> str:
         return "gather_mask_output_dtype_uint32"
@@ -623,6 +658,12 @@ class TestGatherMask:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_gather_mask_p0101(self, test_runner, platform):
         result = test_runner.run(GatherMaskP0101TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_gather_mask_p0101_toplevel(self, test_runner, platform):
+        """Top-level pl.gather alias (mask form) matches pl.tensor.gather."""
+        result = test_runner.run(GatherMaskP0101TopLevelTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
