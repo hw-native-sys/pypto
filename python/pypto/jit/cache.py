@@ -25,8 +25,12 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pypto.pypto_core import DataType
+
+if TYPE_CHECKING:
+    from pypto.ir.pass_manager import OptimizationStrategy
 
 # Stable PyPTO version stamp included in every cache key so that upgrading
 # PyPTO (which may change the pass pipeline or codegen) automatically
@@ -68,9 +72,16 @@ class ScalarCacheInfo:
     value: int | float | bool
 
 
-# A cache key is a tuple of (source_hash, platform, tensor_infos, scalar_infos).
+# A cache key is a tuple of
+# (source_hash, platform, strategy, tensor_infos, scalar_infos).
 # Using a plain tuple keeps it hashable without a custom __hash__.
-CacheKey = tuple[str, str | None, tuple[TensorCacheInfo, ...], tuple[ScalarCacheInfo, ...]]
+CacheKey = tuple[
+    str,
+    str | None,
+    "OptimizationStrategy | None",
+    tuple[TensorCacheInfo, ...],
+    tuple[ScalarCacheInfo, ...],
+]
 
 
 def compute_source_hash(sources: list[str]) -> str:
@@ -101,6 +112,7 @@ def make_cache_key(
     dynamic_dims: set[tuple[str, int]],
     scalar_values: dict[str, int | float | bool],
     platform: str | None = None,
+    strategy: "OptimizationStrategy | None" = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -116,6 +128,12 @@ def make_cache_key(
         platform: Target platform string (e.g. "a2a3sim"). Included in the key
             because compiled artifacts are platform-specific; a cache entry
             compiled for one platform must not be reused for another.
+        strategy: Optimization strategy applied during compilation (an
+            ``OptimizationStrategy`` member, or ``None`` for the JIT default).
+            Included in the key because the strategy changes the compiled
+            artifact; without it, calling the same kernel with two strategies
+            (an A/B comparison) would return the first-compiled artifact for
+            both.
 
     Returns:
         Hashable CacheKey tuple.
@@ -136,7 +154,7 @@ def make_cache_key(
             continue
         scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
 
-    return (source_hash, platform, tuple(tensor_infos), tuple(scalar_infos))
+    return (source_hash, platform, strategy, tuple(tensor_infos), tuple(scalar_infos))
 
 
 def _key_to_hash(key: CacheKey) -> str:

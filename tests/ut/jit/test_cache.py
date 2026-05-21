@@ -10,6 +10,7 @@
 """Tests for python/pypto/jit/cache.py."""
 
 import pytest
+from pypto.ir import OptimizationStrategy
 from pypto.jit.cache import (
     compute_source_hash,
     make_cache_key,
@@ -54,6 +55,7 @@ class TestMakeCacheKey:
         dynamic_dims=None,
         scalar_values=None,
         platform=None,
+        strategy=None,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -63,6 +65,7 @@ class TestMakeCacheKey:
             dynamic_dims=dynamic_dims or set(),
             scalar_values=scalar_values or {},
             platform=platform,
+            strategy=strategy,
         )
 
     def test_basic_key_structure(self):
@@ -72,10 +75,11 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
         )
         assert isinstance(key, tuple)
-        assert len(key) == 4
-        source_hash, platform, tensor_part, scalar_part = key
+        assert len(key) == 5
+        source_hash, platform, strategy, tensor_part, scalar_part = key
         assert source_hash == "abc"
         assert platform is None
+        assert strategy is None
         assert isinstance(tensor_part, tuple)
         assert isinstance(scalar_part, tuple)
 
@@ -85,7 +89,7 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (128, 64)},
             tensor_dtypes={"a": DataType.FP32},
         )
-        _, _, tensor_part, _ = key
+        _, _, _, tensor_part, _ = key
         assert len(tensor_part) == 1
         info = tensor_part[0]
         assert info.name == "a"
@@ -99,7 +103,7 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
         )
-        _, _, tensor_part, _ = key
+        _, _, _, tensor_part, _ = key
         assert tensor_part[0].shape == (None, 128)
 
     def test_dynamic_dim_cache_hit_on_different_concrete_value(self):
@@ -147,7 +151,7 @@ class TestMakeCacheKey:
             param_names=["BLOCK_M"],
             scalar_values={"BLOCK_M": 64},
         )
-        _, _, _, scalar_part = key
+        _, _, _, _, scalar_part = key
         assert len(scalar_part) == 1
         assert scalar_part[0].name == "BLOCK_M"
         assert scalar_part[0].value == 64
@@ -167,7 +171,7 @@ class TestMakeCacheKey:
             dynamic_dims=set(),
             scalar_values={},
         )
-        _, _, tensor_part, _ = key
+        _, _, _, tensor_part, _ = key
         assert tensor_part[0].name == "b"
         assert tensor_part[1].name == "a"
 
@@ -241,6 +245,67 @@ class TestMakeCacheKey:
             platform="a2a3sim",
         )
         assert k_none != k_named
+
+    def test_different_strategy_causes_miss(self):
+        """Same shapes/dtypes compiled with different strategies must not collide.
+
+        Keeps an A/B comparison honest: calling one kernel with two
+        strategies must compile twice, not serve the first artifact twice.
+        """
+        k_default = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            strategy=OptimizationStrategy.Default,
+        )
+        k_debug = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            strategy=OptimizationStrategy.DebugTileOptimization,
+        )
+        assert k_default != k_debug
+
+    def test_same_strategy_is_cache_hit(self):
+        k1 = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            strategy=OptimizationStrategy.Default,
+        )
+        k2 = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            strategy=OptimizationStrategy.Default,
+        )
+        assert k1 == k2
+
+    def test_none_strategy_differs_from_named_strategy(self):
+        """strategy=None (JIT default) and an explicit strategy must not collide."""
+        k_none = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            strategy=None,
+        )
+        k_named = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            strategy=OptimizationStrategy.Default,
+        )
+        assert k_none != k_named
+
+    def test_key_with_strategy_is_hashable(self):
+        key = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.INT32},
+            strategy=OptimizationStrategy.Default,
+        )
+        d = {key: "value"}
+        assert d[key] == "value"
 
 
 if __name__ == "__main__":

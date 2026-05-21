@@ -9,6 +9,7 @@
 
 """Tests for @pl.jit decorator: decoration, cache hit/miss, and bind_dynamic."""
 
+import importlib
 import warnings
 
 import pypto.language as pl
@@ -20,11 +21,13 @@ from pypto.jit.decorator import (
     _discover_deps,
     _extract_local_tensor_metas,
     _rewrite_jit_error,
+    _run_config_compile_kwargs,
     jit,
 )
 from pypto.jit.specializer import TensorMeta
 from pypto.language.parser.diagnostics.exceptions import ParserTypeError
 from pypto.pypto_core import DataType, ir
+from pypto.runtime.runner import RunConfig
 
 # ---------------------------------------------------------------------------
 # Decoration tests (no torch needed)
@@ -1263,6 +1266,125 @@ class TestVariableRebinding:
         result = _rewrite_jit_error(exc, {"x_v1": "x"})
         assert "x_v1" not in str(result)
         assert "x" in str(result)
+
+
+# ---------------------------------------------------------------------------
+# ir.compile() kwarg forwarding (Issue #1405)
+# ---------------------------------------------------------------------------
+
+
+class TestCompileKwargForwarding:
+    """``ir.compile()`` kwargs are forwarded through ``JITFunction._compile``.
+
+    Before this fix, ``_compile`` only forwarded ``skip_ptoas`` and
+    ``platform`` — every other compile knob a user set on ``RunConfig``
+    (``strategy``, ``dump_passes``, ...) was silently dropped on the JIT path.
+    """
+
+    def test_run_config_compile_kwargs_maps_fields(self):
+        """Compile-side RunConfig fields map onto the ir.compile() parameter names."""
+        cfg = RunConfig(
+            strategy=OptimizationStrategy.DebugTileOptimization,
+            dump_passes=True,
+            compile_profiling=True,
+            save_kernels_dir="/tmp/jit_artifacts",
+            block_dim=8,
+        )
+        kwargs = _run_config_compile_kwargs(cfg)
+        assert kwargs["strategy"] == OptimizationStrategy.DebugTileOptimization
+        assert kwargs["dump_passes"] is True
+        assert kwargs["profiling"] is True  # mapped from RunConfig.compile_profiling
+        assert kwargs["output_dir"] == "/tmp/jit_artifacts"  # from RunConfig.save_kernels_dir
+        assert kwargs["block_dim"] == 8
+        assert "diagnostic_phase" in kwargs
+        assert "disabled_diagnostics" in kwargs
+        # backend_type is derived from `platform` by ir.compile(); not forwarded.
+        assert "backend_type" not in kwargs
+
+    def test_run_config_compile_kwargs_omits_unset_optionals(self):
+        """save_kernels_dir / block_dim left unset are omitted so ir.compile() defaults apply."""
+        kwargs = _run_config_compile_kwargs(RunConfig())
+        assert "output_dir" not in kwargs
+        assert "block_dim" not in kwargs
+
+    def test_compile_forwards_run_config_kwargs(self, monkeypatch):
+        """_compile forwards ir_compile_kwargs verbatim to ir.compile()."""
+        # `pypto.ir.compile` the attribute is the re-exported function, so
+        # import the submodule explicitly to patch the name _compile reads.
+        ir_compile_mod = importlib.import_module("pypto.ir.compile")
+
+        @jit
+        def fwd_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(x, [0, 0], [128, 128])
+                pl.store(t, [0, 0], out)
+            return out
+
+        captured: dict = {}
+
+        def fake_compile(_program, **kwargs):
+            captured.update(kwargs)
+            return "fake-compiled-program"
+
+        # _compile re-imports `compile` from pypto.ir.compile on each call,
+        # so patching the module attribute intercepts the real compilation.
+        monkeypatch.setattr(ir_compile_mod, "compile", fake_compile)
+
+        cfg = RunConfig(
+            strategy=OptimizationStrategy.DebugTileOptimization,
+            dump_passes=True,
+            compile_profiling=True,
+        )
+        result = fwd_kernel._compile(
+            tensor_meta={
+                "x": TensorMeta((128, 128), DataType.FP32),
+                "out": TensorMeta((128, 128), DataType.FP32),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(fwd_kernel._func): set()},
+            pl=pl,
+            platform="a2a3sim",
+            **_run_config_compile_kwargs(cfg),
+        )
+        assert result == "fake-compiled-program"
+        assert captured["strategy"] == OptimizationStrategy.DebugTileOptimization
+        assert captured["dump_passes"] is True
+        assert captured["profiling"] is True
+        assert captured["platform"] == "a2a3sim"
+        assert "skip_ptoas" in captured
+
+    def test_compile_without_kwargs_forwards_only_defaults(self, monkeypatch):
+        """_compile with no extra kwargs forwards only skip_ptoas + platform."""
+        ir_compile_mod = importlib.import_module("pypto.ir.compile")
+
+        @jit
+        def plain_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                t = pl.load(x, [0, 0], [128, 128])
+                pl.store(t, [0, 0], out)
+            return out
+
+        captured: dict = {}
+
+        def fake_compile(_program, **kwargs):
+            captured.update(kwargs)
+            return "fake"
+
+        monkeypatch.setattr(ir_compile_mod, "compile", fake_compile)
+
+        plain_kernel._compile(
+            tensor_meta={
+                "x": TensorMeta((128, 128), DataType.FP32),
+                "out": TensorMeta((128, 128), DataType.FP32),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(plain_kernel._func): set()},
+            pl=pl,
+        )
+        assert set(captured) == {"skip_ptoas", "platform"}
+        assert captured["platform"] is None
 
 
 if __name__ == "__main__":

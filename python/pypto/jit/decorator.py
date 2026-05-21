@@ -727,6 +727,42 @@ def _resolve_dep_call_metadata(
 
 
 # ---------------------------------------------------------------------------
+# RunConfig -> ir.compile() keyword forwarding
+# ---------------------------------------------------------------------------
+
+
+def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
+    """Extract ``ir.compile()`` keyword arguments from a ``pypto.runtime.RunConfig``.
+
+    Maps the compile-side fields of ``RunConfig`` onto the parameters
+    ``ir.compile()`` accepts, so a ``@pl.jit`` kernel invoked with
+    ``config=RunConfig(...)`` honours the same compile knobs that
+    ``ir.compile(program, ...)`` does. Runtime-only fields (``device_id``,
+    ``rtol`` / ``atol``, DFX toggles, ...) are not compile inputs and are
+    consumed by ``CompiledProgram.__call__`` instead.
+
+    ``backend_type`` is intentionally omitted: ``ir.compile()`` derives the
+    codegen backend from ``platform``, which the JIT path already forwards;
+    passing ``backend_type`` as well would be redundant and could conflict.
+
+    Optional fields (``output_dir``, ``block_dim``) are forwarded only when
+    set, so an unset value defers to ``ir.compile()``'s own default.
+    """
+    kwargs: dict[str, Any] = {
+        "strategy": run_config.strategy,
+        "dump_passes": run_config.dump_passes,
+        "profiling": run_config.compile_profiling,
+        "diagnostic_phase": run_config.diagnostic_phase,
+        "disabled_diagnostics": run_config.disabled_diagnostics,
+    }
+    if run_config.save_kernels_dir is not None:
+        kwargs["output_dir"] = run_config.save_kernels_dir
+    if run_config.block_dim is not None:
+        kwargs["block_dim"] = run_config.block_dim
+    return kwargs
+
+
+# ---------------------------------------------------------------------------
 
 
 class JITFunction:
@@ -951,9 +987,18 @@ class JITFunction:
         The compiled kernel is then executed on the NPU device with the given
         torch tensor arguments (Triton-like API).
 
+        A ``config=RunConfig(...)`` keyword argument is consumed here rather
+        than passed to the decorated function: its compile-side fields
+        (``strategy``, ``dump_passes``, diagnostics, ...) are forwarded to
+        ``ir.compile()`` via :func:`_run_config_compile_kwargs`, and its
+        runtime fields drive on-device execution.  ``strategy`` also takes
+        part in the cache key so two strategies never share a cache entry.
+
         Args:
             *args: Positional arguments matching the decorated function's params.
-            **kwargs: Keyword arguments.
+            **kwargs: Keyword arguments.  A ``config`` keyword, if present, is
+                a :class:`~pypto.runtime.runner.RunConfig` and is consumed by
+                the JIT machinery (not forwarded to the decorated function).
 
         Returns:
             ``None`` for in-place calls (output tensors modified on device),
@@ -970,9 +1015,16 @@ class JITFunction:
             args, kwargs
         )
 
-        # Build cache key. Platform is included so artifacts compiled for
-        # different targets never collide in the same cache.
+        # Compile-side knobs (strategy, dump_passes, ...) come from the
+        # RunConfig. Forwarding them lets a @pl.jit kernel honour the same
+        # compile options as a direct ir.compile(program, ...) call.
+        compile_kwargs = _run_config_compile_kwargs(run_config) if run_config is not None else {}
+
+        # Build cache key. Platform and strategy are included so artifacts
+        # compiled for different targets or optimization strategies never
+        # collide in the same cache.
         platform = run_config.platform if run_config is not None else None
+        strategy = run_config.strategy if run_config is not None else None
         entry_dyn = per_func_dyn[id(self._func)]
         key = make_cache_key(
             source_hash=self._get_source_hash(),
@@ -982,12 +1034,19 @@ class JITFunction:
             dynamic_dims=entry_dyn,
             scalar_values=scalar_values,
             platform=platform,
+            strategy=strategy,
         )
 
         # L1 cache lookup
         if key not in self._cache:
             self._cache[key] = self._compile(
-                tensor_meta, scalar_values, scalar_dtypes, per_func_dyn, pl, platform=platform
+                tensor_meta,
+                scalar_values,
+                scalar_dtypes,
+                per_func_dyn,
+                pl,
+                platform=platform,
+                **compile_kwargs,
             )
 
         # Execute the compiled kernel on device.
@@ -1012,6 +1071,7 @@ class JITFunction:
         per_func_dyn: dict[int, set[tuple[str, int]]],
         pl: Any,
         platform: str | None = None,
+        **ir_compile_kwargs: Any,
     ) -> Any:
         """Specialize entry + deps into @pl.program source, parse, and compile.
 
@@ -1023,6 +1083,11 @@ class JITFunction:
         ``per_func_dyn`` is the precomputed dynamic-dim map from
         ``_bind_args``.  Reusing it here avoids walking the dep graph
         twice on every cache miss.
+
+        ``ir_compile_kwargs`` are forwarded verbatim to ``ir.compile()`` —
+        compile-side knobs (``strategy``, ``dump_passes``, ``output_dir``,
+        ``profiling``, diagnostics, ...) that the JIT caller derives from a
+        ``RunConfig`` via :func:`_run_config_compile_kwargs`.
         """
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 
@@ -1037,7 +1102,7 @@ class JITFunction:
         try:
             parsed = pl.parse(source)
             skip_ptoas = not _ptoas_available()
-            return ir_compile(parsed, skip_ptoas=skip_ptoas, platform=platform)
+            return ir_compile(parsed, skip_ptoas=skip_ptoas, platform=platform, **ir_compile_kwargs)
         except Exception as exc:
             rewritten = _rewrite_jit_error(exc, rename_map)
             if rewritten is exc:
