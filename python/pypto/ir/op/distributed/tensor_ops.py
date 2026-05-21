@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """IR builders for ``pld.tensor.alloc_window_buffer`` / ``pld.tensor.window`` /
-``pld.tensor.put``.
+``pld.tensor.get`` / ``pld.tensor.put``.
 
 These are the raw IR-layer equivalents of :func:`pypto.ir.op.tile_ops.load`
 and friends: they take ``ir.Expr`` arguments, normalize them to the shapes
@@ -94,4 +94,24 @@ def put(
     )
 
 
-__all__ = ["alloc_window_buffer", "put", "window"]
+def get(
+    dst: Expr,
+    peer: int | Expr,
+    src: Expr,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tensor.get(dst, peer, src)`` Call.
+
+    Cross-rank get: synchronously read ``peer``'s slice of the window-bound
+    DistributedTensor ``src`` into the local window-bound DistributedTensor
+    ``dst``. Side-effect only - the result is an ``UnknownType`` Call. PTO
+    codegen lowers this to a peer-addressed source view, local destination
+    view, synthesised VEC staging tile, and TGET.
+    """
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call("pld.tensor.get", [dst, peer_expr, src], {}, actual_span)
+
+
+__all__ = ["alloc_window_buffer", "get", "put", "window"]

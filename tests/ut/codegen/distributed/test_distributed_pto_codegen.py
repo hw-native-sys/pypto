@@ -376,5 +376,53 @@ def test_put_atomic_add_variant():
     assert "!pto.partition_tensor_view<128xf32>" in mlir_add
 
 
+def test_get_emits_comm_tget_with_staging_tile():
+    """get codegen emits pto.comm.tget with a VEC staging tile."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[16, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.get(dst, peer=peer, src=src)
+
+    mlir = _generate_mlir(P)
+    tget_line = next(line for line in mlir.splitlines() if "pto.comm.tget(" in line)
+    # dst (local) and src (peer-addressed) full-slice partition views, same type.
+    assert tget_line.count("!pto.partition_tensor_view<16x64xf16>") == 2
+    # A VEC staging tile_buf is synthesised and threaded through buf(...).
+    assert "buf(" in tget_line
+    assert "!pto.tile_buf<loc=vec" in mlir
+    # src is peer-addressed (CommRemoteOffset + addptr); dst is local.
+    assert "func.call @CommRemoteOffset_f16" in mlir
+    assert "pto.addptr" in mlir
+    assert "_peer_pview" in mlir
+    assert "_local_pview" in mlir
+
+
+def test_get_rank1_transfer_uses_full_slice_partition_view():
+    """get on a rank-1 tensor lowers to a full 1-D partition view."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[128], pl.FP32],
+            src: pld.DistributedTensor[[128], pl.FP32],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.get(dst, peer=peer, src=src)
+
+    mlir = _generate_mlir(P)
+    assert "pto.comm.tget(" in mlir
+    assert "!pto.partition_tensor_view<128xf32>" in mlir
+    assert "func.call @CommRemoteOffset_f32" in mlir
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

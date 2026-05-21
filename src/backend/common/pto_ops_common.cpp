@@ -2510,6 +2510,84 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   return "";
 }
 
+// pld.tensor.get(dst, peer, src) — synchronous cross-rank bulk read from the
+// peer rank's slice of `src` into the local slice `dst`. dst and src share
+// dtype and (verified) static shape. Lowers to:
+//   delems   = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
+//   src_ptr  = pto.addptr <src_local_ptr>, delems
+//   src_view = pto.make_tensor_view src_ptr, shape=..., strides=...
+//   src_pv   = pto.partition_view src_view,  offsets=[0,..], sizes=<shape>
+//   dst_pv   = pto.partition_view <dst_local_view>, offsets=[0,..], sizes=<shape>
+//   %stage   = pto.alloc_tile : !pto.tile_buf<loc=vec, ...>
+//   pto.comm.tget(dst_pv, src_pv, buf(%stage) : <ptype>, <ptype>, <stage_type>)
+//
+// The VEC staging tile is synthesised here (the user never sees it): TGET
+// copies GM->GM through a VEC bounce buffer, so codegen sizes one ping tile to
+// the (2-D flattened) transfer extent.
+static constexpr uint64_t kTgetVecStagingFractal = 512;
+
+static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 3) << "pld.tensor.get requires 3 arguments (dst, peer, src), got "
+                               << op->args_.size();
+
+  // dst: local DistributedTensor destination — reuses the local tensor_view
+  // created by EmitMakeTensorViews (no peer arithmetic, like wait's signal).
+  auto dst_var = AsVarLike(op->args_[0]);
+  CHECK(dst_var) << "pld.tensor.get dst must be a Var-like expression";
+  auto dst_dist = As<ir::DistributedTensorType>(dst_var->GetType());
+  CHECK(dst_dist) << "pld.tensor.get dst must be DistributedTensorType, got "
+                  << dst_var->GetType()->TypeName();
+
+  // src: remote (peer-addressed) DistributedTensor source.
+  auto src_binding = ResolveDistTensorBinding(op->args_[2], codegen, "pld.tensor.get");
+  auto peer_scalar = As<ir::ScalarType>(op->args_[1]->GetType());
+  CHECK(peer_scalar) << "pld.tensor.get peer must be ScalarType at codegen, got "
+                     << op->args_[1]->GetType()->TypeName();
+
+  const auto& shape = dst_dist->shape_;
+  const size_t rank = shape.size();
+  const std::string dtype_str = codegen.GetTypeString(dst_dist->dtype_);
+
+  // Full-slice partition views: offsets all-zero, sizes = full shape. dst and
+  // src share the same partition_tensor_view type (same dtype + static shape).
+  std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+  std::vector<std::string> zero_offsets(rank, c0);
+  std::vector<std::string> size_ssa = GetSizeCodes(shape, codegen);
+  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(shape), dtype_str);
+
+  // dst: local tensor_view + full-slice partition_view.
+  std::string dst_local_view = codegen.GetOrCreateTensorView(dst_var);
+  std::string dst_view_type = codegen.GetTensorViewTypeString(dst_dist.get());
+  std::string dst_pview = EmitPartitionViewPTO(dst_var->name_hint_ + "_local", dst_local_view, dst_view_type,
+                                               partition_type, zero_offsets, size_ssa, codegen);
+
+  // src: CommRemoteOffset + addptr + make_tensor_view at the call site, then
+  // a full-slice partition_view.
+  auto src_peer_view = EmitCommRemoteView(src_binding, op->args_[1], codegen);
+  std::string src_pview =
+      EmitPartitionViewPTO(src_binding.var->name_hint_ + "_peer", src_peer_view.ssa,
+                           src_peer_view.view_type_str, partition_type, zero_offsets, size_ssa, codegen);
+
+  // Synthesise a VEC staging tile_buf sized to the 2-D-flattened transfer:
+  // rows = product of leading dims, cols = innermost dim (rank-1 -> 1xN).
+  int64_t cols = codegen.GetConstIntValue(shape[rank - 1]);
+  int64_t rows = 1;
+  for (size_t i = 0; i + 1 < rank; ++i) {
+    rows *= codegen.GetConstIntValue(shape[i]);
+  }
+  std::string stage_type = codegen::FormatTileBufTypeString(
+      "vec", dtype_str, rows, cols, ir::TileLayout::row_major, ir::TileLayout::none_box,
+      kTgetVecStagingFractal, ir::PadValue::null, /*v_row=*/rows, /*v_col=*/cols);
+  std::string stage = codegen.AllocNewTileBuf(stage_type, "tget_stage");
+
+  std::ostringstream tget;
+  tget << "pto.comm.tget(" << dst_pview << ", " << src_pview << ", buf(" << stage << ") : " << partition_type
+       << ", " << partition_type << ", " << stage_type << ")";
+  codegen.Emit(tget.str());
+  return "";
+}
+
 // ============================================================================
 // On-core array (ArrayType) -> !pto.local_array lowering helpers
 // ============================================================================
@@ -2801,8 +2879,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     return MakeTileStoreCodegenPTO(op, codegen);
   });
   // Distributed N6 ops — cross-rank tile load + per-rank signal notify/wait +
-  // synchronous bulk put. See MakeRemoteLoadCodegenPTO / MakeNotifyCodegenPTO /
-  // MakeWaitCodegenPTO / MakePutCodegenPTO for the emitted MLIR shape.
+  // synchronous bulk get/put. See MakeRemoteLoadCodegenPTO /
+  // MakeNotifyCodegenPTO / MakeWaitCodegenPTO / MakeGetCodegenPTO /
+  // MakePutCodegenPTO for the emitted MLIR shape.
   // Cross-rank ops lower to a single
   // ``func.call @CommRemoteOffset_<dtype>`` against a module-level helper
   // emitted by PTOCodegen::EmitCommRemoteOffsetHelpers; the helper returns
@@ -2818,6 +2897,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeNotifyCodegenPTO(op, codegen); });
   reg("pld.system.wait",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeWaitCodegenPTO(op, codegen); });
+  reg("pld.tensor.get",
+      [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeGetCodegenPTO(op, codegen); });
   reg("pld.tensor.put",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakePutCodegenPTO(op, codegen); });
   reg("tile.transpose", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

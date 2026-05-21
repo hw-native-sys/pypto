@@ -11,16 +11,17 @@ in this family (strict kind-trait matching — `As<DistributedTensorType>` does
 not match a plain `TensorType`), so a non-window-bound tensor can never be fed
 into a cross-rank operation by accident.
 
-There are **four ops** and **three ABI enums**:
+There are **five ops** and **three ABI enums**:
 
 | Op | Direction | Result | Hardware |
 | -- | --------- | ------ | -------- |
 | `pld.tile.remote_load` | pull (read peer → local tile) | `TileType` | TLOAD |
+| `pld.tensor.get` | pull (read peer → local GM) | `Unknown` (side effect) | TGET |
 | `pld.tensor.put` | push (write local → peer) | `Unknown` (side effect) | TPUT |
 | `pld.system.notify` | signal a peer's slot | `Unknown` (side effect) | TNOTIFY |
 | `pld.system.wait` | block on own slot | `Unknown` (side effect) | TWAIT |
 
-The three side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
+The four side-effect-only ops produce [`UnknownType`](ir/02-types.md): they
 exist for their cross-rank effect, not for an SSA value a consumer reads.
 
 ## Namespacing: why `tile.*` vs `tensor.*` vs `system.*`
@@ -29,6 +30,11 @@ The namespace encodes the IR level the op lives at, not an arbitrary grouping:
 
 - **`pld.tile.remote_load`** produces a *tile* (on-core SRAM region), so it is a
   sibling of `tile.load` and lives in `pld.tile`.
+- **`pld.tensor.get`** reads and writes *tensor* (GM) operands — both `dst` and
+  `src` are window-bound `DistributedTensor` views and the VEC staging tile
+  that TGET bounces through is synthesised at codegen, never on the DSL
+  surface. It is therefore a sibling of `pld.tensor.alloc_window_buffer` /
+  `pld.tensor.window`, **not** of the tile-producing `remote_load`.
 - **`pld.tensor.put`** reads and writes *tensor* (GM) operands — both `dst` and
   `src` are window-bound `DistributedTensor` views and the VEC staging tile
   that TPUT bounces through is synthesised at codegen, never on the DSL
@@ -104,6 +110,23 @@ Verifier: `dst` / `src` must both be `DistributedTensorType`; `peer` must be a
 static** shape (the staging VEC buffer needs compile-time extents). `atomic`
 selects overwrite vs atomic-add (see `AtomicType`).
 
+### `pld.tensor.get` (TGET)
+
+```text
+pld.tensor.get(dst, peer, src) -> Unknown
+```
+
+Synchronously reads the `peer` rank's slice of the window-bound `src` into the
+local window-bound `dst`. Both operands are GM-level `DistributedTensor`
+views; the VEC staging tile is synthesised at codegen
+(`MakeGetCodegenPTO` in `src/backend/common/pto_ops_common.cpp`) and never
+appears on the DSL surface.
+
+Verifier: `dst` / `src` must both be `DistributedTensorType`; `peer` must be a
+`ScalarType`; `dst` and `src` must share element type and identical **positive
+static** shape (the staging VEC buffer needs compile-time extents). `get`
+accepts no keyword attributes.
+
 ### `pld.system.notify` (TNOTIFY)
 
 ```text
@@ -131,7 +154,7 @@ Verifier: `signal` must be `DistributedTensorType`; `expected` must be
 
 ## Shared codegen infrastructure
 
-All four ops lower through PTO codegen helpers in
+All five ops lower through PTO codegen helpers in
 `src/backend/common/pto_ops_common.cpp` and `src/codegen/pto/pto_codegen.cpp`.
 The reusable pieces — shared so each op's lowering carries no bespoke peer
 arithmetic — are:
@@ -139,15 +162,16 @@ arithmetic — are:
 | Helper | Role |
 | ------ | ---- |
 | `CommRemoteOffset_<dtype>` | per-dtype MLIR helper (emitted once by `PTOCodegen::EmitCommRemoteOffsetHelpers`) that turns `(ctx, peer)` into the byte offset of the peer's window slice |
-| `EmitCommRemoteView` | emits `CommRemoteOffset + addptr + make_tensor_view` at the call site, yielding the peer-addressed view (used by `remote_load` and `put`'s `dst`) |
+| `EmitCommRemoteView` | emits `CommRemoteOffset + addptr + make_tensor_view` at the call site, yielding the peer-addressed view (used by `remote_load`, `get`'s `src`, and `put`'s `dst`) |
 | `EmitPartitionViewPTO` | wraps a tensor view in a full-slice `partition_view` with given offsets/sizes (used by every op for both local and peer operands) |
 | `ResolveDistTensorBinding` | resolves a `DistributedTensor` arg to its codegen binding (type + window var) |
 | `AsTensorTypeLike` | kind-trait downcast accepting both `TensorType` and `DistributedTensorType` where a view's element/shape info is read uniformly |
 
-The local-vs-remote split is intentional: a *local* operand (e.g. `put`'s
-`src`, `wait`'s `signal`) reuses the tensor view already created by
+The local-vs-remote split is intentional: a *local* operand (e.g. `get`'s
+`dst`, `put`'s `src`, `wait`'s `signal`) reuses the tensor view already created by
 `EmitMakeTensorViews` with no peer arithmetic, while a *remote* operand (e.g.
-`remote_load`'s `target`, `put`'s `dst`) goes through `EmitCommRemoteView`.
+`remote_load`'s `target`, `get`'s `src`, `put`'s `dst`) goes through
+`EmitCommRemoteView`.
 
 ## Pipeline integration
 
@@ -159,12 +183,12 @@ binds physical buffers to.
 ## Testing
 
 - **IR / parser**: `tests/ut/ir/parser/test_remote_load.py`,
-  `test_system_ops.py`, `test_put_op.py`, plus the negative verifier coverage
-  in `tests/ut/ir/test_distributed_ops.py`.
+  `test_system_ops.py`, `test_get_op.py`, `test_put_op.py`, plus the negative
+  verifier coverage in `tests/ut/ir/test_distributed_ops.py`.
 - **Codegen**: `tests/ut/codegen/distributed/test_distributed_pto_codegen.py`.
 - **End-to-end (ST)**: `tests/st/distributed/test_l3_remote_load.py`,
-  `test_l3_notify_wait.py`, `test_l3_put.py`. These are currently **skipped**
-  pending the N7 host codegen (`add_scalar(ctx)` per `DistributedTensor`,
+  `test_l3_notify_wait.py`, `test_l3_get.py`, `test_l3_put.py`. These are
+  currently **skipped** pending the N7 host codegen (`add_scalar(ctx)` per `DistributedTensor`,
   `ContinuousTensor.make(..., child_memory=True)`) and N8 driver glue
   (`HostBufferStaging` / `ChipBootstrapConfig` window wiring). The embedded
   programs and golden checks are the canonical e2e contracts — drop the skip

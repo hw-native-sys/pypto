@@ -590,5 +590,154 @@ def test_put_rejects_non_scalar_peer():
         )
 
 
+# ---------------------------------------------------------------------------
+# pld.tensor.get op (synchronous cross-rank bulk read — TGET)
+# ---------------------------------------------------------------------------
+
+
+def test_get_returns_unknown_type():
+    """Positive: get is side-effect-only — result is UnknownType."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+
+    call = ir.create_op_call(
+        "pld.tensor.get",
+        [dst, peer, src],
+        {},
+        span,
+    )
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_get_rejects_unexpected_kwargs():
+    """Negative: get does not accept keyword attributes."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="does not accept keyword"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src],
+            {"atomic": 0},
+            span,
+        )
+
+
+def test_get_rejects_plain_tensor_dst():
+    """Negative: a plain pl.Tensor dst is refused — must be window-bound."""
+    span = ir.Span.unknown()
+    plain = ir.Var("x", ir.TensorType([ir.ConstInt(16, DataType.INT64, span)], DataType.FP16), span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="DistributedTensor"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [plain, peer, src],
+            {},
+            span,
+        )
+
+
+def test_get_rejects_plain_tensor_src():
+    """Negative: a plain pl.Tensor src is refused — must be window-bound."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    plain = ir.Var("x", ir.TensorType([ir.ConstInt(16, DataType.INT64, span)], DataType.FP16), span)
+
+    with pytest.raises(Exception, match="DistributedTensor"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, plain],
+            {},
+            span,
+        )
+
+
+def test_get_rejects_dtype_mismatch():
+    """Negative: dst and src must share element type."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16], DataType.FP32, span)
+
+    with pytest.raises(Exception, match="element type"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src],
+            {},
+            span,
+        )
+
+
+def test_get_rejects_shape_mismatch():
+    """Negative: dst and src must have the same static shape."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 32], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="static shape"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src],
+            {},
+            span,
+        )
+
+
+def test_get_rejects_rank_mismatch():
+    """Negative: dst and src ranks must match."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64, 4], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="rank"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src],
+            {},
+            span,
+        )
+
+
+def test_get_rejects_non_positive_static_shape():
+    """Negative: dst/src static shape dims must be positive."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 0], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 0], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="positive"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src],
+            {},
+            span,
+        )
+
+
+def test_get_rejects_non_scalar_peer():
+    """Negative: peer must be a scalar rank index."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16], DataType.FP16, span)
+    bad_peer = _make_distributed_tensor_var("p", [16], DataType.FP16, span)
+    src = _make_distributed_tensor_var("src", [16], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="scalar"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, bad_peer, src],
+            {},
+            span,
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

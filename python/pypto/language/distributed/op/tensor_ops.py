@@ -7,7 +7,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""``pld.tensor.alloc_window_buffer`` / ``pld.tensor.window`` / ``pld.tensor.put`` — DSL wrappers.
+"""``pld.tensor.alloc_window_buffer`` / ``pld.tensor.window`` /
+``pld.tensor.get`` / ``pld.tensor.put`` — DSL wrappers.
 
 Layout mirrors the ``tile.alloc`` / ``MemRef`` / ``TileType`` triple:
 
@@ -21,6 +22,10 @@ Layout mirrors the ``tile.alloc`` / ``MemRef`` / ``TileType`` triple:
   ``src`` are window-bound :class:`pld.DistributedTensor` (GM/tensor-level)
   views — the VEC staging tile that TPUT bounces through is synthesised at
   codegen, so it stays a tensor-level op rather than a tile-level one.
+* ``get`` is a synchronous cross-rank bulk read: both ``dst`` and ``src`` are
+  window-bound :class:`pld.DistributedTensor` (GM/tensor-level) views — the
+  VEC staging tile that TGET bounces through is synthesised at codegen, so it
+  stays a tensor-level op rather than a tile-level one.
 
 ``alloc_window_buffer`` is intercepted at the AssignStmt level by the parser
 so the buffer's ``name`` kwarg can be derived from the LHS — the body of that
@@ -154,4 +159,34 @@ def put(
     return _ir_tensor.put(dst_expr, _unwrap(peer), src_expr, atomic)
 
 
-__all__ = ["alloc_window_buffer", "put", "window"]
+def get(
+    dst: DistributedTensor,
+    peer: IntLike,
+    src: DistributedTensor,
+) -> Call:
+    """Cross-rank get: read the peer rank's slice of ``src`` into local ``dst``.
+
+    Side-effect-only (the returned Call carries ``UnknownType``). Semantically
+    equivalent to ``remote_load + store`` but represented as one tensor-level
+    bulk communication op. Lowers to ``CommRemoteOffset(ctx, peer) + addptr +
+    make_tensor_view + partition_view + a synthesised VEC staging tile + TGET``
+    at codegen.
+
+    Args:
+        dst: Local window-bound :class:`pld.DistributedTensor` destination.
+        peer: Peer rank index.
+        src: Peer rank's window-bound :class:`pld.DistributedTensor` source.
+
+    Returns:
+        The underlying IR Call.
+    """
+    dst_expr = _unwrap(dst)
+    src_expr = _unwrap(src)
+    for role, expr in (("dst", dst_expr), ("src", src_expr)):
+        if not isinstance(expr, Expr) or not isinstance(expr.type, _ir.DistributedTensorType):
+            got = _ir.python_print_type(expr.type) if isinstance(expr, Expr) else type(expr).__name__
+            raise TypeError(f"pld.tensor.get expects a DistributedTensor {role} (window-bound); got {got}")
+    return _ir_tensor.get(dst_expr, _unwrap(peer), src_expr)
+
+
+__all__ = ["alloc_window_buffer", "get", "put", "window"]

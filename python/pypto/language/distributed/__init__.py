@@ -22,7 +22,7 @@ plus 2-segment unified-dispatch short form, just like ``pl``):
 * :mod:`pypto.language.distributed.op` — parser-sentinel ops. Sub-namespaces:
   ``pld.system.*`` (:func:`world_size`, :func:`get_comm_ctx`, :func:`rank`,
   :func:`nranks`), ``pld.tensor.*`` (:func:`alloc_window_buffer`,
-  :func:`window`), and ``pld.tile.*`` (:func:`remote_load`). Per-file split
+  :func:`window`, :func:`get`, :func:`put`), and ``pld.tile.*`` (:func:`remote_load`). Per-file split
   mirrors the C++ side (``src/ir/op/distributed/``).
 * :mod:`pypto.language.distributed.typing` — DSL type wrappers
   (:class:`DistributedTensor`, :class:`CommCtx`).
