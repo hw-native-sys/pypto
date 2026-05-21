@@ -745,8 +745,15 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
     codegen backend from ``platform``, which the JIT path already forwards;
     passing ``backend_type`` as well would be redundant and could conflict.
 
-    Optional fields (``output_dir``, ``block_dim``) are forwarded only when
-    set, so an unset value defers to ``ir.compile()``'s own default.
+    ``block_dim`` is intentionally omitted too: although ``ir.compile()``
+    accepts it (baking it into ``kernel_config.py``), the JIT runtime path
+    always re-supplies ``RunConfig.block_dim`` at dispatch time
+    (``execute_compiled``), which overrides the baked value. Forwarding it
+    here would be redundant and would split the cache key on a value that
+    never reaches the executed artifact.
+
+    ``output_dir`` is forwarded only when set, so an unset value defers to
+    ``ir.compile()``'s own default.
     """
     kwargs: dict[str, Any] = {
         "strategy": run_config.strategy,
@@ -757,8 +764,6 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
     }
     if run_config.save_kernels_dir is not None:
         kwargs["output_dir"] = run_config.save_kernels_dir
-    if run_config.block_dim is not None:
-        kwargs["block_dim"] = run_config.block_dim
     return kwargs
 
 
@@ -1022,9 +1027,13 @@ class JITFunction:
 
         # Build cache key. Platform and strategy are included so artifacts
         # compiled for different targets or optimization strategies never
-        # collide in the same cache.
+        # collide in the same cache. With no RunConfig the strategy is
+        # normalized to ir.compile()'s own default so the key holds the
+        # effective strategy rather than a None sentinel.
+        from pypto.ir.pass_manager import OptimizationStrategy  # noqa: PLC0415
+
         platform = run_config.platform if run_config is not None else None
-        strategy = run_config.strategy if run_config is not None else None
+        strategy = run_config.strategy if run_config is not None else OptimizationStrategy.Default
         entry_dyn = per_func_dyn[id(self._func)]
         key = make_cache_key(
             source_hash=self._get_source_hash(),
@@ -1252,6 +1261,7 @@ class JITFunction:
             dynamic_dims=per_func_dyn[id(self._func)],
             scalar_values=scalar_values,
             platform=None,  # compile_for_test is platform-agnostic (testing only)
+            strategy=OptimizationStrategy.Default,  # _compile() uses the default strategy
         )
 
         # Populate cache via ir.compile() (codegen included) as a best-effort

@@ -1281,31 +1281,34 @@ class TestCompileKwargForwarding:
     (``strategy``, ``dump_passes``, ...) was silently dropped on the JIT path.
     """
 
-    def test_run_config_compile_kwargs_maps_fields(self):
+    def test_run_config_compile_kwargs_maps_fields(self, tmp_path):
         """Compile-side RunConfig fields map onto the ir.compile() parameter names."""
+        artifacts_dir = tmp_path / "jit_artifacts"
         cfg = RunConfig(
             strategy=OptimizationStrategy.DebugTileOptimization,
             dump_passes=True,
             compile_profiling=True,
-            save_kernels_dir="/tmp/jit_artifacts",
+            save_kernels_dir=str(artifacts_dir),
             block_dim=8,
         )
         kwargs = _run_config_compile_kwargs(cfg)
         assert kwargs["strategy"] == OptimizationStrategy.DebugTileOptimization
         assert kwargs["dump_passes"] is True
         assert kwargs["profiling"] is True  # mapped from RunConfig.compile_profiling
-        assert kwargs["output_dir"] == "/tmp/jit_artifacts"  # from RunConfig.save_kernels_dir
-        assert kwargs["block_dim"] == 8
+        assert kwargs["output_dir"] == str(artifacts_dir)  # from RunConfig.save_kernels_dir
         assert "diagnostic_phase" in kwargs
         assert "disabled_diagnostics" in kwargs
         # backend_type is derived from `platform` by ir.compile(); not forwarded.
         assert "backend_type" not in kwargs
+        # block_dim is a runtime dispatch param — execute_compiled re-supplies
+        # RunConfig.block_dim and overrides the baked value, so it is not a
+        # compile input and must not be forwarded (would split the cache key).
+        assert "block_dim" not in kwargs
 
-    def test_run_config_compile_kwargs_omits_unset_optionals(self):
-        """save_kernels_dir / block_dim left unset are omitted so ir.compile() defaults apply."""
+    def test_run_config_compile_kwargs_omits_unset_output_dir(self):
+        """save_kernels_dir left unset omits output_dir so ir.compile()'s default applies."""
         kwargs = _run_config_compile_kwargs(RunConfig())
         assert "output_dir" not in kwargs
-        assert "block_dim" not in kwargs
 
     def test_compile_forwards_run_config_kwargs(self, monkeypatch):
         """_compile forwards ir_compile_kwargs verbatim to ir.compile()."""
