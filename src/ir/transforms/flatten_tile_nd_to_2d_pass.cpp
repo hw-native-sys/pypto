@@ -426,16 +426,99 @@ CallPtr ResolveBatchOperandTranspose(const ExprPtr& operand_expr, const AssignDe
   return nullptr;
 }
 
+/// Check if a `tile.reshape` call is safe to peel when feeding `tile.batch_matmul`.
+///
+/// A reshape is "safe to peel" when it only reinterprets the batch portion of
+/// the shape and leaves the trailing (M, N) matrix dims untouched:
+///   * input and output ranks are both >= 2,
+///   * the last two dims (the matmul page) are identical static values,
+///   * the product of the leading batch dims is the same on both sides.
+bool IsSafePeelableBatchMatmulReshape(const CallPtr& reshape_call) {
+  if (!reshape_call || !reshape_call->op_ || reshape_call->op_->name_ != "tile.reshape") {
+    return false;
+  }
+  if (reshape_call->args_.size() != 2) return false;
+
+  auto out_type = As<TileType>(reshape_call->GetType());
+  auto in_type = As<TileType>(reshape_call->args_[0]->GetType());
+  if (!out_type || !in_type) return false;
+  if (out_type->shape_.size() < 2 || in_type->shape_.size() < 2) return false;
+
+  // Trailing matmul page must be preserved.
+  auto in_rows = As<ConstInt>(in_type->shape_[in_type->shape_.size() - 2]);
+  auto in_cols = As<ConstInt>(in_type->shape_.back());
+  auto out_rows = As<ConstInt>(out_type->shape_[out_type->shape_.size() - 2]);
+  auto out_cols = As<ConstInt>(out_type->shape_.back());
+  if (!in_rows || !in_cols || !out_rows || !out_cols) return false;
+  if (in_rows->value_ != out_rows->value_ || in_cols->value_ != out_cols->value_) return false;
+
+  // Batch element count must be preserved (so the reshape is a pure batch reinterpretation).
+  auto static_batch_product = [](const std::vector<ExprPtr>& shape) -> std::optional<int64_t> {
+    int64_t product = 1;
+    for (size_t i = 0; i + 2 < shape.size(); ++i) {
+      auto ci = As<ConstInt>(shape[i]);
+      if (!ci) return std::nullopt;
+      product *= ci->value_;
+    }
+    return product;
+  };
+  auto in_batch = static_batch_product(in_type->shape_);
+  auto out_batch = static_batch_product(out_type->shape_);
+  if (!in_batch || !out_batch || *in_batch != *out_batch) return false;
+  return true;
+}
+
+/// Peel safe tile.reshape wrappers around a batch_matmul operand.
+///
+/// Peeling lets `LowerBatchMatmul` look through e.g. `tile.reshape([1, M, N],
+/// [1, 1, M, N])` and reuse the upstream `tile.load` operand directly. The
+/// alternative (Strategy 3 in `ExtractBatchPage`) would otherwise emit a
+/// redundant ND `tile.slice` + `tile.reshape` chain per batch element, which
+/// can lower to invalid degenerate tiles for zero-valid sub-blocks.
+///
+/// Iterates so nested reshapes (e.g. two consecutive safe reshapes) all peel.
+/// Returns the deepest safe operand, or the input unchanged when no reshape
+/// is found / the reshape fails the safety conditions.
+ExprPtr PeelSafeBatchReshape(const ExprPtr& operand_expr, const AssignDefMap& def_map) {
+  ExprPtr current = operand_expr;
+  while (true) {
+    CallPtr reshape_call;
+    if (auto call = As<Call>(current)) {
+      if (call->op_ && call->op_->name_ == "tile.reshape") {
+        reshape_call = call;
+      }
+    }
+    if (!reshape_call) {
+      if (auto var = As<Var>(current)) {
+        auto def_it = def_map.find(var.get());
+        if (def_it != def_map.end()) {
+          if (auto call = As<Call>(def_it->second->value_)) {
+            if (call->op_ && call->op_->name_ == "tile.reshape") {
+              reshape_call = call;
+            }
+          }
+        }
+      }
+    }
+    if (!reshape_call) return current;
+    if (!IsSafePeelableBatchMatmulReshape(reshape_call)) return current;
+    current = reshape_call->args_[0];
+  }
+}
+
 /// Normalize one batch_matmul operand by:
+///  - peeling off safe tile.reshape wrappers that only reinterpret batch dims
 ///  - peeling off a direct tile.transpose wrapper
 ///  - recognizing tile.load(transpose=True) as the same operand-transpose semantic
 ///  - returning a base operand plus unified transpose/type information
 BatchOperandInfo NormalizeBatchMatmulOperand(const ExprPtr& operand_expr, const std::string& operand_name,
                                              const AssignDefMap& def_map, const FlattenContext& ctx) {
   BatchOperandInfo info;
-  ExprPtr base_operand = operand_expr;
+  // Peel safe batch-only tile.reshape wrappers first so the transpose/load checks
+  // below see the underlying operand (typically a tile.load) directly.
+  ExprPtr base_operand = PeelSafeBatchReshape(operand_expr, def_map);
 
-  if (auto transpose_call = ResolveBatchOperandTranspose(operand_expr, def_map)) {
+  if (auto transpose_call = ResolveBatchOperandTranspose(base_operand, def_map)) {
     if (transpose_call->op_ && transpose_call->op_->name_ == "tile.transpose") {
       // batch_matmul lowering peels the transpose off; the tmp at args_[3] becomes dead and is DCE'd.
       CHECK(transpose_call->args_.size() == 4)
@@ -1236,6 +1319,27 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         batch_matmul_only_vars.insert(v);
       }
     }
+
+    // Walk back through safe peelable `tile.reshape` chains so the upstream
+    // dead `tile.reshape` (and any further-upstream `tile.load`) are also
+    // skipped during rewriting. Without this, the orphan reshape would emit a
+    // rank>2 tile that violates the post-pass `TileOps2D` property.
+    auto stmt_def_map = BuildAssignDefMap(stmts);
+    std::vector<const Var*> reshape_worklist(batch_matmul_only_vars.begin(), batch_matmul_only_vars.end());
+    while (!reshape_worklist.empty()) {
+      const Var* current = reshape_worklist.back();
+      reshape_worklist.pop_back();
+      auto def_it = stmt_def_map.find(current);
+      if (def_it == stmt_def_map.end()) continue;
+      auto reshape_call = As<Call>(def_it->second->value_);
+      if (!IsSafePeelableBatchMatmulReshape(reshape_call)) continue;
+      auto input_var = As<Var>(reshape_call->args_[0]);
+      if (!input_var) continue;
+      if (use_count[input_var.get()] != 1) continue;
+      if (batch_matmul_only_vars.insert(input_var.get()).second) {
+        reshape_worklist.push_back(input_var.get());
+      }
+    }
   }
 
   for (size_t stmt_index = 0; stmt_index < stmts.size(); ++stmt_index) {
@@ -1681,6 +1785,16 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     // ---- tile.transpose feeding only tile.batch_matmul[_acc]: skip and let lowering peel it ----
     if (op_name == "tile.transpose" && batch_matmul_only_vars.count(assign->var_.get()) != 0) {
+      ctx.Insert(assign->var_, assign->var_);  // identity mapping for safety
+      continue;
+    }
+
+    // ---- tile.reshape feeding only tile.batch_matmul: skip if it is a safe
+    //      batch-only reshape that `NormalizeBatchMatmulOperand` will peel. The
+    //      pre-scan above also marks the reshape's upstream chain so the dead
+    //      `tile.load` underneath is dropped by the `tile.load` skip path. ----
+    if (op_name == "tile.reshape" && batch_matmul_only_vars.count(assign->var_.get()) != 0 &&
+        IsSafePeelableBatchMatmulReshape(call)) {
       ctx.Insert(assign->var_, assign->var_);  // identity mapping for safety
       continue;
     }

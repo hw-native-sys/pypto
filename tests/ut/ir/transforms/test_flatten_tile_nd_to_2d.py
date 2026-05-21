@@ -1582,6 +1582,51 @@ class TestFlattenTileNdTo2DBatchMatmul:
             "expected_store_shapes"
         ]
 
+    def test_batch_matmul_peels_safe_batch_only_reshape(self):
+        """Regression for #1233: peel a `tile.reshape` that only reinterprets
+        batch dims so `batch_matmul` reuses the upstream `tile.load` directly.
+
+        Without peeling, the rank-4 operand fell into `ExtractBatchPage`
+        Strategy 3 (slice + reshape per batch), which produced degenerate
+        rank-N tiles that broke codegen for zero-valid sub-blocks.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 1, 128, 64], pl.FP16],
+                out_0: pl.Out[pl.Tensor[[1, 1, 16, 64], pl.FP16]],
+            ) -> pl.Tensor[[1, 1, 16, 64], pl.FP16]:
+                lhs_3d: pl.Tile[[1, 16, 128], pl.FP16] = pl.load(
+                    lhs, [0, 0, 0], [1, 16, 128], target_memory=pl.MemorySpace.Mat
+                )
+                lhs_tile: pl.Tile[[1, 1, 16, 128], pl.FP16] = pl.tile.reshape(lhs_3d, [1, 1, 16, 128])
+                rhs_tile: pl.Tile[[1, 1, 128, 64], pl.FP16] = pl.load(
+                    rhs, [0, 0, 0, 0], [1, 1, 128, 64], target_memory=pl.MemorySpace.Mat
+                )
+                out_tile: pl.Tile[[1, 1, 16, 64], pl.FP32] = pl.tile.batch_matmul(lhs_tile, rhs_tile)
+                out_0 = pl.store(out_tile, [0, 0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[1, 16, 128], pl.FP16],
+                rhs: pl.Tensor[[1, 1, 128, 64], pl.FP16],
+            ) -> pl.Tensor[[1, 1, 16, 64], pl.FP16]:
+                out_0 = pl.create_tensor([1, 1, 16, 64], dtype=pl.FP16)
+                return self.main_incore_0(lhs, rhs, out_0)
+
+        after_func = self._flattened_incore(Before)
+        op_names = [call.op.name for call in self._top_level_calls(after_func)]
+        # Peeling drops the upstream `tile.reshape` and the per-batch slice +
+        # reshape chain. The result is just the per-batch load + matmul + store
+        # that Strategy 1 produces.
+        assert op_names == ["tile.load", "tile.load", "tile.matmul", "tile.store"]
+
 
 # ----------------------------------------------------------------------------
 # tile.batch_matmul_acc lowering
