@@ -29,35 +29,27 @@ def input_rmsnorm(
     input_rms_weight: pl.Tensor,
     normed_states: pl.Out[pl.Tensor],
 ):
-    """Two-pass RMSNorm: variance reduction, then normalisation × gamma.
-
-    NOTE on naming: locals in the two ``pl.pipeline`` loops are given
-    distinct names (``_a``/``_b``) to work around a JIT specializer
-    limitation — its alpha-renamer treats reuse of the same local in two
-    sibling loops as a carry-over rebind and emits an out-of-scope read.
-    The hand-written ``@pl.program`` reference can reuse names because the
-    parser handles loop scoping directly.
-    """
+    """Two-pass RMSNorm: variance reduction, then normalisation × gamma."""
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="rmsnorm"):
         partial_sq = pl.full([1, BATCH], dtype=pl.FP32, value=0.0)
 
-        for kb_a in pl.pipeline(HIDDEN // RMSNORM_K_CHUNK, stage=4):
-            k0_a = kb_a * RMSNORM_K_CHUNK
-            x_chunk_a = pl.cast(hidden_states[:, k0_a : k0_a + RMSNORM_K_CHUNK], target_type=pl.FP32)
+        for kb in pl.pipeline(HIDDEN // RMSNORM_K_CHUNK, stage=4):
+            k0 = kb * RMSNORM_K_CHUNK
+            x_chunk = pl.cast(hidden_states[:, k0 : k0 + RMSNORM_K_CHUNK], target_type=pl.FP32)
             partial_sq = pl.add(
                 partial_sq,
-                pl.reshape(pl.row_sum(pl.mul(x_chunk_a, x_chunk_a)), [1, BATCH]),
+                pl.reshape(pl.row_sum(pl.mul(x_chunk, x_chunk)), [1, BATCH]),
             )
 
         variance = pl.reshape(pl.add(pl.mul(partial_sq, HIDDEN_INV), EPS), [BATCH, 1])
         inv_rms = pl.recip(pl.sqrt(variance))
 
-        for kb_b in pl.pipeline(HIDDEN // RMSNORM_K_CHUNK, stage=4):
-            k0_b = kb_b * RMSNORM_K_CHUNK
-            x_chunk_b = pl.cast(hidden_states[:, k0_b : k0_b + RMSNORM_K_CHUNK], target_type=pl.FP32)
-            gamma = input_rms_weight[:, k0_b : k0_b + RMSNORM_K_CHUNK]
-            normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk_b, inv_rms), gamma)
-            normed_states = pl.assemble(normed_states, pl.cast(normed, target_type=pl.BF16), [0, k0_b])
+        for kb in pl.pipeline(HIDDEN // RMSNORM_K_CHUNK, stage=4):
+            k0 = kb * RMSNORM_K_CHUNK
+            x_chunk = pl.cast(hidden_states[:, k0 : k0 + RMSNORM_K_CHUNK], target_type=pl.FP32)
+            gamma = input_rms_weight[:, k0 : k0 + RMSNORM_K_CHUNK]
+            normed = pl.col_expand_mul(pl.row_expand_mul(x_chunk, inv_rms), gamma)
+            normed_states = pl.assemble(normed_states, pl.cast(normed, target_type=pl.BF16), [0, k0])
     return normed_states
 
 
@@ -67,31 +59,28 @@ def post_rmsnorm(
     post_rms_weight: pl.Tensor,
     post_norm_tile: pl.Out[pl.Tensor],
 ):
-    """Post-attention RMSNorm. Different chunk size from input_rmsnorm.
-
-    See ``input_rmsnorm`` for the per-loop-naming workaround rationale.
-    """
+    """Post-attention RMSNorm. Different chunk size from input_rmsnorm."""
     # ``resid`` is the BF16 residual stream — promote each chunk to FP32 before
     # the squared-sum + normalize passes (mirrors ``input_rmsnorm``) so the
     # accumulation doesn't lose precision or overflow.
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="post_rmsnorm"):
         sq_sum = pl.full([1, BATCH], dtype=pl.FP32, value=0.0)
 
-        for kb_a in pl.pipeline(HIDDEN // K_CHUNK, stage=2):
-            k0_a = kb_a * K_CHUNK
-            resid_chunk_a = pl.cast(resid[:, k0_a : k0_a + K_CHUNK], target_type=pl.FP32)
+        for kb in pl.pipeline(HIDDEN // K_CHUNK, stage=2):
+            k0 = kb * K_CHUNK
+            resid_chunk = pl.cast(resid[:, k0 : k0 + K_CHUNK], target_type=pl.FP32)
             sq_sum = pl.add(
                 sq_sum,
-                pl.reshape(pl.row_sum(pl.mul(resid_chunk_a, resid_chunk_a)), [1, BATCH]),
+                pl.reshape(pl.row_sum(pl.mul(resid_chunk, resid_chunk)), [1, BATCH]),
             )
 
         inv_rms = pl.recip(pl.sqrt(pl.add(pl.mul(sq_sum, HIDDEN_INV), EPS)))
         inv_rms_col = pl.reshape(inv_rms, [BATCH, 1])
 
-        for kb_b in pl.pipeline(HIDDEN // K_CHUNK, stage=2):
-            k0_b = kb_b * K_CHUNK
-            resid_chunk_b = pl.cast(resid[:, k0_b : k0_b + K_CHUNK], target_type=pl.FP32)
-            gamma = post_rms_weight[:, k0_b : k0_b + K_CHUNK]
-            normed = pl.col_expand_mul(pl.row_expand_mul(resid_chunk_b, inv_rms_col), gamma)
-            post_norm_tile = pl.assemble(post_norm_tile, pl.cast(normed, target_type=pl.BF16), [0, k0_b])
+        for kb in pl.pipeline(HIDDEN // K_CHUNK, stage=2):
+            k0 = kb * K_CHUNK
+            resid_chunk = pl.cast(resid[:, k0 : k0 + K_CHUNK], target_type=pl.FP32)
+            gamma = post_rms_weight[:, k0 : k0 + K_CHUNK]
+            normed = pl.col_expand_mul(pl.row_expand_mul(resid_chunk, inv_rms_col), gamma)
+            post_norm_tile = pl.assemble(post_norm_tile, pl.cast(normed, target_type=pl.BF16), [0, k0])
     return post_norm_tile

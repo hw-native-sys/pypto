@@ -99,5 +99,6 @@ If you cannot produce a concrete example, treat that as a signal the issue may n
 
 - `KNOWN_ISSUES.md` is in `.gitignore` — local-only tracking file
 - Each developer's file is independent; it does not get shared via git
+- **Never reference `KNOWN_ISSUES.md` or its entries in shared artifacts** — commit messages, PR descriptions, and GitHub issues must not name the file or quote its entries. It is local-only and per-developer, so external readers cannot see it. Describe the actual change, not the local tracking entry it resolves.
 - **Always write to the main repo root**, never to a worktree's directory
 - Use `/create-issue` to promote an entry to a proper GitHub issue
