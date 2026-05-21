@@ -163,7 +163,7 @@ std::vector<ir::FunctionPtr> DistributedCodegen::SortFunctionsByRoleAndLevel() c
 void DistributedCodegen::EmitImports() {
   emitter_.EmitLine("import torch");
   emitter_.EmitLine("from simpler.task_interface import TaskArgs, TensorArgType");
-  emitter_.EmitLine("from simpler_setup.torch_interop import make_tensor_arg");
+  emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg");
 }
 
 void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {

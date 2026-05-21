@@ -25,6 +25,8 @@ import torch
 
 from pypto.ir.comm_manifest import COMM_MANIFEST_FILENAME, COMM_MANIFEST_VERSION
 
+from .device_tensor import DeviceTensor
+
 if TYPE_CHECKING:
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
@@ -207,14 +209,15 @@ def _build_chip_bootstrap_configs_from_manifest(
 
 def execute_distributed(  # noqa: PLR0912
     compiled: DistributedCompiledProgram,
-    coerced_args: list[torch.Tensor],
+    coerced_args: list[torch.Tensor | DeviceTensor],
     config: Any = None,
 ) -> None:
     """Execute a distributed compiled program via simpler Worker(level=3).
 
     Args:
         compiled: The DistributedCompiledProgram instance.
-        coerced_args: List of coerced torch.Tensor arguments.
+        coerced_args: Coerced arguments — host ``torch.Tensor`` or
+            worker-resident :class:`~pypto.runtime.DeviceTensor`.
         config: Optional run configuration (unused for now).
     """
     from simpler.task_interface import (  # noqa: PLC0415  # pyright: ignore[reportMissingImports]
@@ -270,8 +273,14 @@ def execute_distributed(  # noqa: PLR0912
 
     # 3. Build tensor mapping from parameter names
     param_infos, _, _ = compiled._get_metadata()
-    tensors: dict[str, torch.Tensor] = {}
+    tensors: dict[str, torch.Tensor | DeviceTensor] = {}
     for info, arg in zip(param_infos, coerced_args, strict=True):
+        if isinstance(arg, DeviceTensor):
+            # Worker-resident buffer: already on device, no pre-fork shared
+            # memory needed. The generated host_orch converts it to a
+            # ContinuousTensor(child_memory=True) via make_tensor_arg.
+            tensors[info.name] = arg
+            continue
         if not arg.is_shared():
             arg.share_memory_()
         tensors[info.name] = arg

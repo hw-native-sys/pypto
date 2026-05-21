@@ -242,6 +242,18 @@ with Worker(config=RunConfig(platform="a2a3sim")) as w:
   Worker 生命周期结束。
 - 只有分配它的那个 Worker 可以使用该 buffer。
 
+### 分布式（L3+）程序
+
+`ir.compile` 对 L3+ 分布式程序返回的 `DistributedCompiledProgram` 与 `CompiledProgram`
+一样接受 `DeviceTensor` 入参：用 worker 常驻 buffer 替代 `torch.Tensor`，runtime 即对该
+参数跳过 H2D/D2H。这是在 generate 循环的多次 dispatch 之间保持大块静态权重常驻的推荐做法。
+
+```python
+compiled = ir.compile(MyDistributedProgram)   # 返回 DistributedCompiledProgram
+weight = DeviceTensor(dev_ptr, (1024, 4096), torch.float16)   # 调用方自管 buffer
+compiled(x, weight, out)                       # weight：无 H2D/D2H 拷贝
+```
+
 ## 下一步
 
 - **[语言指南](01-language_guide.md)** —— 类型、操作、控制流、内存和编译的完整参考

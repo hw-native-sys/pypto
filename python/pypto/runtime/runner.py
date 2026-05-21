@@ -697,10 +697,7 @@ def execute_compiled(  # noqa: PLR0913
         make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
         scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
     )
-    from .task_interface import (  # noqa: PLC0415
-        ContinuousTensor,  # pyright: ignore[reportAttributeAccessIssue]
-        torch_dtype_to_datatype,  # pyright: ignore[reportAttributeAccessIssue]
-    )
+    from .task_interface import device_tensor_to_continuous  # noqa: PLC0415
 
     chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform, pto_isa_commit)
 
@@ -736,17 +733,9 @@ def execute_compiled(  # noqa: PLR0913
             orch_args.add_tensor(make_tensor_arg(arg))
         elif isinstance(arg, DeviceTensor):
             try:
-                dt_enum = torch_dtype_to_datatype(arg.dtype)
-            except KeyError as e:
-                raise ValueError(f"Unsupported DeviceTensor dtype at position {i}: {arg.dtype}") from e
-            orch_args.add_tensor(
-                ContinuousTensor.make(
-                    data=arg.data_ptr,
-                    shapes=arg.shape,
-                    dtype=dt_enum,
-                    child_memory=True,
-                )
-            )
+                orch_args.add_tensor(device_tensor_to_continuous(arg))
+            except ValueError as e:
+                raise ValueError(f"At position {i}: {e}") from e
         elif isinstance(arg, _SimpleCData):
             continue  # handled in pass 2
         else:

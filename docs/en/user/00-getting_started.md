@@ -246,6 +246,20 @@ with Worker(config=RunConfig(platform="a2a3sim")) as w:
   otherwise the memory leaks for the lifetime of the Worker.
 - Only the Worker that allocated the buffer can use it.
 
+### Distributed (L3+) programs
+
+L3+ distributed programs returned by `ir.compile` (a `DistributedCompiledProgram`)
+accept `DeviceTensor` arguments the same way as `CompiledProgram`: pass a
+worker-resident buffer in place of a `torch.Tensor` and the runtime skips H2D/D2H
+for that argument. This is the recommended way to keep large static weights
+resident across the many dispatches of a generate loop.
+
+```python
+compiled = ir.compile(MyDistributedProgram)   # returns DistributedCompiledProgram
+weight = DeviceTensor(dev_ptr, (1024, 4096), torch.float16)   # caller-managed buffer
+compiled(x, weight, out)                       # weight: no H2D/D2H copy
+```
+
 ## What's Next
 
 - **[Language Guide](01-language_guide.md)** — complete reference for types, operations, control flow, memory, and compilation

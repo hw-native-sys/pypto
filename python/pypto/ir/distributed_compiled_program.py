@@ -25,8 +25,16 @@ import torch
 
 from pypto.backend import BackendType
 from pypto.pypto_core.ir import Program, Role, level_to_linqu_level
+from pypto.runtime.device_tensor import DeviceTensor
 
-from .compiled_program import CallArg, _default_platform, _extract_param_infos, _ParamInfo, _to_torch_dtype
+from .compiled_program import (
+    CallArg,
+    _default_platform,
+    _extract_param_infos,
+    _ParamInfo,
+    _to_torch_dtype,
+    _validate_device_tensor,
+)
 
 
 def _extract_param_infos_from_func(func):
@@ -182,7 +190,7 @@ class DistributedCompiledProgram:
         self,
         *args: CallArg,
         config: Any = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
+    ) -> torch.Tensor | DeviceTensor | tuple[torch.Tensor | DeviceTensor, ...] | None:
         """Execute the distributed program via simpler Worker(level=3)."""
         from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
 
@@ -205,12 +213,19 @@ class DistributedCompiledProgram:
                 f"Parameters: {[p.name for p in param_infos]}"
             )
 
-        # Validate and coerce args
-        coerced: list[torch.Tensor] = []
+        # Validate and coerce args. Tensor params accept a host ``torch.Tensor``
+        # or a worker-resident ``DeviceTensor`` (skips H2D/D2H), matching the L2
+        # ``CompiledProgram`` calling convention.
+        coerced: list[torch.Tensor | DeviceTensor] = []
         for info, arg in zip(param_infos, all_args, strict=True):
+            if isinstance(arg, DeviceTensor):
+                _validate_device_tensor(arg, info)
+                coerced.append(arg)
+                continue
             if not isinstance(arg, torch.Tensor):
                 raise TypeError(
-                    f"Distributed programs only support tensor parameters. "
+                    f"Distributed programs only support tensor parameters "
+                    f"(torch.Tensor host or DeviceTensor worker-resident). "
                     f"Parameter {info.name!r} got {type(arg).__name__}"
                 )
             coerced.append(arg)
