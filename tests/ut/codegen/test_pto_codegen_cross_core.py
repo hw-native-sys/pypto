@@ -592,9 +592,7 @@ class TestCrossCoreTpushTpopCodegen:
             ("tile.tpush_to_aic", ir.FunctionType.AIV, ir.MemorySpace.Vec, 2),
         ],
     )
-    def test_split_tpush_uses_full_box_transport_dims(
-        self, tpush_op_name, func_type, memory_space, split
-    ):
+    def test_split_tpush_uses_full_box_transport_dims(self, tpush_op_name, func_type, memory_space, split):
         """Split tpush transports the full producer box on BOTH axes.
 
         Narrowing the split axis to the user's logical valid_shape on the
