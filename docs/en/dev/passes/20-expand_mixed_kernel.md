@@ -57,9 +57,10 @@ A `tile.move` is not the only way data crosses the CV boundary. When one lane wr
 | Producer (writes GM) | AIC side | AIV side |
 | -------------------- | -------- | -------- |
 | Cube store → Vector load | `tile.store ...; tpush_to_aiv(stored_tile)` | `tok = tpop_from_aic(); tfree_to_aic(tok); tile.load ...` |
-| Vector store → Cube load | `tok = tpop_from_aiv(); tfree_to_aiv(tok); tile.load ...` | `tile.store ...; tpush_to_aic(stored_tile)` |
 
 To stay deadlock-free, a handshake is emitted only when (1) the GM origin tensor has exactly one producer-lane store, (2) the opposite-lane load lives in the **same structural body** (same loop/branch, so the `tpush`/`tpop` execute the same number of times), and (3) the store precedes the load. Pairs split across different loops or branches are left untouched.
+
+Only the **Cube→Vector** direction (cube `tile.store` → vector `tile.load`) is fenced. The AIC `tpush` sends the stored tile raw, exactly as the normal boundary C2V push does on both backends, and the AIV `tpop` lands in `Vec`. The reverse Vector→Cube direction would require the V→C fractal-layout adaptation that the `tile.move` boundary path applies before `tpush_to_aic`; emitting a raw-tile sync there would violate the cross-core transport contract, so V2C GM exchanges are left unfenced.
 
 When split kernels contain cross-core `tpush`/`tpop`, the pass also prepends the required frontend pipe setup automatically:
 

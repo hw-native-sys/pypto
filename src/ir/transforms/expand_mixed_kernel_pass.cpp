@@ -447,11 +447,22 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     if (origin_stores.size() != 1) continue;  // require a unique producer store
     const AccessRec& store = *origin_stores.front();
 
+    // Restrict to the cube-store -> vector-load (C2V) direction. The producer
+    // store is on AIC, the consumer load on AIV: the AIC tpush sends the source
+    // tile raw, exactly as the normal boundary C2V push does on both backends
+    // (no fractal adaptation), and the AIV tpop lands in Vec where the transfer
+    // view is "preserve original". The reverse V2C direction would need the V->C
+    // fractal adaptation (tile.move to NZ/ZN before tpush_to_aic, fractal-typed
+    // tpop_from_aiv) that the boundary path applies; emitting a raw-tile sync
+    // there would violate the cross-core transport contract, so we leave V2C
+    // GM exchanges unfenced rather than emit unadapted transport.
+    if (store.side != CoreSide::AIC) continue;
+
     const AccessRec* chosen = nullptr;
     auto loads_it = loads_by_origin.find(origin);
     if (loads_it == loads_by_origin.end()) continue;
     for (const AccessRec* load : loads_it->second) {
-      if (load->side == store.side) continue;        // same lane: no fence needed
+      if (load->side != CoreSide::AIV) continue;     // C2V only: consumer on the vector lane
       if (load->body_id != store.body_id) continue;  // different body: skip (count match unproven)
       if (load->order <= store.order) continue;      // load must follow the store
       if (chosen == nullptr || load->order < chosen->order) chosen = load;
