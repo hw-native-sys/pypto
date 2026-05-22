@@ -1298,7 +1298,10 @@ class TestAsLayoutFolding:
         class Expected:
             @pl.function
             def main(self, x: pl.Tensor[[8, 4], pl.FP32]) -> pl.Tensor[[8, 4], pl.FP32]:
-                return x
+                # 21f11ecb dropped the alias-fold: the as_layout Call still folds
+                # to ``x``, but the ``same = x`` residual is no longer removed.
+                same: pl.Tensor[[8, 4], pl.FP32, pl.TensorView(stride=[4, 1], layout=pl.TensorLayout.ND)] = x
+                return same
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
