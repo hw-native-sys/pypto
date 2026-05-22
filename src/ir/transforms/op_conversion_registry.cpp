@@ -27,6 +27,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -328,17 +329,31 @@ void OpConversionRegistry::RegisterMemoryOps() {
         auto target_tensor_type = As<TensorType>(target->GetType());
         auto target_tile_type = As<TileType>(target->GetType());
 
+        // Optional atomic-add combine mode. Valid only on the GM-store path
+        // (tile source + tensor target) — a tile-to-tile assemble has no
+        // global-memory destination to atomically accumulate into.
+        int atomic = GetKwargOr<int>(kwargs, "atomic", static_cast<int>(AtomicType::kNone));
+        const bool atomic_add = atomic == static_cast<int>(AtomicType::kAdd);
+        constexpr const char* kAtomicTileToTileMsg =
+            "tensor.assemble with atomic=AtomicType.Add requires a global-memory destination "
+            "(a function output tensor), but this assemble targets an on-chip tile";
+
         if (source_tile_type && target_tensor_type) {
-          auto store_call = op_reg.Create("tile.store", {source, offset, target}, span);
-          return ConversionResult{store_call};
+          if (atomic_add) {
+            std::vector<std::pair<std::string, std::any>> store_kw = {{"atomic", atomic}};
+            return ConversionResult{op_reg.Create("tile.store", {source, offset, target}, store_kw, span)};
+          }
+          return ConversionResult{op_reg.Create("tile.store", {source, offset, target}, span)};
         }
 
         if (source_tile_type && target_tile_type) {
+          CHECK(!atomic_add) << kAtomicTileToTileMsg;
           auto assemble_call = op_reg.Create("tile.assemble", {target, source, offset}, span);
           return ConversionResult{assemble_call};
         }
 
         if (target_tile_type && !source_tile_type) {
+          CHECK(!atomic_add) << kAtomicTileToTileMsg;
           auto source_tensor_type = As<TensorType>(source->GetType());
           CHECK(source_tensor_type) << "tensor.assemble: source must be TensorType or TileType, but got "
                                     << source->GetType()->TypeName();

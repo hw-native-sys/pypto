@@ -399,3 +399,64 @@ class TestFuseCreateAssembleToSlice:
         after = _run_prereqs_and_fuse(Before)
         expected = _run_prereqs_only(Expected)
         ir.assert_structural_equal(after, expected)
+
+    def test_atomic_assemble_not_fused(self):
+        """tensor.assemble with atomic=Add → not fused; the atomic assemble must survive.
+
+        Fusing an atomic-add assemble into a tensor.slice would silently drop the
+        atomic combine mode, degrading split-K accumulation to a plain overwrite.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                for r in pl.range(4):
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    row = self.fill_row(x, r, row)
+                    out = pl.assemble(out, row, [r, 0], atomic=pl.AtomicType.Add)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                for r in pl.range(4):
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    row = self.fill_row(x, r, row)
+                    out = pl.assemble(out, row, [r, 0], atomic=pl.AtomicType.Add)
+                return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Expected)
+        ir.assert_structural_equal(after, expected)

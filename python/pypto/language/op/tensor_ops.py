@@ -81,7 +81,7 @@ from pypto.ir.op import tensor_ops as _ir_ops
 from pypto.ir.utils import _normalize_expr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, PtrType, TensorLayout
+from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, PtrType, TensorLayout
 
 from ..typing import IntLike, Scalar, Tensor
 
@@ -965,20 +965,37 @@ def cast(
     return Tensor(expr=call_expr)
 
 
-def assemble(target: Tensor, source: Tensor, offset: Sequence[IntLike]) -> Tensor:
+def assemble(
+    target: Tensor,
+    source: Tensor,
+    offset: Sequence[IntLike],
+    *,
+    atomic: AtomicType = AtomicType.None_,
+) -> Tensor:
     """Write/update tensor values at specified offset.
 
     Args:
         target: Target tensor to update
         source: Source tensor to write
         offset: Offset dimensions for where to write
+        atomic: Combine mode for the write. ``AtomicType.None_`` (default)
+            overwrites; ``AtomicType.Add`` atomically adds ``source`` into the
+            target at ``offset`` — used for split-K, where several cores
+            accumulate partial products into one output. Only valid when the
+            target lowers to a global-memory store (a function output tensor);
+            an atomic assemble into an on-chip tile is rejected.
+
+            NOTE: atomic-add accumulation order across cores is not fixed, so
+            floating-point results are non-deterministic. The target must be
+            zero-initialised before the kernel runs. Supported dtypes:
+            fp32 / fp16 / int32 / int16 / int8 (not bf16).
 
     Returns:
         Tensor wrapping the assemble operation
     """
     target_expr = target.unwrap()
     source_expr = source.unwrap()
-    call_expr = _ir_ops.assemble(target_expr, source_expr, _normalize_intlike(offset))
+    call_expr = _ir_ops.assemble(target_expr, source_expr, _normalize_intlike(offset), atomic=int(atomic))
     return Tensor(expr=call_expr)
 
 

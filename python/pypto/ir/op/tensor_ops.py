@@ -1003,7 +1003,12 @@ def cast(
 
 
 def assemble(
-    target: Expr, source: Expr, offset: list[int | Expr] | _ir_core.MakeTuple, span: Span | None = None
+    target: Expr,
+    source: Expr,
+    offset: list[int | Expr] | _ir_core.MakeTuple,
+    span: Span | None = None,
+    *,
+    atomic: int = 0,
 ) -> Call:
     """Write/update tensor values at specified offset.
 
@@ -1012,6 +1017,9 @@ def assemble(
         source: Source tensor to write
         offset: Offset dimensions for where to write, or a MakeTuple
         span: Optional source span for debugging (auto-captured if not provided)
+        atomic: ``AtomicType`` underlying int — 0 (``kNone``, plain overwrite) or
+            1 (``kAdd``, atomic-add into the global-memory target). The kwarg is
+            omitted entirely when 0 so non-atomic assembles are unchanged.
 
     Returns:
         Call expression for tensor assembly
@@ -1021,7 +1029,8 @@ def assemble(
     offset_tuple = _to_make_tuple(offset, actual_span)
 
     args = [target, source, offset_tuple]
-    return _ir_core.create_op_call("tensor.assemble", args, {}, actual_span)
+    kwargs: dict[str, Any] = {"atomic": atomic} if atomic else {}
+    return _ir_core.create_op_call("tensor.assemble", args, kwargs, actual_span)
 
 
 def concat(

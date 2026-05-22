@@ -29,6 +29,7 @@
 #include "pypto/core/any_cast.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
@@ -316,6 +317,26 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
         << scalar_type->dtype_.ToString();
   }
 
+  // Optional atomic-add combine mode (split-K accumulation into a GM tensor).
+  // Absent = AtomicType::kNone (plain overwrite).
+  int atomic = static_cast<int>(AtomicType::kNone);
+  for (const auto& [key, value] : kwargs) {
+    if (key == "atomic") {
+      atomic = AnyCast<int>(value, "kwarg key: atomic");
+      break;
+    }
+  }
+  CHECK(atomic == static_cast<int>(AtomicType::kNone) || atomic == static_cast<int>(AtomicType::kAdd))
+      << "tensor.assemble atomic kwarg must be AtomicType.None_ or AtomicType.Add, but got int " << atomic;
+  if (atomic == static_cast<int>(AtomicType::kAdd)) {
+    const DataType& dt = target_type->dtype_;
+    CHECK(dt == DataType::FP32 || dt == DataType::FP16 || dt == DataType::INT32 || dt == DataType::INT16 ||
+          dt == DataType::INT8)
+        << "tensor.assemble with atomic=AtomicType.Add requires an fp32/fp16/int32/int16/int8 target "
+           "(hardware atomic-add dtypes), but got "
+        << dt.ToString();
+  }
+
   // Assemble returns a new TensorType with the same shape and dtype as target
   // We need to create a new type object to avoid sharing type instances
   return std::make_shared<TensorType>(target_type->shape_, target_type->dtype_);
@@ -419,6 +440,7 @@ REGISTER_OP("tensor.assemble")
     .add_argument("target", "Target tensor (TensorType)")
     .add_argument("source", "Source tensor to write (TensorType)")
     .add_argument("offset", "Offset dimensions (TupleType of ScalarType(INT64))")
+    .set_attr<int>("atomic")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorAssembleType(args, kwargs);

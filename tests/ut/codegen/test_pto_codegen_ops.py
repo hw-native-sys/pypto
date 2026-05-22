@@ -1934,5 +1934,87 @@ class TestTileStoreAtomicCodegen:
                     pl.store(t, [0, 0], out, atomic=pl.AtomicType.Add)
 
 
+class TestTensorAssembleAtomicCodegen:
+    """Tests for tensor.assemble atomic-add — lowers to tile.store with atomicType."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
+        single = ir.Program([target], target.name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_atomic_add_assemble_emits_atomic_type(self):
+        """pl.assemble(..., atomic=AtomicType.Add) into a GM output lowers to an atomic-add store."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+                y = pl.add(x, x)
+                out = pl.assemble(out, y, [0, 0], atomic=pl.AtomicType.Add)
+                return out
+
+        mlir = self._generate_mlir(Prog)
+        tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
+        assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
+        assert all("{atomicType = #pto<atomic_type atomic_add>}" in line for line in tstore_lines), (
+            f"expected atomic_add attribute on the lowered pto.tstore, got:\n{tstore_lines}"
+        )
+
+    def test_plain_assemble_omits_atomic_type(self):
+        """A plain pl.assemble lowers to a plain store — no atomicType attribute."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+                y = pl.add(x, x)
+                out = pl.assemble(out, y, [0, 0])
+                return out
+
+        mlir = self._generate_mlir(Prog)
+        tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
+        assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
+        assert all("atomicType" not in line for line in tstore_lines), (
+            f"plain assemble must not emit atomicType, got:\n{tstore_lines}"
+        )
+
+    def test_atomic_add_bf16_target_rejected(self):
+        """atomic=Add with a bf16 target is rejected — bf16 is not a hardware atomic dtype."""
+        with pytest.raises(Exception, match="atomic.*fp32/fp16/int32/int16/int8"):
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, x: pl.Tensor[[16, 16], pl.BF16], out: pl.Tensor[[16, 16], pl.BF16]):
+                    y = pl.add(x, x)
+                    out = pl.assemble(out, y, [0, 0], atomic=pl.AtomicType.Add)
+                    return out
+
+    def test_atomic_add_tile_target_rejected(self):
+        """atomic=Add into an on-chip tile is rejected — no global-memory destination."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, src_in: pl.Tensor[[16, 64], pl.FP32], out: pl.Tensor[[16, 128], pl.FP32]):
+                target = pl.create_tensor([16, 128], dtype=pl.FP32)
+                source = pl.add(src_in, src_in)
+                target = pl.assemble(target, source, [0, 64], atomic=pl.AtomicType.Add)
+                out = pl.assemble(out, target, [0, 0])
+                return out
+
+        with pytest.raises(Exception, match="global-memory destination"):
+            self._generate_mlir(Prog)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

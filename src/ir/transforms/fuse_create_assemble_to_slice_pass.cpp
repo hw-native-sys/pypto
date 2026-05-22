@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -189,7 +190,16 @@ class AssemblePatternCollector : public IRVisitor {
         const Var* source_root = ResolveExpr(call->args_[1]);
         auto offset_tuple = ResolveTupleExpr(call->args_[2]);
         if (source_root && offset_tuple && create_vars.count(source_root) > 0) {
-          RecordAssembleInfo(source_root, call->args_[0], offset_tuple);
+          // An atomic-add assemble must survive lowering: fusing it into a
+          // tensor.slice (RewriteAssembleToAlias) would silently drop the
+          // atomic combine mode and degrade split-K accumulation to a plain
+          // overwrite. Mark the root non-fusible so it is never eliminated.
+          if (call->GetKwarg<int>("atomic", 0) != static_cast<int>(AtomicType::kNone)) {
+            fusible_roots.erase(source_root);
+            non_fusible_roots.insert(source_root);
+          } else {
+            RecordAssembleInfo(source_root, call->args_[0], offset_tuple);
+          }
         }
       }
     } else if (auto src_var = AsVarLike(assign->value_)) {
