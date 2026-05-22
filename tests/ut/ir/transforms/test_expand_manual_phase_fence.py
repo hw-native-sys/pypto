@@ -66,11 +66,25 @@ def _program_with_loop(loop_body: ir.Stmt, *, kind: ir.ForKind = ir.ForKind.Para
     return ir.Program([orch, kernel], "test_expand_manual_phase_fence", S)
 
 
-def _main_loop(program: ir.Program) -> ir.ForStmt:
+def _manual_scope_body(program: ir.Program) -> ir.Stmt:
     main = program.get_function("main")
     assert main is not None
     scope = cast(ir.RuntimeScopeStmt, main.body)
-    return cast(ir.ForStmt, scope.body)
+    return scope.body
+
+
+def _main_loop(program: ir.Program) -> ir.ForStmt:
+    body = _manual_scope_body(program)
+    if isinstance(body, ir.SeqStmts):
+        return cast(ir.ForStmt, body.stmts[-1])
+    return cast(ir.ForStmt, body)
+
+
+def _manual_scope_stmts(program: ir.Program) -> list[ir.Stmt]:
+    body = _manual_scope_body(program)
+    if isinstance(body, ir.SeqStmts):
+        return list(body.stmts)
+    return [body]
 
 
 def _loop_body_stmts(program: ir.Program) -> list[ir.Stmt]:
@@ -98,15 +112,15 @@ def test_profitable_parallel_array_dep_inserts_dummy_and_rewrites_consumers():
     )
 
     after = _run(before)
-    stmts = _loop_body_stmts(after)
+    scope_stmts = _manual_scope_stmts(after)
 
-    barrier = cast(ir.AssignStmt, stmts[0])
+    barrier = cast(ir.AssignStmt, scope_stmts[0])
     barrier_call = cast(ir.Call, barrier.value)
     assert barrier_call.op.name == "system.task_dummy"
     assert barrier_call.attrs["dummy_task"] is True
     assert barrier_call.attrs["manual_dep_edges"] == [tids]
 
-    for stmt in stmts[1:]:
+    for stmt in _loop_body_stmts(after):
         call = cast(ir.Call, cast(ir.AssignStmt, stmt).value)
         assert call.attrs["manual_dep_edges"] == [barrier.var]
 

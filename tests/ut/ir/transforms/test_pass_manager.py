@@ -55,6 +55,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "FoldNoOpReshape",
     "FuseCreateAssembleToSlice",
     "DeriveCallDirections",
+    "ExpandManualPhaseFence",
     "CollectCommGroups",
     "Simplify",
 ]
@@ -87,6 +88,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "FoldNoOpReshape",
     "FuseCreateAssembleToSlice",
     "DeriveCallDirections",
+    "ExpandManualPhaseFence",
     "CollectCommGroups",
     "Simplify",
 ]
