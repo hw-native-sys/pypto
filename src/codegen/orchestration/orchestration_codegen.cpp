@@ -1979,12 +1979,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Internal error: function '" << callee_name << "' not found after validation.";
 
     if (callee_func->func_type_ == FunctionType::Spmd) {
-      GenerateSpmdCallCode(call, callee_func);
+      GenerateSpmdCallCode(call, callee_func, capture_auto_dep);
       return;
     }
 
     if (callee_func->func_type_ == FunctionType::Group) {
-      GenerateGroupCallCode(call, callee_func, callee_func);
+      GenerateGroupCallCode(call, callee_func, callee_func, capture_auto_dep);
       return;
     }
 
@@ -2017,13 +2017,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call) || capture_auto_dep);
   }
 
-  void GenerateSpmdCallCode(const CallPtr& call, const FunctionPtr& spmd_func) {
+  void GenerateSpmdCallCode(const CallPtr& call, const FunctionPtr& spmd_func,
+                            bool capture_auto_dep = false) {
     auto info = FindWrapperInnerCall(spmd_func);
     INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
         << "Internal error: no inner call found in Spmd function '" << spmd_func->name_ << "'";
 
     if (info.inner_callee->func_type_ == FunctionType::Group) {
-      GenerateGroupCallCode(call, info.inner_callee, spmd_func);
+      GenerateGroupCallCode(call, info.inner_callee, spmd_func, capture_auto_dep);
       return;
     }
 
@@ -2044,14 +2045,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     EmitLaunchSpec(ind, task_var, spmd_func);
     EmitManualDeps(call, task_var);
+    EmitAutoDeps(call, task_var);
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call));
+    EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call) || capture_auto_dep);
   }
 
   void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func,
-                             const FunctionPtr& launch_func) {
+                             const FunctionPtr& launch_func, bool capture_auto_dep = false) {
     std::string group_name = group_func->name_;
 
     auto info = FindGroupCallees(group_func);
@@ -2084,10 +2086,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
       EmitLaunchSpec(ind, task_var, launch_func);
       EmitManualDeps(call, task_var);
+      EmitAutoDeps(call, task_var);
 
       std::string submit_expr =
           CoreTypeToSubmitPrefix(CoreType::VECTOR) + std::to_string(aiv_id) + ", " + task_var + ")";
-      EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call));
+      EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call) || capture_auto_dep);
       return;
     }
 
@@ -2131,9 +2134,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     EmitLaunchSpec(ind, task_var, launch_func);
     EmitManualDeps(call, task_var);
+    EmitAutoDeps(call, task_var);
 
     std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
-    EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call));
+    EmitTaskSubmitAndBind(submit_expr, IsSubmitCall(call) || capture_auto_dep);
   }
 
   // --- Alias generation helpers ---

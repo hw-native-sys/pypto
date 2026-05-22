@@ -2342,6 +2342,46 @@ class TestTensorReadWriteOffsetCodegen:
         assert f"params_t1_deps[params_t1_deps_count++] = {dep_array}[7];" in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
+    def test_windowed_group_writer_parent_reader_captures_task_outputs(self):
+        """Auto-dep capture through a mixed Group must declare task outputs."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ROWS, COLS, TILE = 16, 64, 16
+
+        @pl.program
+        class WindowedGroupWriteParentReadProgram:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
+                    tmp = pl.create_tensor([ROWS, COLS], dtype=pl.FP32)
+                    for c in pl.parallel(0, COLS, TILE):
+                        tile = pl.slice(x, [ROWS, TILE], [0, c])
+                        tmp = pl.assemble(tmp, tile, [0, c])
+                    for r in pl.range(ROWS):
+                        row = pl.slice(tmp, [1, COLS], [r, 0])
+                        out = pl.assemble(out, row, [r, 0])
+                return out
+
+        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+        instruments: list[_core_passes.PassInstrument] = [
+            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with _core_passes.PassContext(instruments):
+            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+                WindowedGroupWriteParentReadProgram
+            )
+            code = _generate_orch_code(transformed)
+
+        assert "task_0_outs.task_id()" in code, code
+        assert re.search(r"TaskOutputTensors task_0_outs = rt_submit(?:_aiv)?_task\(", code), code
+
     def test_group_submit_uses_both_aiv_slots_for_split_vector_kernel(self):
         """Cross-core split inferred from pipe ops should reuse one AIV kernel across both slots."""
         backend.reset_for_testing()
