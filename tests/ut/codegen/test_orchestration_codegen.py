@@ -54,7 +54,6 @@ def _ensure_arg_directions(program):
 def _generate_orch_code(program) -> str:
     """Generate orchestration code using backend-agnostic codegen."""
     program = _ensure_arg_directions(program)
-    program = passes.expand_manual_phase_fence()(program)
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             result = codegen.generate_orchestration(program, func)
@@ -65,7 +64,6 @@ def _generate_orch_code(program) -> str:
 def _generate_orch_result(program) -> "codegen.OrchestrationResult":
     """Generate orchestration result using backend-agnostic codegen."""
     program = _ensure_arg_directions(program)
-    program = passes.expand_manual_phase_fence()(program)
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return codegen.generate_orchestration(program, func)
@@ -4014,7 +4012,6 @@ class TestManualScopeCodegen:
         # ``is_valid()`` guard (first iteration's sentinel is skipped).
         assert ".is_valid())" in code, code
         assert ".set_dependencies(" in code, code
-
 
 class TestTupleReturnNoDepAliasing:
     """``GenerateTupleReturnAliases`` must classify output slots by the
