@@ -252,15 +252,23 @@ class TestOutlineClusterScopes:
                     _y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return x
 
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.outline_cluster_scopes()(Before)
+        @pl.program
+        class Expected:
+            # _y is not used after the cluster scope, so the outlined Group
+            # function has no return types.
+            @pl.function(type=pl.FunctionType.Group)
+            def main_cluster_0(self, x: pl.Tensor[[64], pl.FP32]):
+                _y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
 
-        # The outlined function should have Group type
-        group_func = After.get_function("main_cluster_0")
-        assert group_func is not None
-        assert group_func.func_type == ir.FunctionType.Group
-        # y is not used after the cluster scope, so no return types
-        assert len(group_func.return_types) == 0
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                self.main_cluster_0(x)
+                return x
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_cluster_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_cluster_round_trip(self):
         """Test that cluster scope survives print -> parse round-trip."""
@@ -290,16 +298,28 @@ class TestOutlineClusterScopes:
                 w: pl.Tensor[[64], pl.FP32] = pl.add(y, z)
                 return w
 
+        @pl.program
+        class Expected:
+            # y and z are both used after the cluster scope, so the outlined
+            # Group function returns a 2-tuple.
+            @pl.function(type=pl.FunctionType.Group)
+            def main_cluster_0(
+                self, x: pl.Tensor[[64], pl.FP32]
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+                return y, z
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y, z = self.main_cluster_0(x)
+                w: pl.Tensor[[64], pl.FP32] = pl.add(y, z)
+                return w
+
         Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_cluster_scopes()(Before)
-
-        # Verify the outlined function has Group type
-        group_func = After.get_function("main_cluster_0")
-        assert group_func is not None
-        assert group_func.func_type == ir.FunctionType.Group
-
-        # Verify it has 2 return types (y and z)
-        assert len(group_func.return_types) == 2
+        ir.assert_structural_equal(After, Expected)
 
     def test_outline_spmd_for_loop_auto_outlines_incore(self):
         """`for i in pl.spmd(N)` auto-outlines into Spmd + InCore.
@@ -382,17 +402,49 @@ class TestOutlineClusterScopes:
                     out = pl.store(tile_a, [offset, 0], out)
                 return out
 
-        Before = passes.convert_to_ssa()(Before)
-        after_incore = passes.outline_incore_scopes()(Before)
-        incore_names = {
-            f.name for f in after_incore.functions.values() if f.func_type == ir.FunctionType.InCore
-        }
-        assert "q_proj" in incore_names
-        assert not any(n.startswith("main_incore_") for n in incore_names)
+        @pl.program
+        class Expected:
+            # name_hint="q_proj_spmd" names the outlined Spmd wrapper, and the
+            # InCore kernel drops the "_spmd" suffix -> "q_proj" (instead of the
+            # default "main_incore_0" / "main_spmd_0").
+            @pl.function(type=pl.FunctionType.InCore)
+            def q_proj(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                i = pl.tile.get_block_idx()
+                offset = i * 128
+                tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                out = pl.store(tile_a, [offset, 0], out)
+                # The outline pass renames the post-store SSA result to the
+                # store target; express that explicit rename as an alias here.
+                out_final: pl.Tensor[[512, 128], pl.FP32] = out
+                return out_final
 
-        after_spmd = passes.outline_cluster_scopes()(after_incore)
-        spmd_names = {f.name for f in after_spmd.functions.values() if f.func_type == ir.FunctionType.Spmd}
-        assert "q_proj_spmd" in spmd_names
+            @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
+            def q_proj_spmd(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                out = self.q_proj(a, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                out = self.q_proj_spmd(a, out)
+                return out
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        After = passes.outline_cluster_scopes()(After)
+        ir.assert_structural_equal(After, Expected)
 
     def test_outline_spmd_for_loop_marks_assemble_dest_as_inout(self):
         """`for n0 in pl.spmd(N): out = pl.assemble(out, slice, [n0, ...])`
@@ -416,37 +468,45 @@ class TestOutlineClusterScopes:
                     out = pl.assemble(out, chunk, [offset, 0])
                 return out
 
+        @pl.program
+        class Expected:
+            # `out` is the assemble destination, so it becomes InOut on both
+            # the outlined InCore kernel and the Spmd wrapper; `a` stays In.
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                n0 = pl.tile.get_block_idx()
+                offset = n0 * 128
+                chunk: pl.Tensor[[128, 128], pl.FP32] = pl.slice(a, [128, 128], [offset, 0])
+                out = pl.assemble(out, chunk, [offset, 0])
+                return out
+
+            @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
+            def main_spmd_0(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                out = self.main_incore_0(a, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                out = self.main_spmd_0(a, out)
+                return out
+
         Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
         After = passes.outline_cluster_scopes()(After)
-
-        def directions_by_hint(func):
-            return {p.name_hint: d for p, d in zip(func.params, func.param_directions)}
-
-        def find_param(hints, prefix):
-            matches = [h for h in hints if h == prefix or h.startswith(prefix + "__")]
-            assert len(matches) == 1, f"expected exactly one param starting with {prefix!r}, got {matches}"
-            return matches[0]
-
-        spmd_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.Spmd]
-        assert len(spmd_funcs) == 1, "expected exactly one outlined Spmd wrapper"
-        spmd_dirs = directions_by_hint(spmd_funcs[0])
-        assert spmd_dirs[find_param(spmd_dirs, "out")] == ir.ParamDirection.InOut, (
-            f"spmd wrapper's `out` param should be InOut, got {spmd_dirs}"
-        )
-        assert spmd_dirs[find_param(spmd_dirs, "a")] == ir.ParamDirection.In, (
-            f"spmd wrapper's `a` param should remain In, got {spmd_dirs}"
-        )
-
-        incore_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.InCore]
-        assert len(incore_funcs) == 1, "expected exactly one outlined InCore wrapper"
-        incore_dirs = directions_by_hint(incore_funcs[0])
-        assert incore_dirs[find_param(incore_dirs, "out")] == ir.ParamDirection.InOut, (
-            f"incore wrapper's `out` param should be InOut, got {incore_dirs}"
-        )
-        assert incore_dirs[find_param(incore_dirs, "a")] == ir.ParamDirection.In, (
-            f"incore wrapper's `a` param should remain In, got {incore_dirs}"
-        )
+        ir.assert_structural_equal(After, Expected)
 
     def test_cluster_outlined_verifier_rejects_cluster_in_incore(self):
         """Test that ClusterOutlined verifier flags Cluster scopes in InCore functions."""

@@ -7,7 +7,20 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for the DeriveCallDirections pass and its CallDirectionsResolved verifier."""
+"""Unit tests for the DeriveCallDirections pass and its CallDirectionsResolved verifier.
+
+Transform tests follow the project-standard Before/After/Expected pattern: the
+``Before`` program is run through ``passes.derive_call_directions()`` to produce
+``After``, and the result is compared with ``Expected`` via
+``ir.assert_structural_equal``. The derived ``Call.attrs['arg_directions']``
+vector is faithfully emitted by the python printer (as
+``attrs={"arg_directions": [pl.adir.<name>, ...]}``) and round-trips through the
+parser, so ``Expected`` can spell out the derived directions directly. The
+kernel bodies in ``Expected`` are written in their post-lowering form
+(``pl.tile.load`` / ``pl.tensor.create`` / explicit ``level`` and ``role``)
+because the DSL frontend lowers ``pl.load`` / ``pl.create_tensor`` and infers
+the function ``level`` / ``role`` before the pass runs.
+"""
 
 import pypto.language as pl
 import pytest
@@ -27,51 +40,6 @@ def _verify_call_directions(program):
     _core_passes.PropertyVerifierRegistry.verify_or_throw(props, program)
 
 
-@pytest.fixture(autouse=True)
-def pass_verification_context():
-    """Override the global roundtrip-verification fixture for this module.
-
-    The python_printer/parser do not yet emit Call.arg_directions, so the
-    print -> parse -> structural_equal roundtrip fails immediately after
-    DeriveCallDirections. We fall back to the lighter BEFORE_AND_AFTER
-    property-verification mode here.
-    """
-    instruments: list[_core_passes.PassInstrument] = [
-        _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
-    ]
-    with _core_passes.PassContext(instruments):
-        yield
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class _UserCallCollector(ir.IRVisitor):
-    """Collect every non-builtin Call from a Program for inspection."""
-
-    def __init__(self):
-        super().__init__()
-        self.calls: list = []
-
-    def visit_call(self, op):
-        name = op.op.name
-        if not (name.startswith("tile.") or name.startswith("tensor.") or name.startswith("system.")):
-            self.calls.append(op)
-        super().visit_call(op)
-
-
-def _user_calls(program):
-    collector = _UserCallCollector()
-    collector.visit_program(program)
-    return collector.calls
-
-
-def _dirs(call):
-    return [d for d in call.arg_directions]
-
-
 # ---------------------------------------------------------------------------
 # Derive pass: per-direction matrix
 # ---------------------------------------------------------------------------
@@ -81,10 +49,14 @@ class TestDeriveDirectionMatrix:
     """One test per cell of the (callee_dir, arg_origin) mapping table."""
 
     def test_in_param_tensor_to_input(self):
-        """Callee In + tensor argument → Input."""
+        """Callee In + tensor argument → Input.
+
+        Position 0 is callee In + tensor; ``x`` is a ``main`` parameter, so the
+        callee In keeps ``Input``.
+        """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -101,21 +73,38 @@ class TestDeriveDirectionMatrix:
                 x: pl.Tensor[[64], pl.FP32],
                 dst: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                # `x` is a function param: callee In keeps Input.
                 r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst)
                 return r
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        # Position 0 is callee In + tensor → Input.
-        assert _dirs(calls[0])[0] == ir.ArgDirection.Input
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_inout_param_tensor_to_inout(self):
         """Callee InOut + tensor argument → InOut."""
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(self, x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
                 t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
@@ -128,16 +117,28 @@ class TestDeriveDirectionMatrix:
                 r: pl.Tensor[[64], pl.FP32] = self.kernel(x)
                 return r
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(self, x: pl.InOut[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                t2 = pl.tile.add(t, t)
+                ret = pl.tile.store(t2, [0], x)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(x, attrs={"arg_directions": [pl.adir.inout]})
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_out_param_external_buffer_to_output_existing(self):
         """Callee Out + arg rooted at a function param → OutputExisting."""
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -157,10 +158,29 @@ class TestDeriveDirectionMatrix:
                 r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst)
                 return r
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_out_param_local_buffer_kept_output_existing(self):
         """Callee Out + single-write locally allocated buffer → OutputExisting.
@@ -174,7 +194,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -191,10 +211,26 @@ class TestDeriveDirectionMatrix:
                 r: pl.Tensor[[64], pl.FP32] = self.kernel(x, local)
                 return r
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                r = self.kernel(x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_two_calls_top_level_second_promoted(self):
         """Two consecutive top-level calls writing the same local root.
@@ -205,7 +241,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -223,11 +259,29 @@ class TestDeriveDirectionMatrix:
                 local = self.kernel(x, local)
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 2
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
-        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                local = self.kernel(
+                    x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+                )
+                local = self.kernel(x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_out_local_in_parallel_keeps_output_existing(self):
         """Single ``pl.parallel`` writer of a local buffer → ``OutputExisting``.
@@ -239,7 +293,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -257,10 +311,29 @@ class TestDeriveDirectionMatrix:
                     local = self.kernel(x, local)
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                for _i in pl.parallel(4):
+                    local = self.kernel(
+                        x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+                    )
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_two_parallel_loops_promote_only_second(self):
         """Two consecutive ``pl.parallel`` loops writing the same root.
@@ -271,7 +344,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -291,11 +364,31 @@ class TestDeriveDirectionMatrix:
                     local = self.kernel(x, local)
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 2
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
-        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                for _i in pl.parallel(4):
+                    local = self.kernel(
+                        x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+                    )
+                for _j in pl.parallel(4):
+                    local = self.kernel(x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_seq_inside_parallel_keeps_inout(self):
         """``pl.range`` (sequential) inside ``pl.parallel`` triggers R-seq.
@@ -306,7 +399,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -325,10 +418,30 @@ class TestDeriveDirectionMatrix:
                         local = self.kernel(x, local)
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                for _i in pl.parallel(4):
+                    for _j in pl.range(4):
+                        local = self.kernel(
+                            x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]}
+                        )
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_parallel_inside_seq_keeps_inout(self):
         """``pl.parallel`` inside ``pl.range`` still triggers R-seq.
@@ -338,7 +451,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -357,10 +470,30 @@ class TestDeriveDirectionMatrix:
                         local = self.kernel(x, local)
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                for _i in pl.range(4):
+                    for _j in pl.parallel(4):
+                        local = self.kernel(
+                            x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]}
+                        )
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_top_level_call_then_parallel_promoted(self):
         """Top-level writer followed by ``pl.parallel`` writer hits R-prior.
@@ -371,7 +504,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -390,11 +523,30 @@ class TestDeriveDirectionMatrix:
                     local = self.kernel(x, local)
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 2
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
-        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                local = self.kernel(
+                    x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+                )
+                for _i in pl.parallel(4):
+                    local = self.kernel(x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_while_keeps_inout(self):
         """``while`` loop body triggers R-seq (sequential writer-unit).
@@ -405,7 +557,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -429,10 +581,33 @@ class TestDeriveDirectionMatrix:
                     i = i + 1
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                i: pl.Scalar[pl.INDEX] = 0
+                while i < n:
+                    local = self.kernel(x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                    i = i + 1
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_if_first_writer_keeps_output_existing(self):
         """First writer inside an ``if`` branch is the only writer-unit.
@@ -443,7 +618,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -465,10 +640,33 @@ class TestDeriveDirectionMatrix:
                     local = self.kernel(x, local)
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                if flag:
+                    local = self.kernel(
+                        x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+                    )
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_if_after_top_level_writer_promoted(self):
         """``if`` branch following a top-level writer hits R-prior.
@@ -479,7 +677,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -502,11 +700,34 @@ class TestDeriveDirectionMatrix:
                     local = self.kernel(x, local)
                 return local
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 2
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
-        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                flag: pl.Scalar[pl.BOOL],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                local = self.kernel(
+                    x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]}
+                )
+                if flag:
+                    local = self.kernel(x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                return local
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_out_param_external_buffer_in_seq_loop_promoted(self):
         """R-seq on external root: writes inside ``pl.range`` promote to ``InOut``.
@@ -517,7 +738,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -538,10 +759,30 @@ class TestDeriveDirectionMatrix:
                     dst = self.kernel(x, dst)
                 return dst
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for _i in pl.range(4):
+                    dst = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                return dst
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_out_param_variable_offset_store_in_seq_loop_promoted(self):
         """R-seq: a callee Out written via a parameter-dependent ``tile.store``
@@ -557,7 +798,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -579,14 +820,36 @@ class TestDeriveDirectionMatrix:
                     dst = self.kernel(x, _i * 64, dst)
                 return dst
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [
-            ir.ArgDirection.Input,
-            ir.ArgDirection.Scalar,
-            ir.ArgDirection.InOut,
-        ]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256], pl.FP32]],
+            ) -> pl.Tensor[[256], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [offset], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[256], pl.FP32],
+            ) -> pl.Tensor[[256], pl.FP32]:
+                for _i in pl.range(4):
+                    dst = self.kernel(
+                        x,
+                        _i * 64,
+                        dst,
+                        attrs={"arg_directions": [pl.adir.input, pl.adir.scalar, pl.adir.inout]},
+                    )
+                return dst
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_out_param_external_buffer_two_writes_second_promoted(self):
         """R-prior on external root: a prior writer-unit promotes the second to ``InOut``.
@@ -598,7 +861,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -619,11 +882,30 @@ class TestDeriveDirectionMatrix:
                 dst = self.kernel(x, dst)
                 return dst
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 2
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]
-        assert _dirs(calls[1]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                dst = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                dst = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                return dst
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_out_param_enclosing_inout_declaration_promoted(self):
         """R-enclosing: explicit ``pl.InOut`` on the enclosing param promotes to ``InOut``.
@@ -638,7 +920,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -658,10 +940,29 @@ class TestDeriveDirectionMatrix:
                 r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst)
                 return r
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.InOut[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                r = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                return r
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_out_param_enclosing_inout_in_parallel_loop_promoted(self):
         """R-enclosing wins even when wrapped in ``pl.parallel``.
@@ -674,7 +975,7 @@ class TestDeriveDirectionMatrix:
         """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -695,16 +996,41 @@ class TestDeriveDirectionMatrix:
                     dst = self.kernel(x, dst)
                 return dst
 
-        out = passes.derive_call_directions()(Prog)
-        calls = [c for c in _user_calls(out) if c.op.name == "kernel"]
-        assert len(calls) == 1
-        assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.InOut]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                dst: pl.InOut[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for _i in pl.parallel(4):
+                    dst = self.kernel(x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.inout]})
+                return dst
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_builtin_calls_left_untouched(self):
-        """tensor.create / tile.* are builtin and keep arg_directions empty."""
+        """tensor.create / tile.* are builtin and keep arg_directions empty.
+
+        Only the user ``kernel`` call gets an ``arg_directions`` vector; the
+        ``tensor.create`` / ``tile.load`` / ``tile.store`` builtins keep their
+        legacy empty ``arg_directions`` (no ``attrs`` is emitted for them).
+        """
 
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -721,23 +1047,26 @@ class TestDeriveDirectionMatrix:
                 r: pl.Tensor[[64], pl.FP32] = self.kernel(x, local)
                 return r
 
-        out = passes.derive_call_directions()(Prog)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t = pl.tile.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                ret = pl.tile.store(t, [0], out)
+                return ret
 
-        class _BuiltinCallChecker(ir.IRVisitor):
-            def __init__(self):
-                super().__init__()
-                self.builtin_calls: list = []
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                local = pl.tensor.create([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                r = self.kernel(x, local, attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]})
+                return r
 
-            def visit_call(self, op):
-                if op.op.name.startswith(("tile.", "tensor.", "system.")):
-                    self.builtin_calls.append(op)
-                super().visit_call(op)
-
-        checker = _BuiltinCallChecker()
-        checker.visit_program(out)
-        # Every builtin keeps the legacy empty arg_directions.
-        assert len(checker.builtin_calls) > 0
-        assert all(list(c.arg_directions) == [] for c in checker.builtin_calls)
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
 
 
 # ---------------------------------------------------------------------------
@@ -781,8 +1110,13 @@ class TestDerivePreservesExplicit:
     """Pre-populated Call.attrs['arg_directions'] is treated as authoritative."""
 
     def test_explicit_directions_not_overwritten(self):
+        # ``Before`` pre-populates the Out-param slot with ``Output``
+        # (runtime-allocation semantics). The derive pass would otherwise emit
+        # ``OutputExisting`` for an external/param-rooted destination, so the
+        # ``After == Before`` check confirms the explicit call-site choice
+        # survives instead of being overwritten.
         @pl.program
-        class Prog:
+        class Before:
             @pl.function(type=pl.FunctionType.InCore)
             def kernel(
                 self,
@@ -799,25 +1133,14 @@ class TestDerivePreservesExplicit:
                 x: pl.Tensor[[64], pl.FP32],
                 dst: pl.Tensor[[64], pl.FP32],
             ) -> pl.Tensor[[64], pl.FP32]:
-                r: pl.Tensor[[64], pl.FP32] = self.kernel(x, dst)
+                r: pl.Tensor[[64], pl.FP32] = self.kernel(
+                    x, dst, attrs={"arg_directions": [pl.adir.input, pl.adir.output]}
+                )
                 return r
 
-        # Pre-populate the Out-param slot with `Output` (runtime-allocation
-        # semantics). The derive pass would otherwise emit `OutputExisting`
-        # for an external/param-rooted destination, so this checks that the
-        # explicit call-site choice survives instead of being overwritten.
-        explicit = [ir.ArgDirection.Input, ir.ArgDirection.Output]
-        prog = _RewriteUserCall(explicit).run(Prog)
-
-        before = _user_calls(prog)
-        assert len(before) == 1
-        assert _dirs(before[0]) == explicit
-
-        derived = passes.derive_call_directions()(prog)
-
-        after = _user_calls(derived)
-        assert len(after) == 1
-        assert _dirs(after[0]) == explicit
+        After = passes.derive_call_directions()(Before)
+        # Explicit directions survive untouched: After is structurally Before.
+        ir.assert_structural_equal(After, Before)
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +1178,30 @@ class TestVerifyPositive:
 # ---------------------------------------------------------------------------
 # Verify pass: negative cases (manually mutated IR)
 # ---------------------------------------------------------------------------
+
+
+class _RewriteUserCall(ir.IRMutator):
+    """Replace every non-builtin Call's arg_directions with *new_dirs*.
+
+    Used only to build deliberately ill-formed IR for the negative verifier
+    tests below; well-formed derived directions are exercised via the
+    Before/Expected transform tests above.
+    """
+
+    def __init__(self, new_dirs):
+        super().__init__()
+        self._new_dirs = list(new_dirs)
+
+    def visit_call(self, op):
+        name = op.op.name
+        if name.startswith(("tile.", "tensor.", "system.")):
+            return super().visit_call(op)
+        new_args = [self.visit_expr(a) for a in op.args]
+        attrs = {"arg_directions": list(self._new_dirs)}
+        return ir.Call(op.op, new_args, op.kwargs, attrs, op.type, op.span)
+
+    def run(self, program):
+        return self.visit_program(program)
 
 
 class TestVerifyNegative:
@@ -901,36 +1248,65 @@ class TestVerifyNegative:
 
 
 # ---------------------------------------------------------------------------
-# Helper: rewrite the user call with a custom arg_directions vector.
+# pl.no_dep override
 # ---------------------------------------------------------------------------
+#
+# These tests are NOT expressed with the Before/Expected + assert_structural_equal
+# pattern. Reason: ``pl.no_dep(arg)`` records its marker as a separate
+# ``Call.attrs['arg_direction_overrides']`` entry, and the python printer
+# (src/ir/transforms/python_printer.cpp:643-658) only emits the derived
+# ``arg_directions`` vector — it never emits ``arg_direction_overrides``.
+# After DeriveCallDirections the marked call therefore carries TWO attrs
+# (``arg_direction_overrides`` + ``arg_directions``), but any program written
+# from / round-tripped through the printer keeps only ONE, so
+# ``assert_structural_equal`` fails with "Kwargs size mismatch (2 != 1)" on the
+# call's ``attrs``. Until the printer round-trips ``arg_direction_overrides``,
+# these stay as direction-vector inspection tests, and the class overrides the
+# global verification fixture to property-verification-only (no print/parse
+# roundtrip).
 
 
-class _RewriteUserCall(ir.IRMutator):
-    """Replace every non-builtin Call's arg_directions with *new_dirs*."""
+class _UserCallCollector(ir.IRVisitor):
+    """Collect every non-builtin Call from a Program for inspection."""
 
-    def __init__(self, new_dirs):
+    def __init__(self):
         super().__init__()
-        self._new_dirs = list(new_dirs)
+        self.calls: list = []
 
     def visit_call(self, op):
         name = op.op.name
-        if name.startswith(("tile.", "tensor.", "system.")):
-            return super().visit_call(op)
-        new_args = [self.visit_expr(a) for a in op.args]
-        attrs = {"arg_directions": list(self._new_dirs)}
-        return ir.Call(op.op, new_args, op.kwargs, attrs, op.type, op.span)
-
-    def run(self, program):
-        return self.visit_program(program)
+        if not (name.startswith("tile.") or name.startswith("tensor.") or name.startswith("system.")):
+            self.calls.append(op)
+        super().visit_call(op)
 
 
-# ---------------------------------------------------------------------------
-# pl.no_dep override
-# ---------------------------------------------------------------------------
+def _user_calls(program):
+    collector = _UserCallCollector()
+    collector.visit_program(program)
+    return collector.calls
+
+
+def _dirs(call):
+    return list(call.arg_directions)
 
 
 class TestNoDepOverride:
     """``pl.no_dep(arg)`` at a kernel call site sets ArgDirection.NoDep at that slot."""
+
+    @pytest.fixture(autouse=True)
+    def _no_roundtrip(self):
+        """Override the global roundtrip fixture for this class only.
+
+        ``pl.no_dep`` leaves an ``arg_direction_overrides`` attr that the python
+        printer does not emit, so the print -> parse -> structural_equal
+        roundtrip fails on the call's ``attrs``. Fall back to the lighter
+        BEFORE_AND_AFTER property-verification mode here.
+        """
+        instruments: list[_core_passes.PassInstrument] = [
+            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with _core_passes.PassContext(instruments):
+            yield
 
     @pl.program
     class _Prog:
@@ -1090,3 +1466,7 @@ class TestNoDepOverride:
         # OutputExisting). The verifier must accept the resulting IR.
         assert _dirs(calls[0]) == [ir.ArgDirection.Input, ir.ArgDirection.NoDep]
         _verify_call_directions(new_prog)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

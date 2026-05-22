@@ -7,6 +7,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+# pyright: reportAttributeAccessIssue=false, reportReturnType=false
+# DSL false positives in @pl.program bodies (parsed as DSL, not executed as
+# Python): `pl.tensor.as_layout` is a parser-only op with no Python wrapper, and
+# `pl.const` is typed `-> int` so a `-> pl.Scalar` function returning it looks
+# like a return-type mismatch.
+
 """Tests for the Simplify pass.
 
 This pass simplifies expressions and statements in the IR using algebraic
@@ -14,44 +20,16 @@ rewrite rules and bound analysis. IRMutatorWithAnalyzer binds ForStmt loop
 variables to their ranges, and ConstraintContext propagates if-branch
 conditions, enabling range-aware simplification.
 
-Tests use the @pl.program DSL where possible. Constant folding tests use
-direct IR construction because Python eagerly evaluates constant expressions
-(e.g., `3 + 4` becomes `7` before the DSL sees it).
+Tests use the @pl.program DSL. Constant-folding tests author un-folded
+constant expressions with ``pl.const(value, dtype)`` — each call builds a
+distinct ``ConstInt`` IR node, so ``pl.const(3, ...) + pl.const(4, ...)``
+reaches the parser as an un-evaluated ``Add`` (Python never sees two bare
+literals to pre-fold).
 """
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir, passes
-
-S = ir.Span.unknown()
-IDX = DataType.INDEX
-
-
-def ci(value: int, dtype: DataType = IDX) -> ir.ConstInt:
-    return ir.ConstInt(value, dtype, S)
-
-
-def make_var(name: str, dtype: DataType = IDX) -> ir.Var:
-    return ir.Var(name, ir.ScalarType(dtype), S)
-
-
-def wrap_stmts(stmts):
-    if len(stmts) == 1:
-        return stmts[0]
-    return ir.SeqStmts(stmts, S)
-
-
-def make_program(body_stmts, return_types=None):
-    """Build a single-function Program.
-
-    Pass `return_types` when `body_stmts` ends in a ReturnStmt so the
-    function signature matches the returned values (otherwise the
-    structural check complains about an empty signature).
-    """
-    body = wrap_stmts(body_stmts)
-    func = ir.Function("main", [], return_types or [], body, S)
-    return ir.Program([func], "test", S)
-
+from pypto import ir, passes
 
 # ============================================================================
 # Pass metadata
@@ -171,43 +149,74 @@ class TestIdentitySimplification:
 
 
 # ============================================================================
-# Constant folding (direct IR — DSL can't produce constant-only expressions)
+# Constant folding
 # ============================================================================
 
 
 class TestConstantFolding:
     """Verify arithmetic constant folding — tests put the expression
     directly in a ReturnStmt so the fold result stays observable after
-    Simplify's scalar DCE step."""
+    Simplify's scalar DCE step.
+
+    ``pl.const(value, dtype)`` builds a single ``ConstInt`` IR node, so an
+    expression like ``pl.const(3, ...) + pl.const(4, ...)`` reaches the
+    parser as an un-folded ``Add`` (Python never sees two bare literals to
+    fold) — letting these stay style-A ``@pl.program`` tests.
+    """
 
     def test_add_constants(self):
         """3 + 4 should fold to 7."""
-        ret_type = ir.ScalarType(IDX)
-        before = make_program([ir.ReturnStmt([ir.Add(ci(3), ci(4), IDX, S)], S)], [ret_type])
-        expected = make_program([ir.ReturnStmt([ci(7)], S)], [ret_type])
 
-        after = passes.simplify()(before)
-        ir.assert_structural_equal(after, expected)
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self) -> pl.Scalar[pl.INDEX]:
+                return pl.const(3, pl.INDEX) + pl.const(4, pl.INDEX)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self) -> pl.Scalar[pl.INDEX]:
+                return pl.const(7, pl.INDEX)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
 
     def test_mul_constants(self):
         """3 * 4 should fold to 12."""
-        ret_type = ir.ScalarType(IDX)
-        before = make_program([ir.ReturnStmt([ir.Mul(ci(3), ci(4), IDX, S)], S)], [ret_type])
-        expected = make_program([ir.ReturnStmt([ci(12)], S)], [ret_type])
 
-        after = passes.simplify()(before)
-        ir.assert_structural_equal(after, expected)
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self) -> pl.Scalar[pl.INDEX]:
+                return pl.const(3, pl.INDEX) * pl.const(4, pl.INDEX)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self) -> pl.Scalar[pl.INDEX]:
+                return pl.const(12, pl.INDEX)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
 
     def test_nested_constant_expr(self):
         """(2 + 3) * 4 should fold to 20."""
-        ret_type = ir.ScalarType(IDX)
-        inner = ir.Add(ci(2), ci(3), IDX, S)
-        outer = ir.Mul(inner, ci(4), IDX, S)
-        before = make_program([ir.ReturnStmt([outer], S)], [ret_type])
-        expected = make_program([ir.ReturnStmt([ci(20)], S)], [ret_type])
 
-        after = passes.simplify()(before)
-        ir.assert_structural_equal(after, expected)
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self) -> pl.Scalar[pl.INDEX]:
+                return (pl.const(2, pl.INDEX) + pl.const(3, pl.INDEX)) * pl.const(4, pl.INDEX)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self) -> pl.Scalar[pl.INDEX]:
+                return pl.const(20, pl.INDEX)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
 
 
 # ============================================================================
@@ -622,12 +631,15 @@ class TestNoChange:
 
     def test_empty_function(self):
         """A function with no expressions should be unchanged."""
-        body = ir.SeqStmts([], S)
-        func = ir.Function("main", [], [], body, S)
-        before = ir.Program([func], "test", S)
 
-        after = passes.simplify()(before)
-        ir.assert_structural_equal(after, before)
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                pass
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
 
 
 # ============================================================================
@@ -808,26 +820,40 @@ class TestScalarDCE:
 
     def test_removes_unused_scalar_const(self):
         """A scalar constant with no uses is removed."""
-        y = make_var("y")
-        before = make_program([ir.AssignStmt(y, ci(5), S)])
-        expected = make_program([])
 
-        after = passes.simplify()(before)
-        ir.assert_structural_equal(after, expected)
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                y: pl.Scalar[pl.INDEX] = 5  # noqa: F841
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                pass
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
 
     def test_cascade_scalar_chain(self):
         """`a = 5; b = a + 1` with b unused removes both."""
-        a = make_var("a")
-        b = make_var("b")
-        stmts = [
-            ir.AssignStmt(a, ci(5), S),
-            ir.AssignStmt(b, ir.Add(a, ci(1), IDX, S), S),
-        ]
-        before = make_program(stmts)
-        expected = make_program([])
 
-        after = passes.simplify()(before)
-        ir.assert_structural_equal(after, expected)
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                a: pl.Scalar[pl.INDEX] = 5
+                b: pl.Scalar[pl.INDEX] = a + 1  # noqa: F841
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                pass
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
 
     def test_keeps_call_rhs_even_if_lhs_unused(self):
         """A Call-backed assignment is preserved even when LHS is unused —
@@ -863,56 +889,70 @@ class TestScalarDCE:
         """A scalar LHS whose RHS is a direct Call must be preserved even
         when the LHS has no further uses — the Call may have side effects.
 
-        Uses a synthetic Op name that won't roundtrip through the DSL parser,
-        so we run under a roundtrip-free PassContext to exercise the DCE
-        predicate directly.
+        A cross-function call returning a scalar is a real ``ir.Call`` that
+        the DSL expresses directly, so this stays a style-A ``@pl.program``
+        test (no synthetic Op / roundtrip-free PassContext needed).
         """
-        y = make_var("y", DataType.INT64)
-        call = ir.Call(ir.Op("test.pure_scalar"), [], ir.ScalarType(DataType.INT64), S)
-        before = make_program([ir.AssignStmt(y, call, S)])
 
-        with passes.PassContext([]):
-            after = passes.simplify()(before)
-        # LHS is scalar-typed and unused, but the direct-Call RHS keeps it.
-        ir.assert_structural_equal(after, before)
+        @pl.program
+        class Before:
+            @pl.function
+            def helper(self) -> pl.Scalar[pl.INT64]:
+                return pl.const(0, pl.INT64)
+
+            @pl.function
+            def main(self):
+                y: pl.Scalar[pl.INT64] = self.helper()  # noqa: F841
+
+        # y is scalar-typed and unused, but the direct-Call RHS keeps it.
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
 
     def test_keeps_scalar_assign_with_nested_call_rhs(self):
         """A scalar LHS whose RHS contains a Call nested inside an arithmetic
         expression must be preserved — any expression containing a Call may
         have side effects, not just a top-level Call."""
-        y = make_var("y", DataType.INT64)
-        call = ir.Call(ir.Op("test.pure_scalar"), [], ir.ScalarType(DataType.INT64), S)
-        nested = ir.Add(call, ci(1, DataType.INT64), DataType.INT64, S)
-        before = make_program([ir.AssignStmt(y, nested, S)])
 
-        with passes.PassContext([]):
-            after = passes.simplify()(before)
+        @pl.program
+        class Before:
+            @pl.function
+            def helper(self) -> pl.Scalar[pl.INT64]:
+                return pl.const(0, pl.INT64)
+
+            @pl.function
+            def main(self):
+                y: pl.Scalar[pl.INT64] = self.helper() + pl.const(1, pl.INT64)  # noqa: F841
+
         # Nested Call must still block removal.
-        ir.assert_structural_equal(after, before)
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Before)
 
     def test_drops_dead_scalar_inside_scope(self):
         """An unused scalar inside a ScopeStmt body is removed — DCE recurses
         into scope bodies, not just For/If/While.
 
-        An evaluation statement anchors the scope so its body stays non-empty
-        after DCE (an empty scope body is not representable in the DSL).
+        A Call-backed ``tensor.create`` anchors the scope so its body stays
+        non-empty after DCE (an empty scope body is not representable in the
+        DSL).
         """
-        dead = make_var("dead")
-        dead_assign = ir.AssignStmt(dead, ci(7), S)
-        anchor = ir.EvalStmt(
-            ir.Call(ir.Op("system.sync"), [], ir.ScalarType(IDX), S),
-            S,
-        )
-        scope_before = ir.InCoreScopeStmt(body=ir.SeqStmts([dead_assign, anchor], S), span=S)
-        before = make_program([scope_before])
 
-        scope_expected = ir.InCoreScopeStmt(body=anchor, span=S)
-        expected = make_program([scope_expected])
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    dead: pl.Scalar[pl.INDEX] = 7  # noqa: F841
+                    _t: pl.Tensor[[4], pl.FP32] = pl.tensor.create([4], dtype=pl.FP32)
 
-        # Synthetic Op names don't roundtrip; run without the roundtrip check.
-        with passes.PassContext([]):
-            after = passes.simplify()(before)
-        ir.assert_structural_equal(after, expected)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    _t: pl.Tensor[[4], pl.FP32] = pl.tensor.create([4], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
 
 
 # ============================================================================
@@ -1225,8 +1265,10 @@ class TestFoldComposition:
 class TestAsLayoutFolding:
     """Simplify drops identity ``tensor.as_layout`` reinterprets per RFC §3.3.
 
-    ``tensor.as_layout`` is internal-only (not in ``pl.*``), so these tests
-    drive the pass with hand-built IR rather than ``@pl.program``.
+    ``tensor.as_layout`` has no ``pl.*`` runtime wrapper, but the DSL parser
+    accepts ``pl.tensor.as_layout(...)`` written inside ``@pl.program``
+    (parsing reads the AST text — it never executes the attribute), and the
+    op round-trips through print→parse, so these stay style-A tests.
 
     Layout encoding refresher (RFC §4.2): row-major ``[a, b]`` ND describes
     the same physical buffer as ``[b, a]`` DN-packed. The trailing-dim swap
@@ -1240,70 +1282,45 @@ class TestAsLayoutFolding:
     chains.
     """
 
-    @staticmethod
-    def _build_program(make_body):
-        """Build a 1-function Program whose body produces a tensor expression.
-
-        ``make_body(x_param)`` returns ``(stmts, return_var)``; the function
-        then returns ``return_var``.
-        """
-        x = ir.Var("x", ir.TensorType([ci(8), ci(4)], DataType.FP32), S)
-        stmts, ret_var = make_body(x)
-        body = wrap_stmts(list(stmts) + [ir.ReturnStmt([ret_var], S)])
-        func = ir.Function("main", [x], [ret_var.type], body, S)
-        return ir.Program([func], "test", S)
-
-    @staticmethod
-    def _iter_stmts(stmt):
-        if isinstance(stmt, ir.SeqStmts):
-            for s in stmt.stmts:
-                yield from TestAsLayoutFolding._iter_stmts(s)
-        else:
-            yield stmt
-
-    def _final_assign(self, program):
-        """Return the function's final AssignStmt (the result-producing one)."""
-        func = program.get_function("main")
-        assert func is not None
-        last = None
-        for stmt in self._iter_stmts(func.body):
-            if isinstance(stmt, ir.AssignStmt):
-                last = stmt
-        assert last is not None, "no AssignStmt in body"
-        return last
-
     def test_eliminates_identity_as_layout(self):
         """``as_layout(x, x.layout)`` simplifies to ``x``: target layout
         matches source layout, so the call is a no-op."""
 
-        def build(x):
-            # x is bare ND [8, 4]; flipping to ND is identity.
-            same = ir.op.tensor.as_layout(x, ir.TensorLayout.ND)
-            same_var = ir.Var("same", same.type, S)
-            return [ir.AssignStmt(same_var, same, S)], same_var
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]) -> pl.Tensor[[8, 4], pl.FP32]:
+                # x is bare ND [8, 4]; flipping to ND is identity.
+                same: pl.Tensor[[8, 4], pl.FP32] = pl.tensor.as_layout(x, layout=pl.TensorLayout.ND)
+                return same
 
-        prog = self._build_program(build)
-        after = passes.simplify()(prog)
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[8, 4], pl.FP32]) -> pl.Tensor[[8, 4], pl.FP32]:
+                return x
 
-        last = self._final_assign(after).value
-        assert isinstance(last, ir.Var) and last.name_hint == "x", (
-            f"expected identity as_layout to simplify to ``x``, got {type(last).__name__} ({last})"
-        )
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
 
     def test_preserves_substantive_layout_flip(self):
         """Genuine ND → DN flip (with the auto trailing-pair swap) survives —
         Simplify only drops layout-tag identities."""
 
-        def build(x):
-            call = ir.op.tensor.as_layout(x, ir.TensorLayout.DN)
-            v = ir.Var("y", call.type, S)
-            return [ir.AssignStmt(v, call, S)], v
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[8, 4], pl.FP32]
+            ) -> pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)]:
+                y: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)] = (
+                    pl.tensor.as_layout(x, layout=pl.TensorLayout.DN)
+                )
+                return y
 
-        prog = self._build_program(build)
-        after = passes.simplify()(prog)
-
-        last = self._final_assign(after).value
-        assert isinstance(last, ir.Call) and last.op.name == "tensor.as_layout"
+        after = passes.simplify()(Before)
+        # Substantive flip is not a layout-tag identity, so it is preserved.
+        ir.assert_structural_equal(after, Before)
 
 
 if __name__ == "__main__":

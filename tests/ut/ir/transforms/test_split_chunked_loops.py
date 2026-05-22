@@ -415,22 +415,6 @@ class TestParserErrors:
 class TestLoopOrigin:
     """Tests for LoopOrigin annotation set by SplitChunkedLoops."""
 
-    def _get_func_body_stmts(self, program):
-        """Get the top-level statements from the first function's body."""
-        return _top_level_stmts(program)
-
-    def _get_auto_incore_body_stmts(self, program):
-        """Get statements inside the AutoInCore scope."""
-        stmts = self._get_func_body_stmts(program)
-        # First stmt should be AutoInCore scope
-        scope = cast(ir.ScopeStmt, stmts[0])
-        assert scope.scope_kind == ir.ScopeKind.AutoInCore
-        body = scope.body
-        # Body may be a single stmt or SeqStmts
-        if hasattr(body, "stmts"):
-            return _body_stmts(body)
-        return [body]
-
     def test_divisible_chunk_origin(self):
         """Verify outer=ChunkOuter, inner=ChunkInner for divisible chunks."""
 
@@ -446,15 +430,27 @@ class TestLoopOrigin:
         Before = _prepare_for_split(Input)
         After = passes.split_chunked_loops()(Before)
 
-        inner_stmts = self._get_auto_incore_body_stmts(After)
-        outer_for = cast(ir.ForStmt, inner_stmts[0])
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_0_out, (x_iter_1_outer,) in pl.range(
+                        0, 2, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.range(
+                            0,
+                            5,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
+                            x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                        x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
+                return x_iter_1_outer_rv
 
-        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-
-        # Inner loop is inside outer body
-        outer_body_stmts = _body_stmts(outer_for.body)
-        inner_for = cast(ir.ForStmt, outer_body_stmts[0])
-        assert inner_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_non_divisible_chunk_origin(self):
         """Verify outer=ChunkOuter, inner=ChunkInner, remainder=ChunkRemainder."""
@@ -471,18 +467,36 @@ class TestLoopOrigin:
         Before = _prepare_for_split(Input)
         After = passes.split_chunked_loops()(Before)
 
-        inner_stmts = self._get_auto_incore_body_stmts(After)
-        # stmts: [outer_for, remainder_for]
-        outer_for = cast(ir.ForStmt, inner_stmts[0])
-        remainder_for = cast(ir.ForStmt, inner_stmts[1])
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_0_out, (x_iter_1_outer,) in pl.range(
+                        0, 1, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_0_in, (x_iter_1_inner,) in pl.range(
+                            0,
+                            5,
+                            1,
+                            init_values=(x_iter_1_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_inner, 1.0)
+                            x_iter_1_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                        x_iter_1_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_iter_1_inner_rv)
+                    for i_0_rem, (x_iter_1_rem,) in pl.range(
+                        0,
+                        2,
+                        1,
+                        init_values=(x_iter_1_outer_rv,),
+                        attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder},
+                    ):
+                        x_3_f: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_rem, 1.0)
+                        x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3_f)
+                return x_iter_1_rem_rv
 
-        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
-
-        outer_body_stmts = _body_stmts(outer_for.body)
-        inner_for = cast(ir.ForStmt, outer_body_stmts[0])
-        assert inner_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
-
-        assert remainder_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkRemainder
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_all_remainder_origin(self):
         """Verify remainder=ChunkRemainder when trip_count < chunk_size."""
@@ -499,12 +513,22 @@ class TestLoopOrigin:
         Before = _prepare_for_split(Input)
         After = passes.split_chunked_loops()(Before)
 
-        inner_stmts = self._get_auto_incore_body_stmts(After)
-        remainder_for = cast(ir.ForStmt, inner_stmts[0])
-        assert remainder_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkRemainder
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_0_rem, (x_iter_1_rem,) in pl.range(
+                        0, 3, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkRemainder}
+                    ):
+                        x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1_rem, 1.0)
+                        x_iter_1_rem_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                return x_iter_1_rem_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_non_chunked_loop_origin(self):
-        """Verify regular (non-chunked) loops have Original origin."""
+        """Verify regular (non-chunked) loops carry no loop_origin attr."""
 
         @pl.program
         class Input:
@@ -517,9 +541,16 @@ class TestLoopOrigin:
         Before = _prepare_for_split(Input)
         After = passes.split_chunked_loops()(Before)
 
-        stmts = self._get_func_body_stmts(After)
-        for_stmt = cast(ir.ForStmt, stmts[0])
-        assert "loop_origin" not in for_stmt.attrs
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i_0, (x_iter_1,) in pl.range(0, 10, 1, init_values=(x_0,)):
+                    x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_iter_1, 1.0)
+                    x_iter_1_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                return x_iter_1_rv
+
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
 
 class TestNestedChunking:
@@ -1394,18 +1425,34 @@ class TestGuardedPolicy:
         Before = _prepare_for_split(Input)
         After = passes.split_chunked_loops()(Before)
 
-        # Navigate: [ScopeStmt, return]; ScopeStmt.body = outer_for (guarded is a single for)
-        stmts = _top_level_stmts(After)
-        scope = cast(ir.ScopeStmt, stmts[0])
-        outer_for = cast(ir.ForStmt, scope.body)
-        assert outer_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkOuter
+        # Guarded mode emits only ChunkOuter/ChunkInner loops (never ChunkRemainder)
+        # with the body wrapped in an `idx < stop` guard. No Simplify is run here,
+        # so the guard expression is left in its raw `0 + (...) * 1 < 7` form.
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                    for i_out, (x_outer,) in pl.range(
+                        0, 2, 1, init_values=(x_0,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                    ):
+                        for i_in, (x_inner,) in pl.range(
+                            0,
+                            5,
+                            1,
+                            init_values=(x_outer,),
+                            attrs={"loop_origin": pl.LoopOrigin.ChunkInner},
+                        ):
+                            if 0 + (i_out * 5 + i_in) * 1 < 7:
+                                x_3: pl.Tensor[[64], pl.FP32] = pl.add(x_inner, 1.0)
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_3)
+                            else:
+                                x_if: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner)
+                            x_inner_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_if)
+                        x_outer_rv: pl.Tensor[[64], pl.FP32] = pl.yield_(x_inner_rv)
+                return x_outer_rv
 
-        inner_for = cast(ir.ForStmt, _body_stmts(outer_for.body)[0])
-        assert inner_for.attrs.get("loop_origin") == ir.LoopOrigin.ChunkInner
-
-        # No remainder loop should exist.
-        printed = python_print(After)
-        assert "ChunkRemainder" not in printed
+        ir.assert_structural_equal(After, _normalize_expected(Expected))
 
     def test_guarded_printer_omits_default(self):
         """Printer omits `chunk_policy="guarded"` (it's the default) but prints `leading_full`."""

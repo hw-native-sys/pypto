@@ -192,15 +192,40 @@ class TestSplitVectorKernelUpDown:
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0_store
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
-        assert "pl.tile.get_subblock_idx()" in printed
-        assert re.search(r"pl\.tile\.tpop_from_aic\(\s*split=1\s*\)", printed)
-        assert "pl.max(pl.min(valid_rows__ssa_v0 - subblock_idx * 8, 8), 0)" in printed
-        assert "valid_rows__ssa_v0 // 2" not in printed
-        # The TileView's localized valid_shape carries a non-constant expression;
-        # both the parser must accept it and the producer must not duplicate Vars.
-        _assert_roundtrip_structural_equal(actual, printed=printed)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+            def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                pl.tpush_to_aiv(z_tile, split=1)
+
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                valid_rows: pl.Scalar[pl.INDEX],
+                valid_cols: pl.Scalar[pl.INDEX],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                z_vec: pl.Tile[
+                    [8, 128],
+                    pl.FP32,
+                    pl.MemorySpace.Vec,
+                    pl.TileView(
+                        valid_shape=[pl.max(pl.min(valid_rows - subblock_idx * 8, 8), 0), valid_cols]
+                    ),
+                ] = pl.tpop_from_aic(split=1)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
 
     def test_load_shape_halved_and_offset_adjusted(self):
         """tile.load in AIV: shape halved, offset adjusted in split dim (includes add of halved tiles)."""
@@ -281,21 +306,26 @@ class TestSplitVectorKernelUpDown:
                     accum = pl.add(accum, pop_tile)
                 return out_0
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
-        main_aiv = actual.get_function("main_aiv")
-        assert main_aiv is not None
-        loop_stmt = next(stmt for stmt in ir.flatten_to_stmts(main_aiv.body) if isinstance(stmt, ir.ForStmt))
-        iter_arg_type = loop_stmt.iter_args[0].type
-        assert isinstance(iter_arg_type, ir.TileType)
-        assert isinstance(iter_arg_type.shape[0], ir.ConstInt)
-        assert iter_arg_type.shape[0].value == 8
-        assert "def main_aiv(" in printed
-        assert "def main_aiv__aiv1(" not in printed
-        assert "pl.tile.get_subblock_idx()" in printed
-        assert "pl.tile.load(data__ssa_v0, [0 + subblock_idx * 8, 0], [8, 128], [8, 128]" in printed
-        assert "pl.tile.tpop_from_aic(split=1)" in printed
-        assert "pl.tile.store(accum__iter_v1, [0 + subblock_idx * 8, 0], out_0__iter_v1)" in printed
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                accum: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
+                )
+                for i in pl.range(2):
+                    out_0 = pl.store(accum, [0 + subblock_idx * 8, 0], out_0)
+                    pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                    accum = pl.add(accum, pop_tile)
+                return out_0
+
+        _assert_split_matches_expected(Before, Expected)
 
     def test_loop_return_var_keeps_split_tracking(self):
         """Loop return_vars fed by split tiles must keep split-aware store offsets after the loop."""
@@ -317,21 +347,26 @@ class TestSplitVectorKernelUpDown:
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(accum, [0, 0], out_0)
                 return out_0_store
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
-        main_aiv = actual.get_function("main_aiv")
-        assert main_aiv is not None
-        loop_stmt = next(stmt for stmt in ir.flatten_to_stmts(main_aiv.body) if isinstance(stmt, ir.ForStmt))
-        return_var_type = loop_stmt.return_vars[0].type
-        assert isinstance(return_var_type, ir.TileType)
-        assert isinstance(return_var_type.shape[0], ir.ConstInt)
-        assert return_var_type.shape[0].value == 8
-        assert "def main_aiv(" in printed
-        assert "def main_aiv__aiv1(" not in printed
-        assert "pl.tile.get_subblock_idx()" in printed
-        assert "pl.tile.load(data__ssa_v0, [0 + subblock_idx * 8, 0], [8, 128], [8, 128]" in printed
-        assert "pl.tile.tpop_from_aic(split=1)" in printed
-        assert "pl.tile.store(accum__rv_v2, [0 + subblock_idx * 8, 0], out_0__ssa_v0)" in printed
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                accum: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
+                )
+                for i in pl.range(2):
+                    pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                    accum = pl.add(accum, pop_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(accum, [0 + subblock_idx * 8, 0], out_0)
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
 
     def test_injected_subblock_idx_avoids_name_collision(self):
         """Injected lane temp should pick a fresh name when subblock_idx already exists."""
@@ -521,15 +556,32 @@ class TestSplitVectorKernelUpDown:
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
                 return out_0_store
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
-        main_aiv = actual.get_function("main_aiv")
-        assert main_aiv is not None
-        assert "pl.tile.get_subblock_idx()" in printed
-        assert "pl.tile.load(data__ssa_v0, [0 + subblock_idx * 8, 0], [8, 128], [8, 128]" in printed
-        assert "pl.tile.load(gamma__ssa_v0, [0, 0], [1, 128], [1, 128]" in printed
-        assert "pl.tile.col_expand_mul(" in printed
-        assert "pl.tile.store(" in printed
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.UP_DOWN, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                gamma: pl.Tensor[[1, 128], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
+                )
+                gamma_tile: pl.Tile[[1, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    gamma, [0, 0], [1, 128], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.col_expand_mul(prev, gamma_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0 + subblock_idx * 8, 0], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
 
     def test_reduce_on_split_axis_rejected(self):
         """Reduce on split axis (dim0 under UP_DOWN) must raise ValueError."""
@@ -684,18 +736,40 @@ class TestSplitVectorKernelLeftRight:
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
                 return out_0_store
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
-        main_aiv = actual.get_function("main_aiv")
-        assert main_aiv is not None
-        assert "pl.tile.get_subblock_idx()" in printed
-        assert "pl.tile.load(data__ssa_v0, [0, 0 + subblock_idx * 64], [16, 64], [16, 64]" in printed
-        assert "pl.tile.load(gamma__ssa_v0, [0, 0], [16, 1], [16, 1]" in printed
-        assert "pl.tile.row_expand_mul(" in printed
-        assert "pl.tile.store(" in printed
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self,
+                data: pl.Tensor[[16, 128], pl.FP32],
+                gamma: pl.Tensor[[16, 1], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                prev: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0, 0 + subblock_idx * 64], [16, 64], target_memory=pl.MemorySpace.Vec
+                )
+                gamma_tile: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    gamma, [0, 0], [16, 1], target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.row_expand_mul(prev, gamma_tile)
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
+                    result, [0, 0 + subblock_idx * 64], out_0
+                )
+                return out_0_store
+
+        _assert_split_matches_expected(Before, Expected)
 
     def test_rank1_load_is_preserved_when_left_right_split_axis_is_absent(self):
-        """Rank-1 tile.load must not be rewritten for LEFT_RIGHT split."""
+        """Rank-1 tile.load must not be rewritten for LEFT_RIGHT split.
+
+        The function still gains the ``dual_aiv_dispatch`` attr and the
+        injected ``subblock_idx`` temp, but the rank-1 load/store offsets
+        must stay unscaled because the split axis (dim1) is absent.
+        """
 
         @pl.program
         class Before:
@@ -709,11 +783,23 @@ class TestSplitVectorKernelLeftRight:
                 out: pl.Tensor[[128], pl.FP32] = pl.store(loaded, [0], out_0)
                 return out
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
-        assert "pl.tile.load(data__ssa_v0, [0], [128], [128]" in printed
-        assert "pl.tile.store(loaded__ssa_v0, [0], out_0__ssa_v0)" in printed
-        assert "subblock_idx *" not in printed
+        @pl.program
+        class Expected:
+            @pl.function(
+                type=pl.FunctionType.AIV,
+                attrs={"split": pl.SplitMode.LEFT_RIGHT, "dual_aiv_dispatch": True},
+            )
+            def main_aiv(
+                self, data: pl.Tensor[[128], pl.FP32], out_0: pl.Out[pl.Tensor[[128], pl.FP32]]
+            ) -> pl.Tensor[[128], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                loaded: pl.Tile[[128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    data, [0], [128], target_memory=pl.MemorySpace.Vec
+                )
+                out: pl.Tensor[[128], pl.FP32] = pl.store(loaded, [0], out_0)
+                return out
+
+        _assert_split_matches_expected(Before, Expected)
 
 
 class TestSplitVectorKernelNoSplitA2A3:
@@ -744,24 +830,42 @@ class TestSplitVectorKernelNoSplitA2A3:
                 pl.tpush_to_aic(summed, split=0)
                 return out
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    a_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                        a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                    )
+                    b_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                        b, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
+                    )
+                    summed: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(a_tile, b_tile)
+                    pl.tpush_to_aic(summed, split=0)
+                    return out
+                else:
+                    a_tile_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    b_tile_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                    summed_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.add(a_tile_lane1, b_tile_lane1)
+                    pl.tpush_to_aic(summed_lane1, split=0)
+                    return out
 
-        assert "pl.tile.get_subblock_idx()" in printed
-        assert "if subblock_idx == 0:" in printed
-        assert printed.count("pl.tile.tpush_to_aic(") == 2
-        assert printed.count("pl.tile.load(") == 2
-        assert printed.count("pl.tile.create(") == 2
-        assert printed.count("pl.tile.add(") == 2
-        assert re.search(
-            r"a_tile__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
-            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.create",
-            printed,
-        )
-        assert "pl.TileView(valid_shape=[0, 0])" in printed
-        assert "pl.tile.move(" not in printed
-        assert printed.count("pl.system.reserve_buffer(") == 1
-        assert printed.count("pl.system.aiv_initialize_pipe(") == 1
+        _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_rewrites_lane1_three_arg_tile_load(self):
         backend.reset_for_testing()
@@ -839,14 +943,30 @@ class TestSplitVectorKernelNoSplitA2A3:
                 pl.tpush_to_aic(zero_tile, split=0)
                 return out
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                peer_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
+                pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=peer_buf)
+                if subblock_idx == 0:
+                    zero_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                        [16, 16], dtype=pl.FP32, value=0.0
+                    )
+                    pl.tpush_to_aic(zero_tile, split=0)
+                    return out
+                else:
+                    zero_tile_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+                    pl.tpush_to_aic(zero_tile_lane1, split=0)
+                    return out
 
-        assert "pl.tile.get_subblock_idx()" in printed
-        assert "if subblock_idx == 0:" in printed
-        assert printed.count("pl.system.import_peer_buffer(") == 1
-        assert printed.count("pl.system.aiv_initialize_pipe(") == 1
-        assert printed.count("pl.tile.tpush_to_aic(") == 2
+        _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_consumer_keeps_only_tpop_tfree_on_lane1(self):
         backend.reset_for_testing()
@@ -868,16 +988,30 @@ class TestSplitVectorKernelNoSplitA2A3:
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(z_vec, [0, 0], out)
                 return updated
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+                    pl.tfree_to_aic(z_vec)
+                    updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(z_vec, [0, 0], out)
+                    return updated
+                else:
+                    z_vec_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tpop_from_aic(split=0)
+                    pl.tfree_to_aic(z_vec_lane1)
+                    updated_lane1: pl.Tensor[[16, 16], pl.FP32] = out
+                    return out
 
-        assert "pl.tile.get_subblock_idx()" in printed
-        assert "if subblock_idx == 0:" in printed
-        assert printed.count("pl.tile.tpop_from_aic(split=0)") == 2
-        assert printed.count("pl.system.tfree_to_aic(") == 2
-        assert printed.count("pl.tile.store(") == 1
-        assert printed.count("pl.system.reserve_buffer(") == 1
-        assert printed.count("pl.system.aiv_initialize_pipe(") == 1
+        _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_lane1_replays_empty_tiles_after_tpop(self):
         backend.reset_for_testing()
@@ -900,23 +1034,34 @@ class TestSplitVectorKernelNoSplitA2A3:
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(incremented, [0, 0], out)
                 return updated
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+                    incremented: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(z_vec, 1.0)
+                    pl.tfree_to_aic(z_vec)
+                    updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(incremented, [0, 0], out)
+                    return updated
+                else:
+                    z_vec_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tpop_from_aic(split=0)
+                    incremented_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.add(z_vec_lane1, 1.0)
+                    pl.tfree_to_aic(z_vec_lane1)
+                    updated_lane1: pl.Tensor[[16, 16], pl.FP32] = out
+                    return out
 
-        assert "if subblock_idx == 0:" in printed
-        assert printed.count("pl.tile.tpop_from_aic(split=0)") == 2
-        assert printed.count("pl.tile.adds(") == 2
-        assert printed.count("pl.tile.store(") == 1
-        assert re.search(
-            r"z_vec__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
-            r"pl.TileView\(valid_shape=\[0, 0\]\)\]",
-            printed,
-        )
-        assert re.search(
-            r"incremented__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
-            r"pl.TileView\(valid_shape=\[0, 0\]\)\]",
-            printed,
-        )
+        _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_lane1_loop_init_uses_empty_accumulator(self):
         backend.reset_for_testing()
@@ -945,22 +1090,50 @@ class TestSplitVectorKernelNoSplitA2A3:
                 updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(incremented, [0, 0], out)
                 return updated
 
-        actual = _run_split_vector_kernel(Before)
-        printed = python_print(actual)
-        lane1 = printed.split("else:", 1)[1]
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+            def main_aiv(
+                self,
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
+                if subblock_idx == 0:
+                    acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
+                        [16, 16], dtype=pl.FP32, value=0.0
+                    )
+                    for kb, (acc_iter,) in pl.range(4, init_values=(acc,)):
+                        z_vec: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+                        next_acc: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, z_vec)
+                        pl.tfree_to_aic(z_vec)
+                        acc_final: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.yield_(next_acc)
+                    incremented: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_final, 1.0)
+                    updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(incremented, [0, 0], out)
+                    return updated
+                else:
+                    acc_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.tile.full([16, 16], dtype=pl.FP32, value=0.0)
+                    for kb_lane1, (acc_iter_lane1,) in pl.range(4, init_values=(acc_lane1,)):
+                        z_vec_lane1: pl.Tile[
+                            [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                        ] = pl.tpop_from_aic(split=0)
+                        next_acc_lane1: pl.Tile[
+                            [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                        ] = pl.add(acc_iter_lane1, z_vec_lane1)
+                        pl.tfree_to_aic(z_vec_lane1)
+                        acc_final_lane1: pl.Tile[
+                            [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                        ] = pl.yield_(next_acc_lane1)
+                    incremented_lane1: pl.Tile[
+                        [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                    ] = pl.add(acc_final_lane1, 1.0)
+                    updated_lane1: pl.Tensor[[16, 16], pl.FP32] = out
+                    return out
 
-        assert re.search(
-            r"acc__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
-            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.full",
-            lane1,
-        )
-        assert re.search(r"pl.range\(4, init_values=\(acc__ssa_v0_\d+,\)\)", lane1)
-        assert "pl.range(4, init_values=(acc__ssa_v0,))" not in lane1
-        assert re.search(
-            r"incremented__ssa_v0_\d+: pl.Tile\[\[16, 16\], pl.FP32, pl.Mem.Vec, "
-            r"pl.TileView\(valid_shape=\[0, 0\]\)\]",
-            lane1,
-        )
+        _assert_split_matches_expected(Before, Expected)
 
     def test_no_split_dual_dispatch_lane1_while_init_uses_empty_accumulator(self):
         """Cover lane1 replay for while-loop tile/scalar carried state."""

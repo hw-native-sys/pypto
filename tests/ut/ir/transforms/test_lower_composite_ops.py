@@ -14,6 +14,10 @@ arithmetic tile ops. Today it covers ``tile.sin`` / ``tile.cos`` (Cody-Waite
 range reduction + degree-9 odd Horner polynomial). The decomposition uses
 only ``tile.muls``, ``tile.adds``, ``tile.add``, ``tile.sub``, ``tile.mul``
 and ``tile.cast`` — no sin/cos remain after the pass.
+
+Decomposition tests use the Before/Expected pattern: the ``Expected`` program
+pins the full decomposed primitive tree so any change to the lowering surfaces
+as a structural diff.
 """
 
 import pypto.language as pl
@@ -85,10 +89,10 @@ def test_lower_composite_ops_noop_on_no_trig():
 
 
 def test_sin_is_decomposed_to_primitives():
-    """``tile.sin`` is removed and only allowed primitives appear in its place."""
+    """``tile.sin`` is decomposed into the full Cody-Waite + Horner primitive tree."""
 
     @pl.program
-    class Prog:
+    class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def main_incore_0(
             self,
@@ -106,30 +110,66 @@ def test_sin_is_decomposed_to_primitives():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    after = passes.lower_composite_ops()(Prog)
-    op_names = set(_collect_op_names(after))
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def main_incore_0(
+            x: pl.Tensor[[16, 16], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec, transpose=False)
+            y_tile__pi_inv_x_tmp_v0 = pl.tile.muls(x_tile, 0.31830987334251404)
+            y_tile__k_i_tmp_v1 = pl.tile.cast(y_tile__pi_inv_x_tmp_v0, target_type=pl.INT32, mode="round")
+            y_tile__k_f_tmp_v2 = pl.tile.cast(y_tile__k_i_tmp_v1, target_type=pl.FP32, mode="none")
+            y_tile__k_pi_v2_tmp_v3 = pl.tile.muls(y_tile__k_f_tmp_v2, 3.140625)
+            y_tile__t0_tmp_v4 = pl.tile.sub(x_tile, y_tile__k_pi_v2_tmp_v3)
+            y_tile__k_pi_c1_tmp_v5 = pl.tile.muls(y_tile__k_f_tmp_v2, 0.0009670257568359375)
+            y_tile__t1_tmp_v6 = pl.tile.sub(y_tile__t0_tmp_v4, y_tile__k_pi_c1_tmp_v5)
+            y_tile__k_pi_c2_tmp_v7 = pl.tile.muls(y_tile__k_f_tmp_v2, 6.2771141529083252e-07)
+            y_tile__t2_tmp_v8 = pl.tile.sub(y_tile__t1_tmp_v6, y_tile__k_pi_c2_tmp_v7)
+            y_tile__k_pi_c3_tmp_v9 = pl.tile.muls(y_tile__k_f_tmp_v2, 1.2164491636212915e-10)
+            y_tile__t3_tmp_v10 = pl.tile.sub(y_tile__t2_tmp_v8, y_tile__k_pi_c3_tmp_v9)
+            y_tile__k_pi_c4_tmp_v11 = pl.tile.muls(y_tile__k_f_tmp_v2, -1.0290622927356871e-13)
+            y_tile__t4_tmp_v12 = pl.tile.sub(y_tile__t3_tmp_v10, y_tile__k_pi_c4_tmp_v11)
+            y_tile__half_k_tmp_v13 = pl.tile.muls(y_tile__k_f_tmp_v2, 0.5)
+            y_tile__floor_hk_i_tmp_v14 = pl.tile.cast(
+                y_tile__half_k_tmp_v13, target_type=pl.INT32, mode="floor"
+            )
+            y_tile__floor_hk_f_tmp_v15 = pl.tile.cast(
+                y_tile__floor_hk_i_tmp_v14, target_type=pl.FP32, mode="none"
+            )
+            y_tile__floor_x4_tmp_v16 = pl.tile.muls(y_tile__floor_hk_f_tmp_v15, 4.0)
+            y_tile__neg2_k_tmp_v17 = pl.tile.muls(y_tile__k_f_tmp_v2, -2.0)
+            y_tile__sign_pre_tmp_v18 = pl.tile.add(y_tile__floor_x4_tmp_v16, y_tile__neg2_k_tmp_v17)
+            y_tile__sign_tmp_v19 = pl.tile.adds(y_tile__sign_pre_tmp_v18, 1.0)
+            y_tile__t2sq_tmp_v20 = pl.tile.mul(y_tile__t4_tmp_v12, y_tile__t4_tmp_v12)
+            y_tile__p_r0_tmp_v21 = pl.tile.muls(y_tile__t2sq_tmp_v20, 2.6049265215988271e-06)
+            y_tile__p_r1_tmp_v22 = pl.tile.adds(y_tile__p_r0_tmp_v21, -0.00019808944489341229)
+            y_tile__p_t2_r1_tmp_v23 = pl.tile.mul(y_tile__p_r1_tmp_v22, y_tile__t2sq_tmp_v20)
+            y_tile__p_r2_tmp_v24 = pl.tile.adds(y_tile__p_t2_r1_tmp_v23, 0.0083330497145652771)
+            y_tile__p_t2_r2_tmp_v25 = pl.tile.mul(y_tile__p_r2_tmp_v24, y_tile__t2sq_tmp_v20)
+            y_tile__p_r3_tmp_v26 = pl.tile.adds(y_tile__p_t2_r2_tmp_v25, -0.16666658222675323)
+            y_tile__p_t2_r3_tmp_v27 = pl.tile.mul(y_tile__p_r3_tmp_v26, y_tile__t2sq_tmp_v20)
+            y_tile__p_one_tmp_v28 = pl.tile.adds(y_tile__p_t2_r3_tmp_v27, 1.0)
+            y_tile__t_p_tmp_v29 = pl.tile.mul(y_tile__t4_tmp_v12, y_tile__p_one_tmp_v28)
+            y_tile = pl.tile.mul(y_tile__sign_tmp_v19, y_tile__t_p_tmp_v29)
+            out_0 = pl.tile.store(y_tile, [0, 0], out_0)
+            return out_0
 
-    # The lowering must remove tile.sin entirely.
-    assert "tile.sin" not in op_names
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            out_0 = pl.tensor.create([16, 16], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+            r = self.main_incore_0(x, out_0)
+            return r
 
-    # Every emitted decomposition op must come from the allowed primitive set.
-    # Framework ops (tile.load/tile.store, tensor.create, the InCore main
-    # function call) are filtered explicitly so an unexpected new op surfaces
-    # as a test failure rather than being silently allowed.
-    framework_ops = {"tile.load", "tile.store", "tensor.create", "main_incore_0"}
-    leftover = op_names - _DECOMP_PRIMITIVES - framework_ops
-    assert not leftover, f"Unexpected ops after lowering: {sorted(leftover)}"
-
-    # Sanity: the decomposition actually emitted primitives (not just deleted
-    # the call).
-    assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
+    After = passes.lower_composite_ops()(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_cos_is_decomposed_to_primitives():
-    """``tile.cos`` is removed and only allowed primitives appear in its place."""
+    """``tile.cos`` is decomposed into the full Cody-Waite + Horner primitive tree."""
 
     @pl.program
-    class Prog:
+    class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def main_incore_0(
             self,
@@ -147,15 +187,62 @@ def test_cos_is_decomposed_to_primitives():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    after = passes.lower_composite_ops()(Prog)
-    op_names = set(_collect_op_names(after))
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def main_incore_0(
+            x: pl.Tensor[[16, 16], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec, transpose=False)
+            y_tile__pi_inv_x_tmp_v0 = pl.tile.muls(x_tile, 0.31830987334251404)
+            y_tile__k_pre_tmp_v1 = pl.tile.adds(y_tile__pi_inv_x_tmp_v0, 0.5)
+            y_tile__k_i_tmp_v2 = pl.tile.cast(y_tile__k_pre_tmp_v1, target_type=pl.INT32, mode="rint")
+            y_tile__k_f_tmp_v3 = pl.tile.cast(y_tile__k_i_tmp_v2, target_type=pl.FP32, mode="none")
+            y_tile__k_pi_v2_tmp_v4 = pl.tile.muls(y_tile__k_f_tmp_v3, 3.140625)
+            y_tile__t0_tmp_v5 = pl.tile.sub(x_tile, y_tile__k_pi_v2_tmp_v4)
+            y_tile__k_pi_c1_tmp_v6 = pl.tile.muls(y_tile__k_f_tmp_v3, 0.0009670257568359375)
+            y_tile__t1_tmp_v7 = pl.tile.sub(y_tile__t0_tmp_v5, y_tile__k_pi_c1_tmp_v6)
+            y_tile__t1h_tmp_v8 = pl.tile.adds(y_tile__t1_tmp_v7, 1.5707963705062866)
+            y_tile__k_pi_c2_tmp_v9 = pl.tile.muls(y_tile__k_f_tmp_v3, 6.2771141529083252e-07)
+            y_tile__t2_tmp_v10 = pl.tile.sub(y_tile__t1h_tmp_v8, y_tile__k_pi_c2_tmp_v9)
+            y_tile__k_pi_c3_tmp_v11 = pl.tile.muls(y_tile__k_f_tmp_v3, 1.2164491636212915e-10)
+            y_tile__t3_tmp_v12 = pl.tile.sub(y_tile__t2_tmp_v10, y_tile__k_pi_c3_tmp_v11)
+            y_tile__k_pi_c4_tmp_v13 = pl.tile.muls(y_tile__k_f_tmp_v3, -1.0290622927356871e-13)
+            y_tile__t4_tmp_v14 = pl.tile.sub(y_tile__t3_tmp_v12, y_tile__k_pi_c4_tmp_v13)
+            y_tile__t4t_tmp_v15 = pl.tile.adds(y_tile__t4_tmp_v14, -4.3711388286737929e-08)
+            y_tile__half_k_tmp_v16 = pl.tile.muls(y_tile__k_f_tmp_v3, 0.5)
+            y_tile__floor_hk_i_tmp_v17 = pl.tile.cast(
+                y_tile__half_k_tmp_v16, target_type=pl.INT32, mode="floor"
+            )
+            y_tile__floor_hk_f_tmp_v18 = pl.tile.cast(
+                y_tile__floor_hk_i_tmp_v17, target_type=pl.FP32, mode="none"
+            )
+            y_tile__floor_x4_tmp_v19 = pl.tile.muls(y_tile__floor_hk_f_tmp_v18, 4.0)
+            y_tile__neg2_k_tmp_v20 = pl.tile.muls(y_tile__k_f_tmp_v3, -2.0)
+            y_tile__sign_pre_tmp_v21 = pl.tile.add(y_tile__floor_x4_tmp_v19, y_tile__neg2_k_tmp_v20)
+            y_tile__sign_tmp_v22 = pl.tile.adds(y_tile__sign_pre_tmp_v21, 1.0)
+            y_tile__t2sq_tmp_v23 = pl.tile.mul(y_tile__t4t_tmp_v15, y_tile__t4t_tmp_v15)
+            y_tile__p_r0_tmp_v24 = pl.tile.muls(y_tile__t2sq_tmp_v23, 2.6049265215988271e-06)
+            y_tile__p_r1_tmp_v25 = pl.tile.adds(y_tile__p_r0_tmp_v24, -0.00019808944489341229)
+            y_tile__p_t2_r1_tmp_v26 = pl.tile.mul(y_tile__p_r1_tmp_v25, y_tile__t2sq_tmp_v23)
+            y_tile__p_r2_tmp_v27 = pl.tile.adds(y_tile__p_t2_r1_tmp_v26, 0.0083330497145652771)
+            y_tile__p_t2_r2_tmp_v28 = pl.tile.mul(y_tile__p_r2_tmp_v27, y_tile__t2sq_tmp_v23)
+            y_tile__p_r3_tmp_v29 = pl.tile.adds(y_tile__p_t2_r2_tmp_v28, -0.16666658222675323)
+            y_tile__p_t2_r3_tmp_v30 = pl.tile.mul(y_tile__p_r3_tmp_v29, y_tile__t2sq_tmp_v23)
+            y_tile__p_one_tmp_v31 = pl.tile.adds(y_tile__p_t2_r3_tmp_v30, 1.0)
+            y_tile__t_p_tmp_v32 = pl.tile.mul(y_tile__t4t_tmp_v15, y_tile__p_one_tmp_v31)
+            y_tile = pl.tile.mul(y_tile__sign_tmp_v22, y_tile__t_p_tmp_v32)
+            out_0 = pl.tile.store(y_tile, [0, 0], out_0)
+            return out_0
 
-    assert "tile.cos" not in op_names
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            out_0 = pl.tensor.create([16, 16], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+            r = self.main_incore_0(x, out_0)
+            return r
 
-    framework_ops = {"tile.load", "tile.store", "tensor.create", "main_incore_0"}
-    leftover = op_names - _DECOMP_PRIMITIVES - framework_ops
-    assert not leftover, f"Unexpected ops after lowering: {sorted(leftover)}"
-    assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
+    After = passes.lower_composite_ops()(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_sin_lowering_is_idempotent():
@@ -216,7 +303,7 @@ def test_both_sin_and_cos_in_same_function():
     """Verify sin and cos lowering don't interfere when both appear in one function."""
 
     @pl.program
-    class Prog:
+    class Before:
         @pl.function(type=pl.FunctionType.InCore)
         def main_incore_0(
             self,
@@ -236,20 +323,90 @@ def test_both_sin_and_cos_in_same_function():
             r: pl.Tensor[[16, 16], pl.FP32] = self.main_incore_0(x, out_0)
             return r
 
-    after = passes.lower_composite_ops()(Prog)
-    op_names = set(_collect_op_names(after))
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+        def main_incore_0(
+            x: pl.Tensor[[16, 16], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]]
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            x_tile = pl.tile.load(x, [0, 0], [16, 16], [16, 16], target_memory=pl.Mem.Vec, transpose=False)
+            a__pi_inv_x_tmp_v0 = pl.tile.muls(x_tile, 0.31830987334251404)
+            a__k_i_tmp_v1 = pl.tile.cast(a__pi_inv_x_tmp_v0, target_type=pl.INT32, mode="round")
+            a__k_f_tmp_v2 = pl.tile.cast(a__k_i_tmp_v1, target_type=pl.FP32, mode="none")
+            a__k_pi_v2_tmp_v3 = pl.tile.muls(a__k_f_tmp_v2, 3.140625)
+            a__t0_tmp_v4 = pl.tile.sub(x_tile, a__k_pi_v2_tmp_v3)
+            a__k_pi_c1_tmp_v5 = pl.tile.muls(a__k_f_tmp_v2, 0.0009670257568359375)
+            a__t1_tmp_v6 = pl.tile.sub(a__t0_tmp_v4, a__k_pi_c1_tmp_v5)
+            a__k_pi_c2_tmp_v7 = pl.tile.muls(a__k_f_tmp_v2, 6.2771141529083252e-07)
+            a__t2_tmp_v8 = pl.tile.sub(a__t1_tmp_v6, a__k_pi_c2_tmp_v7)
+            a__k_pi_c3_tmp_v9 = pl.tile.muls(a__k_f_tmp_v2, 1.2164491636212915e-10)
+            a__t3_tmp_v10 = pl.tile.sub(a__t2_tmp_v8, a__k_pi_c3_tmp_v9)
+            a__k_pi_c4_tmp_v11 = pl.tile.muls(a__k_f_tmp_v2, -1.0290622927356871e-13)
+            a__t4_tmp_v12 = pl.tile.sub(a__t3_tmp_v10, a__k_pi_c4_tmp_v11)
+            a__half_k_tmp_v13 = pl.tile.muls(a__k_f_tmp_v2, 0.5)
+            a__floor_hk_i_tmp_v14 = pl.tile.cast(a__half_k_tmp_v13, target_type=pl.INT32, mode="floor")
+            a__floor_hk_f_tmp_v15 = pl.tile.cast(a__floor_hk_i_tmp_v14, target_type=pl.FP32, mode="none")
+            a__floor_x4_tmp_v16 = pl.tile.muls(a__floor_hk_f_tmp_v15, 4.0)
+            a__neg2_k_tmp_v17 = pl.tile.muls(a__k_f_tmp_v2, -2.0)
+            a__sign_pre_tmp_v18 = pl.tile.add(a__floor_x4_tmp_v16, a__neg2_k_tmp_v17)
+            a__sign_tmp_v19 = pl.tile.adds(a__sign_pre_tmp_v18, 1.0)
+            a__t2sq_tmp_v20 = pl.tile.mul(a__t4_tmp_v12, a__t4_tmp_v12)
+            a__p_r0_tmp_v21 = pl.tile.muls(a__t2sq_tmp_v20, 2.6049265215988271e-06)
+            a__p_r1_tmp_v22 = pl.tile.adds(a__p_r0_tmp_v21, -0.00019808944489341229)
+            a__p_t2_r1_tmp_v23 = pl.tile.mul(a__p_r1_tmp_v22, a__t2sq_tmp_v20)
+            a__p_r2_tmp_v24 = pl.tile.adds(a__p_t2_r1_tmp_v23, 0.0083330497145652771)
+            a__p_t2_r2_tmp_v25 = pl.tile.mul(a__p_r2_tmp_v24, a__t2sq_tmp_v20)
+            a__p_r3_tmp_v26 = pl.tile.adds(a__p_t2_r2_tmp_v25, -0.16666658222675323)
+            a__p_t2_r3_tmp_v27 = pl.tile.mul(a__p_r3_tmp_v26, a__t2sq_tmp_v20)
+            a__p_one_tmp_v28 = pl.tile.adds(a__p_t2_r3_tmp_v27, 1.0)
+            a__t_p_tmp_v29 = pl.tile.mul(a__t4_tmp_v12, a__p_one_tmp_v28)
+            a = pl.tile.mul(a__sign_tmp_v19, a__t_p_tmp_v29)
+            b__pi_inv_x_tmp_v30 = pl.tile.muls(x_tile, 0.31830987334251404)
+            b__k_pre_tmp_v31 = pl.tile.adds(b__pi_inv_x_tmp_v30, 0.5)
+            b__k_i_tmp_v32 = pl.tile.cast(b__k_pre_tmp_v31, target_type=pl.INT32, mode="rint")
+            b__k_f_tmp_v33 = pl.tile.cast(b__k_i_tmp_v32, target_type=pl.FP32, mode="none")
+            b__k_pi_v2_tmp_v34 = pl.tile.muls(b__k_f_tmp_v33, 3.140625)
+            b__t0_tmp_v35 = pl.tile.sub(x_tile, b__k_pi_v2_tmp_v34)
+            b__k_pi_c1_tmp_v36 = pl.tile.muls(b__k_f_tmp_v33, 0.0009670257568359375)
+            b__t1_tmp_v37 = pl.tile.sub(b__t0_tmp_v35, b__k_pi_c1_tmp_v36)
+            b__t1h_tmp_v38 = pl.tile.adds(b__t1_tmp_v37, 1.5707963705062866)
+            b__k_pi_c2_tmp_v39 = pl.tile.muls(b__k_f_tmp_v33, 6.2771141529083252e-07)
+            b__t2_tmp_v40 = pl.tile.sub(b__t1h_tmp_v38, b__k_pi_c2_tmp_v39)
+            b__k_pi_c3_tmp_v41 = pl.tile.muls(b__k_f_tmp_v33, 1.2164491636212915e-10)
+            b__t3_tmp_v42 = pl.tile.sub(b__t2_tmp_v40, b__k_pi_c3_tmp_v41)
+            b__k_pi_c4_tmp_v43 = pl.tile.muls(b__k_f_tmp_v33, -1.0290622927356871e-13)
+            b__t4_tmp_v44 = pl.tile.sub(b__t3_tmp_v42, b__k_pi_c4_tmp_v43)
+            b__t4t_tmp_v45 = pl.tile.adds(b__t4_tmp_v44, -4.3711388286737929e-08)
+            b__half_k_tmp_v46 = pl.tile.muls(b__k_f_tmp_v33, 0.5)
+            b__floor_hk_i_tmp_v47 = pl.tile.cast(b__half_k_tmp_v46, target_type=pl.INT32, mode="floor")
+            b__floor_hk_f_tmp_v48 = pl.tile.cast(b__floor_hk_i_tmp_v47, target_type=pl.FP32, mode="none")
+            b__floor_x4_tmp_v49 = pl.tile.muls(b__floor_hk_f_tmp_v48, 4.0)
+            b__neg2_k_tmp_v50 = pl.tile.muls(b__k_f_tmp_v33, -2.0)
+            b__sign_pre_tmp_v51 = pl.tile.add(b__floor_x4_tmp_v49, b__neg2_k_tmp_v50)
+            b__sign_tmp_v52 = pl.tile.adds(b__sign_pre_tmp_v51, 1.0)
+            b__t2sq_tmp_v53 = pl.tile.mul(b__t4t_tmp_v45, b__t4t_tmp_v45)
+            b__p_r0_tmp_v54 = pl.tile.muls(b__t2sq_tmp_v53, 2.6049265215988271e-06)
+            b__p_r1_tmp_v55 = pl.tile.adds(b__p_r0_tmp_v54, -0.00019808944489341229)
+            b__p_t2_r1_tmp_v56 = pl.tile.mul(b__p_r1_tmp_v55, b__t2sq_tmp_v53)
+            b__p_r2_tmp_v57 = pl.tile.adds(b__p_t2_r1_tmp_v56, 0.0083330497145652771)
+            b__p_t2_r2_tmp_v58 = pl.tile.mul(b__p_r2_tmp_v57, b__t2sq_tmp_v53)
+            b__p_r3_tmp_v59 = pl.tile.adds(b__p_t2_r2_tmp_v58, -0.16666658222675323)
+            b__p_t2_r3_tmp_v60 = pl.tile.mul(b__p_r3_tmp_v59, b__t2sq_tmp_v53)
+            b__p_one_tmp_v61 = pl.tile.adds(b__p_t2_r3_tmp_v60, 1.0)
+            b__t_p_tmp_v62 = pl.tile.mul(b__t4t_tmp_v45, b__p_one_tmp_v61)
+            b = pl.tile.mul(b__sign_tmp_v52, b__t_p_tmp_v62)
+            y_tile = pl.tile.add(a, b)
+            out_0 = pl.tile.store(y_tile, [0, 0], out_0)
+            return out_0
 
-    # Both sin and cos must be removed by the lowering.
-    assert "tile.sin" not in op_names
-    assert "tile.cos" not in op_names
+        @pl.function
+        def main(self, x: pl.Tensor[[16, 16], pl.FP32]) -> pl.Tensor[[16, 16], pl.FP32]:
+            out_0 = pl.tensor.create([16, 16], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+            r = self.main_incore_0(x, out_0)
+            return r
 
-    # Every emitted op must be either an allowed primitive or framework op.
-    framework_ops = {"tile.load", "tile.store", "tensor.create", "main_incore_0"}
-    leftover = op_names - _DECOMP_PRIMITIVES - framework_ops
-    assert not leftover, f"Unexpected ops after lowering: {sorted(leftover)}"
-
-    # Sanity: the decomposition actually emitted primitives for both sin and cos.
-    assert _DECOMP_PRIMITIVES & op_names, "lowering produced no primitive ops"
+    After = passes.lower_composite_ops()(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_sin_in_return_stmt_is_decomposed():

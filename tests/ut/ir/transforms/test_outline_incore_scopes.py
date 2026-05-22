@@ -9,12 +9,9 @@
 
 """Unit tests for OutlineIncoreScopes pass."""
 
-import re
-
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
-from pypto.ir.printer import python_print
 
 
 class TestOutlineIncoreScopes:
@@ -362,13 +359,29 @@ class TestOutlineIncoreScopes:
                         z = pl.yield_(y2)
                 return z
 
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.outline_incore_scopes()(Before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, cond: pl.Scalar[pl.BOOL], x: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                if cond:
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    z = pl.yield_(y)  # type: ignore[no-redef]
+                else:
+                    y2: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+                    z = pl.yield_(y2)  # type: ignore[no-redef]
+                return z
 
-        printed = After.as_python()
-        # The outlined incore function should have correct return type, not Tensor[[1], INT32]
-        assert "Tensor[[1], pl.INT32]" not in printed
-        assert "Tensor[[64], pl.FP32]" in printed
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = self.main_incore_0(cond, x)
+                return z
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_outline_scope_with_intermediate_computation(self):
         """Test outlining scope with computation before, inside, and after."""
@@ -425,14 +438,27 @@ class TestOutlineIncoreScopes:
                 result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf, x)
                 return result
 
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.outline_incore_scopes()(Before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, buf: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
+                buf_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile, [0, 0], buf)
+                return buf_store
 
-        printed = After.as_python()
-        # The outlined InCore function should return buf (store target)
-        assert "return buf" in printed or "return buf_0" in printed
-        # The orchestration should receive the return value
-        assert "main_incore_0(" in printed
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
+                buf: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                buf2: pl.Tensor[[16, 128], pl.FP32] = self.main_incore_0(buf)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf2, x)
+                return result
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
 
     def test_outline_scope_with_multiple_store_targets(self):
         """Test outlining scope with multiple store targets as outputs.
@@ -455,16 +481,33 @@ class TestOutlineIncoreScopes:
                 result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf_a, x)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                buf_a: pl.InOut[pl.Tensor[[16, 128], pl.FP32]],
+                buf_b: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 1], pl.FP32], pl.Tensor[[16, 128], pl.FP32]]:
+                tile_a = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
+                tile_b = pl.tile.full([16, 1], dtype=pl.FP32, value=0.0)
+                buf_a_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile_a, [0, 0], buf_a)
+                buf_b_store: pl.Tensor[[16, 1], pl.FP32] = pl.store(tile_b, [0, 0], buf_b)
+                return (buf_b_store, buf_a_store)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
+                buf_a: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                buf_b: pl.Tensor[[16, 1], pl.FP32] = pl.create_tensor([16, 1], dtype=pl.FP32)
+                ret = self.main_incore_0(buf_a, buf_b)
+                buf_b2 = ret[0]
+                buf_a2 = ret[1]
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf_a2, x)
+                return result
+
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_incore_scopes()(Before)
-
-        printed = After.as_python()
-        # Both store targets should appear as outputs
-        assert "main_incore_0(" in printed
-        # The InCore function should have return statement
-        assert (
-            "return" in printed.split("@pl.function(type=pl.FunctionType.InCore")[1].split("@pl.function")[0]
-        )
+        ir.assert_structural_equal(After, Expected)
 
     def test_outline_scope_with_loop_carried_init_values(self):
         """Test outlining scope where inner loop references outer loop-carried variable via init_values.
@@ -488,23 +531,30 @@ class TestOutlineIncoreScopes:
                     acc_rv = pl.yield_(inner_rv)
                 return acc_rv
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, acc: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for j, (inner,) in pl.range(2, init_values=(acc,)):
+                    updated: pl.Tensor[[64], pl.FP32] = pl.add(inner, y)
+                    inner_rv = pl.yield_(updated)
+                return inner_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for i, (acc,) in pl.range(3, init_values=(x,)):
+                    inner_rv: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, y)
+                    acc_rv = pl.yield_(inner_rv)
+                return acc_rv
+
         Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
-
-        printed = After.as_python()
-        incore_section = printed.split("@pl.function(type=pl.FunctionType.InCore")[1].split("@pl.function")[0]
-        # Extract parameters between "def ...(self, ...)" — handle multiline signatures
-        param_match = re.search(r"def \w+\((.*?)\)\s*->", incore_section, re.DOTALL)
-        assert param_match is not None
-        incore_params = param_match.group(1)
-        orch_section = printed.split("@pl.function(type=pl.FunctionType.Orchestration")[1]
-
-        assert "acc" in incore_params, (
-            "outer loop-carried variable 'acc' must be a parameter of the outlined function"
-        )
-        assert "main_incore_0" in orch_section and "acc" in orch_section, (
-            "orchestration must pass 'acc' to the outlined function"
-        )
+        ir.assert_structural_equal(After, Expected)
 
     def test_outline_scope_does_not_capture_outer_init_value(self):
         """Outer loop's init value must NOT become a parameter of the outlined incore function.
@@ -526,20 +576,28 @@ class TestOutlineIncoreScopes:
                     acc_rv = pl.yield_(result)
                 return acc_rv
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, acc: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                result: pl.Tensor[[64], pl.FP32] = pl.add(acc, y)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, init: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for sb, (acc,) in pl.range(4, init_values=(init,)):
+                    result: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, y)
+                    acc_rv = pl.yield_(result)
+                return acc_rv
+
         Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
-
-        printed = After.as_python()
-        incore_section = printed.split("@pl.function(type=pl.FunctionType.InCore")[1].split("@pl.function")[0]
-        # Extract parameters — handle multiline signatures from ruff formatting
-        param_match = re.search(r"def \w+\((.*?)\)\s*->", incore_section, re.DOTALL)
-        assert param_match is not None
-        incore_params = param_match.group(1)
-
-        assert "acc" in incore_params, "loop-carried 'acc' must be a parameter"
-        assert "init" not in incore_params, (
-            "outer loop's init value 'init' must NOT be a parameter of the incore function"
-        )
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestSplitIncoreOrchVerifier:
@@ -639,15 +697,25 @@ class TestSplitIncoreOrchVerifier:
                 result: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
                 return result
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(a)
+                result: pl.Tensor[[64], pl.FP32] = pl.add(y, y)
+                return result
+
         # Run with full verification — should pass despite compute ops in orchestration
         program = passes.convert_to_ssa()(Input)
+        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(program)
-
-        # Verify the outlined program still has the expected structure
-        orch_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.Orchestration]
-        incore_funcs = [f for f in After.functions.values() if f.func_type == ir.FunctionType.InCore]
-        assert len(orch_funcs) == 1
-        assert len(incore_funcs) == 1
+        ir.assert_structural_equal(After, Expected)
 
     def test_full_pipeline_with_verification_passes(self):
         """Full pipeline with auto_incore: no compute ops leak into Orchestration."""
@@ -662,6 +730,32 @@ class TestSplitIncoreOrchVerifier:
                         x = pl.add(x, 2.0)
                 return x
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x1: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                return x1
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i, (xi,) in pl.parallel(
+                    4, init_values=(x,), attrs={"loop_origin": pl.LoopOrigin.ChunkInner}
+                ):
+                    x4: pl.Tensor[[64], pl.FP32] = pl.add(xi, 2.0)
+                    xrv = pl.yield_(x4)
+                return xrv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x1: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                for i, (xi,) in pl.parallel(
+                    2, init_values=(x1,), attrs={"loop_origin": pl.LoopOrigin.ChunkOuter}
+                ):
+                    xrv: pl.Tensor[[64], pl.FP32] = self.main_incore_1(xi)
+                    xorv = pl.yield_(xrv)
+                return xorv
+
         # Run the full pipeline with verification enabled — should not throw
         program = passes.unroll_loops()(Input)
         program = passes.convert_to_ssa()(program)
@@ -670,11 +764,7 @@ class TestSplitIncoreOrchVerifier:
         program = passes.interchange_chunk_loops()(program)
         program = passes.outline_incore_scopes()(program)
 
-        # Verify no compute tensor ops in orchestration
-        for func in program.functions.values():
-            if func.func_type == ir.FunctionType.Orchestration:
-                func_str = python_print(func)
-                assert "tensor.add" not in func_str
+        ir.assert_structural_equal(program, Expected)
 
 
 class TestOutlineNamedIncoreScopes:

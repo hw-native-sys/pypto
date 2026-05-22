@@ -42,27 +42,6 @@ import pytest
 from pypto import ir, passes
 
 
-def _run_pass(program: ir.Program, *, suppress_verification: bool = False) -> ir.Program:
-    """Run AutoTileMatmulL0.
-
-    Most tests verify their result, but the ``matmul_acc`` case threads a
-    user-supplied ``acc_init`` parameter into the new K-loop's iter-arg.
-    The DSL parser doesn't attach an Nz tile_view to function-parameter
-    Acc tiles, but ``tile.matmul_acc``'s deducer always emits one, so the
-    iter_arg-init / yield-value tile_view-presence check inside the new
-    ForStmt fails.  This is the same parser↔deducer asymmetry tracked in
-    ``KNOWN_ISSUES.md`` ("Structural equality incompatible with Acc-typed
-    iter_args …"), and it doesn't reproduce when ``acc_init`` originates
-    from ``tile.create``/``tile.matmul`` upstream (the common production
-    case).  Pass ``suppress_verification=True`` to bypass the autouse
-    BeforeAndAfter / print-parse roundtrip for that one test.
-    """
-    if suppress_verification:
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            return passes.auto_tile_matmul_l0()(program)
-    return passes.auto_tile_matmul_l0()(program)
-
-
 class TestAutoTileMatmulL0KOnly:
     """K-tiling rewrites for Mat-resident tile.matmul."""
 
@@ -130,7 +109,7 @@ class TestAutoTileMatmulL0KOnly:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        After = _run_pass(Before)
+        After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_matmul_acc_pipelined(self):
@@ -189,7 +168,7 @@ class TestAutoTileMatmulL0KOnly:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        After = _run_pass(Before, suppress_verification=True)
+        After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_already_l0_sized_skipped(self):
@@ -216,7 +195,7 @@ class TestAutoTileMatmulL0KOnly:
                 return out
 
         # No tiling needed → expected = before.
-        After = _run_pass(Before)
+        After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)
 
     def test_pass_idempotent(self):
@@ -247,12 +226,12 @@ class TestAutoTileMatmulL0KOnly:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        once = _run_pass(Before)
+        once = passes.auto_tile_matmul_l0()(Before)
         # First run must have rewritten — otherwise the idempotency check is
         # vacuously true.
         with pytest.raises(ValueError, match="Structural equality"):
             ir.assert_structural_equal(once, Before)
-        twice = _run_pass(once)
+        twice = passes.auto_tile_matmul_l0()(once)
         ir.assert_structural_equal(twice, once)
 
     def test_k_not_divisible_skipped(self):
@@ -282,7 +261,7 @@ class TestAutoTileMatmulL0KOnly:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        After = _run_pass(Before)
+        After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)
 
 
@@ -310,7 +289,7 @@ class TestAutoTileMatmulL0Skips:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        After = _run_pass(Before)
+        After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)
 
     def test_non_mat_operands_left_untouched(self):
@@ -334,7 +313,7 @@ class TestAutoTileMatmulL0Skips:
                 out = pl.store(c, [0, 0], out)
                 return out
 
-        After = _run_pass(Before)
+        After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)
 
 

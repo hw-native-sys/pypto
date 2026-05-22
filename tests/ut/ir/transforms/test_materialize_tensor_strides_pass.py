@@ -17,10 +17,16 @@ pass through unchanged.
 After this pass runs, the codegen-entry contract holds: every
 ``view.has_value()`` slot has explicit stride matching its layout — which
 the strict ``TensorViewCanonical`` verifier enforces.
+
+Tests follow the Before/Expected ``@pl.program`` pattern: the pass runs on
+``Before`` to produce ``After``, which is compared against ``Expected`` via
+``ir.assert_structural_equal``. Skip / no-op cases compare ``After`` against
+``Before``.
 """
 
+import pypto.language as pl
 import pytest
-from pypto import DataType, ir
+from pypto import ir
 from pypto.pypto_core import passes as _passes
 
 # ----------------------------------------------------------------------------
@@ -28,67 +34,13 @@ from pypto.pypto_core import passes as _passes
 # ----------------------------------------------------------------------------
 
 
-def _span():
-    return ir.Span.unknown()
-
-
-def _const(value: int, dtype: DataType = DataType.INDEX):
-    return ir.ConstInt(value, dtype, _span())
-
-
-def _shape(*dims):
-    return [_const(d) for d in dims]
-
-
-def _stride(*vals):
-    return [_const(v) for v in vals]
-
-
-def _empty_body():
-    return ir.EvalStmt(_const(0, DataType.INT64), _span())
-
-
-def _program_with_param_type(tensor_type):
-    span = _span()
-    var = ir.Var("x", tensor_type, span)
-    func = ir.Function("f", [var], [], _empty_body(), span)
-    return ir.Program([func], "p", span)
-
-
 def _materialize(program):
     return _passes.materialize_tensor_strides()(program)
-
-
-def _const_value(expr):
-    assert isinstance(expr, ir.ConstInt), f"expected ConstInt, got {type(expr).__name__}"
-    return expr.value
-
-
-def _values_of(exprs):
-    return [_const_value(e) for e in exprs]
 
 
 def _verify_strict(program):
     """Run TensorViewCanonical in strict mode — empty stride is rejected."""
     return _passes.verify_tensor_view_canonical(program, require_materialized=True)
-
-
-def _param_tensor_type(program):
-    """Return the TensorType attached to the single param of 'f'.
-
-    Wraps the get_function/params/type chain in assertions so callers get
-    a precise TensorType handle (and pyright sees the narrowing).
-    """
-    func = program.get_function("f")
-    assert func is not None
-    param_type = func.params[0].type
-    assert isinstance(param_type, ir.TensorType)
-    return param_type
-
-
-def _param_view(program):
-    """Return the TensorView (or None) attached to the single param of 'f'."""
-    return _param_tensor_type(program).tensor_view
 
 
 # ============================================================================
@@ -97,11 +49,17 @@ def _param_view(program):
 
 
 def test_bare_tensor_unchanged():
-    t = ir.TensorType(_shape(8, 16), DataType.FP32)
-    program = _program_with_param_type(t)
-    out = _materialize(program)
-    assert _param_view(out) is None
-    assert _verify_strict(out) == []
+    @pl.program
+    class Before:
+        @pl.function
+        def f(self, x: pl.Tensor[[8, 16], pl.FP32]):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
+    # Bare TensorType has no view to materialize: pass is a no-op.
+    ir.assert_structural_equal(After, Before)
+    # Strict verifier accepts a bare tensor (implicit ND).
+    assert _verify_strict(After) == []
 
 
 # ============================================================================
@@ -110,37 +68,77 @@ def test_bare_tensor_unchanged():
 
 
 def test_empty_dn_stride_filled_2d():
-    view = ir.TensorView([], ir.TensorLayout.DN)
-    t = ir.TensorType(_shape(4, 8), DataType.FP32, None, view)
-    program = _program_with_param_type(t)
-    out = _materialize(program)
-    out_view = _param_view(out)
-    assert out_view is not None
-    assert out_view.layout == ir.TensorLayout.DN
-    assert _values_of(out_view.stride) == [1, 4]
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
+    ir.assert_structural_equal(After, Expected)
     # Strict verifier accepts the materialized form.
-    assert _verify_strict(out) == []
+    assert _verify_strict(After) == []
 
 
 def test_empty_dn_stride_filled_3d():
-    view = ir.TensorView([], ir.TensorLayout.DN)
-    t = ir.TensorType(_shape(2, 4, 8), DataType.FP32, None, view)
-    program = _program_with_param_type(t)
-    out = _materialize(program)
-    out_view = _param_view(out)
-    assert out_view is not None
-    # B=2, K=4, N=8 -> stride=[K*N, 1, K]=[32, 1, 4]
-    assert _values_of(out_view.stride) == [32, 1, 4]
-    assert _verify_strict(out) == []
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[2, 4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def f(
+            self,
+            # B=2, K=4, N=8 -> stride=[K*N, 1, K]=[32, 1, 4]
+            x: pl.Tensor[[2, 4, 8], pl.FP32, pl.TensorView(stride=[32, 1, 4], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
+    ir.assert_structural_equal(After, Expected)
+    assert _verify_strict(After) == []
 
 
 def test_empty_nd_stride_filled():
     # An ND view with empty stride is also materialized to row-major packed.
-    view = ir.TensorView([], ir.TensorLayout.ND)
-    t = ir.TensorType(_shape(8, 16), DataType.FP32, None, view)
-    out_view = _param_view(_materialize(_program_with_param_type(t)))
-    assert out_view is not None
-    assert _values_of(out_view.stride) == [16, 1]
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.ND)],
+        ):
+            pl.const(0, pl.INT64)
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND)],
+        ):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 # ============================================================================
@@ -149,27 +147,50 @@ def test_empty_nd_stride_filled():
 
 
 def test_explicit_packed_nd_unchanged():
-    view = ir.TensorView(_stride(16, 1), ir.TensorLayout.ND)
-    t = ir.TensorType(_shape(8, 16), DataType.FP32, None, view)
-    program = _program_with_param_type(t)
-    out = _materialize(program)
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[16, 1], layout=pl.TensorLayout.ND)],
+        ):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
     # Identity preservation: pass returns the same Program when nothing changed.
-    assert out is program
+    assert After is Before
+    ir.assert_structural_equal(After, Before)
 
 
 def test_explicit_packed_dn_unchanged():
-    view = ir.TensorView(_stride(1, 4), ir.TensorLayout.DN)
-    t = ir.TensorType(_shape(4, 8), DataType.FP32, None, view)
-    program = _program_with_param_type(t)
-    assert _materialize(program) is program
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
+    assert After is Before
+    ir.assert_structural_equal(After, Before)
 
 
 def test_strided_dn_subview_unchanged():
     # Inherited from a parent — stride larger than DN-packed for the sub-shape.
-    view = ir.TensorView(_stride(1, 8), ir.TensorLayout.DN)
-    t = ir.TensorType(_shape(2, 4), DataType.FP32, None, view)
-    program = _program_with_param_type(t)
-    assert _materialize(program) is program
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[2, 4], pl.FP32, pl.TensorView(stride=[1, 8], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
+    assert After is Before
+    ir.assert_structural_equal(After, Before)
 
 
 # ============================================================================
@@ -182,11 +203,17 @@ def test_nz_on_tensor_rejected_by_paired_verifier():
     # rather than CHECK-failing inside BuildLogicalStridesFromLayout — but
     # because the pass produces TensorViewCanonical, PassPipeline runs the
     # paired verifier, which surfaces the bug as a thrown ValueError.
-    view = ir.TensorView([], ir.TensorLayout.NZ)
-    t = ir.TensorType(_shape(8, 16), DataType.FP32, None, view)
-    program = _program_with_param_type(t)
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[8, 16], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.NZ)],
+        ):
+            pl.const(0, pl.INT64)
+
     with pytest.raises(ValueError, match="NZ layout"):
-        _materialize(program)
+        _materialize(Before)
 
 
 # ============================================================================
@@ -195,13 +222,20 @@ def test_nz_on_tensor_rejected_by_paired_verifier():
 
 
 def test_idempotent_after_first_pass():
-    view = ir.TensorView([], ir.TensorLayout.DN)
-    t = ir.TensorType(_shape(4, 8), DataType.FP32, None, view)
-    program = _program_with_param_type(t)
-    once = _materialize(program)
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    once = _materialize(Before)
     twice = _materialize(once)
     # Second invocation is a no-op: nothing to materialize, identity preserved.
     assert twice is once
+    ir.assert_structural_equal(twice, once)
 
 
 # ============================================================================
@@ -210,21 +244,30 @@ def test_idempotent_after_first_pass():
 
 
 def test_symbolic_dn_materialized_preserves_symbols():
-    K = ir.Var("K", ir.ScalarType(DataType.INDEX), _span())
-    N = ir.Var("N", ir.ScalarType(DataType.INDEX), _span())
-    view = ir.TensorView([], ir.TensorLayout.DN)
-    t = ir.TensorType([K, N], DataType.FP32, None, view)
-    program = _program_with_param_type(t)
-    out_view = _param_view(_materialize(program))
-    assert out_view is not None
-    assert len(out_view.stride) == 2
-    # stride[-2] == ConstInt(1)
-    inner = out_view.stride[0]
-    assert isinstance(inner, ir.ConstInt) and inner.value == 1
-    # stride[-1] == K (the symbolic Var, not a ConstInt)
-    trailing = out_view.stride[1]
-    assert isinstance(trailing, ir.Var)
-    assert trailing.name_hint == "K"
+    K = pl.dynamic("K")
+    N = pl.dynamic("N")
+
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[K, N], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def f(
+            self,
+            # DN-packed: stride[-2] == 1, stride[-1] == K (the symbolic Var).
+            x: pl.Tensor[[K, N], pl.FP32, pl.TensorView(stride=[1, K], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    After = _materialize(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 # ============================================================================
@@ -233,15 +276,31 @@ def test_symbolic_dn_materialized_preserves_symbols():
 
 
 def test_strict_verifier_passes_after_materialization():
-    view = ir.TensorView([], ir.TensorLayout.DN)
-    t = ir.TensorType(_shape(4, 8), DataType.FP32, None, view)
-    program = _program_with_param_type(t)
+    @pl.program
+    class Before:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def f(
+            self,
+            x: pl.Tensor[[4, 8], pl.FP32, pl.TensorView(stride=[1, 4], layout=pl.TensorLayout.DN)],
+        ):
+            pl.const(0, pl.INT64)
+
     # Before materialization, strict mode rejects empty stride.
-    diags_before = _verify_strict(program)
+    diags_before = _verify_strict(Before)
     assert any("stride is empty" in d.message for d in diags_before)
-    # After materialization, strict mode accepts.
-    diags_after = _verify_strict(_materialize(program))
-    assert diags_after == []
+    # After materialization, strict mode accepts and IR matches Expected.
+    After = _materialize(Before)
+    ir.assert_structural_equal(After, Expected)
+    assert _verify_strict(After) == []
 
 
 if __name__ == "__main__":

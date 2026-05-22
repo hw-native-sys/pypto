@@ -20,8 +20,20 @@ chains, and:
 * clusters allocs with the same device descriptor into a single
   :class:`ir.CommGroup` and writes them to ``Program.comm_groups``.
 
-Tests below run the pass directly on a parsed program (via
-``passes.collect_comm_groups()(program)``) and assert on the produced IR.
+Most tests below run the pass directly on a parsed program (via
+``passes.collect_comm_groups()(program)``) and assert on the produced IR by
+node inspection rather than the Before/Expected ``assert_structural_equal``
+pattern. The pass's two output products have no print/parse surface syntax:
+
+* ``Program.comm_groups`` — a ``UsualField`` compared by ``structural_equal``,
+  but the printer emits no ``comm_groups`` syntax and the parser parses none.
+* ``DistributedTensorType.window_buffer_`` — a ``UsualField`` back-reference
+  on each view Var, also compared by ``structural_equal`` but not printed.
+
+An ``Expected`` ``@pl.program`` is built by parsing Python source, so it would
+always carry an empty ``comm_groups`` and ``window_buffer``-less view types,
+mismatching the pass output. ``test_no_alloc_window_buffer_no_op`` is the one
+exception: it produces no such fields and uses ``assert_structural_equal``.
 """
 
 import pypto.language as pl
@@ -32,14 +44,14 @@ from pypto.pypto_core import ir, passes
 
 @pytest.fixture(autouse=True)
 def _basic_verification_context():
-    """Override the ``ut/conftest.py`` autouse fixture to run with BASIC
-    verification (no print/parse roundtrip).
+    """Override the ``ut/conftest.py`` autouse fixture to run with
+    BEFORE_AND_AFTER property verification but no print/parse roundtrip.
 
-    The pass's output materialises ``DistributedTensorType.window_buffer_``
-    back-references on view Vars, but the printer / parser pair has no
-    surface syntax for that field yet — so the roundtrip-symmetric check
-    would fail every iteration despite the in-memory IR being correct.
-    Property verification still runs.
+    The pass's output materialises ``Program.comm_groups`` and
+    ``DistributedTensorType.window_buffer_`` back-references on view Vars,
+    but the printer / parser pair has no surface syntax for either — so the
+    roundtrip-symmetric check would fail every iteration despite the
+    in-memory IR being correct. Property verification still runs.
     """
     with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
         yield
@@ -371,13 +383,15 @@ def test_idempotent():
 
 def test_no_alloc_window_buffer_no_op():
     @pl.program
-    class P:
+    class Before:
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(self, x: pl.Tensor[[64], pl.FP32]):
             return x
 
-    result = _apply(P)
-    assert list(result.comm_groups) == []
+    After = _apply(Before)
+    # No alloc_window_buffer chains ⇒ the pass produces no CommGroups and
+    # rewrites nothing, so the program is unchanged.
+    ir.assert_structural_equal(After, Before)
 
 
 if __name__ == "__main__":
