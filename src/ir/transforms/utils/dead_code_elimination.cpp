@@ -162,6 +162,11 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
       // assignment that feeds the attr (e.g. ``dep_tid = stage1_tid`` after
       // an inline-helper return) is mis-identified as dead and removed,
       // leaving a dangling attr Var reference (issue #1456).
+      //
+      // SpmdScopeStmt additionally has a ``core_num_`` Expr field (e.g.
+      // ``with pl.spmd(n):``) that can reference scalar Vars; we collect
+      // those refs too so a scalar assigned only for the block count is
+      // not deleted.
       auto add_var = [&](const VarPtr& v) {
         if (v) live.insert(v.get());
       };
@@ -173,6 +178,9 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
         } else if (k == kAttrTaskIdVar) {
           if (const auto* var = std::any_cast<VarPtr>(&v)) add_var(*var);
         }
+      }
+      if (auto spmd = std::dynamic_pointer_cast<const SpmdScopeStmt>(scope_stmt)) {
+        collect_expr_refs(spmd->core_num_);
       }
       FindLiveRootsRecursiveImpl(FlattenBody(scope_stmt->body_), is_removable, live);
     }
