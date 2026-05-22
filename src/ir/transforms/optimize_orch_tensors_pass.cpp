@@ -243,6 +243,19 @@ std::vector<OutParamReturnMapping> BuildOutParamReturnMappings(const FunctionPtr
     }
   }
 
+  std::unordered_map<const Var*, ExprPtr> loop_return_to_init;
+  for (const auto& stmt : body_stmts) {
+    if (auto loop = As<ForStmt>(stmt)) {
+      for (size_t i = 0; i < loop->return_vars_.size() && i < loop->iter_args_.size(); ++i) {
+        loop_return_to_init[loop->return_vars_[i].get()] = loop->iter_args_[i]->initValue_;
+      }
+    } else if (auto loop = As<WhileStmt>(stmt)) {
+      for (size_t i = 0; i < loop->return_vars_.size() && i < loop->iter_args_.size(); ++i) {
+        loop_return_to_init[loop->return_vars_[i].get()] = loop->iter_args_[i]->initValue_;
+      }
+    }
+  }
+
   // Find return statement
   ReturnStmtPtr return_stmt;
   for (const auto& stmt : body_stmts) {
@@ -260,7 +273,16 @@ std::vector<OutParamReturnMapping> BuildOutParamReturnMappings(const FunctionPtr
     if (!ret_var) continue;
 
     auto def_it = var_def.find(ret_var.get());
-    if (def_it == var_def.end()) continue;
+    if (def_it == var_def.end()) {
+      auto loop_it = loop_return_to_init.find(ret_var.get());
+      if (loop_it == loop_return_to_init.end()) continue;
+      auto init_var = AsVarLike(loop_it->second);
+      if (!init_var) continue;
+      auto param_it = out_var_to_param_idx.find(init_var.get());
+      if (param_it == out_var_to_param_idx.end()) continue;
+      result.push_back({param_it->second, ret_i, func->params_[param_it->second]});
+      continue;
+    }
 
     auto call = As<Call>(def_it->second->value_);
     if (!call || call->op_->name_ != "tile.store") continue;

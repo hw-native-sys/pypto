@@ -1175,6 +1175,46 @@ class TestOutWindowExternalizer:
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(out" not in printed_main
 
+    def test_loop_returned_output_later_parent_read_stays_baseline(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_rows(
+                self,
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+                row_base: pl.Scalar[pl.INDEX],
+                data: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                for i, (out_iter,) in pl.range(2, init_values=(out,)):
+                    row: pl.Scalar[pl.INDEX] = row_base + i * 32
+                    tile: pl.Tile[[32, 64], pl.FP32] = pl.tile.load(data, [row, 0], [32, 64], [32, 64])
+                    out_next: pl.Tensor[[128, 64], pl.FP32] = pl.tile.store(tile, [row, 0], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume_full(
+                self,
+                out: pl.Tensor[[128, 64], pl.FP32],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[128, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[128, 64], pl.FP32]],
+            ) -> pl.Tensor[[128, 64], pl.FP32]:
+                row_base: pl.Scalar[pl.INDEX] = 32
+                out_next: pl.Tensor[[128, 64], pl.FP32] = self.kernel_rows(out, row_base, data)
+                return self.consume_full(out_next)
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("kernel_rows__windowed") is None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "pl.tensor.slice(out" not in printed_main
+
     def test_multi_out_final_store_all_or_nothing_stays_baseline(self):
         @pl.program
         class Before:
