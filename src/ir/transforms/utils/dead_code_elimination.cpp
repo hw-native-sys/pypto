@@ -11,6 +11,7 @@
 
 #include "pypto/ir/transforms/utils/dead_code_elimination.h"
 
+#include <any>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -152,9 +153,27 @@ void FindLiveRootsRecursiveImpl(const std::vector<StmtPtr>& stmts, const Removab
       collect_iter_arg_refs(while_stmt);
       FindLiveRootsRecursiveImpl(FlattenBody(while_stmt->body_), is_removable, live);
     } else if (auto scope_stmt = std::dynamic_pointer_cast<const ScopeStmt>(stmt)) {
-      // ScopeStmt (InCore/AutoInCore/Cluster/Hierarchy/Spmd) has no Expr
-      // fields that reference scalar Vars — only recurse into the body so
-      // nested assignments remain eligible for removal.
+      // ScopeStmt's own attrs_ can reference Vars defined in the enclosing
+      // scope:
+      //   - manual_dep_edges (vector<VarPtr>)        — pl.at(..., deps=[tid])
+      //   - task_id_var      (VarPtr)                — pl.at(...) as tid
+      //   - arg_direction_overrides_vars (vector<VarPtr>) — direction overrides
+      // These are real uses; without adding them to ``live`` the only
+      // assignment that feeds the attr (e.g. ``dep_tid = stage1_tid`` after
+      // an inline-helper return) is mis-identified as dead and removed,
+      // leaving a dangling attr Var reference (issue #1456).
+      auto add_var = [&](const VarPtr& v) {
+        if (v) live.insert(v.get());
+      };
+      for (const auto& [k, v] : scope_stmt->attrs_) {
+        if (k == kAttrManualDepEdges || k == kAttrArgDirOverrideVars) {
+          if (const auto* edges = std::any_cast<std::vector<VarPtr>>(&v)) {
+            for (const auto& e : *edges) add_var(e);
+          }
+        } else if (k == kAttrTaskIdVar) {
+          if (const auto* var = std::any_cast<VarPtr>(&v)) add_var(*var);
+        }
+      }
       FindLiveRootsRecursiveImpl(FlattenBody(scope_stmt->body_), is_removable, live);
     }
   }

@@ -3355,6 +3355,52 @@ class TestManualScopeCodegen:
         # generated.
         assert "PTO2TaskId t1 = PTO2TaskId::invalid();" not in code, code
 
+    def test_inline_pl_at_task_id_return_feeds_downstream_deps(self):
+        """Regression for issue #1456: a ``TaskId`` produced inside an inline
+        helper and returned to the caller must remain a valid scheduling
+        dependency for a later ``pl.at(..., deps=[tid])`` in the caller.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Inline)
+            def stage1(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                scratch: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Scalar[pl.TASK_ID]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="inline_stage1") as stage1_tid:
+                    v: pl.Scalar[pl.FP32] = pl.read(x, [0])
+                    pl.write(scratch, [0], v)
+                return stage1_tid
+
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                scratch = pl.create_tensor([64], dtype=pl.FP32)
+                dep_tid: pl.Scalar[pl.TASK_ID] = self.stage1(x, scratch)
+
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="stage2", deps=[dep_tid]):
+                    t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                    r: pl.Tile[[64], pl.FP32] = pl.add(t, t)
+                    out = pl.store(r, [0], out)
+
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
+        assert "task_0_outs.task_id()" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
+        assert "params_t1_deps[params_t1_deps_count++]" in code, code
+
     def test_submit_with_deps_in_auto_scope_emits_set_dependencies(self):
         """``pl.submit(..., deps=[tid])`` works in auto scope too.
 
