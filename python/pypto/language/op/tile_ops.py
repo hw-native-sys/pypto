@@ -135,7 +135,7 @@ from pypto.ir.op import tile_ops as _ir_ops
 from pypto.ir.utils import _get_span_or_capture, _normalize_expr
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Expr, MemorySpace, PadValue, PtrType, TileLayout
+from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, PtrType, TileLayout
 
 from ..typing import IntLike, Scalar, Tensor, Tile
 from .system_ops import (  # noqa: F401
@@ -365,6 +365,8 @@ def store(
     offsets: Sequence[IntLike],
     output_tensor: Tensor,
     shapes: Sequence[IntLike] | None = None,
+    *,
+    atomic: AtomicType = AtomicType.None_,
 ) -> Tensor:
     """Copy data from tile back to tensor.
 
@@ -373,6 +375,15 @@ def store(
         offsets: Offsets in each dimension
         output_tensor: Output tensor
         shapes: Optional ND partition shape. Injected by FlattenTileNdTo2D for ND tensors.
+        atomic: Combine mode for the global-memory write. ``AtomicType.None_``
+            (default) overwrites; ``AtomicType.Add`` atomically adds the tile
+            into existing GM contents — used for split-K accumulation, where
+            several cores accumulate partial products into one output.
+
+            NOTE: atomic-add accumulation order across cores is not fixed, so
+            floating-point results are non-deterministic. The destination must
+            be zero-initialised before the kernel runs. Supported tile dtypes:
+            fp32 / fp16 / int32 / int16 / int8 (not bf16).
 
     Returns:
         Tensor wrapping the store operation
@@ -382,10 +393,14 @@ def store(
         >>> result = store(tile, [0, 0], tensor)
         >>> # 3D store
         >>> result = store(tile, [0, 0, 0], tensor)
+        >>> # atomic-add store (split-K)
+        >>> result = store(partial, [0, 0], out, atomic=pl.AtomicType.Add)
     """
     normalized_offsets = _normalize_intlike(offsets)
     normalized_shapes = _normalize_intlike(shapes) if shapes is not None else None
-    call_expr = _ir_ops.store(tile.unwrap(), normalized_offsets, output_tensor.unwrap(), normalized_shapes)
+    call_expr = _ir_ops.store(
+        tile.unwrap(), normalized_offsets, output_tensor.unwrap(), normalized_shapes, atomic=int(atomic)
+    )
     return Tensor(expr=call_expr)
 
 

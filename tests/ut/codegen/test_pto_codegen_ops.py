@@ -1871,5 +1871,68 @@ class TestTileMoveAccNoopElision:
         )
 
 
+class TestTileStoreAtomicCodegen:
+    """Tests for tile.store atomic-add codegen (pto.tstore atomicType attr)."""
+
+    def _generate_mlir(self, program_cls) -> str:
+        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        optimized = pm.run_passes(program_cls)
+        codegen_instance = codegen.PTOCodegen()
+        funcs = list(optimized.functions.values())
+        assert funcs, "Program has no functions"
+        target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
+        single = ir.Program([target], target.name, optimized.span)
+        return codegen_instance.generate(single)
+
+    def test_atomic_add_store_emits_atomic_type(self):
+        """pl.store(..., atomic=AtomicType.Add) emits the atomic_add attribute."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+                t = pl.load(x, [0, 0], [16, 16])
+                pl.store(t, [0, 0], out, atomic=pl.AtomicType.Add)
+
+        mlir = self._generate_mlir(Prog)
+        tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
+        assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
+        assert all("{atomicType = #pto<atomic_type atomic_add>}" in line for line in tstore_lines), (
+            f"expected atomic_add attribute on every pto.tstore, got:\n{tstore_lines}"
+        )
+
+    def test_plain_store_omits_atomic_type(self):
+        """A plain pl.store emits no atomicType attribute (byte-identical codegen)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[16, 16], pl.FP32], out: pl.Tensor[[16, 16], pl.FP32]):
+                t = pl.load(x, [0, 0], [16, 16])
+                pl.store(t, [0, 0], out)
+
+        mlir = self._generate_mlir(Prog)
+        tstore_lines = [line.strip() for line in mlir.splitlines() if "pto.tstore" in line]
+        assert tstore_lines, f"no pto.tstore line emitted:\n{mlir}"
+        assert all("atomicType" not in line for line in tstore_lines), (
+            f"plain store must not emit atomicType, got:\n{tstore_lines}"
+        )
+
+    def test_atomic_add_bf16_tile_rejected(self):
+        """atomic=Add with a bf16 tile is rejected — bf16 is not a hardware atomic dtype."""
+        with pytest.raises(Exception, match="atomic.*fp32/fp16/int32/int16/int8"):
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(self, x: pl.Tensor[[16, 16], pl.BF16], out: pl.Tensor[[16, 16], pl.BF16]):
+                    t = pl.load(x, [0, 0], [16, 16])
+                    pl.store(t, [0, 0], out, atomic=pl.AtomicType.Add)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

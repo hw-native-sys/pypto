@@ -1284,6 +1284,18 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     tstore_line << " : " << tile_buf_type;
   }
   tstore_line << ") outs(" << partition_view << " : " << partition_type << ")";
+
+  // Optional atomic-add combine mode (split-K accumulation into GM). The attr
+  // is emitted only for atomic_add — a plain store omits it so non-atomic
+  // codegen stays byte-identical (pto.tstore's atomicType defaults to none).
+  const int atomic_int = op->GetKwarg<int>("atomic", 0);
+  INTERNAL_CHECK_SPAN(atomic_int == static_cast<int>(ir::AtomicType::kNone) ||
+                          atomic_int == static_cast<int>(ir::AtomicType::kAdd),
+                      op->span_)
+      << "tile.store atomic kwarg must encode AtomicType::kNone or kAdd, got " << atomic_int;
+  if (atomic_int == static_cast<int>(ir::AtomicType::kAdd)) {
+    tstore_line << " {atomicType = #pto<atomic_type atomic_add>}";
+  }
   codegen.Emit(tstore_line.str());
 
   auto result_var = codegen.GetCurrentResultVar();

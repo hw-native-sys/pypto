@@ -1267,10 +1267,11 @@ void BindIR(nb::module_& m) {
       .value("Eq", WaitCmp::kEq, "Block until *signal_slot == expected")
       .value("Ge", WaitCmp::kGe, "Block until *signal_slot >= expected");
 
-  nb::enum_<AtomicType>(ir, "AtomicType", nb::is_arithmetic(),
-                        "Cross-rank remote-write combine mode for pld.tensor.put (TPUT)")
-      .value("None_", AtomicType::kNone, "Plain remote store — overwrite the peer's destination slice")
-      .value("Add", AtomicType::kAdd, "Atomically add the source data into the peer's destination slice");
+  nb::enum_<AtomicType>(
+      ir, "AtomicType", nb::is_arithmetic(),
+      "Combine mode for global-memory writes — pld.tensor.put (TPUT) and tile.store (TSTORE)")
+      .value("None_", AtomicType::kNone, "Plain store — overwrite the destination")
+      .value("Add", AtomicType::kAdd, "Atomically add the source data into the destination");
 
   // ScopeStmt - abstract base class for all scope statements (issue #1047).
   auto scope_stmt_class = nb::class_<ScopeStmt, Stmt>(

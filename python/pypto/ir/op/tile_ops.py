@@ -218,6 +218,8 @@ def store(
     output_tensor: Expr,
     shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
+    *,
+    atomic: int = 0,
 ) -> Call:
     """Copy data from unified buffer (tile) to tensor.
 
@@ -228,6 +230,9 @@ def store(
         shapes: ND partition shape (sequence of ints), or None for 2D tiles. Normally
             injected automatically by FlattenTileNdTo2D for ND tensors.
         span: Optional source span for debugging (auto-captured if not provided)
+        atomic: ``AtomicType`` underlying int — 0 (``kNone``, plain overwrite) or
+            1 (``kAdd``, atomic-add into global memory). The kwarg is omitted
+            entirely when 0 so non-atomic stores are unchanged.
 
     Returns:
         Call expression that returns the output tensor
@@ -239,7 +244,8 @@ def store(
     else:
         args = [tile, offsets_tuple, output_tensor]
 
-    return _ir_core.create_op_call("tile.store", args, {}, actual_span)
+    kwargs: dict[str, Any] = {"atomic": atomic} if atomic else {}
+    return _ir_core.create_op_call("tile.store", args, kwargs, actual_span)
 
 
 def assemble(

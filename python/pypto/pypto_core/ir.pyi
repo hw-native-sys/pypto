@@ -2121,17 +2121,17 @@ class WaitCmp(enum.IntEnum):
     """Block until ``*signal_slot >= expected``."""
 
 class AtomicType(enum.IntEnum):
-    """Cross-rank remote-write combine mode for ``pld.tensor.put`` (TPUT).
+    """Combine mode for global-memory writes — ``pld.tensor.put`` (TPUT) and ``tile.store`` (TSTORE).
 
     Stored as ``int`` in op kwargs; the C++ deducer validates the int falls
     within this enum's range.
     """
 
     None_ = 0
-    """Plain remote store — overwrite the peer rank's destination slice."""
+    """Plain store — overwrite the destination."""
 
     Add = 1
-    """Atomically add the source data into the peer rank's destination slice."""
+    """Atomically add the source data into the destination."""
 
 class ScopeStmt(Stmt):
     """Scope statement: marks a region with specific execution context (abstract base).

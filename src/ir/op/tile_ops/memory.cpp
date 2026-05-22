@@ -30,6 +30,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/core_affinity_kind.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"
@@ -250,6 +251,22 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
         << "The operator " << op_name
         << " requires shapes and offsets to have the same number of dimensions, but got "
         << shapes_tuple->elements_.size() << " shapes and " << offsets_tuple->elements_.size() << " offsets";
+  }
+
+  // Optional atomic-add combine mode (split-K accumulation into GM). Absent =
+  // AtomicType::kNone (plain overwrite store).
+  int atomic = GetKwarg<int>(kwargs, "atomic", 0);
+  CHECK(atomic == static_cast<int>(AtomicType::kNone) || atomic == static_cast<int>(AtomicType::kAdd))
+      << "The operator " << op_name
+      << " atomic kwarg must be AtomicType.None_ or AtomicType.Add, but got int " << atomic;
+  if (atomic == static_cast<int>(AtomicType::kAdd)) {
+    const DataType& dt = tile_type->dtype_;
+    CHECK(dt == DataType::FP32 || dt == DataType::FP16 || dt == DataType::INT32 || dt == DataType::INT16 ||
+          dt == DataType::INT8)
+        << "The operator " << op_name
+        << " with atomic=AtomicType.Add requires an fp32/fp16/int32/int16/int8 tile (hardware atomic-add "
+           "dtypes), but got "
+        << dt.ToString();
   }
 
   // store returns the output tensor (same type)
@@ -675,6 +692,7 @@ REGISTER_OP("tile.store")
     .add_argument("shapes",
                   "Optional ND partition shape (TupleType). "
                   "Injected by FlattenTileNdTo2D for ND tensors.")
+    .set_attr<int>("atomic")
     .set_input_memory(0, {MemorySpace::Vec, MemorySpace::Acc})
     .set_output_reuses_input(2)
     .f_deduce_type([](const std::vector<ExprPtr>& args,

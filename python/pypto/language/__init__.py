@@ -41,6 +41,7 @@ from pypto.ir import TensorView, TileView
 from pypto.jit import JITFunction, jit
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
+    AtomicType,
     ChunkConfig,
     ChunkPolicy,
     ForKind,
@@ -398,6 +399,7 @@ __all__ = [
     "ChunkPolicy",
     "FunctionType",
     "ForKind",
+    "AtomicType",
     "Level",
     "LoopOrigin",
     "MemRef",
