@@ -68,6 +68,17 @@ REGISTER_OP("system.task_invalid")
     .no_argument()
     .f_deduce_type(DeduceTaskIdScalarType);
 
+// system.task_dummy — internal dependency-only task placeholder.
+//
+// ExpandManualPhaseFence synthesizes this op with attrs["dummy_task"] = true
+// and attrs["manual_dep_edges"] = {source_array}. Orchestration codegen lowers
+// it to rt_submit_dummy_task(...), returning the dummy task's producer TaskId.
+REGISTER_OP("system.task_dummy")
+    .set_description("Internal dependency-only TaskId barrier for manual_scope phase fences")
+    .set_op_category("TaskOp")
+    .no_argument()
+    .f_deduce_type(DeduceTaskIdScalarType);
+
 // system.task_is_valid — boolean predicate over a Scalar[TASK_ID]. Returns
 // true when the task id refers to a real dispatched task and false for the
 // sentinel produced by ``system.task_invalid()``.

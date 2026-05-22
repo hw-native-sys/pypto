@@ -724,6 +724,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
+    StmtPtr loop_body = for_stmt->body_;
+    if (in_manual_scope_depth_ > 0 && for_stmt->kind_ == ForKind::Parallel) {
+      auto [pre_loop_dummy_tasks, body_without_pre_loop_dummy_tasks] =
+          SplitLeadingDummyTaskAssigns(for_stmt->body_, for_stmt->span_);
+      for (const auto& stmt : pre_loop_dummy_tasks) {
+        VisitStmt(stmt);
+      }
+      loop_body = std::move(body_without_pre_loop_dummy_tasks);
+    }
+
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
@@ -764,7 +774,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       slot_expr = "((" + loop_var + " - " + start_expr + ") / " + step_expr + ")";
     }
     current_loop_slot_exprs_.push_back(slot_expr);
-    VisitStmt(for_stmt->body_);
+    VisitStmt(loop_body);
     current_loop_slot_exprs_.pop_back();
     current_return_vars_ = saved;
 
@@ -892,6 +902,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // TaskId of a ``pl.submit(...)`` call is handled separately (see
       // ``GenerateSubmitReturnAliases``) — it is a tuple element of the
       // kernel Call, not a standalone op.
+      if (op_name == "system.task_dummy") {
+        INTERNAL_CHECK_SPAN(call->GetAttr<bool>(kAttrDummyTask, false), assign->span_)
+            << "Internal error: system.task_dummy must be marked with attrs['" << kAttrDummyTask << "']";
+        EmitDummyTask(call, var_name);
+        manual_task_id_map_[assign->var_.get()] = var_name;
+        return;
+      }
       if (op_name == "system.task_invalid") {
         // The Python literal ``None`` in a TaskId position lowers here.
         code_ << Indent() << "PTO2TaskId " << var_name << " = PTO2TaskId::invalid();\n";
@@ -936,6 +953,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
             if (auto extent = As<ConstInt>(arr_ty->extent())) {
               RegisterArrayCarry(assign->var_.get(), var_name, extent->value_);
             }
+          }
+        } else if (op_name == "array.get_element") {
+          auto scalar_ty = As<ScalarType>(assign->var_->GetType());
+          if (in_manual_scope_depth_ > 0 && scalar_ty && scalar_ty->dtype_ == DataType::TASK_ID) {
+            manual_task_id_map_[assign->var_.get()] = var_name;
           }
         }
       } else if (!IsBuiltinOp(op_name)) {
@@ -1568,6 +1590,29 @@ class OrchestrationStmtCodegen : public CodegenBase {
       code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
       break;
     }
+  }
+
+  void EmitDummyTask(const CallPtr& call, const std::string& tid_name) {
+    const int barrier_idx = phase_fence_barrier_counter_++;
+    const std::string task_var = "params_phase_fence_barrier_" + std::to_string(barrier_idx);
+    const std::string deps_cnt = task_var + "_deps_count";
+    const std::string outs_var = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_outs";
+    const size_t dep_capacity = CountManualDeps(call);
+    code_ << "\n";
+    code_ << Indent() << "// Phase-fence barrier " << barrier_idx << ": dependency-only dummy task\n";
+    EmitTaskParamsDecl(Indent(), task_var);
+    if (dep_capacity > 0) {
+      EmitManualDeps(call, task_var);
+    } else {
+      code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
+    }
+    code_ << Indent() << "PTO2TaskId " << tid_name << " = PTO2TaskId::invalid();\n";
+    code_ << Indent() << "if (" << deps_cnt << " > 0) {\n";
+    indent_ += 4;
+    code_ << Indent() << "TaskOutputTensors " << outs_var << " = rt_submit_dummy_task(" << task_var << ");\n";
+    code_ << Indent() << tid_name << " = " << outs_var << ".task_id();\n";
+    indent_ -= 4;
+    code_ << Indent() << "}\n";
   }
 
   static constexpr size_t kMaxAllocTensorsArgs = 16;
@@ -2305,6 +2350,41 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return trip > 0 ? trip : 0;
   }
 
+  static bool IsDummyTaskAssign(const StmtPtr& stmt) {
+    auto assign = As<AssignStmt>(stmt);
+    if (!assign) return false;
+    auto call = As<Call>(assign->value_);
+    return call && call->op_->name_ == "system.task_dummy" && call->GetAttr<bool>(kAttrDummyTask, false);
+  }
+
+  static std::pair<std::vector<StmtPtr>, StmtPtr> SplitLeadingDummyTaskAssigns(const StmtPtr& body,
+                                                                              const Span& span) {
+    std::vector<StmtPtr> stmts;
+    if (auto seq = As<SeqStmts>(body)) {
+      stmts = seq->stmts_;
+    } else if (body) {
+      stmts = {body};
+    }
+
+    size_t split = 0;
+    while (split < stmts.size() && IsDummyTaskAssign(stmts[split])) {
+      ++split;
+    }
+    if (split == 0) return {{}, body};
+
+    std::vector<StmtPtr> leading(stmts.begin(), stmts.begin() + static_cast<std::ptrdiff_t>(split));
+    std::vector<StmtPtr> remaining(stmts.begin() + static_cast<std::ptrdiff_t>(split), stmts.end());
+    StmtPtr remaining_body;
+    if (remaining.empty()) {
+      remaining_body = std::make_shared<const SeqStmts>(std::vector<StmtPtr>{}, span);
+    } else if (remaining.size() == 1) {
+      remaining_body = remaining[0];
+    } else {
+      remaining_body = SeqStmts::Flatten(std::move(remaining), span);
+    }
+    return {std::move(leading), std::move(remaining_body)};
+  }
+
   /// Find a ForStmt within ``body`` whose ``return_vars_`` contains a Var
   /// equal to ``target``. Returns nullptr if none. Used by
   /// ``ResolveArrayCarrySize`` to chase Sequential→Parallel array threading.
@@ -2375,6 +2455,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::string current_result_var_;
   std::vector<VarPtr> current_return_vars_;
   int task_counter_ = 0;
+  int phase_fence_barrier_counter_ = 0;
   int alloc_counter_ = 0;
   /// Depth of nested ``RuntimeScopeStmt(manual=true)``. While > 0, the codegen
   /// suppresses the implicit ``PTO2_SCOPE()`` wrapper around ForStmt/IfStmt

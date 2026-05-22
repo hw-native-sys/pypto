@@ -938,7 +938,8 @@ void BindIR(nb::module_& m) {
 
   call_class.def_prop_ro(
       "attrs", [kwargs_to_pydict](const CallPtr& self) { return kwargs_to_pydict(self->attrs_); },
-      "Compiler-internal node metadata. Reserved keys: 'arg_directions' -> list[ArgDirection].");
+      "Compiler-internal node metadata. Reserved keys include 'arg_directions', "
+      "'manual_dep_edges', and 'dummy_task'.");
 
   call_class.def_prop_ro(
       "arg_directions",

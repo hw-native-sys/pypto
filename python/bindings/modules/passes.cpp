@@ -492,6 +492,10 @@ void BindPass(nb::module_& m) {
              "Post-condition: ``IRProperty::CallDirectionsResolved``. The integrity of\n"
              "the produced ``Call.attrs['arg_directions']`` is verified automatically by the\n"
              "``CallDirectionsResolved`` PropertyVerifier (no separate verify pass).");
+  passes.def("expand_manual_phase_fence", &pass::ExpandManualPhaseFence,
+             "Insert dependency-only dummy TaskId barriers for profitable manual_scope "
+             "Array[TASK_ID] phase-fence fanout and rewrite covered consumers to depend "
+             "on the barrier TaskId.");
   // Bind DiagnosticSeverity enum
   nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")
       .value("Error", DiagnosticSeverity::Error, "Error that must be fixed")

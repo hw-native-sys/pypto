@@ -34,6 +34,12 @@ def test_task_invalid_returns_scalar_task_id():
     assert call.type.dtype == DataType.TASK_ID
 
 
+def test_task_dummy_returns_scalar_task_id():
+    call = ir.create_op_call("system.task_dummy", [], {}, _span())
+    assert isinstance(call.type, ir.ScalarType)
+    assert call.type.dtype == DataType.TASK_ID
+
+
 def test_task_is_valid_returns_scalar_bool():
     task_id = ir.Var("tid", ir.ScalarType(DataType.TASK_ID), _span())
     call = ir.create_op_call("system.task_is_valid", [task_id], {}, _span())

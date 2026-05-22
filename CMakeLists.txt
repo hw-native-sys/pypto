@@ -149,6 +149,7 @@ set(PYPTO_SOURCES
     src/ir/transforms/collect_comm_groups_pass.cpp
     src/ir/transforms/optimize_orch_tensors_pass.cpp
     src/ir/transforms/derive_call_directions_pass.cpp
+    src/ir/transforms/expand_manual_phase_fence_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/ctrl_flow_transform_pass.cpp
     src/ir/transforms/flatten_call_expr_pass.cpp

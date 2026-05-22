@@ -663,6 +663,16 @@ Pass FuseCreateAssembleToSlice();
 Pass DeriveCallDirections();
 
 /**
+ * @brief Expand profitable manual_scope Array[TASK_ID] fanout deps into
+ *        explicit dependency-only dummy barrier calls.
+ *
+ * Rewrites selected consumer ``manual_dep_edges=[source_array]`` to
+ * ``manual_dep_edges=[barrier_tid]`` after inserting a marked
+ * ``system.task_dummy`` assignment at the chosen phase-fence placement point.
+ */
+Pass ExpandManualPhaseFence();
+
+/**
  * @brief Fold no-op tile.reshape assignments into Var-to-Var assignments
  *
  * After LegalizePTOBufferReuse, two TileType variables can share the same

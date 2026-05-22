@@ -693,6 +693,16 @@ inline std::vector<std::pair<std::string, std::any>> WithArgDirectionOverridesAt
 inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
 
 /**
+ * @brief Reserved attr key marking an internal dependency-only TaskId call.
+ *
+ * Value type: ``bool``. Written by the manual phase-fence expansion pass on
+ * ``system.task_dummy`` calls. Orchestration codegen lowers the marked call to
+ * ``rt_submit_dummy_task(...)`` and uses ``manual_dep_edges`` on that same call
+ * as the dummy task fanin.
+ */
+inline constexpr const char* kAttrDummyTask = "dummy_task";
+
+/**
  * @brief Reserved attr key for the producer-TaskId Var captured by a
  * ``with pl.at(...) as tid:`` block.
  *
