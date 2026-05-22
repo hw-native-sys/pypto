@@ -1307,10 +1307,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return "";
   }
 
-  // Record a kernel's runtime ArgDirection signature in task-payload order.
-  // The signature is taken from the same ParamEntry vector that emits the
-  // add_input/output/inout/scalar payload calls, so its non-SCALAR entries
-  // line up 1:1 with the payload tensors that the runtime tensor dump walks.
+  // Record a kernel's runtime ArgDirection signature, in task-payload order.
+  // The CoreCallable signature_[] array is sized to CORE_MAX_TENSOR_ARGS and is
+  // a per-tensor-arg direction list: scalars are NOT recorded. They live in a
+  // separate scalar-arg store (CORE_MAX_SCALAR_ARGS) and the runtime tensor
+  // dump skips SCALAR entries anyway, so excluding them keeps the recorded
+  // signature 1:1 with the payload tensors and bounds sig_count by the same
+  // CORE_MAX_TENSOR_ARGS cap that check_add_tensor_valid enforces on the
+  // payload. Including scalars would inflate sig_count past CORE_MAX_TENSOR_ARGS
+  // and trip make_callable's "sig_count exceeds MaxSig" guard.
   // func_id is name-deduped, so we record once per kernel (first call wins).
   void RecordKernelSignature(const std::string& func_name, const std::vector<ParamEntry>& params) {
     auto [it, inserted] = func_name_to_signature_->try_emplace(func_name);
@@ -1319,6 +1324,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     it->second.reserve(params.size());
     for (const auto& p : params) {
+      if (p.direction == ArgDirection::Scalar) {
+        continue;
+      }
       it->second.emplace_back(ArgDirectionToRuntimeName(p.direction));
     }
   }
