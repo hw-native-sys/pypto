@@ -476,12 +476,15 @@ def _tile_load(tensor, offsets, shapes, valid_shapes=None):
     v_shape = tuple(min(v, a) for v, a in zip(v_shape, actual_shape))
     return _mask_valid_region(tile, shapes_t, v_shape)
 
-def _tile_store(tile, offsets, output_tensor):
+def _tile_store(tile, offsets, output_tensor, atomic=0):
     offsets_t = _coerce_shape(offsets)
     valid_shape = getattr(tile, "_pypto_valid_shape", tuple(tile.shape))
     slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, valid_shape))
     valid_slices = tuple(slice(0, s) for s in valid_shape)
-    output_tensor[slices] = tile[valid_slices]
+    if atomic:
+        output_tensor[slices] += tile[valid_slices]
+    else:
+        output_tensor[slices] = tile[valid_slices]
     return output_tensor
 
 def _tensor_slice(tensor, offsets, shapes, valid_shapes=None):
@@ -525,12 +528,15 @@ def _write_and_return(container, index, value):
     container[index] = value
     return container
 
-def _assemble(target, source, offsets):
+def _assemble(target, source, offsets, atomic=0):
     offsets_t = _coerce_shape(offsets)
     valid_shape = getattr(source, "_pypto_valid_shape", tuple(source.shape))
     slices = tuple(slice(o, o + s) for o, s in zip(offsets_t, valid_shape))
     valid_slices = tuple(slice(0, s) for s in valid_shape)
-    target[slices] = source[valid_slices]
+    if atomic:
+        target[slices] += source[valid_slices]
+    else:
+        target[slices] = source[valid_slices]
     return target
 """
 
@@ -620,9 +626,10 @@ def _handle_tile_load(a: list[str], kw: dict[str, Any]) -> str:
     return expr
 
 
-def _handle_tile_store(a: list[str], _kw: dict[str, Any]) -> str:
+def _handle_tile_store(a: list[str], kw: dict[str, Any]) -> str:
     # args: [tile, offsets_tuple, output_tensor] or [tile, offsets_tuple, output_tensor, shapes]
-    return f"_tile_store({a[0]}, {a[1]}, {a[2]})"
+    atomic = int(kw.get("atomic", 0))
+    return f"_tile_store({a[0]}, {a[1]}, {a[2]}, atomic={atomic})"
 
 
 def _handle_create(a: list[str], kw: dict[str, Any]) -> str:
@@ -894,7 +901,9 @@ def _register_ops() -> None:
         m[f"{prefix}.fillpad"] = _handle_fillpad
 
         # assemble -> write source into target at offset
-        m[f"{prefix}.assemble"] = lambda a, _kw: f"_assemble({a[0]}, {a[1]}, {a[2]})"
+        m[f"{prefix}.assemble"] = lambda a, kw: (
+            f"_assemble({a[0]}, {a[1]}, {a[2]}, atomic={int(kw.get('atomic', 0))})"
+        )
 
         # scatter_update
         m[f"{prefix}.scatter_update"] = lambda a, kw: f"{a[0]}.scatter_(-2, {a[1]}.expand_as({a[2]}), {a[2]})"
