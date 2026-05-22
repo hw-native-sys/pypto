@@ -903,10 +903,12 @@ class TestOrchestration:
 
         # tensor.slice generates array variables and runtime .view() call with dynamic offset.
         # Shape dims are clamped to the source extent (offset already emitted above) so the
-        # strided runtime never sees an over-extent view.
+        # strided runtime never sees an over-extent view. The clamp guards the unsigned
+        # subtraction with a ternary so an offset past the source extent saturates to 0u.
         assert (
-            "uint32_t chunk_shapes[2] = {std::min<uint32_t>(16, ext_data.shapes[0] - chunk_offsets[0]), "
-            "std::min<uint32_t>(16, ext_data.shapes[1] - chunk_offsets[1])};" in code
+            "uint32_t chunk_shapes[2] = {"
+            "(chunk_offsets[0] >= ext_data.shapes[0] ? 0u : std::min<uint32_t>(16, ext_data.shapes[0] - chunk_offsets[0])), "
+            "(chunk_offsets[1] >= ext_data.shapes[1] ? 0u : std::min<uint32_t>(16, ext_data.shapes[1] - chunk_offsets[1]))};" in code
         )
         assert "uint32_t chunk_offsets[2] = {static_cast<uint32_t>((i * 16)), 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
@@ -938,8 +940,9 @@ class TestOrchestration:
         code = _generate_orch_code(ValidShapeSliceProgram)
 
         assert (
-            "uint32_t chunk_shapes[2] = {std::min<uint32_t>(16, ext_data.shapes[0] - chunk_offsets[0]), "
-            "std::min<uint32_t>(16, ext_data.shapes[1] - chunk_offsets[1])};" in code
+            "uint32_t chunk_shapes[2] = {"
+            "(chunk_offsets[0] >= ext_data.shapes[0] ? 0u : std::min<uint32_t>(16, ext_data.shapes[0] - chunk_offsets[0])), "
+            "(chunk_offsets[1] >= ext_data.shapes[1] ? 0u : std::min<uint32_t>(16, ext_data.shapes[1] - chunk_offsets[1]))};" in code
         )
         assert "uint32_t chunk_offsets[2] = {0, 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
@@ -986,9 +989,10 @@ class TestOrchestration:
 
         # slice still emits view on the external tensor (shape dims clamped to source extent).
         assert (
-            "uint32_t chunk_shapes[3] = {std::min<uint32_t>(1, ext_data.shapes[0] - chunk_offsets[0]), "
-            "std::min<uint32_t>(16, ext_data.shapes[1] - chunk_offsets[1]), "
-            "std::min<uint32_t>(16, ext_data.shapes[2] - chunk_offsets[2])};" in code
+            "uint32_t chunk_shapes[3] = {"
+            "(chunk_offsets[0] >= ext_data.shapes[0] ? 0u : std::min<uint32_t>(1, ext_data.shapes[0] - chunk_offsets[0])), "
+            "(chunk_offsets[1] >= ext_data.shapes[1] ? 0u : std::min<uint32_t>(16, ext_data.shapes[1] - chunk_offsets[1])), "
+            "(chunk_offsets[2] >= ext_data.shapes[2] ? 0u : std::min<uint32_t>(16, ext_data.shapes[2] - chunk_offsets[2]))};" in code
         )
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
         # reshape emits its shape array and calls .reshape on the local Tensor (no ext_ prefix).
