@@ -699,12 +699,14 @@ def _generate_config_file(
     over-capacity requests with a clear error rather than hanging.
 
     ``func_name_to_signature`` maps each kernel name to its runtime
-    ``ArgDirection`` names ("IN"/"OUT"/"INOUT"/"SCALAR"), in task-payload
-    (tensors-first) order. When present, each KERNELS entry gains a
-    ``"signature"`` field of ``ArgDirection`` members so the runtime builds a
-    non-empty CoreCallable signature — required for the tensor dump to match
-    the task payload tensor_count. Kernels without an entry fall back to an
-    empty signature (the pre-existing behavior).
+    ``ArgDirection`` names ("IN"/"OUT"/"INOUT") for its tensor args, in
+    task-payload (tensors-first) order. Scalars are excluded: the CoreCallable
+    signature array is sized to CORE_MAX_TENSOR_ARGS (a per-tensor-arg list), so
+    each entry lines up 1:1 with a payload tensor. When present, each KERNELS
+    entry gains a ``"signature"`` field of ``ArgDirection`` members so the
+    runtime builds a non-empty CoreCallable signature — required for the tensor
+    dump to match the task payload tensor_count. Kernels without an entry fall
+    back to an empty signature (the pre-existing behavior).
     """
     func_name_to_signature = func_name_to_signature or {}
     has_signatures = any(func_name_to_signature.values())

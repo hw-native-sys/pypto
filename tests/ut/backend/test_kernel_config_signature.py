@@ -65,14 +65,17 @@ class TestKernelConfigSignature:
         assert "ArgDirection" not in text
         assert '"signature"' not in text
 
-    def test_scalar_args_emitted_as_scalar(self) -> None:
-        # Scalars stay in the signature so order matches the payload; the
-        # runtime skips them when walking tensor args.
+    def test_signature_emitted_verbatim_tensor_only(self) -> None:
+        # Codegen records only tensor-arg directions (scalars are excluded, as
+        # the CoreCallable signature is a per-tensor-arg list); the emitter
+        # writes the directions verbatim, preserving tensors-first order.
         text = _generate_config_file(
             **_base_inputs(),
-            func_name_to_signature={"matmul_aic": ["IN", "OUT", "SCALAR"]},
+            func_name_to_signature={"matmul_aic": ["IN", "IN", "INOUT", "OUT"]},
         )
-        assert '"signature": [_D.IN, _D.OUT, _D.SCALAR]' in text
+        assert '"signature": [_D.IN, _D.IN, _D.INOUT, _D.OUT]' in text
+        # No SCALAR members are emitted for codegen-produced signatures.
+        assert "_D.SCALAR" not in text
         assert _is_valid_python(text)
 
     def test_partial_signatures_across_kernels(self) -> None:

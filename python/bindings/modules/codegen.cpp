@@ -55,7 +55,8 @@ void BindCodegen(nb::module_& m) {
       .def_ro("func_name_to_core_type", &OrchestrationResult::func_name_to_core_type,
               "Kernel function name to core type mapping")
       .def_ro("func_name_to_signature", &OrchestrationResult::func_name_to_signature,
-              "Kernel function name to ArgDirection name list, in task-payload (tensors-first) order");
+              "Kernel function name to tensor-arg ArgDirection name list (scalars excluded), in "
+              "task-payload (tensors-first) order");
 
   // Free functions for orchestration codegen (backend-agnostic)
   codegen_module.def("generate_orchestration", &GenerateOrchestration, nb::arg("program"), nb::arg("func"),

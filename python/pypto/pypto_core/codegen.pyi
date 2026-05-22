@@ -59,7 +59,7 @@ class OrchestrationResult:
 
     @property
     def func_name_to_signature(self) -> dict[str, list[str]]:
-        """Kernel name to ArgDirection name list, in task-payload order."""
+        """Kernel name to tensor-arg ArgDirection name list (scalars excluded), in task-payload order."""
         ...
 
 class DistributedCodegen:

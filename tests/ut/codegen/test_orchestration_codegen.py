@@ -284,10 +284,54 @@ class TestOrchestration:
         # build a non-empty CoreCallable signature (issue #1458 — required for
         # the runtime tensor dump to match the task payload tensor_count).
         signature = result.func_name_to_signature["kernel_add"]
-        assert all(d in {"IN", "OUT", "INOUT", "SCALAR"} for d in signature)
-        # a, b, output are all tensors -> 3 non-SCALAR entries == payload tensors.
-        non_scalar = [d for d in signature if d != "SCALAR"]
-        assert len(non_scalar) == 3
+        # a, b, output are all tensors -> 3 tensor directions, no SCALAR. The
+        # CoreCallable signature is a per-tensor-arg list, so scalars are excluded.
+        assert "SCALAR" not in signature
+        assert len(signature) == 3
+        assert all(d in {"IN", "OUT", "INOUT"} for d in signature)
+
+    def test_signature_excludes_scalar_args(self):
+        """Scalar args are excluded from a kernel's CoreCallable signature.
+
+        The CoreCallable signature_[] array is sized to CORE_MAX_TENSOR_ARGS and
+        is a per-tensor-arg direction list. Recording scalars would inflate
+        sig_count past that cap and trip make_callable's "sig_count exceeds
+        MaxSig" guard for kernels with many params (issue #1458 follow-up). Only
+        the tensor args appear, in tensors-first order.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ScalarKernelProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add_scalar(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                scalar: pl.Scalar[pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                x: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(x, scalar)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_scalar(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.kernel_add_scalar(a, 1.0, d)
+                return d
+
+        result = _generate_orch_result(ScalarKernelProgram)
+
+        signature = result.func_name_to_signature["kernel_add_scalar"]
+        # 2 tensor args (a, output); the scalar literal is not recorded.
+        assert "SCALAR" not in signature
+        assert len(signature) == 2
+        assert all(d in {"IN", "OUT", "INOUT"} for d in signature)
 
     def test_independent_tasks(self):
         """Test codegen with independent tasks (no dependencies needed)."""
