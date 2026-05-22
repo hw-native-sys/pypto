@@ -466,15 +466,32 @@ class ScopeOutliner : public IRMutator {
     VarDefUseCollector body_collector;
     body_collector.VisitStmt(op->body_);
 
+    auto resolve_external_scope_var = [&](const Var* var_ptr) -> VarPtr {
+      auto obj_it = var_objects_.find(var_ptr);
+      CHECK(obj_it != var_objects_.end())
+          << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
+      auto resolved = obj_it->second;
+      auto rename_it = store_target_renames_.find(resolved.get());
+      if (rename_it != store_target_renames_.end()) {
+        return rename_it->second;
+      }
+      return resolved;
+    };
+
     // Inputs: variables used but not defined in the scope.
     // Iterate in first-encounter order to preserve the callee's parameter ordering.
     std::vector<VarPtr> input_vars;
+    std::unordered_map<const Var*, std::vector<const Var*>> input_body_aliases;
+    std::unordered_set<const Var*> seen_input_vars;
     for (const Var* var_ptr : body_collector.var_uses_ordered) {
       if (!body_collector.var_defs.count(var_ptr)) {
-        auto obj_it = var_objects_.find(var_ptr);
-        CHECK(obj_it != var_objects_.end())
-            << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
-        input_vars.push_back(obj_it->second);
+        auto resolved = resolve_external_scope_var(var_ptr);
+        if (seen_input_vars.insert(resolved.get()).second) {
+          input_vars.push_back(resolved);
+        }
+        if (resolved.get() != var_ptr) {
+          input_body_aliases[resolved.get()].push_back(var_ptr);
+        }
       }
     }
 
@@ -514,10 +531,8 @@ class ScopeOutliner : public IRMutator {
           (alias_it != post_store_collector.alias_to_target.end()) ? alias_it->second : nullptr;
       if (target_ptr && store_collector.store_targets.count(target_ptr) &&
           !body_collector.var_defs.count(target_ptr)) {
-        auto ext_it = var_objects_.find(target_ptr);
-        CHECK(ext_it != var_objects_.end())
-            << "Store target " << target_ptr->name_hint_ << " not found in var_objects";
-        deferred_post_store_aliases.emplace_back(var_ptr, ext_it->second.get());
+        auto canonical_target = resolve_external_scope_var(target_ptr);
+        deferred_post_store_aliases.emplace_back(var_ptr, canonical_target.get());
         continue;
       }
 
@@ -546,12 +561,10 @@ class ScopeOutliner : public IRMutator {
     if (op->GetScopeKind() != ScopeKind::Hierarchy) {
       for (const Var* var_ptr : store_collector.store_targets) {
         if (!body_collector.var_defs.count(var_ptr)) {
-          auto ext_it = var_objects_.find(var_ptr);
-          CHECK(ext_it != var_objects_.end())
-              << "Variable " << var_ptr->name_hint_ << " not found in var_objects";
-          output_vars.push_back(ext_it->second);
-          store_output_set.insert(ext_it->second.get());
-          store_body_ptrs[ext_it->second.get()] = var_ptr;
+          auto canonical_target = resolve_external_scope_var(var_ptr);
+          output_vars.push_back(canonical_target);
+          store_output_set.insert(canonical_target.get());
+          store_body_ptrs[canonical_target.get()] = var_ptr;
         }
       }
     }
@@ -607,6 +620,12 @@ class ScopeOutliner : public IRMutator {
       input_params.push_back(param_var);
       input_param_directions.push_back(inferred_directions[i]);
       var_substitution_map[input_var.get()] = param_var;
+      auto alias_it = input_body_aliases.find(input_var.get());
+      if (alias_it != input_body_aliases.end()) {
+        for (const Var* alias_ptr : alias_it->second) {
+          var_substitution_map[alias_ptr] = param_var;
+        }
+      }
     }
 
     // Build the set of names already used in the outlined function (inputs + scope-body locals)
@@ -698,6 +717,7 @@ class ScopeOutliner : public IRMutator {
     // collapses to old → freshened. Pick that out and replace the stale
     // entry in input_params / outlined_output_vars / return_types.
     const auto& post_remap = subst_mutator.GetVarRemap();
+    std::unordered_map<const Var*, VarPtr> final_input_params_by_original;
     auto resolve_to_freshened = [&](const VarPtr& original, const VarPtr& seeded) -> VarPtr {
       auto it = post_remap.find(original.get());
       if (it == post_remap.end()) return seeded;
@@ -705,8 +725,21 @@ class ScopeOutliner : public IRMutator {
       if (!freshened) return seeded;
       return freshened;
     };
+    std::unordered_map<const Var*, VarPtr> final_body_substitution;
     for (size_t i = 0; i < input_vars.size(); ++i) {
-      input_params[i] = resolve_to_freshened(input_vars[i], input_params[i]);
+      auto seeded = input_params[i];
+      auto freshened = resolve_to_freshened(input_vars[i], seeded);
+      input_params[i] = freshened;
+      final_input_params_by_original[input_vars[i].get()] = freshened;
+      auto alias_it = input_body_aliases.find(input_vars[i].get());
+      if (alias_it != input_body_aliases.end()) {
+        for (const Var* alias_ptr : alias_it->second) {
+          final_input_params_by_original[alias_ptr] = freshened;
+        }
+      }
+      if (freshened.get() != seeded.get()) {
+        final_body_substitution[seeded.get()] = freshened;
+      }
     }
     for (size_t i = 0; i < output_vars.size(); ++i) {
       bool is_store = store_output_set.count(output_vars[i].get()) > 0;
@@ -718,15 +751,56 @@ class ScopeOutliner : public IRMutator {
         auto it = post_remap.find(outlined_output_vars[i].get());
         if (it != post_remap.end()) {
           if (auto freshened = AsVarLike(it->second)) {
+            if (freshened.get() != outlined_output_vars[i].get()) {
+              final_body_substitution[outlined_output_vars[i].get()] = freshened;
+            }
             outlined_output_vars[i] = freshened;
             return_types[i] = freshened->GetType();
           }
         }
+        // The store result is returned via outlined_output_vars, but the
+        // tile.store target itself must be the fresh InOut input parameter.
+        auto body_it = store_body_ptrs.find(output_vars[i].get());
+        if (body_it != store_body_ptrs.end()) {
+          VarPtr freshened_input;
+          auto input_it = final_input_params_by_original.find(body_it->second);
+          if (input_it != final_input_params_by_original.end()) {
+            freshened_input = input_it->second;
+          } else {
+            for (size_t j = 0; j < input_vars.size(); ++j) {
+              if (input_vars[j]->name_hint_ == body_it->second->name_hint_) {
+                freshened_input = input_params[j];
+                break;
+              }
+            }
+          }
+          if (freshened_input) {
+            const Var* body_target = body_it->second;
+            if (freshened_input.get() != body_target) {
+              final_body_substitution[body_target] = freshened_input;
+            }
+            auto body_remap = post_remap.find(body_target);
+            if (body_remap != post_remap.end()) {
+              if (auto remapped_body_target = AsVarLike(body_remap->second)) {
+                if (freshened_input.get() != remapped_body_target.get()) {
+                  final_body_substitution[remapped_body_target.get()] = freshened_input;
+                }
+              }
+            }
+          }
+        }
         continue;
       }
-      auto freshened = resolve_to_freshened(output_vars[i], outlined_output_vars[i]);
+      auto seeded = outlined_output_vars[i];
+      auto freshened = resolve_to_freshened(output_vars[i], seeded);
       outlined_output_vars[i] = freshened;
       return_types[i] = freshened->GetType();
+      if (freshened.get() != seeded.get()) {
+        final_body_substitution[seeded.get()] = freshened;
+      }
+    }
+    if (!final_body_substitution.empty()) {
+      transformed_body = Substitute(transformed_body, final_body_substitution);
     }
 
     // Build outlined function body (transformed body + return statement)
