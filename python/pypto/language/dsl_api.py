@@ -640,21 +640,17 @@ def yield_(*values: Any) -> Any | tuple[Any, ...]:
     return tuple(values)
 
 
-@overload
-def const(value: int, dtype: Any) -> int: ...
-@overload
-def const(value: float, dtype: Any) -> float: ...
-def const(value: int | float, dtype: Any) -> int | float:
+def const(value: int | float, dtype: Any) -> Scalar:
     """Create a typed constant with an explicit dtype.
 
     Used by the printer to preserve non-default constant dtypes in round-trip.
     The parser intercepts pl.const() calls and creates ConstInt/ConstFloat
     with the specified dtype.
 
-    The return type mirrors the input: ``const(int, ...)`` is statically an
-    ``int`` and ``const(float, ...)`` a ``float``. This keeps a printed
-    ``pl.MemRef("base", pl.const(0, pl.INT64), size)`` type-checking cleanly,
-    since the ``byte_offset`` parameter expects an ``int``.
+    Statically typed ``-> Scalar`` to mirror its IR semantics: ``pl.const``
+    builds a ``ConstInt``/``ConstFloat`` expression, so it can be returned
+    from a ``-> pl.Scalar`` function and combined with other scalars. At
+    runtime the stub returns the numeric value unchanged (``cast`` is a no-op).
 
     Args:
         value: Numeric value (int or float)
@@ -662,9 +658,9 @@ def const(value: int | float, dtype: Any) -> int | float:
 
     Returns:
         Parser builds ``ConstInt``/``ConstFloat`` IR; the runtime stub returns
-        the numeric value unchanged (type checking sees ``int``/``float``).
+        the numeric value unchanged (type checking sees a ``Scalar``).
     """
-    return value
+    return cast("Scalar", value)
 
 
 def cond(condition: CondArg) -> None:

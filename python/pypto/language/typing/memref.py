@@ -17,7 +17,7 @@ forms emitted by the IR printer inside ``@pl.program`` code:
   where ``ptr_var`` is annotated as ``pl.Ptr``.
 * ``byte_offset`` also accepts ``Scalar`` — the printer renders a non-constant
   offset as a ``Scalar`` arithmetic expression (e.g. ``pos * 128 * 4``), and a
-  constant offset as ``pl.const(0, pl.INT64)``, which is statically an ``int``.
+  constant offset as ``pl.const(0, pl.INT64)``, which is statically a ``Scalar``.
 """
 
 from typing import Any, overload
@@ -36,8 +36,9 @@ from pypto.pypto_core.ir import (
 from .scalar import Scalar
 
 # A printed MemRef byte offset is either a constant (rendered by the printer as
-# ``pl.const(...)``, statically an ``int``), a DSL ``Scalar`` arithmetic
+# ``pl.const(...)``, statically a ``Scalar``), a DSL ``Scalar`` arithmetic
 # expression, or a raw IR ``Expr`` when the MemRef is built programmatically.
+# ``int`` stays for MemRefs built programmatically with a plain offset literal.
 _ByteOffset = int | Expr | Scalar
 
 

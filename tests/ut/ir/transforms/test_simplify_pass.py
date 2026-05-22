@@ -7,11 +7,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# pyright: reportAttributeAccessIssue=false, reportReturnType=false
-# DSL false positives in @pl.program bodies (parsed as DSL, not executed as
-# Python): `pl.tensor.as_layout` is a parser-only op with no Python wrapper, and
-# `pl.const` is typed `-> int` so a `-> pl.Scalar` function returning it looks
-# like a return-type mismatch.
+# pyright: reportAttributeAccessIssue=false
+# DSL false positive in @pl.program bodies (parsed as DSL, not executed as
+# Python): `pl.tensor.as_layout` is a parser-only op with no Python wrapper.
 
 """Tests for the Simplify pass.
 
