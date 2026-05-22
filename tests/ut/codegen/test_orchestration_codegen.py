@@ -2717,6 +2717,74 @@ class TestTaskIsValidCodegen:
         assert "bool b = tid.is_valid();" in code, code
 
 
+class TestTupleLineagePointerKeying:
+    """Tuple return-alias lineage must be keyed by Var identity, not name_hint.
+
+    Regression for issue #1463: after inlining + OutWindowExternalizer, two
+    distinct tuple-producing assignments can share a ``name_hint`` (e.g. several
+    rebuilt ``ret__tmp_v0`` MakeTuples). When the orchestration codegen keyed its
+    tuple lineage maps by ``name_hint``, the colliding tuples' TupleGetItem
+    consumers were cross-wired: the emit names of one tuple's elements were
+    propagated onto the other tuple's consumers. In the DeepSeek-V4 KV compressor
+    this made the ``kv_state`` / ``score_state`` return aliases reuse the
+    externalized ``kv_cache`` / ``kv`` window reshape names, so the generated
+    orchestration C++ declared those names twice (``Tensor X = ...`` then
+    ``const Tensor& X = ...``) and failed to compile with ``conflicting
+    declaration``.
+    """
+
+    def test_same_name_tuple_vars_do_not_cross_wire_return_aliases(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        t2d = ir.TensorType([16, 16], pl.FP32)
+        tflat = ir.TensorType([256, 1], pl.FP32)
+        span = ir.Span.unknown()
+
+        ib = IRBuilder()
+        with ib.function("orch", type=ir.FunctionType.Orchestration) as orch_f:
+            o0 = orch_f.param("o0", t2d)
+            o1 = orch_f.param("o1", t2d)
+            orch_f.return_type(ir.TupleType([t2d, t2d]))
+
+            # Two tuple-producing MakeTuple assignments that deliberately share
+            # the SAME name_hint "ret" (distinct Var objects) — exactly what the
+            # OutWindowExternalizer rebuild produces after inlining. Each tuple
+            # wraps a distinct reshape local (rsh0 / rsh1); its TupleGetItem
+            # consumer is then reshaped again, so the consumer's lineage must
+            # resolve to its OWN tuple's element. Old name_hint keying collapsed
+            # both "ret" tuples onto one key, so the first tuple's consumer (a0)
+            # lost its lineage and was emitted as the undeclared ``a0.reshape``.
+            rsh0 = ib.let("rsh0", tensor_ops.reshape(o0, [256, 1]))
+            ret_a = ib.let("ret", ib.make_tuple([rsh0]))
+            a0 = ib.let("a0", ir.TupleGetItemExpr(ret_a, 0, span), type=tflat)
+            rsh1 = ib.let("rsh1", tensor_ops.reshape(o1, [256, 1]))
+            ret_b = ib.let("ret", ib.make_tuple([rsh1]))
+            b0 = ib.let("b0", ir.TupleGetItemExpr(ret_b, 0, span), type=tflat)
+            fa = ib.let("fa", tensor_ops.reshape(a0, [16, 16]))
+            fb = ib.let("fb", tensor_ops.reshape(b0, [16, 16]))
+            ib.return_stmt(ib.make_tuple([fa, fb]))
+
+        orch_func = orch_f.get_result()
+        program = ir.Program([orch_func], "test_tuple_pointer_keying", span)
+        code = codegen.generate_orchestration(program, orch_func).code
+
+        # No declared name may appear twice (the conflicting-declaration bug).
+        declared = re.findall(
+            r"^\s*(?:const\s+Tensor&|Tensor|PTO2TaskId|auto)\s+([A-Za-z_]\w*)\s*=",
+            code,
+            flags=re.MULTILINE,
+        )
+        dups = sorted({n for n in declared if declared.count(n) > 1})
+        assert not dups, f"duplicate declarations {dups} in:\n{code}"
+
+        # Each consumer must reshape from its OWN tuple's element, not a stale /
+        # undeclared getitem name. Before the fix, ``fa`` read undeclared ``a0``.
+        assert "Tensor fa = rsh0.reshape" in code, code
+        assert "Tensor fb = rsh1.reshape" in code, code
+        assert "a0.reshape" not in code and "b0.reshape" not in code, code
+
+
 class TestUnregisteredOpError:
     """Test that unregistered/misplaced ops in Orchestration functions raise errors."""
 

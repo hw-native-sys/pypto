@@ -70,6 +70,8 @@ class OrchestrationInfoCollector : public ir::IRVisitor {
  public:
   std::map<std::string, std::vector<TupleElement>> call_tuple_elements;
   std::map<const ir::Call*, std::string> call_to_tuple_key;
+  // Keyed by the producing Var* (unique per SSA def), not by ``name_hint`` —
+  // post-inline/externalization name_hints can collide across distinct tuples.
   std::map<const ir::Var*, std::string> tuple_var_to_key;
 
  protected:
@@ -77,7 +79,6 @@ class OrchestrationInfoCollector : public ir::IRVisitor {
 
  private:
   int tuple_call_counter_ = 0;
-  std::map<const ir::Var*, std::string> current_tuple_key_;
 };
 
 /**
