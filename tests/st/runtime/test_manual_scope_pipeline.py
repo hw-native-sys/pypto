@@ -234,10 +234,10 @@ class TestManualScopeSwimlane:
         DAG). The minimum requirement: at least ``M * N`` fan-out edges
         exist, one per stage1→stage2 pair.
         """
-        tasks = manual_scope_swimlane_data["tasks"]
         # Swimlane fanout is runtime-dependent on this witness and can
         # under-report the same underlying dependency shape. Do not hard-assert
         # the aggregate fanout count here.
+        # tasks = manual_scope_swimlane_data["tasks"]
         # total_fanout = sum(t["fanout_count"] for t in tasks)
         # assert total_fanout >= _M * _N, (
         #     f"expected at least {_M * _N} fan-out edges (one per stage1->stage2 pair), got {total_fanout}"
