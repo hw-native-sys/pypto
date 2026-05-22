@@ -506,6 +506,7 @@ class TestOutlineIncoreScopes:
                 return result
 
         Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 

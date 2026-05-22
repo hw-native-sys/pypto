@@ -11,19 +11,18 @@
 
 This pass normalizes IR structure by:
 1. Unwrapping single-child SeqStmts (no redundant nesting)
-2. Preventing nested SeqStmts (SeqStmts as child of SeqStmts)
+2. Flattening nested SeqStmts (SeqStmts as child of SeqStmts)
 
 The DSL parser builds function bodies through ``IRBuilder``, whose
 ``EndFunction``/loop/if scopes already emit ``stmts[0]`` for a single
-statement and a flat ``SeqStmts`` for multiple. So a normal ``@pl.program``
-can express both pass-input shapes (a bare single-statement body and a flat
-multi-statement ``SeqStmts``) directly, and the transform tests below use the
-Before/Expected pattern. The pass is a no-op on these already-normalized
-shapes, so each compares ``After`` with ``Before``.
-
-The final test exercises a structurally-invalid mid-body ``YieldStmt``, which
-the DSL parser cannot emit (yields only appear at trailing positions of
-iter-arg scopes); it is built via raw ``ir.*`` constructors on purpose.
+statement and a flat ``SeqStmts`` for multiple — it never produces a
+single-child or nested ``SeqStmts``. So the DSL-authored Before/Expected
+tests below only cover the no-op case (the pass leaves an already-flat body
+unchanged). The pass's actual rewrites are exercised by the raw ``ir.*``
+fixtures ``test_unwraps_single_child_seqstmts`` and
+``test_flattens_nested_seqstmts``, which construct the redundant shapes
+directly. A final raw-IR test exercises a structurally-invalid mid-body
+``YieldStmt`` that the DSL parser likewise cannot emit.
 """
 
 import pypto.language as pl
@@ -82,6 +81,78 @@ def test_idempotence():
     # Apply pass again and verify idempotence.
     After2 = passes.normalize_stmt_structure()(After)
     ir.assert_structural_equal(After2, Before)
+
+
+def test_unwraps_single_child_seqstmts():
+    """A single-child ``SeqStmts`` function body is unwrapped to the bare stmt.
+
+    The DSL parser never emits a single-child ``SeqStmts`` (``IRBuilder``
+    emits ``stmts[0]`` directly), so this pass-input shape is built via raw
+    ``ir.*`` constructors.
+    """
+    span = ir.Span.unknown()
+    tensor_ty = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+    x = ir.Var("x", tensor_ty, span)
+
+    def make_program(body: ir.Stmt) -> ir.Program:
+        func = ir.Function("main", [x], [tensor_ty], body, span)
+        return ir.Program([func], "test_program", span)
+
+    ret = ir.ReturnStmt([x], span)
+    # Before: the function body is a redundant single-child SeqStmts.
+    Before = make_program(ir.SeqStmts([ret], span))
+    # Expected: the single child is unwrapped to a bare ReturnStmt.
+    Expected = make_program(ret)
+
+    # NormalizeStmtStructure repairs NoRedundantBlocks violations, so its input
+    # is by definition such a violation — which the structural-property verifier
+    # rejects before any pass runs. Disable verification so the repair pass can
+    # be exercised on the malformed input it exists to fix.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.normalize_stmt_structure()(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_flattens_nested_seqstmts():
+    """A ``SeqStmts`` nested inside another ``SeqStmts`` is flattened to one level.
+
+    Built via raw ``ir.*`` constructors — the DSL parser always emits a flat
+    ``SeqStmts`` and never nests one inside another.
+    """
+    span = ir.Span.unknown()
+    tensor_ty = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+    x = ir.Var("x", tensor_ty, span)
+    a = ir.Var("a", tensor_ty, span)
+    b = ir.Var("b", tensor_ty, span)
+
+    def make_program(body: ir.Stmt) -> ir.Program:
+        func = ir.Function("main", [x], [tensor_ty], body, span)
+        return ir.Program([func], "test_program", span)
+
+    assign_a = ir.AssignStmt(
+        a,
+        ir.Call(ir.get_op("tensor.adds"), [x, ir.ConstFloat(1.0, DataType.FP32, span)], tensor_ty, span),
+        span,
+    )
+    assign_b = ir.AssignStmt(
+        b,
+        ir.Call(ir.get_op("tensor.muls"), [a, ir.ConstFloat(2.0, DataType.FP32, span)], tensor_ty, span),
+        span,
+    )
+    ret = ir.ReturnStmt([b], span)
+
+    # Before: the body's first child is itself a SeqStmts (one level of nesting).
+    Before = make_program(ir.SeqStmts([ir.SeqStmts([assign_a, assign_b], span), ret], span))
+    # Expected: the nested SeqStmts is absorbed into a single flat SeqStmts.
+    Expected = make_program(ir.SeqStmts([assign_a, assign_b, ret], span))
+
+    # NormalizeStmtStructure repairs NoRedundantBlocks violations, so its input
+    # is by definition such a violation — which the structural-property verifier
+    # rejects before any pass runs. Disable verification so the repair pass can
+    # be exercised on the malformed input it exists to fix.
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.normalize_stmt_structure()(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 def test_no_redundant_blocks_rejects_mid_body_yield():
