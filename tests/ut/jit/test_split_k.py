@@ -32,6 +32,14 @@ _K = 512
 _SPLIT = 4  # K reduction spread across 4 cores
 _KS = _K // _SPLIT  # per-core K-slice width
 
+# Down-projection-pattern constants (mirrors qwen3_decode's down_projection
+# kernel: split-K matmul into an fp32 accumulator, then residual + bf16 cast).
+_DM = 16
+_DN = 64
+_DK = 512
+_DSPLIT = 4
+_DKS = _DK // _DSPLIT
+
 
 @pytest.fixture(autouse=True)
 def _setup_backend():
@@ -109,6 +117,57 @@ def test_split_k_matmul_numerically_correct():
     expected = torch.matmul(a, b)
     assert torch.allclose(out, expected, rtol=1e-3, atol=1e-3), (
         f"split-K result mismatch: max abs diff {(expected - out).abs().max().item():.3e}"
+    )
+
+
+def _down_proj_split_k_program():
+    @jit
+    def down_proj_split_k(mlp: pl.Tensor, w_down: pl.Tensor, resid: pl.Tensor, out: pl.Out[pl.Tensor]):
+        # fp32 GM accumulator for the split-K partials — atomic-add needs an
+        # fp32 target, and `out` is bf16. Zero-initialised before the loop.
+        acc = pl.create_tensor([_DM, _DN], dtype=pl.FP32)
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="dp_zero_init"):
+            acc = pl.assemble(acc, pl.full([_DM, _DN], dtype=pl.FP32, value=0.0), [0, 0])
+        for ks in pl.parallel(0, _DSPLIT):
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="dp_split_k"):
+                k0 = ks * _DKS
+                mlp_k = mlp[:, k0 : k0 + _DKS]
+                w_k = w_down[k0 : k0 + _DKS, :]
+                part = pl.matmul(mlp_k, w_k, out_dtype=pl.FP32)
+                acc = pl.assemble(acc, part, [0, 0], atomic=pl.AtomicType.Add)
+        with pl.at(level=pl.Level.CORE_GROUP, name_hint="dp_residual"):
+            out = pl.assemble(out, pl.cast(pl.add(acc, resid), target_type=pl.BF16), [0, 0])
+        return out
+
+    return down_proj_split_k
+
+
+def test_split_k_down_projection_pattern_numerically_correct():
+    """A qwen3-style down projection (split-K matmul + residual + bf16 cast) is correct.
+
+    This is the kernel shape rewritten in ``qwen3_decode_split_k.py``: a split-K
+    reduction accumulating into an fp32 global-memory tensor, finalised by adding
+    the residual and casting to bf16.
+    """
+    torch = pytest.importorskip("torch")
+
+    torch.manual_seed(0)
+    mlp = torch.randn(_DM, _DK, dtype=torch.float32)
+    w_down = torch.randn(_DK, _DN, dtype=torch.float32)
+    resid = torch.randn(_DM, _DN, dtype=torch.float32)
+    out = torch.zeros(_DM, _DN, dtype=torch.bfloat16)
+
+    post = _down_proj_split_k_program().compile_for_test(mlp, w_down, resid, out)
+    code = torch_codegen(post)
+    ns: dict = {}
+    exec(code, ns)  # noqa: S102 — executing generated reference code is the point
+
+    actual = out.clone()
+    ns["down_proj_split_k"](mlp, w_down, resid, actual)
+    expected = (torch.matmul(mlp, w_down) + resid).bfloat16()
+    assert torch.allclose(actual.float(), expected.float(), rtol=2e-2, atol=2e-2), (
+        f"down-proj split-K mismatch: max abs diff "
+        f"{(actual.float() - expected.float()).abs().max().item():.3e}"
     )
 
 
