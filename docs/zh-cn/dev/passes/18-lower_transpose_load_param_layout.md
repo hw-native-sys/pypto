@@ -93,7 +93,7 @@ class Before:
         return self.matmul_incore(a, b, c)
 ```
 
-**后**（语义层面 —— `tensor.as_layout` 是内部 IR op，不在 pl.* 暴露）：
+**后**（语义层面 —— `tensor.as_layout` 是内部 API；`pl.tensor.as_layout` 有薄封装，但该 op 由编译器 Pass 注入，非用户书写）：
 
 ```text
 @pl.function(type=pl.FunctionType.InCore)

@@ -1725,6 +1725,32 @@ def test_tensor_set_validshape_preserves_existing_view():
     assert len(result_type.tensor_view.valid_shape) == 2
 
 
+def test_pl_tensor_as_layout_wrapper():
+    """pl.tensor.as_layout wraps the IR builder and returns a Tensor."""
+    src = pl.create_tensor([8, 4], pl.FP32)
+    result = pl.tensor.as_layout(src, ir.TensorLayout.DN)
+
+    assert isinstance(result, pl.Tensor)
+    call = result.unwrap()
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.as_layout"
+
+    # ND [8, 4] -> DN flips the trailing pair to [4, 8] (RFC #1300 §4.2).
+    out_type = call.type
+    assert isinstance(out_type, ir.TensorType)
+    dims = []
+    for dim in out_type.shape:
+        assert isinstance(dim, ir.ConstInt)
+        dims.append(dim.value)
+    assert dims == [4, 8]
+
+
+def test_pl_tensor_as_layout_in_all():
+    """as_layout is reachable as a static attribute of the pl.tensor namespace."""
+    assert "as_layout" in pl.tensor.__all__
+    assert hasattr(pl.tensor, "as_layout")
+
+
 def test_tensor_reshape_with_valid_shape():
     """Test tensor.reshape with valid_shape parameter."""
     span = ir.Span.unknown()

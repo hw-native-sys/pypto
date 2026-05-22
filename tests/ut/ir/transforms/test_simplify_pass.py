@@ -7,10 +7,6 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# pyright: reportAttributeAccessIssue=false
-# DSL false positive in @pl.program bodies (parsed as DSL, not executed as
-# Python): `pl.tensor.as_layout` is a parser-only op with no Python wrapper.
-
 """Tests for the Simplify pass.
 
 This pass simplifies expressions and statements in the IR using algebraic

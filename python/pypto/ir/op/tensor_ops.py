@@ -1157,11 +1157,13 @@ def as_layout(
     """Flip ``tensor``'s layout tag over the same physical memory (RFC #1300 §3.3).
 
     .. note::
-        Internal IR builder — this op is not exposed via ``pypto.language``.
-        Passes (e.g. ``LowerTransposeLoadParamLayout`` in P6) inject
-        ``tensor.as_layout`` at orch ↔ InCore call sites to bridge ND ↔ DN views
-        over the same physical buffer. The op emits no PTOAS instruction;
-        downstream ``make_tensor_view`` consumes the new view directly.
+        Internal API — intended for compiler-generated code only, though a
+        thin DSL wrapper exists at ``pl.tensor.as_layout`` for test programs
+        and tooling. Passes (e.g. ``LowerTransposeLoadParamLayout`` in P6)
+        inject ``tensor.as_layout`` at orch ↔ InCore call sites to bridge
+        ND ↔ DN views over the same physical buffer. The op emits no PTOAS
+        instruction; downstream ``make_tensor_view`` consumes the new view
+        directly.
 
     The trailing-two-dim shape swap that comes with a cross-layout flip is
     mechanical (RFC §4.2: row-major ``[..., a, b]`` ND ≡ ``[..., b, a]``

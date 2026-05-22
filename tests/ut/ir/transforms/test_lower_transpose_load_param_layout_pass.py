@@ -7,11 +7,6 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# pyright: reportAttributeAccessIssue=false
-# `pl.tensor.as_layout` is a DSL-parser op recognised by name inside @pl.program
-# bodies; it has no Python wrapper in pypto.language.op.tensor_ops, so pyright
-# (which type-checks the body as plain Python) reports a false attribute error.
-
 """Unit tests for LowerTransposeLoadParamLayout pass (RFC #1300 P6).
 
 The pass leaves InCore parameter signatures untouched and instead prepends a
@@ -24,8 +19,8 @@ trailing pair swapped while ``transpose=True`` is flipped to
 ``transpose=False``. Non-InCore (orch) call sites are not touched — they pass
 their original ND args straight through to the kernel.
 
-Although ``tensor.as_layout`` has no user-facing ``pypto.language`` builder, the
-printer emits it as ``pl.tensor.as_layout(...)`` and the parser accepts that
+``tensor.as_layout`` has a thin ``pl.tensor.as_layout`` wrapper (internal API);
+the printer emits it as ``pl.tensor.as_layout(...)`` and the parser accepts that
 form, so the post-pass IR round-trips through print/parse. Tests therefore use
 the standard Before/Expected ``@pl.program`` pattern: drive the pass with a
 ``Before`` program and compare the result against an ``Expected`` program that

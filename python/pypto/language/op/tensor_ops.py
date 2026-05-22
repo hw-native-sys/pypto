@@ -71,6 +71,7 @@ __all__ = [
     "concat",
     "reshape",
     "transpose",
+    "as_layout",
     "scatter_update",
     "set_validshape",
     "sort32",
@@ -1075,6 +1076,35 @@ def transpose(tensor: Tensor, axis1: int, axis2: int) -> Tensor:
     """
     tensor_expr = tensor.unwrap()
     call_expr = _ir_ops.transpose(tensor_expr, axis1, axis2)
+    return Tensor(expr=call_expr)
+
+
+def as_layout(tensor: Tensor, layout: TensorLayout) -> Tensor:
+    """Flip a tensor's layout tag over the same physical memory (RFC #1300 §3.3).
+
+    .. note::
+        Internal API — intended for compiler-generated code only. Passes such
+        as ``LowerTransposeLoadParamLayout`` inject ``tensor.as_layout`` at
+        orch ↔ InCore call sites to bridge ND ↔ DN views over one physical
+        buffer. It is wrapped here so DSL-level test programs and tooling can
+        name it with static type-checking; end users should not need it.
+
+    The trailing-two-dim shape swap that accompanies a cross-layout flip is
+    derived from the source — callers do not pass a target shape (RFC §4.2:
+    row-major ``[..., a, b]`` ND ≡ ``[..., b, a]`` DN-packed). For genuine
+    shape changes, use :func:`reshape`.
+
+    Args:
+        tensor: Source tensor. Must be packed canonical or bare — strided
+            sub-views are rejected. Cross-layout flips require rank >= 2.
+        layout: Target ``TensorLayout``. Must not be ``NZ`` (NZ is tile-only
+            and fractal).
+
+    Returns:
+        Tensor wrapping the as_layout operation, carrying the canonical
+        ``(shape, stride, layout)`` triple for the target view.
+    """
+    call_expr = _ir_ops.as_layout(tensor.unwrap(), layout)
     return Tensor(expr=call_expr)
 
 

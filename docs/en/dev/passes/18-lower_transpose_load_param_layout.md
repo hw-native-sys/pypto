@@ -113,7 +113,8 @@ class Before:
         return self.matmul_incore(a, b, c)
 ```
 
-**After** (semantic — ``tensor.as_layout`` is an internal IR op, not exposed in pl.*):
+**After** (semantic — ``tensor.as_layout`` is an internal API; a thin
+``pl.tensor.as_layout`` wrapper exists but the op is compiler-injected, not user-written):
 
 ```text
 @pl.function(type=pl.FunctionType.InCore)
