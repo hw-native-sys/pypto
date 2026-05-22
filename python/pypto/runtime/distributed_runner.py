@@ -348,9 +348,14 @@ def execute_distributed(  # noqa: PLR0912
     # 7. Build the orchestration closure and execute
     _keep: list[Any] = []
 
-    # Codegen always emits ``contexts`` in the entry signature; for comm-less
-    # programs ``w.chip_contexts`` is an empty list and the body simply ignores
-    # it, so the runner uses a single uniform call shape.
+    # Codegen always emits ``contexts`` in the entry signature; comm-less programs
+    # ignore it (``pld.system.world_size`` lowers to ``len(contexts)``, never used
+    # without comm). Runtime PR #817 removed the static ``Worker.chip_contexts``
+    # bootstrap in favour of dynamic ``orch.allocate_domain`` (driven from inside
+    # the orch body), so there is no worker-level context list to pass — comm-less
+    # programs get an empty list, matching the prior comm-less semantics.
+    contexts: list[Any] = []
+
     def orch_fn(orch, _unused_args, _unused_cfg):
         entry_fn(
             orch,
@@ -360,7 +365,7 @@ def execute_distributed(  # noqa: PLR0912
             callables=chip_cids,
             sub_ids=sub_ids,
             _keep=_keep,
-            contexts=w.chip_contexts,
+            contexts=contexts,
         )
 
     call_config = CallConfig()

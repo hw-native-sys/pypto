@@ -249,8 +249,12 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   oss << "uint32_t " << result_var << "_shapes[" << ndim << "] = {";
   for (size_t i = 0; i < ndim; ++i) {
     if (i > 0) oss << ", ";
-    oss << "std::min<uint32_t>(" << EmitAsUint32(shape_tuple->elements_[i], codegen) << ", "
-        << ext_input_name << ".shapes[" << i << "] - " << result_var << "_offsets[" << i << "])";
+    // Saturate the remaining extent to 0 before std::min: ``shapes[i] - offsets[i]`` is
+    // unsigned, so an offset past the source extent would underflow and let std::min return
+    // the original (over-extent) size — defeating the clamp. The ternary keeps it at 0.
+    oss << "(" << result_var << "_offsets[" << i << "] >= " << ext_input_name << ".shapes[" << i
+        << "] ? 0u : std::min<uint32_t>(" << EmitAsUint32(shape_tuple->elements_[i], codegen) << ", "
+        << ext_input_name << ".shapes[" << i << "] - " << result_var << "_offsets[" << i << "]))";
   }
   oss << "};\n";
 
