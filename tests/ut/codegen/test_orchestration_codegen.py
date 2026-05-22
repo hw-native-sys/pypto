@@ -1046,6 +1046,49 @@ class TestOrchestration:
         # transpose calls .transpose on the local Tensor (no ext_ prefix).
         assert "Tensor t = chunk.transpose(1, 2);" in code
 
+    def test_tensor_as_layout_cross_flip_lowers_to_transpose(self):
+        """Cross-layout flip (ND→DN) lowers to runtime Tensor::transpose on the
+        trailing pair (shapes + strides swapped, start_offset preserved)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ib = IRBuilder()
+        with ib.function("orch_as_layout", type=ir.FunctionType.Orchestration) as f:
+            b = f.param("b", ir.TensorType([8, 4], DataType.FP16))
+            f.return_type(ir.TensorType([4, 8], DataType.FP16))
+            b_dn = ib.let("b_dn", tensor_ops.as_layout(b, ir.TensorLayout.DN))
+            ib.return_stmt(b_dn)
+        orch = f.get_result()
+        program = ir.Program([orch], "test_as_layout_cross_flip", ir.Span.unknown())
+
+        code = _generate_orch_code(program)
+
+        # Cross-layout flip swaps the trailing pair via runtime Tensor::transpose
+        # on the external tensor handle (start_offset preserved).
+        assert "Tensor b_dn = ext_b.transpose(0, 1);" in code
+        # The deleted pre-#808 fields must never be emitted.
+        assert "raw_shapes" not in code
+        assert "is_raw_eq_shapes" not in code
+
+    def test_tensor_as_layout_identity_flip_aliases(self):
+        """tensor.as_layout with target == source layout emits a plain alias, not a transpose."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ib = IRBuilder()
+        with ib.function("orch_as_layout_id", type=ir.FunctionType.Orchestration) as f:
+            b = f.param("b", ir.TensorType([8, 4], DataType.FP16))
+            f.return_type(ir.TensorType([8, 4], DataType.FP16))
+            b_same = ib.let("b_same", tensor_ops.as_layout(b, ir.TensorLayout.ND))
+            ib.return_stmt(b_same)
+        orch = f.get_result()
+        program = ir.Program([orch], "test_as_layout_identity", ir.Span.unknown())
+
+        code = _generate_orch_code(program)
+
+        assert "Tensor b_same = ext_b;" in code
+        assert ".transpose(" not in code
+
     def test_if_statement(self):
         """Test if/else codegen with conditional scalar values."""
         backend.reset_for_testing()

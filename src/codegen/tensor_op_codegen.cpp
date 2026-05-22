@@ -300,8 +300,9 @@ REGISTER_ORCHESTRATION_OP(tensor_reshape, ("tensor.reshape")) {
 
 REGISTER_ORCHESTRATION_OP(tensor_transpose, ("tensor.transpose")) {
   // tensor.transpose(input, axis1, axis2) -> Tensor view with two axes swapped.
-  // Lowered to runtime Tensor::transpose(x, y), a zero-copy metadata swap of
-  // shapes / raw_shapes / offsets (see runtime tensor.h: Tensor::transpose).
+  // Lowered to runtime Tensor::transpose(x, y), a zero-copy metadata swap of the
+  // two axes' shapes and strides (start_offset preserved; see runtime tensor.h:
+  // Tensor::transpose under the #808 strided model).
   // The optional 4th `valid_shape` argument from the IR op is intentionally
   // ignored at the orchestration layer (it only affects IR metadata, mirroring
   // how tensor.reshape handles valid_shape here).
@@ -355,30 +356,24 @@ REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
   // it at orch ↔ InCore bridge sites so the downstream callee's IR-declared
   // param type carries the new layout / canonical shape.
   //
-  // **Lowering:**
+  // **Lowering** (runtime strided-Tensor model, #808 — addressing is
+  // ``buffer.addr + (start_offset + Σ coords[i]·strides[i]) · elem_size``):
   //
   // - **Identity flip** (target layout == source layout): emit a plain
   //   ``Tensor result = input;`` alias. ``DeduceTensorAsLayoutType`` also
   //   keeps the shape unchanged in this case.
-  // - **Cross-layout flip** (ND ↔ DN, §4.2 canonical pair): emit an alias
-  //   then swap the **trailing-pair shapes** so the kernel binary's
-  //   PTOAS-generated wrapper reads the right dynamic dim values from
-  //   ``runtime_tensor->shapes[i]`` (those slots are referenced under the
-  //   IR-declared post-swap order). ``raw_shapes`` and ``offsets`` are
-  //   intentionally left in the source (pre-swap) coord system — PTOAS uses
-  //   ``raw_shape``-derived strides plus ``offsets`` to compute
-  //   ``start_offset`` (the byte offset of the view into the physical
-  //   buffer), and that base address must continue to point to the original
-  //   ND-coord region (e.g. paged-attention's ``[block_offset, 0]`` slice
-  //   into ``key_cache``). If ``is_raw_eq_shapes`` is true, materialize
-  //   ``raw_shapes`` from the current ``shapes`` *before* the swap so the
-  //   subsequent ``shapes`` mutation does not pollute the raw_shapes-derived
-  //   stride arithmetic.
+  // - **Cross-layout flip** (ND ↔ DN, §4.2 canonical pair): lower to
+  //   ``input.transpose(ndim-2, ndim-1)``. The runtime ``Tensor::transpose``
+  //   swaps the trailing-pair ``shapes`` **and** ``strides`` together while
+  //   leaving ``start_offset`` untouched — exactly the post-flip view that
+  //   ``DeduceTensorAsLayoutType`` deduces (it trailing-pair-swaps both shapes
+  //   and strides). Because ``start_offset`` is preserved, strided/paged
+  //   sub-views (e.g. paged-attention's ``[block_offset, 0]`` slice into
+  //   ``key_cache``) keep pointing at the original physical region.
   //
-  // We do NOT lower to ``input.transpose(N-2, N-1)``: that runtime helper
-  // additionally swaps ``raw_shapes`` and ``offsets``, which would shift
-  // ``start_offset`` by a factor of the raw shape and silently corrupt
-  // sliced/paged inputs.
+  // (This reverses the pre-#808 lowering, which avoided ``transpose`` because the
+  // old helper swapped ``raw_shapes``/``offsets`` and shifted ``start_offset``;
+  // those fields are gone, so ``transpose`` is now the correct lowering.)
   CHECK(op->args_.size() == 1) << "tensor.as_layout requires 1 arg (input) plus a 'layout' kwarg";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
@@ -401,29 +396,19 @@ REGISTER_ORCHESTRATION_OP(tensor_as_layout, ("tensor.as_layout")) {
   std::string result_var = codegen.GetCurrentResultTarget();
 
   std::ostringstream oss;
-  oss << "Tensor " << result_var << " = " << ext_input_name << ";";
-
-  if (target_layout != src_layout) {
+  if (target_layout == src_layout) {
+    // Identity flip: pure alias over the same physical buffer.
+    oss << "Tensor " << result_var << " = " << ext_input_name << ";";
+  } else {
+    // Cross-layout flip (ND ↔ DN, §4.2 canonical pair): swap the trailing pair
+    // via the runtime strided-Tensor transpose (shapes + strides swapped,
+    // start_offset preserved).
     int64_t ndim = static_cast<int64_t>(input_type->shape_.size());
     INTERNAL_CHECK_SPAN(ndim >= 2, op->span_)
         << "Internal error: tensor.as_layout cross-layout flip reached codegen with rank=" << ndim
         << "; DeduceTensorAsLayoutType is supposed to reject cross-layout flips below rank 2";
-    // Materialize raw_shapes (if currently inferred from shapes) so the
-    // trailing-pair shape swap below does not also mutate raw_shapes-derived
-    // stride arithmetic.
-    oss << "\n  if (" << result_var << ".is_raw_eq_shapes) {\n";
-    oss << "    for (uint32_t _i = 0; _i < " << result_var << ".ndims; ++_i) {\n";
-    oss << "      " << result_var << ".raw_shapes[_i] = " << result_var << ".shapes[_i];\n";
-    oss << "    }\n";
-    oss << "    " << result_var << ".is_raw_eq_shapes = false;\n";
-    oss << "  }\n";
-    // Swap trailing-pair shapes (§4.2 canonical pair).
-    oss << "  {\n";
-    oss << "    uint32_t _t = " << result_var << ".shapes[" << (ndim - 2) << "];\n";
-    oss << "    " << result_var << ".shapes[" << (ndim - 2) << "] = " << result_var << ".shapes["
-        << (ndim - 1) << "];\n";
-    oss << "    " << result_var << ".shapes[" << (ndim - 1) << "] = _t;\n";
-    oss << "  }";
+    oss << "Tensor " << result_var << " = " << ext_input_name << ".transpose(" << (ndim - 2) << ", "
+        << (ndim - 1) << ");";
   }
 
   return oss.str();
