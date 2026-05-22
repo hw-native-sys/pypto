@@ -70,8 +70,6 @@ class OrchestrationInfoCollector : public ir::IRVisitor {
  public:
   std::map<std::string, std::vector<TupleElement>> call_tuple_elements;
   std::map<const ir::Call*, std::string> call_to_tuple_key;
-  // Keyed by the producing Var* (unique per SSA def), not ``name_hint``; see
-  // VisitStmt_ in orchestration_analysis.cpp for why name-keying is unsafe.
   std::map<const ir::Var*, std::string> tuple_var_to_key;
 
  protected:

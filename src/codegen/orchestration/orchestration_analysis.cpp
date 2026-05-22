@@ -82,12 +82,6 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
 // ---------------------------------------------------------------------------
 
 void OrchestrationInfoCollector::VisitStmt_(const AssignStmtPtr& assign) {
-  // Key tuple lineage by the producing Var* (the IR's true identity), never by
-  // ``name_hint``. After inlining + OutWindowExternalizer rewrites, two distinct
-  // tuple-producing assignments can share a ``name_hint`` (e.g. several rebuilt
-  // ``ret__tmp_v0`` MakeTuples). Name-keying collapses them onto one key and
-  // cross-wires their TupleGetItem consumers' emit names, which produced
-  // colliding C++ return aliases (issue #1463). Var* is unique per SSA def.
   if (auto call = As<Call>(assign->value_)) {
     if (!IsBuiltinOp(call->op_->name_) && call->op_->name_ != "tensor.create") {
       if (As<TupleType>(call->GetType())) {
