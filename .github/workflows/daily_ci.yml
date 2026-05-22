@@ -2,7 +2,7 @@ name: Daily CI
 
 on:
   schedule:
-    - cron: '0 22 * * *'  # UTC 22:00 = Shanghai 06:00
+    - cron: '0 18 * * *'  # UTC 18:00 = Beijing 02:00 (next day)
   workflow_dispatch:
 
 jobs:
@@ -105,6 +105,32 @@ jobs:
             exit 1
           fi
           echo "All qwen3 pypto-lib cases passed."
+
+      - name: Run deepseek-v4 pypto-lib examples
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        shell: bash
+        run: |
+          failed=()
+          for f in \
+            models/deepseek/v4/decode_compressor_ratio128.py \
+            models/deepseek/v4/decode_compressor_ratio4.py \
+            models/deepseek/v4/decode_indexer_compressor.py \
+            models/deepseek/v4/decode_sparse_attn.py; do
+            echo "::group::$f"
+            if ! python "$f" -p a2a3 -d $DEVICE_ID; then
+              failed+=("$f")
+              echo "::error file=$f::deepseek-v4 pypto-lib example failed: $f"
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -ne 0 ]; then
+            echo "Failed deepseek-v4 pypto-lib cases (${#failed[@]}):"
+            printf '  - %s\n' "${failed[@]}"
+            exit 1
+          fi
+          echo "All deepseek-v4 pypto-lib cases passed."
 
   a5-system-tests:
     runs-on: [self-hosted, a5]
