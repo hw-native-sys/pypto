@@ -264,9 +264,8 @@ class ManualPhaseFenceMutator : public IRMutator {
     auto new_body = VisitStmt(op->body_);
     in_manual_scope_ = saved;
     if (new_body.get() != op->body_.get()) {
-      auto result = MutableCopy(op);
-      result->body_ = std::move(new_body);
-      return result;
+      return std::make_shared<const RuntimeScopeStmt>(op->manual_, op->name_hint_, std::move(new_body),
+                                                      op->span_, op->leading_comments_, op->attrs_);
     }
     return op;
   }
@@ -285,7 +284,7 @@ class ManualPhaseFenceMutator : public IRMutator {
     }
 
     auto body_with_current_rewrites = RewriteCoveredConsumers(op->body_, consumer_to_barrier);
-    if (!decisions.empty()) {
+    if (!decisions.empty() && op->kind_ != ForKind::Parallel) {
       auto body_stmts = FlattenToVector(body_with_current_rewrites);
       std::vector<StmtPtr> with_barriers;
       with_barriers.reserve(decisions.size() + body_stmts.size());
@@ -300,14 +299,29 @@ class ManualPhaseFenceMutator : public IRMutator {
     auto new_start = VisitExpr(op->start_);
     auto new_stop = VisitExpr(op->stop_);
     auto new_step = VisitExpr(op->step_);
-    if (body_with_nested.get() != op->body_.get() || new_start.get() != op->start_.get() ||
-        new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get()) {
-      auto result = MutableCopy(op);
-      result->start_ = std::move(new_start);
-      result->stop_ = std::move(new_stop);
-      result->step_ = std::move(new_step);
-      result->body_ = std::move(body_with_nested);
-      return result;
+    const bool loop_changed = body_with_nested.get() != op->body_.get() || new_start.get() != op->start_.get() ||
+                              new_stop.get() != op->stop_.get() || new_step.get() != op->step_.get();
+    if (loop_changed && (decisions.empty() || op->kind_ != ForKind::Parallel)) {
+      return std::make_shared<const ForStmt>(op->loop_var_, std::move(new_start), std::move(new_stop),
+                                             std::move(new_step), op->iter_args_,
+                                             std::move(body_with_nested), op->return_vars_, op->span_,
+                                             op->kind_, op->chunk_config_, op->attrs_,
+                                             op->leading_comments_);
+    }
+    if (!decisions.empty()) {
+      auto new_for = std::make_shared<const ForStmt>(op->loop_var_, std::move(new_start),
+                                                     std::move(new_stop), std::move(new_step),
+                                                     op->iter_args_, std::move(body_with_nested),
+                                                     op->return_vars_, op->span_, op->kind_,
+                                                     op->chunk_config_, op->attrs_,
+                                                     op->leading_comments_);
+      std::vector<StmtPtr> with_barriers;
+      with_barriers.reserve(decisions.size() + 1);
+      for (const auto& decision : decisions) {
+        with_barriers.push_back(decision.barrier_stmt);
+      }
+      with_barriers.push_back(new_for);
+      return MakeSeqOrStmt(std::move(with_barriers), op->span_);
     }
     return op;
   }
@@ -317,16 +331,16 @@ class ManualPhaseFenceMutator : public IRMutator {
     std::vector<BarrierDecision> decisions;
     std::unordered_set<const Var*> already_decided;
 
-    auto try_add = [&](const VarPtr& source_var, int64_t consumer_count) {
-      if (!source_var || !already_decided.insert(source_var.get()).second) return;
-      const int64_t producer_count = GetArrayProducerCount(source_var);
+    auto try_add = [&](const VarPtr& match_var, const VarPtr& barrier_source_var, int64_t consumer_count) {
+      if (!match_var || !barrier_source_var || !already_decided.insert(match_var.get()).second) return;
+      const int64_t producer_count = GetArrayProducerCount(match_var);
       if (!ShouldEmitPhaseFenceBarrier(producer_count, consumer_count)) return;
       BarrierDecision decision;
-      decision.source = source_var.get();
-      decision.source_var = source_var;
-      decision.barrier_stmt = MakeBarrierStmt(source_var, &decision.barrier_var, for_stmt->span_,
+      decision.source = match_var.get();
+      decision.source_var = barrier_source_var;
+      decision.barrier_stmt = MakeBarrierStmt(barrier_source_var, &decision.barrier_var, for_stmt->span_,
                                               barrier_counter_++);
-      CollectCoveredConsumers(body, source_var.get(), &decision.consumers);
+      CollectCoveredConsumers(body, match_var.get(), &decision.consumers);
       if (!decision.consumers.empty()) decisions.push_back(std::move(decision));
     };
 
@@ -337,16 +351,21 @@ class ManualPhaseFenceMutator : public IRMutator {
     for (const auto& iter_arg : for_stmt->iter_args_) {
       if (!iter_arg || !IsTaskIdArrayVar(iter_arg)) continue;
       if (!ForBodyHasManualDepOnArray(body, iter_arg.get())) continue;
+      VarPtr barrier_source = iter_arg;
+      if (is_parallel) {
+        barrier_source = AsVarLike(iter_arg->initValue_);
+        if (!barrier_source || !IsTaskIdArrayVar(barrier_source)) continue;
+      }
       int64_t consumers = CountManualDepConsumersOnArray(body, iter_arg.get());
       if (is_parallel) consumers *= trip_count;
-      try_add(iter_arg, consumers);
+      try_add(iter_arg, barrier_source, consumers);
     }
 
     for (const auto& dep_array : CollectDirectManualDepArrays(body)) {
       if (!dep_array || BodyUpdatesArray(body, dep_array.get())) continue;
       int64_t consumers = CountManualDepConsumersOnArray(body, dep_array.get());
       if (is_parallel) consumers *= trip_count;
-      try_add(dep_array, consumers);
+      try_add(dep_array, dep_array, consumers);
     }
 
     return decisions;
@@ -386,6 +405,7 @@ ProgramPtr TransformExpandManualPhaseFence(const ProgramPtr& program) {
   bool changed = false;
   for (auto& [gvar, func] : new_functions) {
     if (!func || !func->body_) continue;
+    if (func->func_type_ != FunctionType::Orchestration) continue;
     ManualPhaseFenceMutator mutator;
     auto new_body = mutator.VisitStmt(func->body_);
     if (new_body.get() == func->body_.get()) continue;

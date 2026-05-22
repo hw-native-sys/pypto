@@ -724,16 +724,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
     }
 
-    StmtPtr loop_body = for_stmt->body_;
-    if (in_manual_scope_depth_ > 0 && for_stmt->kind_ == ForKind::Parallel) {
-      auto [pre_loop_dummy_tasks, body_without_pre_loop_dummy_tasks] =
-          SplitLeadingDummyTaskAssigns(for_stmt->body_, for_stmt->span_);
-      for (const auto& stmt : pre_loop_dummy_tasks) {
-        VisitStmt(stmt);
-      }
-      loop_body = std::move(body_without_pre_loop_dummy_tasks);
-    }
-
     code_ << Indent() << "for (int64_t " << loop_var << " = " << start_expr << "; " << loop_var << " < "
           << stop_expr << "; " << loop_var << " += " << step_expr << ") {\n";
     indent_ += 4;
@@ -774,7 +764,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       slot_expr = "((" + loop_var + " - " + start_expr + ") / " + step_expr + ")";
     }
     current_loop_slot_exprs_.push_back(slot_expr);
-    VisitStmt(loop_body);
+    VisitStmt(for_stmt->body_);
     current_loop_slot_exprs_.pop_back();
     current_return_vars_ = saved;
 
@@ -2348,41 +2338,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (!start || !stop || !step || *step <= 0) return 0;
     int64_t trip = (*stop - *start + *step - 1) / *step;
     return trip > 0 ? trip : 0;
-  }
-
-  static bool IsDummyTaskAssign(const StmtPtr& stmt) {
-    auto assign = As<AssignStmt>(stmt);
-    if (!assign) return false;
-    auto call = As<Call>(assign->value_);
-    return call && call->op_->name_ == "system.task_dummy" && call->GetAttr<bool>(kAttrDummyTask, false);
-  }
-
-  static std::pair<std::vector<StmtPtr>, StmtPtr> SplitLeadingDummyTaskAssigns(const StmtPtr& body,
-                                                                              const Span& span) {
-    std::vector<StmtPtr> stmts;
-    if (auto seq = As<SeqStmts>(body)) {
-      stmts = seq->stmts_;
-    } else if (body) {
-      stmts = {body};
-    }
-
-    size_t split = 0;
-    while (split < stmts.size() && IsDummyTaskAssign(stmts[split])) {
-      ++split;
-    }
-    if (split == 0) return {{}, body};
-
-    std::vector<StmtPtr> leading(stmts.begin(), stmts.begin() + static_cast<std::ptrdiff_t>(split));
-    std::vector<StmtPtr> remaining(stmts.begin() + static_cast<std::ptrdiff_t>(split), stmts.end());
-    StmtPtr remaining_body;
-    if (remaining.empty()) {
-      remaining_body = std::make_shared<const SeqStmts>(std::vector<StmtPtr>{}, span);
-    } else if (remaining.size() == 1) {
-      remaining_body = remaining[0];
-    } else {
-      remaining_body = SeqStmts::Flatten(std::move(remaining), span);
-    }
-    return {std::move(leading), std::move(remaining_body)};
   }
 
   /// Find a ForStmt within ``body`` whose ``return_vars_`` contains a Var
