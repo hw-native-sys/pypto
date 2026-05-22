@@ -1259,10 +1259,10 @@ class TestFoldComposition:
 class TestAsLayoutFolding:
     """Simplify drops identity ``tensor.as_layout`` reinterprets per RFC §3.3.
 
-    ``tensor.as_layout`` has no ``pl.*`` runtime wrapper, but the DSL parser
-    accepts ``pl.tensor.as_layout(...)`` written inside ``@pl.program``
-    (parsing reads the AST text — it never executes the attribute), and the
-    op round-trips through print→parse, so these stay style-A tests.
+    ``pl.tensor.as_layout`` is a thin DSL wrapper over the internal
+    ``tensor.as_layout`` IR op — a recognised attribute of the ``pl.tensor``
+    namespace — and the op round-trips through print→parse, so these stay
+    style-A (Before/Expected ``@pl.program``) tests.
 
     Layout encoding refresher (RFC §4.2): row-major ``[a, b]`` ND describes
     the same physical buffer as ``[b, a]`` DN-packed. The trailing-dim swap
