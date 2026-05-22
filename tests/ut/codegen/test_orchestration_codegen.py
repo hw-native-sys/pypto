@@ -231,9 +231,12 @@ class TestOrchestration:
         code = _generate_orch_code(InternalReadProgram)
 
         # The internal tensor read must dereference its buffer.addr, never `.data`.
-        assert "buffer.addr" in code
-        assert "reinterpret_cast<void*>(static_cast<uintptr_t>(" in code
+        # Match the full emitted expression so a recurrence of `name.data` (with
+        # or without trailing punctuation) cannot slip past a loose substring check.
+        assert "static_cast<int32_t*>(reinterpret_cast<void*>(static_cast<uintptr_t>(" in code
+        assert "buffer.addr))" in code
         assert ".data)" not in code
+        assert ".data[" not in code
 
     def test_config_file(self):
         """Test orchestration result contains kernel function metadata."""
