@@ -302,7 +302,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (it != param_name_to_orch_index_.end()) {
       return "orch_args.tensor(" + std::to_string(it->second) + ").data_as<void>()";
     }
-    return name + ".data";
+    // Internally-allocated tensors are bound as `const Tensor&` (no `.data` member);
+    // their base address lives in `buffer.addr`. Mirror the external `data_as<void>()`
+    // form so the surrounding `static_cast<T*>(...)` consumes a valid `void*`.
+    return "reinterpret_cast<void*>(static_cast<uintptr_t>(" + name + ".buffer.addr))";
   }
 
   [[nodiscard]] std::string GetTensorShapeDim(const std::string& name, int64_t axis) const override {

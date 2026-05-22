@@ -196,6 +196,45 @@ class TestOrchestration:
         assert "static_cast<float*>(orch_args.tensor(0).data_as<void>())" in code
         assert "host_t" not in code
 
+    def test_tensor_read_internal_tensor(self):
+        """Orch-level read of an internally-allocated tensor must use buffer.addr.
+
+        Regression for #1479: internal tensors are bound as ``const Tensor&``
+        (no ``.data`` member); their base address lives in ``buffer.addr``.
+        Emitting ``.data`` made the generated orchestration fail to compile.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class InternalReadProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_copy(
+                self,
+                src: pl.Tensor[[8, 1], pl.INT32],
+                output: pl.Out[pl.Tensor[[8, 1], pl.INT32]],
+            ) -> pl.Tensor[[8, 1], pl.INT32]:
+                t: pl.Tile[[8, 1], pl.INT32] = pl.load(src, [0, 0], [8, 1])
+                out: pl.Tensor[[8, 1], pl.INT32] = pl.store(t, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_internal_read(
+                self,
+                src_count: pl.Tensor[[8, 1], pl.INT32],
+            ) -> pl.Tensor[[8, 1], pl.INT32]:
+                cnt: pl.Tensor[[8, 1], pl.INT32] = pl.create_tensor([8, 1], dtype=pl.INT32)
+                cnt = self.kernel_copy(src_count, cnt)
+                n_rows: pl.Scalar[pl.INT32] = pl.tensor.read(cnt, [0, 0])  # noqa: F841
+                return cnt
+
+        code = _generate_orch_code(InternalReadProgram)
+
+        # The internal tensor read must dereference its buffer.addr, never `.data`.
+        assert "buffer.addr" in code
+        assert "reinterpret_cast<void*>(static_cast<uintptr_t>(" in code
+        assert ".data)" not in code
+
     def test_config_file(self):
         """Test orchestration result contains kernel function metadata."""
         backend.reset_for_testing()
