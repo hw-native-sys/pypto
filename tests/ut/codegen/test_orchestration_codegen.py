@@ -3923,5 +3923,187 @@ class TestTupleReturnNoDepAliasing:
         assert code.count("rt_submit_aiv_task") == 2, code
 
 
+class TestTupleReturnNameHintCollision:
+    """Tuple metadata must track tuple Vars by identity, not name_hint."""
+
+    def test_same_name_hint_tuple_calls_keep_distinct_elements(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        span = ir.Span.unknown()
+        tensor_type = ir.TensorType([16, 16], DataType.FP32)
+        tuple_type = ir.TupleType([tensor_type, tensor_type])
+
+        input_a = ir.Var("input_a", tensor_type, span)
+        input_b = ir.Var("input_b", tensor_type, span)
+        first_out = ir.Var("first_out", tensor_type, span)
+        second_out = ir.Var("second_out", tensor_type, span)
+        kernel_a_input = ir.Var("input_a", tensor_type, span)
+        kernel_a_first = ir.Var("first_out", tensor_type, span)
+        kernel_a_second = ir.Var("second_out", tensor_type, span)
+        kernel_b_input = ir.Var("input_b", tensor_type, span)
+        kernel_b_first = ir.Var("first_out", tensor_type, span)
+        kernel_b_second = ir.Var("second_out", tensor_type, span)
+
+        kernel_a_body = ir.SeqStmts([ir.ReturnStmt([kernel_a_first, kernel_a_second], span)], span)
+        kernel_a = ir.Function(
+            "kernel_a",
+            [
+                (kernel_a_input, ir.ParamDirection.In),
+                (kernel_a_first, ir.ParamDirection.Out),
+                (kernel_a_second, ir.ParamDirection.Out),
+            ],
+            [tensor_type, tensor_type],
+            kernel_a_body,
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        kernel_b_body = ir.SeqStmts([ir.ReturnStmt([kernel_b_first, kernel_b_second], span)], span)
+        kernel_b = ir.Function(
+            "kernel_b",
+            [
+                (kernel_b_input, ir.ParamDirection.In),
+                (kernel_b_first, ir.ParamDirection.Out),
+                (kernel_b_second, ir.ParamDirection.Out),
+            ],
+            [tensor_type, tensor_type],
+            kernel_b_body,
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        consume_a = ir.Var("consume_a", tensor_type, span)
+        consume_b = ir.Var("consume_b", tensor_type, span)
+        consume_c = ir.Var("consume_c", tensor_type, span)
+        consume_d = ir.Var("consume_d", tensor_type, span)
+        consume_out = ir.Var("consume_out", tensor_type, span)
+        consume_body = ir.SeqStmts([ir.ReturnStmt([consume_out], span)], span)
+        kernel_consume = ir.Function(
+            "kernel_consume",
+            [
+                (consume_a, ir.ParamDirection.In),
+                (consume_b, ir.ParamDirection.In),
+                (consume_c, ir.ParamDirection.In),
+                (consume_d, ir.ParamDirection.In),
+                (consume_out, ir.ParamDirection.Out),
+            ],
+            [tensor_type],
+            consume_body,
+            span,
+            ir.FunctionType.AIV,
+        )
+
+        tmp_first = ir.Var("ret__tmp_v0", tuple_type, span)
+        tmp_second = ir.Var("ret__tmp_v0", tuple_type, span)
+        first_a = ir.Var("first_a", tensor_type, span)
+        second_a = ir.Var("second_a", tensor_type, span)
+        first_b = ir.Var("first_b", tensor_type, span)
+        second_b = ir.Var("second_b", tensor_type, span)
+        consume_result = ir.Var("consume_result", tensor_type, span)
+
+        call_a = ir.Call(
+            ir.GlobalVar("kernel_a"),
+            [input_a, first_out, second_out],
+            {},
+            {
+                "arg_directions": [
+                    ir.ArgDirection.Input,
+                    ir.ArgDirection.OutputExisting,
+                    ir.ArgDirection.OutputExisting,
+                ]
+            },
+            tuple_type,
+            span,
+        )
+        call_b = ir.Call(
+            ir.GlobalVar("kernel_b"),
+            [input_b, first_out, second_out],
+            {},
+            {
+                "arg_directions": [
+                    ir.ArgDirection.Input,
+                    ir.ArgDirection.OutputExisting,
+                    ir.ArgDirection.OutputExisting,
+                ]
+            },
+            tuple_type,
+            span,
+        )
+        call_consume = ir.Call(
+            ir.GlobalVar("kernel_consume"),
+            [first_a, second_a, first_b, second_b, first_out],
+            {},
+            {
+                "arg_directions": [
+                    ir.ArgDirection.Input,
+                    ir.ArgDirection.Input,
+                    ir.ArgDirection.Input,
+                    ir.ArgDirection.Input,
+                    ir.ArgDirection.OutputExisting,
+                ]
+            },
+            tensor_type,
+            span,
+        )
+
+        orch_body = ir.SeqStmts(
+            [
+                ir.AssignStmt(tmp_first, call_a, span),
+                ir.AssignStmt(tmp_second, call_b, span),
+                ir.AssignStmt(first_a, ir.TupleGetItemExpr(tmp_first, 0, span), span),
+                ir.AssignStmt(second_a, ir.TupleGetItemExpr(tmp_first, 1, span), span),
+                ir.AssignStmt(first_b, ir.TupleGetItemExpr(tmp_second, 0, span), span),
+                ir.AssignStmt(second_b, ir.TupleGetItemExpr(tmp_second, 1, span), span),
+                ir.AssignStmt(consume_result, call_consume, span),
+                ir.ReturnStmt([consume_result], span),
+            ],
+            span,
+        )
+        orch = ir.Function(
+            "orch",
+            [
+                (input_a, ir.ParamDirection.In),
+                (input_b, ir.ParamDirection.In),
+                (first_out, ir.ParamDirection.Out),
+                (second_out, ir.ParamDirection.Out),
+            ],
+            [tensor_type],
+            orch_body,
+            span,
+            ir.FunctionType.Orchestration,
+        )
+        program = ir.Program(
+            [kernel_a, kernel_b, kernel_consume, orch],
+            "TupleNameHintCollisionProgram",
+            span,
+        )
+
+        code = codegen.generate_orchestration(program, orch).code
+
+        assert "const Tensor& first_a = ext_first_out;" in code, code
+        assert "const Tensor& second_a = ext_second_out;" in code, code
+        assert "const Tensor& first_b = ext_first_out;" in code, code
+        assert "const Tensor& second_b = ext_second_out;" in code, code
+
+        task_0 = code.index("// Task 0: kernel_a")
+        task_1 = code.index("// Task 1: kernel_b")
+        task_2 = code.index("// Task 2: kernel_consume")
+        # With name_hint-keyed tuple metadata, first_a/second_a are attached
+        # to the second call because tmp_first and tmp_second share name_hint.
+        assert code.index("const Tensor& first_a", task_0) < task_1, code
+        assert task_1 < code.index("const Tensor& first_b", task_1) < task_2, code
+
+        declared_names = re.findall(
+            r"^\s*(?:const\s+Tensor&|Tensor)\s+([A-Za-z_]\w*)\s*=",
+            code,
+            flags=re.MULTILINE,
+        )
+        duplicate_declarations = {name for name in declared_names if declared_names.count(name) > 1}
+        assert not duplicate_declarations, (
+            f"generated C++ redeclared tensor names {sorted(duplicate_declarations)}:\n{code}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

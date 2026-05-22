@@ -265,9 +265,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
   void SetCallToTupleKey(const std::map<const Call*, std::string>& mapping) { call_to_tuple_key_ = mapping; }
 
-  void SetTupleVarToKey(std::map<std::string, std::string> mapping) {
-    tuple_var_to_key_ = std::move(mapping);
-  }
+  void SetTupleVarToKey(std::map<const Var*, std::string> mapping) { tuple_var_to_key_ = std::move(mapping); }
 
   void SetInitialIndent(int indent) { indent_ = indent; }
 
@@ -2218,7 +2216,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void PropagateMakeTupleAssign(const AssignStmtPtr& assign, const MakeTuplePtr& make_tuple) {
-    auto key_it = tuple_var_to_key_.find(assign->var_->name_hint_);
+    auto key_it = tuple_var_to_key_.find(assign->var_.get());
     if (key_it == tuple_var_to_key_.end()) {
       return;
     }
@@ -2430,7 +2428,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::vector<std::string> current_loop_slot_exprs_;
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
   std::map<const Call*, std::string> call_to_tuple_key_;
-  std::map<std::string, std::string> tuple_var_to_key_;
+  std::map<const Var*, std::string> tuple_var_to_key_;
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
   std::unordered_set<const Var*> effective_uses_;
