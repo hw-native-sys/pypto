@@ -70,6 +70,31 @@ def _generate_orch_result(program) -> "codegen.OrchestrationResult":
     raise ValueError("No orchestration function found in program")
 
 
+def _attach_auto_dep_from_producer_to_consumer(program, producer_name: str, consumer_name: str):
+    """Mark ``consumer_name`` calls as auto-dependent on the preceding ``producer_name`` result."""
+
+    class _AttachAutoDep(ir.IRMutator):
+        def __init__(self):
+            super().__init__()
+            self.producer_var = None
+
+        def visit_assign_stmt(self, op: ir.AssignStmt) -> ir.Stmt:
+            if isinstance(op.value, ir.Call) and op.value.op.name == producer_name:
+                self.producer_var = op.var
+            return super().visit_assign_stmt(op)
+
+        def visit_call(self, op: ir.Call) -> ir.Expr:
+            expr = super().visit_call(op)
+            call = expr if isinstance(expr, ir.Call) else op
+            if call.op.name != consumer_name or self.producer_var is None:
+                return expr
+            attrs = dict(call.attrs)
+            attrs["auto_dep_producer_vars"] = [self.producer_var]
+            return ir.Call(call.op, list(call.args), dict(call.kwargs), attrs, call.type, call.span)
+
+    return _AttachAutoDep().visit_program(program)
+
+
 class TestOrchestration:
     """Test orchestration codegen format."""
 
@@ -2352,21 +2377,62 @@ class TestTensorReadWriteOffsetCodegen:
 
         @pl.program
         class WindowedGroupWriteParentReadProgram:
-            @pl.function(type=pl.FunctionType.Opaque)
+            @pl.function(type=pl.FunctionType.AIC)
+            def cube_produce(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                score: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                tile: pl.Tile[[ROWS, TILE], pl.FP32] = pl.tile.load(x, [0, col], [ROWS, TILE], [ROWS, TILE])
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.tile.store(tile, [0, col], score)
+                return ret
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def vector_peer(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                col: pl.Scalar[pl.INDEX],
+            ):
+                _tile: pl.Tile[[ROWS, TILE], pl.FP32] = pl.tile.load(x, [0, col], [ROWS, TILE], [ROWS, TILE])
+
+            @pl.function(type=pl.FunctionType.Group)
+            def group_produce(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                score: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                ret = self.cube_produce(x, score, col)
+                self.vector_peer(x, col)
+                return ret
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                score: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                tile: pl.Tile[[1, COLS], pl.FP32] = pl.tile.load(score, [row, 0], [1, COLS], [1, COLS])
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.tile.store(tile, [row, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
             def main(
                 self,
                 x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                score: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
                 out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
             ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
-                with pl.auto_incore(split=pl.SplitMode.UP_DOWN):
-                    tmp = pl.create_tensor([ROWS, COLS], dtype=pl.FP32)
-                    for c in pl.parallel(0, COLS, TILE):
-                        tile = pl.slice(x, [ROWS, TILE], [0, c])
-                        tmp = pl.assemble(tmp, tile, [0, c])
-                    for r in pl.range(ROWS):
-                        row = pl.slice(tmp, [1, COLS], [r, 0])
-                        out = pl.assemble(out, row, [r, 0])
-                return out
+                score_flat: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.reshape(score, [ROWS, COLS])
+                for c, (score_iter,) in pl.range(0, COLS, TILE, init_values=(score_flat,)):
+                    score_next: pl.Tensor[[ROWS, COLS], pl.FP32] = self.group_produce(x, score_iter, c)
+                    score_rv = pl.yield_(score_next)
+                for r, (out_iter,) in pl.range(ROWS, init_values=(out,)):
+                    out_next: pl.Tensor[[ROWS, COLS], pl.FP32] = self.consume(score_rv, out_iter, r)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
 
         from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
 
@@ -2377,10 +2443,96 @@ class TestTensorReadWriteOffsetCodegen:
             transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
                 WindowedGroupWriteParentReadProgram
             )
+            transformed = _attach_auto_dep_from_producer_to_consumer(
+                transformed, "group_produce", "consume__windowed"
+            )
             code = _generate_orch_code(transformed)
 
         assert "task_0_outs.task_id()" in code, code
         assert re.search(r"TaskOutputTensors task_0_outs = rt_submit(?:_aiv)?_task\(", code), code
+
+    def test_dynamic_loop_without_auto_dep_capture_does_not_require_static_trip_count(self):
+        """Dynamic loops are allowed when they do not contain auto-dep producers."""
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        ROWS, COLS, TILE = 16, 64, 16
+
+        @pl.program
+        class DynamicLoopWithSiblingAutoDepProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def produce(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                score: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                col: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                tile: pl.Tile[[ROWS, TILE], pl.FP32] = pl.tile.load(x, [0, col], [ROWS, TILE], [ROWS, TILE])
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.tile.store(tile, [0, col], score)
+                return ret
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def ping(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                row: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1, COLS], pl.FP32]:
+                tile: pl.Tile[[1, COLS], pl.FP32] = pl.tile.load(x, [row, 0], [1, COLS], [1, COLS])
+                scratch = pl.create_tensor([1, COLS], dtype=pl.FP32)
+                ret: pl.Tensor[[1, COLS], pl.FP32] = pl.tile.store(tile, [0, 0], scratch)
+                return ret
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                score: pl.Tensor[[ROWS, COLS], pl.FP32],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                row: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                tile: pl.Tile[[1, COLS], pl.FP32] = pl.tile.load(score, [row, 0], [1, COLS], [1, COLS])
+                ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.tile.store(tile, [row, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[ROWS, COLS], pl.FP32],
+                score: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+                config: pl.Tensor[[1], pl.INT64],
+            ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
+                n_blocks: pl.Scalar[pl.INT64] = pl.tensor.read(config, [0])
+                score_flat: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.reshape(score, [ROWS, COLS])
+                for c, (score_iter,) in pl.range(0, COLS, TILE, init_values=(score_flat,)):
+                    score_next: pl.Tensor[[ROWS, COLS], pl.FP32] = self.produce(x, score_iter, c)
+                    score_rv = pl.yield_(score_next)
+                for row in pl.range(n_blocks):
+                    _scratch_next = self.ping(x, row)
+                for row, (out_iter,) in pl.range(ROWS, init_values=(out,)):
+                    out_next: pl.Tensor[[ROWS, COLS], pl.FP32] = self.consume(score_rv, out_iter, row)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+        from pypto.pypto_core import passes as _core_passes  # noqa: PLC0415
+
+        instruments: list[_core_passes.PassInstrument] = [
+            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
+        ]
+        with _core_passes.PassContext(instruments):
+            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+                DynamicLoopWithSiblingAutoDepProgram
+            )
+            transformed = _attach_auto_dep_from_producer_to_consumer(
+                transformed, "produce", "consume__windowed"
+            )
+            code = _generate_orch_code(transformed)
+
+        assert "for (int64_t row = 0; row < n_blocks; row += 1)" in code, code
+        assert "task_0_outs.task_id()" in code, code
+        assert re.search(
+            r"params_t\d+\.set_dependencies\(params_t\d+_deps, params_t\d+_deps_count\);", code
+        ), code
 
     def test_group_submit_uses_both_aiv_slots_for_split_vector_kernel(self):
         """Cross-core split inferred from pipe ops should reuse one AIV kernel across both slots."""

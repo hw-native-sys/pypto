@@ -818,12 +818,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
         std::vector<int64_t> loop_extents_;
       };
 
-      auto trip_count = EvalConstTripCount(for_stmt);
-      INTERNAL_CHECK_SPAN(trip_count > 0, for_stmt->span_)
-          << "Internal error: auto dependency capture across a loop requires a statically-known trip count";
-      CaptureCollector collector(auto_dep_capture_vars_, trip_count);
+      CaptureCollector collector(auto_dep_capture_vars_, 0);
       collector.VisitStmt(for_stmt->body_);
       auto_dep_capture_in_loop = std::move(collector.vars);
+      if (!auto_dep_capture_in_loop.empty()) {
+        auto trip_count = EvalConstTripCount(for_stmt);
+        INTERNAL_CHECK_SPAN(trip_count > 0, for_stmt->span_)
+            << "Internal error: auto dependency capture across a loop requires a statically-known trip count";
+        for (auto& entry : auto_dep_capture_in_loop) {
+          entry.second.front() = trip_count;
+        }
+      }
     }
 
     std::vector<std::pair<const Var*, std::string>> auto_dep_arrays_this_loop;
