@@ -139,6 +139,15 @@ TypePtr DeduceTileCastType(const std::vector<ExprPtr>& args,
   }
   CHECK(found_target_type) << "tile.cast requires 'target_type' kwarg";
 
+  // Reject same-dtype cast: the hardware pto.tcvt instruction is for
+  // cross-dtype conversion, and a same-dtype invocation can corrupt values
+  // rather than acting as an identity copy. Detecting this at construction
+  // time keeps malformed casts out of every downstream pass and codegen.
+  CHECK(tile_type->dtype_ != target_dtype)
+      << op_name << ": target_type " << target_dtype.ToString()
+      << " equals input dtype; same-dtype cast is not a valid operation. "
+      << "Remove the cast or use a different target_type.";
+
   // Cast preserves shape and the source tile's valid_shape; only dtype changes.
   TileView tile_view;
   tile_view.valid_shape = GetValidShape(tile_type);

@@ -59,16 +59,19 @@ def post_rmsnorm(
     post_rms_weight: pl.Tensor,
     post_norm_tile: pl.Out[pl.Tensor],
 ):
-    """Post-attention RMSNorm. Different chunk size from input_rmsnorm."""
-    # ``resid`` is the BF16 residual stream — promote each chunk to FP32 before
-    # the squared-sum + normalize passes (mirrors ``input_rmsnorm``) so the
-    # accumulation doesn't lose precision or overflow.
+    """Post-attention RMSNorm. Different chunk size from input_rmsnorm.
+
+    ``resid`` here is the FP32 residual stream produced by
+    ``out_projection_residual`` — the squared-sum + normalize passes consume
+    it directly without any dtype conversion. ``post_norm_tile`` is BF16, so
+    the final ``normed`` chunk is cast to BF16 at the assemble site.
+    """
     with pl.at(level=pl.Level.CORE_GROUP, name_hint="post_rmsnorm"):
         sq_sum = pl.full([1, BATCH], dtype=pl.FP32, value=0.0)
 
         for kb in pl.pipeline(HIDDEN // K_CHUNK, stage=2):
             k0 = kb * K_CHUNK
-            resid_chunk = pl.cast(resid[:, k0 : k0 + K_CHUNK], target_type=pl.FP32)
+            resid_chunk = resid[:, k0 : k0 + K_CHUNK]
             sq_sum = pl.add(
                 sq_sum,
                 pl.reshape(pl.row_sum(pl.mul(resid_chunk, resid_chunk)), [1, BATCH]),
@@ -79,7 +82,7 @@ def post_rmsnorm(
 
         for kb in pl.pipeline(HIDDEN // K_CHUNK, stage=2):
             k0 = kb * K_CHUNK
-            resid_chunk = pl.cast(resid[:, k0 : k0 + K_CHUNK], target_type=pl.FP32)
+            resid_chunk = resid[:, k0 : k0 + K_CHUNK]
             gamma = post_rms_weight[:, k0 : k0 + K_CHUNK]
             normed = pl.col_expand_mul(pl.row_expand_mul(resid_chunk, inv_rms_col), gamma)
             post_norm_tile = pl.assemble(post_norm_tile, pl.cast(normed, target_type=pl.BF16), [0, k0])

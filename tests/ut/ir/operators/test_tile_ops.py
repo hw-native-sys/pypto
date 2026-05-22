@@ -463,6 +463,23 @@ class TestTileUnaryOps:
         valid_shape = result_type.tile_view.valid_shape
         assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
 
+    def test_tile_cast_rejects_same_dtype(self):
+        """tile.cast must reject same-dtype invocation at construction time.
+
+        Hardware pto.tcvt is for cross-dtype conversion; a same-dtype cast (e.g.
+        FP32 -> FP32) can corrupt values rather than acting as an identity copy.
+        DeduceTileCastType raises so malformed casts never reach any pass or codegen.
+        """
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        src_var = ir.Var("src", src_type, span)
+
+        with pytest.raises(ValueError, match="same-dtype cast is not a valid operation"):
+            tile.cast(src_var, DataType.FP32)
+
     def test_tile_rsqrt_preserves_input_valid_shape(self):
         """tile.rsqrt must propagate the source TileView's valid_shape (issue #1370)."""
         sliced = self._make_sliced_tile_with_valid_shape()

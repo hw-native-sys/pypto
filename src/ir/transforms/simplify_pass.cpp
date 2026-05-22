@@ -19,14 +19,11 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "pypto/core/any_cast.h"
-#include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/arith/analyzer.h"
 #include "pypto/ir/arith/ir_mutator_with_analyzer.h"
@@ -154,14 +151,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
     auto call = std::dynamic_pointer_cast<const Call>(base);
-    if (call && call->op_) {
-      if (call->op_->name_ == "tensor.as_layout") {
-        base = SimplifyAsLayout(call);
-      } else if (call->op_->name_ == "tile.cast") {
-        base = SimplifyTileCast(call);
-      } else if (call->op_->name_ == "tensor.cast") {
-        base = SimplifyTensorCast(call);
-      }
+    if (call && call->op_ && call->op_->name_ == "tensor.as_layout") {
+      base = SimplifyAsLayout(call);
     }
     auto new_type = SimplifyType(base->GetType());
     if (new_type.get() == base->GetType().get()) return base;
@@ -215,32 +206,6 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
         BindScalar(new_var, new_value);
       } else {
         BindScalarBound(new_var, new_value);
-      }
-    }
-
-    // Shaped alias-fold: when a Call-based simplification (e.g. SimplifyTileCast
-    // or SimplifyTensorCast) turned the RHS into the source Var, record the
-    // substitution via var_remap_ so downstream uses resolve directly to the
-    // source, and drop this now-trivial assign by returning an empty SeqStmts.
-    // The surrounding SeqStmts::Flatten skips empty inner nodes, so the alias
-    // leaves no trace.
-    //
-    // Skip when either side already has a bound MemRef (i.e. InitMemRef has
-    // run): post-allocation, the assign may represent a real physical copy and
-    // its dst memory may have been reused — silently aliasing the dst to the
-    // src would then cause downstream reads to land on memory belonging to
-    // another tile.
-    auto lhs_shaped = As<ShapedType>(new_type);
-    if (lhs_shaped && !lhs_shaped->memref_.has_value() &&
-        multi_assigned_.find(op->var_.get()) == multi_assigned_.end()) {
-      if (auto rhs_var = std::dynamic_pointer_cast<const Var>(new_value)) {
-        if (rhs_var.get() != new_var.get()) {
-          auto rhs_shaped = As<ShapedType>(rhs_var->GetType());
-          if (rhs_shaped && !rhs_shaped->memref_.has_value()) {
-            var_remap_[op->var_.get()] = rhs_var;
-            return std::make_shared<SeqStmts>(std::vector<StmtPtr>{}, op->span_);
-          }
-        }
       }
     }
 
@@ -565,59 +530,6 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   }
 
  private:
-  /// Fold `tile.cast(x, target_type=T, mode=...)` to `x` when `T == dtype(x)`.
-  /// Hardware `pto.tcvt` is designed for cross-dtype conversion; on same-dtype
-  /// (e.g. FP32→FP32) the instruction can corrupt values rather than acting as
-  /// an identity copy, so eliminating the call entirely is both an optimization
-  /// and a correctness fix.
-  ///
-  /// For tile-frontend programs the early post-SSA Simplify catches the call
-  /// before any tile-pto pass sees it. Tensor-frontend programs are handled by
-  /// SimplifyTensorCast upstream, so by the time the call reaches tile lowering
-  /// it has already been removed.
-  ExprPtr SimplifyTileCast(const std::shared_ptr<const Call>& call) {
-    return SimplifySameDtypeCast<TileType>(call, "tile.cast");
-  }
-
-  /// Fold `tensor.cast(x, target_type=T, mode=...)` to `x` when `T == dtype(x)`.
-  /// Mirrors SimplifyTileCast at the tensor level so the no-op cast never gets
-  /// lowered to a `tile.cast` by ConvertTensorToTileOps — the early post-SSA
-  /// Simplify runs before tile conversion, so eliminating here means
-  /// MemoryReuse and downstream allocation never observe the spurious cast.
-  ExprPtr SimplifyTensorCast(const std::shared_ptr<const Call>& call) {
-    return SimplifySameDtypeCast<TensorType>(call, "tensor.cast");
-  }
-
-  /// Shared body for SimplifyTileCast / SimplifyTensorCast. `OpName` is used
-  /// only for diagnostic messages in AnyCast failures.
-  template <typename ShapedT>
-  ExprPtr SimplifySameDtypeCast(const std::shared_ptr<const Call>& call, const char* op_name) {
-    if (call->args_.size() != 1) return call;
-    auto src = call->args_[0];
-    auto src_type = As<ShapedT>(src->GetType());
-    if (!src_type) return call;
-
-    // cast accepts target_type as either DataType or int — mirror the dual-form
-    // lookup that DeduceTileCastType / DeduceTensorCastType use.
-    std::string dtype_arg = std::string(op_name) + " target_type";
-    bool found = false;
-    DataType target_dtype{};
-    for (const auto& [key, value] : call->kwargs_) {
-      if (key != "target_type") continue;
-      if (value.type() == typeid(DataType)) {
-        target_dtype = AnyCast<DataType>(value, dtype_arg.c_str());
-        found = true;
-      } else if (value.type() == typeid(int)) {
-        target_dtype = static_cast<DataType>(AnyCast<int>(value, dtype_arg.c_str()));
-        found = true;
-      }
-      break;
-    }
-    if (!found) return call;
-    if (src_type->dtype_ != target_dtype) return call;
-    return src;
-  }
-
   /// Identity elimination per RFC #1300 §3.3:
   /// ``as_layout(x, layout=x.layout)`` → ``x``.
   ///

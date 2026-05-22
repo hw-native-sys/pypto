@@ -589,6 +589,23 @@ def test_tensor_cast():
     assert len(result_type.shape) == 2
 
 
+def test_tensor_cast_rejects_same_dtype():
+    """tensor.cast must reject same-dtype invocation at construction time.
+
+    Hardware pto.tcvt is for cross-dtype conversion; a same-dtype cast (e.g.
+    FP32 -> FP32) can corrupt values rather than acting as an identity copy.
+    DeduceTensorCastType raises so malformed casts never reach any pass or codegen.
+    """
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    with pytest.raises(ValueError, match="same-dtype cast is not a valid operation"):
+        ir.op.tensor.cast(tensor_var, DataType.FP32)
+
+
 def test_tensor_assemble():
     """Test tensor.assemble operation."""
     span = ir.Span.unknown()

@@ -146,7 +146,10 @@ def test_jit_spmd_sibling_pipeline_loops_reuse_names():
         return out
 
     post = entry.compile_for_test(
-        torch.empty([_BATCH, _HIDDEN], dtype=torch.float32).normal_(),
+        # Input is BF16 so the `pl.cast(..., FP32)` in `rmsnorm_like` is a
+        # real cross-dtype promotion. Same-dtype casts are rejected at IR
+        # construction time, so this fixture must not feed FP32 in.
+        torch.empty([_BATCH, _HIDDEN], dtype=torch.bfloat16).normal_(),
         torch.empty([_BATCH, _HIDDEN], dtype=torch.bfloat16),
     )
     func_types = {f.func_type for f in post.functions.values()}

@@ -173,6 +173,15 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
   }
   CHECK(found_target_type) << "tensor.cast requires 'target_type' kwarg";
 
+  // Reject same-dtype cast: the hardware pto.tcvt instruction is for
+  // cross-dtype conversion, and a same-dtype invocation can corrupt values
+  // rather than acting as an identity copy. Detecting this at construction
+  // time keeps malformed casts out of every downstream pass and codegen.
+  CHECK(tensor_type->dtype_ != target_dtype)
+      << "tensor.cast: target_type " << target_dtype.ToString()
+      << " equals input dtype; same-dtype cast is not a valid operation. "
+      << "Remove the cast or use a different target_type.";
+
   // mode kwarg is optional, not used in type deduction
 
   // Cast preserves shape but changes dtype
