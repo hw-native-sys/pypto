@@ -4209,6 +4209,65 @@ class TestManualScopeCodegen:
         assert ".is_valid())" in code, code
         assert ".set_dependencies(" in code, code
 
+    def test_manual_scope_pl_at_iter_arg_taskid_carry(self):
+        """A ``pl.at(..., deps=[prev_tid]) as prev_tid:`` producer TaskId
+        threaded through a ``pl.range`` iter_arg seeds the next iteration's
+        explicit deps.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        N_BRANCHES, N_STEPS = 4, 4
+        TILE_M, BIG_N = 32, 32
+        BIG_M = N_BRANCHES * N_STEPS * TILE_M
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[BIG_M, BIG_N], pl.FP32],
+                out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
+            ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
+                with pl.manual_scope():
+                    for branch in pl.parallel(N_BRANCHES):
+                        prev_tid = None
+                        for step in pl.range(N_STEPS):
+                            row: pl.Scalar[pl.INDEX] = (step * N_BRANCHES + branch) * TILE_M
+                            with pl.at(
+                                level=pl.Level.CORE_GROUP,
+                                name_hint="kernel_stripe",
+                                deps=[prev_tid],
+                            ) as prev_tid:
+                                t: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.load(
+                                    data, [row, 0], [TILE_M, BIG_N]
+                                )
+                                r: pl.Tile[[TILE_M, BIG_N], pl.FP32] = pl.add(t, t)
+                                out = pl.store(r, [row, 0], out)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "PTO2TaskId::invalid()" in code, code
+        assert ".is_valid())" in code, code
+        assert ".set_dependencies(" in code, code
+        prev_tid_bindings = re.findall(
+            r"PTO2TaskId (\w*prev_tid\w*) = task_\d+_outs\.task_id\(\);",
+            code,
+        )
+        assert prev_tid_bindings, code
+        assert any(
+            re.search(
+                rf"if \({re.escape(name)}\.is_valid\(\)\) "
+                rf"params_t\d+_deps\[params_t\d+_deps_count\+\+\] = {re.escape(name)};",
+                code,
+            )
+            for name in prev_tid_bindings
+        ), code
+
+
 class TestTupleReturnNoDepAliasing:
     """``GenerateTupleReturnAliases`` must classify output slots by the
     callee's ``ParamDirection`` — same convention as the submit path. If it
