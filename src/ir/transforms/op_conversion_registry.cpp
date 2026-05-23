@@ -109,6 +109,7 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
   RegisterSimple("tensor.abs", "tile.abs");
   RegisterSimple("tensor.recip", "tile.recip");
   RegisterSimple("tensor.exp", "tile.exp");
+  RegisterSimple("tensor.log", "tile.log");
   RegisterSimple("tensor.sin", "tile.sin");
   RegisterSimple("tensor.cos", "tile.cos");
   RegisterSimple("tensor.sqrt", "tile.sqrt");
@@ -831,6 +832,10 @@ void OpConversionRegistry::RegisterReductionOps() {
   RegisterCustom("tensor.row_max", MakeReductionConv("tile.row_max"));
   RegisterCustom("tensor.row_sum", MakeReductionConv("tile.row_sum"));
   RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
+
+  // tile.col_sum's 1-arg form is the sequential reduction path — no tmp_tile workspace
+  // needed, so a plain 1:1 name rewrite is enough.
+  RegisterSimple("tensor.col_sum", "tile.col_sum");
 }
 
 // ============================================================================

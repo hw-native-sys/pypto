@@ -877,6 +877,7 @@ def _register_ops() -> None:
         # unary
         m[f"{prefix}.neg"] = _torch_fn("neg")
         m[f"{prefix}.exp"] = _torch_fn("exp")
+        m[f"{prefix}.log"] = _torch_fn("log")
         m[f"{prefix}.sqrt"] = _torch_fn("sqrt")
         # rsqrt in tile form may carry an optional tmp_tile arg for the high-precision
         # path; torch.rsqrt takes only the input, so ignore any extra operands.
@@ -891,6 +892,9 @@ def _register_ops() -> None:
         m[f"{prefix}.row_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-1, keepdim=True)"
         m[f"{prefix}.row_max"] = lambda a, _kw: f"{a[0]}.amax(dim=-1, keepdim=True)"
         m[f"{prefix}.row_min"] = lambda a, _kw: f"{a[0]}.amin(dim=-1, keepdim=True)"
+
+        # col reductions — tile.col_sum may carry an optional tmp_tile arg; ignore it.
+        m[f"{prefix}.col_sum"] = lambda a, _kw: f"{a[0]}.sum(dim=-2, keepdim=True)"
 
         # reshape / transpose / slice / concat
         m[f"{prefix}.reshape"] = lambda a, _kw: f"{a[0]}.reshape({a[1]})"
@@ -942,8 +946,7 @@ def _register_ops() -> None:
     m["tile.write"] = lambda a, _kw: f"_write_and_return({a[0]}, {a[1]}, {a[2]})"
     m["tile.get_block_idx"] = lambda _a, _kw: "0"
 
-    # tile log / relu
-    m["tile.log"] = _torch_fn("log")
+    # Tile-only ops not covered by the shared tensor/tile loop above.
     m["tile.relu"] = _torch_fn("relu")
     m["tile.rem"] = _binop("%")
 

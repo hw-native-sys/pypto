@@ -26,6 +26,7 @@ __all__ = [
     "maximum",
     "minimum",
     "exp",
+    "log",
     "neg",
     "abs",
     "recip",
@@ -265,6 +266,15 @@ def exp(input: T) -> T:
     if isinstance(input, Tile):
         return _tile.exp(input)
     raise TypeError(f"pl.exp: expected Tensor or Tile, got {type(input).__name__}")
+
+
+def log(input: T) -> T:
+    """Element-wise natural logarithm, dispatched by input type."""
+    if isinstance(input, Tensor):
+        return _tensor.log(input)
+    if isinstance(input, Tile):
+        return _tile.log(input)
+    raise TypeError(f"pl.log: expected Tensor or Tile, got {type(input).__name__}")
 
 
 def neg(input: T) -> T:
@@ -616,8 +626,11 @@ def col_sum(input: T, tmp_tile: Tile | None = None) -> T:
     """Column-wise sum reduction, dispatched by input type.
 
     For Tile inputs, passing ``tmp_tile`` activates the binary-tree reduction
-    path; omitting it uses the sequential path.
+    path; omitting it uses the sequential path. For Tensor inputs, ``tmp_tile``
+    is ignored — the tensor-to-tile conversion lowers to the sequential path.
     """
+    if isinstance(input, Tensor):
+        return _tensor.col_sum(input)
     if isinstance(input, Tile):
         return _tile.col_sum(input, tmp_tile)
     _raise_type_dispatch_error("col_sum", input)

@@ -255,6 +255,28 @@ def test_tensor_row_sum():
     assert isinstance(result_type, ir.TensorType)
 
 
+def test_tensor_col_sum():
+    """tensor.col_sum reduces axis=-2 (the M dim of [..., M, N]) with keepdim=True."""
+    span = ir.Span.unknown()
+
+    # Create a tensor [64, 128]
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.col_sum(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_sum"
+
+    # Output shape should be [1, 128] — the second-to-last dim collapses to 1.
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
 def test_tensor_exp():
     """Test tensor.exp operation."""
     span = ir.Span.unknown()
@@ -276,6 +298,41 @@ def test_tensor_exp():
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP16
     assert len(result_type.shape) == 2
+
+
+def test_tensor_log():
+    """Test tensor.log operation preserves float dtype and shape."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.log(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.log"
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_log_int_promotes_to_fp32():
+    """tensor.log on integer input promotes the result dtype to FP32."""
+    span = ir.Span.unknown()
+
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.INT32)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.log(tensor_var)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
 
 
 # =============================================================================

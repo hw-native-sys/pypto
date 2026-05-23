@@ -45,6 +45,7 @@ __all__ = [
     "row_max",
     "row_sum",
     "row_min",
+    "col_sum",
     "row_expand",
     "row_expand_mul",
     "row_expand_div",
@@ -57,6 +58,7 @@ __all__ = [
     "expands",
     "expand_clone",
     "exp",
+    "log",
     "sin",
     "cos",
     "neg",
@@ -654,6 +656,22 @@ def row_min(input: Tensor) -> Tensor:
     return Tensor(expr=call_expr)
 
 
+def col_sum(input: Tensor) -> Tensor:
+    """Column-wise sum reduction (reduces along axis=-2, keeps dim).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the col_sum operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.col_sum(input_expr)
+    return Tensor(expr=call_expr)
+
+
 def row_expand(target: Tensor, row_vec: Tensor) -> Tensor:
     """Row-wise expansion: expand row_vec [M, 1] to target shape [M, N].
 
@@ -841,6 +859,20 @@ def exp(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.exp(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def log(input: Tensor) -> Tensor:
+    """Element-wise natural logarithm operation.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the log operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.log(input_expr)
     return Tensor(expr=call_expr)
 
 
