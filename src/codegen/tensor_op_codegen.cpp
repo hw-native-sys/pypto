@@ -141,7 +141,7 @@ REGISTER_ORCHESTRATION_OP(tensor_read, ("tensor.read")) {
     oss << "uint32_t " << indices_var << "[" << ndims << "] = {";
     for (size_t i = 0; i < ndims; ++i) {
       if (i > 0) oss << ", ";
-      oss << "static_cast<uint32_t>(" << codegen.GenerateExprString(indices[i]) << ")";
+      oss << EmitAsUint32(indices[i], codegen);
     }
     oss << "};\n";
     oss << cpp_type << " " << result_var << " = get_tensor_data<" << cpp_type << ">(" << tensor_ref << ", "
@@ -190,13 +190,13 @@ REGISTER_ORCHESTRATION_OP(tensor_write, ("tensor.write")) {
     // scope — multiple writes to the same tensor in the same outer scope
     // (or across loop iterations) won't collide on the array name.
     oss << "{\n";
-    oss << "    uint32_t indices_" << input_name << "[" << ndims << "] = {";
+    oss << "  uint32_t indices_" << input_name << "[" << ndims << "] = {";
     for (size_t i = 0; i < ndims; ++i) {
       if (i > 0) oss << ", ";
-      oss << "static_cast<uint32_t>(" << codegen.GenerateExprString(indices[i]) << ")";
+      oss << EmitAsUint32(indices[i], codegen);
     }
     oss << "};\n";
-    oss << "    set_tensor_data<" << cpp_type << ">(" << tensor_ref << ", " << ndims << ", indices_"
+    oss << "  set_tensor_data<" << cpp_type << ">(" << tensor_ref << ", " << ndims << ", indices_"
         << input_name << ", " << value_expr << ");\n";
     oss << "}";
   }

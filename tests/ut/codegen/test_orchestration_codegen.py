@@ -195,7 +195,8 @@ class TestOrchestration:
         # tensor.read emits a typed get_tensor_data<T>() call (the runtime
         # spin-waits on TensorMap producers before reading), and packs the
         # multi-dim indices into a uint32_t indices_<var>[N] = {...} array.
-        assert "uint32_t indices_val[2] = {static_cast<uint32_t>(1), static_cast<uint32_t>(3)};" in code
+        # ConstInt indices are emitted bare via EmitAsUint32 (no redundant cast).
+        assert "uint32_t indices_val[2] = {1, 3};" in code
         assert "float val = get_tensor_data<float>(ext_t, 2, indices_val);" in code
         # The old raw-deref path must not return.
         assert "data_as<void>" not in code
@@ -957,7 +958,7 @@ class TestOrchestration:
         # tensor.read now goes through get_tensor_data<T>() (producer-sync
         # via TensorMap) instead of a raw orch_args.tensor().data_as<void>()
         # deref. See #1487.
-        assert "uint32_t indices_n_blocks[1] = {static_cast<uint32_t>(0)};" in code
+        assert "uint32_t indices_n_blocks[1] = {0};" in code
         assert "int64_t n_blocks = get_tensor_data<int64_t>(ext_config, 1, indices_n_blocks);" in code
 
         # kernel_add task submitted inside loop
@@ -1936,7 +1937,7 @@ class TestTensorReadWriteOffsetCodegen:
                 return t
 
         code = _generate_orch_code(Prog)
-        assert "uint32_t indices_val[1] = {static_cast<uint32_t>(3)};" in code
+        assert "uint32_t indices_val[1] = {3};" in code
         assert "float val = get_tensor_data<float>(ext_t, 1, indices_val);" in code
         assert "data_as<void>" not in code
         assert "buffer.addr" not in code
@@ -1956,7 +1957,7 @@ class TestTensorReadWriteOffsetCodegen:
         code = _generate_orch_code(Prog)
         # Multi-dim indices are passed as a uint32_t[N] array — the runtime
         # computes the flat offset itself, so no `1 * 8 + 3` arithmetic appears.
-        assert "uint32_t indices_val[2] = {static_cast<uint32_t>(1), static_cast<uint32_t>(3)};" in code
+        assert "uint32_t indices_val[2] = {1, 3};" in code
         assert "float val = get_tensor_data<float>(ext_t, 2, indices_val);" in code
         assert "data_as<void>" not in code
 
@@ -1973,10 +1974,7 @@ class TestTensorReadWriteOffsetCodegen:
                 return t
 
         code = _generate_orch_code(Prog)
-        assert (
-            "uint32_t indices_val[3] = {static_cast<uint32_t>(1), static_cast<uint32_t>(2), "
-            "static_cast<uint32_t>(3)};" in code
-        )
+        assert "uint32_t indices_val[3] = {1, 2, 3};" in code
         assert "float val = get_tensor_data<float>(ext_t, 3, indices_val);" in code
         assert "data_as<void>" not in code
 
@@ -2025,7 +2023,7 @@ class TestTensorReadWriteOffsetCodegen:
         # set_tensor_data<T> API so the runtime can spin-wait on producers /
         # tracked INOUT consumers before writing.
         assert "float val = get_tensor_data<float>(ext_t, 2, indices_val);" in code
-        assert "uint32_t indices_t[2] = {static_cast<uint32_t>(1), static_cast<uint32_t>(3)};" in code
+        assert "uint32_t indices_t[2] = {1, 3};" in code
         assert "set_tensor_data<float>(ext_t, 2, indices_t, val);" in code
         # Old raw-store form must not return.
         assert "data_as<void>" not in code
