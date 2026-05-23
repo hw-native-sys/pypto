@@ -1229,6 +1229,61 @@ def test_python_print_dangling_iter_arg_use_disambiguated():
     assert "acc_1" in text
 
 
+def test_python_print_free_variable_marked():
+    """A function body use that is neither a parameter nor a body-local
+    definition is a free variable — malformed IR — and must print with a
+    visible ``__FREE_VAR`` marker so the dump is unmistakably invalid.
+
+    A well-formed function is a closed scope; a transform that leaks another
+    function's Var across the function boundary (issue #1462) otherwise
+    produces a dump that reuses an ordinary-looking name and reads as valid.
+    """
+    span = ir.Span.unknown()
+    scalar_ty = ir.ScalarType(DataType.INT64)
+    one = ir.ConstInt(1, DataType.INT64, span)
+
+    a = ir.Var("a", scalar_ty, span)
+    # Distinct pointer, same name_hint as the parameter — neither a param nor
+    # a body definition, so it is a free variable.
+    leaked = ir.Var("a", scalar_ty, span)
+    assert leaked is not a
+    local = ir.Var("local", scalar_ty, span)
+    body = ir.SeqStmts(
+        [
+            ir.AssignStmt(local, ir.Add(a, one, DataType.INT64, span), span),
+            ir.ReturnStmt([ir.Add(local, leaked, DataType.INT64, span)], span),
+        ],
+        span,
+    )
+    func = ir.Function("f", [a], [scalar_ty], body, span)
+    text = func.as_python()
+
+    # The parameter keeps "a"; the leaked use is both suffix-disambiguated
+    # (distinct pointer) and flagged as free.
+    assert "a_1__FREE_VAR" in text
+    # The well-formed parameter and local must not be marked.
+    assert "a__FREE_VAR" not in text
+    assert "local__FREE_VAR" not in text
+
+
+def test_python_print_free_variable_not_marked_for_bare_stmt():
+    """Bare-stmt roots (``stmt.as_python()``) must NOT get the free-variable
+    marker: a statement fragment is not a closed scope, so it legitimately
+    references vars supplied by its absent surrounding context.
+    """
+    span = ir.Span.unknown()
+    scalar_ty = ir.ScalarType(DataType.INT64)
+    one = ir.ConstInt(1, DataType.INT64, span)
+
+    outer = ir.Var("outer", scalar_ty, span)
+    local = ir.Var("local", scalar_ty, span)
+    stmt = ir.AssignStmt(local, ir.Add(outer, one, DataType.INT64, span), span)
+    text = stmt.as_python()
+
+    assert "outer" in text
+    assert "__FREE_VAR" not in text
+
+
 def test_int64_const_roundtrips_in_expression_context():
     """ConstInt(INT64) prints explicit ``pl.const(...)`` and survives print -> reparse.
 

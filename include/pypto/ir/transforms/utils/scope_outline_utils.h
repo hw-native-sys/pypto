@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -24,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -254,6 +256,14 @@ class ScopeOutliner : public IRMutator {
    *
    * When a store-target output is assigned a fresh SSA name at the call site
    * (e.g., buf_0 -> buf_1), subsequent references must use the new variable.
+   *
+   * ``store_target_renames_`` is kept flat: every entry maps an original
+   * store-target Var directly to its *latest* renamed Var. When N sibling
+   * scopes write the same target, each scope's CreateFreshStoreTargetVar
+   * overwrites the single entry rather than appending a chain link (see
+   * CreateFreshStoreTargetVar). A single lookup therefore always yields the
+   * current value — a reference after the last scope (the function's
+   * ReturnStmt) resolves to the latest, never a stale intermediate.
    */
   ExprPtr VisitExpr_(const VarPtr& op) override {
     auto it = store_target_renames_.find(op.get());
@@ -468,6 +478,10 @@ class ScopeOutliner : public IRMutator {
 
     // Inputs: variables used but not defined in the scope.
     // Iterate in first-encounter order to preserve the callee's parameter ordering.
+    // var_objects_ is a pure identity symbol table (never rewritten with
+    // renames), so obj_it->second is the same Var that appears in the body —
+    // input_vars[i].get() is the body pointer, the key used for both the body
+    // substitution and the call-site lookup below.
     std::vector<VarPtr> input_vars;
     for (const Var* var_ptr : body_collector.var_uses_ordered) {
       if (!body_collector.var_defs.count(var_ptr)) {
@@ -606,6 +620,8 @@ class ScopeOutliner : public IRMutator {
       auto param_var = std::make_shared<Var>(input_var->name_hint_, input_var->GetType(), op->span_);
       input_params.push_back(param_var);
       input_param_directions.push_back(inferred_directions[i]);
+      // input_var.get() is the body pointer (var_objects_ is identity), so the
+      // substitution reaches the actual use-site in the scope body.
       var_substitution_map[input_var.get()] = param_var;
     }
 
@@ -779,6 +795,17 @@ class ScopeOutliner : public IRMutator {
     auto global_var = std::make_shared<GlobalVar>(outlined_func_name);
     std::vector<ExprPtr> call_args;
     for (const auto& input_var : input_vars) {
+      // The argument must be the value current as of this scope. A store
+      // target written by an earlier sibling scope has been renamed; its
+      // latest Var lives in store_target_renames_ keyed on the original Var
+      // (the map is flat — see CreateFreshStoreTargetVar — so one lookup
+      // yields the current value regardless of how many scopes wrote it).
+      // Everything else passes through var_objects_ unchanged.
+      auto rename_it = store_target_renames_.find(input_var.get());
+      if (rename_it != store_target_renames_.end()) {
+        call_args.push_back(rename_it->second);
+        continue;
+      }
       auto var_it = var_objects_.find(input_var.get());
       CHECK(var_it != var_objects_.end())
           << "Variable " << input_var->name_hint_ << " not found in var_objects";
@@ -841,15 +868,15 @@ class ScopeOutliner : public IRMutator {
     if (scope_task_id_var) {
       effective_return_types.push_back(std::make_shared<ScalarType>(DataType::TASK_ID));
     }
+    // Determine call return type. Single non-task-id return is unwrapped; the
+    // task_id_var path always uses TupleType (even for the lone TASK_ID
+    // element) so codegen's ``IsSubmitCall`` detection — which keys on a
+    // trailing ``Scalar[TASK_ID]`` element of a ``TupleType`` — fires
+    // uniformly.
     TypePtr call_return_type;
     if (effective_return_types.empty()) {
       call_return_type = nullptr;
-    } else if (scope_task_id_var) {
-      // ``IsSubmitCall`` keys on a trailing ``Scalar[TASK_ID]`` element of a
-      // ``TupleType`` — keep the tuple wrapping even when there is only the
-      // one (TASK_ID) element so codegen's submit-detection fires uniformly.
-      call_return_type = std::make_shared<TupleType>(effective_return_types);
-    } else if (effective_return_types.size() == 1) {
+    } else if (!scope_task_id_var && effective_return_types.size() == 1) {
       call_return_type = effective_return_types[0];
     } else {
       call_return_type = std::make_shared<TupleType>(effective_return_types);
@@ -968,8 +995,16 @@ class ScopeOutliner : public IRMutator {
   /**
    * @brief Create a fresh Var for a store-target output and register the rename.
    *
-   * Updates var_types_, var_objects_, and store_target_renames_ so that subsequent
-   * statements visited by the mutator will use the new variable.
+   * Registers the fresh Var in var_types_/var_objects_ and records the rename
+   * in store_target_renames_ so subsequent statements (and the ReturnStmt)
+   * resolve the store target to its new value.
+   *
+   * ``original_var`` is the *original* store-target Var, not a prior rename:
+   * var_objects_ is kept as a pure identity symbol table (never rewritten with
+   * call-site renames), so when N sibling scopes write the same target every
+   * scope resolves it back to the same original and this overwrites the single
+   * store_target_renames_ entry. The map therefore stays flat — one key, the
+   * latest value — and call-site / ReturnStmt lookups need no chain chasing.
    */
   VarPtr CreateFreshStoreTargetVar(const VarPtr& original_var, const Span& span) {
     std::string fresh_name = GenerateFreshSSAName(original_var->name_hint_);
@@ -979,8 +1014,6 @@ class ScopeOutliner : public IRMutator {
     var_types_[fresh_var.get()] = type;
     var_objects_[fresh_var.get()] = fresh_var;
     known_names_.insert(fresh_name);
-    // Also update the original pointer so subsequent scopes pass the renamed var as call args
-    var_objects_[original_var.get()] = fresh_var;
     return fresh_var;
   }
 

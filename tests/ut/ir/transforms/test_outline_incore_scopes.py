@@ -510,6 +510,65 @@ class TestOutlineIncoreScopes:
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_outline_repeated_store_target_keeps_body_in_sync(self):
+        """N same-kind scopes storing to one tensor must thread the store target.
+
+        Regression test for issue #1462. Each scope writing the shared store
+        target ``out`` is outlined into a function that takes it as a parameter
+        and returns a fresh renamed value (``out -> out_v1 -> out_v2 -> ...``).
+        ScopeOutliner must keep every reference consistent:
+
+        - the outlined body's store use-site must resolve to that function's
+          own parameter (else a Var is used outside its defining function — a
+          whole-program SSAForm violation);
+        - each scope's synthesised call must pass the value current as of that
+          scope, and the ReturnStmt must read the final value (else a renamed
+          store target is read pre-call — an InOutUseDiscipline violation).
+
+        Four scopes are used so the test exercises both the body use-site
+        (visible with two scopes) and the call-argument threading across the
+        full chain (call-argument staleness only becomes visible by the fourth
+        scope). ``outline_incore_scopes`` post-verifies the structural
+        properties, so a stale call argument throws here; the explicit check
+        covers SSAForm.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[32, 32], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
+            ) -> pl.Tensor[[32, 32], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    tile0 = pl.load(a, [0, 0], [32, 32])
+                    pl.store(tile0, [0, 0], out)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    tile1 = pl.load(a, [0, 0], [32, 32])
+                    pl.store(tile1, [0, 0], out)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    tile2 = pl.load(a, [0, 0], [32, 32])
+                    pl.store(tile2, [0, 0], out)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    tile3 = pl.load(a, [0, 0], [32, 32])
+                    pl.store(tile3, [0, 0], out)
+                return out
+
+        After = passes.outline_incore_scopes()(passes.convert_to_ssa()(Before))
+
+        # Four InCore scopes outlined into four functions plus the orchestrator.
+        assert len(After.functions) == 5
+
+        props = passes.IRPropertySet()
+        props.insert(passes.IRProperty.SSAForm)
+        errors = [
+            d
+            for d in passes.PropertyVerifierRegistry.verify(props, After)
+            if d.severity == passes.DiagnosticSeverity.Error
+        ]
+        assert not errors, f"SSAForm violated: {[d.message for d in errors]}"
+
     def test_outline_scope_with_loop_carried_init_values(self):
         """Test outlining scope where inner loop references outer loop-carried variable via init_values.
 

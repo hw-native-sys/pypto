@@ -434,16 +434,24 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
   // Pass 3: pair a unique producer store with the first matching consumer load.
   // Bucket stores and loads by origin first so the matching stays linear in the
   // number of GM accesses (rather than rescanning all stores/loads per store).
+  // Track origins in store-traversal insertion order so iteration is
+  // deterministic without iterating the pointer-keyed unordered_map (which
+  // yields pointer-order traversal and unstable downstream assignments).
   std::unordered_map<const Var*, std::vector<const AccessRec*>> stores_by_origin;
   std::unordered_map<const Var*, std::vector<const AccessRec*>> loads_by_origin;
+  std::vector<const Var*> ordered_origins;
+  std::unordered_set<const Var*> seen_origins;
   for (const auto& store : stores) {
-    if (store.origin) stores_by_origin[store.origin].push_back(&store);
+    if (!store.origin) continue;
+    if (seen_origins.insert(store.origin).second) ordered_origins.push_back(store.origin);
+    stores_by_origin[store.origin].push_back(&store);
   }
   for (const auto& load : loads) {
     if (load.origin) loads_by_origin[load.origin].push_back(&load);
   }
 
-  for (const auto& [origin, origin_stores] : stores_by_origin) {
+  for (const Var* origin : ordered_origins) {
+    const auto& origin_stores = stores_by_origin.at(origin);
     if (origin_stores.size() != 1) continue;  // require a unique producer store
     const AccessRec& store = *origin_stores.front();
 

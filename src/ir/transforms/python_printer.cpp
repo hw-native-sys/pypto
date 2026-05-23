@@ -274,6 +274,15 @@ class IRPythonPrinter : public IRVisitor {
   // Vars defined in the current function body (for PrintMemRef formatting).
   std::unordered_set<const Var*> body_defined_vars_;
 
+  // Free variables of the current function: Vars used in the body that are
+  // neither a parameter nor a body-local definition. A well-formed function is
+  // a closed scope, so a non-empty set marks malformed IR (e.g. a transform
+  // that leaked another function's Var across the function boundary). These
+  // get a visible suffix in GetVarName so the dump is unmistakably invalid.
+  // Populated only for full functions, never for bare-stmt roots (a statement
+  // fragment legitimately references vars defined by its absent context).
+  std::unordered_set<const Var*> free_body_vars_;
+
   // Program-level dyn var rename map: Var pointer → disambiguated printed name.
   // Built once by VisitProgram for dynamic dimension variables used in type annotations.
   // When two distinct Var* share the same name_hint_, they get unique suffixed names.
@@ -291,8 +300,10 @@ class IRPythonPrinter : public IRVisitor {
   // Assigns unique suffixed names (e.g., "i", "i_1") when two distinct Vars share a name.
   // Called from VisitFunction (with params) and from Print() for bare Stmt roots
   // (no params) so that standalone stmt.as_python() also gets disambiguation.
-  void BuildVarRenameMap(const std::vector<VarPtr>& params, const StmtPtr& body);
-  void BuildVarRenameMap(const FunctionPtr& func) { BuildVarRenameMap(func->params_, func->body_); }
+  void BuildVarRenameMap(const std::vector<VarPtr>& params, const StmtPtr& body, bool is_function = false);
+  void BuildVarRenameMap(const FunctionPtr& func) {
+    BuildVarRenameMap(func->params_, func->body_, /*is_function=*/true);
+  }
 
   // Print a statement block at current indent level.
   // SeqStmts is a transparent container - recursed into without extra indent.
@@ -1496,14 +1507,20 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
 }
 
 std::string IRPythonPrinter::GetVarName(const Var* var) const {
+  // Free variables print with a visible suffix so a dump of malformed IR is
+  // unmistakably invalid instead of silently reusing an ordinary-looking name
+  // (the marked use-site pinpoints the SSAVerify "used outside its defining
+  // scope" diagnostic). dyn_var_rename_map_ entries are never flagged free.
+  std::string suffix = free_body_vars_.count(var) ? "__FREE_VAR" : "";
   auto it = var_rename_map_.find(var);
-  if (it != var_rename_map_.end()) return it->second;
+  if (it != var_rename_map_.end()) return it->second + suffix;
   auto dyn_it = dyn_var_rename_map_.find(var);
   if (dyn_it != dyn_var_rename_map_.end()) return dyn_it->second;
-  return var->name_hint_;
+  return var->name_hint_ + suffix;
 }
 
-void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const StmtPtr& body) {
+void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const StmtPtr& body,
+                                        bool is_function) {
   // Collect Var/IterArg pointers in DFS pre-order: params, then body defs,
   // then body uses. Defs precede uses so a pointer appearing as both keeps
   // its def-site canonical name; pointers appearing only as uses (e.g. a
@@ -1511,8 +1528,13 @@ void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const
   // sharing a name_hint) still get their own suffix. (#1244)
   std::vector<const Var*> ordered_refs;
   ordered_refs.reserve(params.size());
-  for (const auto& p : params) ordered_refs.push_back(p.get());
+  std::unordered_set<const Var*> param_ptrs;
+  for (const auto& p : params) {
+    ordered_refs.push_back(p.get());
+    param_ptrs.insert(p.get());
+  }
   body_defined_vars_.clear();
+  free_body_vars_.clear();
   if (body) {
     var_collectors::VarDefUseCollector body_collector;
     body_collector.VisitStmt(body);
@@ -1520,15 +1542,35 @@ void IRPythonPrinter::BuildVarRenameMap(const std::vector<VarPtr>& params, const
                         body_collector.var_defs_ordered.end());
     ordered_refs.insert(ordered_refs.end(), body_collector.var_uses_ordered.begin(),
                         body_collector.var_uses_ordered.end());
+    // A function is a closed scope: every body use must resolve to a parameter
+    // or a body-local definition. A use that resolves to neither is a free
+    // variable — malformed IR — so flag it (see free_body_vars_). Skipped for
+    // bare-stmt roots, whose absent context legitimately supplies such vars.
+    if (is_function) {
+      for (const Var* use : body_collector.var_uses_ordered) {
+        if (!param_ptrs.count(use) && !body_collector.var_defs.count(use)) {
+          free_body_vars_.insert(use);
+        }
+      }
+    }
     body_defined_vars_ = std::move(body_collector.var_defs);
   }
   // Drop program-level dynamic dim vars: they are already disambiguated
   // globally in dyn_var_rename_map_, and re-registering them here would
-  // shadow that map in GetVarName's two-tier lookup.
+  // shadow that map in GetVarName's two-tier lookup. They are program-scoped,
+  // so they are also legitimately "free" in a function body — drop them from
+  // free_body_vars_ too to avoid false positives.
   if (!dyn_var_rename_map_.empty()) {
     ordered_refs.erase(std::remove_if(ordered_refs.begin(), ordered_refs.end(),
                                       [this](const Var* v) { return dyn_var_rename_map_.count(v) > 0; }),
                        ordered_refs.end());
+    for (auto it = free_body_vars_.begin(); it != free_body_vars_.end();) {
+      if (dyn_var_rename_map_.count(*it)) {
+        it = free_body_vars_.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
   auto_name::BuildRenameMapForDefs(ordered_refs, var_rename_map_);
 }
