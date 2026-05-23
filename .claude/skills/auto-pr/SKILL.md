@@ -1,7 +1,7 @@
 ---
 name: auto-pr
 description: Create a GitHub PR then autonomously loop on CI failures and review comments until the PR is fully green. Combines branch prep, PR creation, and a hands-off fix loop. Use when the user wants to ship a PR end-to-end, auto-fix a PR until green, or create-and-fix a PR in one go.
-argument-hint: <pr-number>
+argument-hint: [pr-number]
 ---
 
 # Auto PR Workflow
@@ -83,7 +83,8 @@ failure with no actionable fix), do not loop pointlessly — go to Final Report.
 
 ### Step 3: Commit & Push
 
-Commit via `/git-commit` (skip testing/review for minor fixes).
+Commit via `/git-commit` — let it apply its own review/testing logic based
+on the changed file types; do not override.
 Message: `fix(pr): resolve issues for #<NUMBER>` + bullet list of fixes.
 Then `git push`.
 
@@ -108,8 +109,11 @@ Wait for all checks to finish using `gh`'s built-in watch — **never a manual
 gh pr checks <NUMBER> --watch
 ```
 
-Once it returns, every check is complete and `gh run view <RUN_ID> --log-failed`
-is safe to read. Then loop back to Step 1.
+Once it returns, every check is complete. Identify failed runs via
+`gh pr checks <NUMBER> --json name,state,link` and extract `<RUN_ID>` from the
+link (`/runs/<RUN_ID>/job/...`) — exactly as `fix-pr` Step 3 documents. Then
+`gh run view <RUN_ID> --log-failed` is safe to read. For external (non-Actions)
+checks there is no run ID; open the `link` URL directly. Then loop back to Step 1.
 
 ### Exit Condition
 
