@@ -158,7 +158,8 @@ class TestOrchestration:
         assert_code_equal(code, expected)
 
     def test_tensor_read(self):
-        """Test tensor.read uses orch_args.tensor().data_as<void>(), not host_t."""
+        """Test tensor.read emits get_tensor_data<T>() so the runtime spin-waits
+        on the producer task before reading (no raw host buffer deref)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -191,10 +192,57 @@ class TestOrchestration:
 
         code = _generate_orch_code(TensorReadProgram)
 
-        # tensor.read uses orch_args.tensor(0).data_as<void>(), not host_t
-        assert "idx_val" in code
-        assert "static_cast<float*>(orch_args.tensor(0).data_as<void>())" in code
+        # tensor.read emits a typed get_tensor_data<T>() call (the runtime
+        # spin-waits on TensorMap producers before reading), and packs the
+        # multi-dim indices into a uint32_t indices_<var>[N] = {...} array.
+        assert "uint32_t indices_val[2] = {static_cast<uint32_t>(1), static_cast<uint32_t>(3)};" in code
+        assert "float val = get_tensor_data<float>(ext_t, 2, indices_val);" in code
+        # The old raw-deref path must not return.
+        assert "data_as<void>" not in code
         assert "host_t" not in code
+        assert "buffer.addr" not in code
+
+    def test_orch_internal_tensor_read_uses_get_tensor_data(self):
+        """Regression for #1487: an orch-level read of an internally-allocated
+        tensor (produced by a device-scope task) must go through
+        ``get_tensor_data<T>()`` so the runtime spin-waits on the producer's
+        TensorMap entry. A raw ``buffer.addr`` deref returns stale/zero data
+        before the producer has finished writing.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class InternalReadProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_copy(
+                self,
+                src: pl.Tensor[[8, 1], pl.INT32],
+                output: pl.Out[pl.Tensor[[8, 1], pl.INT32]],
+            ) -> pl.Tensor[[8, 1], pl.INT32]:
+                t: pl.Tile[[8, 1], pl.INT32] = pl.load(src, [0, 0], [8, 1])
+                out: pl.Tensor[[8, 1], pl.INT32] = pl.store(t, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_internal_read(
+                self,
+                src_count: pl.Tensor[[8, 1], pl.INT32],
+            ) -> pl.Tensor[[8, 1], pl.INT32]:
+                cnt: pl.Tensor[[8, 1], pl.INT32] = pl.create_tensor([8, 1], dtype=pl.INT32)
+                cnt = self.kernel_copy(src_count, cnt)
+                n_rows: pl.Scalar[pl.INT32] = pl.tensor.read(cnt, [0, 0])  # noqa: F841
+                return cnt
+
+        code = _generate_orch_code(InternalReadProgram)
+
+        # The runtime API call is what gives us producer-sync; it must be present.
+        assert "get_tensor_data<int32_t>(cnt" in code
+        # The pre-fix raw-deref shapes must not return — including the
+        # buffer.addr / reinterpret_cast path from the dead #1479 attempt.
+        assert "buffer.addr" not in code
+        assert "reinterpret_cast<void*>(static_cast<uintptr_t>" not in code
+        assert "static_cast<int32_t*>(reinterpret_cast" not in code
 
     def test_config_file(self):
         """Test orchestration result contains kernel function metadata."""
@@ -906,8 +954,11 @@ class TestOrchestration:
         assert "uint32_t chunk_offsets[2] = {static_cast<uint32_t>((i * 16)), 0};" in code
         assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
 
-        # tensor.read generates host pointer access
-        assert "static_cast<int64_t*>(orch_args.tensor(2).data_as<void>())" in code
+        # tensor.read now goes through get_tensor_data<T>() (producer-sync
+        # via TensorMap) instead of a raw orch_args.tensor().data_as<void>()
+        # deref. See #1487.
+        assert "uint32_t indices_n_blocks[1] = {static_cast<uint32_t>(0)};" in code
+        assert "int64_t n_blocks = get_tensor_data<int64_t>(ext_config, 1, indices_n_blocks);" in code
 
         # kernel_add task submitted inside loop
         assert "rt_submit_aiv_task" in code
@@ -1873,7 +1924,7 @@ class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""
 
     def test_tensor_read_constant_1d(self):
-        """1D tensor [8], read(t, [3]) -> flat offset 3 (inlined constant)."""
+        """1D tensor [8], read(t, [3]) -> get_tensor_data<float>(ext_t, 1, indices_val)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1885,10 +1936,13 @@ class TestTensorReadWriteOffsetCodegen:
                 return t
 
         code = _generate_orch_code(Prog)
-        assert "static_cast<float*>(orch_args.tensor(0).data_as<void>())[3]" in code
+        assert "uint32_t indices_val[1] = {static_cast<uint32_t>(3)};" in code
+        assert "float val = get_tensor_data<float>(ext_t, 1, indices_val);" in code
+        assert "data_as<void>" not in code
+        assert "buffer.addr" not in code
 
     def test_tensor_read_constant_2d(self):
-        """2D tensor [4, 8], read(t, [1, 3]) -> flat offset 1*8+3=11 (computed correctly)."""
+        """2D tensor [4, 8], read(t, [1, 3]) -> get_tensor_data<float>(ext_t, 2, indices_val)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1900,12 +1954,14 @@ class TestTensorReadWriteOffsetCodegen:
                 return t
 
         code = _generate_orch_code(Prog)
-        # The flat offset expression 1*8+3=11 is generated (either inlined or via idx_val)
-        assert ("orch_args.tensor(0).data_as<void>())[11]" in code) or ("1 * 8 + 3" in code)
-        assert "orch_args.tensor(0).data_as<void>())" in code
+        # Multi-dim indices are passed as a uint32_t[N] array — the runtime
+        # computes the flat offset itself, so no `1 * 8 + 3` arithmetic appears.
+        assert "uint32_t indices_val[2] = {static_cast<uint32_t>(1), static_cast<uint32_t>(3)};" in code
+        assert "float val = get_tensor_data<float>(ext_t, 2, indices_val);" in code
+        assert "data_as<void>" not in code
 
     def test_tensor_read_constant_3d(self):
-        """3D tensor [2, 4, 8], read(t, [1, 2, 3]) -> flat offset 1*32+2*8+3=51."""
+        """3D tensor [2, 4, 8], read(t, [1, 2, 3]) -> get_tensor_data<float>(ext_t, 3, indices_val)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1917,14 +1973,15 @@ class TestTensorReadWriteOffsetCodegen:
                 return t
 
         code = _generate_orch_code(Prog)
-        # The flat offset expression is generated (either inlined as 51 or as computed expression)
-        assert ("orch_args.tensor(0).data_as<void>())[51]" in code) or (
-            "1 * 4 * 8" in code and "2 * 8" in code
+        assert (
+            "uint32_t indices_val[3] = {static_cast<uint32_t>(1), static_cast<uint32_t>(2), "
+            "static_cast<uint32_t>(3)};" in code
         )
-        assert "orch_args.tensor(0).data_as<void>())" in code
+        assert "float val = get_tensor_data<float>(ext_t, 3, indices_val);" in code
+        assert "data_as<void>" not in code
 
     def test_tensor_read_variable_index(self):
-        """2D tensor [4, 8], read(t, [i, j]) -> generates idx_val = i * 8 + j."""
+        """2D tensor [4, 8], read(t, [i, j]) -> indices array carries the runtime expressions."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1942,8 +1999,13 @@ class TestTensorReadWriteOffsetCodegen:
                 return t
 
         code = _generate_orch_code(Prog)
-        assert "idx_val" in code
-        assert "* 8" in code
+        # Each read emits its own typed get_tensor_data<T> call.
+        assert "int64_t row = get_tensor_data<int64_t>(ext_config, 1, indices_row);" in code
+        assert "int64_t col = get_tensor_data<int64_t>(ext_config, 1, indices_col);" in code
+        # The variable indices ride through unchanged inside static_cast<uint32_t>(...).
+        assert "uint32_t indices_val[2] = {static_cast<uint32_t>(row), static_cast<uint32_t>(col)};" in code
+        assert "float val = get_tensor_data<float>(ext_t, 2, indices_val);" in code
+        assert "data_as<void>" not in code
 
     def test_tensor_write_constant_2d(self):
         """2D tensor [4, 8], write(t, [1, 3], val) -> flat offset 11."""
@@ -1959,9 +2021,11 @@ class TestTensorReadWriteOffsetCodegen:
                 return t
 
         code = _generate_orch_code(Prog)
-        # Write generates flat offset 11 or the expression 1*8+3
+        # The read switched to get_tensor_data<T>; the write still emits a raw
+        # buffer deref (tracked separately as a follow-up — symmetrical issue
+        # to #1487 for set_tensor_data<T>).
+        assert "float val = get_tensor_data<float>(ext_t, 2, indices_val);" in code
         assert ("orch_args.tensor(0).data_as<void>())[11]" in code) or ("1 * 8 + 3" in code)
-        assert "orch_args.tensor(0).data_as<void>())" in code
 
     def test_infer_output_param_from_loop_carried_store(self):
         """Loop-carried store to a default-In tensor should emit output params."""
