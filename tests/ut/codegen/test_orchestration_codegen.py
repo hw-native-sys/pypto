@@ -2008,7 +2008,7 @@ class TestTensorReadWriteOffsetCodegen:
         assert "data_as<void>" not in code
 
     def test_tensor_write_constant_2d(self):
-        """2D tensor [4, 8], write(t, [1, 3], val) -> flat offset 11."""
+        """2D tensor [4, 8], write(t, [1, 3], val) -> set_tensor_data<float>(ext_t, 2, indices_t, val)."""
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -2021,11 +2021,15 @@ class TestTensorReadWriteOffsetCodegen:
                 return t
 
         code = _generate_orch_code(Prog)
-        # The read switched to get_tensor_data<T>; the write still emits a raw
-        # buffer deref (tracked separately as a follow-up — symmetrical issue
-        # to #1487 for set_tensor_data<T>).
+        # Read uses get_tensor_data<T>; write goes through the symmetric
+        # set_tensor_data<T> API so the runtime can spin-wait on producers /
+        # tracked INOUT consumers before writing.
         assert "float val = get_tensor_data<float>(ext_t, 2, indices_val);" in code
-        assert ("orch_args.tensor(0).data_as<void>())[11]" in code) or ("1 * 8 + 3" in code)
+        assert "uint32_t indices_t[2] = {static_cast<uint32_t>(1), static_cast<uint32_t>(3)};" in code
+        assert "set_tensor_data<float>(ext_t, 2, indices_t, val);" in code
+        # Old raw-store form must not return.
+        assert "data_as<void>" not in code
+        assert "buffer.addr" not in code
 
     def test_infer_output_param_from_loop_carried_store(self):
         """Loop-carried store to a default-In tensor should emit output params."""
