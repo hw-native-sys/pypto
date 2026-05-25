@@ -102,7 +102,7 @@ class TensorAbsProgramFP16:
     ) -> pl.Tensor[[M, N], pl.FP16]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
         ):
             y = pl.abs(x)
             out = pl.assemble(out, y, [0, 0])
@@ -143,7 +143,7 @@ class TensorAbsProgramFP32:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
         ):
             y = pl.abs(x)
             out = pl.assemble(out, y, [0, 0])
@@ -187,7 +187,7 @@ class TensorAbsProgramLarge:
     ) -> pl.Tensor[[LARGE_M, LARGE_N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
         ):
             y = pl.abs(x)
             out = pl.assemble(out, y, [0, 0])

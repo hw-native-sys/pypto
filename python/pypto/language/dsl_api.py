@@ -23,63 +23,6 @@ from pypto.pypto_core.ir import SplitMode
 
 from .optimizations import Optimization
 
-
-class _ChunkedLoopOptimizerCall:
-    """Result of calling chunked_loop_optimizer(split=...).
-
-    Stores the split mode to pass to the AutoInCore scope.
-
-    Bare ``pl.chunked_loop_optimizer`` intentionally maps to ``SplitMode.NONE``.
-    Callers that want explicit cross-core work splitting must pass
-    ``split=pl.SplitMode.UP_DOWN`` or ``split=pl.SplitMode.LEFT_RIGHT``.
-    """
-
-    def __init__(self, split: SplitMode = SplitMode.NONE) -> None:
-        self.split = split
-
-    def __repr__(self) -> str:
-        return f"chunked_loop_optimizer(split={self.split!r})"
-
-
-class _ChunkedLoopOptimizer:
-    """Sentinel type for optimization=pl.chunked_loop_optimizer in pl.at().
-
-    Can be used bare or called with a split mode:
-    - ``optimization=pl.chunked_loop_optimizer``
-    - ``optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE)``
-
-    The bare form intentionally means "no split". Explicit splitting remains
-    opt-in via the ``split=...`` call form.
-    """
-
-    def __call__(self, *, split: SplitMode = SplitMode.NONE) -> _ChunkedLoopOptimizerCall:
-        """Create an optimizer specification with an explicit split mode.
-
-        Args:
-            split: Split mode for cross-core data transfer (default: SplitMode.NONE)
-
-        Returns:
-            Optimizer call with the given split mode
-        """
-        return _ChunkedLoopOptimizerCall(split=split)
-
-    def __repr__(self) -> str:
-        return "chunked_loop_optimizer"
-
-
-chunked_loop_optimizer: _ChunkedLoopOptimizer = _ChunkedLoopOptimizer()
-"""Sentinel for optimization=pl.chunked_loop_optimizer in pl.at().
-
-Use with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer)
-to request compiler-driven chunked loop outlining (replaces pl.auto_incore()).
-Can also be called with a split mode:
-pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE))
-
-Bare ``pl.chunked_loop_optimizer`` intentionally defaults to ``SplitMode.NONE``.
-Use the call form with ``split=pl.SplitMode.UP_DOWN`` or
-``split=pl.SplitMode.LEFT_RIGHT`` when explicit cross-core splitting is desired.
-"""
-
 # Range argument type: int literal or Scalar variable
 RangeArg = Union[int, "Scalar"]
 
@@ -979,9 +922,6 @@ class AtContext:
         optimizations: list[Optimization] | None = None,
         deps: list[Any] | None = None,
         no_dep_args: list[Any] | None = None,
-        # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
-        optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
-        split: SplitMode | None = None,
         name_hint: str = "",
     ) -> None:
         self.level = level
@@ -989,8 +929,6 @@ class AtContext:
         self.optimizations = optimizations
         self.deps = deps
         self.no_dep_args = no_dep_args
-        self.optimization = optimization
-        self.split = split
         self.name_hint = name_hint
 
     def __enter__(self) -> Any:
@@ -1013,9 +951,6 @@ def at(
     optimizations: list[Optimization] | None = None,
     deps: list[Any] | None = None,
     no_dep_args: list[Any] | None = None,
-    # Deprecated kwargs (kept for back-compat; emit DeprecationWarning at parse time):
-    optimization: _ChunkedLoopOptimizer | _ChunkedLoopOptimizerCall | None = None,
-    split: SplitMode | None = None,
     name_hint: str = "",
 ) -> AtContext:
     """Mark a region of code for execution at a specific hierarchy level.
@@ -1061,9 +996,6 @@ def at(
             disjoint regions of the tensor and therefore do not need
             OverlapMap dep tracking. Note: ``deps=`` takes TaskIds, while
             ``no_dep_args=`` takes tensors — they describe different things.
-        optimization: **Deprecated.** Use ``optimizations=[pl.auto_chunk]`` (or
-            ``optimizations=[pl.auto_chunk, pl.split(mode)]``) instead.
-        split: **Deprecated.** Use ``optimizations=[pl.split(mode)]`` instead.
         name_hint: Optional name hint for the outlined function (must be a
             valid identifier).
 
@@ -1101,8 +1033,6 @@ def at(
         optimizations=optimizations,
         deps=deps,
         no_dep_args=no_dep_args,
-        optimization=optimization,
-        split=split,
         name_hint=name_hint,
     )
 
@@ -1122,7 +1052,6 @@ __all__ = [
     "at",
     "cluster",
     "spmd",
-    "chunked_loop_optimizer",
     "RangeIterator",
     "WhileIterator",
     "IncoreContext",

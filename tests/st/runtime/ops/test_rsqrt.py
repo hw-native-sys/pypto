@@ -175,7 +175,7 @@ class TensorRsqrtProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
         ):
             y = pl.rsqrt(x)
             out = pl.assemble(out, y, [0, 0])
@@ -223,7 +223,7 @@ class TensorRsqrtHighPrecisionProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)],
         ):
             y = pl.rsqrt(x, high_precision=True)
             out = pl.assemble(out, y, [0, 0])

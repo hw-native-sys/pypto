@@ -68,6 +68,11 @@ class AutoChunk(Optimization):
     and outline the inner sequential portion into ``InCore`` scopes.
 
     Only valid with ``level=pl.Level.CORE_GROUP``.
+
+    .. deprecated::
+        ``AutoChunk`` / ``pl.auto_chunk`` is deprecated and will be removed in
+        a future release. Using it in ``pl.at(optimizations=[...])`` raises a
+        ``DeprecationWarning`` at parse time.
     """
 
 
@@ -89,6 +94,10 @@ auto_chunk: AutoChunk = AutoChunk()
 """Sentinel for the ``AutoChunk`` optimization.
 
 Use as ``pl.auto_chunk`` in ``pl.at(..., optimizations=[pl.auto_chunk, ...])``.
+
+.. deprecated::
+    ``pl.auto_chunk`` is deprecated and will be removed in a future release;
+    using it emits a ``DeprecationWarning`` at parse time.
 """
 
 

@@ -1266,7 +1266,8 @@ void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
 void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
   stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP";
   if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-    stream_ << ", split=" << prefix_ << ".SplitMode." << SplitModeToPythonString(op->split_.value());
+    stream_ << ", optimizations=[" << prefix_ << ".split(" << prefix_ << ".SplitMode."
+            << SplitModeToPythonString(op->split_.value()) << ")]";
   }
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
@@ -1279,13 +1280,13 @@ void IRPythonPrinter::VisitStmt_(const InCoreScopeStmtPtr& op) {
 }
 
 void IRPythonPrinter::VisitStmt_(const AutoInCoreScopeStmtPtr& op) {
-  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimization=";
+  stream_ << "with " << prefix_ << ".at(level=" << prefix_ << ".Level.CORE_GROUP, optimizations=[" << prefix_
+          << ".auto_chunk";
   if (op->split_.has_value() && op->split_.value() != SplitMode::None) {
-    stream_ << prefix_ << ".chunked_loop_optimizer(split=" << prefix_ << ".SplitMode."
+    stream_ << ", " << prefix_ << ".split(" << prefix_ << ".SplitMode."
             << SplitModeToPythonString(op->split_.value()) << ")";
-  } else {
-    stream_ << prefix_ << ".chunked_loop_optimizer";
   }
+  stream_ << "]";
   if (!op->name_hint_.empty()) {
     stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
   }

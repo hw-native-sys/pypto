@@ -38,9 +38,7 @@ class V2CUDProgram:
         b: pl.Tensor[[32, 32], pl.FP32],
         output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)
-        ):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
             out = pl.matmul(a_plus_b, sub)
@@ -58,7 +56,7 @@ class V2CLRProgram:
         output: pl.Out[pl.Tensor[[32, 32], pl.FP32]],
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(
-            level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT)
+            level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)]
         ):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
@@ -78,7 +76,7 @@ class V2CNoSplitProgram:
     ) -> pl.Tensor[[32, 32], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.NONE)],
         ):
             a_plus_b = pl.add(a, b)
             sub = pl.sub(a, b)
@@ -97,7 +95,7 @@ class C2VLRProgram:
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
-            level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT)
+            level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)]
         ):
             for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
@@ -117,9 +115,7 @@ class C2VUDProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)
-        ):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
             for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
@@ -140,7 +136,7 @@ class C2VNoSplitProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.NONE)],
         ):
             for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
@@ -160,9 +156,7 @@ class BiDirectUDProgram:
         b: pl.Tensor[[K, N], pl.FP32],
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
-        with pl.at(
-            level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.UP_DOWN)
-        ):
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
             for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
                 c_prev = pl.slice(c, [M, N_BLOCK], [0, n0])
@@ -183,7 +177,7 @@ class BiDirectLRProgram:
         c: pl.Tensor[[M, N], pl.FP32],
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
-            level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.LEFT_RIGHT)
+            level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.LEFT_RIGHT)]
         ):
             for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK
@@ -206,7 +200,7 @@ class BiDirectNoSplitProgram:
     ) -> pl.Tensor[[M, N], pl.FP32]:
         with pl.at(
             level=pl.Level.CORE_GROUP,
-            optimization=pl.chunked_loop_optimizer(split=pl.SplitMode.NONE),
+            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.NONE)],
         ):
             for nb in pl.parallel(0, N_BLOCKS, 1, chunk=4, chunk_policy="leading_full"):
                 n0 = nb * N_BLOCK

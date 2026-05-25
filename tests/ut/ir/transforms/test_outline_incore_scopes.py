@@ -784,7 +784,7 @@ class TestSplitIncoreOrchVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
                     x = pl.add(x, 1.0)
                     for i in pl.parallel(0, 8, 1, chunk=4, chunk_policy="leading_full"):
                         x = pl.add(x, 2.0)

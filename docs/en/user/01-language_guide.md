@@ -456,9 +456,6 @@ with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
         x = pl.add(x, x)
 
 # Deprecated (still works, emits DeprecationWarning):
-with pl.at(level=pl.Level.CORE_GROUP, optimization=pl.chunked_loop_optimizer):
-    ...
-
 with pl.auto_incore():
     ...
 ```
@@ -477,10 +474,6 @@ with pl.at(level=pl.Level.CORE_GROUP,
            optimizations=[pl.auto_chunk, pl.split(pl.SplitMode.UP_DOWN)]):
     for i in pl.parallel(0, 8, 1, chunk=4):
         x = pl.add(x, x)
-
-# Deprecated single-kwarg form (still works, emits DeprecationWarning):
-with pl.at(level=pl.Level.CORE_GROUP, split=pl.SplitMode.UP_DOWN):
-    ...
 ```
 
 ## Memory and Data Movement

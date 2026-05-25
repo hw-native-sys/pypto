@@ -328,8 +328,6 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.manual_scope()` | `Runtime(manual=true)` | 由用户管理任务排序的 orchestrator 区域——见[手工依赖原语](#手工依赖原语) |
 | `pl.incore()` *(已弃用)* | `InCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP)` |
 | `pl.auto_incore(split=...)` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(...)])` |
-| `pl.at(..., optimization=pl.chunked_loop_optimizer[(split=...)])` *(已弃用)* | `AutoInCore` | 请改用 `pl.at(..., optimizations=[pl.auto_chunk, pl.split(...)])` |
-| `pl.at(..., split=...)` *(已弃用)* | `InCore` | 请改用 `pl.at(..., optimizations=[pl.split(...)])` |
 
 #### `pl.spmd` 多 block 派发
 

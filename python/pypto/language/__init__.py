@@ -63,7 +63,6 @@ from . import optimizations, parser
 from .dsl_api import (
     at,
     auto_incore,
-    chunked_loop_optimizer,
     cluster,
     cond,
     const,
@@ -277,7 +276,6 @@ __all__ = [
     "auto_incore",
     "cluster",
     "spmd",
-    "chunked_loop_optimizer",
     "optimizations",
     "split",
     "auto_chunk",

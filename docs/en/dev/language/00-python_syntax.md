@@ -329,8 +329,6 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator region where the user manages task ordering — see [Manual dependency primitives](#manual-dependency-primitives) |
 | `pl.incore()` *(deprecated)* | `InCore` | Use `pl.at(level=pl.Level.CORE_GROUP)` instead |
 | `pl.auto_incore(split=...)` *(deprecated)* | `AutoInCore` | Use `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(...)])` |
-| `pl.at(..., optimization=pl.chunked_loop_optimizer[(split=...)])` *(deprecated)* | `AutoInCore` | Use `pl.at(..., optimizations=[pl.auto_chunk, pl.split(...)])` |
-| `pl.at(..., split=...)` *(deprecated)* | `InCore` | Use `pl.at(..., optimizations=[pl.split(...)])` |
 
 See [Language Guide](../../user/01-language_guide.md#incore-scopes) for examples.
 
