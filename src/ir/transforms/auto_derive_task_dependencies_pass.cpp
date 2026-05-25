@@ -80,6 +80,10 @@ struct StorageAccess {
   bool dynamic_producer = false;
 };
 
+struct AccessSummary {
+  std::vector<StorageAccess> accesses;
+};
+
 bool IsTensorType(const TypePtr& type) { return As<TensorType>(type) != nullptr; }
 
 AccessRegion UnknownRegion() { return AccessRegion{RegionKind::Unknown, {}, {}}; }
@@ -531,6 +535,16 @@ class SubmitTaskIdCollector : public IRVisitor {
           const int task_id_index = static_cast<int>(tuple_ty->types_.size()) - 1;
           if (tuple_get->index_ == task_id_index) {
             task_id_by_call_[call_it->second.get()] = op->var_;
+            for (const auto& [index, var] : tuple_get_by_tuple_[tuple_var.get()]) {
+              if (index != task_id_index) {
+                task_id_by_var_[var.get()] = op->var_;
+              }
+            }
+          } else {
+            auto tid_it = tuple_get_by_tuple_[tuple_var.get()].find(task_id_index);
+            if (tid_it != tuple_get_by_tuple_[tuple_var.get()].end()) {
+              task_id_by_var_[op->var_.get()] = tid_it->second;
+            }
           }
         }
       }
@@ -555,18 +569,24 @@ class SubmitTaskIdCollector : public IRVisitor {
   }
 
   const std::unordered_map<const Call*, VarPtr>& task_id_by_call() const { return task_id_by_call_; }
+  const std::unordered_map<const Var*, VarPtr>& task_id_by_var() const { return task_id_by_var_; }
 
  private:
   std::unordered_map<const Var*, CallPtr> call_by_tuple_;
   std::unordered_map<const Var*, std::unordered_map<int, VarPtr>> tuple_get_by_tuple_;
   std::unordered_map<const Call*, VarPtr> task_id_by_call_;
+  std::unordered_map<const Var*, VarPtr> task_id_by_var_;
 };
 
 class AutoDepMutator : public IRMutator {
  public:
   AutoDepMutator(ProgramPtr program, const StorageRootAnalysis* storage,
-                 const std::unordered_map<const Call*, VarPtr>* task_id_by_call)
-      : program_(std::move(program)), storage_(storage), task_id_by_call_(task_id_by_call) {}
+                 const std::unordered_map<const Call*, VarPtr>* task_id_by_call,
+                 const std::unordered_map<const Var*, VarPtr>* task_id_by_var)
+      : program_(std::move(program)),
+        storage_(storage),
+        task_id_by_call_(task_id_by_call),
+        task_id_by_var_(task_id_by_var) {}
 
  protected:
   StmtPtr VisitStmt_(const ForStmtPtr& op) override {
@@ -619,11 +639,12 @@ class AutoDepMutator : public IRMutator {
     VarPtr task_id = LookupTaskId(op.get());
     bool needs_fallback = false;
     auto user_edges = GetDepAttr(call, kAttrManualDepEdges);
-    auto accesses = SummarizeAccesses(call, &needs_fallback);
+    auto summary = SummarizeAccesses(call, user_edges, &needs_fallback);
     if (needs_fallback) {
       fallback_stack_.back() = true;
       return call;
     }
+    auto& accesses = summary.accesses;
     if (accesses.empty()) return call;
 
     std::vector<VarPtr> compiler_edges;
@@ -682,8 +703,17 @@ class AutoDepMutator : public IRMutator {
     return it != task_id_by_call_->end() ? it->second : nullptr;
   }
 
-  std::vector<StorageAccess> SummarizeAccesses(const CallPtr& call, bool* needs_fallback) const {
-    std::vector<StorageAccess> out;
+  VarPtr LookupTaskIdForVar(const ExprPtr& expr) const {
+    if (!task_id_by_var_) return nullptr;
+    auto var = AsVarLike(expr);
+    if (!var) return nullptr;
+    auto it = task_id_by_var_->find(var.get());
+    return it != task_id_by_var_->end() ? it->second : nullptr;
+  }
+
+  AccessSummary SummarizeAccesses(const CallPtr& call, const std::vector<VarPtr>& user_edges,
+                                  bool* needs_fallback) const {
+    AccessSummary out;
     auto dirs = call->GetArgDirections();
     if (dirs.size() != call->args_.size()) return out;
 
@@ -707,11 +737,14 @@ class AutoDepMutator : public IRMutator {
       if (kind.has_value()) {
         auto resolved = storage_ ? storage_->ResolveExprStatus(call->args_[i]) : ResolvedLocation{};
         if (resolved.status != LocationStatus::Known) {
+          if (kind == AccessKind::Read && ContainsVar(user_edges, LookupTaskIdForVar(call->args_[i]))) {
+            continue;
+          }
           if (needs_fallback) *needs_fallback = true;
           return {};
         }
         for (const auto& alternative : resolved.location.alternatives) {
-          out.push_back(StorageAccess{alternative, *kind, nullptr});
+          out.accesses.push_back(StorageAccess{alternative, *kind, nullptr});
         }
       }
     }
@@ -721,6 +754,7 @@ class AutoDepMutator : public IRMutator {
   ProgramPtr program_;
   const StorageRootAnalysis* storage_;
   const std::unordered_map<const Call*, VarPtr>* task_id_by_call_;
+  const std::unordered_map<const Var*, VarPtr>* task_id_by_var_;
   std::vector<std::vector<StorageAccess>> prior_stack_;
   std::vector<bool> fallback_stack_;
   size_t loop_depth_ = 0;
@@ -748,7 +782,7 @@ Pass AutoDeriveTaskDependencies() {
       SubmitTaskIdCollector task_ids;
       task_ids.VisitStmt(func->body_);
 
-      AutoDepMutator mutator(program, &storage, &task_ids.task_id_by_call());
+      AutoDepMutator mutator(program, &storage, &task_ids.task_id_by_call(), &task_ids.task_id_by_var());
       auto new_body = mutator.VisitStmt(func->body_);
       if (new_body.get() == func->body_.get()) continue;
 
