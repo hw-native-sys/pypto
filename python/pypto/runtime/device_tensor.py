@@ -28,7 +28,7 @@ read the data back must do so explicitly via
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -78,3 +78,80 @@ class DeviceTensor:
 
     def __repr__(self) -> str:
         return f"DeviceTensor(data_ptr=0x{self.data_ptr:x}, shape={self.shape}, dtype={self.dtype})"
+
+
+def default_init_prep(init: torch.Tensor) -> torch.Tensor:
+    """Default host-buffer prep for an upload: a defensive contiguous CPU copy."""
+    return init.contiguous().cpu()
+
+
+def alloc_device_tensor(
+    *,
+    malloc: Callable[[int], int],
+    copy_to: Callable[[int, int, int], None],
+    free: Callable[[int], None],
+    shape: Sequence[int],
+    dtype: torch.dtype,
+    init: torch.Tensor | None = None,
+    init_prep: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> DeviceTensor:
+    """Allocate a device buffer and (optionally) upload host data.
+
+    Shared by :meth:`pypto.runtime.Worker.alloc_tensor` (L2) and
+    :meth:`pypto.runtime.distributed_runner.DistributedRuntime.alloc_tensor`
+    (L3). The ``malloc`` / ``copy_to`` / ``free`` callables are injected with
+    any ``worker_id`` already bound, so this helper stays free of worker scope.
+
+    When *init* is provided its dtype and shape must match exactly. The host
+    buffer actually uploaded is ``init_prep(init)``: the default makes a
+    defensive contiguous CPU copy (L2), while L3 overrides it to *reject* a copy
+    and require ``init`` already be shared memory (the upload runs in a forked
+    child that can only see host memory inherited at fork). If any step after
+    ``malloc`` raises, the allocation is rolled back via ``free`` before the
+    exception propagates so callers never observe a leaked pointer.
+
+    Args:
+        malloc: ``malloc(nbytes) -> device_ptr``.
+        copy_to: ``copy_to(dst_dev_ptr, src_host_ptr, nbytes) -> None`` (H2D).
+        free: ``free(device_ptr) -> None`` (rollback on failure).
+        shape: Logical tensor shape (all dimensions positive).
+        dtype: Element ``torch.dtype``.
+        init: Optional host tensor to upload into the buffer.
+        init_prep: Maps ``init`` to the host tensor actually uploaded. Defaults
+            to a defensive ``init.contiguous().cpu()`` copy.
+
+    Returns:
+        A :class:`DeviceTensor` referencing the allocated buffer.
+    """
+    # Validate the shape up front (before malloc) and without coercion, mirroring
+    # DeviceTensor's constructor contract: bool is an int subclass, so reject it
+    # explicitly; only positive int dimensions are allowed. This avoids allocating
+    # for a wrong logical shape (e.g. an empty shape would make n_elems == 1) and
+    # gives the same error the resulting DeviceTensor would raise — just earlier.
+    shape_t = tuple(shape)
+    if not shape_t:
+        raise ValueError("shape must be non-empty")
+    for d in shape_t:
+        if isinstance(d, bool) or not isinstance(d, int):
+            raise TypeError(f"shape must contain ints, got {shape_t!r}")
+    if any(d <= 0 for d in shape_t):
+        raise ValueError(f"shape must contain only positive dimensions, got {shape_t}")
+    n_elems = 1
+    for d in shape_t:
+        n_elems *= d
+    elem = torch.tensor([], dtype=dtype).element_size()
+    nbytes = n_elems * elem
+    ptr = malloc(nbytes)
+    try:
+        if init is not None:
+            if init.dtype != dtype or tuple(init.shape) != shape_t:
+                raise ValueError(
+                    f"init must have shape={shape_t} dtype={dtype}, "
+                    f"got shape={tuple(init.shape)} dtype={init.dtype}"
+                )
+            host = (init_prep or default_init_prep)(init)
+            copy_to(ptr, host.data_ptr(), nbytes)
+        return DeviceTensor(ptr, shape_t, dtype)
+    except Exception:
+        free(ptr)
+        raise

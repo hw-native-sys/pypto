@@ -146,11 +146,20 @@ class TestAllocTensor:
         worker.alloc_tensor((4, 8), torch.float32, init=host)
         fake_simpler_worker.copy_to.assert_called_once()
 
-    def test_alloc_negative_dim_rejected_before_malloc(self, fake_simpler_worker, worker):
-        # Negative dims would silently produce a positive nbytes via tuple(int(d) for ...).
-        # The pre-malloc validation must reject them before any allocation happens.
-        with pytest.raises(ValueError, match="non-negative"):
+    def test_alloc_non_positive_dim_rejected_before_malloc(self, fake_simpler_worker, worker):
+        # The shape contract (mirroring DeviceTensor) requires positive int dims.
+        # Negative and zero dims must be rejected before any allocation happens —
+        # a zero dim would otherwise compute nbytes as 0 (empty shape -> nbytes 1).
+        with pytest.raises(ValueError, match="positive"):
             worker.alloc_tensor((-1, 4), torch.float32)
+        with pytest.raises(ValueError, match="positive"):
+            worker.alloc_tensor((0, 4), torch.float32)
+        fake_simpler_worker.malloc.assert_not_called()
+
+    def test_alloc_empty_shape_rejected_before_malloc(self, fake_simpler_worker, worker):
+        # An empty shape would make n_elems collapse to 1 and malloc a bogus buffer.
+        with pytest.raises(ValueError, match="non-empty"):
+            worker.alloc_tensor((), torch.float32)
         fake_simpler_worker.malloc.assert_not_called()
 
     def test_alloc_copy_to_failure_frees_pointer(self, fake_simpler_worker, worker):

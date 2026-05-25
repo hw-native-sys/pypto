@@ -29,6 +29,24 @@ from simpler_setup.torch_interop import (  # pyright: ignore[reportMissingImport
     torch_dtype_to_datatype,
 )
 
+from .device_tensor import DeviceTensor
+
+
+def device_tensor_to_continuous(dt: DeviceTensor) -> ContinuousTensor:
+    """Wrap a worker-resident :class:`DeviceTensor` as a ``ContinuousTensor``.
+
+    ``child_memory=True`` tells the runtime the buffer is already on the device,
+    so it skips the H2D/D2H copies — the buffer stays caller-managed. Shared by
+    the L2 (:func:`pypto.runtime.runner.execute_compiled`) and L3
+    (:func:`pypto.runtime.tensor_arg.make_tensor_arg`) calling conventions.
+    """
+    try:
+        dt_enum = torch_dtype_to_datatype(dt.dtype)
+    except KeyError as e:
+        raise ValueError(f"Unsupported DeviceTensor dtype: {dt.dtype}") from e
+    return ContinuousTensor.make(data=dt.data_ptr, shapes=dt.shape, dtype=dt_enum, child_memory=True)
+
+
 __all__ = [
     "CallConfig",
     "ChipCallable",
@@ -37,6 +55,7 @@ __all__ = [
     "CoreCallable",
     "DataType",
     "Worker",
+    "device_tensor_to_continuous",
     "make_tensor_arg",
     "scalar_to_uint64",
     "torch_dtype_to_datatype",

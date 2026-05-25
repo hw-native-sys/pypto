@@ -27,12 +27,9 @@ Example::
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Sequence
 from typing import Any
 
-import torch
-
-from .device_tensor import DeviceTensor
+from .device_memory import DeviceMemoryHandle
 from .runner import RunConfig
 
 # ``simpler`` is loaded lazily on first ``Worker(...)`` instantiation, matching
@@ -66,7 +63,7 @@ _ACTIVE_WORKERS: contextvars.ContextVar[tuple[Worker, ...]] = contextvars.Contex
 _DEFAULT_RUNTIME = "host_build_graph"
 
 
-class Worker:
+class Worker(DeviceMemoryHandle):
     """Reusable execution Worker bound to one ``(level, platform, device_id, runtime)``.
 
     A ``Worker`` constructed with ``level=2`` auto-initializes device state in
@@ -171,6 +168,10 @@ class Worker:
                 f"Use `with worker:` or call `worker.init()` first."
             )
 
+    def _require_ready(self, op: str) -> None:
+        # DeviceMemoryHandle hook: device-memory ops need an initialized Worker.
+        self._require_initialized(op)
+
     def malloc(self, nbytes: int, *, worker_id: int = 0) -> int:
         """Allocate ``nbytes`` of device memory; returns an opaque pointer.
 
@@ -217,72 +218,10 @@ class Worker:
         self._require_initialized("copy_from")
         self._impl.copy_from(dst_host_ptr, src_dev_ptr, nbytes, worker_id)
 
-    # ------------------------------------------------------------------
-    # DeviceTensor convenience helpers
-    # ------------------------------------------------------------------
-
-    def alloc_tensor(
-        self,
-        shape: Sequence[int],
-        dtype: torch.dtype,
-        *,
-        init: torch.Tensor | None = None,
-        worker_id: int = 0,
-    ) -> DeviceTensor:
-        """Allocate a device buffer and (optionally) upload host data.
-
-        Convenience wrapper around :meth:`malloc` + :meth:`copy_to`.  When
-        *init* is provided, its dtype and shape must match exactly; the
-        tensor is moved to CPU and made contiguous before upload.  If any
-        step after :meth:`malloc` raises (validation, copy, …), the
-        allocation is rolled back via :meth:`free` before the exception
-        propagates so callers never observe a leaked pointer.
-
-        Returns:
-            A :class:`DeviceTensor` referencing the allocated buffer.  Free
-            it via :meth:`free_tensor` (or :meth:`free` with the underlying
-            ``data_ptr``) before this Worker is closed.
-        """
-        # DeviceTensor only carries (data_ptr, shape, dtype) — no worker_id.
-        # Until the handle encodes worker scope, restrict the convenience
-        # helpers to the default worker so ``free_tensor`` cannot silently
-        # free a different worker's pointer.
-        if worker_id != 0:
-            raise ValueError(
-                "Worker.alloc_tensor currently only supports worker_id=0. "
-                "Use malloc/copy_to directly if you need a different worker."
-            )
-        shape_t = tuple(int(d) for d in shape)
-        if any(d < 0 for d in shape_t):
-            raise ValueError(f"shape must contain only non-negative dimensions, got {shape_t}")
-        n_elems = 1
-        for d in shape_t:
-            n_elems *= d
-        elem = torch.tensor([], dtype=dtype).element_size()
-        nbytes = n_elems * elem
-        ptr = self.malloc(nbytes, worker_id=worker_id)
-        try:
-            if init is not None:
-                if init.dtype != dtype or tuple(init.shape) != shape_t:
-                    raise ValueError(
-                        f"init must have shape={shape_t} dtype={dtype}, "
-                        f"got shape={tuple(init.shape)} dtype={init.dtype}"
-                    )
-                host = init.contiguous().cpu()
-                self.copy_to(ptr, host.data_ptr(), nbytes, worker_id=worker_id)
-            return DeviceTensor(ptr, shape_t, dtype)
-        except Exception:
-            self.free(ptr, worker_id=worker_id)
-            raise
-
-    def free_tensor(self, t: DeviceTensor, *, worker_id: int = 0) -> None:
-        """Release a buffer previously returned by :meth:`alloc_tensor`."""
-        if worker_id != 0:
-            raise ValueError(
-                "Worker.free_tensor currently only supports worker_id=0. "
-                "Use free directly if you need a different worker."
-            )
-        self.free(t.data_ptr, worker_id=worker_id)
+    # ``alloc_tensor`` / ``free_tensor`` are inherited from DeviceMemoryHandle.
+    # L2 uses the default ``_prepare_init`` (a defensive contiguous CPU copy) and
+    # the default ``_WORKER_KIND`` ("worker"); only ``_require_ready`` is
+    # overridden above to require an initialized Worker.
 
     # ------------------------------------------------------------------
     # Binding accessors

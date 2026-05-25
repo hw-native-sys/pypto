@@ -45,7 +45,7 @@ class TestDistributedCodegen:
 
         # Verify imports
         assert "from simpler.task_interface import TaskArgs, TensorArgType" in code
-        assert "from simpler_setup.torch_interop import make_tensor_arg" in code
+        assert "from pypto.runtime.tensor_arg import make_tensor_arg" in code
 
         # Verify function definition
         assert "def host_orch" in code
@@ -156,7 +156,7 @@ class TestDistributedCodegen:
         code = cg.generate(program)
 
         assert "from simpler.task_interface import TaskArgs, TensorArgType" in code
-        assert "from simpler_setup.torch_interop import make_tensor_arg" in code
+        assert "from pypto.runtime.tensor_arg import make_tensor_arg" in code
 
     def test_tensor_arg_type_tags(self):
         """Parameter directions map to correct TensorArgType tags."""

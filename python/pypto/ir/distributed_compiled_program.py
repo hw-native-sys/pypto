@@ -17,16 +17,28 @@ through simpler's distributed runtime (Worker level=3)::
 """
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from pypto.backend import BackendType
 from pypto.pypto_core.ir import Program, Role, level_to_linqu_level
+from pypto.runtime.device_tensor import DeviceTensor
 
-from .compiled_program import CallArg, _default_platform, _extract_param_infos, _ParamInfo, _to_torch_dtype
+from .compiled_program import (
+    CallArg,
+    _default_platform,
+    _extract_param_infos,
+    _ParamInfo,
+    _to_torch_dtype,
+    _validate_device_tensor,
+)
+
+if TYPE_CHECKING:
+    from pypto.runtime.distributed_runner import DistributedRuntime
 
 
 def _extract_param_infos_from_func(func):
@@ -182,7 +194,7 @@ class DistributedCompiledProgram:
         self,
         *args: CallArg,
         config: Any = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...] | None:
+    ) -> torch.Tensor | DeviceTensor | tuple[torch.Tensor | DeviceTensor, ...] | None:
         """Execute the distributed program via simpler Worker(level=3)."""
         from pypto.runtime.distributed_runner import execute_distributed  # noqa: PLC0415
 
@@ -205,12 +217,19 @@ class DistributedCompiledProgram:
                 f"Parameters: {[p.name for p in param_infos]}"
             )
 
-        # Validate and coerce args
-        coerced: list[torch.Tensor] = []
+        # Validate and coerce args. Tensor params accept a host ``torch.Tensor``
+        # or a worker-resident ``DeviceTensor`` (skips H2D/D2H), matching the L2
+        # ``CompiledProgram`` calling convention.
+        coerced: list[torch.Tensor | DeviceTensor] = []
         for info, arg in zip(param_infos, all_args, strict=True):
+            if isinstance(arg, DeviceTensor):
+                _validate_device_tensor(arg, info)
+                coerced.append(arg)
+                continue
             if not isinstance(arg, torch.Tensor):
                 raise TypeError(
-                    f"Distributed programs only support tensor parameters. "
+                    f"Distributed programs only support tensor parameters "
+                    f"(torch.Tensor host or DeviceTensor worker-resident). "
                     f"Parameter {info.name!r} got {type(arg).__name__}"
                 )
             coerced.append(arg)
@@ -221,6 +240,46 @@ class DistributedCompiledProgram:
             return None
         outputs = [coerced[i] for i in output_indices]
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
+
+    def prepare(
+        self,
+        config: Any = None,
+        *,
+        sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
+    ) -> "DistributedRuntime":
+        """Prepare a reusable L3 execution handle (setup once, dispatch many).
+
+        Runs the expensive setup (``compile_and_assemble``, generated-module
+        loading, ``Worker(level=3)`` construction + registration + ``init()``)
+        exactly once and returns a :class:`DistributedRuntime` that dispatches
+        many times on the held Worker. The handle also exposes device-memory
+        helpers (``alloc_tensor`` / ``malloc`` / ``copy_to`` / ``copy_from`` /
+        ``free``) for building worker-resident :class:`DeviceTensor` buffers
+        that survive across dispatches.
+
+        Per-call inputs and outputs are reused-in-place **shared-memory** host
+        ``torch.Tensor`` buffers (allocated before ``prepare()``) and/or
+        worker-resident ``DeviceTensor`` / ``ContinuousTensor`` arguments.
+        Non-shared host tensors are rejected (the forked chip worker cannot see
+        a buffer allocated after the fork). The convenience host-to-device
+        upload of arbitrary host ``torch.Tensor`` inputs is only available on
+        the one-shot ``compile(...)(*args)`` / ``execute_distributed`` path.
+
+        Args:
+            config: Optional run configuration (reserved; currently unused).
+            sub_worker_overrides: Replace a generated sub-worker placeholder
+                (matched by name) with your own callable — e.g. a real sampling
+                closure in place of the codegen stub. Each name must be a
+                sub-worker the program declares; an unknown name raises
+                ``ValueError``.
+
+        Returns:
+            A :class:`DistributedRuntime`; use it as a context manager or call
+            ``close()`` when done.
+        """
+        from pypto.runtime.distributed_runner import DistributedRuntime  # noqa: PLC0415
+
+        return DistributedRuntime(self, config, sub_worker_overrides=sub_worker_overrides)
 
     @staticmethod
     def _build_full_args(input_args, param_infos, output_indices):

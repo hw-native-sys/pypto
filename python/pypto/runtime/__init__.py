@@ -24,6 +24,7 @@ Example::
     compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
+from .device_memory import DeviceMemoryHandle
 from .device_tensor import DeviceTensor
 from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
@@ -41,6 +42,7 @@ __all__ = [
     "execute_compiled",
     "configure_log",
     "log_level",
+    "DeviceMemoryHandle",
     "DeviceTensor",
     "RunConfig",
     "RunResult",
