@@ -13,13 +13,13 @@ import ctypes
 import os
 from unittest.mock import MagicMock, patch
 
+import pypto.runtime.device_runner  # noqa: F401 — ensure submodule attr exists for patch() targets
 import pytest
 import torch
+from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
 from pypto.runtime import DeviceTensor
-
-from pypto import DataType, backend, ir
 
 
 def _make_program_with_orchestration(*, has_return: bool = False) -> ir.Program:
@@ -635,6 +635,7 @@ class TestCompiledProgramExtraction:
             oa_helper.return_value = "fake_orch_args"
             orch_args, coerced, return_style = cp.build_orch_args(a, b)
 
+        assert orch_args == "fake_orch_args"
         assert return_style is True
         assert len(coerced) == 3
         # Output slot is at index 2 (output_indices == [2]); a real torch.Tensor was allocated.
@@ -755,9 +756,7 @@ class TestCompiledProgramExtraction:
 
         # spec doesn't include "output_prefix", so any attempted set would fail.
         # Reaching here means _build_call_config correctly skipped it.
-        assert not hasattr(fake_call_config, "output_prefix") or not isinstance(
-            fake_call_config.output_prefix, str
-        )
+        assert not hasattr(fake_call_config, "output_prefix")
 
 
 class TestCompiledProgramExtractionMultiOrch:

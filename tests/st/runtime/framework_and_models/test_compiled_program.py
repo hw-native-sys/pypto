@@ -139,14 +139,17 @@ class TestJitCompiledProgram:
         assert compiled.has_return is True
 
 
-def _manual_dispatch(compiled, *args, device_id, config=None):
+def _manual_dispatch(compiled, *args, device_id, config=None, call_config=None):
     """Drive a hand-built simpler.Worker via the extraction surface; return coerced list."""
-    from simpler.worker import Worker as SimplerWorker
+    from simpler.worker import Worker as SimplerWorker  # noqa: PLC0415 — lazy: skip on host-only CI
 
     cc = compiled.chip_callable
     rn = compiled.runtime_name
     orch_args, coerced, return_style = compiled.build_orch_args(*args)
-    cfg = compiled.build_call_config(config) if config is not None else compiled.build_call_config()
+    if call_config is not None:
+        cfg = call_config
+    else:
+        cfg = compiled.build_call_config(config) if config is not None else compiled.build_call_config()
     w = SimplerWorker(level=2, device_id=device_id, platform=compiled.platform, runtime=rn)
     w.init()
     try:
@@ -221,7 +224,7 @@ class TestManualWorkerExtraction:
         compiled = _get_cached_compiled(tile_add_128)
         cfg = compiled.build_call_config(test_config, block_dim=1)
         assert cfg.block_dim == 1
-        coerced, _ = _manual_dispatch(compiled, a, b, device_id=test_config.device_id)
+        coerced, _ = _manual_dispatch(compiled, a, b, device_id=test_config.device_id, call_config=cfg)
         assert torch.allclose(coerced[compiled.output_indices[0]], torch.full((128, 128), 5.0))
 
 

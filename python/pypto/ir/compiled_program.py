@@ -608,6 +608,11 @@ class CompiledProgram:
         are responsible for creating ``dfx_dir`` beforehand — simpler's
         ``validate()`` rejects DFX-enabled calls without a valid prefix.
         """
+        if self._sub_chip_dirs:
+            raise TypeError(
+                f"Multi-orch program has {len(self._sub_chip_dirs)} orchestrations "
+                f"{sorted(self._sub_chip_dirs)}; use compiled[<name>].build_call_config(...)."
+            )
         from pypto.runtime.runner import RunConfig, _build_call_config  # noqa: PLC0415
 
         run_config = config if config is not None else RunConfig()
