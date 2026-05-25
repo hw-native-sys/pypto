@@ -36,6 +36,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/codegen/codegen_base.h"
+#include "pypto/codegen/distributed/comm_layout.h"
 #include "pypto/codegen/pto/pto_codegen.h"
 #include "pypto/codegen/pto/pto_type_utils.h"
 #include "pypto/core/dtype.h"
@@ -52,6 +53,7 @@ namespace pypto {
 namespace backend {
 
 using ir::As;
+using ir::AsTensorTypeLike;
 using ir::AsVarLike;
 using ir::CallPtr;
 using ir::ExprPtr;
@@ -1599,7 +1601,7 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "tensor.read requires 2 arguments, but got " << op->args_.size();
 
-  auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
+  auto tensor_type_ptr = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.read first argument must be TensorType";
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
@@ -1635,7 +1637,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 3) << "tensor.write requires 3 arguments, but got " << op->args_.size();
 
-  auto tensor_type_ptr = As<ir::TensorType>(op->args_[0]->GetType());
+  auto tensor_type_ptr = AsTensorTypeLike(op->args_[0]->GetType());
   INTERNAL_CHECK_SPAN(tensor_type_ptr, op->span_) << "tensor.write first argument must be TensorType";
 
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
@@ -2479,30 +2481,23 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   const std::string cmp_attr = cmp_int == static_cast<int>(ir::WaitCmp::kEq) ? "eq" : "ge";
 
   // Reuse the local tensor_view created by EmitMakeTensorViews — wait only
-  // touches the local signal slot.
+  // touches the local signal slot. The view's MLIR type must match the
+  // emit-time form (all dims printed as ``?``), not the IR-level concrete
+  // shape, otherwise the SSA value picks up two incompatible types when other
+  // uses (tile.load, etc.) reference the same view. Mirrors tile.load at
+  // line 1192 above.
   std::string local_view = codegen.GetOrCreateTensorView(signal_var);
-  std::ostringstream local_view_type;
-  local_view_type << "!pto.tensor_view<";
-  const auto& shape = dist_type->shape_;
-  const size_t rank = shape.size();
-  for (size_t i = 0; i < rank; ++i) {
-    if (i > 0) local_view_type << "x";
-    if (auto ci = As<ir::ConstInt>(shape[i])) {
-      local_view_type << ci->value_;
-    } else {
-      local_view_type << "?";
-    }
-  }
+  std::string local_view_type = codegen.GetTensorViewTypeString(dist_type.get());
   const std::string dtype_str = codegen.GetTypeString(dist_type->dtype_);
-  local_view_type << "x" << dtype_str << ">";
+  const size_t rank = dist_type->shape_.size();
 
   std::vector<std::string> one_dims(rank, "1");
   std::vector<std::string> one_size_ssa(rank,
                                         codegen.GetOrEmitConstant(static_cast<int64_t>(1), DataType::INDEX));
   std::string partition_type = MakePartitionTensorViewType(one_dims, dtype_str);
-  std::string partition_view = EmitPartitionViewPTO(
-      signal_var->name_hint_ + "_local", local_view, local_view_type.str(), partition_type,
-      GetExprCodes(offsets_tuple->elements_, codegen), one_size_ssa, codegen);
+  std::string partition_view =
+      EmitPartitionViewPTO(signal_var->name_hint_ + "_local", local_view, local_view_type, partition_type,
+                           GetExprCodes(offsets_tuple->elements_, codegen), one_size_ssa, codegen);
 
   // PTOAS contract: twait expected value's MLIR type must match the signal
   // element type. Emit using the expected value's own ScalarType — see notify
@@ -2735,6 +2730,19 @@ static std::string EmitLocalArrayValue(codegen::PTOCodegen& codegen, const ir::E
 // ============================================================================
 // RegisterPTOOps: Register all standard PTO ops to the given backend
 // ============================================================================
+
+// Emit ``%rk_pair = pto.load_scalar %ctx[%slot] : !pto.ptr<i64> -> i64`` for
+// the (rankId, rankNum) u64 slot. Shared by ``pld.system.rank`` (low 32 bits)
+// and ``pld.system.nranks`` (high 32 bits) — see comm_layout.h for the static
+// asserts that anchor rankNum at rankId + 4 in the same i64 slot.
+static std::string EmitLoadRankPair(codegen::PTOCodegen& cg, const std::string& ctx_ssa) {
+  namespace cl = codegen::distributed::comm_layout;
+  constexpr int64_t kRankSlotIdx = static_cast<int64_t>(cl::kRankIdOffset / cl::kWindowSlotStride);
+  std::string slot_c = cg.GetOrEmitConstant(kRankSlotIdx, DataType::INDEX);
+  std::string rk_pair = cg.NewTemp();
+  cg.Emit(rk_pair + " = pto.load_scalar " + ctx_ssa + "[" + slot_c + "] : !pto.ptr<i64> -> i64");
+  return rk_pair;
+}
 
 void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exclude_ops) {
   // Register simple N-ary ops
@@ -3001,6 +3009,68 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeNotifyCodegenPTO(op, codegen); });
   reg("pld.system.wait",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeWaitCodegenPTO(op, codegen); });
+
+  // Distributed N7 ops — CommContext accessor lowering.
+  //
+  // ``pld.system.get_comm_ctx(dist_t) -> CommCtxType``: pure SSA alias. No
+  // MLIR is emitted; the ctx-ptr arg slot that PTOCodegen's
+  // ``GenerateFunction`` appended for ``dist_t`` (see
+  // ``fs_.dist_tensor_to_ctx`` / ``GetCommCtxSSAFor``) is published as the
+  // current expression value, which the surrounding ``VisitStmt_(AssignStmt)``
+  // then binds to the LHS Var. Downstream ``pld.system.rank(ctx)`` /
+  // ``pld.system.nranks(ctx)`` codegen resolves ``ctx`` via the standard
+  // ``GetExprAsCode(call->args_[0])`` path.
+  reg("pld.system.get_comm_ctx",
+      [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
+        auto& cg = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+        CHECK(op->args_.size() == 1) << "pld.system.get_comm_ctx expects exactly 1 argument, got "
+                                     << op->args_.size();
+        auto var = ir::AsVarLike(op->args_[0]);
+        CHECK(var) << "pld.system.get_comm_ctx expects a Var (DistributedTensor param), got "
+                   << op->args_[0]->TypeName();
+        std::string ctx_ssa = cg.GetCommCtxSSAFor(var.get());
+        CHECK(!ctx_ssa.empty())
+            << "No CommContext ptr arg threaded for DistributedTensor '" << var->name_hint_
+            << "' — ensure the func.func ctx segment was emitted (PTOCodegen::GenerateFunction)";
+        if (auto lhs = cg.GetCurrentResultVar()) {
+          cg.RegisterVarToMlir(lhs, ctx_ssa);
+        }
+        cg.SetCurrentExprValue(ctx_ssa);
+        return "";
+      });
+
+  // ``pld.system.rank(ctx) -> i32``: low 32 bits of the (rankId, rankNum)
+  // u64 slot. Emits ``pto.load_scalar`` (via EmitLoadRankPair) + arith.trunci.
+  reg("pld.system.rank", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
+    auto& cg = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 1) << "pld.system.rank expects exactly 1 argument, got " << op->args_.size();
+    std::string ctx_ssa = cg.GetExprAsCode(op->args_[0]);
+    std::string rk_pair = EmitLoadRankPair(cg, ctx_ssa);
+    std::string rk = cg.GetCurrentResultTarget();
+    cg.Emit(rk + " = arith.trunci " + rk_pair + " : i64 to i32");
+    cg.SetCurrentExprValue(rk);
+    return "";
+  });
+
+  // ``pld.system.nranks(ctx) -> i32``: high 32 bits of the same slot —
+  // ``kRankNumOffset == kRankIdOffset + 4`` lets us shift the already-loaded
+  // i64 right by 32 instead of issuing a second pto.load_scalar.
+  reg("pld.system.nranks", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) -> std::string {
+    auto& cg = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+    CHECK(op->args_.size() == 1) << "pld.system.nranks expects exactly 1 argument, got " << op->args_.size();
+    namespace cl = codegen::distributed::comm_layout;
+    static_assert(cl::kRankNumOffset == cl::kRankIdOffset + 4,
+                  "pld.system.nranks codegen assumes rankNum sits in the high 32 bits of rankId's i64 slot");
+    std::string ctx_ssa = cg.GetExprAsCode(op->args_[0]);
+    std::string rk_pair = EmitLoadRankPair(cg, ctx_ssa);
+    std::string c32 = cg.GetOrEmitConstant(static_cast<int64_t>(32), DataType::INT64);
+    std::string rn_i64 = cg.NewTemp();
+    cg.Emit(rn_i64 + " = arith.shrui " + rk_pair + ", " + c32 + " : i64");
+    std::string rn = cg.GetCurrentResultTarget();
+    cg.Emit(rn + " = arith.trunci " + rn_i64 + " : i64 to i32");
+    cg.SetCurrentExprValue(rn);
+    return "";
+  });
   reg("pld.tensor.get",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeGetCodegenPTO(op, codegen); });
   reg("pld.tensor.put",

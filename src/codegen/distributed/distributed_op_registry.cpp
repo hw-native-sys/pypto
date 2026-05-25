@@ -1,0 +1,43 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include "pypto/codegen/distributed/distributed_op_registry.h"
+
+#include <optional>
+#include <string>
+#include <utility>
+
+#include "pypto/core/error.h"
+
+namespace pypto {
+namespace codegen {
+
+DistributedOpRegistry& DistributedOpRegistry::GetInstance() {
+  static DistributedOpRegistry instance;
+  return instance;
+}
+
+void DistributedOpRegistry::Register(const std::string& op_name, CodegenFunc func) {
+  auto [it, inserted] = registry_.emplace(op_name, std::move(func));
+  CHECK(inserted) << "Duplicate distributed op registration for op '" << op_name << "'";
+}
+
+std::optional<DistributedOpRegistry::CodegenFunc> DistributedOpRegistry::Get(
+    const std::string& op_name) const {
+  auto it = registry_.find(op_name);
+  if (it != registry_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+}  // namespace codegen
+}  // namespace pypto

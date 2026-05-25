@@ -190,6 +190,7 @@ binds physical buffers to.
   `test_l3_notify_wait.py`, `test_l3_get.py`, `test_l3_put.py`. These are
   currently **skipped** pending the N7 host codegen (`add_scalar(ctx)` per `DistributedTensor`,
   `ContinuousTensor.make(..., child_memory=True)`) and N8 driver glue
-  (`HostBufferStaging` / `ChipBootstrapConfig` window wiring). The embedded
+  (`HostBufferStaging` window wiring on the codegen-emitted
+  `orch.allocate_domain(...)` block). The embedded
   programs and golden checks are the canonical e2e contracts — drop the skip
   markers once that host-side work lands.

@@ -44,7 +44,8 @@ class TestDistributedCodegen:
         code = cg.generate(program)
 
         # Verify imports
-        assert "from simpler.task_interface import TaskArgs, TensorArgType" in code
+        assert "from simpler.task_interface import " in code
+        assert "TaskArgs" in code and "TensorArgType" in code
         assert "from pypto.runtime.tensor_arg import make_tensor_arg" in code
 
         # Verify function definition
@@ -155,7 +156,8 @@ class TestDistributedCodegen:
         cg = codegen.DistributedCodegen()
         code = cg.generate(program)
 
-        assert "from simpler.task_interface import TaskArgs, TensorArgType" in code
+        assert "from simpler.task_interface import " in code
+        assert "TaskArgs" in code and "TensorArgType" in code
         assert "from pypto.runtime.tensor_arg import make_tensor_arg" in code
 
     def test_tensor_arg_type_tags(self):

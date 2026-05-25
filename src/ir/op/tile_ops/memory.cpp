@@ -231,9 +231,7 @@ TypePtr DeduceTileStoreType(const std::vector<ExprPtr>& args,
 
   // Third argument must be the output tensor. AsTensorTypeLike accepts both
   // plain TensorType and DistributedTensorType — the latter is needed for the
-  // N6 stage-in pattern where a kernel writes a local tile into its own
-  // window-bound DistributedTensor slice (e.g. ring-shuffle Phase 1 in
-  // tests/st/distributed/test_l3_remote_load.py).
+  // local operation on DistributedTensor.
   auto output_tensor_type = AsTensorTypeLike(args[2]->GetType());
   CHECK(output_tensor_type)
       << "The operator " << op_name

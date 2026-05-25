@@ -14,8 +14,8 @@ cross-rank synchronisation primitives:
 
 * :func:`world_size` — host-only scalar returning the number of devices in the
   current distributed execution. Returns a :class:`Scalar` wrapping an
-  :class:`ir.Expr` of type ``ScalarType(INT64)``. Codegen later lowers each
-  call site to ``len(contexts)``.
+  :class:`ir.Expr` of type ``ScalarType(INT64)``. Codegen lowers each call
+  site to the ``world_size`` kwarg bound in the host_orch signature.
 * :func:`get_comm_ctx` — lift a :class:`pld.DistributedTensor` to its
   :class:`pld.CommCtx` handle. The op verifier (C++) refuses any argument
   that is not :class:`ir.DistributedTensorType`.

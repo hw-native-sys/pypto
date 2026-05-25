@@ -1868,9 +1868,12 @@ class IncoreTileOpsVerifier : public IRVisitor {
     const auto& entry = op_registry.GetEntry(call->op_->name_);
     if (entry.GetOpCategory() == "TensorOp" &&
         OpConversionRegistry::GetInstance().HasConversion(call->op_->name_)) {
-      // tensor.read/tensor.write on a gm_tensor (TensorType input) intentionally stays unconverted
+      // tensor.read/tensor.write on a gm_tensor (TensorType input) intentionally stays unconverted.
+      // ``AsTensorTypeLike`` also whitelists ``DistributedTensorType``, which the
+      // conversion registry above keeps as ``tensor.read`` / ``tensor.write`` so the
+      // PTO codegen can lower it as a local-rank ``pto.load_scalar`` / ``pto.store_scalar``.
       if ((call->op_->name_ == "tensor.read" || call->op_->name_ == "tensor.write") && !call->args_.empty() &&
-          As<TensorType>(call->args_[0]->GetType())) {
+          AsTensorTypeLike(call->args_[0]->GetType())) {
         return;
       }
 

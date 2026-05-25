@@ -14,7 +14,8 @@
  * @brief ``pld.system.world_size`` — host-only IR op returning the L3 world size.
  *
  * Returns a scalar ``INT64`` value equal to the number of devices participating
- * in the current distributed execution (``len(contexts)`` at codegen time).
+ * in the current distributed execution (the ``world_size`` kwarg bound in the
+ * host_orch signature at codegen time).
  *
  * The op takes no positional args, no kwargs, and no attrs; the parser is
  * responsible for ensuring the call appears inside a host-level orchestrator
@@ -55,7 +56,8 @@ REGISTER_OP("pld.system.world_size")
     .set_description(
         "Return the number of devices participating in the current distributed execution "
         "as a scalar INT64. Host-only: must appear inside a host-level orchestrator function "
-        "body. Codegen lowers each call site to ``len(contexts)``.")
+        "body. Codegen lowers each call site to the ``world_size`` kwarg "
+        "bound in the host_orch signature.")
     .set_op_category("DistributedOp")
     .no_argument()
     .no_memory_spec()

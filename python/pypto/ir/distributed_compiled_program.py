@@ -71,13 +71,18 @@ def _extract_param_infos_from_func(func):
 
 @dataclass
 class DistributedConfig:
-    """Configuration for L3 distributed execution."""
+    """Configuration for L3 distributed execution.
+
+    ``aicpu_thread_num=4`` matches the ``tensormap_and_ringbuffer`` runtime's
+    3-scheduler-plus-1-dispatcher layout; ``block_dim=None`` lets the L2
+    simpler runtime pick its own default.
+    """
 
     device_ids: list[int] = field(default_factory=lambda: [0])
     num_sub_workers: int = 0
     runtime: str = "tensormap_and_ringbuffer"
-    block_dim: int = 1
-    aicpu_thread_num: int = 1
+    block_dim: int | None = None
+    aicpu_thread_num: int = 4
 
 
 class DistributedCompiledProgram:

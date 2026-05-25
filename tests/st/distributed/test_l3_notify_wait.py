@@ -38,9 +38,9 @@ host-side glue still has open work:
   ``DistributedTensor`` formal parameter, plus the
   ``ContinuousTensor.make(..., child_memory=True)`` wrapper for each
   ``DistributedTensor`` arg.
-* **N8** distributed_runner.py must thread ``HostBufferStaging`` /
-  ``ChipBootstrapConfig`` for the inferred CommGroup so the runtime knows
-  which physical buffer to bind to each rank's window slot.
+* **N8** distributed_codegen must thread ``HostBufferStaging`` onto the
+  ``orch.allocate_domain(...)`` block for the inferred CommGroup so the
+  runtime knows which physical buffer to bind to each rank's window slot.
 
 Drop ``pytest.mark.skip`` once the above land — the program below and the
 golden check are the canonical e2e contract for ``pld.system.notify`` /
@@ -71,7 +71,7 @@ def _build_signal_handshake_program():
         def barrier_step(
             self,
             out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
             peer: pl.Scalar[pl.INT32],
             tag: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, 1], pl.INT32]:
@@ -94,15 +94,18 @@ def _build_signal_handshake_program():
             )
 
             # Phase 3: read our own cell back locally and surface the received
-            # tag as the output.
-            recv = pl.load(signal, [0, 0], [1, 1])
-            return pl.store(recv, [0, 0], out)
+            # tag as the output. Scalar read/write avoids the 32-byte tile
+            # alignment constraint that a ``pl.load([1, 1])`` of a 4-byte
+            # INT32 cell would otherwise hit.
+            val: pl.Scalar[pl.INT32] = pl.read(signal, [0, 0])
+            pl.write(out, [0, 0], val)
+            return out
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
             out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
             peer: pl.Scalar[pl.INT32],
             tag: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, 1], pl.INT32]:
@@ -124,16 +127,6 @@ def _build_signal_handshake_program():
     return SignalHandshake
 
 
-@pytest.mark.skip(
-    reason=(
-        "pld.system.notify / pld.system.wait end-to-end requires: (a) N7 "
-        "host_orch python codegen emitting add_scalar(ctx) per "
-        "DistributedTensor, plus the ContinuousTensor.make(..., "
-        "child_memory=True) wrapper; (b) N8 driver wiring CommGroup window "
-        "buffers. The InCore PTO codegen (N6 P1) is in place — drop this "
-        "skip once (a)-(b) land."
-    )
-)
 class TestL3NotifyWait:
     """L3 distributed runtime: cross-rank notify/wait handshake."""
 
@@ -154,8 +147,8 @@ class TestL3NotifyWait:
         outputs = torch.zeros((2, 1, 1), dtype=torch.int32)
         compiled(outputs)
 
-        # rank r reads its own cell, written by rank (r - 1) % nranks with
-        # tag = ((r - 1) % nranks) + 1 → rank 0 sees 2, rank 1 sees 1.
+        # rank r reads the tag written by rank (r-1) % nranks (= r-1+1 = r),
+        # i.e. for nranks=2: rank 0 sees 2, rank 1 sees 1.
         expected = torch.tensor([[[2]], [[1]]], dtype=torch.int32)
         got = outputs.flatten().tolist()
         assert torch.equal(outputs, expected), f"notify/wait handshake mismatch: got {got}"

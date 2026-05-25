@@ -3474,8 +3474,8 @@ class TestTileStoreDistributedDest:
     """``tile.store`` accepts ``DistributedTensorType`` as the destination.
 
     N6 stage-in pattern: a kernel writes a local tile into its own
-    window-bound DistributedTensor slice (e.g. ring-shuffle Phase 1 in
-    tests/st/distributed/test_l3_remote_load.py). The verifier reaches
+    window-bound DistributedTensor slice (e.g. allreduce Phase 1 in
+    tests/st/distributed/test_l3_allreduce.py). The verifier reaches
     DistributedTensorType through AsTensorTypeLike since
     DistributedTensorType inherits from TensorType but carries its own
     ObjectKind — exact-match As<TensorType>() would miss it.

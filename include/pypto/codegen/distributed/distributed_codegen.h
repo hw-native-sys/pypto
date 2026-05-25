@@ -64,6 +64,13 @@ class DistributedCodegen : public CodegenBase {
   int64_t GetConstIntValue(const ir::ExprPtr& expr) const override;
   std::string GetVarName(const ir::VarPtr& var) const override;
 
+  /// Public hook for op codegen functions registered via
+  /// :c:macro:`REGISTER_DISTRIBUTED_OP`. Marks @p var_name as emitted so the
+  /// surrounding ``AssignStmt`` visitor does not re-emit ``var = ...`` on
+  /// the fall-through path. Mirrors the manual ``declared_vars_.insert(...)``
+  /// performed by in-class emitters such as :func:`EmitTensorCreate`.
+  void MarkDeclared(const std::string& var_name) { declared_vars_.insert(var_name); }
+
  protected:
   // Statement visitors
   void VisitStmt_(const ir::AssignStmtPtr& op) override;
@@ -79,6 +86,44 @@ class DistributedCodegen : public CodegenBase {
   void VisitExpr_(const ir::ConstIntPtr& op) override;
   void VisitExpr_(const ir::ConstFloatPtr& op) override;
   void VisitExpr_(const ir::ConstBoolPtr& op) override;
+
+  // Binary arithmetic expression visitors (src/codegen/distributed/distributed_scalar_expr_codegen.cpp)
+  void VisitExpr_(const ir::AddPtr& op) override;
+  void VisitExpr_(const ir::SubPtr& op) override;
+  void VisitExpr_(const ir::MulPtr& op) override;
+  void VisitExpr_(const ir::FloorDivPtr& op) override;
+  void VisitExpr_(const ir::FloorModPtr& op) override;
+  void VisitExpr_(const ir::FloatDivPtr& op) override;
+  void VisitExpr_(const ir::PowPtr& op) override;
+  void VisitExpr_(const ir::MinPtr& op) override;
+  void VisitExpr_(const ir::MaxPtr& op) override;
+
+  // Comparison expression visitors
+  void VisitExpr_(const ir::EqPtr& op) override;
+  void VisitExpr_(const ir::NePtr& op) override;
+  void VisitExpr_(const ir::LtPtr& op) override;
+  void VisitExpr_(const ir::LePtr& op) override;
+  void VisitExpr_(const ir::GtPtr& op) override;
+  void VisitExpr_(const ir::GePtr& op) override;
+
+  // Logical expression visitors
+  void VisitExpr_(const ir::AndPtr& op) override;
+  void VisitExpr_(const ir::OrPtr& op) override;
+  void VisitExpr_(const ir::XorPtr& op) override;
+
+  // Bitwise expression visitors
+  void VisitExpr_(const ir::BitAndPtr& op) override;
+  void VisitExpr_(const ir::BitOrPtr& op) override;
+  void VisitExpr_(const ir::BitXorPtr& op) override;
+  void VisitExpr_(const ir::BitShiftLeftPtr& op) override;
+  void VisitExpr_(const ir::BitShiftRightPtr& op) override;
+
+  // Unary expression visitors
+  void VisitExpr_(const ir::NegPtr& op) override;
+  void VisitExpr_(const ir::NotPtr& op) override;
+  void VisitExpr_(const ir::BitNotPtr& op) override;
+  void VisitExpr_(const ir::AbsPtr& op) override;
+  void VisitExpr_(const ir::CastPtr& op) override;
 
  private:
   // Code structure emission
@@ -108,6 +153,23 @@ class DistributedCodegen : public CodegenBase {
   void CollectHostOrchHoistableAllocs(const ir::FunctionPtr& host_orch);
   void EmitAllocIntermediatesFunction(const ir::FunctionPtr& host_orch);
 
+  // Emit `with orch.allocate_domain(name=..., workers=..., window_size=...,
+  // buffers=[CommBufferSpec(...), ...]) as __comm_d<idx>:` for every
+  // CommGroup on the program (single-group only for now; multi-group is
+  // CHECKed against). Increments emitter_'s indent level once per emitted
+  // with-block so the function body's subsequent emission lands inside; the
+  // caller is responsible for DecreaseIndent() after VisitStmt finishes.
+  // Returns the number of with-blocks emitted (== number of DecreaseIndent
+  // calls the caller owes).
+  int EmitCommDomainAllocations();
+
+  // Scalar-expression Python-emission helpers (see distributed_scalar_expr_codegen.cpp).
+  // Each writes the rendered Python expression into ``current_expr_value_``.
+  void EmitInfixBinaryOp(const ir::BinaryExprPtr& op, const char* symbol);
+  void EmitCallStyleBinaryOp(const ir::BinaryExprPtr& op, const char* func_name);
+  void EmitUnaryPrefixOp(const ir::UnaryExprPtr& op, const char* prefix);
+  void EmitUnaryCallOp(const ir::UnaryExprPtr& op, const char* func_name);
+
   // Helpers
   void RegisterParamsAndEmitScalarBindings(const ir::FunctionPtr& func);
   [[nodiscard]] std::string ParamDirectionToTensorArgType(ir::ParamDirection dir) const;
@@ -117,6 +179,24 @@ class DistributedCodegen : public CodegenBase {
   std::string FormatArgs(const std::vector<ir::ExprPtr>& args);
   [[nodiscard]] bool IsSubWorker(const ir::FunctionPtr& func) const;
   [[nodiscard]] static std::string DataTypeToPythonDType(const DataType& dtype);
+
+  /// Map a PyPTO :class:`DataType` to the matching ``simpler.task_interface.DataType``
+  /// enum name (e.g. FP32 -> "FLOAT32", INT32 -> "INT32"). Used by N7
+  /// DistributedTensor formal emission when constructing
+  /// ``ContinuousTensor.make(..., dtype=DataType.FLOAT32, child_memory=True)``.
+  [[nodiscard]] static std::string DataTypeToSimplerEnum(const DataType& dtype);
+
+  /// Resolve a dispatch call's ``device=`` attr to a Python rank expression.
+  /// Returns the empty string if the call carries no ``device=`` attr (the
+  /// comm-less L3 dispatch path). For ``device=ConstInt(k)`` returns ``"k"``;
+  /// for ``device=Var(r)`` returns ``SanitizeName(r->name_hint_)``.
+  [[nodiscard]] std::string ResolveRankExpr(const ir::CallPtr& call) const;
+
+  /// Format a DistributedTensor's shape as a Python tuple literal, e.g.
+  /// ``(64,)`` / ``(M, N)``. ConstInt dims are emitted as literals;
+  /// Var dims are emitted via ``SanitizeName``. Always trailing-comma for
+  /// rank-1 tuples to keep the literal a tuple.
+  [[nodiscard]] std::string FormatShapeTuple(const std::vector<ir::ExprPtr>& shape);
 
   ir::ProgramPtr program_;
   CodeEmitter emitter_;

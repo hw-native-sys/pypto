@@ -48,8 +48,11 @@ TypePtr DeduceTensorReadType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 2) << "tensor.read requires exactly 2 arguments (tensor, indices), but got "
                           << args.size();
 
-  // First argument must be TensorType
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  // First argument must be a tensor-shaped value. ``AsTensorTypeLike``
+  // accepts both ``TensorType`` and its ``DistributedTensorType`` subclass
+  // (which carries its own ``ObjectKind`` and so does NOT match a strict
+  // ``As<TensorType>`` cast — see ``.claude/rules/ir-kind-traits.md``).
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.read requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -595,7 +598,10 @@ TypePtr DeduceTensorWriteType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 3) << "tensor.write requires exactly 3 arguments (tensor, indices, value), but got "
                           << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  // First argument must be a tensor-shaped value — see tensor.read above
+  // for the rationale behind ``AsTensorTypeLike`` over a strict
+  // ``As<TensorType>`` cast.
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.write requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 

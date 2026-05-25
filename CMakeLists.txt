@@ -249,6 +249,9 @@ set(PYPTO_SOURCES
     src/codegen/pto/pto_scalar_expr_codegen.cpp
     src/codegen/pto/pto_type_utils.cpp
     src/codegen/distributed/distributed_codegen.cpp
+    src/codegen/distributed/distributed_op_registry.cpp
+    src/codegen/distributed/distributed_ops_codegen.cpp
+    src/codegen/distributed/distributed_scalar_expr_codegen.cpp
     src/codegen/tensor_op_codegen.cpp
     src/codegen/array_op_codegen.cpp
 

@@ -755,6 +755,22 @@ inline std::vector<std::pair<std::string, std::any>> WithManualDepEdgesAttr(
 }
 
 /**
+ * @brief Reserved attr key for the physical device selector on a
+ * host-orchestrator dispatch to a chip-level Orchestration function.
+ *
+ * Value type: ``ExprPtr`` — either a ``ConstInt`` (fixed device) or a ``Var``
+ * referring to the induction variable of an enclosing ``pl.range`` loop.
+ * Written by the parser when the user writes ``self.chip_orch(..., device=r)``;
+ * consumed by ``CollectCommGroups`` to derive per-CommGroup device subsets and
+ * by distributed codegen to emit ``submit_next_level(..., worker=<r>)``.
+ *
+ * SSA passes MUST substitute ``Var`` references inside this attr's value the
+ * same way they do for Call args, otherwise the stored ``Var`` becomes a dead
+ * reference once the loop's induction variable is versioned.
+ */
+inline constexpr const char* kAttrDevice = "device";
+
+/**
  * @brief Expression to create a tuple from multiple expressions
  *
  * Takes a list of expressions and creates a tuple value.

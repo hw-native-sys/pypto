@@ -992,12 +992,17 @@ class ASTParser:
             # Skip annotations the resolver can't handle:
             # - String forward refs (e.g. "SomeType")
             # - pl.UnknownType (emitted by printer for unrepresentable types)
+            # - Singleton marker types (pl.MemRefType / pl.Ptr / pld.WindowBufferType
+            #   / pld.CommCtxType): no shape/dtype to validate; the Var's type is
+            #   fully determined by the RHS-inferred type.
             ann = stmt.annotation
             is_unresolvable = (isinstance(ann, ast.Constant) and isinstance(ann.value, str)) or (
                 isinstance(ann, ast.Attribute)
                 and isinstance(ann.value, ast.Name)
-                and ann.value.id == "pl"
-                and ann.attr in ("UnknownType", "MemRefType", "Ptr")
+                and (
+                    (ann.value.id == "pl" and ann.attr in ("UnknownType", "MemRefType", "Ptr"))
+                    or (ann.value.id == "pld" and ann.attr in ("WindowBufferType", "CommCtxType"))
+                )
             )
             if is_unresolvable:
                 resolved = None

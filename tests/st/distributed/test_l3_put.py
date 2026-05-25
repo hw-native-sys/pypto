@@ -40,9 +40,9 @@ glue still has open work, identical to the gap blocking
   ``DistributedTensor`` formal parameter (in IR-parameter order), plus the
   ``ContinuousTensor.make(..., child_memory=True)`` wrapper for each
   ``DistributedTensor`` arg.
-* **N8** distributed_runner.py must thread ``HostBufferStaging`` /
-  ``ChipBootstrapConfig`` for the inferred CommGroup so the runtime knows
-  which physical buffer to bind to each rank's window slot.
+* **N8** distributed_codegen must thread ``HostBufferStaging`` onto the
+  ``orch.allocate_domain(...)`` block for the inferred CommGroup so the
+  runtime knows which physical buffer to bind to each rank's window slot.
 
 Drop ``pytest.mark.skip`` (and inline the ``@pl.program`` decorator at module
 top-level) once the above land — the programs below and the golden checks are

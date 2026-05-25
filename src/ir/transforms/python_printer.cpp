@@ -672,7 +672,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       // dispatches) as a ``device=<expr>`` kwarg so it round-trips through
       // reparse and remains observable by the CollectCommGroups pass.
       for (const auto& [k, v] : op->attrs_) {
-        if (k != "device") continue;
+        if (k != kAttrDevice) continue;
         if (const auto* p = std::any_cast<ExprPtr>(&v)) {
           if (*p) {
             stream_ << (need_kwarg_comma ? ", " : "") << "device=";

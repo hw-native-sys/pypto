@@ -14,6 +14,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -120,6 +121,12 @@ class AllocAndWindowCollector : public IRVisitor {
         }
       }
     }
+    // Record the AssignStmt def for every Var so ResolveDeviceDescriptor can
+    // follow ``for r in pl.range(<var>)`` back to ``<var> = pld.system.world_size()``
+    // (CSE / NormalizeStmtStructure hoists such calls out into a temp).
+    if (auto var = As<Var>(op->var_)) {
+      var_defs[var.get()] = op->value_;
+    }
     IRVisitor::VisitStmt_(op);
   }
 
@@ -127,6 +134,7 @@ class AllocAndWindowCollector : public IRVisitor {
   std::unordered_map<const Var*, AllocRecord*> ptr_to_alloc;
   std::unordered_map<const Var*, WindowRecord> view_to_window;
   std::vector<WindowRecord> windows;
+  std::unordered_map<const Var*, ExprPtr> var_defs;
 };
 
 /// Detects whether a Call resolves to a chip-level Orchestration function (i.e.
@@ -140,11 +148,30 @@ class AllocAndWindowCollector : public IRVisitor {
   return chip_orchs.find(gvar->name_) != chip_orchs.end();
 }
 
+/// Unwrap a ``stop_`` expression through one level of SSA assignment indirection
+/// so the dispatch device resolver can see through CSE-hoisted bounds like
+/// ``t__tmp_v0 = pld.system.world_size(); for r in pl.range(t__tmp_v0):``.
+/// Returns ``stop`` unchanged when it is already a literal/call or when the
+/// chain dead-ends in a Var without a known def.
+[[nodiscard]] ExprPtr UnwrapStopExpr(const ExprPtr& stop,
+                                     const std::unordered_map<const Var*, ExprPtr>& var_defs) {
+  ExprPtr cur = stop;
+  std::unordered_set<const Var*> visited;
+  while (auto v = As<Var>(cur)) {
+    if (!visited.insert(v.get()).second) return cur;
+    auto it = var_defs.find(v.get());
+    if (it == var_defs.end() || !it->second) return cur;
+    cur = it->second;
+  }
+  return cur;
+}
+
 /// Resolves the device descriptor for a ``device=`` Expr in the context of a
 /// stack of enclosing ForStmt scopes. Throws pypto::ValueError on unsupported
 /// forms (the user's parser is meant to restrict ``device=`` to ConstInt or
 /// the induction var of an enclosing pl.range loop).
 DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vector<ForStmtPtr>& for_stack,
+                                         const std::unordered_map<const Var*, ExprPtr>& var_defs,
                                          const Span& dispatch_span) {
   DeviceDescriptor desc;
   if (auto ci = As<ConstInt>(device)) {
@@ -156,18 +183,23 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
     for (auto it = for_stack.rbegin(); it != for_stack.rend(); ++it) {
       const auto& fs = *it;
       if (fs->loop_var_.get() == v.get()) {
-        // Loop bound determines coverage.
-        if (auto stop_call = As<Call>(fs->stop_)) {
+        // Loop bound determines coverage. Unwrap one level of SSA-assigned temp
+        // so a hoisted ``t = pld.system.world_size()`` is recognised the same
+        // as the direct ``pl.range(pld.system.world_size())`` form.
+        ExprPtr stop = UnwrapStopExpr(fs->stop_, var_defs);
+        if (auto stop_call = As<Call>(stop)) {
           if (stop_call->op_ && stop_call->op_->name_ == "pld.system.world_size") {
             desc.is_all = true;
             return desc;
           }
         }
-        if (auto stop_ci = As<ConstInt>(fs->stop_)) {
-          int64_t start = 0;
-          if (auto start_ci = As<ConstInt>(fs->start_)) start = start_ci->value_;
-          int64_t step = 1;
-          if (auto step_ci = As<ConstInt>(fs->step_)) step = step_ci->value_;
+        if (auto stop_ci = As<ConstInt>(stop)) {
+          auto start_ci = As<ConstInt>(UnwrapStopExpr(fs->start_, var_defs));
+          CHECK(start_ci) << "CollectCommGroups: device=r loop start must unwrap to ConstInt";
+          int64_t start = start_ci->value_;
+          auto step_ci = As<ConstInt>(UnwrapStopExpr(fs->step_, var_defs));
+          CHECK(step_ci) << "CollectCommGroups: device=r loop step must unwrap to ConstInt";
+          int64_t step = step_ci->value_;
           CHECK(step == 1) << "CollectCommGroups: device=r over a non-unit-step loop is not supported "
                               "(step="
                            << step << ")";
@@ -195,8 +227,9 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
 class DispatchAnalyzer : public IRVisitor {
  public:
   DispatchAnalyzer(const std::unordered_map<const Var*, WindowRecord>& view_to_window,
-                   const std::map<std::string, FunctionPtr>& chip_orchs)
-      : view_to_window_(view_to_window), chip_orchs_(chip_orchs) {}
+                   const std::map<std::string, FunctionPtr>& chip_orchs,
+                   const std::unordered_map<const Var*, ExprPtr>& var_defs)
+      : view_to_window_(view_to_window), chip_orchs_(chip_orchs), var_defs_(var_defs) {}
 
   void VisitStmt_(const ForStmtPtr& op) override {
     for_stack_.push_back(op);
@@ -208,14 +241,14 @@ class DispatchAnalyzer : public IRVisitor {
     if (IsChipOrchDispatch(op, chip_orchs_)) {
       ExprPtr device;
       for (const auto& [k, v] : op->attrs_) {
-        if (k == "device") {
+        if (k == kAttrDevice) {
           // attrs["device"] is stored as ExprPtr by N3 parser.
           if (const auto* p = std::any_cast<ExprPtr>(&v)) device = *p;
           break;
         }
       }
       if (device) {
-        DeviceDescriptor desc = ResolveDeviceDescriptor(device, for_stack_, op->span_);
+        DeviceDescriptor desc = ResolveDeviceDescriptor(device, for_stack_, var_defs_, op->span_);
         for (const auto& arg : op->args_) {
           auto arg_var = As<Var>(arg);
           if (!arg_var) continue;
@@ -232,6 +265,7 @@ class DispatchAnalyzer : public IRVisitor {
  private:
   const std::unordered_map<const Var*, WindowRecord>& view_to_window_;
   const std::map<std::string, FunctionPtr>& chip_orchs_;
+  const std::unordered_map<const Var*, ExprPtr>& var_defs_;
   std::vector<ForStmtPtr> for_stack_;
 };
 
@@ -282,12 +316,12 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   }
 
   // Phase 2: record device-descriptor evidence from dispatch sites.
-  DispatchAnalyzer analyzer(collector.view_to_window, chip_orchs);
+  DispatchAnalyzer analyzer(collector.view_to_window, chip_orchs, collector.var_defs);
   analyzer.VisitStmt(func->body_);
 
   // Phase 3: each alloc must have at least one window AND at least one
   // consuming dispatch — otherwise it is dead and downstream codegen has
-  // nothing to point ChipBootstrapConfig at.
+  // nothing to point a CommDomain buffer slot at.
   std::unordered_map<const Var*, std::vector<const WindowRecord*>> allocs_with_windows;
   for (const auto& w : collector.windows) {
     allocs_with_windows[w.alloc->ptr_var.get()].push_back(&w);

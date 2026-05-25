@@ -17,8 +17,8 @@
  * DSL surface (explicit op calls, no attribute-access sugar)::
  *
  *     ctx = pld.system.get_comm_ctx(data)  # CommCtx
- *     r   = pld.system.rank(ctx)           # INT32 scalar
- *     n   = pld.system.nranks(ctx)         # INT32 scalar
+ *     r   = pld.system.rank(ctx)           # UINT32 scalar
+ *     n   = pld.system.nranks(ctx)         # UINT32 scalar
  *
  * All three ops use the standard 3-segment ``pld.<category>.<op>`` shape and
  * dispatch through the parser's generic ``_parse_pld_category_op`` path. The
@@ -73,7 +73,7 @@ TypePtr DeduceGetCommCtxType(const std::vector<ExprPtr>& args,
 }
 
 /// Shared deducer for the ``pld.system.rank`` / ``pld.system.nranks`` scalar
-/// accessors — same signature (single ``CommCtx`` arg, ``INT32`` result),
+/// accessors — same signature (single ``CommCtx`` arg, ``UINT32`` result),
 /// differing only in the registered op name surfaced in error messages.
 TypePtr DeduceCommCtxScalarType(const std::string& op_name, const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
@@ -81,7 +81,7 @@ TypePtr DeduceCommCtxScalarType(const std::string& op_name, const std::vector<Ex
   CHECK(IsA<CommCtxType>(args[0]->GetType()))
       << op_name << " expects a CommCtx (output of pld.system.get_comm_ctx), got "
       << args[0]->GetType()->TypeName();
-  return std::make_shared<ScalarType>(DataType::INT32);
+  return std::make_shared<ScalarType>(DataType::UINT32);
 }
 
 }  // namespace
@@ -107,7 +107,7 @@ REGISTER_OP("pld.system.get_comm_ctx")
 
 REGISTER_OP("pld.system.rank")
     .set_description(
-        "Read the local rank (INT32 scalar) from a CommContext handle. Codegen "
+        "Read the local rank (UINT32 scalar) from a CommContext handle. Codegen "
         "lowers this to a scalar load of CommContext::rankId.")
     .set_op_category("DistributedOp")
     .add_argument("ctx", "A CommContext handle (CommCtxType)")
@@ -123,7 +123,7 @@ REGISTER_OP("pld.system.rank")
 
 REGISTER_OP("pld.system.nranks")
     .set_description(
-        "Read the rank count (INT32 scalar) of the comm group from a CommContext "
+        "Read the rank count (UINT32 scalar) of the comm group from a CommContext "
         "handle. Codegen lowers this to a scalar load of CommContext::rankNum.")
     .set_op_category("DistributedOp")
     .add_argument("ctx", "A CommContext handle (CommCtxType)")

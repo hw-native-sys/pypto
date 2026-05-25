@@ -55,6 +55,7 @@ using ir::As;
 using ir::AssignStmtPtr;
 using ir::BinaryExprPtr;
 using ir::CallPtr;
+using ir::CommCtxType;
 using ir::EvalStmtPtr;
 using ir::ExprPtr;
 using ir::ForStmtPtr;
@@ -522,13 +523,10 @@ void PTOCodegen::EmitCommRemoteOffsetHelpers() {
     const int64_t elem_size_bytes = static_cast<int64_t>(elem_bits / 8);
     const std::string func_name = GetCommRemoteOffsetFuncName(dtype);
 
-    // Helper signature: (ctx, peer) → index. Returns the peer-vs-local
-    // element offset; the call site applies ``pto.addptr`` to its own
-    // ``%local_ptr`` and then ``pto.make_tensor_view`` (both must live in
-    // the kernel's func, since PTOAS requires ``addptr`` to feed
-    // ``make_tensor_view`` locally and the ``make_tensor_view`` lowering
-    // produces a strided memref that cannot cross a func boundary).
-    stream_ << "  func.func @" << func_name << "(%ctx: !pto.ptr<i64>, %peer: index) -> index {\n";
+    // ``private`` visibility tells PTOAS to emit the helper with C++
+    // ``static`` linkage — without it AIV mis-lowers the call and the
+    // remote pointer arithmetic silently returns garbage.
+    stream_ << "  func.func private @" << func_name << "(%ctx: !pto.ptr<i64>, %peer: index) -> index {\n";
     stream_ << body_indent << "%c_r = arith.constant " << k_rank_idx << " : index\n";
     stream_ << body_indent << "%c_w = arith.constant " << k_win_idx << " : index\n";
     // Read rankId (the low 32 bits of the (rankId, rankNum) 8-byte slot at
@@ -1429,8 +1427,15 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
 
   fs_.current_expr_value = "";
   VisitExpr(op->value_);
-  // Register scalar/index result so subsequent expressions can look up this variable
-  if (As<ScalarType>(op->var_->GetType()) && !fs_.current_expr_value.empty()) {
+  // Register scalar/index/CommCtx result so subsequent expressions can look up
+  // this variable. N7: CommCtxType is a singleton marker; the bound SSA is the
+  // matching ``!pto.ptr<i64>`` ctx ptr from the func.func trailing-ctx segment
+  // (no MLIR is emitted for ``pld.system.get_comm_ctx`` — its lambda just sets
+  // ``current_expr_value`` to the ctx SSA). Treating it like a scalar here lets
+  // downstream ``pld.system.rank(ctx)`` / ``pld.system.nranks(ctx)`` codegen
+  // resolve ``ctx`` via the standard ``GetExprAsCode(call->args_[0])`` path.
+  const auto& var_type = op->var_->GetType();
+  if ((As<ScalarType>(var_type) || As<CommCtxType>(var_type)) && !fs_.current_expr_value.empty()) {
     BindVarToMlir(op->var_, fs_.current_expr_value);
   }
 }

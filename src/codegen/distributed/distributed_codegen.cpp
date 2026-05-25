@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "pypto/codegen/distributed/distributed_op_registry.h"
 #include "pypto/core/dtype.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
@@ -34,6 +35,23 @@
 
 namespace pypto {
 namespace codegen {
+
+// Handle / domain naming for emitted `with orch.allocate_domain(...)` blocks.
+// Each CommGroup in Program.comm_groups_ (declaration order) yields one
+// `__comm_d<idx>` Python handle var and `name="comm_d<idx>"` simpler-side
+// identifier. Single-group programs use `__comm_d0` / `"comm_d0"`.
+namespace {
+constexpr const char kCommDomainHandlePrefix[] = "__comm_d";
+constexpr const char kCommDomainNamePrefix[] = "comm_d";
+
+std::string HandleVarForGroup(size_t group_idx) {
+  return std::string(kCommDomainHandlePrefix) + std::to_string(group_idx);
+}
+
+std::string DomainNameForGroup(size_t group_idx) {
+  return std::string(kCommDomainNamePrefix) + std::to_string(group_idx);
+}
+}  // namespace
 
 // ========================================================================
 // Public API
@@ -162,7 +180,15 @@ std::vector<ir::FunctionPtr> DistributedCodegen::SortFunctionsByRoleAndLevel() c
 
 void DistributedCodegen::EmitImports() {
   emitter_.EmitLine("import torch");
-  emitter_.EmitLine("from simpler.task_interface import TaskArgs, TensorArgType");
+  // ``ContinuousTensor`` + ``DataType`` are used by DistributedTensor
+  // formal emission (host_orch wraps per-rank window-bound regions via
+  // ``ContinuousTensor.make(..., child_memory=True)``).
+  // ``CommBufferSpec`` is the spec list passed to ``orch.allocate_domain``
+  // inside host_orch when the program declares at least one CommGroup;
+  // harmless to import for comm-less L3 programs.
+  emitter_.EmitLine(
+      "from simpler.task_interface import "
+      "CommBufferSpec, ContinuousTensor, DataType, TaskArgs, TensorArgType");
   emitter_.EmitLine("from pypto.runtime.tensor_arg import make_tensor_arg");
 }
 
@@ -175,18 +201,18 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   is_worker_context_ = is_sub_worker;
 
   // Build function signature
-  // Orchestrators: def func(orch, _args, config, *, tensors, callables, sub_ids, _keep, contexts):
+  // Orchestrators: def func(orch, _args, config, *, tensors, callables, sub_ids, _keep, world_size):
   // SubWorkers are not emitted as Python functions (they run on device or as registered callables)
   if (is_sub_worker) {
     is_worker_context_ = false;
     return;
   }
 
-  // ``contexts`` is always present in the signature; for comm-less programs it
-  // is an empty list (and goes unused inside the body), which lets the runner
-  // dispatch with a single uniform call shape.
+  // ``world_size`` is always present in the signature; the runner fills it
+  // with ``len(DistributedConfig.device_ids)``. ``pld.system.world_size()``
+  // lowers to a bare reference to this kwarg.
   std::ostringstream sig;
-  sig << "def " << func->name_ << "(orch, _args, config, *, tensors, callables, sub_ids, _keep, contexts):";
+  sig << "def " << func->name_ << "(orch, _args, config, *, tensors, callables, sub_ids, _keep, world_size):";
   emitter_.EmitLine(sig.str());
   emitter_.IncreaseIndent();
 
@@ -198,14 +224,98 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
   // function body ensures the bare name resolves correctly.
   RegisterParamsAndEmitScalarBindings(func);
 
+  // Wrap the HOST orch body in one `with orch.allocate_domain(...)` per
+  // CommGroup. Chip-level orchestrators don't own comm allocations and
+  // skip this step. `with_blocks` counts how many indent levels must be
+  // popped after the body to balance the wrapper(s).
+  int with_blocks = 0;
+  if (func->level_.has_value() && ir::LevelToLinquLevel(*func->level_) >= 3) {
+    with_blocks = EmitCommDomainAllocations();
+  }
+
   // Emit body
   if (func->body_) {
     VisitStmt(func->body_);
   }
 
+  for (int i = 0; i < with_blocks; ++i) {
+    emitter_.DecreaseIndent();
+  }
   emitter_.DecreaseIndent();
   emitter_.EmitLine("");
   is_worker_context_ = false;
+}
+
+int DistributedCodegen::EmitCommDomainAllocations() {
+  if (!program_ || program_->comm_groups_.empty()) return 0;
+  CHECK(program_->comm_groups_.size() == 1)
+      << "distributed_codegen currently supports at most one CommGroup; got " << program_->comm_groups_.size()
+      << ". Multi-group will emit nested `with orch.allocate_domain(...)` per group; "
+         "see EmitCommDomainAllocations for the extension point.";
+
+  constexpr size_t group_idx = 0;
+  const auto& group = program_->comm_groups_[group_idx];
+  const std::string handle_var = HandleVarForGroup(group_idx);
+  const std::string domain_name = DomainNameForGroup(group_idx);
+
+  // workers: literal list of worker indices into DistributedConfig.device_ids.
+  // Empty devices_ in the IR means "all" — resolved at runtime via world_size.
+  std::ostringstream workers;
+  workers << "[";
+  if (group->devices_.empty()) {
+    workers << "*range(world_size)";
+  } else {
+    for (size_t i = 0; i < group->devices_.size(); ++i) {
+      if (i > 0) workers << ", ";
+      workers << group->devices_[i];
+    }
+  }
+  workers << "]";
+
+  // Lower each slot's size_ expression to a Python string. Constant sizes
+  // become int literals; dynamic sizes (e.g. `pld.world_size() * 4`) lower
+  // to the Python equivalent (e.g. `(world_size * 4)`) — `world_size` is
+  // bound at the host_orch signature.
+  std::vector<std::string> slot_nbytes;
+  slot_nbytes.reserve(group->slots_.size());
+  for (const auto& slot : group->slots_) {
+    slot_nbytes.push_back(GetExprAsCode(slot->size_));
+  }
+
+  // window_size = sum of all slot byte expressions. Parenthesise each summand
+  // to keep operator precedence safe under any sub-expression shape.
+  std::ostringstream window_size_expr;
+  if (slot_nbytes.empty()) {
+    window_size_expr << "0";
+  } else {
+    for (size_t i = 0; i < slot_nbytes.size(); ++i) {
+      if (i > 0) window_size_expr << " + ";
+      window_size_expr << "(" << slot_nbytes[i] << ")";
+    }
+  }
+
+  emitter_.EmitLine("with orch.allocate_domain(");
+  emitter_.IncreaseIndent();
+  emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
+  emitter_.EmitLine("workers=" + workers.str() + ",");
+  emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
+  emitter_.EmitLine("buffers=[");
+  emitter_.IncreaseIndent();
+  for (size_t i = 0; i < group->slots_.size(); ++i) {
+    const auto& slot = group->slots_[i];
+    const std::string& nbytes = slot_nbytes[i];
+    // dtype="opaque" mirrors the manifest-era placeholder: WindowBuffer is
+    // intentionally dtype-agnostic (the field is unused by simpler). count is
+    // also in opaque bytes so it shares the same expression as nbytes.
+    emitter_.EmitLine(std::string("CommBufferSpec(name=\"") + SanitizeName(slot->name_hint_) +
+                      "\", dtype=\"opaque\", count=" + nbytes + ", nbytes=" + nbytes + "),");
+  }
+  emitter_.DecreaseIndent();
+  emitter_.EmitLine("],");
+  emitter_.DecreaseIndent();
+  emitter_.EmitLine(") as " + handle_var + ":");
+  emitter_.IncreaseIndent();
+  return 1;
 }
 
 void DistributedCodegen::EmitEntryFunction() {
@@ -216,7 +326,7 @@ void DistributedCodegen::EmitEntryFunction() {
   current_func_ = entry_func_;
 
   // Entry function signature
-  emitter_.EmitLine("def entry(orch, _args, config, *, tensors, callables, sub_ids, _keep, contexts):");
+  emitter_.EmitLine("def entry(orch, _args, config, *, tensors, callables, sub_ids, _keep, world_size):");
   emitter_.IncreaseIndent();
 
   // Register parameter names and emit local bindings for scalar params.
@@ -436,7 +546,7 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
         current_expr_value_ =
             callee->name_ +
             "(orch, _args, config, "
-            "tensors=tensors, callables=callables, sub_ids=sub_ids, _keep=_keep, contexts=contexts)";
+            "tensors=tensors, callables=callables, sub_ids=sub_ids, _keep=_keep, world_size=world_size)";
         return;
       }
       // Chip-level function (Orchestration/InCore with no role) called from HOST orchestrator
@@ -461,6 +571,26 @@ void DistributedCodegen::VisitExpr_(const ir::CallPtr& op) {
   // tensor.create → orch.alloc() for HOST-level orchestrators
   if (op->op_->name_ == "tensor.create") {
     EmitTensorCreate(op);
+    return;
+  }
+
+  // ``pld.system.world_size()`` lowers to the ``world_size`` kwarg bound in
+  // every emitted orchestrator's signature (see EmitFunction / EmitEntryFunction).
+  // The runner fills it with len(DistributedConfig.device_ids) — present for
+  // comm-less programs too, so this lowering is uniform.
+  if (op->op_->name_ == "pld.system.world_size") {
+    current_expr_value_ = "world_size";
+    return;
+  }
+
+  // Per-op host_orch codegen registry (mirror of OrchestrationOpRegistry /
+  // PTO backend codegen). Handlers that need to emit ``tensors["lhs"] = ...``
+  // or skip emission entirely (window-buffer markers) register here and
+  // return either the RHS Python expression or the empty string to signal
+  // "already emitted, drop the wrapping AssignStmt line".
+  auto registered = DistributedOpRegistry::GetInstance().Get(op->op_->name_);
+  if (registered) {
+    current_expr_value_ = (*registered)(op, *this);
     return;
   }
 
@@ -496,6 +626,12 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   bool is_sub = IsSubWorker(callee);
   std::string ta_var = "_ta_" + std::to_string(task_args_counter_++);
 
+  // ``device=`` attr (set by N3 parser) is the single source of truth for
+  // both the per-rank ``__comm_d0[<r>]`` subscript (used by DistributedTensor
+  // arg emit) and the trailing ``worker=<r>`` kwarg on ``submit_next_level``.
+  // Empty string means no ``device=`` was set — comm-less L3 dispatch path.
+  std::string rank_expr = ResolveRankExpr(call);
+
   // Build TaskArgs from callee's parameter directions
   emitter_.EmitLine(ta_var + " = TaskArgs()");
 
@@ -504,13 +640,69 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     std::string arg_str = current_expr_value_;
     current_expr_value_ = "";
 
-    // Only tensor args get add_tensor; skip scalar args for now
+    // N7: DistributedTensorType formals route through ContinuousTensor.make
+    // with ``child_memory=True``. ``As<DistributedTensorType>`` is strict
+    // ObjectKind match, so this branch fires only for DistributedTensor —
+    // plain TensorType falls through to the existing make_tensor_arg path.
+    if (auto dist_type = ir::As<ir::DistributedTensorType>(call->args_[i]->GetType())) {
+      INTERNAL_CHECK_SPAN(!rank_expr.empty(), call->span_)
+          << "Call passing DistributedTensor args must carry device= attr "
+             "(N3 parser writes attrs[\"device\"] on chip-orch dispatch sites)";
+      INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
+          << "DistributedTensorType arg must have window_buffer_ populated by N4 pass";
+      const std::string name = SanitizeName(dist_type->window_buffer_.value()->name_hint_);
+      const std::string shape = FormatShapeTuple(dist_type->shape_);
+      const std::string dtype_enum = "DataType." + DataTypeToSimplerEnum(dist_type->dtype_);
+      std::string tag = "TensorArgType.INOUT";
+      if (i < callee->param_directions_.size()) {
+        tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
+      }
+      // Single-group only: every DistributedTensor routes through `__comm_d0`.
+      // Multi-group will need a WindowBuffer→group_idx lookup to pick the
+      // right `__comm_d<idx>` handle (the EmitCommDomainAllocations CHECK
+      // currently fail-fast guards against that case).
+      const std::string handle_var = HandleVarForGroup(0);
+      emitter_.EmitLine(ta_var + ".add_tensor(ContinuousTensor.make(data=" + handle_var + "[" + rank_expr +
+                        "].buffer_ptrs[\"" + name + "\"], shapes=" + shape + ", dtype=" + dtype_enum +
+                        ", child_memory=True), " + tag + ")");
+      continue;
+    }
+
+    // Plain TensorType formal — existing path.
     if (std::dynamic_pointer_cast<const ir::TensorType>(call->args_[i]->GetType())) {
       std::string tag = "TensorArgType.INPUT";
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
       emitter_.EmitLine(ta_var + ".add_tensor(make_tensor_arg(tensors[\"" + arg_str + "\"]), " + tag + ")");
+      continue;
+    }
+
+    // ScalarType formal — pass-through via ``add_scalar``. Emitted in the
+    // call's IR-argument position so the runtime TaskArgs layout matches
+    // the callee's parameter list one-for-one (the trailing CommContext
+    // pointers appended below for each DistributedTensor formal are
+    // synthetic — added by the N7 kernel-signature transform and do not
+    // appear in the user-visible signature).
+    if (ir::As<ir::ScalarType>(call->args_[i]->GetType())) {
+      emitter_.EmitLine(ta_var + ".add_scalar(" + arg_str + ")");
+      continue;
+    }
+
+    INTERNAL_CHECK_SPAN(false, call->span_) << "EmitCallToWorker: unsupported call arg type at index " << i
+                                            << ": " << call->args_[i]->GetType()->TypeName();
+  }
+
+  // After all add_tensor lines, append one
+  // ``add_scalar(__comm_d0[<r>].device_ctx)`` per DistributedTensor arg, in
+  // IR-arg order — matches the N6 incore PTO signature's trailing ctx-ptr
+  // segment. Single-group only: every DistributedTensor routes through
+  // `__comm_d0`. Multi-group will pick the per-group handle via the same
+  // WindowBuffer→group_idx lookup used above.
+  const std::string device_ctx_handle = HandleVarForGroup(0);
+  for (const auto& arg : call->args_) {
+    if (ir::As<ir::DistributedTensorType>(arg->GetType())) {
+      emitter_.EmitLine(ta_var + ".add_scalar(" + device_ctx_handle + "[" + rank_expr + "].device_ctx)");
     }
   }
 
@@ -561,9 +753,15 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
     // HOST Worker = SubWorker: orch.submit_sub(callable_id, task_args)
     emitter_.EmitLine("orch.submit_sub(sub_ids[\"" + callee->name_ + "\"], " + ta_var + ")");
   } else {
-    // CHIP Worker: orch.submit_next_level(callable, task_args, config)
+    // CHIP Worker: orch.submit_next_level(callable, task_args, config).
+    // N7: thread the dispatch ``device=`` attr (N3 parser) into the
+    // simpler runtime's ``worker=`` kwarg (see simpler/python/simpler/
+    // orchestrator.py — ``-1`` = unconstrained). Empty rank_expr ⇔ no
+    // ``device=`` attr → omit the kwarg, byte-compatible with comm-less L3.
+    const std::string worker_kwarg = rank_expr.empty() ? "" : (", worker=" + rank_expr);
     emitter_.EmitLine("_keep.append(" + ta_var + ")");
-    emitter_.EmitLine("orch.submit_next_level(callables[\"" + callee->name_ + "\"], " + ta_var + ", config)");
+    emitter_.EmitLine("orch.submit_next_level(callables[\"" + callee->name_ + "\"], " + ta_var + ", config" +
+                      worker_kwarg + ")");
   }
 
   // If this call has an assignment target (return value), alias it to the OUT
@@ -772,6 +970,56 @@ std::string DistributedCodegen::DataTypeToPythonDType(const DataType& dtype) {
   auto it = kRenames.find(name);
   CHECK(name != "unknown") << "Unsupported dtype for distributed tensor create: " << name;
   return it != kRenames.end() ? it->second : name;
+}
+
+std::string DistributedCodegen::DataTypeToSimplerEnum(const DataType& dtype) {
+  // ``simpler.task_interface.DataType`` exposes the C-style enum names
+  // (FLOAT16 / FLOAT32 / BFLOAT16 / INT* / UINT* / BOOL). Map PyPTO's
+  // dtype tags to those names so emitted ``ContinuousTensor.make(..., dtype=DataType.<X>)``
+  // matches at runtime.
+  if (dtype == DataType::FP16) return "FLOAT16";
+  if (dtype == DataType::FP32) return "FLOAT32";
+  if (dtype == DataType::BF16) return "BFLOAT16";
+  if (dtype == DataType::INT8) return "INT8";
+  if (dtype == DataType::INT16) return "INT16";
+  if (dtype == DataType::INT32) return "INT32";
+  if (dtype == DataType::INT64) return "INT64";
+  if (dtype == DataType::UINT8) return "UINT8";
+  if (dtype == DataType::UINT16) return "UINT16";
+  if (dtype == DataType::UINT32) return "UINT32";
+  if (dtype == DataType::UINT64) return "UINT64";
+  if (dtype == DataType::BOOL) return "BOOL";
+  CHECK(false) << "Unsupported DistributedTensor dtype for simpler.DataType mapping: " << dtype.ToString();
+  return "FLOAT32";
+}
+
+std::string DistributedCodegen::ResolveRankExpr(const ir::CallPtr& call) const {
+  if (!call->HasAttr(ir::kAttrDevice)) return "";
+  auto dev = call->GetAttr<ir::ExprPtr>(ir::kAttrDevice, nullptr);
+  INTERNAL_CHECK_SPAN(dev != nullptr, call->span_) << "device= attr must hold a non-null ExprPtr";
+  if (auto ci = std::dynamic_pointer_cast<const ir::ConstInt>(dev)) {
+    CHECK(ci->value_ >= 0) << "device= ConstInt must be non-negative rank index, got " << ci->value_;
+    return std::to_string(ci->value_);
+  }
+  if (auto v = std::dynamic_pointer_cast<const ir::Var>(dev)) {
+    return SanitizeName(v->name_hint_);
+  }
+  INTERNAL_CHECK_SPAN(false, call->span_)
+      << "device= attr must be ConstInt or Var (N3 parser invariant), got " << dev->TypeName();
+  return "";
+}
+
+std::string DistributedCodegen::FormatShapeTuple(const std::vector<ir::ExprPtr>& shape) {
+  std::ostringstream oss;
+  oss << "(";
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << GetExprAsCode(shape[i]);
+  }
+  // Trailing comma on rank-1 so the literal stays a tuple, not a parenthesised scalar.
+  if (shape.size() == 1) oss << ",";
+  oss << ")";
+  return oss.str();
 }
 
 // ========================================================================

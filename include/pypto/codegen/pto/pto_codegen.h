@@ -403,6 +403,18 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetCommCtxSSAFor(const ir::Var* dist_var) const;
 
   /**
+   * @brief Set the current expression's SSA result.
+   *
+   * Op codegen lambdas that produce a value without emitting an MLIR line
+   * (e.g. ``pld.system.get_comm_ctx`` aliases the existing ctx-ptr arg) call
+   * this to publish their result; the surrounding ``VisitStmt_(AssignStmt)``
+   * then binds the LHS Var to the same SSA. Lambdas that emit an MLIR line
+   * AND want the emitted LHS to be the result must also call this — Emit()
+   * alone does not update ``current_expr_value``.
+   */
+  void SetCurrentExprValue(std::string value) { fs_.current_expr_value = std::move(value); }
+
+  /**
    * @brief Name of the module-level ``@CommRemoteOffset_<dtype>`` helper.
    *
    * Distributed remote ops (``pld.tile.remote_load`` / ``pld.system.notify``)

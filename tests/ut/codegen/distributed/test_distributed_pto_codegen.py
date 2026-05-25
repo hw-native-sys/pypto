@@ -94,20 +94,16 @@ def test_ctx_arg_appended_per_distributed_tensor():
 def _split_module(mlir: str) -> dict[str, str]:
     """Split ``module {...}`` into a mapping of ``func_name -> body``.
 
-    The PTO codegen output is shallow — a single module containing flat
-    ``func.func`` definitions — so a regex-free split on the ``func.func @``
-    header is sufficient. Each entry's value contains everything from the
-    function header (inclusive) up to (but excluding) the next header.
+    Handles both ``func.func @name(...)`` and ``func.func private @name(...)``.
     """
     funcs: dict[str, str] = {}
     current_name: str | None = None
     current_lines: list[str] = []
     for line in mlir.splitlines():
         stripped = line.strip()
-        if stripped.startswith("func.func @"):
+        if stripped.startswith("func.func ") and "@" in stripped:
             if current_name is not None:
                 funcs[current_name] = "\n".join(current_lines)
-            # `func.func @name(...)` → grab the bit between '@' and '('.
             after_at = stripped.split("@", 1)[1]
             current_name = after_at.split("(", 1)[0]
             current_lines = [line]
@@ -141,7 +137,7 @@ def test_remote_load_emits_func_call_to_offset_helper_with_addptr_at_call_site()
     helper_name = "CommRemoteOffset_f16"
     assert helper_name in funcs, f"Expected @{helper_name} in module, got {list(funcs)}"
     helper = funcs[helper_name]
-    assert f"func.func @{helper_name}(%ctx: !pto.ptr<i64>, %peer: index) -> index" in helper, helper
+    assert f"func.func private @{helper_name}(%ctx: !pto.ptr<i64>, %peer: index) -> index" in helper, helper
     # Helper body: load_scalar reads + arith + divsi + return %delems : index.
     assert helper.count("pto.load_scalar") >= 3, helper  # rankId + 2 window slots
     assert "arith.divsi" in helper
@@ -323,6 +319,82 @@ def test_notify_value_type_matches_value_ir_dtype():
     # The element type tag inside the partition_tensor_view is the signal dtype
     # (i32) — confirm it survived the lowering.
     assert "!pto.partition_tensor_view<1x1xi32>" in tnotify_line
+
+
+def test_get_comm_ctx_emits_no_mlir_aliases_ctx_arg():
+    """``pld.system.get_comm_ctx(dist_t)`` is a pure SSA alias.
+
+    The op codegen lambda sets ``current_expr_value`` to the matching
+    ``!pto.ptr<i64>`` ctx arg's SSA without emitting any MLIR line. The
+    surrounding ``VisitStmt_(AssignStmt)`` then binds the LHS Var to the
+    same SSA — so the literal op name must NOT appear in the emitted MLIR.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, data: pld.DistributedTensor[[16, 16], pl.FP32]):
+            ctx = pld.system.get_comm_ctx(data)  # noqa: F841 — exercise the alias
+            # Touch ``data`` again so it is not DCE'd before the get_comm_ctx call.
+            pld.system.wait(data, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    mlir = _generate_mlir(P)
+    # No literal op name in the emitted MLIR — get_comm_ctx is alias-only.
+    assert "pld.system.get_comm_ctx" not in mlir, mlir
+    # The ctx ptr arg is still in the func header.
+    header = next(line for line in mlir.splitlines() if "func.func @kernel" in line)
+    assert "!pto.ptr<i64>" in header, header
+
+
+def test_rank_emits_pto_load_scalar_at_slot_2_plus_trunci():
+    """``pld.system.rank(ctx) -> i32`` reads slot 2 (= kRankIdOffset /
+    kWindowSlotStride = 16/8) of the ctx ptr then truncates to i32.
+
+    Asserts that the emitted MLIR contains ``pto.load_scalar %argN[%cK] :
+    !pto.ptr<i64> -> i64`` and ``arith.trunci`` — no ``arith.shrui`` (that
+    is the nranks path).
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, data: pld.DistributedTensor[[16, 16], pl.FP32]):
+            ctx = pld.system.get_comm_ctx(data)
+            _r = pld.system.rank(ctx)  # noqa: F841 — exercise rank-only path
+            pld.system.wait(data, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    mlir = _generate_mlir(P)
+    body = mlir.split("func.func @kernel", 1)[1]
+    # rank lowering line.
+    assert "pto.load_scalar" in body and "!pto.ptr<i64> -> i64" in body, body
+    assert "arith.trunci" in body, body
+    # rank does not shrui — only nranks does.
+    assert "arith.shrui" not in body, body
+
+
+def test_nranks_emits_pto_load_scalar_plus_shrui_32_plus_trunci():
+    """``pld.system.nranks(ctx) -> i32`` reads the SAME slot 2 then
+    ``arith.shrui ..., 32`` (high 32 bits = rankNum) then ``arith.trunci``.
+
+    Uses the static_asserted invariant ``kRankNumOffset == kRankIdOffset
+    + 4`` (see include/pypto/codegen/distributed/comm_layout.h) to fold
+    the rankNum read into the same slot as rankId, saving one load.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(self, data: pld.DistributedTensor[[16, 16], pl.FP32]):
+            ctx = pld.system.get_comm_ctx(data)
+            _n = pld.system.nranks(ctx)  # noqa: F841 — exercise nranks
+            pld.system.wait(data, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Eq)
+
+    mlir = _generate_mlir(P)
+    body = mlir.split("func.func @kernel", 1)[1]
+    # nranks lowering: pto.load_scalar + arith.shrui + arith.trunci.
+    assert "pto.load_scalar" in body and "!pto.ptr<i64> -> i64" in body, body
+    assert "arith.shrui" in body, body
+    assert "arith.trunci" in body, body
 
 
 def test_put_emits_comm_tput_with_attr_and_staging_tile():

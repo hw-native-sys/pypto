@@ -1706,5 +1706,131 @@ class TestMidBodyYieldGuard:
             passes.convert_to_ssa()(program)
 
 
+class TestCallAttrSubstitution:
+    """SSA renaming must reach into Call attrs that hold IR expressions.
+
+    Regression: ``Call.attrs["device"]`` (an ``ExprPtr`` written by the N3
+    parser on host_orch → chip_orch dispatches) used to be left untouched by
+    ConvertToSSA, leaving a dead reference to the pre-SSA loop induction var.
+    CollectCommGroups then failed identity-matching the dead Var against any
+    enclosing ForStmt's versioned ``loop_var_``.
+    """
+
+    @staticmethod
+    def _find_host_orch_dispatch(program: ir.Program) -> tuple[ir.ForStmt, ir.Call]:
+        """Locate the host_orch ForStmt and the inner chip_orch dispatch Call."""
+
+        host_orch = None
+        for _gv, func in program.functions.items():
+            if func.name == "host_orch":
+                host_orch = func
+                break
+        assert host_orch is not None, "host_orch function not found in program"
+
+        for_stmt: ir.ForStmt | None = None
+        call: ir.Call | None = None
+
+        def walk_stmt(stmt: ir.Stmt) -> None:
+            nonlocal for_stmt, call
+            if isinstance(stmt, ir.ForStmt):
+                for_stmt = stmt
+                walk_stmt(stmt.body)
+                return
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    walk_stmt(s)
+                return
+            if isinstance(stmt, ir.EvalStmt):
+                if isinstance(stmt.expr, ir.Call) and "device" in dict(stmt.expr.attrs):
+                    call = stmt.expr
+                return
+            if isinstance(stmt, ir.AssignStmt):
+                if isinstance(stmt.value, ir.Call) and "device" in dict(stmt.value.attrs):
+                    call = stmt.value
+                return
+
+        walk_stmt(host_orch.body)
+        assert for_stmt is not None, "expected a ForStmt in host_orch"
+        assert call is not None, "expected a chip_orch dispatch Call with device= attr"
+        return for_stmt, call
+
+    def test_device_var_attr_versioned_with_loop_var(self):
+        """``device=r`` must rebind to the versioned induction Var, not the dead
+        pre-SSA Var. Verified by object-identity between the ForStmt's
+        ``loop_var`` and the Call's ``attrs['device']`` after SSA."""
+        SIZE = 8
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip_orch(self, out: pl.Out[pl.Tensor[[SIZE], pl.FP32]]) -> pl.Tensor[[SIZE], pl.FP32]:
+                return out
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(
+                self,
+                outputs: pl.Out[pl.Tensor[[2, SIZE], pl.FP32]],
+            ) -> pl.Tensor[[2, SIZE], pl.FP32]:
+                for r in pl.range(2):
+                    self.chip_orch(outputs[r], device=r)
+                return outputs
+
+        After = passes.convert_to_ssa()(Before)
+        for_stmt, call = self._find_host_orch_dispatch(After)
+        device_expr = dict(call.attrs)["device"]
+        assert isinstance(device_expr, ir.Var), (
+            f"device= attr should remain an ir.Var after SSA, got {type(device_expr).__name__}"
+        )
+        assert device_expr is for_stmt.loop_var, (
+            "ConvertToSSA must substitute the device= attr Var to point at the "
+            f"versioned loop_var ({for_stmt.loop_var.name_hint!r}); got "
+            f"{device_expr.name_hint!r}"
+        )
+
+    def test_device_const_attr_preserved(self):
+        """``device=<ConstInt>`` is untouched by SSA — it has no Var to rewrite,
+        so the Call's attrs vector should not be rebuilt unnecessarily."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def chip_orch(self, out: pl.Out[pl.Tensor[[8], pl.FP32]]) -> pl.Tensor[[8], pl.FP32]:
+                return out
+
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def host_orch(
+                self,
+                outputs: pl.Out[pl.Tensor[[2, 8], pl.FP32]],
+            ) -> pl.Tensor[[2, 8], pl.FP32]:
+                self.chip_orch(outputs[0], device=0)
+                self.chip_orch(outputs[1], device=1)
+                return outputs
+
+        After = passes.convert_to_ssa()(Before)
+        host_orch = next(f for _, f in After.functions.items() if f.name == "host_orch")
+
+        seen: list[int] = []
+
+        def walk(stmt: ir.Stmt) -> None:
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    walk(s)
+            elif isinstance(stmt, ir.EvalStmt):
+                v = stmt.expr
+                if isinstance(v, ir.Call) and "device" in dict(v.attrs):
+                    dev = dict(v.attrs)["device"]
+                    assert isinstance(dev, ir.ConstInt)
+                    seen.append(dev.value)
+            elif isinstance(stmt, ir.AssignStmt):
+                v = stmt.value
+                if isinstance(v, ir.Call) and "device" in dict(v.attrs):
+                    dev = dict(v.attrs)["device"]
+                    assert isinstance(dev, ir.ConstInt)
+                    seen.append(dev.value)
+
+        walk(host_orch.body)
+        assert seen == [0, 1], f"expected device=[0, 1] preserved, got {seen}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

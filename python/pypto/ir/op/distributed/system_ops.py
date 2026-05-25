@@ -49,7 +49,7 @@ def get_comm_ctx(dist_tensor: _ir_core.Expr, *, span: Span | None = None) -> Cal
 
 
 def rank(ctx: _ir_core.Expr, *, span: Span | None = None) -> Call:
-    """Build a ``pld.system.rank(ctx)`` Call returning ``ScalarType(INT32)``.
+    """Build a ``pld.system.rank(ctx)`` Call returning ``ScalarType(UINT32)``.
 
     Type verifier enforces that ``ctx`` has :class:`ir.CommCtxType`.
     """
@@ -58,7 +58,7 @@ def rank(ctx: _ir_core.Expr, *, span: Span | None = None) -> Call:
 
 
 def nranks(ctx: _ir_core.Expr, *, span: Span | None = None) -> Call:
-    """Build a ``pld.system.nranks(ctx)`` Call returning ``ScalarType(INT32)``.
+    """Build a ``pld.system.nranks(ctx)`` Call returning ``ScalarType(UINT32)``.
 
     Type verifier enforces that ``ctx`` has :class:`ir.CommCtxType`.
     """

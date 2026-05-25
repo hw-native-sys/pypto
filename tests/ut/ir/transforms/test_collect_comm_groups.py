@@ -394,5 +394,69 @@ def test_no_alloc_window_buffer_no_op():
     ir.assert_structural_equal(After, Before)
 
 
+# ---------------------------------------------------------------------------
+# Loop-bound through SSA temp (regression for the second N4 bug)
+# ---------------------------------------------------------------------------
+
+
+def test_loop_bound_via_assigned_temp_world_size():
+    """``n = pld.world_size(); for r in pl.range(n): ... device=r`` ⇒ kAll.
+
+    Mirrors the post-ConvertToSSA / NormalizeStmtStructure shape where
+    ``pl.range(pld.world_size())`` has been CSE-hoisted into a named temp.
+    The pass must follow the AssignStmt def chain back to the
+    ``pld.system.world_size`` Call, otherwise the dispatch is rejected.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(1024)
+            data = pld.window(buf, [256], dtype=pl.FP32)
+            n = pld.world_size()
+            for r in pl.range(n):
+                self.chip_orch(data, device=r)
+            return 0
+
+    result = _apply(P)
+    assert len(result.comm_groups) == 1
+    g = result.comm_groups[0]
+    assert list(g.devices) == [], "world_size loop bound must resolve to kAll"
+
+
+def test_loop_bound_via_assigned_temp_const_int():
+    """``n = 2; for r in pl.range(n): ... device=r`` ⇒ subset {0, 1}.
+
+    Same indirection as the world_size case but with a ConstInt at the
+    end of the def chain — exercises the integer-bound branch of
+    ``UnwrapStopExpr``.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(1024)
+            data = pld.window(buf, [256], dtype=pl.FP32)
+            n = 2
+            for r in pl.range(n):
+                self.chip_orch(data, device=r)
+            return 0
+
+    result = _apply(P)
+    assert len(result.comm_groups) == 1
+    g = result.comm_groups[0]
+    assert list(g.devices) == [0, 1]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

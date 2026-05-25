@@ -2552,7 +2552,7 @@ class WindowBuffer(Var):
     size: Final[Expr]
     """Per-rank allocation size in **bytes** (matches
     :attr:`tile.alloc`'s size argument and the runtime's
-    ``ChipBufferSpec.nbytes`` field)."""
+    ``CommBufferSpec.nbytes`` field)."""
 
     load_from_host: Final[bool]
     """``True`` if this slot participates in pre-fork H2D staging."""

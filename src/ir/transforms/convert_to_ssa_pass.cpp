@@ -298,10 +298,13 @@ class SSAConverter {
     return {std::move(out), changed};
   }
 
-  /// Substitute Var references stored in Call attrs that hold
-  /// ``std::vector<VarPtr>`` (currently only ``manual_dep_edges`` on Call —
-  /// ``arg_direction_overrides_vars`` is scope-only and handled by the
-  /// separate ``SubstScopeAttrs`` path below).
+  /// Substitute Var references stored in Call attrs. Currently covers:
+  ///   * ``kAttrManualDepEdges`` — ``std::vector<VarPtr>`` (dep edges)
+  ///   * ``kAttrDevice`` — ``ExprPtr`` (host-orch dispatch device selector,
+  ///     typically a loop induction Var that SSA must version)
+  ///
+  /// ``kAttrArgDirOverrideVars`` is scope-only and handled by the separate
+  /// ``SubstScopeAttrs`` path below.
   /// Returns a rebuilt attrs vector when any Var was rewritten, otherwise
   /// std::nullopt so the caller can keep the existing attrs vector verbatim.
   std::optional<std::vector<std::pair<std::string, std::any>>> SubstCallAttrs(
@@ -332,6 +335,16 @@ class SSAConverter {
           if (any) {
             changed = true;
             out.emplace_back(k, std::any(std::move(new_edges)));
+            continue;
+          }
+        }
+      } else if (k == kAttrDevice) {
+        const auto* dev = std::any_cast<ExprPtr>(&v);
+        if (dev && *dev) {
+          auto new_dev = SubstExpr(*dev);
+          if (new_dev.get() != dev->get()) {
+            changed = true;
+            out.emplace_back(k, std::any(std::move(new_dev)));
             continue;
           }
         }

@@ -369,22 +369,22 @@ def test_get_comm_ctx_rejects_extra_positional():
         ir.create_op_call("pld.system.get_comm_ctx", [target, extra], {}, span)
 
 
-def test_comm_ctx_rank_returns_int32_scalar():
+def test_comm_ctx_rank_returns_uint32_scalar():
     span = ir.Span.unknown()
     target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
     ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
     rank = ir.create_op_call("pld.system.rank", [ctx], {}, span)
     assert isinstance(rank.type, ir.ScalarType)
-    assert rank.type.dtype == DataType.INT32
+    assert rank.type.dtype == DataType.UINT32
 
 
-def test_comm_ctx_nranks_returns_int32_scalar():
+def test_comm_ctx_nranks_returns_uint32_scalar():
     span = ir.Span.unknown()
     target = _make_distributed_tensor_var("data", [64], DataType.FP32, span)
     ctx = ir.create_op_call("pld.system.get_comm_ctx", [target], {}, span)
     nranks = ir.create_op_call("pld.system.nranks", [ctx], {}, span)
     assert isinstance(nranks.type, ir.ScalarType)
-    assert nranks.type.dtype == DataType.INT32
+    assert nranks.type.dtype == DataType.UINT32
 
 
 def test_comm_ctx_rank_rejects_non_comm_ctx_arg():

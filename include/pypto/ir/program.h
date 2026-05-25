@@ -82,17 +82,18 @@ using WindowBufferPtr = std::shared_ptr<const WindowBuffer>;
  * @brief A communication group inferred for a ``@pl.program``.
  *
  * The ``CollectCommGroups`` pass (N4) builds these from
- * ``pld.tensor.alloc_window_buffer`` ops and their dispatch coverage. The runtime
- * (``distributed_runner``) uses this to compose ``ChipBootstrapConfig`` before
- * bringing the workers up.
+ * ``pld.tensor.alloc_window_buffer`` ops and their dispatch coverage. The
+ * distributed codegen reads them in ``EmitCommDomainAllocations`` and emits
+ * one ``with orch.allocate_domain(name=..., workers=..., window_size=...,
+ * buffers=[...])`` block per group at the top of host_orch.
  *
- * ``devices_`` is the ascending-sorted set of physical device ids covered by
- * the group. **An empty vector means "all devices"** (every entry of
- * ``DistributedConfig.device_ids``, resolved by the driver at submit-time).
+ * ``devices_`` is the ascending-sorted set of worker indices into
+ * ``DistributedConfig.device_ids`` covered by the group. **An empty vector
+ * means "all devices"** (every entry of ``DistributedConfig.device_ids``).
  */
 class CommGroup : public IRNode {
  public:
-  std::vector<int64_t> devices_;        ///< Covered device ids (ascending); empty = all devices
+  std::vector<int64_t> devices_;        ///< Covered worker indices (ascending); empty = all devices
   std::vector<WindowBufferPtr> slots_;  ///< Allocation slots in this group (alloc-order)
 
   CommGroup(std::vector<int64_t> devices, std::vector<WindowBufferPtr> slots, Span span = Span::unknown())
