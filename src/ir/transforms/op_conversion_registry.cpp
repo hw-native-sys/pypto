@@ -1338,12 +1338,13 @@ void OpConversionRegistry::RegisterGatherOps() {
 // ============================================================================
 // Scatter lowering (mirror of gather, no compare-form).
 //
-// tensor.scatter (index form, MVP — rank-2, dim=0/-2):
+// tensor.scatter (index form, MVP — rank-2, dim=-1 column scatter):
 //   The framework auto-bridges (input, index, src) to Vec tiles via input_reqs.
-//   We swap the arg order to match the tile-level DPS signature (dst, src,
-//   indexes) and emit a single tile.scatter. The result Var inherits dst's
-//   storage; the surrounding pass wraps the tile result in a tile.store to the
-//   output tensor param.
+//   We build the flattened per-element destination index from the column index
+//   (flat_idx = index + i*dst_cols) and emit tile.scatter against the tile-level
+//   DPS signature (dst, src, indexes), then reconstruct the DPS preserve with a
+//   select blend. The surrounding pass wraps the tile result in a tile.store to
+//   the output tensor param.
 //
 // tensor.scatter_mask: same idea, simple (input, dst) → (dst, src) re-wire.
 // ============================================================================

@@ -2525,16 +2525,20 @@ def scatter(
     indexes: Expr,
     span: Span | None = None,
 ) -> Call:
-    """Scatter rows from ``src`` into ``dst`` at per-row destination indices.
+    """Scatter elements of ``src`` into ``dst`` at per-element flattened indices.
 
-    Computes ``dst[indexes[i, 0], j] = src[i, j]``. Maps to PTOAS ``pto.tscatter``
-    index form. The op is DPS — ``dst`` is the first (in/out) argument, rewritten
-    in place, and the call's return value aliases ``dst``.
+    Computes ``dst.flat[indexes[i, j]] = src[i, j]``, i.e. ``indexes`` carries the
+    *flattened* destination offset for each ``src`` element and therefore has the
+    **same [rows, cols] shape as** ``src``. Maps to PTOAS ``pto.tscatter`` index
+    form. The op is DPS — ``dst`` is the first (in/out) argument, rewritten in
+    place, and the call's return value aliases ``dst``.
 
     Args:
-        dst: Destination tile (same dtype as src; rewritten in-place via DPS)
+        dst: Destination tile (same dtype as src; rewritten in-place via DPS).
+            Flat-addressed, so its column count is independent of ``src``.
         src: Source tile (FP16/FP32/BF16/INT8/INT16/INT32, 2D)
-        indexes: Per-row destination index tile (INT16 or INT32; one row per src row)
+        indexes: Per-element flattened destination index tile (INT16 or INT32;
+            same shape as ``src``)
         span: Optional source span
 
     Returns:

@@ -2031,19 +2031,22 @@ def gather_compare(
 
 
 def scatter(dst: Tile, src: Tile, indexes: Tile) -> Tile:
-    """Scatter rows from ``src`` into ``dst`` at per-row destination indices.
+    """Scatter elements of ``src`` into ``dst`` at per-element flattened indices.
 
-    Computes ``dst[indexes[i, 0], j] = src[i, j]``. Maps to PTOAS ``pto.tscatter``
-    index form. The op is DPS — ``dst`` is the first (in/out) argument, rewritten
-    in place, and the returned Tile aliases the same buffer. For the hardware
+    Computes ``dst.flat[indexes[i, j]] = src[i, j]``, i.e. ``indexes`` carries the
+    *flattened* destination offset for each ``src`` element and therefore has the
+    **same [rows, cols] shape as** ``src``. Maps to PTOAS ``pto.tscatter`` index
+    form. The op is DPS — ``dst`` is the first (in/out) argument, rewritten in
+    place, and the returned Tile aliases the same buffer. For the hardware
     mask-pattern variant, use :func:`scatter_mask`.
 
     Args:
         dst: Destination tile (same dtype as ``src``; rewritten in-place).
+            Flat-addressed, so its column count is independent of ``src``.
         src: Source tile (FP16/FP32/BF16/INT8/INT16/INT32, 2D)
-        indexes: Per-row destination index tile (INT16 or INT32). The element
-            width must match ``dst``: 4-byte dst → INT32, 2-byte dst → INT16,
-            1-byte dst → INT16.
+        indexes: Per-element flattened destination index tile (INT16 or INT32;
+            same shape as ``src``). The element width must match ``dst``: 4-byte
+            dst → INT32, 2-byte dst → INT16, 1-byte dst → INT16.
 
     Returns:
         Tile aliasing the post-scatter ``dst`` tile.
