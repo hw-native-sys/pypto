@@ -1642,7 +1642,7 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   auto analysis_result = ComputeLifetimes(new_body);
 
   if (analysis_result.lifetimes.empty()) {
-    LOG_INFO << "No TileType variables found in function '" << func->name_ << "', skipping memory reuse";
+    LOG_DEBUG << "No TileType variables found in function '" << func->name_ << "', skipping memory reuse";
     return func;
   }
 
