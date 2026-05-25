@@ -1302,6 +1302,7 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
   if (result_var != nullptr) {
     codegen.RegisterTensorView(result_var, tensor_view);
     codegen.RegisterVarToMlir(result_var, tensor_view);
+    codegen.RegisterBasePtr(result_var, codegen.GetTensorBasePtr(output_tensor));
   }
 
   return "";
@@ -1380,6 +1381,7 @@ static std::string MakeTileMscatterCodegenPTO(const CallPtr& op, codegen::Codege
   if (result_var != nullptr) {
     codegen.RegisterTensorView(result_var, tensor_view);
     codegen.RegisterVarToMlir(result_var, tensor_view);
+    codegen.RegisterBasePtr(result_var, codegen.GetTensorBasePtr(output_tensor));
   }
 
   return "";
@@ -1513,9 +1515,9 @@ static std::string MakeTensorReadCodegenPTO(const CallPtr& op, codegen::CodegenB
   INTERNAL_CHECK_SPAN(scalar_type_ptr, op->span_) << "tensor.read result must be ScalarType";
   std::string scalar_type = codegen.GetTypeString(scalar_type_ptr->dtype_);
 
-  // store_scalar/load_scalar need the base !pto.ptr; resolve through any
-  // tensor_view the tensor was rebound to by a slice-assign (issue #1493).
-  std::string src = codegen.ResolveBasePtr(codegen.GetExprAsCode(op->args_[0]));
+  // store_scalar/load_scalar need the base !pto.ptr; resolve via the tensor var
+  // even after a slice-assign rebound it to a tensor_view (issue #1493).
+  std::string src = codegen.GetTensorBasePtr(AsVarLike(op->args_[0]));
   std::string src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string result = codegen.GetCurrentResultTarget();
 
@@ -1545,9 +1547,9 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
   auto indices_tuple = As<ir::MakeTuple>(op->args_[1]);
   INTERNAL_CHECK_SPAN(indices_tuple, op->span_) << "tensor.write second argument must be MakeTuple (indices)";
 
-  // store_scalar needs the base !pto.ptr; resolve through any tensor_view the
-  // tensor was rebound to by a prior slice-assign (issue #1493).
-  std::string tensor = codegen.ResolveBasePtr(codegen.GetExprAsCode(op->args_[0]));
+  // store_scalar needs the base !pto.ptr; resolve via the tensor var even after
+  // a prior slice-assign rebound it to a tensor_view (issue #1493).
+  std::string tensor = codegen.GetTensorBasePtr(AsVarLike(op->args_[0]));
   std::string tensor_type_str = codegen.GetExprTypeAnnotation(op->args_[0]);
   std::string value = codegen.GetExprAsCode(op->args_[2]);
   std::string value_type = codegen.GetExprTypeAnnotation(op->args_[2]);
@@ -1572,6 +1574,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
   if (result_var != nullptr) {
     codegen.RegisterTensorView(result_var, tensor);
     codegen.RegisterVarToMlir(result_var, tensor);
+    codegen.RegisterBasePtr(result_var, tensor);
   }
   return "";
 }
