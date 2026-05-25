@@ -642,7 +642,8 @@ def test_pto_codegen_mixed_slice_assign_and_write_keeps_ptr():
             with pl.at(level=pl.Level.CORE_GROUP, name_hint="repro"):
                 buf[:, :] = pl.full([T, 1], dtype=pl.FP32, value=0.0)
                 for r in pl.range(T):
-                    pl.write(buf, [r, 0], 1.0)
+                    val: pl.Scalar[pl.FP32] = pl.read(out, [r, 0])
+                    pl.write(buf, [r, 0], val)
             out[:, :] = buf
 
     prog = _run_default_passes(MixedAccess)
