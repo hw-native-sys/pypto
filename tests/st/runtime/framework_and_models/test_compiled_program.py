@@ -139,5 +139,91 @@ class TestJitCompiledProgram:
         assert compiled.has_return is True
 
 
+def _manual_dispatch(compiled, *args, device_id, config=None):
+    """Drive a hand-built simpler.Worker via the extraction surface; return coerced list."""
+    from simpler.worker import Worker as SimplerWorker
+
+    cc = compiled.chip_callable
+    rn = compiled.runtime_name
+    orch_args, coerced, return_style = compiled.build_orch_args(*args)
+    cfg = compiled.build_call_config(config) if config is not None else compiled.build_call_config()
+    w = SimplerWorker(level=2, device_id=device_id, platform=compiled.platform, runtime=rn)
+    w.init()
+    try:
+        cid = w.register(cc)
+        w.run(cid, orch_args, cfg)
+        w.unregister_callable(cid)
+    finally:
+        w.close()
+    return coerced, return_style
+
+
+class TestManualWorkerExtraction:
+    """PR#1496: manual simpler.Worker dispatch via extraction surface must
+    match the direct ``compiled(...)`` path numerically."""
+
+    def test_manual_add_matches_direct(self, test_config):
+        tile_add_128._cache.clear()
+        a = torch.full((128, 128), 2.0, dtype=torch.float32)
+        b = torch.full((128, 128), 3.0, dtype=torch.float32)
+        tile_add_128(a, b, torch.zeros_like(a), config=test_config)
+        compiled = _get_cached_compiled(tile_add_128)
+
+        c_direct = compiled(a, b, config=test_config)
+        coerced, return_style = _manual_dispatch(compiled, a, b, device_id=test_config.device_id)
+        assert return_style is True
+        c_manual = coerced[compiled.output_indices[0]]
+        assert torch.equal(c_direct, c_manual)
+
+    def test_manual_mul_matches_direct(self, test_config):
+        tile_mul_128._cache.clear()
+        a = torch.full((128, 128), 4.0, dtype=torch.float32)
+        b = torch.full((128, 128), 3.0, dtype=torch.float32)
+        tile_mul_128(a, b, torch.zeros_like(a), config=test_config)
+        compiled = _get_cached_compiled(tile_mul_128)
+
+        c_direct = compiled(a, b, config=test_config)
+        coerced, _ = _manual_dispatch(compiled, a, b, device_id=test_config.device_id)
+        c_manual = coerced[compiled.output_indices[0]]
+        assert torch.equal(c_direct, c_manual)
+        assert torch.allclose(c_manual, torch.full((128, 128), 12.0), rtol=1e-5, atol=1e-5)
+
+    def test_manual_inplace_writes_output(self, test_config):
+        """Passing the output tensor: return_style False, write lands in coerced."""
+        tile_add_128._cache.clear()
+        a = torch.full((128, 128), 1.0, dtype=torch.float32)
+        b = torch.full((128, 128), 6.0, dtype=torch.float32)
+        c = torch.zeros((128, 128), dtype=torch.float32)
+        tile_add_128(a, b, c, config=test_config)
+        compiled = _get_cached_compiled(tile_add_128)
+
+        coerced, return_style = _manual_dispatch(compiled, a, b, c, device_id=test_config.device_id)
+        assert return_style is False
+        assert torch.allclose(coerced[compiled.output_indices[0]], torch.full((128, 128), 7.0))
+
+    def test_lazy_artefacts_cached(self, test_config):
+        """Property access auto-loads once and caches the same chip_callable."""
+        tile_add_128._cache.clear()
+        a = torch.full((128, 128), 2.0, dtype=torch.float32)
+        b = torch.full((128, 128), 3.0, dtype=torch.float32)
+        tile_add_128(a, b, torch.zeros_like(a), config=test_config)
+        compiled = _get_cached_compiled(tile_add_128)
+        assert compiled.chip_callable is compiled.chip_callable
+        assert isinstance(compiled.runtime_name, str) and compiled.runtime_name
+        assert isinstance(compiled.runtime_config, dict)
+
+    def test_block_dim_override_runs(self, test_config):
+        """build_call_config block_dim override is accepted and runs correctly."""
+        tile_add_128._cache.clear()
+        a = torch.full((128, 128), 2.0, dtype=torch.float32)
+        b = torch.full((128, 128), 3.0, dtype=torch.float32)
+        tile_add_128(a, b, torch.zeros_like(a), config=test_config)
+        compiled = _get_cached_compiled(tile_add_128)
+        cfg = compiled.build_call_config(test_config, block_dim=1)
+        assert cfg.block_dim == 1
+        coerced, _ = _manual_dispatch(compiled, a, b, device_id=test_config.device_id)
+        assert torch.allclose(coerced[compiled.output_indices[0]], torch.full((128, 128), 5.0))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
