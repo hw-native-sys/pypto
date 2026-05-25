@@ -2100,5 +2100,6 @@ class TestScatterCodegen:
             f"pto.tscatter mask form must use the ins(...) outs(...) DPS form, got:\n{line}"
         )
 
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
