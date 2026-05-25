@@ -2581,7 +2581,8 @@ class ASTParser:
 
         Supports both positional and keyword forms. The only accepted form of
         AutoInCore / split configuration is the ``optimizations=[...]`` list
-        with ``pl.split(...)`` and ``pl.auto_chunk`` entries.
+        with ``pl.split(...)`` and ``pl.auto_chunk`` entries (``pl.auto_chunk``
+        is deprecated and emits a ``DeprecationWarning`` at parse time).
 
         Returns the populated :class:`_AtKwargState`. ``requests_auto_chunk`` is
         True when the resulting scope must be ``AutoInCore`` rather than
@@ -2729,11 +2730,16 @@ class ASTParser:
                     )
                 seen_auto_chunk = True
                 requests_auto_chunk = True
-                warnings.warn(
-                    "pl.auto_chunk is deprecated and will be removed in a future release.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
+                # pl.spmd rejects pl.auto_chunk with a hard error a few lines
+                # later in _parse_spmd_optimizations_list; suppress the
+                # deprecation warning there so users don't get two diagnostics
+                # for the same use.
+                if owner == "pl.at":
+                    warnings.warn(
+                        "pl.auto_chunk is deprecated and will be removed in a future release.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
             elif (mode := self._try_parse_pl_split(entry)) is not None:
                 if seen_split:
                     raise ParserSyntaxError(
