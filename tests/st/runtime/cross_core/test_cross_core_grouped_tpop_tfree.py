@@ -51,7 +51,7 @@ _PLATFORM_TO_BACKEND: dict[str, BackendType] = {
     "a2a3": BackendType.Ascend910B,
 }
 _DEFAULT_PLATFORM = "a2a3"
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
 def _resolve_platform(config: pytest.Config) -> str:

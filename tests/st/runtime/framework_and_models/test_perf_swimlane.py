@@ -27,7 +27,7 @@ import torch
 from harness.core.harness import DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
-_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output"
+_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
 
 
 class _MatmulPTO(PTOTestCase):

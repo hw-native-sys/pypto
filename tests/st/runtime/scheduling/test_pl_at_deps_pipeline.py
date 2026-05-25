@@ -60,7 +60,7 @@ import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
-_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output"
+_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
 
 # Tile grid — kept small so a single run produces a readable swimlane chart.
 _M = 4
