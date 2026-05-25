@@ -40,7 +40,7 @@ from pypto.runtime import RunConfig  # noqa: E402
 T, K, N, KC = 32, 4096, 128, 512
 
 # Deterministic dump location so the per-pass IR / .pto is easy to inspect.
-DUMP_DIR = Path(__file__).resolve().parents[3] / "build_output" / "issue_1467_repro"
+DUMP_DIR = Path(__file__).resolve().parents[4] / "build_output" / "issue_1467_repro"
 
 # A pto.tmov whose input and output tile_buf are both loc=mat (the illegal
 # Mat->Mat move issue #1467 is about). The op spans two lines in the .pto.
