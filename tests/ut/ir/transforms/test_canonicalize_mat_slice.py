@@ -43,9 +43,8 @@ class TestSliceIntoExtract:
     """A Mat tile.slice consumed by tile.extract is folded into the extract."""
 
     def test_zero_offset_slice_folded(self):
-        """An offset-0 full-shape Mat ``tile.slice`` (the issue #1467 no-op
-        shape) feeding ``tile.extract`` is dropped; the extract reads the
-        slice's source directly."""
+        """An offset-0 full-shape Mat ``tile.slice`` feeding ``tile.extract``
+        is dropped; the extract reads the slice's source directly."""
 
         @pl.program
         class Before:

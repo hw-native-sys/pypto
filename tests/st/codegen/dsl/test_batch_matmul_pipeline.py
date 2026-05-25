@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Regression test for issue #1467.
+"""Regression test: pipelined 3D batch matmul must not emit Mat->Mat ``pto.tmov``.
 
 A 3D batch matmul (operands sliced from a tensor with a leading dim of 1)
 written inside a ``pl.pipeline`` K-reduction loop with a ``create_tensor``
@@ -15,14 +15,11 @@ accumulator and an ``if kb == 0`` first-iteration branch.
 
 ``FlattenTileNdTo2D`` lowers the rank-3 ``tile.batch_matmul`` by unrolling the
 batch dimension; with a 1-sized batch the per-page extraction emits a no-op
-full-shape, offset-0 ``tile.slice`` whose result is ``Mem.Mat``. Before the
-fix that dead slice lowered to an unsupported ``loc=mat -> loc=mat``
-``pto.tmov``. The ``CanonicalizeMatSlice`` pass folds every Mat-resident
-``tile.slice`` into its ``tile.extract`` consumer, so the generated ``.pto``
-contains zero Mat->Mat ``pto.tmov``.
-
-This test asserts issue #1467's stated expectation directly: 0
-``loc=mat -> loc=mat`` ``pto.tmov`` in the generated ``.pto``.
+full-shape, offset-0 ``tile.slice`` whose result is ``Mem.Mat``. Without
+canonicalization that dead slice lowers to an unsupported
+``loc=mat -> loc=mat`` ``pto.tmov``. The ``CanonicalizeMatSlice`` pass folds
+every Mat-resident ``tile.slice`` into its ``tile.extract`` consumer, so the
+generated ``.pto`` contains zero Mat->Mat ``pto.tmov``.
 """
 
 import re
@@ -40,10 +37,10 @@ from pypto.runtime import RunConfig  # noqa: E402
 T, K, N, KC = 32, 4096, 128, 512
 
 # Deterministic dump location so the per-pass IR / .pto is easy to inspect.
-DUMP_DIR = Path(__file__).resolve().parents[4] / "build_output" / "issue_1467_repro"
+DUMP_DIR = Path(__file__).resolve().parents[4] / "build_output" / "batch_matmul_pipeline_repro"
 
 # A pto.tmov whose input and output tile_buf are both loc=mat (the illegal
-# Mat->Mat move issue #1467 is about). The op spans two lines in the .pto.
+# Mat->Mat move this test guards against). The op spans two lines in the .pto.
 _MAT_TO_MAT_TMOV = re.compile(r"pto\.tmov\s+ins\([^)]*loc=mat[^)]*\)\s*outs\([^)]*loc=mat[^)]*\)", re.DOTALL)
 
 
@@ -68,9 +65,9 @@ def batch_matmul_pipeline_repro(
     return out
 
 
-def test_issue_1467_no_mat_to_mat_tmov():
+def test_no_mat_to_mat_tmov():
     """The 3D-batch pipelined matmul must not lower a Mat ``tile.slice`` to a
-    ``loc=mat -> loc=mat`` ``pto.tmov`` (issue #1467)."""
+    ``loc=mat -> loc=mat`` ``pto.tmov``."""
     batch_matmul_pipeline_repro._cache.clear()
     if DUMP_DIR.exists():
         shutil.rmtree(DUMP_DIR)
@@ -87,8 +84,9 @@ def test_issue_1467_no_mat_to_mat_tmov():
         save_kernels_dir=str(DUMP_DIR),
     )
     # End-to-end compilation may still fail on an unrelated downstream codegen
-    # bug (transposed-weight DN->NZ TLOAD — tracked separately); the issue #1467
-    # check below is on the generated .pto, which codegen emits before that.
+    # bug (transposed-weight DN->NZ TLOAD — tracked separately); the Mat->Mat
+    # ``pto.tmov`` check below is on the generated .pto, which codegen emits
+    # before that.
     compile_error: Exception | None = None
     try:
         batch_matmul_pipeline_repro(x, w, out, config=cfg)
@@ -102,8 +100,8 @@ def test_issue_1467_no_mat_to_mat_tmov():
     text = pto.read_text()
     mat_to_mat = _MAT_TO_MAT_TMOV.findall(text)
     assert not mat_to_mat, (
-        f"issue #1467: {len(mat_to_mat)} unsupported loc=mat -> loc=mat pto.tmov "
-        f"in {pto}; the Mat tile.slice was not canonicalized into tile.extract"
+        f"{len(mat_to_mat)} unsupported loc=mat -> loc=mat pto.tmov in {pto}; "
+        f"the Mat tile.slice was not canonicalized into tile.extract"
     )
 
 
