@@ -11,14 +11,15 @@
 
 import ctypes
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
 from pypto.runtime import DeviceTensor
+
+from pypto import DataType, backend, ir
 
 
 def _make_program_with_orchestration(*, has_return: bool = False) -> ir.Program:
@@ -513,6 +514,338 @@ class TestCompiledProgramDeviceTensor:
 
         with pytest.raises(TypeError, match="expects dtype"):
             cp(a, bad_b, c)
+
+
+class TestCompiledProgramExtraction:
+    """Verify the extraction surface that lets users drive ``simpler.worker.Worker``
+    directly: ``chip_callable`` / ``runtime_name`` / ``runtime_config`` properties,
+    ``load()``, ``build_orch_args()``, and ``build_call_config()``.
+    """
+
+    def _patch_assemble(self, chip_callable_name: str = "fake_chip"):
+        """Patch ``device_runner.compile_and_assemble`` and return the MagicMock.
+
+        The patch target is the *source* module — inner-scope ``from ... import``
+        statements bind to the patched name at import time.
+        """
+        cc = MagicMock(name=chip_callable_name)
+        runtime_config = {"block_dim": 8, "aicpu_thread_num": 2}
+        return (
+            cc,
+            runtime_config,
+            patch(
+                "pypto.runtime.device_runner.compile_and_assemble",
+                return_value=(cc, "host_build_graph", runtime_config),
+            ),
+        )
+
+    def test_chip_callable_triggers_assemble(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        cc, _, patcher = self._patch_assemble()
+        with patcher as mock:
+            assert cp.chip_callable is cc
+            mock.assert_called_once_with(tmp_path.resolve(), cp.platform, None)
+
+    def test_runtime_name_triggers_assemble(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        with patcher:
+            assert cp.runtime_name == "host_build_graph"
+
+    def test_runtime_config_triggers_assemble(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, runtime_config, patcher = self._patch_assemble()
+        with patcher:
+            assert cp.runtime_config == runtime_config
+
+    def test_properties_cache_across_calls(self, tmp_path):
+        """All three properties together trigger exactly one compile_and_assemble call."""
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        with patcher as mock:
+            _ = cp.chip_callable
+            _ = cp.runtime_name
+            _ = cp.runtime_config
+            _ = cp.chip_callable  # repeat
+            assert mock.call_count == 1
+
+    def test_load_passes_pto_isa_commit(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        with patcher as mock:
+            cp.load(pto_isa_commit="abc1234")
+            mock.assert_called_once_with(tmp_path.resolve(), cp.platform, "abc1234")
+
+    def test_load_after_first_access_with_commit_raises(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        with patcher:
+            _ = cp.chip_callable  # cache warmed
+            with pytest.raises(RuntimeError, match="already loaded"):
+                cp.load(pto_isa_commit="abc1234")
+
+    def test_load_after_first_access_without_commit_is_noop(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        with patcher as mock:
+            _ = cp.chip_callable
+            cp.load()  # no commit override → idempotent
+            assert mock.call_count == 1
+
+    def test_build_orch_args_inplace_returns_full_list(self, tmp_path):
+        """In-place call shape: all params passed, return_style is False."""
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+        a = torch.zeros(128, 128)
+        b = torch.zeros(128, 128)
+        c = torch.zeros(128, 128)
+
+        # Patch the runner-side helper so we don't hit simpler types.
+        with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
+            oa_helper.return_value = "fake_orch_args"
+            orch_args, coerced, return_style = cp.build_orch_args(a, b, c)
+
+        assert orch_args == "fake_orch_args"
+        assert coerced == [a, b, c]
+        assert return_style is False
+        oa_helper.assert_called_once_with([a, b, c])
+
+    def test_build_orch_args_return_style_allocates_output(self, tmp_path):
+        """Return-style: only inputs passed; output auto-allocated at output_indices."""
+        prog = _make_program_with_orchestration(has_return=True)
+        cp = CompiledProgram(prog, str(tmp_path))
+        a = torch.zeros(128, 128)
+        b = torch.zeros(128, 128)
+
+        with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
+            oa_helper.return_value = "fake_orch_args"
+            orch_args, coerced, return_style = cp.build_orch_args(a, b)
+
+        assert return_style is True
+        assert len(coerced) == 3
+        # Output slot is at index 2 (output_indices == [2]); a real torch.Tensor was allocated.
+        out = coerced[cp.output_indices[0]]
+        assert isinstance(out, torch.Tensor)
+        assert out.shape == (128, 128)
+
+    def test_build_orch_args_wrong_arg_count_raises(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+        a = torch.zeros(128, 128)
+        with pytest.raises(TypeError, match="expects 3"):
+            cp.build_orch_args(a)
+
+    def test_build_call_config_uses_runtime_config_default(self, tmp_path):
+        """When config has no overrides, RUNTIME_CONFIG values feed CallConfig."""
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        fake_call_config = MagicMock(name="CallConfig_instance")
+        with (
+            patcher,
+            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+        ):
+            from pypto.runtime import RunConfig  # noqa: PLC0415
+
+            cfg = cp.build_call_config(RunConfig())
+
+        assert cfg is fake_call_config
+        assert fake_call_config.block_dim == 8  # from runtime_config
+        assert fake_call_config.aicpu_thread_num == 2
+
+    def test_build_call_config_explicit_overrides_runtime_config(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        fake_call_config = MagicMock(name="CallConfig_instance")
+        with (
+            patcher,
+            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+        ):
+            from pypto.runtime import RunConfig  # noqa: PLC0415
+
+            cp.build_call_config(RunConfig(), block_dim=32, aicpu_thread_num=4)
+
+        assert fake_call_config.block_dim == 32
+        assert fake_call_config.aicpu_thread_num == 4
+
+    def test_build_call_config_run_config_beats_runtime_config(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        fake_call_config = MagicMock(name="CallConfig_instance")
+        with (
+            patcher,
+            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+        ):
+            from pypto.runtime import RunConfig  # noqa: PLC0415
+
+            cp.build_call_config(RunConfig(block_dim=16))
+
+        assert fake_call_config.block_dim == 16  # RunConfig wins over runtime_config.block_dim=8
+
+    def test_build_call_config_copies_dfx_flags(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        fake_call_config = MagicMock(name="CallConfig_instance")
+        with (
+            patcher,
+            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+        ):
+            from pypto.runtime import RunConfig  # noqa: PLC0415
+
+            cp.build_call_config(
+                RunConfig(
+                    enable_l2_swimlane=True,
+                    enable_dump_tensor=True,
+                    enable_pmu=2,
+                    enable_dep_gen=True,
+                ),
+                dfx_dir=tmp_path / "dfx",
+            )
+
+        assert fake_call_config.enable_l2_swimlane is True
+        assert fake_call_config.enable_dump_tensor is True
+        assert fake_call_config.enable_pmu == 2
+        assert fake_call_config.enable_dep_gen is True
+        assert fake_call_config.output_prefix == str(tmp_path / "dfx")
+
+    def test_build_call_config_dfx_dir_omitted_when_none(self, tmp_path):
+        """No dfx_dir → output_prefix must NOT be set on CallConfig."""
+        prog = _make_program_with_orchestration()
+        cp = CompiledProgram(prog, str(tmp_path))
+
+        _, _, patcher = self._patch_assemble()
+        fake_call_config = MagicMock(
+            spec=[
+                "block_dim",
+                "aicpu_thread_num",
+                "enable_l2_swimlane",
+                "enable_dump_tensor",
+                "enable_pmu",
+                "enable_dep_gen",
+            ]
+        )
+        with (
+            patcher,
+            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+        ):
+            from pypto.runtime import RunConfig  # noqa: PLC0415
+
+            cp.build_call_config(RunConfig())
+
+        # spec doesn't include "output_prefix", so any attempted set would fail.
+        # Reaching here means _build_call_config correctly skipped it.
+        assert not hasattr(fake_call_config, "output_prefix") or not isinstance(
+            fake_call_config.output_prefix, str
+        )
+
+
+class TestCompiledProgramExtractionMultiOrch:
+    """Multi-orch programs must reject extraction on the parent and route through
+    ``compiled[<name>]``.
+    """
+
+    def _make_multi_orch_layout(self, tmp_path):
+        """Lay out next_levels/<name>/orchestration/ so CompiledProgram detects multi-orch."""
+        for name in ("orch_a", "orch_b"):
+            (tmp_path / "next_levels" / name / "orchestration").mkdir(parents=True)
+
+    def test_chip_callable_rejected_on_multi_orch_parent(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        self._make_multi_orch_layout(tmp_path)
+        cp = CompiledProgram(prog, str(tmp_path))
+        assert cp.orchestration_names  # sanity: multi-orch detected
+        with pytest.raises(TypeError, match="Multi-orch"):
+            _ = cp.chip_callable
+
+    def test_build_orch_args_rejected_on_multi_orch_parent(self, tmp_path):
+        prog = _make_program_with_orchestration()
+        self._make_multi_orch_layout(tmp_path)
+        cp = CompiledProgram(prog, str(tmp_path))
+        a = torch.zeros(128, 128)
+        b = torch.zeros(128, 128)
+        c = torch.zeros(128, 128)
+        with pytest.raises(TypeError, match="Multi-orch"):
+            cp.build_orch_args(a, b, c)
+
+
+class TestSubChipCallableExtraction:
+    """Mirror of TestCompiledProgramExtraction for ``compiled[<name>]``."""
+
+    def _make_subchip(self, tmp_path):
+        from pypto.ir.compiled_program import _SubChipCallable  # noqa: PLC0415
+
+        # Build a Function with the same params as _make_program_with_orchestration.
+        span = ir.Span.unknown()
+        tensor_type = ir.TensorType([128, 128], DataType.FP32)
+        a_var = ir.Var("a", tensor_type, span)
+        b_var = ir.Var("b", tensor_type, span)
+        c_var = ir.Var("c", tensor_type, span)
+        params = [
+            (a_var, ir.ParamDirection.In),
+            (b_var, ir.ParamDirection.In),
+            (c_var, ir.ParamDirection.Out),
+        ]
+        body = ir.SeqStmts([], span)
+        func = ir.Function("orch_a", params, [], body, span, ir.FunctionType.Orchestration)
+        sub_dir = tmp_path / "next_levels" / "orch_a"
+        sub_dir.mkdir(parents=True)
+        return _SubChipCallable("orch_a", func, sub_dir, "a2a3sim")
+
+    def test_chip_callable_triggers_assemble(self, tmp_path):
+        sub = self._make_subchip(tmp_path)
+        cc = MagicMock(name="sub_chip_callable")
+        with patch(
+            "pypto.runtime.device_runner.compile_and_assemble",
+            return_value=(cc, "host_build_graph", {}),
+        ) as mock:
+            assert sub.chip_callable is cc
+            mock.assert_called_once_with(sub.output_dir, sub.platform, None)
+
+    def test_build_orch_args_routes_through_helper(self, tmp_path):
+        sub = self._make_subchip(tmp_path)
+        a = torch.zeros(128, 128)
+        b = torch.zeros(128, 128)
+        c = torch.zeros(128, 128)
+        with patch("pypto.runtime.runner._coerced_to_orch_args") as oa_helper:
+            oa_helper.return_value = "fake_orch_args"
+            orch_args, coerced, return_style = sub.build_orch_args(a, b, c)
+
+        assert orch_args == "fake_orch_args"
+        assert coerced == [a, b, c]
+        assert return_style is False
+
+    def test_load_after_first_access_with_commit_raises(self, tmp_path):
+        """Same guard as on CompiledProgram: cannot re-pin once cached."""
+        sub = self._make_subchip(tmp_path)
+        cc = MagicMock(name="sub_chip_callable")
+        with patch(
+            "pypto.runtime.device_runner.compile_and_assemble",
+            return_value=(cc, "host_build_graph", {}),
+        ):
+            _ = sub.chip_callable  # cache warmed
+            with pytest.raises(RuntimeError, match="already loaded"):
+                sub.load(pto_isa_commit="abc1234")
 
 
 if __name__ == "__main__":

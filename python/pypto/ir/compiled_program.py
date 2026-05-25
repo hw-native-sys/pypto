@@ -233,23 +233,23 @@ def _build_full_args(
     return all_tensors
 
 
-def _invoke_compiled(  # noqa: PLR0912 — branches for in-place vs return + scalar/tensor coercion
-    *,
-    output_dir: Path,
-    platform: str,
+def _coerce_args(  # noqa: PLR0912 — branches for in-place vs return + scalar/tensor coercion
+    args: tuple["CallArg", ...],
     param_infos: list[_ParamInfo],
     output_indices: list[int],
     return_types: list[Any],
-    args: tuple["CallArg", ...],
-    config: Any,
+    *,
     caller_name: str,
-) -> "torch.Tensor | tuple[torch.Tensor, ...] | None":
-    """Shared dispatch: coerce args, call the runtime, pack outputs.
+) -> tuple[list[torch.Tensor | DeviceTensor | ctypes._SimpleCData], bool]:
+    """Validate user-provided args against IR metadata and coerce them.
 
-    Used by both :meth:`CompiledProgram.__call__` (single-orch case) and
-    :meth:`_SubChipCallable.__call__` (multi-orch case). The two callers
-    differ only in *where* the artifacts live and *whose* metadata they
-    apply — everything from argument coercion onward is identical.
+    Returns ``(coerced, return_style)`` where ``coerced`` is a full positional
+    list (length ``len(param_infos)``) and ``return_style`` is ``True`` when
+    the caller passed only inputs and expects outputs to be returned.
+
+    For return-style calls, output ``torch.Tensor`` slots are auto-allocated
+    and placed at ``output_indices``. Tensor args are checked for shape/dtype
+    against IR; scalar args are wrapped in the matching ctypes type.
     """
     n_params = len(param_infos)
     n_inputs = n_params - len(output_indices)
@@ -296,6 +296,31 @@ def _invoke_compiled(  # noqa: PLR0912 — branches for in-place vs return + sca
             if isinstance(arg, DeviceTensor):
                 _validate_device_tensor(arg, info)
             coerced.append(arg)
+
+    return coerced, return_style
+
+
+def _invoke_compiled(
+    *,
+    output_dir: Path,
+    platform: str,
+    param_infos: list[_ParamInfo],
+    output_indices: list[int],
+    return_types: list[Any],
+    args: tuple["CallArg", ...],
+    config: Any,
+    caller_name: str,
+) -> "torch.Tensor | tuple[torch.Tensor, ...] | None":
+    """Shared dispatch: coerce args, call the runtime, pack outputs.
+
+    Used by both :meth:`CompiledProgram.__call__` (single-orch case) and
+    :meth:`_SubChipCallable.__call__` (multi-orch case). The two callers
+    differ only in *where* the artifacts live and *whose* metadata they
+    apply — everything from argument coercion onward is identical.
+    """
+    coerced, return_style = _coerce_args(
+        args, param_infos, output_indices, return_types, caller_name=caller_name
+    )
 
     from pypto.runtime.runner import RunConfig, _DfxOpts, execute_compiled  # noqa: PLC0415
 
@@ -377,6 +402,12 @@ class CompiledProgram:
         self._output_indices: list[int] | None = None
         self._return_types: list[Any] | None = None
 
+        # Lazy runtime artefacts -- compiled-and-assembled on first access
+        # of chip_callable / runtime_name / runtime_config (or via load()).
+        self._chip_callable: Any = None
+        self._runtime_name: str | None = None
+        self._runtime_config: dict[str, Any] | None = None
+
         # Multi-orch (L2-only) programs emit each Orchestration as a
         # self-contained sub-build under ``next_levels/<name>/``. Detect
         # those sub-dirs eagerly so ``__call__`` can error early and
@@ -451,6 +482,142 @@ class CompiledProgram:
     def platform(self) -> str:
         """Target execution platform (e.g. ``"a2a3sim"``, ``"a5"``)."""
         return self._platform
+
+    # --- Runtime artefacts (lazy) --------------------------------------------
+    #
+    # These three properties expose the simpler-side products of
+    # ``compile_and_assemble`` so callers that want to drive execution
+    # themselves (e.g. with a hand-constructed ``simpler.worker.Worker``)
+    # can pull them out of the CompiledProgram. First access triggers
+    # the assemble step; the result is cached for the lifetime of the
+    # CompiledProgram. For programs that need ``pto_isa_commit`` pinned,
+    # call :meth:`load` explicitly before accessing the properties.
+
+    def _ensure_runtime_loaded(self, pto_isa_commit: str | None = None) -> None:
+        if self._chip_callable is not None:
+            return
+        if self._sub_chip_dirs:
+            raise TypeError(
+                f"Multi-orch program has {len(self._sub_chip_dirs)} orchestrations "
+                f"{sorted(self._sub_chip_dirs)}; access runtime artefacts via "
+                f"compiled[<name>] instead."
+            )
+        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+
+        cc, rn, rc = compile_and_assemble(self._output_dir, self._platform, pto_isa_commit)
+        self._chip_callable = cc
+        self._runtime_name = rn
+        self._runtime_config = rc
+
+    def load(self, *, pto_isa_commit: str | None = None) -> None:
+        """Eagerly compile-and-load the runtime artefacts.
+
+        Optional — :attr:`chip_callable`, :attr:`runtime_name`, and
+        :attr:`runtime_config` all auto-load on first access. Use this
+        only when you need to pin a specific ``pto_isa_commit`` (which
+        must happen before any property access, since the result is
+        cached).
+
+        Raises:
+            RuntimeError: When runtime artefacts are already loaded and
+                a non-None ``pto_isa_commit`` is supplied — the cached
+                build cannot be re-pinned.
+        """
+        if self._chip_callable is not None and pto_isa_commit is not None:
+            raise RuntimeError(
+                "Runtime artefacts already loaded; pto_isa_commit cannot change. "
+                "Call load(pto_isa_commit=...) before any chip_callable / "
+                "runtime_name / runtime_config access."
+            )
+        self._ensure_runtime_loaded(pto_isa_commit)
+
+    @property
+    def chip_callable(self) -> Any:
+        """Simpler ``ChipCallable`` — hand to ``simpler.worker.Worker.register``."""
+        self._ensure_runtime_loaded()
+        return self._chip_callable
+
+    @property
+    def runtime_name(self) -> str:
+        """Runtime ABI name baked into ``kernel_config.py`` (e.g. ``"host_build_graph"``)."""
+        self._ensure_runtime_loaded()
+        assert self._runtime_name is not None
+        return self._runtime_name
+
+    @property
+    def runtime_config(self) -> dict[str, Any]:
+        """``RUNTIME_CONFIG`` dict from ``kernel_config.py`` (e.g. ``block_dim``, ``aicpu_thread_num``)."""
+        self._ensure_runtime_loaded()
+        assert self._runtime_config is not None
+        return self._runtime_config
+
+    # --- Argument builders (for users driving a simpler.Worker directly) -----
+
+    def build_orch_args(
+        self,
+        *args: "CallArg",
+    ) -> tuple[Any, list[torch.Tensor | DeviceTensor | ctypes._SimpleCData], bool]:
+        """Coerce user args and pack into a simpler ``ChipStorageTaskArgs``.
+
+        Returns ``(orch_args, coerced, return_style)``:
+
+        - ``orch_args``: simpler dispatch arg pack. Hand to
+          ``Worker.run(cid, orch_args, cfg)``.
+        - ``coerced``: full positional list of length ``len(param_infos)``.
+          Scalar values are wrapped in their target ``ctypes`` type. For
+          return-style callers, output ``torch.Tensor``s are auto-allocated
+          and placed at :attr:`output_indices`; read those after dispatch
+          to get the run's outputs.
+        - ``return_style``: ``True`` if the caller passed only inputs.
+
+        Raises:
+            TypeError: Arg count / type mismatch, or called on a multi-orch
+                program (use ``compiled[<name>].build_orch_args(...)`` instead).
+        """
+        if self._sub_chip_dirs:
+            raise TypeError(
+                f"Multi-orch program has {len(self._sub_chip_dirs)} orchestrations "
+                f"{sorted(self._sub_chip_dirs)}; use compiled[<name>].build_orch_args(...)."
+            )
+        param_infos, output_indices, return_types = self._get_metadata()
+        coerced, return_style = _coerce_args(
+            args, param_infos, output_indices, return_types, caller_name="CompiledProgram"
+        )
+        from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+
+        orch_args = _coerced_to_orch_args(coerced)
+        return orch_args, coerced, return_style
+
+    def build_call_config(
+        self,
+        config: Any = None,
+        *,
+        block_dim: int | None = None,
+        aicpu_thread_num: int | None = None,
+        dfx_dir: "Path | None" = None,
+    ) -> Any:
+        """Translate a pypto :class:`RunConfig` into a simpler ``CallConfig``.
+
+        Precedence for ``block_dim`` / ``aicpu_thread_num``: explicit kwarg
+        > ``config`` field > ``runtime_config`` baked into
+        ``kernel_config.py``. When all three are unset, the simpler
+        runtime's own default applies.
+
+        DFX flags are copied straight from ``config``; ``dfx_dir`` (when
+        given) becomes ``output_prefix``. Callers that enable DFX flags
+        are responsible for creating ``dfx_dir`` beforehand — simpler's
+        ``validate()`` rejects DFX-enabled calls without a valid prefix.
+        """
+        from pypto.runtime.runner import RunConfig, _build_call_config  # noqa: PLC0415
+
+        run_config = config if config is not None else RunConfig()
+        return _build_call_config(
+            run_config,
+            runtime_config=self.runtime_config,
+            block_dim_override=block_dim,
+            aicpu_thread_num_override=aicpu_thread_num,
+            dfx_dir=dfx_dir,
+        )
 
     # --- Backward compatibility: behave like a path string --------------------
 
@@ -600,6 +767,10 @@ class _SubChipCallable:
         self._output_dir = sub_dir
         self._platform = platform
         self._param_infos, self._output_indices, self._return_types = _extract_func_param_infos(func)
+        # Lazy runtime artefacts — mirror CompiledProgram.
+        self._chip_callable: Any = None
+        self._runtime_name: str | None = None
+        self._runtime_config: dict[str, Any] | None = None
 
     @property
     def name(self) -> str:
@@ -610,8 +781,92 @@ class _SubChipCallable:
         return self._output_dir
 
     @property
+    def platform(self) -> str:
+        return self._platform
+
+    @property
     def param_names(self) -> list[str]:
         return [p.name for p in self._param_infos]
+
+    @property
+    def output_indices(self) -> list[int]:
+        return list(self._output_indices)
+
+    # --- Runtime artefacts (lazy) — mirror CompiledProgram --------------------
+
+    def _ensure_runtime_loaded(self, pto_isa_commit: str | None = None) -> None:
+        if self._chip_callable is not None:
+            return
+        from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
+
+        cc, rn, rc = compile_and_assemble(self._output_dir, self._platform, pto_isa_commit)
+        self._chip_callable = cc
+        self._runtime_name = rn
+        self._runtime_config = rc
+
+    def load(self, *, pto_isa_commit: str | None = None) -> None:
+        """Eagerly compile-and-load the runtime artefacts. Mirrors
+        :meth:`CompiledProgram.load`; see that method for full semantics.
+        """
+        if self._chip_callable is not None and pto_isa_commit is not None:
+            raise RuntimeError(
+                "Runtime artefacts already loaded; pto_isa_commit cannot change. "
+                "Call load(pto_isa_commit=...) before any chip_callable / "
+                "runtime_name / runtime_config access."
+            )
+        self._ensure_runtime_loaded(pto_isa_commit)
+
+    @property
+    def chip_callable(self) -> Any:
+        self._ensure_runtime_loaded()
+        return self._chip_callable
+
+    @property
+    def runtime_name(self) -> str:
+        self._ensure_runtime_loaded()
+        assert self._runtime_name is not None
+        return self._runtime_name
+
+    @property
+    def runtime_config(self) -> dict[str, Any]:
+        self._ensure_runtime_loaded()
+        assert self._runtime_config is not None
+        return self._runtime_config
+
+    def build_orch_args(
+        self,
+        *args: "CallArg",
+    ) -> tuple[Any, list[torch.Tensor | DeviceTensor | ctypes._SimpleCData], bool]:
+        coerced, return_style = _coerce_args(
+            args,
+            self._param_infos,
+            self._output_indices,
+            self._return_types,
+            caller_name=f"orchestration {self._name!r}",
+        )
+        from pypto.runtime.runner import _coerced_to_orch_args  # noqa: PLC0415
+
+        orch_args = _coerced_to_orch_args(coerced)
+        return orch_args, coerced, return_style
+
+    def build_call_config(
+        self,
+        config: Any = None,
+        *,
+        block_dim: int | None = None,
+        aicpu_thread_num: int | None = None,
+        dfx_dir: "Path | None" = None,
+    ) -> Any:
+        from pypto.runtime.runner import RunConfig, _build_call_config  # noqa: PLC0415
+
+        run_config = config if config is not None else RunConfig()
+        return _build_call_config(
+            run_config,
+            runtime_config=self.runtime_config,
+            block_dim_override=block_dim,
+            aicpu_thread_num_override=aicpu_thread_num,
+            dfx_dir=dfx_dir,
+        )
 
     def __repr__(self) -> str:
         return f"_SubChipCallable({self._name!r} @ {self._output_dir})"

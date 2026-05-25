@@ -360,6 +360,107 @@ class _DfxOpts:
         )
 
 
+def _coerced_to_orch_args(
+    coerced: list[torch.Tensor | DeviceTensor | _SimpleCData],
+) -> Any:
+    """Pack a coerced positional arg list into a simpler ``ChipStorageTaskArgs``.
+
+    Two-pass dispatch (tensors then scalars) to respect simpler's add-order
+    constraint: ``ChipStorageTaskArgs`` requires all ``add_tensor`` calls to
+    precede any ``add_scalar`` call. Codegen addresses tensors/scalars from
+    independent pools (``orch_args.tensor(i)`` / ``orch_args.scalar(i)``), so
+    cross-pool order is irrelevant for the binary ABI — only within-pool
+    order matters, and we preserve it.
+
+    Used by both :func:`execute_compiled` and the extraction path on
+    :class:`pypto.ir.CompiledProgram` (``build_orch_args``).
+    """
+    from .device_runner import (  # noqa: PLC0415
+        ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
+        make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
+        scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
+    )
+    from .task_interface import (  # noqa: PLC0415
+        device_tensor_to_continuous,  # pyright: ignore[reportAttributeAccessIssue]
+    )
+
+    orch_args = ChipStorageTaskArgs()
+    for i, arg in enumerate(coerced):
+        if isinstance(arg, torch.Tensor):
+            if not arg.is_contiguous():
+                raise ValueError(
+                    f"Tensor at position {i} is not contiguous. "
+                    f"Call .contiguous() before packing into orch_args."
+                )
+            if arg.device.type != "cpu":
+                raise ValueError(
+                    f"Tensor at position {i} is on {arg.device}, expected CPU. "
+                    f"Call .cpu() before packing into orch_args."
+                )
+            orch_args.add_tensor(make_tensor_arg(arg))
+        elif isinstance(arg, DeviceTensor):
+            try:
+                orch_args.add_tensor(device_tensor_to_continuous(arg))
+            except ValueError as e:
+                raise ValueError(f"At position {i}: {e}") from e
+        elif isinstance(arg, _SimpleCData):
+            continue  # handled below
+        else:
+            raise TypeError(
+                f"Argument at position {i} must be torch.Tensor, DeviceTensor or "
+                f"ctypes scalar, got {type(arg).__name__}"
+            )
+    for arg in coerced:
+        if isinstance(arg, _SimpleCData):
+            orch_args.add_scalar(scalar_to_uint64(arg))
+    return orch_args
+
+
+def _build_call_config(
+    run_config: "RunConfig",
+    *,
+    runtime_config: dict[str, Any],
+    block_dim_override: int | None = None,
+    aicpu_thread_num_override: int | None = None,
+    dfx_dir: Path | None = None,
+) -> Any:
+    """Translate a pypto :class:`RunConfig` into a simpler ``CallConfig``.
+
+    Precedence for ``block_dim`` and ``aicpu_thread_num``:
+    explicit *override* > ``run_config`` field > ``runtime_config`` baked
+    into ``kernel_config.py``. When all three are unset the field is left
+    untouched on ``CallConfig`` so the simpler runtime's own default applies.
+
+    DFX flags are copied straight from *run_config*; *dfx_dir* — when given —
+    becomes ``output_prefix``. Callers that enable DFX flags are responsible
+    for creating *dfx_dir* before the run (simpler's ``validate()`` rejects
+    DFX-enabled calls without a valid prefix).
+    """
+    from .task_interface import (  # noqa: PLC0415
+        CallConfig,  # pyright: ignore[reportAttributeAccessIssue]
+    )
+
+    cfg = CallConfig()
+
+    bd = block_dim_override if block_dim_override is not None else run_config.block_dim
+    bd = bd if bd is not None else runtime_config.get("block_dim")
+    if bd is not None:
+        cfg.block_dim = bd
+
+    at = aicpu_thread_num_override if aicpu_thread_num_override is not None else run_config.aicpu_thread_num
+    at = at if at is not None else runtime_config.get("aicpu_thread_num")
+    if at is not None:
+        cfg.aicpu_thread_num = at
+
+    cfg.enable_l2_swimlane = run_config.enable_l2_swimlane
+    cfg.enable_dump_tensor = run_config.enable_dump_tensor
+    cfg.enable_pmu = run_config.enable_pmu
+    cfg.enable_dep_gen = run_config.enable_dep_gen
+    if dfx_dir is not None:
+        cfg.output_prefix = str(dfx_dir)
+    return cfg
+
+
 def _execute_on_device(
     work_dir: Path,
     golden_path: Path,
@@ -691,13 +792,9 @@ def execute_compiled(  # noqa: PLR0913
     _patch_orchestration_headers(work_dir)
 
     from .device_runner import (  # noqa: PLC0415
-        ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
         compile_and_assemble,
         execute_on_device,
-        make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
-        scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
     )
-    from .task_interface import device_tensor_to_continuous  # noqa: PLC0415
 
     chip_callable, runtime_name, runtime_config = compile_and_assemble(work_dir, platform, pto_isa_commit)
 
@@ -709,44 +806,7 @@ def execute_compiled(  # noqa: PLR0913
         aicpu_thread_num if aicpu_thread_num is not None else runtime_config.get("aicpu_thread_num")
     )
 
-    # Build orch args from user-provided tensors and scalars.
-    #
-    # simpler's ChipStorageTaskArgs requires all add_tensor() calls to precede
-    # any add_scalar() call. Codegen already addresses tensors and scalars from
-    # independent pools (orch_args.tensor(i) / orch_args.scalar(i)), so the
-    # binary ABI is order-agnostic across pools. Dispatch in two passes so the
-    # user-facing source order does not have to obey simpler's constraint.
-    orch_args = ChipStorageTaskArgs()
-    # Pass 1: tensors (torch.Tensor + DeviceTensor).
-    for i, arg in enumerate(args):
-        if isinstance(arg, torch.Tensor):
-            if not arg.is_contiguous():
-                raise ValueError(
-                    f"Tensor at position {i} is not contiguous. "
-                    f"Call .contiguous() before passing to execute_compiled()."
-                )
-            if arg.device.type != "cpu":
-                raise ValueError(
-                    f"Tensor at position {i} is on {arg.device}, expected CPU. "
-                    f"Call .cpu() before passing to execute_compiled()."
-                )
-            orch_args.add_tensor(make_tensor_arg(arg))
-        elif isinstance(arg, DeviceTensor):
-            try:
-                orch_args.add_tensor(device_tensor_to_continuous(arg))
-            except ValueError as e:
-                raise ValueError(f"At position {i}: {e}") from e
-        elif isinstance(arg, _SimpleCData):
-            continue  # handled in pass 2
-        else:
-            raise TypeError(
-                f"Argument at position {i} must be torch.Tensor, DeviceTensor or "
-                f"ctypes scalar, got {type(arg).__name__}"
-            )
-    # Pass 2: scalars.
-    for arg in args:
-        if isinstance(arg, _SimpleCData):
-            orch_args.add_scalar(scalar_to_uint64(arg))
+    orch_args = _coerced_to_orch_args(args)
 
     # Snapshot DFX state before execution
     dfx_dir: Path | None = None
