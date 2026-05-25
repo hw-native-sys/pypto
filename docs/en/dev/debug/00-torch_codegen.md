@@ -257,8 +257,8 @@ Recommended coverage dimensions:
 References:
 
 - `tests/ut/debug/test_torch_codegen.py`
-- `tests/st/codegen/test_torch_codegen_cross_core.py`
-- `tests/st/codegen/test_torch_codegen_qwen3_decode_scope3_mixed.py`
+- `tests/st/codegen/torch/test_torch_codegen_cross_core.py`
+- `tests/st/codegen/torch/test_torch_codegen_qwen3_decode_scope3_mixed.py`
 
 ## Relation to Other Codegen Docs
 

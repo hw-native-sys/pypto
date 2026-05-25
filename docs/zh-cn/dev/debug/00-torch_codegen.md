@@ -256,8 +256,8 @@ split 维度定义：
 可参考：
 
 - `tests/ut/debug/test_torch_codegen.py`
-- `tests/st/codegen/test_torch_codegen_cross_core.py`
-- `tests/st/codegen/test_torch_codegen_qwen3_decode_scope3_mixed.py`
+- `tests/st/codegen/torch/test_torch_codegen_cross_core.py`
+- `tests/st/codegen/torch/test_torch_codegen_qwen3_decode_scope3_mixed.py`
 
 ## 与其它代码生成文档的关系
 

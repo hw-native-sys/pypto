@@ -31,8 +31,8 @@ specializer fix (see the comments in ``examples/models/qwen3_jit/``).
 
 Note: ``__main__`` runs ``compile_for_test`` only (no device execution).
 Full end-to-end execution is exercised under
-``tests/st/codegen/test_dyn_valid_shape_loop.py`` and
-``test_dynamic_valid_shape_if_else.py``.
+``tests/st/codegen/dsl/test_dyn_valid_shape_loop.py`` and
+``tests/st/codegen/dsl/test_dynamic_valid_shape_if_else.py``.
 
 Run:  python examples/kernels/09_dyn_valid_shape.py
 """

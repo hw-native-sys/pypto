@@ -2,7 +2,7 @@
 
 This guide summarizes the practical `torch_codegen` workflows used in:
 
-- `tests/st/codegen/test_torch_codegen_qwen3_decode_scope3_mixed.py`
+- `tests/st/codegen/torch/test_torch_codegen_qwen3_decode_scope3_mixed.py`
 
 Use these workflows to debug numerical correctness at different compilation stages.
 

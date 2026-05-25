@@ -57,7 +57,8 @@ def _resolve_platform(config: pytest.Config) -> str:
     valid_platforms = tuple(dict.fromkeys(tok for tok in tokens if tok in _PLATFORM_TO_BACKEND))
     if tokens and not valid_platforms:
         raise pytest.UsageError(
-            "tests/st/runtime/test_cross_core.py supports --platform values (a2a3, a2a3sim, a5, or a5sim)"
+            "tests/st/runtime/cross_core/test_cross_core.py "
+            "supports --platform values (a2a3, a2a3sim, a5, or a5sim)"
         )
     return valid_platforms[0] if valid_platforms else _DEFAULT_PLATFORM
 
@@ -69,7 +70,7 @@ def _resolve_backend_type(config: pytest.Config) -> BackendType:
         return _PLATFORM_TO_BACKEND[platform]
     except KeyError as exc:
         raise pytest.UsageError(
-            f"Unsupported --platform {platform!r} for tests/st/runtime/test_cross_core.py"
+            f"Unsupported --platform {platform!r} for tests/st/runtime/cross_core/test_cross_core.py"
         ) from exc
 
 

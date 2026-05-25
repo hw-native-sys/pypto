@@ -16,7 +16,7 @@ This scope covers:
   5. Final residual addition
 
 The original file was a standalone script executed via:
-    python tests/st/runtime/test_qwen3_decode_scope3_mixed.py -d <device>
+    python tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py -d <device>
 
 It is now structured as a standard pytest ST case so it can be collected and
 run together with the rest of tests/st/, while preserving the same program and

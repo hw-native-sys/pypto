@@ -2,7 +2,7 @@
 
 本文档基于以下测试用例：
 
-- `tests/st/codegen/test_torch_codegen_qwen3_decode_scope3_mixed.py`
+- `tests/st/codegen/torch/test_torch_codegen_qwen3_decode_scope3_mixed.py`
 
 用于在不同编译阶段验证 `torch_codegen` 的数值正确性。
 

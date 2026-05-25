@@ -9,7 +9,7 @@
 
 """End-to-end L3 reuse via ``DistributedCompiledProgram.prepare()``.
 
-The L3 analogue of ``tests/st/runtime/test_device_tensor.py``: prepare a
+The L3 analogue of ``tests/st/runtime/framework_and_models/test_device_tensor.py``: prepare a
 reusable handle once, upload a static weight to a worker-resident DeviceTensor
 via ``rt.alloc_tensor`` (once), then dispatch multiple times reusing both the
 handle (no re-setup) and the resident weight.

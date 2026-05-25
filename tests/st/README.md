@@ -63,13 +63,13 @@ cd /path/to/pypto-github
 pytest tests/st/ -v --forked
 
 # Run specific test file
-pytest tests/st/runtime/test_matmul.py -v --forked
+pytest tests/st/runtime/ops/test_matmul.py -v --forked
 
 # Run specific test class
-pytest tests/st/runtime/test_matmul.py::TestMatmulOperations -v --forked
+pytest tests/st/runtime/ops/test_matmul.py::TestMatmulOperations -v --forked
 
 # Run specific test method
-pytest tests/st/runtime/test_matmul.py::TestMatmulOperations::test_matmul_shapes -v --forked
+pytest tests/st/runtime/ops/test_matmul.py::TestMatmulOperations::test_matmul_shapes -v --forked
 ```
 
 ### Platform Selection
@@ -194,7 +194,7 @@ pytest tests/st/ -v --forked --save-kernels
 pytest tests/st/ -v --forked --save-kernels --kernels-dir ./test_artifacts
 
 # Run single test and save outputs
-pytest tests/st/runtime/test_matmul.py::TestMatmulOperations::test_matmul_shapes -v --forked --save-kernels
+pytest tests/st/runtime/ops/test_matmul.py::TestMatmulOperations::test_matmul_shapes -v --forked --save-kernels
 ```
 
 **Output Structure:**
@@ -300,7 +300,7 @@ System tests inherit from `PTOTestCase` and implement required methods. See the 
 
 ```python
 """
-Test file: tests/st/runtime/test_my_operation.py
+Test file: tests/st/runtime/ops/test_my_operation.py
 """
 from typing import Any
 
@@ -399,7 +399,7 @@ TensorSpec("output", [128, 128], DataType.FP32, is_output=True)
 
 Refer to existing tests for more examples:
 
-- **Matrix Multiplication**: [`tests/st/runtime/test_matmul.py`](runtime/test_matmul.py)
+- **Matrix Multiplication**: [`tests/st/runtime/ops/test_matmul.py`](runtime/ops/test_matmul.py)
   - Demonstrates matmul operation with L0A/L0B/L0C memory levels
   - Shows parameterized testing with pytest
 

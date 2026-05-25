@@ -43,7 +43,7 @@ How to run
 ::
 
     # On real hardware, with profiling enabled:
-    pytest tests/st/runtime/test_pl_at_deps_pipeline.py \\
+    pytest tests/st/runtime/scheduling/test_pl_at_deps_pipeline.py \\
         --enable-l2-swimlane --platform=a2a3
 
     # Without --enable-l2-swimlane, the swimlane assertions skip and only

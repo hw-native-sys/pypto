@@ -50,7 +50,7 @@ Kernels (one representative per distinct pattern):
 Note: ``__main__`` runs ``compile_for_test`` (full pass pipeline, no device
 execution) for each kernel. The per-mode hardware semantics of TINSERT
 (Acc->Mat NZ vs. Vec->Vec ND_VEC) are best validated on device via
-``tests/st/runtime/test_assemble.py`` rather than against a torch reference.
+``tests/st/runtime/ops/test_assemble.py`` rather than against a torch reference.
 
 Run:  python examples/kernels/08_assemble.py
 Next: examples/models/01_ffn.py

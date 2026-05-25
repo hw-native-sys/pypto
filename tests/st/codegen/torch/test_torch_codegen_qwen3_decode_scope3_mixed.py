@@ -21,7 +21,7 @@ from pypto.backend import reset_for_testing, set_backend_type
 from pypto.debug import torch_codegen
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
-from tests.st.runtime.test_qwen3_decode_scope3_mixed import (
+from tests.st.runtime.framework_and_models.test_qwen3_decode_scope3_mixed import (
     build_qwen3_scope3_program,
     golden,
 )

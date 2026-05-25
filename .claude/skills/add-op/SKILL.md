@@ -314,7 +314,7 @@ Also check if 910B backend needs special handling:
 
 System tests require hardware/environment. Follow patterns in:
 
-- `tests/st/codegen/test_add_mul_orch_codegen.py`
+- `tests/st/codegen/dsl/test_add_mul_orch_codegen.py`
 
 **Codegen unit tests** (no hardware needed):
 `tests/ut/codegen/test_pto_codegen_ops.py`

@@ -48,7 +48,7 @@ run(
 ### 从 pytest
 
 ```bash
-pytest tests/st/runtime/test_perf_swimlane.py \
+pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
     --platform a2a3sim --enable-l2-swimlane
 
 pytest tests/st/runtime/ \
