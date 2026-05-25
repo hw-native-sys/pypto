@@ -7,26 +7,48 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""End-to-end tests for ``pl.tensor.scatter`` — both forms.
+"""End-to-end tests for ``pl.tensor.scatter`` (index form, ``dim=-1`` column scatter).
 
-The tensor layer exposes a single unified ``pl.tensor.scatter`` that dispatches
-to one of two tile-level ops based on the kwargs passed (there is no compare
-form for scatter):
+Semantics (torch ``scatter_`` along the last axis)::
 
-Index form (``dim`` + ``index`` + ``src``) → ``tile.scatter``
-Mask form  (``mask_pattern=<int>`` + ``dst``) → ``tile.scatter_mask``
+    out = base.clone()
+    out[b, index[b, k]] = val[b, k]        # for all b, k (k ascending = last-wins)
+    # columns no index[b, :] selects keep base's value (DPS preserve)
 
-Both ops are destination-passing-style (DPS): ``input`` / ``dst`` is the base
-buffer and the result aliases it — rows/columns not written keep their value.
+**Why these inputs (avoiding the degenerate round-trip)**
 
-Index form (row scatter, ``out[index[i, 0], :] = src[i, :]``):
+A previous version used ``base == val == src`` and ``expected == src``, so a
+scatter that did *nothing* (identity passthrough of ``base``) still produced the
+expected output and passed. To make every test discriminating, here:
 
-1. Rank-2 + dim=0 (baseline).
-2. Rank-2 + dim=-2 (negative-dim normalization — alias of dim=0).
+- ``base`` holds a **negative sentinel** ``base[b, j] = -(j + 1 + b)`` —
+  distinct per (row, col) and disjoint from any written value.
+- ``val`` holds **positive, row+col-varying** values.
+- ``expected`` is computed from ``base`` + ``index`` + ``val`` (not a copy of any
+  input), so a no-op (``out == base``, all negative) mismatches immediately, and
+  the DPS-preserved columns are checked to still hold their sentinel.
 
-Mask form (hardware mask-pattern column expansion, inverse of gather_mask):
+**dtype / size rules exercised** (one program per element type):
 
-3. P0101 — write each compact ``input`` row into the even columns of ``dst``.
+| dst/src | bytes | indexes | cols rule (cols*sizeof % 32 == 0)        |
+| ------- | ----- | ------- | ---------------------------------------- |
+| FP32    | 4     | INT32   | base S=16, val/idx K=8                    |
+| INT32   | 4     | INT32   | base S=16, val/idx K=8                    |
+| FP16    | 2     | INT16   | base S=32, val/idx K=16                   |
+| BF16    | 2     | INT16   | base S=32, val/idx K=16                   |
+| INT16   | 2     | INT16   | base S=32, val/idx K=16                   |
+
+Row counts (B) also satisfy the lowering's internal arange alignment
+(rows*sizeof(indexes) % 32 == 0): B=8 for the i32 path, B=16 for the i16 path.
+
+BF16 works because the scatter lowering rebuilds the DPS-preserve blend with a
+select (``out = sel(mask != 0, scattered, input)``) rather than ``input * mask``
+— the latter's ``tile.mul`` lowers to ``pto.tmul``, which A2/A3 rejects for
+bf16. (INT8 is left uncovered: the 1-byte path needs a separate validation.)
+
+A separate FP32 case feeds **repeated** indices with distinct values to pin the
+ascending-k last-wins ordering (the round-trip version hid this by writing equal
+values to repeated targets).
 """
 
 from typing import Any
@@ -38,140 +60,170 @@ from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy
 
-# --- Shared init helpers ---
+# --- Data builders (negative sentinel base, positive distinct values) ---
 
 
-def _distinct_row_indices_8() -> torch.Tensor:
-    """``[8, 1]`` INT32 of distinct destination rows in ``[0, 16)``.
+def _make_base(b: int, s: int, torch_dtype: torch.dtype) -> torch.Tensor:
+    """``[B, S]`` negative sentinel: ``base[i, j] = -(j + 1 + i)`` (disjoint from val)."""
+    rows = torch.arange(b, dtype=torch.int32).reshape(b, 1)
+    cols = torch.arange(s, dtype=torch.int32).reshape(1, s)
+    return (-(cols + 1 + rows)).to(torch_dtype).contiguous()
 
-    Distinct rows keep the row-scatter result well-defined (no row is written
-    twice, so the outcome is independent of write order). 8 rows are used so the
-    col-major index tile's column byte size (rows * sizeof(i32) = 32) meets the
-    PTOAS 32-byte alignment requirement for ``pto.alloc_tile``.
+
+def _make_index(b: int, s: int, k: int, torch_idx_dtype: torch.dtype) -> torch.Tensor:
+    """``[B, K]`` per-row distinct columns: ``index[i, m] = (m + i) % S`` (K <= S).
+
+    Distinct within a row (a per-row cyclic shift), so the scatter is well-defined
+    regardless of write order; different rows hit different columns, exercising
+    per-row index usage; K < S leaves preserve columns to validate DPS.
     """
-    return torch.tensor([[0], [2], [4], [6], [9], [11], [13], [15]], dtype=torch.int32)
+    rows = torch.arange(b, dtype=torch.int64).reshape(b, 1)
+    sel = torch.arange(k, dtype=torch.int64).reshape(1, k)
+    return ((sel + rows) % s).to(torch_idx_dtype).contiguous()
 
 
-def _flat_row_indices_6x32() -> torch.Tensor:
-    """``[6, 32]`` INT32 of *flattened* destination indices for a row-scatter.
+def _make_repeat_index(b: int, s: int, k: int, torch_idx_dtype: torch.dtype) -> torch.Tensor:
+    """``[B, K]`` repeated columns: ``index[i, m] = (m // 2 + i) % S``.
 
-    The hardware ``pto.tscatter`` index form scatters per element using flattened
-    destination indices: ``dst.flat[idx[i, j]] = src[i, j]``. To express a
-    row-scatter ``dst[row, :] = src[i, :]`` the index tile must have the same
-    ``[rows, cols]`` shape as ``src`` with ``idx[i, j] = row[i] * dst_cols + j``.
-
-    Here ``dst`` has 16 rows × 32 columns and the 6 source rows land on the
-    distinct destination rows ``[0, 3, 6, 9, 12, 15]``. Only these 6 rows
-    (6 * 32 = 192 elements) are written by the scatter; the remaining 10 rows
-    (320 elements) must keep ``inp``'s value (DPS preserve).
+    Each of the K/2 target columns is written twice (m even, then m odd). With
+    distinct ``val`` the odd-m write must win under ascending-k last-wins.
     """
-    dst_rows = torch.tensor([0, 3, 6, 9, 12, 15], dtype=torch.int32).reshape(6, 1)
-    cols = torch.arange(32, dtype=torch.int32).reshape(1, 32)
-    return (dst_rows * 32 + cols).to(torch.int32)
+    rows = torch.arange(b, dtype=torch.int64).reshape(b, 1)
+    sel = torch.arange(k, dtype=torch.int64).reshape(1, k)
+    return ((sel // 2 + rows) % s).to(torch_idx_dtype).contiguous()
 
 
-def _make_scatter_mask_src_8x8() -> torch.Tensor:
-    """Deterministic ``[8, 8]`` FP32 source for the mask scatter test.
+def _make_values(b: int, k: int, torch_dtype: torch.dtype) -> torch.Tensor:
+    """``[B, K]`` positive distinct values: ``val[i, m] = i*K + m + 1`` (<= B*K).
 
-    Distinct values per element so even-column placement is easy to verify. 8
-    rows keep the col-major tile column byte size (8 * sizeof(fp32) = 32) on the
-    PTOAS 32-byte alignment boundary.
+    Distinct per element and never collides with the negative sentinel base.
     """
-    return (torch.arange(8 * 8, dtype=torch.float32).reshape(8, 8) - 32.0) / 4.0
+    rows = torch.arange(b, dtype=torch.int32).reshape(b, 1)
+    sel = torch.arange(k, dtype=torch.int32).reshape(1, k)
+    return (rows * k + sel + 1).to(torch_dtype).contiguous()
 
 
-# --- Programs ---
+def _apply_scatter(base: torch.Tensor, index: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+    """Reference column scatter: ``out[i, index[i, m]] = values[i, m]`` (ascending m)."""
+    out = base.clone()
+    b, k = index.shape
+    for i in range(b):
+        for m in range(k):
+            out[i, int(index[i, m])] = values[i, m]
+    return out
+
+
+def _scatter_specs(
+    b: int,
+    s: int,
+    k: int,
+    dt: DataType,
+    torch_dt: torch.dtype,
+    idt: DataType,
+    torch_idt: torch.dtype,
+    *,
+    repeat: bool = False,
+) -> list[TensorSpec]:
+    """Build the (base, idx, val, output) TensorSpecs for a scatter case."""
+    index_fn = _make_repeat_index if repeat else _make_index
+    return [
+        TensorSpec("base", [b, s], dt, init_value=lambda: _make_base(b, s, torch_dt)),
+        TensorSpec("idx", [b, k], idt, init_value=lambda: index_fn(b, s, k, torch_idt)),
+        TensorSpec("val", [b, k], dt, init_value=lambda: _make_values(b, k, torch_dt)),
+        TensorSpec("output", [b, s], dt, is_output=True),
+    ]
+
+
+# --- Programs (one per element type; shapes satisfy the 32-byte row alignment) ---
 
 
 @pl.program
-class ScatterIndexDim0Program:
-    """Baseline rank-2 + dim=0: ``out = inp; out[idx[i, 0], :] = src[i, :]``."""
+class ScatterFP32Program:
+    """FP32 dst/src + INT32 indexes (4-byte path)."""
 
     @pl.function(type=pl.FunctionType.Opaque)
     def main(
         self,
-        inp: pl.Tensor[[16, 32], pl.FP32],
-        idx: pl.Tensor[[8, 1], pl.INT32],
-        src: pl.Tensor[[8, 32], pl.FP32],
-        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
-    ) -> pl.Tensor[[16, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            out = pl.tensor.scatter(inp, dim=0, index=idx, src=src)
-            output = pl.assemble(output, out, [0, 0])
-        return output
-
-
-@pl.program
-class ScatterIndexNegDimProgram:
-    """Rank-2 + dim=-2 (alias of dim=0 after negative-dim normalization)."""
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        inp: pl.Tensor[[16, 32], pl.FP32],
-        idx: pl.Tensor[[8, 1], pl.INT32],
-        src: pl.Tensor[[8, 32], pl.FP32],
-        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
-    ) -> pl.Tensor[[16, 32], pl.FP32]:
-        with pl.at(level=pl.Level.CORE_GROUP):
-            out = pl.tensor.scatter(inp, dim=-2, index=idx, src=src)
-            output = pl.assemble(output, out, [0, 0])
-        return output
-
-
-@pl.program
-class ScatterMaskP0101Program:
-    """Mask-form scatter (P0101): write each compact ``inp`` row into the even
-    columns of ``dst`` (the inverse of gather_mask P0101). ``dst`` is the DPS
-    destination, initialized to zero, so non-selected columns read back as 0."""
-
-    @pl.function(type=pl.FunctionType.Opaque)
-    def main(
-        self,
-        inp: pl.Tensor[[8, 8], pl.FP32],
-        dst: pl.Tensor[[8, 16], pl.FP32],
+        base: pl.Tensor[[8, 16], pl.FP32],
+        idx: pl.Tensor[[8, 8], pl.INT32],
+        val: pl.Tensor[[8, 8], pl.FP32],
         output: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
     ) -> pl.Tensor[[8, 16], pl.FP32]:
         with pl.at(level=pl.Level.CORE_GROUP):
-            out = pl.tensor.scatter(inp, mask_pattern=pl.tile.MaskPattern.P0101, dst=dst)
+            out = pl.tensor.scatter(base, dim=-1, index=idx, src=val)
             output = pl.assemble(output, out, [0, 0])
         return output
 
 
 @pl.program
-class ScatterTileFlatProgram:
-    """Minimal tile-level index-form scatter fed *flattened* indices directly.
+class ScatterINT32Program:
+    """INT32 dst/src + INT32 indexes (4-byte integer path)."""
 
-    Bypasses the tensor-level row-index → flat-index expansion: the index tile
-    already holds per-element flattened destination indices, so this exercises
-    the raw ``pto.tscatter`` hardware path. DPS — ``inp`` is the destination and
-    rows not addressed by the index keep their value.
-    """
-
-    @pl.function(type=pl.FunctionType.InCore)
-    def kernel(
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
         self,
-        inp: pl.Tensor[[16, 32], pl.FP32],
-        src: pl.Tensor[[6, 32], pl.FP32],
-        idx: pl.Tensor[[6, 32], pl.INT32],
-        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
-    ) -> pl.Tensor[[16, 32], pl.FP32]:
-        dst_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(inp, [0, 0], [16, 32])
-        src_tile: pl.Tile[[6, 32], pl.FP32] = pl.load(src, [0, 0], [6, 32])
-        idx_tile: pl.Tile[[6, 32], pl.INT32] = pl.load(idx, [0, 0], [6, 32])
-        scattered: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter(dst_tile, src_tile, idx_tile)
-        out: pl.Tensor[[16, 32], pl.FP32] = pl.store(scattered, [0, 0], output)
-        return out
+        base: pl.Tensor[[8, 16], pl.INT32],
+        idx: pl.Tensor[[8, 8], pl.INT32],
+        val: pl.Tensor[[8, 8], pl.INT32],
+        output: pl.Out[pl.Tensor[[8, 16], pl.INT32]],
+    ) -> pl.Tensor[[8, 16], pl.INT32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(base, dim=-1, index=idx, src=val)
+            output = pl.assemble(output, out, [0, 0])
+        return output
 
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def orchestrator(
+
+@pl.program
+class ScatterFP16Program:
+    """FP16 dst/src + INT16 indexes (2-byte path)."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
         self,
-        inp: pl.Tensor[[16, 32], pl.FP32],
-        src: pl.Tensor[[6, 32], pl.FP32],
-        idx: pl.Tensor[[6, 32], pl.INT32],
-        output: pl.Out[pl.Tensor[[16, 32], pl.FP32]],
-    ) -> pl.Tensor[[16, 32], pl.FP32]:
-        output = self.kernel(inp, src, idx, output)
+        base: pl.Tensor[[16, 32], pl.FP16],
+        idx: pl.Tensor[[16, 16], pl.INT16],
+        val: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 32], pl.FP16]],
+    ) -> pl.Tensor[[16, 32], pl.FP16]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(base, dim=-1, index=idx, src=val)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class ScatterBF16Program:
+    """BF16 dst/src + INT16 indexes (2-byte path; preserve blend via tile.sel)."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        base: pl.Tensor[[16, 32], pl.BF16],
+        idx: pl.Tensor[[16, 16], pl.INT16],
+        val: pl.Tensor[[16, 16], pl.BF16],
+        output: pl.Out[pl.Tensor[[16, 32], pl.BF16]],
+    ) -> pl.Tensor[[16, 32], pl.BF16]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(base, dim=-1, index=idx, src=val)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
+class ScatterINT16Program:
+    """INT16 dst/src + INT16 indexes (2-byte integer path)."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        base: pl.Tensor[[16, 32], pl.INT16],
+        idx: pl.Tensor[[16, 16], pl.INT16],
+        val: pl.Tensor[[16, 16], pl.INT16],
+        output: pl.Out[pl.Tensor[[16, 32], pl.INT16]],
+    ) -> pl.Tensor[[16, 32], pl.INT16]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(base, dim=-1, index=idx, src=val)
+            output = pl.assemble(output, out, [0, 0])
         return output
 
 
@@ -187,135 +239,117 @@ class _ScatterBaseTestCase(PTOTestCase):
     def get_backend_type(self) -> BackendType:
         return BackendType.Ascend910B
 
+    def compute_expected(self, tensors, params=None):
+        # Ground truth derived from the actual index + values (not a copy of any
+        # input): a no-op leaves `base` (all negative) and fails immediately, and
+        # the unselected columns must keep their sentinel (DPS preserve).
+        tensors["output"][:] = _apply_scatter(tensors["base"], tensors["idx"], tensors["val"])
 
-class ScatterTileFlatTestCase(_ScatterBaseTestCase):
+
+class ScatterFP32TestCase(_ScatterBaseTestCase):
     def get_name(self) -> str:
-        return "scatter_tile_flat"
+        return "scatter_fp32"
 
     def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("inp", [16, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("src", [6, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("idx", [6, 32], DataType.INT32, init_value=_flat_row_indices_6x32),
-            TensorSpec("output", [16, 32], DataType.FP32, is_output=True),
-        ]
+        return _scatter_specs(8, 16, 8, DataType.FP32, torch.float32, DataType.INT32, torch.int32)
 
     def get_program(self) -> Any:
-        return ScatterTileFlatProgram
-
-    def compute_expected(self, tensors, params=None):
-        # Flat element scatter: out.flat[idx[i, j]] = src[i, j]; unaddressed
-        # destination elements keep inp's value (DPS).
-        out = tensors["inp"].clone()
-        out_flat = out.reshape(-1)
-        out_flat[tensors["idx"].reshape(-1).to(torch.int64)] = tensors["src"].reshape(-1)
-        tensors["output"][:] = out_flat.reshape(16, 32)
+        return ScatterFP32Program
 
 
-class ScatterIndexDim0TestCase(_ScatterBaseTestCase):
+class ScatterINT32TestCase(_ScatterBaseTestCase):
     def get_name(self) -> str:
-        return "scatter_index_dim0"
+        return "scatter_int32"
 
     def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("inp", [16, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("idx", [8, 1], DataType.INT32, init_value=_distinct_row_indices_8),
-            TensorSpec("src", [8, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [16, 32], DataType.FP32, is_output=True),
-        ]
+        return _scatter_specs(8, 16, 8, DataType.INT32, torch.int32, DataType.INT32, torch.int32)
 
     def get_program(self) -> Any:
-        return ScatterIndexDim0Program
-
-    def compute_expected(self, tensors, params=None):
-        # out = inp with the named rows overwritten by src.
-        out = tensors["inp"].clone()
-        rows = tensors["idx"][:, 0].to(torch.int64)
-        out[rows, :] = tensors["src"]
-        tensors["output"][:] = out
+        return ScatterINT32Program
 
 
-class ScatterIndexNegDimTestCase(_ScatterBaseTestCase):
+class ScatterFP16TestCase(_ScatterBaseTestCase):
     def get_name(self) -> str:
-        return "scatter_index_neg_dim"
+        return "scatter_fp16"
 
     def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("inp", [16, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("idx", [8, 1], DataType.INT32, init_value=_distinct_row_indices_8),
-            TensorSpec("src", [8, 32], DataType.FP32, init_value=torch.randn),
-            TensorSpec("output", [16, 32], DataType.FP32, is_output=True),
-        ]
+        return _scatter_specs(16, 32, 16, DataType.FP16, torch.float16, DataType.INT16, torch.int16)
 
     def get_program(self) -> Any:
-        return ScatterIndexNegDimProgram
-
-    def compute_expected(self, tensors, params=None):
-        out = tensors["inp"].clone()
-        rows = tensors["idx"][:, 0].to(torch.int64)
-        out[rows, :] = tensors["src"]
-        tensors["output"][:] = out
+        return ScatterFP16Program
 
 
-class ScatterMaskP0101TestCase(_ScatterBaseTestCase):
+class ScatterBF16TestCase(_ScatterBaseTestCase):
     def get_name(self) -> str:
-        return "scatter_mask_p0101"
+        return "scatter_bf16"
 
     def define_tensors(self) -> list[TensorSpec]:
-        return [
-            TensorSpec("inp", [8, 8], DataType.FP32, init_value=_make_scatter_mask_src_8x8),
-            TensorSpec("dst", [8, 16], DataType.FP32, init_value=lambda: torch.zeros(8, 16)),
-            TensorSpec("output", [8, 16], DataType.FP32, is_output=True),
-        ]
+        return _scatter_specs(16, 32, 16, DataType.BF16, torch.bfloat16, DataType.INT16, torch.int16)
 
     def get_program(self) -> Any:
-        return ScatterMaskP0101Program
+        return ScatterBF16Program
 
-    def compute_expected(self, tensors, params=None):
-        # P0101 (stride 2) writes input columns into the even columns of dst.
-        # dst starts at zero, so the odd (non-selected) columns read back as 0.
-        out = tensors["dst"].clone()
-        out[:, 0::2] = tensors["inp"]
-        tensors["output"][:] = out
+
+class ScatterINT16TestCase(_ScatterBaseTestCase):
+    def get_name(self) -> str:
+        return "scatter_int16"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_specs(16, 32, 16, DataType.INT16, torch.int16, DataType.INT16, torch.int16)
+
+    def get_program(self) -> Any:
+        return ScatterINT16Program
+
+
+class ScatterRepeatLastWinsTestCase(_ScatterBaseTestCase):
+    """FP32 with repeated indices + distinct values: pins ascending-k last-wins."""
+
+    def get_name(self) -> str:
+        return "scatter_repeat_last_wins"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_specs(
+            8, 16, 8, DataType.FP32, torch.float32, DataType.INT32, torch.int32, repeat=True
+        )
+
+    def get_program(self) -> Any:
+        return ScatterFP32Program
 
 
 # --- Tests ---
 
 
-class TestScatterTileFlat:
-    # --- Raw tile-level index form with flattened indices (hardware path) ---
+class TestScatterIndexForm:
+    """Index-form column scatter across the dst/src + indexes dtype matrix."""
 
     @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_scatter_tile_flat(self, test_runner, platform):
-        result = test_runner.run(ScatterTileFlatTestCase(platform=platform))
-        assert result.passed, f"Test failed: {result.error}"
-
-
-# The tensor-level row-index forms depend on the [N,1] → [N,cols] flat-index
-# expansion lowering, which is the next step. Skipped until the raw tile-level
-# flat-index path above is confirmed working on the device.
-@pytest.mark.skip(reason="row-index→flat-index expansion lowering pending; validating raw flat path first")
-class TestScatterIndex:
-    # --- Index form ---
-
-    @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_scatter_index_dim0(self, test_runner, platform):
-        result = test_runner.run(ScatterIndexDim0TestCase(platform=platform))
+    def test_scatter_fp32(self, test_runner, platform):
+        result = test_runner.run(ScatterFP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_scatter_index_neg_dim(self, test_runner, platform):
-        result = test_runner.run(ScatterIndexNegDimTestCase(platform=platform))
+    def test_scatter_int32(self, test_runner, platform):
+        result = test_runner.run(ScatterINT32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-
-@pytest.mark.skip(reason="mask form validated separately; focusing on index form first")
-class TestScatterMask:
-    # --- Mask form ---
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_fp16(self, test_runner, platform):
+        result = test_runner.run(ScatterFP16TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_scatter_mask_p0101(self, test_runner, platform):
-        result = test_runner.run(ScatterMaskP0101TestCase(platform=platform))
+    def test_scatter_bf16(self, test_runner, platform):
+        result = test_runner.run(ScatterBF16TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_int16(self, test_runner, platform):
+        result = test_runner.run(ScatterINT16TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_repeat_last_wins(self, test_runner, platform):
+        result = test_runner.run(ScatterRepeatLastWinsTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

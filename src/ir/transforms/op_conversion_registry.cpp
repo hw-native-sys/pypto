@@ -1361,8 +1361,8 @@ void OpConversionRegistry::RegisterScatterOps() {
         CHECK(args.size() == 3) << "tensor.scatter conversion expects 3 args (input, index, src), got "
                                 << args.size();
 
-        // Validate dim — MVP supports dim=0 only (per-row row-scatter).
-        int dim_val = GetKwargOr<int>(kwargs, "dim", 0);
+        // Validate dim — MVP supports dim=-1 only (column scatter).
+        int dim_val = GetKwargOr<int>(kwargs, "dim", -1);
         auto input_tile = As<TileType>(args[0]->GetType());
         auto idx_tile = As<TileType>(args[1]->GetType());
         auto src_tile = As<TileType>(args[2]->GetType());
@@ -1370,23 +1370,23 @@ void OpConversionRegistry::RegisterScatterOps() {
             << "tensor.scatter conversion: input/index/src must be Vec tiles after bridge";
         const int rank = static_cast<int>(input_tile->shape_.size());
         const int norm_dim = dim_val < 0 ? dim_val + rank : dim_val;
-        CHECK(rank == 2 && norm_dim == 0)
-            << "tensor.scatter conversion currently supports rank-2 input with dim=0 (or dim=-2) only, got "
+        CHECK(rank == 2 && norm_dim == rank - 1)
+            << "tensor.scatter conversion currently supports rank-2 input with dim=-1 only, got "
             << "rank=" << rank << " dim=" << dim_val;
 
         // The hardware pto.tscatter scatters per *element* using flattened
         // destination indices: dst.flat[idx[i,j]] = src[i,j], looping over the
-        // `idx` tile's valid [rows, cols]. The tensor-level API exposes a
-        // convenient per-row [N,1] index (row r := index[i,0] means row i of
-        // src lands on dst row r). We therefore expand the [N,1] row-index tile
-        // into the [N, cols] flattened-index tile the hardware expects, mirroring
-        // how tensor.gather builds flat indices for tile.gather:
+        // `idx` tile's valid [rows, cols]. The tensor-level API exposes the
+        // gather-style column index (same shape as src): index[i,j] is the
+        // destination *column* of src[i,j], with the row preserved (the
+        // column-wise inverse of gather, out[i, index[i,j]] = src[i,j]). We
+        // therefore turn the column index into the flattened index the hardware
+        // expects by adding each row's flat base offset:
         //
-        //   flat_idx[i, j] = row_index[i] * dst_cols + j
+        //   flat_idx[i, j] = i * dst_cols + index[i, j]
         //
-        // Built via a contiguous arange A[i,j] = i*dst_cols + j plus a per-row
-        // delta (row_index[i] - i) * dst_cols broadcast across columns:
-        //   flat_idx = A + (row_index - row_arange) * dst_cols
+        // Built via row_base[i] = i * dst_cols broadcast across columns:
+        //   flat_idx = index + row_base   (row-broadcast add)
         auto& op_reg = OpRegistry::GetInstance();
         auto src_rows = As<ConstInt>(src_tile->shape_[0]);
         auto dst_cols_c = As<ConstInt>(input_tile->shape_[1]);
@@ -1394,15 +1394,21 @@ void OpConversionRegistry::RegisterScatterOps() {
             << "tensor.scatter conversion requires static src rows and dst cols for index expansion";
         const int64_t n = src_rows->value_;
         const int64_t cols = dst_cols_c->value_;
+        // Build the flat-index arithmetic in the index tile's own dtype so it
+        // keeps satisfying the pto.tscatter element-size matching rule (INT32
+        // for 4-byte dst, INT16 for 2/1-byte dst).
+        const DataType idx_dtype = idx_tile->dtype_;
 
         auto make_idx = [&](int64_t v) -> ExprPtr {
           return std::make_shared<ConstInt>(v, DataType::INDEX, span);
         };
-        auto make_i32 = [&](int64_t v) -> ExprPtr {
-          return std::make_shared<ConstInt>(v, DataType::INT32, span);
+        auto make_idx_dt = [&](int64_t v) -> ExprPtr {
+          return std::make_shared<ConstInt>(v, idx_dtype, span);
         };
         ExprPtr one = make_idx(1);
-        std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", DataType(DataType::INT32)}};
+        // tile.ci carries both attrs (dtype, descending); supply both so the
+        // emitted Call matches the parser-reconstructed one on round-trip.
+        std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", idx_dtype}, {"descending", false}};
 
         std::vector<StmtPtr> prologue;
         auto emit = [&](const std::string& op_name, const std::vector<ExprPtr>& op_args,
@@ -1419,23 +1425,78 @@ void OpConversionRegistry::RegisterScatterOps() {
           return emit("tile.reshape", {src, MakeShapeTuple(shape, span)}, {}, name);
         };
 
-        // A[i, j] = i * cols + j  (contiguous arange reshaped to [N, cols]).
-        auto a_flat = emit("tile.ci", {make_i32(0), MakeShapeTuple({one, make_idx(n * cols)}, span)}, ci_kw,
-                           "scatter_ci_flat");
-        auto a_idx = reshape_to(a_flat, {make_idx(n), make_idx(cols)}, "scatter_flat_base");
-        // row_arange[i] = i  (shape [N, 1]).
-        auto row_flat = emit("tile.ci", {make_i32(0), MakeShapeTuple({one, make_idx(n)}, span)}, ci_kw,
+        // row_arange[i] = i  (contiguous arange reshaped to [N, 1]).
+        auto row_flat = emit("tile.ci", {make_idx_dt(0), MakeShapeTuple({one, make_idx(n)}, span)}, ci_kw,
                              "scatter_ci_rows");
         auto row_ar = reshape_to(row_flat, {make_idx(n), one}, "scatter_row_arange");
-        // delta[i] = (row_index[i] - i) * cols  (shape [N, 1]).
-        auto diff = emit("tile.sub", {args[1], row_ar}, {}, "scatter_row_diff");
-        auto delta = emit("tile.muls", {diff, make_i32(cols)}, {}, "scatter_row_delta");
-        // flat_idx[i, j] = A[i, j] + delta[i]  (row-broadcast add → [N, cols]).
-        auto flat_idx = emit("tile.row_expand_add", {a_idx, delta}, {}, "scatter_flat_idx");
+        // row_base[i] = i * dst_cols  (shape [N, 1]).
+        auto row_base = emit("tile.muls", {row_ar, make_idx_dt(cols)}, {}, "scatter_row_base");
+        // flat_idx[i, j] = index[i, j] + row_base[i]  (row-broadcast add → [N, K]).
+        auto flat_idx = emit("tile.row_expand_add", {args[1], row_base}, {}, "scatter_flat_idx");
 
-        // tile.scatter signature: (dst, src, indexes) — `input` is the DPS dst.
-        auto tile_call = op_reg.Create("tile.scatter", {args[0], args[2], flat_idx}, span);
-        return ConversionResult{std::move(prologue), tile_call};
+        // pto.tscatter only writes the scattered positions and does NOT preserve
+        // the destination's other elements (its `dst` operand is treated as
+        // write-only), so unwritten coordinates would read back as garbage/zero
+        // instead of keeping `input`. PTOAS confirmed this is the machine
+        // instruction's behaviour (dst is not RMW), so we permanently
+        // reconstruct the preserve semantics on the PyPTO side with a select —
+        // which, unlike a multiply-based blend (`input * mask`), emits no
+        // pto.tmul (A2/A3 tmul rejects bf16/i8):
+        //
+        //   scattered = scatter(zeros,   src,  flat_idx)  # src @written, 0 @unwritten
+        //   mask      = scatter(zeros_m, ones,  flat_idx)  # 1   @written, 0 @unwritten
+        //   pred      = (mask != 0)                         # packed predicate
+        //   out       = sel(pred, scattered, input)         # written→scattered, else→input
+        //
+        // Both scatters MUST use a zeroed base: pto.tscatter zeros unwritten
+        // slots, so only a zero base survives to mark the unwritten positions.
+        const DataType dt = input_tile->dtype_;
+        auto dst_rows_c = As<ConstInt>(input_tile->shape_[0]);
+        auto src_cols_c = As<ConstInt>(src_tile->shape_[1]);
+        CHECK(dst_rows_c && src_cols_c)
+            << "tensor.scatter conversion requires static dst rows and src cols for the preserve blend";
+        const int64_t m = dst_rows_c->value_;
+        const int64_t k = src_cols_c->value_;
+
+        // The mask scatter reuses `flat_idx`, so its element size must match
+        // `dt` (else the pto.tscatter index-size rule breaks); within that size
+        // pick a compare-friendly type so tile.cmps is well-defined for any
+        // supported `dt` (e.g. bf16 → f16 mask).
+        const int dt_bytes = static_cast<int>(dt.GetBit()) / 8;
+        const DataType mask_dt = (dt_bytes == 4)   ? DataType(DataType::FP32)
+                                 : (dt_bytes == 2) ? DataType(DataType::FP16)
+                                                   : DataType(DataType::INT8);
+
+        auto make_full = [&](const DataType& fdt, int64_t rows, int64_t cols_, double v,
+                             const std::string& name) -> VarPtr {
+          ExprPtr val = fdt.IsFloat()
+                            ? ExprPtr(std::make_shared<ConstFloat>(v, fdt, span))
+                            : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), fdt, span));
+          std::vector<std::pair<std::string, std::any>> full_kw = {{"dtype", fdt}};
+          return emit("tile.full", {MakeShapeTuple({make_idx(rows), make_idx(cols_)}, span), val}, full_kw,
+                      name);
+        };
+
+        // scattered[*, *] = scatter src into a zeroed [dst_rows, dst_cols] base.
+        auto values_zero = make_full(dt, m, cols, 0.0, "scatter_values_zero");
+        auto scattered = emit("tile.scatter", {values_zero, args[2], flat_idx}, {}, "scatter_values");
+        // mask[*, *] = scatter ones into a zeroed base (1 @written, 0 @unwritten).
+        auto mask_zero = make_full(mask_dt, m, cols, 0.0, "scatter_mask_zero");
+        auto ones_src = make_full(mask_dt, n, k, 1.0, "scatter_ones");
+        auto mask = emit("tile.scatter", {mask_zero, ones_src, flat_idx}, {}, "scatter_mask");
+        // pred = (mask != 0)  → packed predicate mask (NE = cmp_type 1).
+        ExprPtr zero_scalar = mask_dt.IsFloat() ? ExprPtr(std::make_shared<ConstFloat>(0.0, mask_dt, span))
+                                                : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
+        std::vector<std::pair<std::string, std::any>> cmp_kw = {{"cmp_type", 1}};
+        auto pred = emit("tile.cmps", {mask, zero_scalar}, cmp_kw, "scatter_pred");
+        // tmp = TSEL scratch tile (UINT8 [1, 32]).
+        std::vector<std::pair<std::string, std::any>> tmp_kw = {{"dtype", DataType(DataType::UINT8)},
+                                                                {"target_memory", MemorySpace::Vec}};
+        auto tmp =
+            emit("tile.create", {MakeShapeTuple({one, make_idx(32)}, span)}, tmp_kw, "scatter_sel_tmp");
+        // out = sel(pred, scattered, input, tmp): scattered @written, input @unwritten.
+        auto out_call = op_reg.Create("tile.sel", {pred, scattered, args[0], tmp}, span);
+        return ConversionResult{std::move(prologue), out_call};
       },
       std::move(scatter_input_reqs));
 

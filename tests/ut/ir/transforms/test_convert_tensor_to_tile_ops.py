@@ -2412,14 +2412,17 @@ class TestConvertGatherOp:
 
 
 class TestConvertScatterOp:
-    """Test conversion of tensor.scatter (rank-2 dim=0 MVP) and tensor.scatter_mask."""
+    """Test conversion of tensor.scatter (rank-2 dim=-1 MVP) and tensor.scatter_mask."""
 
     @pytest.mark.skip(
-        reason="tensor.scatter row-index→flat-index expansion lowering is WIP pending the "
-        "final PTOAS pto.tscatter index interface; conversion output will be redone to match."
+        reason="Blocked by a pre-existing cmp/cmps round-trip gap: the scatter preserve "
+        "blend emits tile.cmps, whose packed-mask result TileView loses its blayout on "
+        "print->parse, so the autouse RoundtripInstrument fails structural equality "
+        "(same failure as any tensor.cmp conversion). Assertions below are correct and "
+        "ready once the packed-mask TileView blayout round-trips."
     )
     def test_scatter_conversion(self):
-        """tensor.scatter -> tile.load(input/index/src) + tile.scatter + tile.store."""
+        """tensor.scatter -> tile.load(input/index/src) + flat-index build + tile.scatter."""
 
         @pl.program
         class Before:
@@ -2427,17 +2430,17 @@ class TestConvertScatterOp:
             def main_incore_0(
                 self,
                 inp: pl.Tensor[[16, 8], pl.FP32],
-                idx: pl.Tensor[[4, 1], pl.INT32],
+                idx: pl.Tensor[[4, 8], pl.INT32],
                 src: pl.Tensor[[4, 8], pl.FP32],
             ) -> pl.Tensor[[16, 8], pl.FP32]:
-                out: pl.Tensor[[16, 8], pl.FP32] = pl.tensor.scatter(inp, dim=0, index=idx, src=src)
+                out: pl.Tensor[[16, 8], pl.FP32] = pl.tensor.scatter(inp, dim=-1, index=idx, src=src)
                 return out
 
             @pl.function
             def main(
                 self,
                 inp: pl.Tensor[[16, 8], pl.FP32],
-                idx: pl.Tensor[[4, 1], pl.INT32],
+                idx: pl.Tensor[[4, 8], pl.INT32],
                 src: pl.Tensor[[4, 8], pl.FP32],
             ) -> pl.Tensor[[16, 8], pl.FP32]:
                 out: pl.Tensor[[16, 8], pl.FP32] = self.main_incore_0(inp, idx, src)
@@ -2449,6 +2452,15 @@ class TestConvertScatterOp:
         # tensor.scatter is fully lowered; the tile-level call is present.
         assert "tensor.scatter" not in after_src
         assert "tile.scatter" in after_src
+        # Column index -> flat index: row_base via muls + row-broadcast add.
+        assert "tile.muls" in after_src
+        assert "tile.row_expand_add" in after_src
+        # Preserve blend (pto.tscatter does not keep unwritten dst elements):
+        # values + mask scatters into zeroed bases, then out = sel(mask != 0, values, input).
+        # The select avoids a multiply-based blend (pto.tmul rejects bf16/i8).
+        assert after_src.count("tile.scatter") == 2
+        assert "tile.full" in after_src
+        assert "tile.cmps" in after_src and "tile.sel" in after_src
         # Three Vec tile.load calls (one per tensor input).
         assert after_src.count("tile.load") >= 3
         # Phase 3 stores the resulting tile through an Out tensor param.

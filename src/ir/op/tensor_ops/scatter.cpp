@@ -20,10 +20,14 @@
  *                         ConvertTensorToTileOps.
  * - tensor.scatter_mask — mask-pattern form. Lowered 1:1 to tile.scatter_mask.
  *
- * Semantics (index form, rank-2):
+ * Semantics (index form, rank-2) — the column-wise inverse of tensor.gather,
+ * so the index tile has the same shape as `src` (just like gather's index has
+ * the same shape as its output):
  *   out = input
- *   for i in [0, src.shape[0]):
- *     out[indexes[i, 0], :] = src[i, :]
+ *   out[b, index[b, k]] = src[b, k]   for all b, k
+ * with dim == -1 (last axis). `src`/`index` are [rows, K]; `input`/output are
+ * [rows, S] with K <= S. ConvertTensorToTileOps expands the per-element column
+ * index into the flattened destination index pto.tscatter expects.
  */
 
 #include <any>
@@ -108,10 +112,10 @@ static TypePtr DeduceTensorScatterType(const std::vector<ExprPtr>& args,
   CHECK(index_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D index, but got rank " << index_type->shape_.size();
 
-  // The `dim` kwarg controls along which axis the per-row indices address.
-  // MVP only supports dim=0 (or dim=-2) — per-row row-scatter, which is what
-  // pto.tscatter implements.
-  int dim_val = 0;
+  // The `dim` kwarg controls which axis the per-element indices address. As the
+  // column-wise inverse of gather, the MVP only supports dim=-1 (last axis):
+  //   out[b, index[b, k]] = src[b, k].
+  int dim_val = -1;
   bool dim_seen = false;
   for (const auto& [key, value] : kwargs) {
     if (key == "dim") {
@@ -122,25 +126,39 @@ static TypePtr DeduceTensorScatterType(const std::vector<ExprPtr>& args,
   }
   CHECK(dim_seen) << "The operator " << op_name << " requires a 'dim' keyword argument";
   const int norm_dim = dim_val < 0 ? dim_val + static_cast<int>(rank) : dim_val;
-  CHECK(norm_dim == 0) << "The operator " << op_name
-                       << " currently supports dim=0 (or dim=-2) only, got dim=" << dim_val;
+  CHECK(norm_dim == static_cast<int>(rank) - 1)
+      << "The operator " << op_name << " currently supports dim=-1 (last axis) only, got dim=" << dim_val;
 
-  // Column count must match between src and input (whole rows scattered).
-  auto src_cols = As<ConstInt>(src_type->shape_[1]);
-  auto inp_cols = As<ConstInt>(input_type->shape_[1]);
-  if (src_cols && inp_cols) {
-    CHECK(src_cols->value_ == inp_cols->value_)
-        << "The operator " << op_name << " requires src.shape[1] == input.shape[1], got src cols "
-        << src_cols->value_ << " vs input cols " << inp_cols->value_;
-  }
-
-  // index.shape[0] must equal src.shape[0] (one row-index per src row).
+  // index has the same shape as src (gather-style): index[b, k] selects the
+  // destination column for src[b, k].
   auto src_rows = As<ConstInt>(src_type->shape_[0]);
   auto idx_rows = As<ConstInt>(index_type->shape_[0]);
   if (src_rows && idx_rows) {
     CHECK(src_rows->value_ == idx_rows->value_)
         << "The operator " << op_name << " requires index.shape[0] == src.shape[0], got src rows "
         << src_rows->value_ << " vs index rows " << idx_rows->value_;
+  }
+  auto src_cols = As<ConstInt>(src_type->shape_[1]);
+  auto idx_cols = As<ConstInt>(index_type->shape_[1]);
+  if (src_cols && idx_cols) {
+    CHECK(src_cols->value_ == idx_cols->value_)
+        << "The operator " << op_name << " requires index.shape[1] == src.shape[1], got src cols "
+        << src_cols->value_ << " vs index cols " << idx_cols->value_;
+  }
+
+  // src rows land on the same rows of the [rows, S] output, so src must not have
+  // more rows than input; src columns (K) may be fewer than input columns (S).
+  auto inp_rows = As<ConstInt>(input_type->shape_[0]);
+  if (src_rows && inp_rows) {
+    CHECK(src_rows->value_ <= inp_rows->value_)
+        << "The operator " << op_name << " requires src.shape[0] <= input.shape[0], got src rows "
+        << src_rows->value_ << " vs input rows " << inp_rows->value_;
+  }
+  auto inp_cols = As<ConstInt>(input_type->shape_[1]);
+  if (src_cols && inp_cols) {
+    CHECK(src_cols->value_ <= inp_cols->value_)
+        << "The operator " << op_name << " requires src.shape[1] <= input.shape[1], got src cols "
+        << src_cols->value_ << " vs input cols " << inp_cols->value_;
   }
 
   // Output shape/dtype mirror input (whole-tensor scatter, in-place semantics).
@@ -150,12 +168,14 @@ static TypePtr DeduceTensorScatterType(const std::vector<ExprPtr>& args,
 REGISTER_OP("tensor.scatter")
     .set_op_category("TensorOp")
     .set_description(
-        "Scatter rows from src into input at per-row indices along `dim` "
-        "(tensor-level; MVP supports rank-2 with dim=0/-2). Lowered to "
-        "tile.scatter by ConvertTensorToTileOps.")
-    .add_argument("input", "Base tensor whose rows are propagated (TensorType, 2D)")
-    .add_argument("index", "Per-row destination index tensor (TensorType, INT16 or INT32, 2D)")
-    .add_argument("src", "Source tensor with rows to scatter (same dtype as input)")
+        "Scatter src elements into input at per-element column indices along "
+        "`dim` (tensor-level; column-wise inverse of gather, MVP rank-2 dim=-1: "
+        "out[b, index[b, k]] = src[b, k]). Lowered to tile.scatter by "
+        "ConvertTensorToTileOps.")
+    .add_argument("input", "Base tensor that supplies the unwritten elements (TensorType, 2D)")
+    .add_argument("index",
+                  "Per-element destination column index (TensorType, INT16/INT32, same shape as src)")
+    .add_argument("src", "Source tensor with values to scatter (same dtype as input)")
     .set_attr<int>("dim")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

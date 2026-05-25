@@ -1570,15 +1570,17 @@ def scatter(  # noqa: PLR0913
     dst: Expr | None = None,
     span: Span | None = None,
 ) -> Call:
-    """Scatter rows of ``src`` into ``input`` (tensor-level) — index or mask form.
+    """Scatter elements of ``src`` into ``input`` (tensor-level) — index or mask form.
 
-    Index form (``dim`` + ``index`` + ``src``) → ``tensor.scatter``::
+    Index form (``dim`` + ``index`` + ``src``) → ``tensor.scatter`` — the
+    column-wise inverse of :func:`gather`, so ``index`` has the same shape as
+    ``src`` (just like gather's index matches its output)::
 
         output = input
-        for i in range(src.shape[0]):
-            output[index[i, 0], :] = src[i, :]
+        output[b, index[b, k]] = src[b, k]   # for all b, k
 
-        MVP limitation: rank-2 input with ``dim`` in ``{0, -2}`` only.
+        MVP limitation: rank-2 input with ``dim == -1``. ``src``/``index`` are
+        ``[rows, K]``; ``input``/output are ``[rows, S]`` with ``K <= S``.
 
     Mask form (``mask_pattern=<int>`` + ``dst``) → ``tensor.scatter_mask``:
         write each row of ``input`` into the columns of ``dst`` selected by the
@@ -1587,10 +1589,11 @@ def scatter(  # noqa: PLR0913
         Targeted at A3 / CPU-sim style backends — A5 rejects this form.
 
     Args:
-        input: Base tensor (TensorType, 2D).
-        dim: (index form) Axis along which to scatter. MVP accepts 0 or -2.
-        index: (index form) Per-row destination indices (TensorType, INT16/INT32).
-        src: (index form) Source rows tensor (same dtype as ``input``).
+        input: Base tensor supplying unwritten elements (TensorType, 2D).
+        dim: (index form) Axis along which to scatter. MVP accepts -1.
+        index: (index form) Per-element destination column indices, same shape
+            as ``src`` (TensorType, INT16/INT32).
+        src: (index form) Source values tensor (same dtype as ``input``).
         mask_pattern: (mask form, keyword-only) Mask selector in [1, 7].
         dst: (mask form, keyword-only) Destination tensor (rewritten on mask
             positions; same dtype as ``input``).

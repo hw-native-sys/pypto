@@ -94,19 +94,22 @@ TypePtr MakeScatterResultType(const std::shared_ptr<const TileType>& dst_type) {
 // ============================================================================
 //
 // Args (3 inputs):
-//   dst     : destination tile (in/out via DPS), must have the same dtype
-//             and column count as `src`
+//   dst     : destination tile (in/out via DPS), same dtype as `src`. Its
+//             shape is independent of `src` — only the flattened indices need
+//             to address valid `dst` elements.
 //   src     : source tile, [rows, cols]
-//   indexes : per-element *flattened* destination indices, same [rows, cols]
-//             shape as `src` (dtype constrained by the element-size matching
-//             rule). pto.tscatter writes dst.flat[indexes[i, j]] = src[i, j],
-//             so a row-scatter dst[r, :] = src[i, :] is expressed with
-//             indexes[i, j] = r * dst_cols + j. The tensor.scatter lowering
-//             builds these flat indices from the user's [N, 1] row indices.
+//   indexes : per-element *flattened* destination indices, with the **same
+//             [rows, cols] shape as `src`** (dtype constrained by the
+//             element-size matching rule). pto.tscatter loops over the index
+//             tile's valid shape and writes dst.flat[indexes[i, j]] = src[i, j].
+//             A column scatter dst[i, c] = src[i, j] is expressed with
+//             indexes[i, j] = i * dst_cols + c. The tensor.scatter lowering
+//             builds these flat indices from the user's gather-style column
+//             index tile (same shape as `src`).
 //
 // Result: TileType matching `dst` (aliased via set_output_reuses_input(0)).
 //
-// Semantics: dst[indexes[i, 0], j] = src[i, j]   for i in [0, src_rows)
+// Semantics: dst.flat[indexes[i, j]] = src[i, j]   for (i, j) in src valid shape
 
 static TypePtr DeduceTileScatterType(const std::vector<ExprPtr>& args,
                                      const std::vector<std::pair<std::string, std::any>>& /*kwargs*/,
@@ -146,22 +149,23 @@ static TypePtr DeduceTileScatterType(const std::vector<ExprPtr>& args,
   CHECK(idx_type->shape_.size() == 2)
       << "The operator " << op_name << " requires 2D indexes tile, but got rank " << idx_type->shape_.size();
 
-  // Column count must match between src and dst (whole rows are scattered).
-  auto src_cols = As<ConstInt>(src_type->shape_[1]);
-  auto dst_cols = As<ConstInt>(dst_type->shape_[1]);
-  if (src_cols && dst_cols) {
-    CHECK(src_cols->value_ == dst_cols->value_)
-        << "The operator " << op_name << " requires src.shape[1] == dst.shape[1], got src cols "
-        << src_cols->value_ << " vs dst cols " << dst_cols->value_;
-  }
-
-  // Indexes must supply one destination row per source row.
+  // pto.tscatter loops over the index tile's valid [rows, cols], reading the
+  // matching src element each step, so `indexes` must have exactly the same
+  // shape as `src`. `dst` is addressed by the flattened indices and may have an
+  // independent shape (its column count need not equal src's).
   auto src_rows = As<ConstInt>(src_type->shape_[0]);
   auto idx_rows = As<ConstInt>(idx_type->shape_[0]);
   if (src_rows && idx_rows) {
     CHECK(src_rows->value_ == idx_rows->value_)
         << "The operator " << op_name << " requires indexes.shape[0] == src.shape[0], got src rows "
         << src_rows->value_ << " vs indexes rows " << idx_rows->value_;
+  }
+  auto src_cols = As<ConstInt>(src_type->shape_[1]);
+  auto idx_cols = As<ConstInt>(idx_type->shape_[1]);
+  if (src_cols && idx_cols) {
+    CHECK(src_cols->value_ == idx_cols->value_)
+        << "The operator " << op_name << " requires indexes.shape[1] == src.shape[1], got src cols "
+        << src_cols->value_ << " vs indexes cols " << idx_cols->value_;
   }
 
   return MakeScatterResultType(dst_type);
@@ -170,11 +174,12 @@ static TypePtr DeduceTileScatterType(const std::vector<ExprPtr>& args,
 REGISTER_OP("tile.scatter")
     .set_op_category("TileOp")
     .set_description(
-        "Scatter rows from src into dst at per-row destination indices "
+        "Scatter src elements into dst at flattened destination indices "
         "(maps to pto.tscatter index form; DPS: dst is in/out)")
     .add_argument("dst", "Destination tile (same dtype as src; rewritten in-place via DPS)")
     .add_argument("src", "Source tile (FP16/FP32/BF16/INT8/INT16/INT32, 2D)")
-    .add_argument("indexes", "Per-row destination index tile (INT16 or INT32; one row per src row)")
+    .add_argument("indexes",
+                  "Per-element flattened destination index tile (INT16 or INT32; same shape as src)")
     .set_input_memory(0, MemorySpace::Vec)
     .set_input_memory(1, MemorySpace::Vec)
     .set_input_memory(2, MemorySpace::Vec)

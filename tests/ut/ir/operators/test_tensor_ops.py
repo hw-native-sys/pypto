@@ -2769,22 +2769,24 @@ def _make_scatter_inputs(
     rows: int = 16,
     cols: int = 8,
     k: int = 4,
+    k_cols: int | None = None,
 ):
     span = ir.Span.unknown()
     M = ir.ConstInt(rows, DataType.INT32, span)
     N = ir.ConstInt(cols, DataType.INT32, span)
     K = ir.ConstInt(k, DataType.INT32, span)
-    one = ir.ConstInt(1, DataType.INT32, span)
+    Kc = ir.ConstInt(k_cols if k_cols is not None else cols, DataType.INT32, span)
     inp = ir.Var("inp", ir.TensorType([M, N], dtype), span)
-    idx = ir.Var("idx", ir.TensorType([K, one], idx_dtype), span)
-    src = ir.Var("src", ir.TensorType([K, N], dtype), span)
+    # Column-scatter index has the same shape as src ([K rows, K_cols]).
+    idx = ir.Var("idx", ir.TensorType([K, Kc], idx_dtype), span)
+    src = ir.Var("src", ir.TensorType([K, Kc], dtype), span)
     return inp, idx, src
 
 
 def test_tensor_scatter_basic():
     """tensor.scatter output preserves input shape and dtype."""
     inp, idx, src = _make_scatter_inputs()
-    call = ir.op.tensor.scatter(inp, dim=0, index=idx, src=src)
+    call = ir.op.tensor.scatter(inp, dim=-1, index=idx, src=src)
     assert isinstance(call, ir.Call)
     assert call.op.name == "tensor.scatter"
     result_type = call.type
@@ -2794,18 +2796,28 @@ def test_tensor_scatter_basic():
     assert dims == [16, 8]
 
 
-def test_tensor_scatter_negative_dim():
-    """dim=-2 is accepted as an alias for dim=0."""
+def test_tensor_scatter_narrow_src_cols():
+    """src/index columns (K) may be fewer than input columns (S); output keeps S."""
+    inp, idx, src = _make_scatter_inputs(cols=8, k_cols=4)
+    call = ir.op.tensor.scatter(inp, dim=-1, index=idx, src=src)
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    dims = [d.value for d in result_type.shape if isinstance(d, ir.ConstInt)]
+    assert dims == [16, 8]
+
+
+def test_tensor_scatter_positive_dim():
+    """dim=1 is accepted as an alias for dim=-1 (rank-2 last axis)."""
     inp, idx, src = _make_scatter_inputs()
-    call = ir.op.tensor.scatter(inp, dim=-2, index=idx, src=src)
+    call = ir.op.tensor.scatter(inp, dim=1, index=idx, src=src)
     assert call.op.name == "tensor.scatter"
 
 
 def test_tensor_scatter_rejects_unsupported_dim():
-    """MVP only supports dim=0 / dim=-2."""
+    """MVP only supports dim=-1 (last axis)."""
     inp, idx, src = _make_scatter_inputs()
-    with pytest.raises(Exception, match=r"dim=0"):
-        ir.op.tensor.scatter(inp, dim=1, index=idx, src=src)
+    with pytest.raises(Exception, match=r"dim=-1"):
+        ir.op.tensor.scatter(inp, dim=0, index=idx, src=src)
 
 
 def test_tensor_scatter_rejects_dtype_mismatch():
@@ -2816,7 +2828,7 @@ def test_tensor_scatter_rejects_dtype_mismatch():
     N = ir.ConstInt(8, DataType.INT32, span)
     src_wrong = ir.Var("src_bad", ir.TensorType([K, N], DataType.FP16), span)
     with pytest.raises(Exception, match=r"src dtype"):
-        ir.op.tensor.scatter(inp, dim=0, index=idx, src=src_wrong)
+        ir.op.tensor.scatter(inp, dim=-1, index=idx, src=src_wrong)
 
 
 @pytest.mark.parametrize(
@@ -2833,10 +2845,10 @@ def test_tensor_scatter_rejects_index_size_mismatch(dtype, wrong_idx_dtype):
     inp, _, src = _make_scatter_inputs(dtype=dtype)
     span = ir.Span.unknown()
     K = ir.ConstInt(4, DataType.INT32, span)
-    one = ir.ConstInt(1, DataType.INT32, span)
-    idx_wrong = ir.Var("idx_bad", ir.TensorType([K, one], wrong_idx_dtype), span)
+    N = ir.ConstInt(8, DataType.INT32, span)
+    idx_wrong = ir.Var("idx_bad", ir.TensorType([K, N], wrong_idx_dtype), span)
     with pytest.raises(Exception, match=r"index dtype"):
-        ir.op.tensor.scatter(inp, dim=0, index=idx_wrong, src=src)
+        ir.op.tensor.scatter(inp, dim=-1, index=idx_wrong, src=src)
 
 
 def test_tensor_scatter_mask_p0101_doubles_last_dim():

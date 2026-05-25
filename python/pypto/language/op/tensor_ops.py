@@ -1371,20 +1371,22 @@ def scatter(
     mask_pattern: int | None = None,
     dst: Tensor | None = None,
 ) -> Tensor:
-    """Scatter rows of ``src`` into ``input`` (tensor-level) — index or mask form.
+    """Scatter elements of ``src`` into ``input`` (tensor-level) — index or mask form.
 
     The tensor layer exposes a single unified ``scatter``. Based on the arguments
     you pass, it lowers to one of two tile-level ops:
 
-    Index form (``dim`` + ``index`` + ``src``) → :func:`pl.tile.scatter`::
+    Index form (``dim`` + ``index`` + ``src``) → :func:`pl.tile.scatter` — the
+    column-wise inverse of :func:`gather`, so ``index`` has the same shape as
+    ``src`` (just like gather's index matches its output)::
 
         output = input
-        for i in range(src.shape[0]):
-            output[index[i, 0], :] = src[i, :]
+        output[b, index[b, k]] = src[b, k]   # for all b, k
 
-        MVP: rank-2 input with ``dim`` in ``{0, -2}``. ``index`` element width
-        must match ``input``: 4-byte input → INT32, 2-byte input → INT16,
-        1-byte input → INT16.
+        MVP: rank-2 input with ``dim == -1``. ``src``/``index`` are ``[rows, K]``;
+        ``input``/output are ``[rows, S]`` with ``K <= S``. ``index`` element
+        width must match ``input``: 4-byte input → INT32, 2-byte → INT16,
+        1-byte → INT16.
 
     Mask form (``mask_pattern=<int>`` + ``dst``) → :func:`pl.tile.scatter_mask`:
         Writes each row of ``input`` into the columns of ``dst`` selected by the
@@ -1394,9 +1396,10 @@ def scatter(
 
     Args:
         input: Base tensor (FP16/FP32/BF16/INT8/INT16/INT32, 2D).
-        dim: (index form) Axis along which to scatter. MVP accepts 0 or -2.
-        index: (index form) Per-row destination indices (INT16/INT32).
-        src: (index form) Source rows tensor (same dtype as ``input``).
+        dim: (index form) Axis along which to scatter. MVP accepts -1.
+        index: (index form) Per-element destination column indices, same shape
+            as ``src`` (INT16/INT32).
+        src: (index form) Source values tensor (same dtype as ``input``).
         mask_pattern: (mask form, keyword-only) Mask pattern selector (1-7).
             1=P0101, 2=P1010, 3=P0001, 4=P0010, 5=P0100, 6=P1000, 7=P1111.
         dst: (mask form, keyword-only) Destination tensor; ``dst.cols ==
@@ -1406,7 +1409,7 @@ def scatter(
         Tensor representing the post-scatter result.
 
     Examples:
-        out = scatter(input, dim=0, index=idx, src=src_rows)
+        out = scatter(input, dim=-1, index=idx, src=src_vals)
         out = scatter(input, mask_pattern=pl.tile.MaskPattern.P0101, dst=dst)
     """
     is_index = dim is not None or index is not None or src is not None

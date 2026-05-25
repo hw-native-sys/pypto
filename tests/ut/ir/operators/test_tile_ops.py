@@ -2969,7 +2969,8 @@ class TestTileScatterOps:
         """tile.scatter constructs a Call returning a TileType aliased to dst."""
         span = ir.Span.unknown()
         src_type = ir.TileType(_const_dims(span, 4, 32), dtype)
-        idx_type = ir.TileType(_const_dims(span, 4, 1), idx_dtype)
+        # indexes are per-element flattened indices, same shape as src.
+        idx_type = ir.TileType(_const_dims(span, 4, 32), idx_dtype)
         dst_type = ir.TileType(_const_dims(span, 16, 32), dtype)
 
         call = tile.scatter(
@@ -3038,14 +3039,31 @@ class TestTileScatterOps:
                 ir.Var("idx", idx_type, span),
             )
 
-    def test_tile_scatter_rejects_col_mismatch(self):
-        """tile.scatter requires src.shape[1] == dst.shape[1]."""
+    def test_tile_scatter_allows_dst_col_mismatch(self):
+        """tile.scatter's dst column count is independent of src (flat-addressed)."""
         span = ir.Span.unknown()
         src_type = ir.TileType(_const_dims(span, 4, 32), DataType.FP32)
-        idx_type = ir.TileType(_const_dims(span, 4, 1), DataType.INT32)
+        idx_type = ir.TileType(_const_dims(span, 4, 32), DataType.INT32)
         dst_type = ir.TileType(_const_dims(span, 16, 64), DataType.FP32)
 
-        with pytest.raises(ValueError, match=r"src.shape\[1\] == dst.shape\[1\]"):
+        call = tile.scatter(
+            ir.Var("dst", dst_type, span),
+            ir.Var("src", src_type, span),
+            ir.Var("idx", idx_type, span),
+        )
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        const_dims = [dim.value for dim in result_type.shape if isinstance(dim, ir.ConstInt)]
+        assert const_dims == [16, 64]
+
+    def test_tile_scatter_rejects_index_col_mismatch(self):
+        """tile.scatter requires indexes.shape[1] == src.shape[1]."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(_const_dims(span, 4, 32), DataType.FP32)
+        idx_type = ir.TileType(_const_dims(span, 4, 16), DataType.INT32)
+        dst_type = ir.TileType(_const_dims(span, 16, 32), DataType.FP32)
+
+        with pytest.raises(ValueError, match=r"indexes.shape\[1\] == src.shape\[1\]"):
             tile.scatter(
                 ir.Var("dst", dst_type, span),
                 ir.Var("src", src_type, span),
@@ -3056,7 +3074,7 @@ class TestTileScatterOps:
         """tile.scatter requires indexes.shape[0] == src.shape[0]."""
         span = ir.Span.unknown()
         src_type = ir.TileType(_const_dims(span, 4, 32), DataType.FP32)
-        idx_type = ir.TileType(_const_dims(span, 8, 1), DataType.INT32)
+        idx_type = ir.TileType(_const_dims(span, 8, 32), DataType.INT32)
         dst_type = ir.TileType(_const_dims(span, 16, 32), DataType.FP32)
 
         with pytest.raises(ValueError, match=r"indexes.shape\[0\] == src.shape\[0\]"):
