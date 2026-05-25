@@ -745,6 +745,9 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
       }
       std::string tensor_view = NewNamedTemp(var->name_hint_ + "_view");
       BindTensorView(var, tensor_view);
+      // Map the view back to its base pointer up front (the view emit is deferred
+      // to EmitMakeTensorViews) so mid-body pl.read/pl.write resolve to !pto.ptr.
+      RegisterViewPtr(tensor_view, GetVarName(var));
 
       for (const auto& j : tensor_type->shape_) {
         if (As<ir::ConstInt>(j)) {
@@ -989,6 +992,9 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
 
     stream_ << GetIndent() << tensor_view << " = pto.make_tensor_view ";
     stream_ << GetVarName(param);
+    // Remember the view's source pointer so element-wise pl.read/pl.write on the
+    // same tensor can recover the base !pto.ptr instead of (mis)using the view.
+    RegisterViewPtr(tensor_view, GetVarName(param));
 
     // Emit shape (verbatim from IR — canonical).
     stream_ << ", shape = [";
@@ -1564,6 +1570,15 @@ void PTOCodegen::RegisterVarToMlir(const VarPtr& var, const std::string& mlir_na
 
 void PTOCodegen::RegisterTensorView(const VarPtr& var, const std::string& tensor_view_name) {
   BindTensorView(var, tensor_view_name);
+}
+
+void PTOCodegen::RegisterViewPtr(const std::string& tensor_view_name, const std::string& ptr_name) {
+  if (!tensor_view_name.empty() && !ptr_name.empty()) fs_.view_to_ptr[tensor_view_name] = ptr_name;
+}
+
+std::string PTOCodegen::ResolveBasePtr(const std::string& name) const {
+  auto it = fs_.view_to_ptr.find(name);
+  return it != fs_.view_to_ptr.end() ? it->second : name;
 }
 
 int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) const {
