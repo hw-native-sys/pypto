@@ -624,6 +624,38 @@ def test_pto_codegen_tile_store_lowering():
     assert "outs(" in mlir_code
 
 
+def test_pto_codegen_mixed_slice_assign_and_write_keeps_ptr():
+    """Mixing slice-assign (view) with pl.write (ptr) on one tensor must not clash.
+
+    Regression for #1493: slice-assign lowers to `pto.make_tensor_view`/`tstore`
+    (a `!pto.tensor_view`) while pl.write lowers to `store_scalar` (a `!pto.ptr`).
+    Both must not bind to the same SSA name, or ptoas rejects one value typed two
+    ways. The base pointer must flow through to store_scalar, not the view SSA.
+    """
+    T = 768
+
+    @pl.program
+    class MixedAccess:
+        @pl.function
+        def main(self, out: pl.Out[pl.Tensor[[T, 1], pl.FP32]]):
+            buf = pl.create_tensor([T, 1], dtype=pl.FP32)
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint="repro"):
+                buf[:, :] = pl.full([T, 1], dtype=pl.FP32, value=0.0)
+                for r in pl.range(T):
+                    pl.write(buf, [r, 0], 1.0)
+            out[:, :] = buf
+
+    prog = _run_default_passes(MixedAccess)
+    aiv = [f for f in prog.functions.values() if f.func_type == ir.FunctionType.AIV]
+    sub = ir.Program(aiv, "m", aiv[0].span)
+    mlir = _generate_mlir(sub)
+
+    # The view path stays a tensor_view; the element write resolves to the ptr.
+    store_scalar = _single_line(_get_mlir_lines(mlir), "pto.store_scalar")
+    assert "_view[" not in store_scalar, f"store_scalar must use ptr, not view: {store_scalar}"
+    assert "!pto.ptr<f32>" in store_scalar
+
+
 def test_pto_codegen_tile_mul():
     """Test that tile.mul generates pto.tmul."""
 
