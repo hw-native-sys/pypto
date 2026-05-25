@@ -1068,6 +1068,166 @@ class TestTileBroadcastOps:
         ir_str = str(Program)
         assert "tile.expands" in ir_str
 
+    # ------------------------------------------------------------------
+    # Issue #1450: broadcast tile ops must preserve TileView.valid_shape
+    # from their main tile input. Without this, chains like
+    #   pl.slice(..., valid_shape=[16, 4]) -> pl.row_expand_div(...) -> pl.slice(...)
+    # cause the downstream subview verifier to reject the slice with
+    # "'pto.subview' op expects result valid_shape[0] to match
+    # inferred/explicit valid_row" because row_expand* clobbered the
+    # dynamic valid_shape with the static declared shape.
+    # ------------------------------------------------------------------
+
+    def _make_sliced_tile_with_valid_shape(self):
+        """Helper: returns a tile-typed Call whose result has valid_shape=[8, 4]."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        src_var = ir.Var("src", src_type, span)
+        return tile.slice(src_var, [8, 16], [0, 0], valid_shape=[8, 4])
+
+    def _make_row_vec_with_valid_shape(self):
+        """Helper: returns a tile-typed Call shaped [8, 1] for row-expand inputs."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(8, DataType.INT32, span), ir.ConstInt(1, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        src_var = ir.Var("row_src", src_type, span)
+        return tile.slice(src_var, [8, 1], [0, 0], valid_shape=[8, 1])
+
+    def _make_col_vec_with_valid_shape(self):
+        """Helper: returns a tile-typed Call shaped [1, 16] for col-expand inputs."""
+        span = ir.Span.unknown()
+        src_type = ir.TileType(
+            [ir.ConstInt(1, DataType.INT32, span), ir.ConstInt(16, DataType.INT32, span)],
+            DataType.FP32,
+        )
+        src_var = ir.Var("col_src", src_type, span)
+        return tile.slice(src_var, [1, 16], [0, 0], valid_shape=[1, 4])
+
+    def test_tile_row_expand_div_preserves_input_valid_shape(self):
+        """tile.row_expand_div must propagate the main tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        row_vec = self._make_row_vec_with_valid_shape()
+        call = tile.row_expand_div(main, row_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert len(valid_shape) == 2
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_row_expand_mul_preserves_input_valid_shape(self):
+        """tile.row_expand_mul must propagate the main tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        row_vec = self._make_row_vec_with_valid_shape()
+        call = tile.row_expand_mul(main, row_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_row_expand_sub_preserves_input_valid_shape(self):
+        """tile.row_expand_sub must propagate the main tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        row_vec = self._make_row_vec_with_valid_shape()
+        call = tile.row_expand_sub(main, row_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_row_expand_add_preserves_input_valid_shape(self):
+        """tile.row_expand_add must propagate the main tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        row_vec = self._make_row_vec_with_valid_shape()
+        call = tile.row_expand_add(main, row_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_row_expand_preserves_input_valid_shape(self):
+        """tile.row_expand must propagate the main tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        row_vec = self._make_row_vec_with_valid_shape()
+        call = tile.row_expand(main, row_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_col_expand_mul_preserves_input_valid_shape(self):
+        """tile.col_expand_mul must propagate the target tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        col_vec = self._make_col_vec_with_valid_shape()
+        call = tile.col_expand_mul(main, col_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_col_expand_div_preserves_input_valid_shape(self):
+        """tile.col_expand_div must propagate the target tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        col_vec = self._make_col_vec_with_valid_shape()
+        call = tile.col_expand_div(main, col_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_col_expand_sub_preserves_input_valid_shape(self):
+        """tile.col_expand_sub must propagate the target tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        col_vec = self._make_col_vec_with_valid_shape()
+        call = tile.col_expand_sub(main, col_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_col_expand_preserves_input_valid_shape(self):
+        """tile.col_expand must propagate the target tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        col_vec = self._make_col_vec_with_valid_shape()
+        call = tile.col_expand(main, col_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_expands_preserves_input_valid_shape(self):
+        """tile.expands must propagate the target tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        call = tile.expands(main, 1.0)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
 
 class TestTileMatMulOps:
     """Test suite for tile-level matrix multiplication operators."""
