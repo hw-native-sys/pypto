@@ -38,16 +38,18 @@ import torch
 @pl.jit
 def atomic_add_store_fp32(x: pl.Tensor, out: pl.Out[pl.Tensor]):
     """``out += x`` via a single atomic-add store of the loaded tile."""
-    x_tile = pl.load(x, [0, 0], [16, 16])
-    pl.store(x_tile, [0, 0], out, atomic=pl.AtomicType.Add)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        x_tile = pl.load(x, [0, 0], [16, 16])
+        pl.store(x_tile, [0, 0], out, atomic=pl.AtomicType.Add)
     return out
 
 
 @pl.jit
 def atomic_add_store_int32(x: pl.Tensor, out: pl.Out[pl.Tensor]):
     """INT32 variant of :func:`atomic_add_store_fp32` (atomic-add accumulation)."""
-    x_tile = pl.load(x, [0, 0], [16, 16])
-    pl.store(x_tile, [0, 0], out, atomic=pl.AtomicType.Add)
+    with pl.at(level=pl.Level.CORE_GROUP):
+        x_tile = pl.load(x, [0, 0], [16, 16])
+        pl.store(x_tile, [0, 0], out, atomic=pl.AtomicType.Add)
     return out
 
 
