@@ -25,7 +25,7 @@ from .device_memory import DeviceMemoryHandle
 from .device_tensor import DeviceTensor
 
 if TYPE_CHECKING:
-    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram
+    from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ def _dispatch(
     chip_cids: dict[str, int],
     sub_ids: dict[str, int],
     call_config: Any,
-    device_nums: int
+    device_nums: int,
 ) -> None:
     """Build the orchestration closure and run it once on ``w``."""
     # Fresh _keep per dispatch: it pins per-call TaskArgs alive for the run.
@@ -331,7 +331,7 @@ def execute_distributed(
         alloc_fn(tensors)
 
     sub_worker_fns = _load_sub_worker_fns(output_dir)
-    
+
     num_sub = max(dc.num_sub_workers, len(sub_worker_fns))
 
     # Construct/register/init inside the try so a failure in any setup step still
@@ -570,7 +570,15 @@ class DistributedRuntime(DeviceMemoryHandle):
                 )
             tensors[info.name] = arg
 
-        _dispatch(self._w, self._entry_fn, tensors, self._chip_cids, self._sub_ids, self._call_config, len(self.dc.device_ids))
+        _dispatch(
+            self._w,
+            self._entry_fn,
+            tensors,
+            self._chip_cids,
+            self._sub_ids,
+            self._call_config,
+            len(self.dc.device_ids),
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
