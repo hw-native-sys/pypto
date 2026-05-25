@@ -74,6 +74,7 @@ struct PassProperties {
 | LowerCompositeOps | — | — | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
 | AutoTileMatmulL0 | SSAForm, IncoreTileOps, TileOps2D | SSAForm, IncoreTileOps, TileOps2D | — |
+| CanonicalizeMatSlice | SSAForm, IncoreTileOps, TileOps2D | SSAForm, IncoreTileOps, TileOps2D | — |
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, NormalizedStmtStructure | — |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
 | NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
@@ -372,31 +373,32 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 1. [`LowerCompositeOps`](14-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md)
 3. [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)
-4. `InferTileMemorySpace`
-5. [`LowerTransposeLoadParamLayout`](18-lower_transpose_load_param_layout.md) (RFC #1300 P6 — replaces `ResolveTransposeLayout`)
-6. [`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md) (self-normalizes statement structure internally)
-7. `ExpandMixedKernel`
-8. [`InjectGMPipeBuffer`](21-inject_gm_pipe_buffer.md)
-9. [`SplitVectorKernel`](22-split_vector_kernel.md)
-10. `NormalizeReturnOrder`
-11. [`LowerPipelineLoops`](24-lower_pipeline_loops.md)
-12. [`CanonicalizeIOOrder`](25-canonicalize_io_order.md)
-13. [`MaterializeTensorStrides`](26-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
-14. `InitMemRef`
-15. `MemoryReuse`
-16. [`LegalizePTOBufferReuse`](29-legalize_pto_buffer_reuse.md)
-17. `AllocateMemoryAddr`
-18. [`FoldNoOpReshape`](31-fold_no_op_reshape.md)
-19. [`FuseCreateAssembleToSlice`](32-fuse_create_assemble_to_slice.md)
-20. [`DeriveCallDirections`](33-derive_call_directions.md)
-21. [`CollectCommGroups`](34-collect_comm_groups.md) (distributed: WindowBuffer + Program.comm_groups_; no-op for comm-less programs)
-22. `Simplify`
+4. [`CanonicalizeMatSlice`](17-canonicalize_mat_slice.md)
+5. `InferTileMemorySpace`
+6. [`LowerTransposeLoadParamLayout`](19-lower_transpose_load_param_layout.md) (RFC #1300 P6 — replaces `ResolveTransposeLayout`)
+7. [`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md) (self-normalizes statement structure internally)
+8. `ExpandMixedKernel`
+9. [`InjectGMPipeBuffer`](22-inject_gm_pipe_buffer.md)
+10. [`SplitVectorKernel`](23-split_vector_kernel.md)
+11. `NormalizeReturnOrder`
+12. [`LowerPipelineLoops`](25-lower_pipeline_loops.md)
+13. [`CanonicalizeIOOrder`](26-canonicalize_io_order.md)
+14. [`MaterializeTensorStrides`](27-materialize_tensor_strides.md) — wired into the default pipeline starting from RFC #1300 P6
+15. `InitMemRef`
+16. `MemoryReuse`
+17. [`LegalizePTOBufferReuse`](30-legalize_pto_buffer_reuse.md)
+18. `AllocateMemoryAddr`
+19. [`FoldNoOpReshape`](32-fold_no_op_reshape.md)
+20. [`FuseCreateAssembleToSlice`](33-fuse_create_assemble_to_slice.md)
+21. [`DeriveCallDirections`](34-derive_call_directions.md)
+22. [`CollectCommGroups`](35-collect_comm_groups.md) (distributed: WindowBuffer + Program.comm_groups_; no-op for comm-less programs)
+23. `Simplify`
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and
 for non-strategy-specific tests so the maintained pipeline stays covered.
 
-[`ResolveBackendOpLayouts`](19-resolve_backend_op_layouts.md) repairs
+[`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md) repairs
 backend-constrained elementwise tile ops using registered layout metadata.
 For the current PTO row-major elementwise ops, it rewrites `[N, 1]` vector
 operands into `[1, N] row_major` `tile.reshape` operations at the
@@ -404,7 +406,7 @@ constrained use site, where row-major is inferred from the target shape.
 It then reshapes the result back to the original vector shape when
 needed.
 
-[`NormalizeReturnOrder`](23-normalize_return_order.md) reorders `ReturnStmt::value_` in InCore functions so that
+[`NormalizeReturnOrder`](24-normalize_return_order.md) reorders `ReturnStmt::value_` in InCore functions so that
 `return[i]` corresponds to the i-th `Out`/`InOut` parameter in declaration order,
 and updates `TupleGetItemExpr` indices at call sites accordingly. This lets
 orchestration codegen map tuple element indices to output parameters with a

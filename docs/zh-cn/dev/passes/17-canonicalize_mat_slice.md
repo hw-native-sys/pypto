@@ -1,0 +1,126 @@
+# CanonicalizeMatSlice Pass
+
+将 Mat-resident 的 `tile.slice` 下沉 (lower) 为规范的 `tile.extract` 形式，使所有 Mat→Left/Right 搬运统一走 `pto.textract`。
+
+## 概览
+
+结果 tile 位于 `Mem.Mat` 的 `tile.slice` 是一种合法的高层「Mat tile 子窗口」构造。[`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md) 在展开 `tile.batch_matmul` 的 batch 维时，会为每个 batch page 生成一个这样的 slice：page 偏移为 `batch_index * page_rows`；当 batch 前导维为 1 时该偏移为 0、窗口覆盖整个 tile——但它仍然是一个 `tile.slice`。
+
+独立的 Mat-resident `tile.slice` **没有硬件下沉路径**：codegen 会把它实例化为一个 `loc=mat -> loc=mat` 的 `pto.tmov`，而 Ascend 910C 等目标没有 L1→L1 DMA 通路。本 pass 通过把每个 Mat-resident `tile.slice` 的偏移折叠进其消费者来消除该 slice，随后删除已死的 slice。
+
+**Pipeline 位置**：紧跟在 [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md) 之后（此时读取 batch-page slice 的逐迭代 `tile.extract` 已经存在），先于 [`InferTileMemorySpace`](18-infer_tile_memory_space.md)。
+
+**前置属性 (Required)**：`SSAForm`、`SplitIncoreOrch`、`IncoreTileOps`、`TileOps2D`、`NormalizedStmtStructure`。
+
+**产出属性 (Produced)**：与前置属性相同（属性保持不变的改写）。
+
+**失效属性 (Invalidated)**：无。
+
+**何时使用**：一律在默认 tile 阶段流水线中运行。如果不存在 Mat-resident 的 `tile.slice`，本 pass 是 no-op。
+
+## API
+
+| C++ | Python | 层级 |
+| --- | ------ | ---- |
+| `pass::CanonicalizeMatSlice()` | `passes.canonicalize_mat_slice()` | Function 级 |
+
+```python
+from pypto.pypto_core import passes
+
+program_canon = passes.canonicalize_mat_slice()(program)
+```
+
+## 算法
+
+对每个 InCore 类型的 function，分三个阶段：
+
+1. **收集 (Collect)** —— 索引每个 value 为 Mat-resident `tile.slice(src, shape, offset)`（规范 3 参数形式）的 `AssignStmt`。若某 slice 的 `src` 本身又是一个 Mat slice，则进行剥离 (peel) 并累加偏移，使每个条目最终解析为一个非 slice 的 base tile 加上总偏移 `(off_row, off_col)`。带有 `valid_shape` / `drop_dims` 的 slice（4–5 参数）不是普通窗口，跳过。
+
+2. **改写消费者 (Rewrite consumers)** —— 对每个 Mat slice：
+   - **`tile.extract(slice, ir, ic, shape)`** → `tile.extract(base, ir + off_row, ic + off_col, shape)`。extract 直接读取 slice 的源 tile；当两个加数都是 `ConstInt` 时对索引加法做常量折叠。
+   - **`tile.matmul` / `tile.matmul_acc` / `tile.matmul_bias` 的操作数** → 该操作数被替换为一个新的 `tile.extract(base, off_row, off_col, slice_shape, target_memory=Left|Right)`——lhs 操作数用 `Left`，rhs 操作数用 `Right`。（`tile.matmul_acc` 的累加器操作数位于 `Acc`，永远不会是 Mat slice。）
+
+3. **删除死 slice (Drop dead slices)** —— 结果不再被任何使用者引用的 `tile.slice` 被删除。链式 slice（slice 的 slice）只有在消费它的那个 slice 被删除后才会变死，因此该步骤迭代至不动点（迭代次数以 Mat-slice 数量为上界）。结束时仍被使用的 Mat slice，说明其消费者不被本 pass 规范化——保持原样，相对 pass 前的 IR 无回退。
+
+本 pass 是 `FunctionPass`；当不存在 Mat-resident `tile.slice` 时 function 原样返回。
+
+## 示例
+
+### slice 折叠进 `tile.extract`
+
+[`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md) 为前导维为 1 的 batch 操作数生成的偏移为 0、全形状的 slice：
+
+**改写前 (Before)**：
+
+```python
+lhs_slice: pl.Tile[[32, 512], pl.INT8, pl.Mem.Mat] = pl.tile.slice(x_mat, [32, 512], [0, 0])
+a:         pl.Tile[[32, 256], pl.INT8, pl.Mem.Left] = pl.tile.extract(
+    lhs_slice, 0, ko, shape=[32, 256], target_memory=pl.Mem.Left)
+```
+
+**改写后 (After)**（slice 被删除；extract 直接读取已加载的 Mat tile）：
+
+```python
+a: pl.Tile[[32, 256], pl.INT8, pl.Mem.Left] = pl.tile.extract(
+    x_mat, 0, ko, shape=[32, 256], target_memory=pl.Mem.Left)
+```
+
+非零的 page 偏移会折叠进 extract 索引——例如偏移为 `[32, 0]` 的 slice 会把 `extract(slice, 0, ko, ...)` 变为 `extract(x_mat, 32, ko, ...)`。
+
+### slice 折叠进 `tile.matmul` 操作数
+
+当 `AutoTileMatmulL0` 未对某个 matmul 做切分（其已是 L0 大小）时，它的 Mat-slice 操作数被直接转换：
+
+**改写前 (Before)**：
+
+```python
+lhs_slice: pl.Tile[[16, 256], pl.BF16, pl.Mem.Mat] = pl.tile.slice(lhs_mat, [16, 256], [0, 0])
+rhs_slice: pl.Tile[[256, 64], pl.BF16, pl.Mem.Mat] = pl.tile.slice(rhs_mat, [256, 64], [0, 0])
+c:         pl.Tile[[16, 64],  pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_slice, rhs_slice)
+```
+
+**改写后 (After)**：
+
+```python
+lhs_left:  pl.Tile[[16, 256], pl.BF16, pl.Mem.Left]  = pl.tile.extract(
+    lhs_mat, 0, 0, shape=[16, 256], target_memory=pl.Mem.Left)
+rhs_right: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+    rhs_mat, 0, 0, shape=[256, 64], target_memory=pl.Mem.Right)
+c:         pl.Tile[[16, 64],  pl.FP32, pl.Mem.Acc]   = pl.tile.matmul(lhs_left, rhs_right)
+```
+
+## 实现
+
+**头文件**：`include/pypto/ir/transforms/passes.h`
+
+**属性**：`include/pypto/ir/transforms/pass_properties.h`（`kCanonicalizeMatSliceProperties`）
+
+**实现**：`src/ir/transforms/canonicalize_mat_slice_pass.cpp`
+
+**Python 绑定**：`python/bindings/modules/passes.cpp`
+
+**测试**：`tests/ut/ir/transforms/test_canonicalize_mat_slice.py`
+
+## Pass 属性
+
+| 属性 | 取值 |
+| ---- | ---- |
+| Required | SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、NormalizedStmtStructure |
+| Produced | SSAForm、SplitIncoreOrch、IncoreTileOps、TileOps2D、NormalizedStmtStructure |
+| Invalidated | — |
+
+## 适用范围
+
+| Op | 处理 |
+| -- | ---- |
+| 喂给 `tile.extract` 的 Mat-resident `tile.slice`（3 参数） | 折叠进 extract；删除 slice |
+| 喂给 matmul 族操作数的 Mat-resident `tile.slice`（3 参数） | 替换为 `tile.extract(target_memory=Left\|Right)`；删除 slice |
+| 链式 Mat `tile.slice`（slice 的 slice） | 剥离；累加偏移 |
+| 带 `valid_shape` / `drop_dims` 的 Mat `tile.slice` | 跳过（不是普通窗口） |
+| 位于 Vec/Left/Right/Acc 的 `tile.slice` | 不处理（只下沉 Mat slice） |
+| 不含 Mat `tile.slice` 的 function | 原样返回 |
+
+## 参见
+
+- [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md) —— 上游 pass；生成本 pass 下沉的 Mat-resident batch-page `tile.slice`
+- [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md) —— 上游 pass；生成消费 batch-page slice 的 `tile.extract`

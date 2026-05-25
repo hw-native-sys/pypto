@@ -4,7 +4,7 @@
 
 `CollectCommGroups` 扫描每个 host-orchestration 函数，组装出分布式 runtime
 为分配 / 填充 per-rank 通信窗口所需要的 host 侧元数据。它与
-[`InitMemRef`](27-init_memref.md) 在结构上完全同构：追溯一次分配到所有
+[`InitMemRef`](28-init_memref.md) 在结构上完全同构：追溯一次分配到所有
 消费点，构造反向引用对象，再把该对象挂到 IR 类型上，让下游 codegen 能 O(1)
 访问。
 

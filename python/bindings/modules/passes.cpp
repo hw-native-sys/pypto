@@ -421,6 +421,14 @@ void BindPass(nb::module_& m) {
              "pipeline_stages=2 so LowerPipelineLoops produces a 2-deep ping-pong. Already-L0-\n"
              "sized matmuls are left untouched. tile.matmul_bias is not yet supported. Only K\n"
              "tiling; M/N tiling and K%k!=0 cases emit a PerfHint and skip.");
+  passes.def("canonicalize_mat_slice", &pass::CanonicalizeMatSlice,
+             "Create a pass that lowers Mat-resident tile.slice into tile.extract\n\n"
+             "A tile.slice whose result tile is Mem.Mat (e.g. a batch-page slice emitted by\n"
+             "FlattenTileNdTo2D when unrolling tile.batch_matmul) has no standalone hardware\n"
+             "lowering. This pass folds each such slice's offset into its consumer: a\n"
+             "tile.extract absorbs the offset and reads the slice's source directly, and a\n"
+             "tile.matmul operand is replaced by a tile.extract(target_memory=Left|Right).\n"
+             "The dead tile.slice is then dropped, unifying Mat->Left/Right on pto.textract.");
   passes.def("infer_tile_memory_space", &pass::InferTileMemorySpace,
              "Create a pass that infers memory_space for TileType variables in InCore functions");
   passes.def("lower_transpose_load_param_layout", &pass::LowerTransposeLoadParamLayout,

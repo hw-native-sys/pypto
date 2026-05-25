@@ -448,6 +448,30 @@ Pass FlattenTileNdTo2D();
 Pass AutoTileMatmulL0();
 
 /**
+ * @brief Canonicalize Mat-resident ``tile.slice`` into ``tile.extract``
+ *
+ * A ``tile.slice`` whose result tile is ``Mem.Mat`` is a legal high-level
+ * "sub-window of a Mat tile" construct (e.g. emitted by ``FlattenTileNdTo2D``
+ * when it unrolls a ``tile.batch_matmul`` batch dimension).  It has no direct
+ * hardware lowering — codegen would materialize it as an unsupported
+ * ``loc=mat -> loc=mat`` ``pto.tmov``.
+ *
+ * This pass lowers every Mat-resident ``tile.slice`` into the canonical
+ * ``tile.extract`` form by folding the slice offset into its consumer:
+ * - consumed by ``tile.extract`` — the slice offset is added to the extract
+ *   index and the extract reads the slice's source directly;
+ * - consumed by a ``tile.matmul`` family operand — the operand is replaced by
+ *   a ``tile.extract(src, off, shape, target=Left|Right)``.
+ *
+ * The now-dead ``tile.slice`` is dropped.  Result: Mat->Left/Right movement
+ * is unified on ``tile.extract`` / ``pto.textract``.
+ *
+ * Requirements:
+ * - Input IR must have tile ops in 2D form; runs after ``AutoTileMatmulL0``
+ */
+Pass CanonicalizeMatSlice();
+
+/**
  * @brief Infer target memory space for TileType variables in InCore functions
  *
  * Sets TileType::memory_space_ based on the producing tile operation:

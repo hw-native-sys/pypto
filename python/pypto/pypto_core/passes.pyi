@@ -443,6 +443,23 @@ def auto_tile_matmul_l0() -> Pass:
     ``K % k != 0`` cases emit a perf hint and skip.
     """
 
+def canonicalize_mat_slice() -> Pass:
+    """Create a pass that lowers Mat-resident ``tile.slice`` into ``tile.extract``.
+
+    A ``tile.slice`` whose result tile is ``Mem.Mat`` (e.g. a batch-page slice
+    emitted by ``FlattenTileNdTo2D`` when unrolling ``tile.batch_matmul``) has
+    no standalone hardware lowering. This pass folds each such slice's offset
+    into its consumer:
+
+    * consumed by ``tile.extract`` — the extract reads the slice's source
+      directly with the slice offset added into its index;
+    * consumed by a ``tile.matmul`` family operand — the operand is replaced
+      by a ``tile.extract(target_memory=Left|Right)``.
+
+    The now-dead ``tile.slice`` is dropped, unifying Mat→Left/Right movement
+    on ``tile.extract`` / ``pto.textract``.
+    """
+
 def infer_tile_memory_space() -> Pass:
     """Create a pass that infers memory_space for TileType variables in InCore functions."""
 
@@ -713,6 +730,7 @@ __all__ = [
     "optimize_orch_tensors",
     "flatten_tile_nd_to_2d",
     "auto_tile_matmul_l0",
+    "canonicalize_mat_slice",
     "infer_tile_memory_space",
     "lower_transpose_load_param_layout",
     "materialize_tensor_strides",

@@ -21,7 +21,7 @@ Codegen needs one machine-readable contract, so `MaterializeTensorStrides` walks
 
 - `TensorViewCanonical` — `PassPipeline` auto-verifies after the pass using the registry's **strict-mode** verifier (empty stride on a present `TensorView` is rejected — that is the state this pass is responsible for eliminating)
 
-**Position in the default pipeline** (active since RFC #1300 P6): between [`CanonicalizeIOOrder`](25-canonicalize_io_order.md) and [`InitMemRef`](27-init_memref.md). This is the codegen-prep boundary — every layout-mutating pass (`LowerTransposeLoadParamLayout`, `ResolveBackendOpLayouts`, `ExpandMixedKernel`, `SplitVectorKernel`) has finished, and `InitMemRef` is the first consumer that needs explicit stride.
+**Position in the default pipeline** (active since RFC #1300 P6): between [`CanonicalizeIOOrder`](26-canonicalize_io_order.md) and [`InitMemRef`](28-init_memref.md). This is the codegen-prep boundary — every layout-mutating pass (`LowerTransposeLoadParamLayout`, `ResolveBackendOpLayouts`, `ExpandMixedKernel`, `SplitVectorKernel`) has finished, and `InitMemRef` is the first consumer that needs explicit stride.
 
 ## API
 
@@ -110,8 +110,8 @@ Because the pass declares `produced = {... ∪ TensorViewCanonical}`, `PassPipel
 
 ## Related
 
-- [`CanonicalizeIOOrder`](25-canonicalize_io_order.md) — runs immediately before; produces the program state the materialization consumes
-- [`InitMemRef`](27-init_memref.md) — first downstream consumer that depends on explicit stride
-- [`LowerTransposeLoadParamLayout`](18-lower_transpose_load_param_layout.md) — primary source of empty-stride DN views in the default pipeline (active since RFC #1300 P6)
+- [`CanonicalizeIOOrder`](26-canonicalize_io_order.md) — runs immediately before; produces the program state the materialization consumes
+- [`InitMemRef`](28-init_memref.md) — first downstream consumer that depends on explicit stride
+- [`LowerTransposeLoadParamLayout`](19-lower_transpose_load_param_layout.md) — primary source of empty-stride DN views in the default pipeline (active since RFC #1300 P6)
 - [`tensor_view_semantics.h`](../../../../include/pypto/ir/transforms/utils/tensor_view_semantics.h) — the helpers (`BuildLogicalStridesFromLayout`, `CheckCanonicalView`, `CanonicalizeView`)
 - RFC [#1300](https://github.com/hw-native-sys/pypto/issues/1300) — Self-consistent IR TensorType layout representation

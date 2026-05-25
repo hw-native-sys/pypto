@@ -5,7 +5,7 @@
 `CollectCommGroups` walks each host-orchestration function and assembles the
 host-side metadata that the distributed runtime needs in order to size and
 populate per-rank communication windows. It is the structural analogue of
-[`InitMemRef`](27-init_memref.md): it traces an allocation through to its
+[`InitMemRef`](28-init_memref.md): it traces an allocation through to its
 consumption points, constructs a back-reference object, and threads it onto
 the IR types so downstream codegen has O(1) access.
 

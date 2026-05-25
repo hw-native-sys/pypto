@@ -144,6 +144,7 @@ class PassManager:
             ("LowerCompositeOps", lambda: passes.lower_composite_ops()),
             ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
             ("AutoTileMatmulL0", lambda: passes.auto_tile_matmul_l0()),
+            ("CanonicalizeMatSlice", lambda: passes.canonicalize_mat_slice()),
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
             ("LowerTransposeLoadParamLayout", lambda: passes.lower_transpose_load_param_layout()),
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),

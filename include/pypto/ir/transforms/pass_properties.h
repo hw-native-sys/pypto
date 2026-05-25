@@ -135,6 +135,18 @@ inline const PassProperties kAutoTileMatmulL0Properties{
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
 
+// -- Canonicalize Mat-resident tile.slice into tile.extract -------------------
+// Runs right after AutoTileMatmulL0, before InferTileMemorySpace.  A
+// property-preserving rewrite: it only folds Mat-resident tile.slice ops into
+// their tile.extract / tile.matmul consumers, so it requires and produces the
+// same property set as AutoTileMatmulL0.
+
+inline const PassProperties kCanonicalizeMatSliceProperties{
+    .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
+    .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
+                 IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure}};
+
 // -- Tile memory space inference pass -----------------------------------------
 
 inline const PassProperties kInferTileMemorySpaceProperties{
