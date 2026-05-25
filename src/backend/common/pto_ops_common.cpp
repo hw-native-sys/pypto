@@ -949,7 +949,9 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
 
   std::ostringstream oss;
   oss << "pto.tscatter ins(" << src << ", " << idx;
-  if (!src_type.empty() || !idx_type.empty()) {
+  // Emit the type clause only when both annotations are present; printing one
+  // alone would produce malformed PTOAS (": , idx" or ": src, ").
+  if (!src_type.empty() && !idx_type.empty()) {
     oss << " : " << src_type << ", " << idx_type;
   }
   oss << ") outs(" << dst;

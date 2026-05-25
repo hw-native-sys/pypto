@@ -2449,16 +2449,19 @@ class TestConvertScatterOp:
         After = passes.convert_tensor_to_tile_ops()(Before)
         after_src = After.as_python()
 
-        # tensor.scatter is fully lowered; the tile-level call is present.
+        # tensor.scatter is fully lowered; the index-form tile call is present.
+        # Exact-call match avoids the "tile.scatter" substring also matching
+        # "tile.scatter_mask" (index form must not lower to the mask op).
         assert "tensor.scatter" not in after_src
-        assert "tile.scatter" in after_src
+        assert "pl.tile.scatter(" in after_src
+        assert "pl.tile.scatter_mask(" not in after_src
         # Column index -> flat index: row_base via muls + row-broadcast add.
         assert "tile.muls" in after_src
         assert "tile.row_expand_add" in after_src
         # Preserve blend (pto.tscatter does not keep unwritten dst elements):
         # values + mask scatters into zeroed bases, then out = sel(mask != 0, values, input).
         # The select avoids a multiply-based blend (pto.tmul rejects bf16/i8).
-        assert after_src.count("tile.scatter") == 2
+        assert after_src.count("pl.tile.scatter(") == 2
         assert "tile.full" in after_src
         assert "tile.cmps" in after_src and "tile.sel" in after_src
         # Three Vec tile.load calls (one per tensor input).
@@ -2493,7 +2496,7 @@ class TestConvertScatterOp:
         after_src = After.as_python()
 
         assert "tensor.scatter_mask" not in after_src
-        assert "tile.scatter_mask" in after_src
+        assert "pl.tile.scatter_mask(" in after_src
         assert "mask_pattern=1" in after_src
         assert "pl.Out[pl.Tensor[[4, 16]" in after_src
 
