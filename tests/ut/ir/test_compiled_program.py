@@ -35,9 +35,22 @@ def _fake_compile_and_assemble(return_value):
     """
     mock = MagicMock(return_value=return_value)
     fake = types.ModuleType("pypto.runtime.device_runner")
-    fake.compile_and_assemble = mock
+    setattr(fake, "compile_and_assemble", mock)
     with patch.dict(sys.modules, {"pypto.runtime.device_runner": fake}):
         yield mock
+
+
+@contextlib.contextmanager
+def _fake_call_config(instance):
+    """Stub ``pypto.runtime.task_interface.CallConfig`` via a fake module.
+
+    ``task_interface`` imports the device-only ``simpler`` package, so it can't
+    load on host CI. Fake it so ``build_call_config``'s inner import binds to a
+    ``CallConfig`` that returns ``instance``."""
+    fake = types.ModuleType("pypto.runtime.task_interface")
+    setattr(fake, "CallConfig", MagicMock(return_value=instance))
+    with patch.dict(sys.modules, {"pypto.runtime.task_interface": fake}):
+        yield
 
 
 def _make_program_with_orchestration(*, has_return: bool = False) -> ir.Program:
@@ -674,7 +687,7 @@ class TestCompiledProgramExtraction:
         fake_call_config = MagicMock(name="CallConfig_instance")
         with (
             patcher,
-            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+            _fake_call_config(fake_call_config),
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
@@ -692,7 +705,7 @@ class TestCompiledProgramExtraction:
         fake_call_config = MagicMock(name="CallConfig_instance")
         with (
             patcher,
-            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+            _fake_call_config(fake_call_config),
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
@@ -709,7 +722,7 @@ class TestCompiledProgramExtraction:
         fake_call_config = MagicMock(name="CallConfig_instance")
         with (
             patcher,
-            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+            _fake_call_config(fake_call_config),
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
@@ -725,7 +738,7 @@ class TestCompiledProgramExtraction:
         fake_call_config = MagicMock(name="CallConfig_instance")
         with (
             patcher,
-            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+            _fake_call_config(fake_call_config),
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
@@ -763,7 +776,7 @@ class TestCompiledProgramExtraction:
         )
         with (
             patcher,
-            patch("pypto.runtime.task_interface.CallConfig", return_value=fake_call_config),
+            _fake_call_config(fake_call_config),
         ):
             from pypto.runtime import RunConfig  # noqa: PLC0415
 
