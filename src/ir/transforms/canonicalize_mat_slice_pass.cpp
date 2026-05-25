@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -67,6 +68,7 @@
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
+#include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -76,14 +78,6 @@ namespace pass {
 namespace {
 
 constexpr const char* kPassName = "CanonicalizeMatSlice";
-
-ExprPtr MakeIndex(int64_t v, const Span& span) {
-  return std::make_shared<ConstInt>(v, DataType::INDEX, span);
-}
-
-ExprPtr MakeIndexTuple(int64_t d0, int64_t d1, const Span& span) {
-  return std::make_shared<MakeTuple>(std::vector<ExprPtr>{MakeIndex(d0, span), MakeIndex(d1, span)}, span);
-}
 
 /// Build a canonical index add, folding ConstInt cases so a zero offset leaves
 /// the original index untouched (avoids spurious ``ko + 0`` forms).
@@ -212,7 +206,9 @@ class CanonicalizeMutator : public IRMutator {
                                  MakeCanonicalIndexAdd(call->args_[2], info.off_col, sp), call->args_[3]};
     auto& reg = OpRegistry::GetInstance();
     auto new_call = reg.Create("tile.extract", args, call->kwargs_, sp);
-    return std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_);
+    auto new_assign = MutableCopy(assign);
+    new_assign->value_ = new_call;
+    return new_assign;
   }
 
  private:
@@ -229,15 +225,18 @@ class CanonicalizeMutator : public IRMutator {
     return std::nullopt;
   }
 
-  /// Build `var = tile.extract(base, off_row, off_col, [d0, d1],
-  /// target_memory=target)` for a matmul operand that was a Mat slice.
+  /// Build `var = tile.extract(base, off_row, off_col, slice_shape,
+  /// target_memory=target)` for a matmul operand that was a Mat slice.  The
+  /// slice's result tile shape is forwarded as the extract shape — passing the
+  /// existing shape expressions through (rather than extracting int64 values
+  /// and rebuilding ConstInts) keeps the path safe under future symbolic dims.
   AssignStmtPtr BuildOperandExtract(const VarPtr& slice_var, const MatSliceInfo& info, MemorySpace target,
                                     const Span& span) {
     auto slice_tile = As<TileType>(slice_var->GetType());
-    auto d0 = As<ConstInt>(slice_tile->shape_[0]);
-    auto d1 = As<ConstInt>(slice_tile->shape_[1]);
-    std::vector<ExprPtr> args = {info.base, info.off_row, info.off_col,
-                                 MakeIndexTuple(d0->value_, d1->value_, span)};
+    INTERNAL_CHECK(slice_tile && slice_tile->shape_.size() == 2)
+        << "CanonicalizeMatSlice: matmul-operand slice must have a 2-D TileType result";
+    auto shape_tuple = std::make_shared<MakeTuple>(slice_tile->shape_, span);
+    std::vector<ExprPtr> args = {info.base, info.off_row, info.off_col, shape_tuple};
     std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", target}};
     auto& reg = OpRegistry::GetInstance();
     auto call = reg.Create("tile.extract", args, kwargs, span);
@@ -275,8 +274,10 @@ class CanonicalizeMutator : public IRMutator {
 
     auto& reg = OpRegistry::GetInstance();
     auto new_call = reg.Create(call->op_->name_, new_args, call->kwargs_, sp);
+    auto new_assign = MutableCopy(assign);
+    new_assign->value_ = new_call;
     std::vector<StmtPtr> out = std::move(extracts);
-    out.push_back(std::make_shared<AssignStmt>(assign->var_, new_call, assign->span_));
+    out.push_back(new_assign);
     return out;
   }
 
@@ -362,9 +363,9 @@ Pass CanonicalizeMatSlice() {
     }
 
     if (new_body.get() == func->body_.get()) return func;
-    return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
-                                      func->return_types_, new_body, func->span_, func->func_type_,
-                                      func->level_, func->role_, func->attrs_);
+    auto new_func = MutableCopy(func);
+    new_func->body_ = new_body;
+    return new_func;
   };
   return CreateFunctionPass(pass_func, kPassName, kCanonicalizeMatSliceProperties);
 }

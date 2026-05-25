@@ -89,13 +89,16 @@ def test_issue_1467_no_mat_to_mat_tmov():
     # End-to-end compilation may still fail on an unrelated downstream codegen
     # bug (transposed-weight DN->NZ TLOAD — tracked separately); the issue #1467
     # check below is on the generated .pto, which codegen emits before that.
+    compile_error: Exception | None = None
     try:
         batch_matmul_pipeline_repro(x, w, out, config=cfg)
-    except Exception:  # noqa: BLE001 - see comment above
-        pass
+    except Exception as e:  # noqa: BLE001 - see comment above
+        compile_error = e
 
     pto = DUMP_DIR / "ptoas" / "repro_mm.pto"
-    assert pto.exists(), f"codegen did not emit {pto}"
+    assert pto.exists(), (
+        f"codegen did not emit {pto}; compile raised before .pto materialized: {compile_error!r}"
+    )
     text = pto.read_text()
     mat_to_mat = _MAT_TO_MAT_TMOV.findall(text)
     assert not mat_to_mat, (
