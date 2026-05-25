@@ -9,17 +9,35 @@
 
 """Tests for CompiledProgram callable API."""
 
+import contextlib
 import ctypes
 import os
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
-import pypto.runtime.device_runner  # noqa: F401 — ensure submodule attr exists for patch() targets
 import pytest
 import torch
 from pypto import DataType, backend, ir
 from pypto.backend import BackendType
 from pypto.ir.compiled_program import CompiledProgram, _build_full_args, _extract_param_infos
 from pypto.runtime import DeviceTensor
+
+
+@contextlib.contextmanager
+def _fake_compile_and_assemble(return_value):
+    """Stub ``pypto.runtime.device_runner.compile_and_assemble`` via a fake module.
+
+    The real module imports ``simpler_setup`` (device-only), so it can't be loaded
+    on host-only CI. Inserting a fake module into ``sys.modules`` lets the inner
+    ``from pypto.runtime.device_runner import compile_and_assemble`` resolve to the
+    mock on every platform. Yields the mock for call assertions.
+    """
+    mock = MagicMock(return_value=return_value)
+    fake = types.ModuleType("pypto.runtime.device_runner")
+    fake.compile_and_assemble = mock
+    with patch.dict(sys.modules, {"pypto.runtime.device_runner": fake}):
+        yield mock
 
 
 def _make_program_with_orchestration(*, has_return: bool = False) -> ir.Program:
@@ -533,10 +551,7 @@ class TestCompiledProgramExtraction:
         return (
             cc,
             runtime_config,
-            patch(
-                "pypto.runtime.device_runner.compile_and_assemble",
-                return_value=(cc, "host_build_graph", runtime_config),
-            ),
+            _fake_compile_and_assemble((cc, "host_build_graph", runtime_config)),
         )
 
     def test_chip_callable_triggers_assemble(self, tmp_path):
@@ -814,10 +829,7 @@ class TestSubChipCallableExtraction:
     def test_chip_callable_triggers_assemble(self, tmp_path):
         sub = self._make_subchip(tmp_path)
         cc = MagicMock(name="sub_chip_callable")
-        with patch(
-            "pypto.runtime.device_runner.compile_and_assemble",
-            return_value=(cc, "host_build_graph", {}),
-        ) as mock:
+        with _fake_compile_and_assemble((cc, "host_build_graph", {})) as mock:
             assert sub.chip_callable is cc
             mock.assert_called_once_with(sub.output_dir, sub.platform, None)
 
@@ -838,10 +850,7 @@ class TestSubChipCallableExtraction:
         """Same guard as on CompiledProgram: cannot re-pin once cached."""
         sub = self._make_subchip(tmp_path)
         cc = MagicMock(name="sub_chip_callable")
-        with patch(
-            "pypto.runtime.device_runner.compile_and_assemble",
-            return_value=(cc, "host_build_graph", {}),
-        ):
+        with _fake_compile_and_assemble((cc, "host_build_graph", {})):
             _ = sub.chip_callable  # cache warmed
             with pytest.raises(RuntimeError, match="already loaded"):
                 sub.load(pto_isa_commit="abc1234")
