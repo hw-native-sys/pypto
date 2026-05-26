@@ -2430,13 +2430,6 @@ class TestConvertGatherOp:
 class TestConvertScatterOp:
     """Test conversion of tensor.scatter (rank-2 dim=-1 MVP) and tensor.scatter_mask."""
 
-    @pytest.mark.skip(
-        reason="Blocked by a pre-existing cmp/cmps round-trip gap: the scatter preserve "
-        "blend emits tile.cmps, whose packed-mask result TileView loses its blayout on "
-        "print->parse, so the autouse RoundtripInstrument fails structural equality "
-        "(same failure as any tensor.cmp conversion). Assertions below are correct and "
-        "ready once the packed-mask TileView blayout round-trips."
-    )
     def test_scatter_conversion(self):
         """tensor.scatter -> tile.load(input/index/src) + flat-index build + tile.scatter."""
 
@@ -2462,6 +2455,11 @@ class TestConvertScatterOp:
                 out: pl.Tensor[[16, 8], pl.FP32] = self.main_incore_0(inp, idx, src)
                 return out
 
+        # Runs under the autouse roundtrip instrument. The preserve blend emits
+        # tile.cmps whose packed-mask result has valid_shape [N, 1] on a wider
+        # physical tile; with #1498 fixed (parser now infers the implicit blayout
+        # from the physical tile shape, not valid_shape) the print->parse roundtrip
+        # holds, so this conversion no longer needs to be skipped.
         After = passes.convert_tensor_to_tile_ops()(Before)
         after_src = After.as_python()
 

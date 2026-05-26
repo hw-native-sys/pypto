@@ -1309,8 +1309,18 @@ class TypeResolver:
         # fields matching the memory-space-aware implicit defaults; the parser must
         # recover them from the same rules — regardless of whether memory_space is
         # present, since shape-derived defaults (e.g. col_major for [N,1]) also apply.
+        #
+        # The basis MUST be the full tile shape, not valid_shape: the printer elides
+        # against ``GetImplicitTileView(tile_type.shape_, ...)`` (the physical tile
+        # shape), so the parser has to infer from the same shape. Using valid_shape
+        # here desynchronized the two for packed-mask tiles — e.g. a cmp/cmps result
+        # with physical shape [16, 8] but valid_shape [16, 1]: the printer omits the
+        # (row_major) blayout, while valid_shape's cols==1 made the parser fill
+        # col_major, so the print->parse roundtrip failed with "TileView blayout
+        # mismatch" (#1498). Prefer tile_shape, falling back to valid_shape only when
+        # the physical shape is unavailable.
         impl_blayout, impl_slayout, impl_fractal = _implicit_tile_view_defaults(
-            valid_shape if valid_shape else (tile_shape or []), memory_space
+            tile_shape if tile_shape else (valid_shape or []), memory_space
         )
         return ir.TileView(
             valid_shape=valid_shape if valid_shape is not None else [],
