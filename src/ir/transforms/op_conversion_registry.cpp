@@ -1498,12 +1498,16 @@ void OpConversionRegistry::RegisterScatterOps() {
         // Without this check an oversized tile would silently overflow INT16 and
         // scatter to wrong addresses instead of failing loudly.
         if (idx_dtype == DataType::INT16) {
-          CHECK(n * cols <= 32768)
-              << "tensor.scatter with element dtype " << input_tile->dtype_.ToString()
-              << " uses INT16 flattened indices, but the destination is too large: rows(" << n << ") * cols("
-              << cols << ") = " << (n * cols)
-              << " exceeds the INT16 index range (max flat index 32767). Use a smaller tile or split "
-                 "the scatter into chunks.";
+          // Bound via division so the product never overflows int64_t: rows is
+          // capped so rows*cols stays <= 32768. cols is always > 0 here (a
+          // 2-byte tile has at least one column), but guard against 0 anyway.
+          const int64_t kMaxFlat = 32768;
+          const int64_t max_rows = cols == 0 ? kMaxFlat : kMaxFlat / cols;
+          CHECK(n <= max_rows) << "tensor.scatter with element dtype " << input_tile->dtype_.ToString()
+                               << " uses INT16 flattened indices, but the destination is too large: rows("
+                               << n << ") * cols(" << cols
+                               << ") exceeds the INT16 index range (max flat index 32767, rows <= "
+                               << max_rows << "). Use a smaller tile or split the scatter into chunks.";
         }
 
         auto make_idx = [&](int64_t v) -> ExprPtr {
