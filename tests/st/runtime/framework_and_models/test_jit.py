@@ -32,6 +32,30 @@ def add_kernel(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     return c
 
 
+# Dynamic user-batch dim declared directly in the annotation (no bind_dynamic),
+# matching @pl.program style. BATCH_CAP pads the parallel loop; the dynamic
+# user_batch only clamps valid rows. One compiled artifact must serve any
+# batch <= BATCH_CAP. Reproduces gh#1508.
+USER_BATCH = pl.dynamic("USER_BATCH")
+_COLS = 128
+_BATCH_CAP = 64
+_ROW_TILE = 16
+
+
+@pl.jit
+def copy_dyn_batch(
+    a: pl.Tensor[[USER_BATCH, _COLS], pl.FP32],
+    out: pl.Out[pl.Tensor[[USER_BATCH, _COLS], pl.FP32]],
+):
+    user_batch = pl.tensor.dim(a, 0)
+    for b0 in pl.parallel(0, _BATCH_CAP, _ROW_TILE):
+        cur_valid = pl.min(_ROW_TILE, user_batch - b0)
+        with pl.at(level=pl.Level.CORE_GROUP):
+            chunk = pl.slice(a, [_ROW_TILE, _COLS], [b0, 0], valid_shape=[cur_valid, _COLS])
+            out = pl.assemble(out, chunk, [b0, 0])
+    return out
+
+
 class TestJITExecution:
     """End-to-end tests for @pl.jit compile + execute on device."""
 
@@ -121,6 +145,32 @@ class TestJITExecution:
         # Shape / dtype derived from the kernel signature.
         assert "torch.randn((128, 128)" in text
         assert "torch.zeros((128, 128)" in text
+
+
+class TestJITDynamicBatch:
+    """A pl.dynamic() user-batch dim in the annotation serves variable batch (gh#1508)."""
+
+    def test_one_artifact_serves_multiple_batches(self, test_config):
+        """Compiling at one batch must not specialize the dynamic dim to a constant.
+
+        Two different runtime batches (both <= BATCH_CAP) hit a single compiled
+        artifact and copy correctly — pre-fix, codegen pinned user_batch to the
+        first concrete value, blocking smaller batches.
+        """
+        copy_dyn_batch._cache.clear()
+
+        a32 = torch.randn(32, _COLS, dtype=torch.float32)
+        out32 = torch.zeros(32, _COLS, dtype=torch.float32)
+        copy_dyn_batch(a32, out32, config=test_config)
+        assert torch.allclose(out32, a32, rtol=1e-5, atol=1e-5)
+        assert len(copy_dyn_batch._cache) == 1
+
+        a8 = torch.randn(8, _COLS, dtype=torch.float32)
+        out8 = torch.zeros(8, _COLS, dtype=torch.float32)
+        copy_dyn_batch(a8, out8, config=test_config)
+        assert torch.allclose(out8, a8, rtol=1e-5, atol=1e-5)
+        # Same dynamic artifact serves the smaller batch — no recompilation.
+        assert len(copy_dyn_batch._cache) == 1
 
 
 if __name__ == "__main__":
