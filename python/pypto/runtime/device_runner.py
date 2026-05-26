@@ -530,12 +530,16 @@ def execute_on_device(  # noqa: PLR0913
         block_dim: Number of logical SPMD blocks to dispatch. ``None``
             (default) leaves the field unset on the underlying
             ``ChipCallConfig``, so the simpler runtime's own default
-            (``ChipCallConfig::block_dim = 24``) applies. Simpler
-            validates the value against device capacity and rejects
-            over-capacity requests with a clear error
+            (``ChipCallConfig::block_dim = 0``, the "auto" sentinel)
+            applies — DeviceRunner resolves it at ``run()`` time to the
+            max the AICore stream allows (``aclrtGetStreamResLimit`` on
+            onboard, ``PLATFORM_MAX_BLOCKDIM`` on sim). Any positive
+            value is taken as an explicit cap and validated against the
+            same stream-resource limits; over-capacity requests are
+            rejected with a clear error
             (``max_block_dim=... cube=... vector=...``). Callers that
             know the kernel's required block count should pass it
-            explicitly rather than relying on the implicit default.
+            explicitly rather than relying on auto-resolution.
         aicpu_thread_num: Number of AICPU threads. ``None`` leaves the
             field unset and uses the simpler runtime default.
         output_prefix: Directory under which the runtime writes diagnostic
