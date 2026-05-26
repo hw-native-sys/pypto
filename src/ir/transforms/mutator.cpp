@@ -399,6 +399,93 @@ ExprPtr IRMutator::VisitExpr_(const CallPtr& op) {
                                       std::move(new_type), op->span_);
 }
 
+ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
+  std::vector<ExprPtr> new_args;
+  bool args_changed = false;
+  new_args.reserve(op->args_.size());
+
+  for (size_t i = 0; i < op->args_.size(); ++i) {
+    INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Submit has null argument at index " << i;
+    auto new_arg = ExprFunctor<ExprPtr>::VisitExpr(op->args_[i]);
+    INTERNAL_CHECK_SPAN(new_arg, op->span_) << "Submit argument at index " << i << " mutated to null";
+    new_args.push_back(new_arg);
+    if (new_arg.get() != op->args_[i].get()) {
+      args_changed = true;
+    }
+  }
+
+  // Mutate deps_ — first-class field, distinct from attrs.
+  std::vector<ExprPtr> new_deps;
+  bool deps_changed = false;
+  new_deps.reserve(op->deps_.size());
+  for (size_t i = 0; i < op->deps_.size(); ++i) {
+    INTERNAL_CHECK_SPAN(op->deps_[i], op->span_) << "Submit has null dep at index " << i;
+    auto new_dep = ExprFunctor<ExprPtr>::VisitExpr(op->deps_[i]);
+    INTERNAL_CHECK_SPAN(new_dep, op->span_) << "Submit dep at index " << i << " mutated to null";
+    new_deps.push_back(new_dep);
+    if (new_dep.get() != op->deps_[i].get()) {
+      deps_changed = true;
+    }
+  }
+
+  auto new_type = RemapTypeViaVisitor(op->GetType());
+  bool type_changed = (new_type.get() != op->GetType().get());
+
+  // Mutate Var-typed attrs (arg_direction_overrides_vars on Submit args).
+  // Note: kAttrManualDepEdges is intentionally NOT consulted on Submit — deps_
+  // is the source of truth (see .claude/rules/pass-submit-awareness.md).
+  std::vector<std::pair<std::string, std::any>> new_attrs;
+  bool attrs_changed = false;
+  new_attrs.reserve(op->attrs_.size());
+  for (const auto& [k, v] : op->attrs_) {
+    if (k == kAttrArgDirOverrideVars) {
+      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+      if (edges) {
+        std::vector<VarPtr> new_edges;
+        new_edges.reserve(edges->size());
+        bool any_changed = false;
+        for (const auto& e : *edges) {
+          if (!e) {
+            new_edges.push_back(e);
+            continue;
+          }
+          auto remapped = ExprFunctor<ExprPtr>::VisitExpr(e);
+          // Use AsVarLike so a remapped IterArg (loop-carried tensor) still
+          // matches — As<Var> is exact-kind only and would silently drop the
+          // remap, leaving a stale pointer in the attr.
+          auto remapped_var = AsVarLike(remapped);
+          if (!remapped_var) {
+            // Should not happen — Var/IterArg visits return Var-like. Fall
+            // back to original to avoid corrupting the attr.
+            new_edges.push_back(e);
+            continue;
+          }
+          if (remapped_var.get() != e.get()) {
+            any_changed = true;
+          }
+          new_edges.push_back(std::move(remapped_var));
+        }
+        if (any_changed) {
+          attrs_changed = true;
+          new_attrs.emplace_back(k, std::any(std::move(new_edges)));
+          continue;
+        }
+      }
+    }
+    new_attrs.emplace_back(k, v);
+  }
+
+  if (!args_changed && !deps_changed && !type_changed && !attrs_changed) return op;
+  std::vector<std::pair<std::string, std::any>> attrs_to_use;
+  if (attrs_changed) {
+    attrs_to_use = std::move(new_attrs);
+  } else {
+    attrs_to_use = op->attrs_;
+  }
+  return std::make_shared<const Submit>(op->op_, std::move(new_args), std::move(new_deps), op->kwargs_,
+                                        std::move(attrs_to_use), std::move(new_type), op->span_);
+}
+
 ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {
   std::vector<ExprPtr> new_elements;
   new_elements.reserve(op->elements_.size());

@@ -43,6 +43,7 @@ DEFINE_KIND_TRAIT(Var, ObjectKind::Var)
 DEFINE_KIND_TRAIT(IterArg, ObjectKind::IterArg)
 DEFINE_KIND_TRAIT(MemRef, ObjectKind::MemRef)
 DEFINE_KIND_TRAIT(Call, ObjectKind::Call)
+DEFINE_KIND_TRAIT(Submit, ObjectKind::Submit)
 DEFINE_KIND_TRAIT(MakeTuple, ObjectKind::MakeTuple)
 DEFINE_KIND_TRAIT(TupleGetItemExpr, ObjectKind::TupleGetItemExpr)
 DEFINE_KIND_TRAIT(ConstInt, ObjectKind::ConstInt)
@@ -161,8 +162,9 @@ template <>
 struct KindTrait<Expr> {
   static constexpr ObjectKind kinds[] = {
       // Direct expression types
-      ObjectKind::Var, ObjectKind::IterArg, ObjectKind::MemRef, ObjectKind::Call, ObjectKind::MakeTuple,
-      ObjectKind::TupleGetItemExpr, ObjectKind::ConstInt, ObjectKind::ConstFloat, ObjectKind::ConstBool,
+      ObjectKind::Var, ObjectKind::IterArg, ObjectKind::MemRef, ObjectKind::Call, ObjectKind::Submit,
+      ObjectKind::MakeTuple, ObjectKind::TupleGetItemExpr, ObjectKind::ConstInt, ObjectKind::ConstFloat,
+      ObjectKind::ConstBool,
       // Binary expressions (22 kinds)
       ObjectKind::Add, ObjectKind::Sub, ObjectKind::Mul, ObjectKind::FloorDiv, ObjectKind::FloorMod,
       ObjectKind::FloatDiv, ObjectKind::Min, ObjectKind::Max, ObjectKind::Pow, ObjectKind::Eq, ObjectKind::Ne,
@@ -171,7 +173,7 @@ struct KindTrait<Expr> {
       ObjectKind::BitShiftRight,
       // Unary expressions (5 kinds)
       ObjectKind::Abs, ObjectKind::Neg, ObjectKind::Not, ObjectKind::BitNot, ObjectKind::Cast};
-  static constexpr size_t count = 37;
+  static constexpr size_t count = 38;
 };
 
 // BinaryExpr base class - matches any binary expression kind

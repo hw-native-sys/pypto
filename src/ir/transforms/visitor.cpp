@@ -92,6 +92,20 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
   }
 }
 
+void IRVisitor::VisitExpr_(const SubmitPtr& op) {
+  for (size_t i = 0; i < op->args_.size(); ++i) {
+    INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Submit has null argument at index " << i;
+    VisitExpr(op->args_[i]);
+  }
+  // deps_ is a first-class field on Submit — every entry is a Scalar[TASK_ID]
+  // or Array[N, TASK_ID] Var defined elsewhere in the IR. Visit them so
+  // analyses (unused-var detection, SSA liveness) see the cross-task uses.
+  for (size_t i = 0; i < op->deps_.size(); ++i) {
+    INTERNAL_CHECK_SPAN(op->deps_[i], op->span_) << "Submit has null dep at index " << i;
+    VisitExpr(op->deps_[i]);
+  }
+}
+
 void IRVisitor::VisitExpr_(const MakeTuplePtr& op) {
   for (size_t i = 0; i < op->elements_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->elements_[i], op->span_) << "MakeTuple has null element at index " << i;

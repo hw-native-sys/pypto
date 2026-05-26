@@ -771,6 +771,142 @@ inline std::vector<std::pair<std::string, std::any>> WithManualDepEdgesAttr(
 inline constexpr const char* kAttrDevice = "device";
 
 /**
+ * @brief Task-launch expression — ``pl.submit(self.kernel, args, deps=[...])``
+ *
+ * Produced by ``pl.submit(...)`` inside a ``pl.manual_scope`` body.
+ * Semantically distinct from ``Call``: a ``Submit`` launches an asynchronous
+ * task and produces a TaskId in addition to the callee's logical return. The
+ * result type is always ``Tuple[<callee return>..., Scalar[TASK_ID]]`` (or
+ * just ``Scalar[TASK_ID]`` when the callee has no value return); callers
+ * unpack as ``out, tid = pl.submit(...)``.
+ *
+ * ``deps_`` is a first-class field carrying the explicit cross-task
+ * dependencies passed as ``deps=[tid1, tid2, ...]`` — each entry is an
+ * ``ExprPtr`` referencing a ``Scalar[TASK_ID]`` Var or an
+ * ``Array[N, TASK_ID]`` Var. Passes that walk variable uses MUST include
+ * ``deps_`` (see ``.claude/rules/pass-submit-awareness.md``).
+ *
+ * ``attrs_`` / ``kwargs_`` mirror ``Call``'s layout so reserved keys such as
+ * ``kAttrArgDirections`` and ``kAttrArgDirectionOverrides`` still apply to
+ * ``args_``. The ``kAttrManualDepEdges`` key is intentionally NOT read from a
+ * ``Submit``'s ``attrs_`` — use the typed ``deps_`` field instead.
+ */
+class Submit : public Expr {
+ public:
+  OpPtr op_;                   // Callee (typically a GlobalVar)
+  std::vector<ExprPtr> args_;  // Positional arguments
+  std::vector<ExprPtr> deps_;  // TaskId dependencies (Scalar[TASK_ID] / Array[N, TASK_ID])
+  std::vector<std::pair<std::string, std::any>> attrs_;   // Compiler-internal metadata (ordered)
+  std::vector<std::pair<std::string, std::any>> kwargs_;  // Keyword arguments (metadata, ordered)
+
+  /**
+   * @brief Create a Submit with the minimum fields.
+   */
+  Submit(OpPtr op, std::vector<ExprPtr> args, std::vector<ExprPtr> deps, TypePtr type, Span span)
+      : Expr(std::move(span), std::move(type)),
+        op_(std::move(op)),
+        args_(std::move(args)),
+        deps_(std::move(deps)),
+        attrs_(),
+        kwargs_() {}
+
+  /**
+   * @brief Create a Submit with attrs and kwargs.
+   *
+   * Validates that, when present, ``attrs[kAttrArgDirections]`` is a
+   * ``std::vector<ArgDirection>`` whose length matches ``args``.
+   */
+  Submit(OpPtr op, std::vector<ExprPtr> args, std::vector<ExprPtr> deps,
+         std::vector<std::pair<std::string, std::any>> kwargs,
+         std::vector<std::pair<std::string, std::any>> attrs, TypePtr type, Span span)
+      : Expr(std::move(span), std::move(type)),
+        op_(std::move(op)),
+        args_(std::move(args)),
+        deps_(std::move(deps)),
+        attrs_(std::move(attrs)),
+        kwargs_(std::move(kwargs)) {
+    ValidateArgDirectionsAttr();
+  }
+
+  template <typename T>
+  T GetKwarg(const std::string& key, const T& default_value = T{}) const {
+    for (const auto& [k, v] : kwargs_) {
+      if (k == key) {
+        return AnyCast<T>(v, "kwarg key: " + key);
+      }
+    }
+    return default_value;
+  }
+
+  [[nodiscard]] bool HasKwarg(const std::string& key) const {
+    for (const auto& [k, v] : kwargs_) {
+      if (k == key) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  template <typename T>
+  [[nodiscard]] T GetAttr(const std::string& key, const T& default_value = T{}) const {
+    for (const auto& [k, v] : attrs_) {
+      if (k == key) {
+        return AnyCast<T>(v, "attr key: " + key);
+      }
+    }
+    return default_value;
+  }
+
+  [[nodiscard]] bool HasAttr(const std::string& key) const {
+    for (const auto& [k, v] : attrs_) {
+      if (k == key) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  [[nodiscard]] bool HasArgDirections() const { return HasAttr(kAttrArgDirections); }
+
+  [[nodiscard]] std::vector<ArgDirection> GetArgDirections() const {
+    return GetAttr<std::vector<ArgDirection>>(kAttrArgDirections);
+  }
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Submit; }
+  [[nodiscard]] std::string TypeName() const override { return "Submit"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(Expr::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&Submit::op_, "op"),
+                                          reflection::UsualField(&Submit::args_, "args"),
+                                          reflection::UsualField(&Submit::deps_, "deps"),
+                                          reflection::UsualField(&Submit::attrs_, "attrs"),
+                                          reflection::UsualField(&Submit::kwargs_, "kwargs")));
+  }
+
+ private:
+  void ValidateArgDirectionsAttr() const {
+    for (const auto& [k, v] : attrs_) {
+      if (k != kAttrArgDirections) {
+        continue;
+      }
+      if (v.type() != typeid(std::vector<ArgDirection>)) {
+        throw pypto::TypeError("Submit attrs['" + std::string(kAttrArgDirections) +
+                               "'] must be std::vector<ArgDirection>");
+      }
+      const auto& dirs = AnyCast<std::vector<ArgDirection>>(v, "attr key: arg_directions");
+      if (!dirs.empty() && dirs.size() != args_.size()) {
+        throw pypto::TypeError("Submit attrs['arg_directions'] size (" + std::to_string(dirs.size()) +
+                               ") must match args size (" + std::to_string(args_.size()) + ")");
+      }
+      return;
+    }
+  }
+};
+
+using SubmitPtr = std::shared_ptr<const Submit>;
+
+/**
  * @brief Expression to create a tuple from multiple expressions
  *
  * Takes a list of expressions and creates a tuple value.

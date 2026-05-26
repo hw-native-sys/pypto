@@ -145,6 +145,7 @@ ExprPtr RewriteSimplifier::Impl::VisitExpr_(const ConstBoolPtr& op) { return op;
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const MemRefPtr& op) { return op; }
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const WindowBufferPtr& op) { return op; }
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const CallPtr& op) { return op; }
+ExprPtr RewriteSimplifier::Impl::VisitExpr_(const SubmitPtr& op) { return op; }
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const MakeTuplePtr& op) { return op; }
 ExprPtr RewriteSimplifier::Impl::VisitExpr_(const TupleGetItemExprPtr& op) { return op; }
 
