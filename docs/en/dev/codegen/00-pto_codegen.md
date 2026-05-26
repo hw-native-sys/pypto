@@ -253,7 +253,7 @@ Example for a `[16, 1]` column vector (no DN annotation in DSL):
 %col_view = pto.make_tensor_view %arg1,
     shape = [%c16_index, %c1_index], strides = [%c1_index, %c16_index]
     {layout = #pto.layout<dn>}
-    : !pto.tensor_view<32x32xf32>
+    : !pto.tensor_view<16x1xf32>
 ```
 
 ### Allocation Generation
