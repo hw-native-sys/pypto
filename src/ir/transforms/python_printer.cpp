@@ -202,6 +202,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const ConstBoolPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
+  void VisitExpr_(const SubmitPtr& op) override;
   void VisitExpr_(const MakeTuplePtr& op) override;
   void VisitExpr_(const TupleGetItemExprPtr& op) override;
 
@@ -860,6 +861,50 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     }
   }
 
+  stream_ << ")";
+}
+
+void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
+  INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Submit has null op";
+  // Submit nodes only appear inside a Program (manual_scope body of a function),
+  // so the callee is always emitted as ``self.<kernel_name>`` and the whole
+  // expression is wrapped in ``pl.submit(...)``. If a Submit ever gets surfaced
+  // outside a Program context we fall through to a generic form that names the
+  // op directly, so the printer never crashes.
+  auto gvar = As<GlobalVar>(op->op_);
+  INTERNAL_CHECK_SPAN(gvar && current_program_, op->span_)
+      << "Submit expects a GlobalVar callee inside a Program context";
+
+  stream_ << prefix_ << ".submit(self." << gvar->name_;
+  for (const auto& arg : op->args_) {
+    stream_ << ", ";
+    VisitExpr(arg);
+  }
+
+  if (!op->deps_.empty()) {
+    stream_ << ", deps=[";
+    for (size_t i = 0; i < op->deps_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      INTERNAL_CHECK_SPAN(op->deps_[i], op->span_) << "Submit dep at index " << i << " is null";
+      VisitExpr(op->deps_[i]);
+    }
+    stream_ << "]";
+  }
+
+  // Surface ``attrs["arg_directions"]`` post-DeriveCallDirections on Submit
+  // the same way Call does, so the round-trip recovers the metadata.
+  auto submit_arg_directions = op->GetArgDirections();
+  if (!submit_arg_directions.empty()) {
+    INTERNAL_CHECK_SPAN(submit_arg_directions.size() == op->args_.size(), op->span_)
+        << "Submit arg_directions size (" << submit_arg_directions.size() << ") must match args size ("
+        << op->args_.size() << ")";
+    stream_ << ", attrs={\"arg_directions\": [";
+    for (size_t i = 0; i < submit_arg_directions.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << prefix_ << ".adir." << ArgDirectionToDslName(submit_arg_directions[i]);
+    }
+    stream_ << "]}";
+  }
   stream_ << ")";
 }
 
@@ -1861,6 +1906,17 @@ class GlobalVarCollector : public IRVisitor {
       collected_gvars.insert(gvar);
     }
     // Visit arguments
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    // Submit's callee is a GlobalVar (the kernel being launched). Treat the
+    // same as Call so cross-function dependencies through pl.submit are
+    // captured by the topological sort.
+    INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Submit has null op";
+    if (auto gvar = As<GlobalVar>(op->op_)) {
+      collected_gvars.insert(gvar);
+    }
     IRVisitor::VisitExpr_(op);
   }
 };
