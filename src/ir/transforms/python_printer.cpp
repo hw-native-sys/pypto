@@ -309,6 +309,13 @@ class IRPythonPrinter : public IRVisitor {
   // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
 
+  // Emit a comma-prefixed kwarg ``, <kwarg_name>=[v1, v2, ...]`` from the
+  // list-of-VarPtr attr keyed by ``attr_key`` on ``op``. Skips null entries so
+  // the rendered Python stays syntactically valid. Returns false when the attr
+  // is absent or every entry is null. Shared by the two scope-attr printers
+  // below so the null-filter rule lives in one place.
+  bool PrintScopeVarListKwarg(const ScopeStmtPtr& op, const char* attr_key, const char* kwarg_name);
+
   // Emit ``no_dep_args=[t1, t2]`` if the scope carries ``kAttrArgDirOverrideVars``;
   // returns true when something was printed. Common to InCore/AutoInCore/
   // Hierarchy scope printers so the parser can recover the marker after a
@@ -324,14 +331,21 @@ class IRPythonPrinter : public IRVisitor {
   // responsible for placing the ``)`` before and the ``:\n`` after this call.
   bool PrintScopeTaskIdVarSuffix(const ScopeStmtPtr& op);
 
-  // Return the ``task_id_var`` VarPtr from a HierarchyScopeStmt /
-  // InCoreScopeStmt / AutoInCoreScopeStmt; nullptr for any other stmt or when
-  // the attr is absent. Used by SeqStmts printing to detect when an
-  // immediately-preceding ``AssignStmt(tid, system.task_invalid())`` placeholder
-  // should be suppressed (the printer re-creates it from the ``as <tid>`` clause,
-  // so emitting the placeholder would double up after reparse).
+  // Return the ``task_id_var`` VarPtr from any ``ScopeStmt`` subclass; nullptr
+  // for any other stmt or when the attr is absent. Used by SeqStmts printing
+  // to detect when an immediately-preceding ``AssignStmt(tid, system.task_invalid())``
+  // placeholder should be suppressed (the printer re-creates it from the
+  // ``as <tid>`` clause, so emitting the placeholder would double up after
+  // reparse).
   VarPtr GetScopeTaskIdVar(const StmtPtr& stmt) const;
   bool IsTaskInvalidPlaceholderFor(const StmtPtr& candidate, const VarPtr& tid_var) const;
+
+  // Return true when ``stmts[i]`` is the synthetic ``system.task_invalid()``
+  // placeholder for the next-sibling scope's ``task_id_var`` and should be
+  // skipped by the printer. Called from every site that iterates a SeqStmts —
+  // keeping the lookahead in one helper avoids the 4-way drift hazard that
+  // an inline check at each site would create.
+  bool ShouldSuppressPlaceholder(const std::vector<StmtPtr>& stmts, size_t i) const;
 
   // Emit each leading comment line of `stmt` as `# <text>` above the stmt itself.
   // Assumes the current indent has already been written to the stream.
@@ -1247,17 +1261,27 @@ void IRPythonPrinter::VisitStmt_(const WhileStmtPtr& op) {
 // ``pl.at(no_dep_args=[t1, t2])``) as a trailing ``no_dep_args=[...]`` kwarg
 // so the roundtrip parser can recover it. Returns true when something was
 // printed.
-bool IRPythonPrinter::PrintScopeNoDepsAttr(const ScopeStmtPtr& op) {
+// Emit a comma-prefixed kwarg ``, <name>=[v1, v2, ...]`` from the list-of-VarPtr
+// attr ``key`` on ``op``. Null entries are skipped so the rendered Python is
+// always syntactically valid (e.g. ``deps=[t1, t3]`` rather than ``deps=[t1, , t3]``)
+// — some transforms intentionally leave null slots in dep-edge lists.
+// Returns false (no output) when the attr is missing or every entry is null.
+bool IRPythonPrinter::PrintScopeVarListKwarg(const ScopeStmtPtr& op, const char* attr_key,
+                                             const char* kwarg_name) {
   for (const auto& [k, v] : op->attrs_) {
-    if (k != kAttrArgDirOverrideVars) continue;
+    if (k != attr_key) continue;
     const auto* vars = std::any_cast<std::vector<VarPtr>>(&v);
-    if (!vars || vars->empty()) continue;
-    stream_ << ", no_dep_args=[";
-    for (size_t i = 0; i < vars->size(); ++i) {
+    if (!vars) continue;
+    std::vector<const Var*> non_null;
+    non_null.reserve(vars->size());
+    for (const auto& var : *vars) {
+      if (var) non_null.push_back(var.get());
+    }
+    if (non_null.empty()) continue;
+    stream_ << ", " << kwarg_name << "=[";
+    for (size_t i = 0; i < non_null.size(); ++i) {
       if (i > 0) stream_ << ", ";
-      if ((*vars)[i]) {
-        stream_ << GetVarName((*vars)[i].get());
-      }
+      stream_ << GetVarName(non_null[i]);
     }
     stream_ << "]";
     return true;
@@ -1265,22 +1289,12 @@ bool IRPythonPrinter::PrintScopeNoDepsAttr(const ScopeStmtPtr& op) {
   return false;
 }
 
+bool IRPythonPrinter::PrintScopeNoDepsAttr(const ScopeStmtPtr& op) {
+  return PrintScopeVarListKwarg(op, kAttrArgDirOverrideVars, "no_dep_args");
+}
+
 bool IRPythonPrinter::PrintScopeDepsAttr(const ScopeStmtPtr& op) {
-  for (const auto& [k, v] : op->attrs_) {
-    if (k != kAttrManualDepEdges) continue;
-    const auto* vars = std::any_cast<std::vector<VarPtr>>(&v);
-    if (!vars || vars->empty()) continue;
-    stream_ << ", deps=[";
-    for (size_t i = 0; i < vars->size(); ++i) {
-      if (i > 0) stream_ << ", ";
-      if ((*vars)[i]) {
-        stream_ << GetVarName((*vars)[i].get());
-      }
-    }
-    stream_ << "]";
-    return true;
-  }
-  return false;
+  return PrintScopeVarListKwarg(op, kAttrManualDepEdges, "deps");
 }
 
 bool IRPythonPrinter::PrintScopeTaskIdVarSuffix(const ScopeStmtPtr& op) {
@@ -1295,9 +1309,12 @@ bool IRPythonPrinter::PrintScopeTaskIdVarSuffix(const ScopeStmtPtr& op) {
 }
 
 VarPtr IRPythonPrinter::GetScopeTaskIdVar(const StmtPtr& stmt) const {
-  if (auto s = As<InCoreScopeStmt>(stmt)) return s->GetAttr<VarPtr>(kAttrTaskIdVar);
-  if (auto s = As<AutoInCoreScopeStmt>(stmt)) return s->GetAttr<VarPtr>(kAttrTaskIdVar);
-  if (auto s = As<HierarchyScopeStmt>(stmt)) return s->GetAttr<VarPtr>(kAttrTaskIdVar);
+  // ``As<ScopeStmt>`` is the polymorphic form — KindTrait<ScopeStmt> matches
+  // every concrete scope subclass (see include/pypto/ir/kind_traits.h:152).
+  // Cluster / Spmd / Runtime scopes never carry ``kAttrTaskIdVar`` today, but
+  // ``GetAttr<VarPtr>`` returns null for them, so the broader cast is harmless
+  // and keeps the helper future-proof.
+  if (auto s = As<ScopeStmt>(stmt)) return s->GetAttr<VarPtr>(kAttrTaskIdVar);
   return nullptr;
 }
 
@@ -1313,6 +1330,12 @@ bool IRPythonPrinter::IsTaskInvalidPlaceholderFor(const StmtPtr& candidate, cons
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_) return false;
   return call->op_->name_ == "system.task_invalid";
+}
+
+bool IRPythonPrinter::ShouldSuppressPlaceholder(const std::vector<StmtPtr>& stmts, size_t i) const {
+  if (i + 1 >= stmts.size()) return false;
+  auto next_tid = GetScopeTaskIdVar(stmts[i + 1]);
+  return IsTaskInvalidPlaceholderFor(stmts[i], next_tid);
 }
 
 void IRPythonPrinter::VisitStmt_(const HierarchyScopeStmtPtr& op) {
@@ -1410,9 +1433,13 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
     stream_ << "):\n";
     IncreaseIndent();
     // Emit the InCore body skipping the get_block_idx binding we just
-    // materialized as the loop variable.
+    // materialized as the loop variable. ShouldSuppressPlaceholder keeps the
+    // ``with pl.at(...) as tid:`` round-trip working if such a scope ever
+    // appears nested inside the SPMD body (the lookahead operates on the
+    // already-trimmed subrange via the same SeqStmts contract).
     if (incore_seq && incore_seq->stmts_.size() > 1) {
       for (size_t i = 1; i < incore_seq->stmts_.size(); ++i) {
+        if (ShouldSuppressPlaceholder(incore_seq->stmts_, i)) continue;
         PrintStmtBlock(incore_seq->stmts_[i]);
         if (i + 1 < incore_seq->stmts_.size()) stream_ << "\n";
       }
@@ -1439,13 +1466,7 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
 
 void IRPythonPrinter::VisitStmt_(const SeqStmtsPtr& op) {
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
-    // Suppress ``AssignStmt(tid, system.task_invalid())`` when the next sibling
-    // is a scope whose ``kAttrTaskIdVar`` is the same Var — the scope printer
-    // emits ``as <tid>`` directly, and reparse would re-create the placeholder.
-    if (i + 1 < op->stmts_.size()) {
-      auto next_tid = GetScopeTaskIdVar(op->stmts_[i + 1]);
-      if (IsTaskInvalidPlaceholderFor(op->stmts_[i], next_tid)) continue;
-    }
+    if (ShouldSuppressPlaceholder(op->stmts_, i)) continue;
     PrintStmtBlock(op->stmts_[i]);
     if (i < op->stmts_.size() - 1) {
       stream_ << "\n";
@@ -1463,12 +1484,7 @@ void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
   if (auto seq = As<SeqStmts>(stmt)) {
     INTERNAL_CHECK(seq->leading_comments_.empty()) << "SeqStmts should not carry leading comments directly";
     for (size_t i = 0; i < seq->stmts_.size(); ++i) {
-      // Same placeholder-suppression logic as VisitStmt_(SeqStmtsPtr) — keep
-      // the two SeqStmts traversals in sync.
-      if (i + 1 < seq->stmts_.size()) {
-        auto next_tid = GetScopeTaskIdVar(seq->stmts_[i + 1]);
-        if (IsTaskInvalidPlaceholderFor(seq->stmts_[i], next_tid)) continue;
-      }
+      if (ShouldSuppressPlaceholder(seq->stmts_, i)) continue;
       PrintStmtBlock(seq->stmts_[i]);
       if (i < seq->stmts_.size() - 1) stream_ << "\n";
     }
@@ -1562,15 +1578,8 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
       return;
     }
     for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
+      if (ShouldSuppressPlaceholder(seq_stmts->stmts_, i)) continue;
       auto stmt = seq_stmts->stmts_[i];
-
-      // Same placeholder-suppression logic as VisitStmt_(SeqStmtsPtr) and the
-      // SeqStmts branch of PrintStmtBlock — the function body is iterated here,
-      // so the rule must hold across all three sites.
-      if (i + 1 < seq_stmts->stmts_.size()) {
-        auto next_tid = GetScopeTaskIdVar(seq_stmts->stmts_[i + 1]);
-        if (IsTaskInvalidPlaceholderFor(stmt, next_tid)) continue;
-      }
 
       // Check if this is the last statement and it's a YieldStmt
       bool is_last = (i == seq_stmts->stmts_.size() - 1);
@@ -1793,12 +1802,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << GetIndent() << "pass";
       } else {
         for (size_t i = 0; i < seq_stmts->stmts_.size(); ++i) {
-          // Same placeholder-suppression logic as VisitStmt_(SeqStmtsPtr),
-          // PrintStmtBlock, and VisitStmtBody — see those sites for rationale.
-          if (i + 1 < seq_stmts->stmts_.size()) {
-            auto next_tid = GetScopeTaskIdVar(seq_stmts->stmts_[i + 1]);
-            if (IsTaskInvalidPlaceholderFor(seq_stmts->stmts_[i], next_tid)) continue;
-          }
+          if (ShouldSuppressPlaceholder(seq_stmts->stmts_, i)) continue;
           // Convert yield to return in function context
           if (auto yield_stmt = As<YieldStmt>(seq_stmts->stmts_[i])) {
             stream_ << GetIndent();
