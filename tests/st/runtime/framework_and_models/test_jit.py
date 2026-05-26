@@ -48,7 +48,7 @@ def copy_dyn_batch(
 ):
     user_batch = pl.tensor.dim(a, 0)
     for b0 in pl.parallel(0, _BATCH_CAP, _ROW_TILE):
-        cur_valid = pl.max(0, pl.min(_ROW_TILE, user_batch - b0))  # clamp: never negative
+        cur_valid = pl.max(pl.min(_ROW_TILE, user_batch - b0), 0)  # clamp: never negative
         with pl.at(level=pl.Level.CORE_GROUP):
             chunk = pl.slice(a, [_ROW_TILE, _COLS], [b0, 0], valid_shape=[cur_valid, _COLS])
             out = pl.assemble(out, chunk, [b0, 0])
