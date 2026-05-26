@@ -144,10 +144,11 @@ class SpecializeContext:
         """Map ``dynvar_name → pl.dynamic("...") literal`` across all metas.
 
         Used by :class:`Specializer` to emit module-level
-        ``M = pl.dynamic("M")`` declarations. A given DynVar name should map
-        to a single literal — if two metas disagree, the last one wins (this
-        would already be a user bug since ``pl.dynamic()`` returns a singleton
-        per literal).
+        ``M = pl.dynamic("M")`` declarations. A given Python name should not
+        be rebound to a different literal within a function — if two metas
+        disagree, the last one wins. (``pl.dynamic()`` itself is not
+        singleton-cached; the constraint is on user source, not on the
+        runtime object identity.)
         """
         out: dict[str, str] = {}
         for meta in self.tensor_meta.values():
@@ -415,25 +416,16 @@ class _BodyTransformer(ast.NodeTransformer):
         self._meta = tensor_meta
         self._scalars = scalar_values
         self._dep_names = dep_names
-        # DynVar name → ``pl.tensor.dim(<anchor_param>, <anchor_dim>)`` AST
-        # expression. ``visit_Name`` uses these to rewrite runtime references
-        # like ``pl.create_tensor([M, 128], ...)`` so the annotation-only
-        # DynVar doesn't leak past SSA conversion. Each DynVar anchors at the
-        # first parameter dim it's bound to.
-        self._dynvar_anchors: dict[str, ast.expr] = {}
+        # DynVar name → (anchor_param, anchor_dim_idx). ``visit_Name`` uses
+        # this to rewrite runtime references like ``pl.create_tensor([M, ...])``
+        # via ``_dyn_dim_expr`` so the annotation-only DynVar doesn't leak past
+        # SSA conversion. Each DynVar anchors at the first parameter dim it's
+        # bound to; the AST is built fresh per use site to avoid node sharing.
+        self._dynvar_anchors: dict[str, tuple[str, int]] = {}
         for pname, meta in tensor_meta.items():
             for i, dim in enumerate(meta.shape):
                 if isinstance(dim, DynDim) and dim.name not in self._dynvar_anchors:
-                    pl_tensor = ast.Attribute(
-                        value=ast.Name(id="pl", ctx=ast.Load()),
-                        attr="tensor",
-                        ctx=ast.Load(),
-                    )
-                    self._dynvar_anchors[dim.name] = ast.Call(
-                        func=ast.Attribute(value=pl_tensor, attr="dim", ctx=ast.Load()),
-                        args=[ast.Name(id=pname, ctx=ast.Load()), ast.Constant(value=i)],
-                        keywords=[],
-                    )
+                    self._dynvar_anchors[dim.name] = (pname, i)
         # Maps dep_name → ordered parameter list. Used by ``visit_Call`` to
         # normalise keyword args to positional, so generated
         # ``self.<dep>(a, out=out)`` calls become parser-accepted
@@ -537,12 +529,36 @@ class _BodyTransformer(ast.NodeTransformer):
         node.value = visited_value
         return node
 
+    def _dyn_dim_expr(self, param_name: str, dim_idx: int) -> ast.expr:
+        """Emit ``pl.tensor.dim(<param>, <dim_idx>)`` for a dynamic dim.
+
+        Used by ``_shape_tuple_node`` / ``_shape_dim_node`` / the
+        ``M, N = a.shape`` Case 2 emission so DynVar references never
+        materialize as bare names in runtime expressions. Going through the
+        anchor expression directly keeps these emitted nodes outside the
+        scope where ``visit_Name``'s DynVar→anchor substitution would have
+        rewritten them anyway, and avoids the "Variable 'M' used outside
+        its defining scope" SSA error.
+        """
+        pl_tensor = ast.Attribute(
+            value=ast.Name(id="pl", ctx=ast.Load()),
+            attr="tensor",
+            ctx=ast.Load(),
+        )
+        return ast.fix_missing_locations(
+            ast.Call(
+                func=ast.Attribute(value=pl_tensor, attr="dim", ctx=ast.Load()),
+                args=[ast.Name(id=param_name, ctx=ast.Load()), ast.Constant(value=dim_idx)],
+                keywords=[],
+            )
+        )
+
     def _shape_tuple_node(self, param_name: str) -> ast.Tuple:
         meta = self._meta[param_name]
         elts: list[ast.expr] = []
-        for d in meta.shape:
+        for i, d in enumerate(meta.shape):
             if isinstance(d, DynDim):
-                elts.append(ast.Name(id=d.name, ctx=ast.Load()))
+                elts.append(self._dyn_dim_expr(param_name, i))
             else:
                 elts.append(ast.Constant(value=d))
         return ast.Tuple(elts=elts, ctx=ast.Load())
@@ -550,7 +566,7 @@ class _BodyTransformer(ast.NodeTransformer):
     def _shape_dim_node(self, param_name: str, dim_idx: int) -> ast.expr:
         d = self._meta[param_name].shape[dim_idx]
         if isinstance(d, DynDim):
-            return ast.Name(id=d.name, ctx=ast.Load())
+            return self._dyn_dim_expr(param_name, dim_idx)
         return ast.Constant(value=d)
 
     # ------------------------------------------------------------------
@@ -604,15 +620,12 @@ class _BodyTransformer(ast.NodeTransformer):
             target_names = node.targets[0].elts
             if len(target_names) == len(meta.shape):
                 stmts: list[ast.stmt] = []
-                for tgt, dim in zip(target_names, meta.shape):
+                for i, (tgt, dim) in enumerate(zip(target_names, meta.shape, strict=True)):
                     if not isinstance(tgt, ast.Name):
                         continue
                     if isinstance(dim, DynDim):
-                        # Dynamic dim: emit assignment (M = <dynvar ref>),
-                        # but skip if it would be a no-op (LHS name == RHS name).
-                        if dim.name == tgt.id:
-                            self._record_first_assign(tgt.id)
-                            continue
+                        # Dynamic dim: emit M = pl.tensor.dim(<param>, i) so the
+                        # DynVar name never appears as a runtime expression.
                         lhs_name = tgt.id
                         if lhs_name in self._assign_count:
                             lhs_name = self._rebind(lhs_name)
@@ -621,7 +634,7 @@ class _BodyTransformer(ast.NodeTransformer):
                         stmts.append(
                             ast.Assign(
                                 targets=[ast.Name(id=lhs_name, ctx=ast.Store())],
-                                value=ast.Name(id=dim.name, ctx=ast.Load()),
+                                value=self._dyn_dim_expr(param_name, i),
                                 lineno=node.lineno,
                                 col_offset=node.col_offset,
                             )
@@ -711,14 +724,8 @@ class _BodyTransformer(ast.NodeTransformer):
             # those cases. Otherwise the substitution fires for the bare
             # module-level DynVar reference.
             if node.id in self._dynvar_anchors and node.id not in self._used_names:
-                anchor = self._dynvar_anchors[node.id]
-                return ast.fix_missing_locations(
-                    ast.Call(
-                        func=anchor.func,  # type: ignore[attr-defined]
-                        args=list(anchor.args),  # type: ignore[attr-defined]
-                        keywords=[],
-                    )
-                )
+                pname, dim_idx = self._dynvar_anchors[node.id]
+                return self._dyn_dim_expr(pname, dim_idx)
             # Module-level constant inlining: only when the name is not also a
             # local (function param or assigned-in-body) — those take priority.
             if node.id not in self._used_names:

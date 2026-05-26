@@ -849,6 +849,48 @@ class TestDynamicLocalTensorMetadata:
         out = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
         fwd_dv.compile_for_test(hidden, out)
 
+    def test_shape_attribute_emits_anchor_not_dynvar(self):
+        """``M, N = a.shape`` for a dynamic-bound param emits
+        ``pl.tensor.dim(a, 0)`` rather than the bare DynVar — protects against
+        the leak reported by Copilot / CodeRabbit (per-helper shape emission
+        bypasses ``visit_Name``)."""
+        torch = pytest.importorskip("torch")
+
+        @jit
+        def shape_unpack(
+            a: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+            out: pl.Out[pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]],
+        ) -> pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]:
+            a.bind_dynamic(0, _M_1524)
+            out.bind_dynamic(0, _M_1524)
+            M, _N = a.shape
+            buf = pl.create_tensor([M, _HIDDEN_1524], dtype=pl.BF16)
+            return buf
+
+        a = torch.empty(5, _HIDDEN_1524, dtype=torch.bfloat16)
+        out = torch.empty(5, _HIDDEN_1524, dtype=torch.bfloat16)
+        shape_unpack.compile_for_test(a, out)
+
+    def test_dim_alias_rebind_is_safe(self):
+        """An alias rebound to a non-``pl.tensor.dim`` value must not stamp
+        the parent's DynDim onto downstream shape resolution — regression for
+        the flow-insensitive alias bug raised by CodeRabbit."""
+        from pypto.jit.specializer import DynDim  # noqa: PLC0415
+
+        m_dim = DynDim(name="M", literal="M", static_bound=5)
+        seed = {"x": TensorMeta(shape=(m_dim, 128), dtype=DataType.FP32)}
+
+        def body(x):
+            tokens = pl.tensor.dim(x, 0)
+            tokens = tokens - 1  # rebound — alias must be dropped
+            buf = pl.create_tensor([tokens, 128], dtype=pl.FP32)
+            return buf
+
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        # ``buf`` must NOT be recorded — ``tokens`` is no longer a clean dim
+        # alias, so pl.create_tensor's shape can't be statically resolved.
+        assert "buf" not in metas
+
     def test_issue_1524_repro_compiles(self):
         """The exact failing pattern from issue #1524."""
         torch = pytest.importorskip("torch")

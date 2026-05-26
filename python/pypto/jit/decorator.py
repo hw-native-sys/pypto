@@ -411,36 +411,51 @@ def _scan_dim_aliases(func_def: ast.FunctionDef) -> dict[str, tuple[str, int]]:
     The walker in :func:`_extract_local_tensor_metas` doesn't otherwise visit
     this assignment via its create_tensor/slice/dep branches, so the alias
     table is built up-front and consulted from ``_resolve_shape_elt``.
+
+    The scan is flow-insensitive but safe: if a name is later reassigned to
+    anything that is *not* another ``pl.tensor.dim(P, k)`` call, its alias is
+    dropped from the table — so patterns like ``tokens = pl.tensor.dim(x, 0);
+    tokens = tokens - 1`` don't leave a stale entry that would stamp the
+    wrong DynDim onto downstream ``pl.create_tensor`` shapes.
     """
     aliases: dict[str, tuple[str, int]] = {}
+    rebound: set[str] = set()
     for node in ast.walk(func_def):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1:
-            target, value = node.targets[0], node.value
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
         elif isinstance(node, ast.AnnAssign):
-            target, value = node.target, node.value
+            targets, value = [node.target], node.value
         else:
             continue
-        if not isinstance(target, ast.Name) or not isinstance(value, ast.Call):
-            continue
-        fn = value.func
-        if not (
-            isinstance(fn, ast.Attribute)
-            and fn.attr == "dim"
-            and isinstance(fn.value, ast.Attribute)
-            and fn.value.attr == "tensor"
-            and isinstance(fn.value.value, ast.Name)
-            and fn.value.value.id == "pl"
-        ):
-            continue
-        if len(value.args) < 2:
-            continue
-        src_arg, dim_arg = value.args[0], value.args[1]
-        if (
-            isinstance(src_arg, ast.Name)
-            and isinstance(dim_arg, ast.Constant)
-            and isinstance(dim_arg.value, int)
-        ):
-            aliases[target.id] = (src_arg.id, dim_arg.value)
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            new_alias: tuple[str, int] | None = None
+            if isinstance(value, ast.Call):
+                fn = value.func
+                if (
+                    isinstance(fn, ast.Attribute)
+                    and fn.attr == "dim"
+                    and isinstance(fn.value, ast.Attribute)
+                    and fn.value.attr == "tensor"
+                    and isinstance(fn.value.value, ast.Name)
+                    and fn.value.value.id == "pl"
+                    and len(value.args) >= 2
+                ):
+                    src_arg, dim_arg = value.args[0], value.args[1]
+                    if (
+                        isinstance(src_arg, ast.Name)
+                        and isinstance(dim_arg, ast.Constant)
+                        and isinstance(dim_arg.value, int)
+                    ):
+                        new_alias = (src_arg.id, dim_arg.value)
+            if new_alias is not None and target.id not in rebound:
+                aliases[target.id] = new_alias
+            else:
+                # Reassigned to something other than pl.tensor.dim(...) —
+                # drop any earlier alias and mark the name poisoned.
+                aliases.pop(target.id, None)
+                rebound.add(target.id)
     return aliases
 
 
@@ -467,14 +482,15 @@ def _func_name_lookup(func: Any) -> dict[str, Any]:
     A function defined inside a test method (or any other enclosing scope)
     captures module-level helpers (``HIDDEN``, ``ROWS``, ...) as closure free
     vars, not as globals — both namespaces have to be inspected for static
-    shape-element resolution to find them.
+    shape-element resolution to find them. Closure bindings override globals,
+    matching Python's own name-resolution order at the function's call site.
     """
     out: dict[str, Any] = dict(getattr(func, "__globals__", {}))
     co_freevars = getattr(getattr(func, "__code__", None), "co_freevars", ())
     closure = getattr(func, "__closure__", None) or ()
-    for fv_name, cell in zip(co_freevars, closure):
+    for fv_name, cell in zip(co_freevars, closure, strict=True):
         try:
-            out.setdefault(fv_name, cell.cell_contents)
+            out[fv_name] = cell.cell_contents
         except ValueError:
             # Unbound closure cell — skip silently (matches _discover_deps).
             pass
