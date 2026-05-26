@@ -1,8 +1,12 @@
 name: Daily CI
 
 on:
-  schedule:
-    - cron: '0 18 * * *'  # UTC 18:00 = Beijing 02:00 (next day)
+  push:
+    branches:
+      - "main"
+      - "revert-*"
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
