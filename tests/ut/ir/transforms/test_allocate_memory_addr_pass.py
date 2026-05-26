@@ -564,7 +564,7 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
             c0: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(s0, [16, 1])
             c1: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(s1, [16, 1])
             r0: pl.Tensor[[16, 1], pl.FP32] = pl.store(c0, [0, 0], out0)
-            r1: pl.Tensor[[16, 1], pl.FP32] = pl.store(c1, [0, 0], out1)
+            _r1: pl.Tensor[[16, 1], pl.FP32] = pl.store(c1, [0, 0], out1)
             return r0
 
     After = passes.init_mem_ref()(Before)

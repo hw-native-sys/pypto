@@ -340,18 +340,26 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       // INT64 dtype is required by the PTOAS dialect's `pto.alloc_tile` addr
       // operand. PTO codegen reads this dtype from the ConstInt 1:1 — no
       // codegen-side override.
+      auto base_addr_expr =
+          std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INT64, Span::unknown());
       for (const auto& old_memref : group) {
-        // Views carry a const relative offset post-InitMemRef; fall back to 0
-        // for the rare non-const case so the result stays a verifier-readable
-        // ConstInt addr.
-        int64_t relative_offset = 0;
+        // Common case: views carry a const relative offset post-InitMemRef, so
+        // fold it into a single ConstInt the verifier and codegen can read 1:1.
+        // Rare case (dynamic slice offset): preserve the expression via
+        // AddByteOffsets rather than dropping it — collapsing a dynamic offset
+        // onto the bare base would silently alias views at runtime.
+        ExprPtr member_addr_expr;
         if (auto old_offset = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_)) {
-          relative_offset = old_offset->value_;
+          member_addr_expr = std::make_shared<ConstInt>(
+              static_cast<int64_t>(current_addr) + old_offset->value_, DataType::INT64, Span::unknown());
+        } else {
+          member_addr_expr = AddByteOffsets(base_addr_expr, old_memref->byte_offset_);
         }
-        auto member_addr_expr = std::make_shared<ConstInt>(
-            static_cast<int64_t>(current_addr) + relative_offset, DataType::INT64, Span::unknown());
-        auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, member_addr_expr,
-                                                   old_memref->size_, old_memref->span_);
+        // NOTE: MemRef is identity-bearing — each result must get a fresh
+        // unique_id_, so build it via the explicit constructor (MutableCopy is
+        // static_assert-forbidden for Var/MemRef).
+        auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_,
+                                                   member_addr_expr, old_memref->size_, old_memref->span_);
         memref_pairs.emplace_back(old_memref.get(), new_memref);
       }
 
