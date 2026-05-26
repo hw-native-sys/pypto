@@ -10,6 +10,7 @@
 """AST parsing for converting Python DSL to IR builder calls."""
 
 import ast
+import copy
 import keyword as _keyword_mod
 import warnings
 from collections.abc import Iterator, Sequence
@@ -21,6 +22,7 @@ from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.ir.printer import python_print
 from pypto.language.distributed import op as _dsl_pld
+from pypto.language.dsl_api import RangeIterator as _DslRangeIterator
 from pypto.language.op import array_ops as _dsl_array
 from pypto.language.op import system_ops as _dsl_system
 from pypto.language.op import tensor_ops as _dsl_tensor
@@ -130,6 +132,27 @@ def _is_dep_var_type(type_: ir.Type | None) -> bool:
     if isinstance(type_, ir.ArrayType) and type_.dtype == DataType.TASK_ID:
         return True
     return False
+
+
+def _is_per_element_task_id_read(expr: ir.Expr) -> bool:
+    """Return True if ``expr`` is ``array.get_element(arr, idx)`` reading a
+    TASK_ID from an ``Array[_, TASK_ID]``.
+
+    Accepted as a ``deps=`` entry under Form 1 (per-element subscript). The
+    parser desugars these into a fresh ``Array[N, TASK_ID]`` populated by
+    ``array.update_element`` calls so the existing whole-array dep codegen
+    path can emit the per-slot ``is_valid()``-guarded ``set_dependencies``.
+    """
+    if not isinstance(expr, ir.Call):
+        return False
+    if expr.op.name != "array.get_element":
+        return False
+    if not isinstance(expr.type, ir.ScalarType) or expr.type.dtype != DataType.TASK_ID:
+        return False
+    if not expr.args:
+        return False
+    arr_type = expr.args[0].type
+    return isinstance(arr_type, ir.ArrayType) and arr_type.dtype == DataType.TASK_ID
 
 
 def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
@@ -4332,53 +4355,274 @@ class ASTParser:
             augment_task_id=as_submit,
         )
 
+    def _is_python_resolvable_ast(
+        self, node: ast.AST, extra_python_names: frozenset[str] = frozenset()
+    ) -> bool:
+        """True iff no ``ast.Name`` in ``node`` shadows a DSL-scope IR Var.
+
+        Used by Form 2 (``deps=[arr[i] for i in ...]``) to decide whether the
+        comprehension's iterable + filter clauses can be evaluated natively in
+        Python. Returning True means it is *safe* to hand the AST to
+        ``ExprEvaluator.eval_expr``; the evaluator will surface a ``NameError``
+        (wrapped as ``ParserTypeError``) if any name still cannot be resolved
+        at runtime, which is the right error path for typos / missing imports.
+
+        Returning False (an IR Var is in scope) guarantees the eval would
+        either crash on an IR-side type or produce IR objects we cannot use
+        as a Python sequence — surface a clear "depends on IR variable" error
+        before reaching eval.
+
+        ``extra_python_names`` lets the caller temporarily inject names that
+        are bound by the comprehension's own loop targets (and so are valid
+        Python references during filter evaluation even though they are not
+        in ``closure_vars`` yet).
+
+        Note: ``ast.walk`` recurses through nested ``ast.ListComp`` /
+        ``ast.GeneratorExp`` nodes too. Any inner generator's loop target
+        is *not* added to ``extra_python_names`` automatically, so the
+        predicate is conservative for nested comprehensions. This is fine
+        in v1 — ``_unroll_deps_comprehension`` only accepts a single ``for``
+        clause and so never produces nested generators inside the iterable
+        / filter — but tighten the walk if multi-generator support lands.
+        """
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name):
+                if child.id in extra_python_names:
+                    continue
+                if self.scope_manager.lookup_var(child.id) is not None:
+                    # An IR Var shadows the name — cannot evaluate at parse time.
+                    return False
+        return True
+
+    @staticmethod
+    def _substitute_python_name_in_ast(node: ast.expr, name: str, value: Any) -> ast.expr:
+        """Return a copy of ``node`` with every bare reference to ``name``
+        replaced by an ``ast.Constant(value)``.
+
+        Used by Form 2's body substitution: the comprehension's loop variable
+        is bound to a per-iteration Python int, and the body AST is rewritten
+        accordingly before being handed back to ``parse_expression``.
+        """
+
+        class _Substituter(ast.NodeTransformer):
+            def visit_Name(self, n: ast.Name) -> ast.AST:  # noqa: N802
+                if n.id == name and isinstance(n.ctx, ast.Load):
+                    return ast.copy_location(ast.Constant(value=value), n)
+                return n
+
+        copied = copy.deepcopy(node)
+        return cast(ast.expr, _Substituter().visit(copied))
+
+    def _unroll_deps_comprehension(
+        self, comp: ast.ListComp, method_name: str, span: ir.Span
+    ) -> list[ast.expr]:
+        """Form 2: unroll ``[<body> for x in <iter> if <filter>]`` to a flat
+        list of ``ast.expr`` per kept element. The body is returned as AST
+        (not parsed) so the caller can route it through Form-1 acceptance,
+        substituting the loop variable as an ``ast.Constant`` first.
+
+        Requires every name in ``<iter>`` and ``<filter>`` to be Python-only
+        (closure / globals / the comprehension's own loop var). Multi-target
+        ``for (i, j) in ...`` and multi-generator comprehensions are rejected
+        at v1.
+        """
+        if len(comp.generators) != 1:
+            raise ParserSyntaxError(
+                f"'{method_name}' deps= comprehension supports a single `for` clause (v1)",
+                span=span,
+                hint="Inline the inner generator(s) or write a single flat `for ... in ...`.",
+            )
+        gen = comp.generators[0]
+        if gen.is_async:
+            raise ParserSyntaxError(
+                f"'{method_name}' deps= comprehension cannot be `async for` (v1)",
+                span=span,
+            )
+        if not isinstance(gen.target, ast.Name):
+            raise ParserSyntaxError(
+                f"'{method_name}' deps= comprehension target must be a single name (v1)",
+                span=span,
+                hint="Use `for i in ...`, not `for i, j in ...`.",
+            )
+        loop_name = gen.target.id
+
+        if not self._is_python_resolvable_ast(gen.iter):
+            raise ParserTypeError(
+                f"'{method_name}' deps= comprehension iterable depends on an IR variable; "
+                f"cannot unroll at parse time",
+                span=span,
+                hint="Use a Python `range(...)`, a tuple of const ints, or a module-level list. "
+                "If you need a runtime-bounded loop, write Form 1 (`arr[i]`) inside a `pl.range` body.",
+            )
+        for if_ in gen.ifs:
+            if not self._is_python_resolvable_ast(if_, extra_python_names=frozenset([loop_name])):
+                raise ParserTypeError(
+                    f"'{method_name}' deps= comprehension filter depends on an IR variable; "
+                    f"cannot unroll at parse time",
+                    span=span,
+                    hint="Filter clauses may reference only Python-level constants "
+                    "(closures, globals, the comprehension's own loop var).",
+                )
+
+        iterable = self.expr_evaluator.eval_expr(gen.iter)
+        # Reject DSL loop builders (``pl.range`` / ``pl.parallel`` / ``pl.pipeline``)
+        # — they signal "runtime IR loop," and unrolling them at parse time
+        # would silently flatten what the user intended as a per-iteration
+        # construct.
+        if isinstance(iterable, _DslRangeIterator):
+            raise ParserTypeError(
+                f"'{method_name}' deps= comprehension iterable is a DSL loop "
+                f"(`pl.range` / `pl.parallel` / `pl.pipeline`); cannot unroll at parse time",
+                span=span,
+                hint="Use a Python `range(...)` for a parse-time-unrolled list, or write "
+                "Form 1 (`arr[i]`) inside a `pl.range` body for a runtime loop.",
+            )
+        try:
+            iter_values = list(iterable)
+        except TypeError as e:
+            raise ParserTypeError(
+                f"'{method_name}' deps= comprehension iterable did not produce a sequence: {e}",
+                span=span,
+                hint="The iterable must be a Python `range`, list, or tuple.",
+            ) from e
+        for v in iter_values:
+            # ``bool`` is an ``int`` subclass — exclude it first so a stray
+            # ``True``/``False`` does not silently index slot 0/1.
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ParserTypeError(
+                    f"'{method_name}' deps= comprehension iterable yielded a non-integer "
+                    f"value ({type(v).__name__}); only integer indices are supported",
+                    span=span,
+                )
+
+        saved_closure = self.expr_evaluator.closure_vars
+        result: list[ast.expr] = []
+        try:
+            for value in iter_values:
+                self.expr_evaluator.closure_vars = {**saved_closure, loop_name: value}
+                keep = all(bool(self.expr_evaluator.eval_expr(if_)) for if_ in gen.ifs)
+                if not keep:
+                    continue
+                result.append(self._substitute_python_name_in_ast(comp.elt, loop_name, value))
+        finally:
+            self.expr_evaluator.closure_vars = saved_closure
+        return result
+
+    def _synthesize_deps_array(self, entries: list[ir.Expr], span: ir.Span) -> ir.Var:
+        """Emit ``_submit_deps_buf = pl.array.create(N, pl.TASK_ID)`` followed
+        by N ``array.update_element`` rebinds, returning the final array Var.
+
+        Triggered when any ``deps=`` entry needs Form 1 / Form 2 desugaring.
+        The synthesized array is single-use (referenced only as the produced
+        Call's ``manual_dep_edges`` source) and is locally scoped — never
+        threaded through a loop iter_arg — so existing array-carry, SSA, and
+        DCE machinery treat it as any other locally-bound ``pl.array.create``
+        followed by writes.
+        """
+        n = len(entries)
+        size_expr = ir.ConstInt(n, DataType.INDEX, span)
+        create_call = ir.create_op_call("array.create", [size_expr], {"dtype": DataType.TASK_ID}, span)
+        buf_var = self.builder.let("_submit_deps_buf", create_call, span=span)
+        for i, entry in enumerate(entries):
+            idx_expr = ir.ConstInt(i, DataType.INDEX, span)
+            upd_call = ir.create_op_call("array.update_element", [buf_var, idx_expr, entry], {}, span)
+            buf_var = self.builder.let("_submit_deps_buf", upd_call, span=span)
+        return buf_var
+
     def _parse_submit_deps_kwarg(
         self, method_name: str, keywords: list[ast.keyword], span: ir.Span
     ) -> list[ir.Var]:
         """Extract the optional ``deps=[tid1, tid2]`` kwarg on a ``pl.submit(...)`` call.
 
-        Each list entry must be a TaskId variable — typically the ``tid``
-        bound by a previous ``out, tid = pl.submit(...)``, or threaded through
-        a ``pl.range`` / ``pl.parallel`` iter_arg as the TaskId carry. A bare
-        ``None`` entry (the "no producer yet" sentinel) is also accepted and
-        lowers to ``system.task_invalid``; codegen skips it via an
-        ``is_valid()`` guard. Tensors are not accepted: the user names the
-        producer TaskId directly so the compiler does not need closure
-        analysis to figure out which kernel Call to depend on.
+        Accepted entry shapes:
 
-        Two variable shapes pass: ``Scalar[TASK_ID]`` (single producer) and
-        ``Array[N, TASK_ID]`` (per-slot TaskId array, e.g. from
-        ``pl.array.create(N, pl.TASK_ID)`` threaded through a loop).
+        * ``Scalar[TASK_ID]`` Var — a single producer TaskId (from a prior
+          ``_, tid = pl.submit(...)`` or a loop iter_arg carry).
+        * ``Array[N, TASK_ID]`` Var — a per-slot TaskId array (whole-array
+          fence; codegen expands one ``is_valid()``-guarded slot per element).
+        * ``None`` literal — the "no producer yet" sentinel; dropped here.
+        * ``arr[idx]`` where ``arr`` is an ``Array[_, TASK_ID]`` — **Form 1**.
+          Lowered into a fresh ``Array[K, TASK_ID]`` populated by
+          ``array.update_element`` so the existing whole-array dep codegen
+          fires unchanged. ``idx`` is any int-typed IR expression.
+        * ``[<entry> for <name> in <iter> if <pred>]`` where ``<iter>`` /
+          ``<pred>`` are evaluable in pure Python at parse time — **Form 2**.
+          Unrolled into N Form-1 entries.
+
+        When at least one entry needs desugaring, the synthesized array Var
+        replaces the entire dep list (single ``Array[K, TASK_ID]`` entry).
+        When every entry is a bare TaskId / Array Var, the direct path is
+        kept verbatim so existing codegen golden output is byte-identical.
 
         Returns an empty list when ``deps=`` is absent.
         """
         deps_kw = next((kw for kw in keywords if kw.arg == "deps"), None)
         if deps_kw is None:
             return []
-        if not isinstance(deps_kw.value, (ast.List, ast.Tuple)):
+
+        # Top-level acceptable shapes:
+        #   * ast.List / ast.Tuple — element-wise iteration (mixing direct
+        #     entries with Form 1 subscripts).
+        #   * ast.ListComp — the entire dep list is a single comprehension
+        #     (Form 2). The comprehension is unrolled into a flat list of
+        #     ast.expr entries which are then processed like a list literal.
+        if isinstance(deps_kw.value, ast.ListComp):
+            ast_entries: list[ast.expr] = self._unroll_deps_comprehension(deps_kw.value, method_name, span)
+        elif isinstance(deps_kw.value, (ast.List, ast.Tuple)):
+            ast_entries = []
+            for elt in deps_kw.value.elts:
+                if isinstance(elt, ast.ListComp):
+                    ast_entries.extend(self._unroll_deps_comprehension(elt, method_name, span))
+                else:
+                    ast_entries.append(elt)
+        else:
             raise ParserTypeError(
-                f"'{method_name}' deps= must be a list/tuple of TaskId values",
+                f"'{method_name}' deps= must be a list / tuple / comprehension of TaskId values",
                 span=span,
                 hint="Use deps=[tid] where tid is a TaskId from a prior "
-                "`_, tid = pl.submit(...)`, a loop iter_arg, or `None`.",
+                "`_, tid = pl.submit(...)`, a loop iter_arg, `arr[i]` on a TASK_ID array, "
+                "or `None`.",
             )
-        out: list[ir.Var] = []
-        for elt in deps_kw.value.elts:
+
+        direct_entries: list[ir.Expr] = []
+        needs_desugar = False
+        for elt in ast_entries:
             # A bare ``None`` entry is the "no producer yet" sentinel — it
             # contributes no edge (an invalid TaskId would be skipped by the
             # codegen ``is_valid()`` guard anyway), so drop it here.
             if isinstance(elt, ast.Constant) and elt.value is None:
                 continue
             expr = self.parse_expression(elt)
-            if not isinstance(expr, ir.Var) or not _is_dep_var_type(expr.type):
-                raise ParserTypeError(
-                    f"'{method_name}' deps= entries must be TaskId variables, got '{ast.unparse(elt)}'",
-                    span=span,
-                    hint="Bind a TaskId with `_, tid = pl.submit(self.producer, ...)`, "
-                    "thread it through a loop iter_arg, or pass `None` for no producer.",
-                )
-            out.append(expr)
-        return out
+            if isinstance(expr, ir.Var) and _is_dep_var_type(expr.type):
+                direct_entries.append(expr)
+                continue
+            if _is_per_element_task_id_read(expr):
+                direct_entries.append(expr)
+                needs_desugar = True
+                continue
+            raise ParserTypeError(
+                f"'{method_name}' deps= entries must be a TaskId variable, "
+                f"a TASK_ID array element (e.g. `arr[i]`), or None — "
+                f"got '{ast.unparse(elt)}'",
+                span=span,
+                hint="Bind a TaskId with `_, tid = pl.submit(self.producer, ...)`, "
+                "read a slot with `arr[i]` from a `pl.array.create(N, pl.TASK_ID)`, "
+                "or pass `None` for no producer.",
+            )
+
+        if not needs_desugar:
+            # All-direct path — preserve existing codegen byte-for-byte.
+            # Invariant: ``needs_desugar`` is only flipped on the Call branch
+            # above, so every entry on this path is an ``ir.Var``. The assert
+            # documents that invariant and surfaces a clear failure if any
+            # future edit threads a non-Var into ``direct_entries`` without
+            # setting the desugar gate.
+            assert all(isinstance(e, ir.Var) for e in direct_entries)
+            return cast(list[ir.Var], direct_entries)
+        if not direct_entries:
+            return []
+        synth = self._synthesize_deps_array(direct_entries, span)
+        return [synth]
 
     def _parse_dispatch_device_kwarg(
         self,
