@@ -747,6 +747,39 @@ def test_python_print_tile_load_store():
     assert "target_memory=pl.Mem.Vec" in load_kwargs_result
 
 
+def test_python_print_atomic_kwarg_uses_enum_form():
+    """``atomic`` kwarg prints as ``pl.AtomicType.<Name>``, not the raw int.
+
+    The DSL signature is ``atomic: AtomicType``; storage is ``int`` (the DSL
+    casts before stashing on kwargs_). The printer must restore the enum form
+    so the printed source is type-correct for static checkers and round-trips
+    through the parser (``pl.AtomicType`` is exposed in ``pypto.language``).
+    """
+    span = ir.Span.unknown()
+
+    dim = ir.ConstInt(16, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim, dim], DataType.FP32)
+    tile_type = ir.TileType([dim, dim], DataType.FP32)
+    tile = ir.Var("tile", tile_type, span)
+    out = ir.Var("out", tensor_type, span)
+    zero = ir.ConstInt(0, DataType.INDEX, span)
+    offsets_tuple = ir.MakeTuple([zero, zero], span)
+
+    store_op = ir.Op("tile.store")
+
+    # atomic=Add (1) — must print as pl.AtomicType.Add, not atomic=1.
+    add_call = ir.Call(store_op, [tile, offsets_tuple, out], {"atomic": int(ir.AtomicType.Add)}, span)
+    add_result = add_call.as_python()
+    assert "atomic=pl.AtomicType.Add" in add_result
+    assert "atomic=1" not in add_result
+
+    # atomic=None_ (0) — same enum-form treatment for symmetry.
+    none_call = ir.Call(store_op, [tile, offsets_tuple, out], {"atomic": int(ir.AtomicType.None_)}, span)
+    none_result = none_call.as_python()
+    assert "atomic=pl.AtomicType.None_" in none_result
+    assert "atomic=0" not in none_result
+
+
 def test_python_print_while_stmt_natural():
     """Test natural while loop printing (no iter_args)."""
     span = ir.Span.unknown()

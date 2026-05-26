@@ -12,6 +12,10 @@
 #ifndef PYPTO_IR_COMM_H_
 #define PYPTO_IR_COMM_H_
 
+#include <string>
+
+#include "pypto/core/error.h"
+
 namespace pypto {
 namespace ir {
 
@@ -48,6 +52,21 @@ enum class AtomicType : int {
   kNone = 0,
   kAdd = 1,
 };
+
+// Convert AtomicType to the matching Python enum member name. The Python
+// member is `None_` (trailing underscore) because `None` is a reserved word —
+// keep this in sync with the `nb::enum_<AtomicType>` binding in
+// `python/bindings/modules/ir.cpp`.
+inline std::string AtomicTypeToString(AtomicType atomic) {
+  switch (atomic) {
+    case AtomicType::kNone:
+      return "None_";
+    case AtomicType::kAdd:
+      return "Add";
+    default:
+      throw pypto::TypeError("Unknown AtomicType: " + std::to_string(static_cast<int>(atomic)));
+  }
+}
 
 }  // namespace ir
 }  // namespace pypto

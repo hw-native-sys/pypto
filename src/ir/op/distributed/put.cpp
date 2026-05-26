@@ -47,11 +47,13 @@
  */
 
 #include <any>
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "pypto/core/dtype.h"
+#include "pypto/core/logging.h"
 #include "pypto/ir/comm.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/kind_traits.h"

@@ -35,6 +35,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/comm.h"
 #include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -773,6 +774,13 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
         stream_ << prefix_ << ".PipeType." << PipeTypeToString(static_cast<PipeType>(int_val));
       } else if (key == "mode") {
         stream_ << "'" << CastModeToString(int_val) << "'";
+      } else if (key == "atomic") {
+        // Stored as int (the DSL casts AtomicType -> int before stashing on
+        // kwargs_; nb::isinstance<AtomicType> in bindings does the same). The
+        // public DSL signature is `atomic: AtomicType`, so restore the enum
+        // form on print to keep the output type-correct for static checkers
+        // and round-trippable through the parser (pl.AtomicType is exposed).
+        stream_ << prefix_ << ".AtomicType." << AtomicTypeToString(static_cast<AtomicType>(int_val));
       } else {
         stream_ << int_val;
       }
