@@ -324,20 +324,33 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
         slot_size = std::max(slot_size, static_cast<uint64_t>(ref->size_));
       }
 
-      // Every member of the group (root + views) gets the same bumped base
-      // address as its byte_offset.  The codegen recovers each view's actual
-      // location from the corresponding ``tile.slice`` op args, not from the
-      // result MemRef offset, so collapsing all members onto base_addr is safe
-      // (and matches the existing post-pass invariant that byte_offset_ is a
-      // ConstInt the verifier can read).
+      // Bump the whole group to `current_addr`, then preserve each member's
+      // own offset within the slot: new byte_offset = base_addr + old offset.
+      //
+      // InitMemRef already records each view's relative offset (parent offset +
+      // the view op's byte offset, see ShareMemRefFrom).  The root MemRef has
+      // offset 0, so it lands on base_addr; a ``tile.slice`` view at row k lands
+      // on base_addr + k*row_stride.  Codegen reads ``pto.alloc_tile`` addr 1:1
+      // from this ConstInt, so a reshape-of-slice chain — whose result inherits
+      // the slice's offset but does NOT go through ``pto.subview`` — gets the
+      // correct per-view address instead of collapsing onto the parent base
+      // (issue #1510).  Pure ``tile.slice`` codegen is unaffected: it still
+      // derives the offset from the slice op's own operands off the root base.
       //
       // INT64 dtype is required by the PTOAS dialect's `pto.alloc_tile` addr
       // operand. PTO codegen reads this dtype from the ConstInt 1:1 — no
       // codegen-side override.
-      auto base_addr_expr =
-          std::make_shared<ConstInt>(static_cast<int64_t>(current_addr), DataType::INT64, Span::unknown());
       for (const auto& old_memref : group) {
-        auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, base_addr_expr,
+        // Views carry a const relative offset post-InitMemRef; fall back to 0
+        // for the rare non-const case so the result stays a verifier-readable
+        // ConstInt addr.
+        int64_t relative_offset = 0;
+        if (auto old_offset = std::dynamic_pointer_cast<const ConstInt>(old_memref->byte_offset_)) {
+          relative_offset = old_offset->value_;
+        }
+        auto member_addr_expr = std::make_shared<ConstInt>(
+            static_cast<int64_t>(current_addr) + relative_offset, DataType::INT64, Span::unknown());
+        auto new_memref = std::make_shared<MemRef>(old_memref->name_hint_, old_memref->base_, member_addr_expr,
                                                    old_memref->size_, old_memref->span_);
         memref_pairs.emplace_back(old_memref.get(), new_memref);
       }

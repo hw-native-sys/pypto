@@ -55,6 +55,10 @@ program_with_addrs = alloc_pass(program)
 - MemRefs are sorted by ID for deterministic allocation order
 - DDR MemRefs are skipped (addresses managed externally)
 
+**View MemRefs (slices) share one slot**:
+
+MemRefs that share the same `base_` Ptr (a root allocation plus its `tile.slice` views) are co-located in a single slot sized by the largest member, since every view physically aliases its parent. Each member keeps its own relative offset within the slot: `new_addr = slot_base + member.byte_offset` (the relative offset InitMemRef computed). The root sits at `slot_base`; a view at row `k` sits at `slot_base + k * row_stride`. This matters for chains where a view's offset is not re-derived at codegen — e.g. a `tile.reshape` of a `tile.slice` does not emit `pto.subview`, so its `pto.alloc_tile addr` is read directly from this MemRef offset.
+
 Backends can override these defaults by supplying a custom `MemoryAllocatorPolicy` via `Backend::CreateMemoryAllocatorPolicy()`. See [Allocation Policy](#allocation-policy) below.
 
 ## Example

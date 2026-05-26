@@ -533,5 +533,66 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
             reset_for_testing()
 
 
+def test_allocate_memory_addr_preserves_sibling_slice_offsets():
+    """Sibling slice/reshape views keep distinct per-view addresses (base + slice offset).
+
+    Regression for issue #1510: AllocateMemoryAddr used to collapse every member
+    of a base_ group onto the bare base address, dropping the per-view offset that
+    InitMemRef had already computed. A reshape-of-slice chain does not go through
+    ``pto.subview`` at codegen, so it relied on the MemRef offset being correct —
+    siblings at different rows silently aliased row 0. Each view must instead land
+    at ``base + row*cols*elem_bytes``.
+
+    Kept as a value-assertion (rather than a declarative before/after) to match the
+    sibling precondition test above and to pin the exact byte offsets the codegen
+    reads.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[8, 16], pl.FP32],
+            out0: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            out1: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [8, 16])
+            # Two sibling slices at rows 0 and 1, each reshaped to a column vector.
+            s0: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(tile_a, [1, 16], [0, 0])
+            s1: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(tile_a, [1, 16], [1, 0])
+            c0: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(s0, [16, 1])
+            c1: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(s1, [16, 1])
+            r0: pl.Tensor[[16, 1], pl.FP32] = pl.store(c0, [0, 0], out0)
+            r1: pl.Tensor[[16, 1], pl.FP32] = pl.store(c1, [0, 0], out1)
+            return r0
+
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+
+    func = next(iter(After.functions.values()))
+    assert isinstance(func.body, ir.SeqStmts)
+    addrs: dict[str, int] = {}
+    for stmt in func.body.stmts:
+        if isinstance(stmt, ir.AssignStmt):
+            var_type = stmt.var.type
+            if isinstance(var_type, ir.TileType) and var_type.memref is not None:
+                off = var_type.memref.byte_offset_
+                if isinstance(off, ir.ConstInt):
+                    addrs[stmt.var.name_hint] = off.value
+
+    # The root tile and its row-0 views share the slot base.
+    base = addrs["tile_a"]
+    assert addrs["s0"] == base, f"row-0 slice should sit at base {base}, got {addrs['s0']}"
+    assert addrs["c0"] == base, f"reshape of row-0 slice should sit at base {base}, got {addrs['c0']}"
+
+    # Row-1 views must carry the slice offset: 1 row * 16 cols * 4 bytes = 64.
+    assert addrs["s1"] == base + 64, f"row-1 slice should sit at base+64, got {addrs['s1']}"
+    assert addrs["c1"] == base + 64, (
+        f"reshape of row-1 slice should inherit base+64, got {addrs['c1']} "
+        f"(issue #1510: offset must not collapse onto base {base})"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
