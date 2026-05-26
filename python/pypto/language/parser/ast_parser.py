@@ -4578,7 +4578,7 @@ class ASTParser:
         else:
             raise ParserTypeError(
                 f"'{method_name}' deps= must be a list / tuple / comprehension of TaskId values",
-                span=span,
+                span=self.span_tracker.get_span(deps_kw.value),
                 hint="Use deps=[tid] where tid is a TaskId from a prior "
                 "`_, tid = pl.submit(...)`, a loop iter_arg, `arr[i]` on a TASK_ID array, "
                 "or `None`.",
