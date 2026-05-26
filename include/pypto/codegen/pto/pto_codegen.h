@@ -367,73 +367,6 @@ class PTOCodegen : public CodegenBase {
    */
   [[nodiscard]] std::string GetGMSlotBufferSSA() const;
 
-  /**
-   * @brief SSA name of the synthetic SPMD block_idx prefix param.
-   *
-   * When the current function uses tile.get_block_idx / tile.get_block_num,
-   * PTOCodegen prepends two i32 prefix params (%arg0, %arg1) to the emitted
-   * func.func signature. The kernel wrapper resolves the runtime values via
-   * intrinsic.h::get_block_idx(args) / get_block_num(args) and forwards them
-   * as the first two call args. Returns empty when the function does not use
-   * SPMD block ops.
-   */
-  [[nodiscard]] std::string GetSpmdBlockIdxArgSSA() const { return fs_.spmd_block_idx_arg; }
-
-  /**
-   * @brief SSA name of the synthetic SPMD block_num prefix param. See
-   * GetSpmdBlockIdxArgSSA() for the surrounding mechanism.
-   */
-  [[nodiscard]] std::string GetSpmdBlockNumArgSSA() const { return fs_.spmd_block_num_arg; }
-
-  /**
-   * @brief SSA name of the CommContext pointer arg appended for a
-   * DistributedTensor param.
-   *
-   * N6 distributed codegen appends one ``!pto.ptr<i64>`` arg per
-   * DistributedTensor parameter at the end of the func.func signature
-   * (after explicit tensor/scalar params, before dynamic-shape ``index``
-   * params). The mapping ``dist_tensor_var → ctx_ssa`` lets the
-   * pld.tile.remote_load / pld.system.notify / pld.system.wait codegen
-   * recover the matching context pointer.
-   *
-   * @param dist_var DistributedTensor parameter variable.
-   * @return SSA name (e.g. ``%arg7``), or empty string if @p dist_var is
-   *         not a DistributedTensor param of the current function.
-   */
-  [[nodiscard]] std::string GetCommCtxSSAFor(const ir::Var* dist_var) const;
-
-  /**
-   * @brief Name of the module-level ``@CommRemoteOffset_<dtype>`` helper.
-   *
-   * Distributed remote ops (``pld.tile.remote_load`` / ``pld.system.notify``)
-   * lower their per-call peer-rank addressing to a ``func.call`` of a
-   * per-dtype module-level helper that returns the **element offset**
-   * (``index``) between the local rank's window slice and the peer
-   * rank's slice. The call site then does
-   * ``pto.addptr %local_ptr, %delems`` followed by ``pto.make_tensor_view``
-   * — keeping ``addptr`` and ``make_tensor_view`` co-located in the user
-   * kernel's ``func.func``, which is what PTOAS's per-func lowering check
-   * (``addptr must feed make_tensor_view / initialize_l2g2l_pipe(gm_addr)
-   * / load|store_scalar``) requires.
-   *
-   * The helper cannot return the peer **pointer** (addptr → func.return
-   * is rejected by PTOAS) and cannot return the **tensor view** (the
-   * view's lowered memref is strided whenever strides are SSA operands,
-   * but ``!pto.tensor_view<…>`` source syntax cannot encode strided
-   * layout, so the func boundary always lowers to plain memref → type
-   * mismatch). Returning the **offset** is the minimum-fanout shape that
-   * shares the CommContext field reads + element-size division across
-   * call sites while leaving both forbidden ops at the call site.
-   *
-   * Helper is keyed only on dtype — the only dtype-dependent code in the
-   * body is the element-size constant fed to ``arith.divsi``.
-   *
-   * @param dtype Element dtype of the DistributedTensor (e.g. ``FP16``,
-   *              ``INT32``).
-   * @return Helper function name (e.g. ``CommRemoteOffset_f16``).
-   */
-  [[nodiscard]] static std::string GetCommRemoteOffsetFuncName(const DataType& dtype);
-
   /// Increase/decrease the current indentation level (used by op codegen helpers that emit scf.for blocks)
   void IncreaseIndent() { indent_level_++; }
   void DecreaseIndent() { indent_level_--; }
@@ -665,19 +598,6 @@ class PTOCodegen : public CodegenBase {
     DataType gm_slot_buffer_dtype = DataType::FP32;
     std::map<std::pair<int, int>, std::string> gm_slot_buffer_region_by_pipe;
 
-    /// SSA names of the synthetic SPMD block_idx/block_num prefix params.
-    /// Empty when the current function does not use tile.get_block_idx /
-    /// tile.get_block_num.
-    std::string spmd_block_idx_arg;
-    std::string spmd_block_num_arg;
-
-    /// Mapping from DistributedTensor parameter Var → CommContext pointer
-    /// arg SSA name. Populated in GenerateFunction when appending the
-    /// trailing ``!pto.ptr<i64>`` ctx params. Consumed by
-    /// pld.tile.remote_load / pld.system.notify / pld.system.wait codegen
-    /// to recover the per-tensor CommContext pointer.
-    std::map<const ir::Var*, std::string> dist_tensor_to_ctx;
-
     std::string current_expr_value;
     std::vector<std::string> yield_buffer;
 
@@ -717,10 +637,6 @@ class PTOCodegen : public CodegenBase {
       gm_slot_buffer_ssa.clear();
       gm_slot_buffer_dtype = DataType::FP32;
       gm_slot_buffer_region_by_pipe.clear();
-
-      spmd_block_idx_arg.clear();
-      spmd_block_num_arg.clear();
-      dist_tensor_to_ctx.clear();
 
       current_expr_value.clear();
       yield_buffer.clear();

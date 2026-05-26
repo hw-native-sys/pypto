@@ -264,17 +264,7 @@ class TupleConsumerCollector : public ir::IRVisitor {
 
 }  // namespace
 
-std::vector<VarPtr> CollectVarsFromShapeExpr(const ExprPtr& expr) {
-  std::vector<VarPtr> out;
-  std::set<const ir::Var*> seen;
-  CollectVarsFromShapeExprImpl(expr, seen, out);
-  return out;
-}
-
-// Visitor to collect all MemRef objects from TileType variables. Also
-// piggy-backs SPMD block-identity detection (tile.get_block_idx /
-// tile.get_block_num) on the same body walk so callers do not need a
-// separate IR traversal.
+// Visitor to collect all MemRef objects from TileType variables
 class MemRefCollectorVisitor : public ir::IRVisitor {
  public:
   MemRefCollectorVisitor() = default;
@@ -283,13 +273,6 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
   [[nodiscard]] const std::map<const ir::Var*, std::shared_ptr<const TileType>>& GetMemRefTileTypes() const {
     return memref_tile_types_;
   }
-
-  /// Returns true when the visited body invokes tile.get_block_idx or
-  /// tile.get_block_num. Drives PTOCodegen's decision to append two synthetic
-  /// i32 params to the emitted func.func signature; the kernel wrapper
-  /// resolves those values from intrinsic.h::get_block_idx(args) /
-  /// get_block_num(args) at dispatch time.
-  [[nodiscard]] bool UsesSpmdBlockOps() const { return uses_spmd_block_ops_; }
 
   void VisitExpr_(const VarPtr& op) override {
     if (iter_arg_ids_.count(op->UniqueId())) return;
@@ -303,20 +286,11 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
     ir::IRVisitor::VisitExpr_(op);
   }
 
-  void VisitExpr_(const ir::CallPtr& op) override {
-    if (!uses_spmd_block_ops_ && op->op_ &&
-        (op->op_->name_ == "tile.get_block_idx" || op->op_->name_ == "tile.get_block_num")) {
-      uses_spmd_block_ops_ = true;
-    }
-    ir::IRVisitor::VisitExpr_(op);
-  }
-
  private:
   std::vector<MemRefPtr> memrefs_;
   std::set<const ir::Var*> seen_bases_;
   std::map<const ir::Var*, std::shared_ptr<const TileType>> memref_tile_types_;
   std::set<uint64_t> iter_arg_ids_;
-  bool uses_spmd_block_ops_ = false;
 
   void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
     const ir::Var* base_ptr = memref->base_.get();
@@ -583,21 +557,9 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   BuildVarToMemRefMapping(func);
 
-  // One body walk: collects MemRefs and detects SPMD block-identity usage.
-  // SPMD block identity params are injected at codegen time (not at IR level)
-  // when the function body invokes tile.get_block_idx / tile.get_block_num;
-  // they are appended at the end of the func.func signature with named SSAs,
-  // and the two ops lower to arith.index_cast of those params (the kernel
-  // wrapper supplies the runtime values via intrinsic.h::get_block_idx(args) /
-  // get_block_num(args)).
   MemRefCollectorVisitor collector;
   if (func->body_) {
     collector.VisitStmt(func->body_);
-  }
-  const bool uses_spmd_params = collector.UsesSpmdBlockOps();
-  if (uses_spmd_params) {
-    fs_.used_ssa_names.insert("__pypto_spmd_block_idx");
-    fs_.used_ssa_names.insert("__pypto_spmd_block_num");
   }
 
   // Still collect fs_.memref_to_tile_type for GetTileBufTypeString fallback paths
@@ -705,15 +667,6 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     std::string arg_name = "%arg" + std::to_string(next_arg_idx++);
     stream_ << ", " << arg_name << ": index";
     BindVarToMlir(dyn_var, arg_name);
-  }
-
-  // Append SPMD block identity params after dynamic-dim args. Named SSAs make
-  // the synthetic origin obvious in the emitted MLIR and let lowerings refer
-  // to them via PTOCodegen::GetSpmdBlock{Idx,Num}ArgSSA().
-  if (uses_spmd_params) {
-    fs_.spmd_block_idx_arg = "%__pypto_spmd_block_idx";
-    fs_.spmd_block_num_arg = "%__pypto_spmd_block_num";
-    stream_ << ", " << fs_.spmd_block_idx_arg << ": i32, " << fs_.spmd_block_num_arg << ": i32";
   }
 
   stream_ << ")";
