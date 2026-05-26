@@ -364,13 +364,17 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
   - `OutlineClusterScopes` extracts `ClusterScopeStmt` into `Function(Group)`
     and standalone `SpmdScopeStmt` into `Function(Spmd)`
   - `OutlineHierarchyScopes` extracts `HierarchyScopeStmt`
-  - Inside `RuntimeScopeStmt(manual=true)` blocks, the parser writes
-    `Call.attrs["manual_dep_edges"]` directly from the user's
-    `pl.submit(kernel, ..., deps=[tid1, tid2])` kwarg (each entry a
-    `Scalar[TASK_ID]` — the producer TaskId returned by a prior
-    `pl.submit(...)`, a TaskId loop iter_arg, or the literal `None`,
-    which is dropped); codegen fills a fixed-size stack array and emits
-    one `params.set_dependencies(arr, count)` call per task.
+  - Inside `RuntimeScopeStmt(manual=true)` blocks, the parser emits a
+    `Submit` node for each `pl.submit(kernel, ..., deps=[tid1, tid2])`
+    call and populates its first-class `deps_` field directly from the
+    user's `deps=` kwarg (each entry a `Scalar[TASK_ID]` — the producer
+    TaskId returned by a prior `pl.submit(...)`, a TaskId loop iter_arg,
+    or the literal `None`, which is dropped). `DeriveCallDirections`
+    lowers each `Submit` to an equivalent `Call` via `SubmitToCallView`,
+    folding `Submit::deps_` back into `Call.attrs["manual_dep_edges"]`
+    so the orchestration codegen — which still operates on `Call` —
+    fills a fixed-size stack array and emits one
+    `params.set_dependencies(arr, count)` call per task.
 - `RuntimeScopeStmt` lowers to `PTO2_SCOPE()` for `manual=false` and
   `PTO2_SCOPE(PTO2ScopeMode::MANUAL)` for `manual=true`. It is created by
   `pl.manual_scope()` (manual mode) and by the orchestration codegen path

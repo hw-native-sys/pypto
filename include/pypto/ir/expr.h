@@ -919,7 +919,18 @@ using SubmitPtr = std::shared_ptr<const Submit>;
  * adapter, not a transformation of the IR.
  */
 inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
-  std::vector<std::pair<std::string, std::any>> attrs = submit->attrs_;
+  // Strip any pre-existing kAttrManualDepEdges from submit->attrs_ — the
+  // canonical encoding for Submit deps is the typed deps_ field, so a
+  // stray attr entry would either duplicate the deps (when deps_ is
+  // populated and we re-add the attr below) or survive as a stale stand-in
+  // (when deps_ is empty and the original attr would silently propagate
+  // into the synthesised Call). Filtering here keeps deps_ as the single
+  // source of truth at the view boundary.
+  std::vector<std::pair<std::string, std::any>> attrs;
+  attrs.reserve(submit->attrs_.size());
+  for (const auto& [k, v] : submit->attrs_) {
+    if (k != kAttrManualDepEdges) attrs.emplace_back(k, v);
+  }
   if (!submit->deps_.empty()) {
     std::vector<VarPtr> dep_vars;
     dep_vars.reserve(submit->deps_.size());

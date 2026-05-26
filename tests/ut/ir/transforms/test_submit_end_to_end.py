@@ -56,7 +56,7 @@ def test_submit_visible_in_mid_pipeline_dump():
             out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
         ) -> pl.Tensor[[16, 256], pl.FP32]:
             with pl.manual_scope():
-                scratch, tid = pl.submit(self.stage1, x, out)  # noqa: F841
+                _scratch, _tid = pl.submit(self.stage1, x, out)
             return out
 
     text = _ssa_then_print(Prog)
