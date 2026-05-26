@@ -4759,15 +4759,26 @@ class ASTParser:
             attrs["device"] = device_expr
 
         if augment_task_id:
-            # pl.submit: the Call natively returns a flat
-            # Tuple{*<kernel results>, TaskId}. Keeping it flat (rather than
-            # nesting the kernel's own TupleType) lets codegen's existing
-            # tuple-return aliasing map elements 0..N-2 straight to the
-            # kernel's output params and element N-1 to the producer TaskId.
+            # pl.submit emits a first-class Submit node (not an augmented
+            # Call) so passes / printers can dispatch on the kind directly
+            # and the typed deps_ field replaces the prior attrs-encoded
+            # manual_dep_edges. The return type is still the flat
+            # Tuple{*<kernel results>, TaskId} so tuple projection of the
+            # producer TaskId continues to work the same way as before.
             return_type = ir.TupleType([*return_types, ir.ScalarType(DataType.TASK_ID)])
+            deps_list: list[ir.Expr] = list(user_dep_vars) if user_dep_vars else []
+            # manual_dep_edges lives on Submit::deps_ now; strip it from
+            # attrs so the Submit's attrs_ matches the post-flip invariant
+            # documented in include/pypto/ir/expr.h (and enforced by
+            # the pass-submit-awareness rule).
+            submit_attrs: dict[str, Any] | None = None
             if attrs is not None:
-                return ir.Call(gvar, args, {}, attrs, return_type, span)
-            return ir.Call(gvar, args, return_type, span)
+                submit_attrs = {k: v for k, v in attrs.items() if k != "manual_dep_edges"}
+                if not submit_attrs:
+                    submit_attrs = None
+            if submit_attrs is not None:
+                return ir.Submit(gvar, args, deps_list, {}, submit_attrs, return_type, span)
+            return ir.Submit(gvar, args, deps_list, return_type, span)
 
         if attrs is not None:
             return ir.Call(gvar, args, {}, attrs, return_type, span)

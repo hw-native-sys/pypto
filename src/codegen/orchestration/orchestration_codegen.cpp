@@ -885,7 +885,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitStmt_(const AssignStmtPtr& assign) override {
     std::string var_name = ReserveVarEmitName(assign->var_.get());
 
-    if (auto call = As<Call>(assign->value_)) {
+    // Funnel Submit through the existing Call codepath via the synthetic
+    // SubmitToCallView adapter (deps_ → attrs[manual_dep_edges]). The IR
+    // still has Submit as the canonical form; only this view is consumed
+    // by the Call-shaped codegen logic.
+    CallPtr call = As<Call>(assign->value_);
+    if (!call) {
+      if (auto submit = As<Submit>(assign->value_)) {
+        call = SubmitToCallView(submit);
+      }
+    }
+    if (call) {
       const std::string& op_name = call->op_->name_;
 
       // Special-case TaskId ops emitted from the DSL surface. The producer

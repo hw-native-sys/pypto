@@ -406,6 +406,21 @@ class CallDirectionMutator : public IRMutator {
                                         call->GetType(), call->span_);
   }
 
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    // DeriveCallDirections is the natural lowering point for Submit → Call.
+    // Earlier passes (dumps 1–N before this one) see Submit so users get a
+    // clear `pl.submit(...)` print form, and post-DeriveCallDirections
+    // consumers (codegen, verifiers) stay on the existing Call codepath
+    // with deps_ folded into attrs[manual_dep_edges] via SubmitToCallView.
+    auto base = IRMutator::VisitExpr_(op);
+    auto submit = std::static_pointer_cast<const Submit>(base);
+    auto view_call = SubmitToCallView(submit);
+    // Run the Call-side derivation on the synthesised view; the result is
+    // a Call (possibly with arg_directions populated) which we return as
+    // the rewrite. The Submit kind ends here.
+    return VisitExpr_(view_call);
+  }
+
  private:
   ProgramPtr program_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;

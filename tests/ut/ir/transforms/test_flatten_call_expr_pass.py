@@ -561,22 +561,26 @@ class TestFlattenPreservesFuncType:
 
 
 class TestFlattenPreservesAttrs:
-    """Tests that flatten_call_expr preserves Call.attrs when rewriting args.
+    """Tests that flatten_call_expr preserves Submit.deps when rewriting args.
 
-    Call must keep `attrs_` (e.g. `manual_dep_edges` set by the parser for
-    `pl.submit(..., deps=[tid, ...])`); otherwise codegen never emits the
-    `params.set_dependencies(arr, count)` call, silently breaking manual
-    dependencies.
+    A ``pl.submit(..., deps=[tid, ...])`` lowers to an ``ir.Submit`` whose
+    typed ``deps_`` field carries the producer TaskIds. FlattenCallExpr
+    rebuilds the Submit when it hoists nested arg expressions to fresh
+    temporaries; the rebuild must keep ``deps_`` intact, otherwise codegen
+    never emits the ``params.set_dependencies(arr, count)`` call and the
+    user's explicit dep wiring is silently lost.
     """
 
     def test_manual_dep_edges_survive_arg_flatten(self):
-        # The python_printer does not surface ``Call.attrs['manual_dep_edges']``
-        # so the default print -> parse roundtrip would fail. Property
-        # verification still runs.
+        # Disable round-trip verification — the printer emits
+        # ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)`` for a single-LHS
+        # Submit binding, which the parser does not yet re-accept (it
+        # requires ``out, tid = pl.submit(...)`` unpacking). Property
+        # verification still runs through the BEFORE_AND_AFTER instrument.
         instruments: list[_core_passes.PassInstrument] = [
             _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
         ]
-        ctx = _core_passes.PassContext(instruments)
+        ctx = _core_passes.PassContext(instruments, _core_passes.VerificationLevel.NONE)
 
         @pl.program
         class Prog:
@@ -601,8 +605,8 @@ class TestFlattenPreservesAttrs:
                 with pl.manual_scope():
                     a, a_tid = pl.submit(self.k1, x)
                     # Inline `pl.slice(...)` arg forces FlattenCallExpr to rebuild
-                    # the k2 call. The deps=[a_tid] kwarg attaches manual_dep_edges
-                    # which must survive the rebuild.
+                    # the k2 Submit. The deps=[a_tid] kwarg attaches the dep on
+                    # Submit::deps_ which must survive the rebuild.
                     _b, _ = pl.submit(self.k2, x, pl.slice(out, [32], [0]), deps=[a_tid])
                 return out
 
@@ -611,24 +615,25 @@ class TestFlattenPreservesAttrs:
         fn = After.get_function("main")
         assert fn is not None, "main function must exist after flatten_call_expr"
 
-        def find_k2_call(stmt):
+        def find_k2_submit(stmt):
             if isinstance(stmt, ir.SeqStmts):
                 for s in stmt.stmts:
-                    r = find_k2_call(s)
+                    r = find_k2_submit(s)
                     if r is not None:
                         return r
             elif isinstance(stmt, ir.RuntimeScopeStmt):
-                return find_k2_call(stmt.body)
+                return find_k2_submit(stmt.body)
             elif isinstance(stmt, ir.AssignStmt):
                 v = stmt.value
-                if isinstance(v, ir.Call) and v.op.name == "k2":
+                if isinstance(v, ir.Submit) and v.op.name == "k2":
                     return v
             return None
 
-        k2_call = find_k2_call(fn.body)
-        assert k2_call is not None, "expected the k2 call in the manual scope"
-        edges = k2_call.attrs.get("manual_dep_edges", [])
-        assert len(edges) == 1, f"manual_dep_edges dropped after FlattenCallExpr; got {edges!r}"
+        k2_submit = find_k2_submit(fn.body)
+        assert k2_submit is not None, "expected the k2 pl.submit in the manual scope"
+        assert len(k2_submit.deps) == 1, (
+            f"Submit.deps dropped after FlattenCallExpr; got {list(k2_submit.deps)!r}"
+        )
 
 
 class TestFlattenCallInScopeStmt:

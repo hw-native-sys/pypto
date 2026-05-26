@@ -907,6 +907,39 @@ class Submit : public Expr {
 using SubmitPtr = std::shared_ptr<const Submit>;
 
 /**
+ * @brief Adapter that returns the equivalent augmented-Call view of a Submit.
+ *
+ * Synthesises a fresh ``Call`` with ``Submit::deps_`` re-encoded as the
+ * ``kAttrManualDepEdges`` attr. Used by codegen and other consumers that
+ * predate the Submit IR kind and still operate on Call: dispatch on
+ * ``As<Submit>(expr)`` first, then funnel through this view so the existing
+ * Call codepath sees the dep info via the legacy attrs interface.
+ *
+ * The original Submit is untouched — the returned Call is a transient
+ * adapter, not a transformation of the IR.
+ */
+inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
+  std::vector<std::pair<std::string, std::any>> attrs = submit->attrs_;
+  if (!submit->deps_.empty()) {
+    std::vector<VarPtr> dep_vars;
+    dep_vars.reserve(submit->deps_.size());
+    for (const auto& d : submit->deps_) {
+      // Submit::deps_ entries are Var-like by construction (Scalar[TASK_ID] /
+      // Array[N, TASK_ID]). Inline the Var/IterArg check here — kind_traits.h
+      // (AsVarLike) depends on this header so we can't call it from inside it.
+      if (!d) continue;
+      auto kind = d->GetKind();
+      if (kind == ObjectKind::Var || kind == ObjectKind::IterArg) {
+        dep_vars.push_back(std::static_pointer_cast<const Var>(d));
+      }
+    }
+    attrs = WithManualDepEdgesAttr(std::move(attrs), std::move(dep_vars));
+  }
+  return std::make_shared<Call>(submit->op_, submit->args_, submit->kwargs_, std::move(attrs),
+                                submit->GetType(), submit->span_);
+}
+
+/**
  * @brief Expression to create a tuple from multiple expressions
  *
  * Takes a list of expressions and creates a tuple value.
