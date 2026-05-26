@@ -3930,6 +3930,74 @@ class TestDCERegression:
         with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
             ir.assert_structural_equal(After, passes.convert_to_ssa()(Expected))
 
+    def test_orphan_if_yields_after_split_dont_leak_acc_memref(self):
+        """Regression for issue #1501.
+
+        When a kernel mixes a VECTOR cast (forcing an AIC/AIV split) with an
+        ``if`` whose branches yield AIC-only matmul results, ExpandMixedKernel
+        prunes the matmul AssignStmts on the AIV side but used to leave the
+        IfStmt's ``return_vars`` and the trailing branch yields in place. Those
+        yields then referenced free (undefined) Vars; InitMemRef later fabricated
+        a fresh ``mem_acc_<N>`` base for them, and PTO codegen crashed with
+        ``no MLIR mapping for MemRef base 'mem_acc_<N>'``.
+
+        Assert the AIV side carries no leftover Acc-typed IfStmt return_vars or
+        yields after the split.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                w: pl.Tensor[[128, 128], pl.FP32],
+                flag: pl.Scalar[pl.INT32],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                # AIV-side cast forces the kernel to be mixed.
+                x_load = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_fp32 = pl.tile.cast(x_load, target_type=pl.FP32, mode="round")
+                if flag == 0:
+                    x_left = pl.move(x_fp32, target_memory=pl.MemorySpace.Left)
+                    w_mat = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                    w_right = pl.move(w_mat, target_memory=pl.MemorySpace.Right)
+                    acc = pl.matmul(x_left, w_right)
+                else:
+                    x_left2 = pl.move(x_fp32, target_memory=pl.MemorySpace.Left)
+                    w_mat2 = pl.load(w, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                    w_right2 = pl.move(w_mat2, target_memory=pl.MemorySpace.Right)
+                    acc = pl.matmul(x_left2, w_right2)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(acc, [0, 0], out_0)
+                return out_0
+
+        After = _expand_raw(Before)
+        aiv = After.get_function("main_incore_0_aiv")
+        assert aiv is not None
+
+        def _walk_if_stmts(body):
+            for stmt in ir.flatten_to_stmts(body):
+                if isinstance(stmt, ir.IfStmt):
+                    yield stmt
+                    yield from _walk_if_stmts(stmt.then_body)
+                    if stmt.else_body is not None:
+                        yield from _walk_if_stmts(stmt.else_body)
+
+        for if_stmt in _walk_if_stmts(aiv.body):
+            # Every surviving IfStmt return_var on the AIV side must have a
+            # backing definition; the bug fingerprint was Acc-memory return_vars
+            # left dangling after the matmul producer was pruned.
+            for rv in if_stmt.return_vars:
+                ty = rv.type
+                space = getattr(ty, "memory_space", None)
+                assert space != ir.MemorySpace.Acc, (
+                    f"AIV IfStmt retained an Acc-memory return_var {rv.name_hint!r} — "
+                    "the matmul producer was pruned but the IfStmt yield slot survived"
+                )
+
+        # End-to-end safety net: the property verifier rejects free-var refs.
+        passes.run_verifier()(After)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

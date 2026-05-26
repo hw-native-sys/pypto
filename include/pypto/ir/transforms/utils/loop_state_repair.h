@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "pypto/ir/expr.h"
@@ -72,8 +73,28 @@ std::vector<StmtPtr> FixupIterArgInitValues(const std::vector<StmtPtr>& stmts,
 
 std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts);
 
+/// Strip IfStmt return_vars whose corresponding yield value (in either
+/// branch) references a Var not visible at that branch — i.e. the producer
+/// was pruned by an earlier split (e.g. ExpandMixedKernel removing AIC-only
+/// statements from the AIV body) but the yield carrying its value survived.
+///
+/// `extra_defined` lists Var pointers that should also be treated as defined
+/// even when no in-branch AssignStmt produces them — for callers that will
+/// remap those Vars to valid in-branch definitions in a later step (e.g.
+/// ExpandMixedKernel's post-FinalizeSplitCoreBody DeepClone substituting
+/// boundary tpop sources via `tpop_var_remap`).
+///
+/// For each true-orphan return_var index, the index is dropped from
+/// `return_vars_` AND from the trailing YieldStmts in both branches.
+/// Downstream references to the dropped return_var become dangling and are
+/// cleaned up by the rest of the FinalizeSplitCoreBody pipeline
+/// (StripDeadIterArgs, FixupDanglingYieldValues, EliminateDeadCode).
+std::vector<StmtPtr> StripDanglingIfReturnVars(const std::vector<StmtPtr>& stmts,
+                                               const std::unordered_set<const Var*>& extra_defined = {});
+
 std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
-                                           const std::unordered_map<const Var*, StmtPtr>& original_def_map);
+                                           const std::unordered_map<const Var*, StmtPtr>& original_def_map,
+                                           const std::unordered_set<const Var*>& extra_defined = {});
 
 // ============================================================================
 // Template implementations (must be in header)

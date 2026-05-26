@@ -725,15 +725,29 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
       aic_stmts_no_return.push_back(s);
     }
   }
-  auto aic_final = FinalizeTpopTfrees(FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map),
-                                      CoreSide::AIC, aic_tpop_remap);
+  // tpop_var_remap keys are originally-defined Vars whose producers got
+  // replaced on this side by a boundary tpop. A later DeepClone seeded with
+  // `tpop_var_remap` substitutes them with valid in-scope Vars, so they are
+  // not truly dangling. Pass the keys to FinalizeSplitCoreBody so its
+  // StripDanglingIfReturnVars phase doesn't drop IfStmt return_vars whose
+  // yields reference those Vars.
+  auto remap_keys = [](const std::unordered_map<const Var*, VarPtr>& m) {
+    std::unordered_set<const Var*> keys;
+    keys.reserve(m.size());
+    for (const auto& kv : m) keys.insert(kv.first);
+    return keys;
+  };
+  auto aic_final = FinalizeTpopTfrees(
+      FinalizeSplitCoreBody(aic_stmts_no_return, original_def_map, remap_keys(aic_tpop_remap)), CoreSide::AIC,
+      aic_tpop_remap);
 
   // Build AIV body (recursive — handles MIXED compound stmts)
   std::unordered_map<const Var*, VarPtr> aiv_tpop_remap;
   auto aiv_stmts = BuildCoreBody(CoreSide::AIV, stmts, stmt_map, boundary_moves, aiv_tpop_remap,
                                  superseded_tpop_vars, gm_sync_pushes, gm_sync_pops);
   auto aiv_final =
-      FinalizeTpopTfrees(FinalizeSplitCoreBody(aiv_stmts, original_def_map), CoreSide::AIV, aiv_tpop_remap);
+      FinalizeTpopTfrees(FinalizeSplitCoreBody(aiv_stmts, original_def_map, remap_keys(aiv_tpop_remap)),
+                         CoreSide::AIV, aiv_tpop_remap);
 
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";

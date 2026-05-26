@@ -382,11 +382,170 @@ std::vector<StmtPtr> FixupDanglingYieldValues(const std::vector<StmtPtr>& stmts)
   return result;
 }
 
+namespace {
+
+/// Return the trailing `YieldStmt` of `stmts`, or nullptr if absent.
+std::shared_ptr<const YieldStmt> TrailingYield(const std::vector<StmtPtr>& stmts) {
+  if (stmts.empty()) return nullptr;
+  return std::dynamic_pointer_cast<const YieldStmt>(stmts.back());
+}
+
+/// True when every Var referenced by `expr` is in `defined`.
+bool ExprRefsAllDefined(const ExprPtr& expr, const std::unordered_set<const Var*>& defined) {
+  outline_utils::VarDefUseCollector collector;
+  collector.VisitExpr(expr);
+  for (const Var* ref : collector.var_uses) {
+    if (!defined.count(ref)) return false;
+  }
+  return true;
+}
+
+/// Insert every Var defined anywhere within the given statement subtree into `out`.
+void CollectAllDefsInStmts(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& out) {
+  for (const auto& s : stmts) {
+    outline_utils::VarDefUseCollector c;
+    c.VisitStmt(s);
+    out.insert(c.var_defs.begin(), c.var_defs.end());
+  }
+}
+
+/// Return the indices of the trailing yield's values (against the IfStmt's
+/// return_vars_) whose expressions reference only vars in `branch_defs`. If
+/// the branch has no trailing yield, every index is kept (the missing yield
+/// can't make the value ill-defined here).
+void NarrowKeptIndices(const std::shared_ptr<const YieldStmt>& yield,
+                       const std::unordered_set<const Var*>& branch_defs, size_t num_return_vars,
+                       std::vector<bool>& keep) {
+  if (!yield) return;
+  for (size_t i = 0; i < num_return_vars && i < yield->value_.size(); ++i) {
+    if (keep[i] && !ExprRefsAllDefined(yield->value_[i], branch_defs)) {
+      keep[i] = false;
+    }
+  }
+}
+
+}  // namespace
+
+std::vector<StmtPtr> StripDanglingIfReturnVars(const std::vector<StmtPtr>& stmts,
+                                               const std::unordered_set<const Var*>& extra_defined) {
+  std::unordered_set<const Var*> outer_defined = extra_defined;
+  std::vector<StmtPtr> result;
+  result.reserve(stmts.size());
+
+  for (const auto& stmt : stmts) {
+    StmtPtr new_stmt = stmt;
+    if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(stmt)) {
+      // Recurse into branches first so nested IfStmts are repaired bottom-up.
+      // `outer_defined` carries vars defined by earlier siblings — pass it (not
+      // just the original `extra_defined`) so nested branches see prior defs.
+      auto new_then_stmts = StripDanglingIfReturnVars(FlattenBody(if_stmt->then_body_), outer_defined);
+      std::optional<std::vector<StmtPtr>> new_else_stmts;
+      if (if_stmt->else_body_.has_value()) {
+        new_else_stmts = StripDanglingIfReturnVars(FlattenBody(*if_stmt->else_body_), outer_defined);
+      }
+
+      const size_t num_rv = if_stmt->return_vars_.size();
+      std::vector<size_t> kept_indices;
+      if (num_rv > 0) {
+        // A branch's yield value is well-defined if it only references vars
+        // visible before the IfStmt or defined within that branch (or in
+        // `extra_defined`, e.g. vars that will be remapped by a later
+        // DeepClone-with-tpop-remap step in ExpandMixedKernel).
+        std::unordered_set<const Var*> then_defs = outer_defined;
+        CollectAllDefsInStmts(new_then_stmts, then_defs);
+        std::unordered_set<const Var*> else_defs = outer_defined;
+        if (new_else_stmts.has_value()) {
+          CollectAllDefsInStmts(*new_else_stmts, else_defs);
+        }
+
+        std::vector<bool> keep(num_rv, true);
+        NarrowKeptIndices(TrailingYield(new_then_stmts), then_defs, num_rv, keep);
+        if (new_else_stmts.has_value()) {
+          NarrowKeptIndices(TrailingYield(*new_else_stmts), else_defs, num_rv, keep);
+        }
+        for (size_t i = 0; i < num_rv; ++i) {
+          if (keep[i]) kept_indices.push_back(i);
+        }
+      }
+
+      if (num_rv == 0 || kept_indices.size() == num_rv) {
+        new_stmt = RebuildIfStmt(if_stmt, new_then_stmts, new_else_stmts);
+      } else {
+        // Drop the orphan indices from return_vars_ and from each branch's
+        // trailing yield. FilterYieldStmt rewrites the tail YieldStmt
+        // (returning nullptr when kept_indices is empty, in which case we
+        // drop the trailing yield outright).
+        std::vector<VarPtr> new_return_vars;
+        new_return_vars.reserve(kept_indices.size());
+        for (size_t idx : kept_indices) new_return_vars.push_back(if_stmt->return_vars_[idx]);
+
+        auto filter_branch = [&](const std::vector<StmtPtr>& branch_stmts) {
+          std::vector<StmtPtr> filtered = branch_stmts;
+          if (TrailingYield(filtered)) {
+            auto new_last = FilterYieldStmt(filtered.back(), kept_indices);
+            if (new_last) {
+              filtered.back() = new_last;
+            } else {
+              filtered.pop_back();
+            }
+          }
+          return filtered;
+        };
+
+        auto filtered_then = filter_branch(new_then_stmts);
+        std::optional<std::vector<StmtPtr>> filtered_else;
+        if (new_else_stmts.has_value()) {
+          filtered_else = filter_branch(*new_else_stmts);
+        }
+
+        auto new_if = MutableCopy(if_stmt);
+        new_if->then_body_ = MakeBody(filtered_then, if_stmt->span_);
+        new_if->else_body_ = filtered_else.has_value()
+                                 ? std::optional<StmtPtr>(MakeBody(*filtered_else, if_stmt->span_))
+                                 : std::nullopt;
+        new_if->return_vars_ = new_return_vars;
+        new_stmt = new_if;
+      }
+    } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(stmt)) {
+      // Seed the body's visible-defs set from `outer_defined` (vars defined
+      // before the loop) plus the loop's own scope-defined vars (loop_var,
+      // iter_args). CollectAllDefsInStmts on body statements wouldn't pick
+      // these up on its own, so nested IfStmt yield checks need them passed
+      // in via the extra_defined channel.
+      auto body_extra = outer_defined;
+      body_extra.insert(for_stmt->loop_var_.get());
+      for (const auto& ia : for_stmt->iter_args_) body_extra.insert(ia.get());
+      auto new_body = StripDanglingIfReturnVars(FlattenBody(for_stmt->body_), body_extra);
+      new_stmt = RebuildForStmt(for_stmt, MakeBody(new_body, for_stmt->span_));
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
+      auto body_extra = outer_defined;
+      for (const auto& ia : while_stmt->iter_args_) body_extra.insert(ia.get());
+      auto new_body = StripDanglingIfReturnVars(FlattenBody(while_stmt->body_), body_extra);
+      new_stmt = RebuildWhileStmt(while_stmt, MakeBody(new_body, while_stmt->span_));
+    }
+
+    result.push_back(new_stmt);
+    outline_utils::VarDefUseCollector c;
+    c.VisitStmt(new_stmt);
+    outer_defined.insert(c.var_defs.begin(), c.var_defs.end());
+  }
+
+  return result;
+}
+
 std::vector<StmtPtr> FinalizeSplitCoreBody(const std::vector<StmtPtr>& stmts,
-                                           const std::unordered_map<const Var*, StmtPtr>& original_def_map) {
+                                           const std::unordered_map<const Var*, StmtPtr>& original_def_map,
+                                           const std::unordered_set<const Var*>& extra_defined) {
+  // FixupDanglingYieldValues runs first so that dangling yield refs inside
+  // IfStmts nested in a loop are rewritten to the loop's iter_arg when one is
+  // available (issue #534 pattern). StripDanglingIfReturnVars then mops up the
+  // genuinely orphan IfStmt return_vars that remain — those whose enclosing
+  // loop has no matching iter_arg fallback (issue #1501 pattern: outer loop's
+  // iter_args have themselves already been stripped by an earlier pass).
   auto repaired = StripDeadIterArgs(stmts);
   repaired = FixupIterArgInitValues(repaired, original_def_map);
   repaired = FixupDanglingYieldValues(repaired);
+  repaired = StripDanglingIfReturnVars(repaired, extra_defined);
   repaired = dce::EliminateDeadCode(repaired);
   repaired = StripDeadIterArgs(repaired);
   return dce::EliminateDeadCode(repaired);
