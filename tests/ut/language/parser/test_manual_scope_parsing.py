@@ -828,6 +828,61 @@ class TestSubmitDepsPerElementAndComprehension:
                         b, _ = pl.submit(self.consumer, x, deps=cast_deps)
                     return b
 
+    def test_mixed_whole_array_then_per_element_rejected(self):
+        """``deps=[whole_arr, arr[i]]`` cannot be desugared — the synthesizer
+        would feed an ArrayType Var into ``array.update_element``'s scalar
+        value slot, tripping a C++ type-deducer CHECK. Reject the mixed form
+        at parse time with a clear error."""
+        with pytest.raises(ParserTypeError, match="cannot mix"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def producer(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.InCore)
+                def consumer(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        tids = pl.array.create(4, pl.TASK_ID)
+                        for n in pl.parallel(4):
+                            a, t = pl.submit(self.producer, x)
+                            tids[n] = t
+                        # Whole array first, then a per-element read — rejected.
+                        b, _ = pl.submit(self.consumer, x, deps=[tids, tids[0]])
+                    return b
+
+    def test_mixed_per_element_then_whole_array_rejected(self):
+        """Same correctness guard, opposite order — per-element first, whole
+        array second. The synthesizer trips the same way regardless of order,
+        so both orientations raise."""
+        with pytest.raises(ParserTypeError, match="cannot mix"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def producer(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.InCore)
+                def consumer(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    return x
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.manual_scope():
+                        tids = pl.array.create(4, pl.TASK_ID)
+                        for n in pl.parallel(4):
+                            a, t = pl.submit(self.producer, x)
+                            tids[n] = t
+                        # Per-element first, then whole array — rejected.
+                        b, _ = pl.submit(self.consumer, x, deps=[tids[0], tids])
+                    return b
+
     def test_pl_at_form1_per_element_subscript(self):
         """``with pl.at(..., deps=[arr[i]])`` — the per-element form must
         also work on the pl.at path, since both share ``_parse_submit_deps_kwarg``.

@@ -4529,7 +4529,7 @@ class ASTParser:
             buf_var = self.builder.let("_submit_deps_buf", upd_call, span=span)
         return buf_var
 
-    def _parse_submit_deps_kwarg(
+    def _parse_submit_deps_kwarg(  # noqa: PLR0912 — single-purpose validation flow; splitting hurts readability
         self, method_name: str, keywords: list[ast.keyword], span: ir.Span
     ) -> list[ir.Var]:
         """Extract the optional ``deps=[tid1, tid2]`` kwarg on a ``pl.submit(...)`` call.
@@ -4586,7 +4586,9 @@ class ASTParser:
 
         direct_entries: list[ir.Expr] = []
         needs_desugar = False
+        saw_whole_array = False
         for elt in ast_entries:
+            elt_span = self.span_tracker.get_span(elt)
             # A bare ``None`` entry is the "no producer yet" sentinel — it
             # contributes no edge (an invalid TaskId would be skipped by the
             # codegen ``is_valid()`` guard anyway), so drop it here.
@@ -4594,9 +4596,35 @@ class ASTParser:
                 continue
             expr = self.parse_expression(elt)
             if isinstance(expr, ir.Var) and _is_dep_var_type(expr.type):
+                is_array_var = isinstance(expr.type, ir.ArrayType)
+                # Mixing a whole-array Var with per-element / comprehension
+                # entries cannot be lowered: the synthesizer would feed the
+                # ArrayType Var into ``array.update_element``'s scalar value
+                # slot, tripping a C++ type-deducer CHECK. Refuse the mixed
+                # form rather than silently re-shaping the user's intent.
+                if is_array_var and needs_desugar:
+                    raise ParserTypeError(
+                        f"'{method_name}' deps= cannot mix a whole TASK_ID array "
+                        f"with per-element entries (got array entry "
+                        f"'{ast.unparse(elt)}' after a per-element / comprehension entry)",
+                        span=elt_span,
+                        hint="Pass the array alone (`deps=[arr]`) for a whole-array "
+                        "fence, or index it slot-by-slot (`deps=[arr[i], arr[j], ...]`).",
+                    )
+                if is_array_var:
+                    saw_whole_array = True
                 direct_entries.append(expr)
                 continue
             if _is_per_element_task_id_read(expr):
+                if saw_whole_array:
+                    raise ParserTypeError(
+                        f"'{method_name}' deps= cannot mix a whole TASK_ID array "
+                        f"with per-element entries (got per-element entry "
+                        f"'{ast.unparse(elt)}' after a whole-array entry)",
+                        span=elt_span,
+                        hint="Pass the array alone (`deps=[arr]`) for a whole-array "
+                        "fence, or index it slot-by-slot (`deps=[arr[i], arr[j], ...]`).",
+                    )
                 direct_entries.append(expr)
                 needs_desugar = True
                 continue
@@ -4604,7 +4632,7 @@ class ASTParser:
                 f"'{method_name}' deps= entries must be a TaskId variable, "
                 f"a TASK_ID array element (e.g. `arr[i]`), or None — "
                 f"got '{ast.unparse(elt)}'",
-                span=span,
+                span=elt_span,
                 hint="Bind a TaskId with `_, tid = pl.submit(self.producer, ...)`, "
                 "read a slot with `arr[i]` from a `pl.array.create(N, pl.TASK_ID)`, "
                 "or pass `None` for no producer.",
