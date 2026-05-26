@@ -195,14 +195,12 @@ int GetGMPipeSlotCount(int dir_mask) {
   return 0;
 }
 
-// DPS scatter family: each op is `set_output_reuses_input(0)` with `dst`/`input`
-// as arg 0, so the result must be written in-place into the input tile rather
-// than a freshly-allocated result tile. tile.scatter / tile.scatter_mask need
-// the same in-place aliasing tile.scatter_update relies on — otherwise the
-// emitted tscatter targets an uninitialized tile and the DPS rows that are not
-// written lose their `input` values.
+// DPS scatter family: each op is `set_output_reuses_input(0)` with `dst` as
+// arg 0, so the result must be written in-place into the input tile rather than
+// a freshly-allocated result tile — otherwise the emitted tscatter targets an
+// uninitialized tile and the DPS rows that are not written lose their values.
 bool IsInPlaceScatterFamilyOp(const std::string& op_name) {
-  return op_name == "tile.scatter_update" || op_name == "tile.scatter" || op_name == "tile.scatter_mask";
+  return op_name == "tile.scatter" || op_name == "tile.scatter_mask";
 }
 
 bool ShouldAliasScatterResultToInput(const AssignStmtPtr& stmt) {

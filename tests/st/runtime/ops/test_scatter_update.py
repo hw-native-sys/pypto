@@ -14,8 +14,9 @@ tile.scatter_update(input, index, src) updates rows in input at positions
 specified by a 2D index tile with corresponding rows from src.
 
 Hardware semantics (PTO backend):
-  tile.scatter_update generates nested scf.for loops with pto.tgetval +
-  pto.tsetval to copy src elements into dst at scattered row positions.
+  tile.scatter_update lowers to a whole-row pto.tscatter using per-element flat
+  destination indices (index.flat[k]*d + c), with a select blend preserving rows
+  that are not addressed by the index.
 """
 
 from typing import Any
@@ -66,11 +67,8 @@ class TileScatterUpdateFP16Program:
         input_tile: pl.Tile[[32, 32], pl.FP16] = pl.load(input_t, [0, 0], [32, 32])
         index_tile: pl.Tile[[2, 8], pl.INT32] = pl.load(index_t, [0, 0], [2, 8])
         src_tile: pl.Tile[[16, 32], pl.FP16] = pl.load(src_t, [0, 0], [16, 32])
-        scratch_tile: pl.Tile[[1, 32], pl.FP16] = pl.tile.create(
-            [1, 32], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec
-        )
         result: pl.Tile[[32, 32], pl.FP16] = pl.tile.scatter_update(
-            input_tile, dim=-2, index=index_tile, src=src_tile, scratch=scratch_tile
+            input_tile, dim=-2, index=index_tile, src=src_tile
         )
         return pl.store(result, [0, 0], dst_t)
 
@@ -99,11 +97,8 @@ class TileScatterUpdateSingleBatchProgram:
         input_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(input_t, [0, 0], [32, 32])
         index_tile: pl.Tile[[1, 8], pl.INT32] = pl.load(index_t, [0, 0], [1, 8])
         src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
-        scratch_tile: pl.Tile[[1, 32], pl.FP32] = pl.tile.create(
-            [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-        )
         result: pl.Tile[[32, 32], pl.FP32] = pl.tile.scatter_update(
-            input_tile, dim=-2, index=index_tile, src=src_tile, scratch=scratch_tile
+            input_tile, dim=-2, index=index_tile, src=src_tile
         )
         return pl.store(result, [0, 0], dst_t)
 
@@ -132,11 +127,8 @@ class TileScatterUpdateProgram:
         input_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(input_t, [0, 0], [32, 32])
         index_tile: pl.Tile[[2, 8], pl.INT32] = pl.load(index_t, [0, 0], [2, 8])
         src_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(src_t, [0, 0], [16, 32])
-        scratch_tile: pl.Tile[[1, 32], pl.FP32] = pl.tile.create(
-            [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-        )
         result: pl.Tile[[32, 32], pl.FP32] = pl.tile.scatter_update(
-            input_tile, dim=-2, index=index_tile, src=src_tile, scratch=scratch_tile
+            input_tile, dim=-2, index=index_tile, src=src_tile
         )
         return pl.store(result, [0, 0], dst_t)
 
@@ -434,7 +426,7 @@ class TileScatterUpdateShuffledIndicesTestCase(PTOTestCase):
 
 
 class TensorScatterUpdateTestCase(TileScatterUpdateTestCase):
-    """Tensor-level scatter_update lowering should allocate addressed scratch row tile."""
+    """Tensor-level scatter_update lowers to whole-row tile.scatter (pto.tscatter)."""
 
     def get_name(self) -> str:
         return "tensor_scatter_update"
@@ -556,7 +548,7 @@ class TestScatterUpdateOperations:
         assert result.passed, f"Test failed: {result.error}"
 
     def test_tensor_scatter_update(self, test_runner):
-        """Tensor-level scatter_update lowers through explicit scratch row tile."""
+        """Tensor-level scatter_update lowers to whole-row tile.scatter (pto.tscatter)."""
         result = test_runner.run(TensorScatterUpdateTestCase())
         assert result.passed, f"Test failed: {result.error}"
 

@@ -297,14 +297,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     return CodegenBase::TryGetVarName(expr);
   }
-  [[nodiscard]] std::string GetTensorDataPtr(const std::string& name) const override {
-    auto it = param_name_to_orch_index_.find(name);
-    if (it != param_name_to_orch_index_.end()) {
-      return "orch_args.tensor(" + std::to_string(it->second) + ").data_as<void>()";
-    }
-    return name + ".data";
-  }
-
   [[nodiscard]] std::string GetTensorShapeDim(const std::string& name, int64_t axis) const override {
     auto it = param_name_to_orch_index_.find(name);
     if (it != param_name_to_orch_index_.end()) {
