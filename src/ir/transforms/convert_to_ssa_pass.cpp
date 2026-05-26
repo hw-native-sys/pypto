@@ -278,6 +278,22 @@ class SSAConverter {
       return result;
     }
 
+    ExprPtr VisitExpr_(const SubmitPtr& op) override {
+      // The base IRMutator already SSA-renames args_ and deps_ (both
+      // first-class fields on Submit), so we only need to also rewrite the
+      // return type and surface any kAttrArgDirOverrideVars Var renames
+      // that the base did. Call's manual_dep_edges branch in SubstCallAttrs
+      // does not apply on Submit — deps live in deps_ now.
+      auto result = IRMutator::VisitExpr_(op);
+      auto submit = std::static_pointer_cast<const Submit>(result);
+      auto new_type = converter_.SubstType(submit->GetType());
+      if (new_type.get() != submit->GetType().get()) {
+        return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                              submit->attrs_, new_type, submit->span_);
+      }
+      return result;
+    }
+
    private:
     SSAConverter& converter_;
     const std::unordered_map<const Var*, VarPtr>& versions_;
