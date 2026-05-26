@@ -263,7 +263,7 @@ class TestManualScopeSwimlane:
     def test_no_blocking_serialization_chain(self, manual_scope_swimlane_data: dict):
         """No single task may fan out to more than the necessary downstream count.
 
-        If the codegen mistakenly cross-linked iterations,
+        If ``DeriveManualScopeDeps`` mistakenly cross-linked iterations,
         stage1 of an early iteration would fan out to *every* later
         stage1/stage2 in the same scope, blowing up the fan-out count
         well past the per-iteration bound (which is 1: stage1 -> its own
@@ -294,9 +294,9 @@ class TestManualScopeSwimlane:
 #
 # Every task writes a disjoint ``TILE_M``-row stripe of ``out`` so the program
 # is numerically correct regardless of dep semantics — the value of these
-# tests is in the SWIMLANE shape: the orchestration codegen's array-carry
-# lowering must produce a phase fence keyed on ALL prior-phase tasks, not
-# just the last-dispatched one.
+# tests is in the SWIMLANE shape: ``DeriveManualScopeDeps`` + array-carry
+# codegen must produce a phase fence keyed on ALL prior-phase tasks, not just
+# the last-dispatched one.
 # ---------------------------------------------------------------------------
 
 
@@ -786,8 +786,8 @@ class TestBranchChainSwimlane:
         """Each task has at most 1 successor (next step in its own branch).
 
         A cross-branch dep would push ``fanout_count`` above 1 for at least
-        one task — indicating the codegen accidentally cross-linked sibling
-        parallel iterations.
+        one task — indicating ``DeriveManualScopeDeps`` accidentally
+        cross-linked sibling parallel iterations.
         """
         tasks = branch_chain_swimlane_data["tasks"]
         for t in tasks:

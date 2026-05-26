@@ -404,16 +404,13 @@ def main(self, x: pl.Tensor[[64], pl.FP32],
     return out
 ```
 
-```python
-# 示例 2——只用机制 B，**不**进 manual_scope。其他 buffer 仍然走自动跟踪；
-# 显式边是在自动跟踪结果**之上**追加。注意没有 `with pl.manual_scope():`。
-@pl.function(type=pl.FunctionType.Orchestration)
-def main(self, x: pl.Tensor[[64], pl.FP32],
-         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
-    tmp, prep_tid = pl.submit(self.preprocess, x)
-    out, _ = pl.submit(self.consume, tmp, out, deps=[prep_tid])
-    return out
-```
+`with pl.manual_scope():` 内由
+[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
+pass（底层实现为 `LowerManualDepsToTaskId` lowering，对外保留旧 pass 名）
+把每个 `deps=[var, ...]` 解析为 producer 的 TaskId 配套、写入 call 的
+`manual_dep_edges`，并为每个外层 `pl.range` / `pl.parallel` 同步追加
+TaskId iter_arg / return_var / yield 项。不再对每 call 边数设上限——
+codegen 按实际依赖数生成 `ArgWithDeps<N>`。
 
 ```python
 # 示例 3——以 pl.at-块作为 producer，给下游 pl.at-块加显式边。

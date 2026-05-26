@@ -389,34 +389,10 @@ The orchestration file is named `orchestration/<func_name>.cpp` in the generated
 ## Manual Scope and TaskId Lowering
 
 `with pl.manual_scope():` regions lower to a `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
-block where the runtime's auto OverlapMap is disabled. Per-task params are
-always declared as a plain `Arg <task_var>;`. The orchestration codegen
-materialises the required dependency edges as a fixed-size stack array plus
-a single `set_dependencies` call:
-
-```cpp
-Arg params_t1;
-params_t1.add_input(...);
-// ...
-PTO2TaskId params_t1_deps[K];          // K = exact dep-edge count
-uint32_t params_t1_deps_count = 0;
-if (tid.is_valid()) params_t1_deps[params_t1_deps_count++] = tid;      // every entry is is_valid()-guarded
-if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;
-params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
-```
-
-Every dep slot is wrapped in `if (task_id.is_valid())`: any TaskId may
-legitimately hold the `PTO2TaskId::invalid()` sentinel — a `None` loop-carry
-seed, an early loop iteration's iter_arg carry, or an unwritten array slot —
-and an invalid id must never reach `set_dependencies`. The guard is a cheap
-always-true branch for ids known valid.
-
-There is no `params.add_dep(...)` call any more, and there is no 16-dep cap
-— the runtime `Arg::set_dependencies` primitive has no upper bound, and the
-stack array is sized to the exact count. The dep edges come straight from
-the parser: it writes the user's `pl.submit(..., deps=[tid1, tid2])` kwarg
-into `Call.attrs["manual_dep_edges"]` as a `vector<VarPtr>` of
-`Scalar[TASK_ID]` variables.
+block where the runtime's auto OverlapMap is disabled. The orchestration
+codegen materialises every required dependency edge as an explicit
+`params.add_dep(<task_id>);` call, sourced from the post-[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
+IR.
 
 ### TaskId sourcing
 
@@ -530,4 +506,5 @@ Every task in phase `N+1` waits for **all** `N_BRANCHES` tasks of phase `N`.
 
 - [PTO Codegen](00-pto_codegen.md) — MLIR generation for PTO backend
 - [Pass Manager](../passes/00-pass_manager.md) — IR optimization passes applied before codegen
+- [DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md) — the pass that produces the post-lowering IR consumed here
 - [Python syntax: manual dependency primitives](../language/00-python_syntax.md#manual-dependency-primitives) — the user-facing surface form

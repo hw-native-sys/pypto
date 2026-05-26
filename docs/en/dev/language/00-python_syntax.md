@@ -410,17 +410,14 @@ def main(self, x: pl.Tensor[[64], pl.FP32],
     return out
 ```
 
-```python
-# Example 2 — Mechanism B alone, NO manual_scope. Auto-tracking stays on
-# for everything else; the explicit edge is *added on top* of whatever
-# auto-tracking decided. Note the absence of `with pl.manual_scope():`.
-@pl.function(type=pl.FunctionType.Orchestration)
-def main(self, x: pl.Tensor[[64], pl.FP32],
-         out: pl.Out[pl.Tensor[[64], pl.FP32]]) -> pl.Tensor[[64], pl.FP32]:
-    tmp, prep_tid = pl.submit(self.preprocess, x)
-    out, _ = pl.submit(self.consume, tmp, out, deps=[prep_tid])
-    return out
-```
+Inside `with pl.manual_scope():`, the
+[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md)
+pass (the public name for the underlying `LowerManualDepsToTaskId` lowering)
+resolves each `deps=[var, ...]` entry to a TaskId companion of the producer,
+attaches it to the call's `manual_dep_edges` attr, and threads matching TaskId
+iter_args / return-vars / yields through every enclosing `pl.range` /
+`pl.parallel`. There is no cap on the number of edges per call — codegen
+sizes the emitted `ArgWithDeps<N>` to the exact dep count.
 
 ```python
 # Example 3 — pl.at-block as the producer, with deps= on a downstream block.

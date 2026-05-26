@@ -336,13 +336,9 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
   - `OutlineClusterScopes` extracts `ClusterScopeStmt` into `Function(Group)`
     and standalone `SpmdScopeStmt` into `Function(Spmd)`
   - `OutlineHierarchyScopes` extracts `HierarchyScopeStmt`
-  - Inside `RuntimeScopeStmt(manual=true)` blocks, the parser writes
-    `Call.attrs["manual_dep_edges"]` directly from the user's
-    `pl.submit(kernel, ..., deps=[tid1, tid2])` kwarg (each entry a
-    `Scalar[TASK_ID]` — the producer TaskId returned by a prior
-    `pl.submit(...)`, a TaskId loop iter_arg, or the literal `None`,
-    which is dropped); codegen fills a fixed-size stack array and emits
-    one `params.set_dependencies(arr, count)` call per task.
+  - `DeriveManualScopeDeps` populates `Call.attrs["manual_dep_edges"]` for
+    every kernel call inside `RuntimeScopeStmt(manual=true)` so codegen can
+    emit explicit `params.add_dep(task_<m>);` calls.
 - `RuntimeScopeStmt` lowers to `PTO2_SCOPE()` for `manual=false` and
   `PTO2_SCOPE(PTO2ScopeMode::MANUAL)` for `manual=true`. It is created by
   `pl.manual_scope()` (manual mode) and by the orchestration codegen path

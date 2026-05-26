@@ -563,10 +563,12 @@ class TestFlattenPreservesFuncType:
 class TestFlattenPreservesAttrs:
     """Tests that flatten_call_expr preserves Call.attrs when rewriting args.
 
-    Call must keep `attrs_` (e.g. `manual_dep_edges` set by the parser for
-    `pl.submit(..., deps=[tid, ...])`); otherwise codegen never emits the
-    `params.set_dependencies(arr, count)` call, silently breaking manual
-    dependencies.
+    Regression test: when an argument is a nested Call (e.g. `pl.slice(...)`)
+    and gets extracted to a temp, the outer Call is rebuilt. The rebuilt
+    Call must keep `attrs_` (e.g. `user_manual_dep_edges` set by the parser
+    for `kernel(..., deps=[var, ...])`); otherwise downstream passes such as
+    `DeriveManualScopeDeps` produce empty edges and codegen never emits the
+    `params.add_dep(task_<m>);` calls, silently breaking manual dependencies.
     """
 
     def test_manual_dep_edges_survive_arg_flatten(self):

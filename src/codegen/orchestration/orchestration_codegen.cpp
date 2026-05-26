@@ -1502,24 +1502,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  /// Emit explicit dependency wiring for a kernel ``Call``: a fixed-size
-  /// ``PTO2TaskId <task>_deps[K]`` stack array filled with the valid producer
-  /// TaskIds from ``Call.attrs["manual_dep_edges"]``, followed by a single
-  /// ``<task>.set_dependencies(<task>_deps, <task>_deps_count)``.
-  ///
-  /// The edge list is written directly by the parser from a ``pl.submit(...)``
-  /// ``deps=[tid1, tid2]`` kwarg — each entry a ``Scalar[TASK_ID]`` Var, or an
-  /// ``Array[N, TASK_ID]`` that contributes one slot each. Every entry is
-  /// guarded by ``is_valid()``: any TaskId may legitimately hold the
-  /// ``PTO2TaskId::invalid()`` sentinel — a ``None`` loop-carry seed, an early
-  /// loop iteration's iter_arg carry, or an unwritten array slot — and an
-  /// invalid id must never reach ``set_dependencies``. The guard is a cheap
-  /// always-true branch for ids known valid.
-  ///
-  /// Orthogonal to scope mode: ``set_dependencies`` adds explicit edges on top
-  /// of any auto-tracked deps the runtime infers from OverlapMap (final
-  /// fanin = auto ∪ explicit), so this fires in both auto and manual scopes.
-  /// No-op when there are no edges attached.
+  /// Emit ``params_t<n>.add_dep(task_<m>);`` for every entry resolved by the
+  /// ``DeriveManualScopeDeps`` pass. No-op outside a manual scope (auto scope
+  /// derives deps from data flow at runtime).
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
     const size_t dep_capacity = CountManualDeps(call);
     if (dep_capacity == 0) return;

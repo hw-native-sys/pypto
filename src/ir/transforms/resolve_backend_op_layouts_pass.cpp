@@ -34,7 +34,6 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/auto_name_utils.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/normalize_stmt_structure.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
@@ -295,9 +294,7 @@ FunctionPtr RewriteFunction(const FunctionPtr& func) {
 
   auto new_func = MutableCopy(func);
   new_func->body_ = new_body;
-  // Re-flatten nested SeqStmts emitted by MakeSeqOrSingle so the pass
-  // preserves NormalizedStmtStructure.
-  return ::pypto::ir::NormalizeStmtStructure(new_func);
+  return new_func;
 }
 
 }  // namespace

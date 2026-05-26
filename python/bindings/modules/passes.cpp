@@ -490,16 +490,22 @@ void BindPass(nb::module_& m) {
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,
-             "Derive Call attrs['arg_directions'].\n\n"
+             "Derive Call attrs['arg_directions'] from callee param directions and buffer lineage.\n\n"
              "Writes per-argument runtime ArgDirection (Input / Output / InOut /\n"
              "OutputExisting / Scalar) onto every non-builtin Call. Locally allocated\n"
              "Out arguments are promoted to InOut to model WAW dependencies.\n\n"
-             "Manual-scope dependency edges (Call.attrs['manual_dep_edges']) are\n"
-             "written directly by the parser from a pl.submit(...) deps= kwarg — this\n"
-             "pass does not synthesise or lower them.\n\n"
              "Post-condition: ``IRProperty::CallDirectionsResolved``. The integrity of\n"
              "the produced ``Call.attrs['arg_directions']`` is verified automatically by the\n"
              "``CallDirectionsResolved`` PropertyVerifier (no separate verify pass).");
+  passes.def("derive_manual_scope_deps", &pass::DeriveManualScopeDeps,
+             "Resolve manual_dep_edges on every kernel Call inside a "
+             "RuntimeScopeStmt(manual=true).\n\n"
+             "Merges user-supplied edges (deps=[var1, var2] kwarg) with auto-derived "
+             "data-flow edges (tensor args referencing prior-call Vars in the same "
+             "manual scope) into Call.attrs['manual_dep_edges'].\n\n"
+             "Args wrapped in pl.no_dep(...) (ArgDirection.NoDep) are excluded from "
+             "auto-derived edges. The pass fails the build if any single submit "
+             "would carry more than 16 explicit deps (runtime hard cap).");
   // Bind DiagnosticSeverity enum
   nb::enum_<DiagnosticSeverity>(passes, "DiagnosticSeverity", "Severity level for diagnostics")
       .value("Error", DiagnosticSeverity::Error, "Error that must be fixed")

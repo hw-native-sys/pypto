@@ -388,30 +388,10 @@ orch_code = files["orchestration/orch_func_name.cpp"]
 ## Manual Scope 与 TaskId 降级
 
 `with pl.manual_scope():` 区域被降级为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`
-代码块，区域内 runtime 的 auto OverlapMap 关闭。每个 task 的 params 始终
-声明为普通的 `Arg <task_var>;`。orchestration codegen 把所需的依赖边
-物化为一个定长栈数组加一次 `set_dependencies` 调用：
-
-```cpp
-Arg params_t1;
-params_t1.add_input(...);
-// ...
-PTO2TaskId params_t1_deps[K];          // K = 精确的 dep 边数
-uint32_t params_t1_deps_count = 0;
-if (tid.is_valid()) params_t1_deps[params_t1_deps_count++] = tid;      // 每个条目都有 is_valid() 守卫
-if (carry.is_valid()) params_t1_deps[params_t1_deps_count++] = carry;
-params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);
-```
-
-每个 dep 槽位都被 `if (task_id.is_valid())` 包裹：任何 TaskId 都可能合法地
-持有 `PTO2TaskId::invalid()` 哨兵——`None` 循环 carry 种子、循环首次迭代的
-iter_arg carry，或未写入的数组槽——invalid id 绝不能进入
-`set_dependencies`。对已知有效的 id，该守卫只是一个恒真的廉价分支。
-
-不再有 `params.add_dep(...)` 调用，也没有 16 条依赖上限——runtime 的
-`Arg::set_dependencies` 原语没有上限，栈数组按精确数量定长。dep 边
-直接来自 parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg
-写入 `Call.attrs["manual_dep_edges"]`，每项为 `Scalar[TASK_ID]` 类型的 Var。
+代码块，区域内 runtime 的 auto OverlapMap 关闭。orchestration codegen 对
+每条必需依赖都显式发出 `params.add_dep(<task_id>);`，源数据来自
+[DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md) pass 之后
+的 IR。
 
 ### TaskId 的来源
 
@@ -516,4 +496,5 @@ phase `N+1` 中的每个 task 都会等待 phase `N` 的**全部** `N_BRANCHES` 
 
 - [PTO 代码生成](00-pto_codegen.md) — PTO 后端的 MLIR 生成
 - [Pass 管理器](../passes/00-pass_manager.md) — 代码生成前应用的 IR 优化 Pass
+- [DeriveManualScopeDeps](../passes/33-derive_manual_scope_deps.md) — 产生本节消费的降级后 IR
 - [Python syntax: 手工依赖原语](../language/00-python_syntax.md#手工依赖原语) — 表层语法及语义

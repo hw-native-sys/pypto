@@ -445,16 +445,19 @@ Pass DeriveCallDirections() {
       pw_collector.Run(func->body_);
 
       CallDirectionMutator mutator(program, br_collector.buffer_roots, pw_collector.first_writer_roots,
-                                   enclosing_param_dir_by_root);
+                                   enclosing_param_dir_by_root, scalar_defs_collector.defs(),
+                                   scalar_defs_collector.unique_name_defs());
       auto new_body = mutator.VisitStmt(func->body_);
-
       if (new_body.get() == func->body_.get()) continue;
+
       func = std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
                                         func->return_types_, new_body, func->span_, func->func_type_,
                                         func->level_, func->role_, func->attrs_);
     }
 
-    if (new_functions == program->functions_) return program;
+    if (new_functions == program->functions_) {
+      return program;
+    }
     return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
   };
 

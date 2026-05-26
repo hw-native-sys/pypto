@@ -29,25 +29,24 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 14 | `14-lower_composite_ops.md` | 14th pass (first tile_pto pass) |
 | 15 | `15-flatten_tile_nd_to_2d.md` | 15th pass |
 | 16 | `16-auto_tile_matmul_l0.md` | 16th pass |
-| 17 | `17-canonicalize_mat_slice.md` | Runs immediately after `AutoTileMatmulL0` (lowers Mat `tile.slice` → `tile.extract`) |
-| 18 | `18-infer_tile_memory_space.md` | 18th pass |
-| 19 | `19-lower_transpose_load_param_layout.md` | 19th pass (RFC #1300 P6 — replaces ResolveTransposeLayout) |
-| 20 | `20-resolve_backend_op_layouts.md` | 20th pass |
-| 21 | `21-expand_mixed_kernel.md` | 21st pass |
-| 22 | `22-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
-| 23 | `23-split_vector_kernel.md` | 23rd pass |
-| 24 | `24-normalize_return_order.md` | 24th pass |
-| 25 | `25-lower_pipeline_loops.md` | 25th pass |
-| 26 | `26-canonicalize_io_order.md` | 26th pass |
-| 27 | `27-materialize_tensor_strides.md` | 27th pass (RFC #1300 P3 — wired into Default starting from P6) |
-| 28 | `28-init_memref.md` | 28th pass |
-| 29 | `29-memory_reuse.md` | 29th pass |
-| 30 | `30-legalize_pto_buffer_reuse.md` | 30th pass |
-| 31 | `31-allocate_memory_addr.md` | 31st pass |
-| 32 | `32-fold_no_op_reshape.md` | 32nd pass |
-| 33 | `33-fuse_create_assemble_to_slice.md` | 33rd pass |
-| 34 | `34-derive_call_directions.md` | 34th pass (two-phase: arg directions + manual-scope lowering) |
-| 35 | `35-collect_comm_groups.md` | 35th pass (distributed: WindowBuffer + Program.comm_groups_; runs immediately before the final Simplify) |
+| 17 | `17-infer_tile_memory_space.md` | 17th pass |
+| 18 | `18-lower_transpose_load_param_layout.md` | 18th pass (RFC #1300 P6 — replaces ResolveTransposeLayout) |
+| 19 | `19-resolve_backend_op_layouts.md` | 19th pass |
+| 20 | `20-expand_mixed_kernel.md` | 20th pass |
+| 21 | `21-inject_gm_pipe_buffer.md` | Runs immediately after `ExpandMixedKernel` (backend-gated, Ascend910B) |
+| 22 | `22-split_vector_kernel.md` | 22nd pass |
+| 23 | `23-normalize_return_order.md` | 23rd pass |
+| 24 | `24-lower_pipeline_loops.md` | 24th pass |
+| 25 | `25-canonicalize_io_order.md` | 25th pass |
+| 26 | `26-materialize_tensor_strides.md` | 26th pass (RFC #1300 P3 — wired into Default starting from P6) |
+| 27 | `27-init_memref.md` | 27th pass |
+| 28 | `28-memory_reuse.md` | 28th pass |
+| 29 | `29-legalize_pto_buffer_reuse.md` | 29th pass |
+| 30 | `30-allocate_memory_addr.md` | 30th pass |
+| 31 | `31-fold_no_op_reshape.md` | 31st pass |
+| 32 | `32-fuse_create_assemble_to_slice.md` | 32nd pass |
+| 33 | `33-derive_call_directions.md` | 33rd pass |
+| 34 | `34-derive_manual_scope_deps.md` | 34th pass |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

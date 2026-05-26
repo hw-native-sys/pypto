@@ -4443,14 +4443,10 @@ class ASTParser:
                 at the call site. Stored as ``attrs['arg_direction_overrides']`` so
                 ``DeriveCallDirections`` can overwrite the auto-derived direction at
                 each indicated slot to ``ArgDirection.NoDep``.
-            user_dep_vars: Optional list of TaskId Vars from a ``pl.submit(...)``
-                ``deps=[tid1, tid2]`` kwarg. Each entry is a
-                ``Scalar[TASK_ID]`` (from a prior ``_, tid = pl.submit(...)`` /
-                a ``None`` sentinel / a loop iter_arg) or an
-                ``Array[N, TASK_ID]`` (from ``pl.array.create(N, pl.TASK_ID)``).
-                Stored directly as ``attrs['manual_dep_edges']``; codegen
-                emits a ``set_dependencies(arr, count)`` call built from the
-                entries (array entries expand to one slot each).
+            user_dep_vars: Optional list of tensor Vars from a manual_scope
+                ``deps=[var1, var2]`` kwarg. Stored as
+                ``attrs['user_manual_dep_edges']`` so ``DeriveManualScopeDeps``
+                can merge them with auto-derived data-flow edges.
             device_expr: Optional :class:`ir.Expr` from the ``device=`` kwarg
                 on an Orchestration dispatch call. Stored under
                 ``attrs['device']`` so the comm-collection pass can recover

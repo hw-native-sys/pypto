@@ -658,13 +658,13 @@ Pass NormalizeReturnOrder();
 Pass FuseCreateAssembleToSlice();
 
 /**
- * @brief Derive Call::GetArgDirections() (stored in attrs_["arg_directions"])
- *        from callee param directions and buffer lineage.
+ * @brief Derive Call::GetArgDirections() (stored in attrs_["arg_directions"]) from
+ *        callee param directions and buffer lineage.
  *
  * For every non-builtin call in Orchestration / Group / Spmd functions,
- * compute the runtime call-site direction
- * (Input/Output/InOut/OutputExisting/Scalar) for each argument and write it
- * into Call::attrs_ under the reserved key ``"arg_directions"``.
+ * compute the runtime call-site direction (Input/Output/InOut/OutputExisting/Scalar)
+ * for each argument and write it into Call::attrs_ under the reserved key
+ * ``"arg_directions"``.
  *
  * Mapping:
  *   - scalar argument                        -> ArgDirection::Scalar
@@ -677,14 +677,35 @@ Pass FuseCreateAssembleToSlice();
  *
  * Builtin ops (tensor.*, tile.*, system.*) are left untouched (arg_directions empty).
  *
- * Manual-scope dependency edges (``Call.attrs[manual_dep_edges]``) are written
- * directly by the parser from a ``pl.submit(...)`` ``deps=[...]`` kwarg — this
- * pass does not synthesise or lower them.
- *
  * Requirements:
  *   - InCore scopes outlined (run OutlineIncoreScopes first)
  */
 Pass DeriveCallDirections();
+
+/**
+ * @brief Resolve manual-dependency edges inside ``RuntimeScopeStmt(manual=true)``.
+ *
+ * For every kernel ``Call`` inside a manual scope, populate
+ * ``Call.attrs[manual_dep_edges]`` (vector<VarPtr>) as the de-duplicated
+ * union of:
+ *   1. user-specified edges from ``Call.attrs[user_manual_dep_edges]``
+ *      (set by the parser when the user writes
+ *      ``self.kernel(..., deps=[var1, var2])``);
+ *   2. data-flow edges: every tensor argument that resolves to a Var
+ *      previously assigned by a Call in the same manual scope, EXCLUDING
+ *      arg slots whose resolved direction is ``ArgDirection::NoDep``
+ *      (so ``pl.no_dep(x)`` correctly suppresses the auto edge).
+ *
+ * Codegen reads only ``manual_dep_edges`` and emits
+ * ``params.add_dep(task_<emit_name>, ...)`` calls before the
+ * ``rt_submit_*_task(...)`` line.
+ *
+ *
+ * Requirements:
+ *   - DeriveCallDirections must run first (``arg_directions`` populated
+ *     so we can identify NoDep slots).
+ */
+Pass DeriveManualScopeDeps();
 
 /**
  * @brief Fold no-op tile.reshape assignments into Var-to-Var assignments

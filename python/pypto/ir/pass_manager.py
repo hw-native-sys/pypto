@@ -148,6 +148,7 @@ class PassManager:
             ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
             ("LowerTransposeLoadParamLayout", lambda: passes.lower_transpose_load_param_layout()),
             ("ResolveBackendOpLayouts", lambda: passes.resolve_backend_op_layouts()),
+            ("NormalizeStmtStructure", lambda: passes.normalize_stmt_structure()),
             ("ExpandMixedKernel", lambda: passes.expand_mixed_kernel()),
             ("InjectGMPipeBuffer", lambda: passes.inject_gm_pipe_buffer()),
             ("SplitVectorKernel", lambda: passes.split_vector_kernel()),
@@ -168,15 +169,7 @@ class PassManager:
             ("FoldNoOpReshape", lambda: passes.fold_no_op_reshape()),
             ("FuseCreateAssembleToSlice", lambda: passes.fuse_create_assemble_to_slice()),
             ("DeriveCallDirections", lambda: passes.derive_call_directions()),
-            # Trace pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r)
-            # in each host_orch and materialise WindowBuffer +
-            # Program.comm_groups_. Runs at the end of the pipeline because
-            # nothing between InlineFunctions and here touches the host_orch
-            # alloc/window/dispatch chain (host_orch is never tile-lowered),
-            # so the alloc/view/dispatch sites are still discoverable. Runs
-            # before the final Simplify so any constant folding it does on the
-            # collected sizes is applied uniformly.
-            ("CollectCommGroups", lambda: passes.collect_comm_groups()),
+            ("DeriveManualScopeDeps", lambda: passes.derive_manual_scope_deps()),
             ("Simplify", lambda: passes.simplify()),
         ]
         cls._strategy_passes = {
