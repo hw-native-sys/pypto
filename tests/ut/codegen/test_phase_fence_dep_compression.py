@@ -13,15 +13,13 @@ import re
 
 import pypto.language as pl
 import pytest
-from pypto import backend, codegen, passes
+from pypto import backend, codegen
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import ir
 
 
 def _generate_orch_code(program) -> str:
-    program = passes.derive_call_directions()(program)
-    program = passes.expand_manual_phase_fence()(program)
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return codegen.generate_orchestration(program, func).code

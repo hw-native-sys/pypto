@@ -178,6 +178,29 @@ static bool BodyUpdatesArray(const StmtPtr& body, const Var* target) {
   return finder.found;
 }
 
+static bool BodyDefinesVar(const StmtPtr& body, const Var* target) {
+  class Finder : public IRVisitor {
+   public:
+    bool found = false;
+    const Var* target = nullptr;
+
+    void VisitStmt_(const ForStmtPtr&) override {}
+
+    void VisitStmt_(const AssignStmtPtr& assign) override {
+      if (found) return;
+      if (assign->var_.get() == target) {
+        found = true;
+        return;
+      }
+      IRVisitor::VisitStmt_(assign);
+    }
+  };
+  Finder finder;
+  finder.target = target;
+  finder.VisitStmt(body);
+  return finder.found;
+}
+
 static int64_t CountManualDepConsumersOnArray(const StmtPtr& body, const Var* target) {
   class Counter : public IRVisitor {
    public:
@@ -222,18 +245,6 @@ static int64_t GetArrayProducerCount(const VarPtr& array_var) {
   if (!array_ty) return 0;
   if (auto ci = As<ConstInt>(array_ty->extent())) return ci->value_;
   return 0;
-}
-
-static std::vector<std::pair<std::string, std::any>> WithBoolAttr(
-    std::vector<std::pair<std::string, std::any>> attrs, const std::string& key, bool value) {
-  for (auto& [k, v] : attrs) {
-    if (k == key) {
-      v = value;
-      return attrs;
-    }
-  }
-  attrs.emplace_back(key, value);
-  return attrs;
 }
 
 static CallPtr RewriteManualDepsToBarrier(const CallPtr& call, const VarPtr& barrier_var) {
@@ -360,7 +371,9 @@ class ManualPhaseFenceMutator : public IRMutator {
     }
 
     for (const auto& dep_array : CollectDirectManualDepArrays(body)) {
-      if (!dep_array || BodyUpdatesArray(body, dep_array.get())) continue;
+      if (!dep_array || BodyDefinesVar(body, dep_array.get()) || BodyUpdatesArray(body, dep_array.get())) {
+        continue;
+      }
       int64_t consumers = CountManualDepConsumersOnArray(body, dep_array.get());
       if (is_parallel) consumers *= trip_count;
       try_add(dep_array, dep_array, consumers);

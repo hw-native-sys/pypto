@@ -158,6 +158,29 @@ def test_parallel_iter_arg_barrier_uses_visible_init_value():
     )
 
 
+def test_loop_local_dep_array_is_not_moved_before_definition():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    for kind in (ir.ForKind.Parallel, ir.ForKind.Sequential):
+        local_tids = ir.Var("local_tids", tids.type, S)
+        before = _program_with_loop(
+            ir.SeqStmts(
+                [
+                    ir.AssignStmt(local_tids, tids, S),
+                    _consumer("a", [local_tids]),
+                    _consumer("b", [local_tids]),
+                ],
+                S,
+            ),
+            kind=kind,
+        )
+
+        after = _run(before)
+        assert isinstance(_manual_scope_body(after), ir.ForStmt)
+        for stmt in _loop_body_stmts(after)[1:]:
+            call = cast(ir.Call, cast(ir.AssignStmt, stmt).value)
+            assert call.attrs["manual_dep_edges"] == [local_tids]
+
+
 def test_non_orchestration_function_is_ignored():
     tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
     loop = _main_loop(_program_with_loop(ir.SeqStmts([_consumer("a", [tids]), _consumer("b", [tids])], S)))
