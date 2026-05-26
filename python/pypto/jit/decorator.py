@@ -1116,12 +1116,14 @@ class JITFunction:
         """
         bindings, literals = _build_dynvar_bindings(contexts)
         deps, callers_by_id, _, _, call_args_cache = self._get_dep_graph()
-        _backfill_dynvar_bindings(deps, callers_by_id, bindings, literals, call_args_cache)
+        # Merge annotation dynvars before backfill so dep-only annotation dims
+        # also propagate caller-side keys (else callers fall back to dummy names).
         _merge_annotation_dynvars(
             [(self._func, self._param_names()), *[(d._func, d._param_names()) for d in deps]],
             bindings,
             literals,
         )
+        _backfill_dynvar_bindings(deps, callers_by_id, bindings, literals, call_args_cache)
         return bindings, literals
 
     def _compile(

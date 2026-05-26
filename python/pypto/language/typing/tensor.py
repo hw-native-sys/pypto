@@ -237,6 +237,8 @@ class Tensor(metaclass=TensorMeta):
         ``pl.dynamic()`` variable directly in the annotation instead — that
         form matches ``@pl.program`` and needs no ``bind_dynamic`` call::
 
+            M = pl.dynamic("M")
+
             @pl.jit
             def kernel(
                 a: pl.Tensor[[M, 128], pl.FP32],          # dim 0 dynamic via annotation

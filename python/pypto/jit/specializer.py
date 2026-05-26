@@ -33,6 +33,7 @@ other_jit_func(a, b)              self.other_jit_func(a, b)  (multi-function onl
 from __future__ import annotations
 
 import ast
+import functools
 import inspect
 import textwrap
 import warnings
@@ -230,6 +231,18 @@ def _collect_annotation_dynamic_dims(
         generated module-level variable name and the ``pl.dynamic("...")``
         literal.
     """
+    dims, bindings, literals = _collect_annotation_dynamic_dims_cached(func, frozenset(param_names))
+    # Return copies so callers can freely mutate without corrupting the cache.
+    return set(dims), dict(bindings), dict(literals)
+
+
+@functools.lru_cache(maxsize=512)
+def _collect_annotation_dynamic_dims_cached(
+    func: Any,
+    param_names: frozenset[str],
+) -> tuple[set[tuple[str, int]], dict[str, str], dict[str, str]]:
+    """Cached core of :func:`_collect_annotation_dynamic_dims` (hot path: runs
+    per JIT call). A function object's signature is fixed, so memoize on it."""
     from pypto.language.typing.dynamic import DynVar  # noqa: PLC0415
     from pypto.language.typing.tensor import Tensor  # noqa: PLC0415
 
