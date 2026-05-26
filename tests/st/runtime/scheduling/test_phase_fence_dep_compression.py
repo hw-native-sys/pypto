@@ -26,7 +26,7 @@ import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
-_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[3] / "build_output"
+_BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
 
 _BRANCHES = 4
 _TILE_M = 32
