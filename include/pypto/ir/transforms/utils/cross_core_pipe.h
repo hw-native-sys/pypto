@@ -57,6 +57,13 @@ struct AutomaticPipeSetup {
 
 constexpr int kAutoBufferBase = -1;
 
+/// Default cross-core pipe ring depth used by ``BuildAutomaticPipeSetup`` when
+/// the user has not supplied an override via ``pl.split(..., ring_slots=N)``.
+/// Kept intentionally small so that UB-tight scopes do not blow the Vec/UB
+/// budget by default; latency-bound scopes can opt back into deeper buffering
+/// via the DSL. See issue #1472.
+constexpr int kDefaultRingSlots = 2;
+
 std::optional<int64_t> TryGetConstIntValue(const ExprPtr& expr);
 std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type);
 void RecordObservedSlotSize(PipeDirectionMetadata& metadata, int64_t slot_size);
@@ -83,9 +90,17 @@ CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slo
 void CollectCrossCorePipeMetadata(const std::vector<StmtPtr>& stmts, CrossCorePipeMetadata& metadata);
 CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtPtr>& stmts);
 
+/// Build the automatic cross-core pipe setup (reserve / import / initialize)
+/// for a mixed kernel.
+///
+/// @param slot_num_override If positive, overrides the default ring depth
+///   (``kDefaultRingSlots``) returned by ``GetSlotNumForDirMask``. Zero (the
+///   default) selects the heuristic. Sourced from
+///   ``func->GetAttr<int>("ring_slots", 0)``; see issue #1472.
 AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const std::string& aic_name,
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
-                                           const std::vector<StmtPtr>& aiv_stmts, const Span& span);
+                                           const std::vector<StmtPtr>& aiv_stmts, const Span& span,
+                                           int slot_num_override = 0);
 
 std::vector<StmtPtr> PrependPipeSetup(const std::vector<StmtPtr>& prologue, const std::vector<StmtPtr>& body);
 

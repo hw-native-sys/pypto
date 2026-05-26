@@ -944,5 +944,103 @@ class TestSpmdOptimizations:
                 return a
 
 
+class TestSplitRingSlots:
+    """Test ``pl.split(MODE, ring_slots=N)`` — the cross-core pipe depth knob.
+
+    See issue #1472. ``ring_slots`` is forwarded onto ``InCoreScopeStmt.attrs``
+    by the parser and propagated to the outlined function's attrs by
+    ``OutlineIncoreScopes`` so ``ExpandMixedKernel`` can size the pipe ring.
+    """
+
+    @staticmethod
+    def _first_incore(stmt):
+        if isinstance(stmt, ir.InCoreScopeStmt):
+            return stmt
+        if isinstance(stmt, ir.SeqStmts):
+            for s in stmt.stmts:
+                found = TestSplitRingSlots._first_incore(s)
+                if found is not None:
+                    return found
+        return None
+
+    def test_ring_slots_lands_on_incore_scope_attrs(self):
+        """``pl.split(MODE, ring_slots=N)`` attaches ``ring_slots`` to the InCoreScopeStmt attrs."""
+        program = parse_program(
+            "@pl.program\n"
+            "class P:\n"
+            "    @pl.function\n"
+            "    def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+            "        with pl.at(level=pl.Level.CORE_GROUP,\n"
+            "                   optimizations=[pl.split(pl.SplitMode.UP_DOWN, ring_slots=2)]):\n"
+            "            tile = pl.load(a, [0], [64])\n"
+            "            a = pl.store(tile, [0], a)\n"
+            "        return a\n"
+        )
+
+        main = next(iter(program.functions.values()))
+        incore = self._first_incore(main.body)
+        assert incore is not None
+        assert dict(incore.attrs).get("ring_slots") == 2
+
+    def test_ring_slots_default_omitted(self):
+        """Omitting ``ring_slots`` leaves the scope attrs without the entry."""
+        program = parse_program(
+            "@pl.program\n"
+            "class P:\n"
+            "    @pl.function\n"
+            "    def main(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:\n"
+            "        with pl.at(level=pl.Level.CORE_GROUP,\n"
+            "                   optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):\n"
+            "            tile = pl.load(a, [0], [64])\n"
+            "            a = pl.store(tile, [0], a)\n"
+            "        return a\n"
+        )
+        main = next(iter(program.functions.values()))
+        incore = self._first_incore(main.body)
+        assert incore is not None
+        assert "ring_slots" not in dict(incore.attrs)
+
+    def test_ring_slots_rejects_zero(self):
+        """``ring_slots=0`` is rejected at parse time."""
+        with pytest.raises(ParserSyntaxError, match=r"ring_slots must be a positive int"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimizations=[pl.split(pl.SplitMode.UP_DOWN, ring_slots=0)],
+                ):
+                    _ = pl.load(a, [0], [64])
+                return a
+
+    def test_ring_slots_rejects_with_none_mode(self):
+        """``ring_slots`` with ``SplitMode.NONE`` is rejected — it's a no-op."""
+        with pytest.raises(ParserSyntaxError, match=r"SplitMode\.NONE.*ring_slots"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimizations=[pl.split(pl.SplitMode.NONE, ring_slots=2)],
+                ):
+                    _ = pl.load(a, [0], [64])
+                return a
+
+    def test_ring_slots_rejects_non_core_group_level(self):
+        """``ring_slots`` is only valid with ``level=CORE_GROUP``."""
+        # The split-mode check fires first for non-CORE_GROUP — both errors are
+        # acceptable here as they reject the same misuse.
+        with pytest.raises(ParserSyntaxError, match=r"CORE_GROUP"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(
+                    level=pl.Level.HOST,
+                    optimizations=[pl.split(pl.SplitMode.UP_DOWN, ring_slots=2)],
+                ):
+                    _ = pl.load(a, [0], [64])
+                return a
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

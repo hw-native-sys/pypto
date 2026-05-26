@@ -110,7 +110,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ):
             main_incore_0_v2c_slot_buffer = pl.reserve_buffer(
-                name="main_incore_0_v2c_slot_buffer", size=16384, base=-1
+                name="main_incore_0_v2c_slot_buffer", size=8192, base=-1
             )
             main_incore_0_c2v_slot_buffer_import = pl.import_peer_buffer(
                 name="main_incore_0_c2v_slot_buffer", peer_func="main_incore_0_aiv"
@@ -147,7 +147,7 @@ def test_v2c_boundary_uses_nz_layout_on_a2a3():
                 name="main_incore_0_v2c_slot_buffer", peer_func="main_incore_0_aic"
             )
             main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
-                name="main_incore_0_c2v_slot_buffer", size=16384, base=-1
+                name="main_incore_0_c2v_slot_buffer", size=8192, base=-1
             )
             pl.aiv_initialize_pipe(
                 main_incore_0_c2v_slot_buffer,
@@ -246,7 +246,7 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
             out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
             main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
-                name="main_incore_0_c2v_slot_buffer", size=32768, base=-1
+                name="main_incore_0_c2v_slot_buffer", size=8192, base=-1
             )
             pl.aiv_initialize_pipe(
                 main_incore_0_c2v_slot_buffer,
@@ -350,7 +350,7 @@ def test_gm_mediated_cross_lane_store_load_gets_handshake_on_a2a3():
             scratch: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
         ) -> pl.Tensor[[16, 64], pl.FP32]:
-            gm_relay_c2v_slot_buffer = pl.reserve_buffer(name="gm_relay_c2v_slot_buffer", size=32768, base=-1)
+            gm_relay_c2v_slot_buffer = pl.reserve_buffer(name="gm_relay_c2v_slot_buffer", size=8192, base=-1)
             pl.aiv_initialize_pipe(
                 gm_relay_c2v_slot_buffer,
                 pl.const(0, pl.INT32),

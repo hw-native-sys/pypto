@@ -54,9 +54,15 @@ class Split(Optimization):
     Args:
         mode: Split mode (``SplitMode.NONE``, ``SplitMode.UP_DOWN``, or
             ``SplitMode.LEFT_RIGHT``).
+        ring_slots: Optional override for the cross-core pipe ring depth (number
+            of slots in the C2V / V2C ring). When unset, ``ExpandMixedKernel``
+            falls back to its built-in heuristic (8 slots for unidirectional,
+            4 slots for bidirectional). Only meaningful with a non-``NONE``
+            ``mode``; must be a positive ``int``.
     """
 
     mode: SplitMode
+    ring_slots: int | None = None
 
 
 @dataclass(frozen=True)
@@ -71,18 +77,36 @@ class AutoChunk(Optimization):
     """
 
 
-def split(mode: SplitMode) -> Split:
+def split(mode: SplitMode, *, ring_slots: int | None = None) -> Split:
     """Create a ``Split`` optimization entry.
 
     Args:
         mode: Split mode. May be ``SplitMode.NONE``,
             ``SplitMode.UP_DOWN``, or ``SplitMode.LEFT_RIGHT``.
+        ring_slots: Optional override for the cross-core pipe ring depth.
+            When unset, ``ExpandMixedKernel`` uses its built-in heuristic
+            (8 for unidirectional, 4 for bidirectional). Must be a positive
+            ``int`` and is only meaningful when ``mode != SplitMode.NONE``.
 
     Returns:
         ``Split`` instance for use in ``pl.at(..., optimizations=[...])``.
 
+    Raises:
+        ValueError: If ``ring_slots`` is not a positive ``int``, or if
+            ``ring_slots`` is given alongside ``mode == SplitMode.NONE``.
     """
-    return Split(mode=mode)
+    if ring_slots is not None:
+        if isinstance(ring_slots, bool) or not isinstance(ring_slots, int):
+            raise ValueError(f"ring_slots must be a positive int, got {ring_slots!r}")
+        if ring_slots <= 0:
+            raise ValueError(f"ring_slots must be a positive int, got {ring_slots}")
+        if mode == SplitMode.NONE:
+            raise ValueError(
+                "ring_slots is only meaningful with a non-NONE split mode; "
+                "use pl.split(pl.SplitMode.UP_DOWN, ring_slots=N) or "
+                "pl.split(pl.SplitMode.LEFT_RIGHT, ring_slots=N)"
+            )
+    return Split(mode=mode, ring_slots=ring_slots)
 
 
 auto_chunk: AutoChunk = AutoChunk()

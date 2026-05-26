@@ -770,10 +770,25 @@ class ScopeOutliner : public IRMutator {
         outlined_attrs.emplace_back("split", static_cast<int>(split.value()));
       }
     };
+    // Forward the optional cross-core pipe ring depth override from
+    // pl.split(MODE, ring_slots=N). Stored on the ScopeStmt's attrs_ by the
+    // parser; ExpandMixedKernel reads it back via func->GetAttr<int>("ring_slots").
+    // Only meaningful with a non-None split; the DSL/parser already rejects
+    // the SplitMode::None case, so a stray attr here is treated defensively
+    // by ExpandMixedKernel (positive override wins, otherwise default).
+    auto forward_ring_slots_attr = [&](const ScopeStmtPtr& scope) {
+      if (!scope->HasAttr("ring_slots")) return;
+      const int ring_slots = scope->GetAttr<int>("ring_slots", 0);
+      if (ring_slots > 0) {
+        outlined_attrs.emplace_back("ring_slots", ring_slots);
+      }
+    };
     if (auto incore = As<InCoreScopeStmt>(op)) {
       append_split_attr(incore->split_);
+      forward_ring_slots_attr(incore);
     } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
       append_split_attr(auto_incore->split_);
+      forward_ring_slots_attr(auto_incore);
     } else if (auto spmd = As<SpmdScopeStmt>(op)) {
       outlined_attrs.emplace_back("core_num", spmd->core_num_);
       if (spmd->sync_start_) {

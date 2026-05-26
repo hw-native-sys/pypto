@@ -123,8 +123,14 @@ int BuildDirMask(const CrossCorePipeMetadata& metadata) {
   return dir_mask;
 }
 
-int GetSlotNumForDirMask(int dir_mask) {
-  return dir_mask == (core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C) ? 4 : 8;
+int GetSlotNumForDirMask(int /*dir_mask*/) {
+  // Default cross-core pipe ring depth. Was historically 8 for unidirectional
+  // (C2V or V2C alone) and 4 for bidirectional; that default exhausted the
+  // Vec/UB budget on UB-tight scopes (e.g. fused INT8 matmul + dequant) since
+  // the C2V ring footprint is slot_size * slot_num. The DSL exposes
+  // pl.split(MODE, ring_slots=N) so authors can opt back into deeper buffering
+  // for latency-bound scopes when UB headroom allows. See issue #1472.
+  return kDefaultRingSlots;
 }
 
 std::optional<int64_t> GetCommonSlotSizeBytes(const CrossCorePipeMetadata& metadata) {
@@ -266,7 +272,8 @@ CrossCorePipeMetadata CollectDominatingPipeSetupMetadata(const std::vector<StmtP
 
 AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const std::string& aic_name,
                                            const std::string& aiv_name, const std::vector<StmtPtr>& aic_stmts,
-                                           const std::vector<StmtPtr>& aiv_stmts, const Span& span) {
+                                           const std::vector<StmtPtr>& aiv_stmts, const Span& span,
+                                           int slot_num_override) {
   CrossCorePipeMetadata aic_metadata;
   CollectCrossCorePipeMetadata(aic_stmts, aic_metadata);
   CrossCorePipeMetadata aiv_metadata;
@@ -283,7 +290,8 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
     return {};
   }
 
-  const int64_t buffer_size = common_slot_size.value() * GetSlotNumForDirMask(dir_mask);
+  const int slot_num = slot_num_override > 0 ? slot_num_override : GetSlotNumForDirMask(dir_mask);
+  const int64_t buffer_size = common_slot_size.value() * slot_num;
   CHECK(common_slot_size.value() <= std::numeric_limits<int>::max())
       << "Cross-core slot_size out of range: " << common_slot_size.value();
   const int slot_size_bytes = static_cast<int>(common_slot_size.value());

@@ -2169,7 +2169,7 @@ class TestAutoPipeSetup:
                 return out_0
 
         # V2C: BF16 [16,128] = 4096 bytes; C2V: FP32 [16,128] = 8192 bytes; max = 8192
-        # bidirectional slot_num=4, buffer_size = 8192 * 4 = 32768
+        # default slot_num=2 (kDefaultRingSlots), buffer_size = 8192 * 2 = 16384
         After = _expand_raw(Before)
 
         @pl.program
@@ -2181,7 +2181,7 @@ class TestAutoPipeSetup:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ):
-                v2c = pl.reserve_buffer(name="main_incore_0_v2c_slot_buffer", size=32768)
+                v2c = pl.reserve_buffer(name="main_incore_0_v2c_slot_buffer", size=16384)
                 c2v = pl.import_peer_buffer(
                     name="main_incore_0_c2v_slot_buffer", peer_func="main_incore_0_aiv"
                 )
@@ -2208,7 +2208,7 @@ class TestAutoPipeSetup:
                 v2c = pl.import_peer_buffer(
                     name="main_incore_0_v2c_slot_buffer", peer_func="main_incore_0_aic"
                 )
-                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=32768)
+                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=16384)
                 pl.aiv_initialize_pipe(c2v, v2c, dir_mask=3, slot_size=8192)
                 x_tile = pl.load(x, [0, 0], [16, 128])
                 x_sum = pl.add(x_tile, x_tile)
@@ -2267,7 +2267,7 @@ class TestAutoPipeSetup:
                 y: pl.Tensor[[128, 128], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
-                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=65536)
+                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=16384)
                 pl.aiv_initialize_pipe(c2v, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192)
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(
                     shape=[16, 128], dtype=pl.FP32, split=0
@@ -2277,6 +2277,61 @@ class TestAutoPipeSetup:
                 return out_0_store
 
         _assert_function_equal(After, ExpAIC, "main_incore_0_aic")
+        _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
+
+    def test_ring_slots_attr_overrides_default_buffer_size(self):
+        """pl.split(MODE, ring_slots=N) should override the default slot_num.
+
+        Without the override the default ring depth is ``kDefaultRingSlots`` (= 2),
+        so a single-direction C2V transfer of an 8192-byte slot reserves a
+        16384-byte buffer. Setting ``ring_slots=4`` on the function attrs (the
+        same shape the parser emits via OutlineIncoreScopes) bumps the buffer
+        to ``8192 * 4 = 32768``. See issue #1472.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"ring_slots": 4})
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+                x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+                y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
+                y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+                z_tile = pl.matmul(x_left, y_right)
+                z_vec = pl.move(
+                    z_tile,
+                    target_memory=pl.MemorySpace.Vec,
+                    blayout=pl.TileLayout.row_major,
+                    slayout=pl.TileLayout.none_box,
+                )
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                return out_0
+
+        After = _expand_raw(Before)
+
+        @pl.program
+        class ExpAIV:
+            @pl.function(type=pl.FunctionType.AIV, attrs={"ring_slots": 4})
+            def main_incore_0_aiv(
+                self,
+                x: pl.Tensor[[16, 128], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=32768)
+                pl.aiv_initialize_pipe(c2v, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192)
+                z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
+                    shape=[16, 128], dtype=pl.FP32, split=0
+                )
+                out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+                pl.tfree_to_aic(z_vec)
+                return out_0_store
+
         _assert_function_equal(After, ExpAIV, "main_incore_0_aiv")
 
     def test_auto_tfree_inserted_after_post_tpop_move(self):
@@ -2317,7 +2372,7 @@ class TestAutoPipeSetup:
                 out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
             ):
                 main_incore_0_v2c_slot_buffer = pl.reserve_buffer(
-                    name="main_incore_0_v2c_slot_buffer", size=16384
+                    name="main_incore_0_v2c_slot_buffer", size=8192
                 )
                 main_incore_0_c2v_slot_buffer_import = pl.import_peer_buffer(
                     name="main_incore_0_c2v_slot_buffer",
@@ -2389,7 +2444,7 @@ class TestAutoPipeSetup:
                 out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
-                    name="main_incore_0_c2v_slot_buffer", size=8192
+                    name="main_incore_0_c2v_slot_buffer", size=2048
                 )
                 pl.aiv_initialize_pipe(
                     main_incore_0_c2v_slot_buffer,
@@ -2494,7 +2549,7 @@ class TestAutoPipeSetup:
                 y: pl.Tensor[[32, 32], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
             ) -> pl.Tensor[[4, 32], pl.FP32]:
-                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=4096)
+                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=1024)
                 pl.aiv_initialize_pipe(c2v, pl.const(0, pl.INT32), dir_mask=1, slot_size=512)
                 z_vec: pl.Tile[[4, 32], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(
                     shape=[4, 32], dtype=pl.FP32, split=0
@@ -2556,7 +2611,7 @@ class TestAutoPipeSetup:
                 y: pl.Tensor[[32, 32], pl.BF16],
                 out_0: pl.Out[pl.Tensor[[4, 32], pl.FP32]],
             ) -> pl.Tensor[[4, 32], pl.FP32]:
-                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=4096)
+                c2v = pl.reserve_buffer(name="main_incore_0_c2v_slot_buffer", size=1024)
                 pl.aiv_initialize_pipe(c2v, pl.const(0, pl.INT32), dir_mask=1, slot_size=512)
                 z_vec: pl.Tile[[4, 32], pl.FP32, pl.Mem.Vec, pl.TileView()] = pl.tpop_from_aic(
                     shape=[4, 32], dtype=pl.FP32, split=0

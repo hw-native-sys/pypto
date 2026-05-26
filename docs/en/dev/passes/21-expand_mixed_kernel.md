@@ -76,7 +76,7 @@ Setup is derived from the split bodies:
 - `dir_mask`: `C2V=1`, `V2C=2`, bidirectional=`3`
 - `id`: omitted for automatic setup, so PTOAS uses the default frontend pipe id `0`
 - `slot_size`: max tile byte size across all directions (`shape * dtype bits / 8`)
-- `slot_num`: `8` for unidirectional, `4` per direction for bidirectional
+- `slot_num`: defaults to `kDefaultRingSlots` (`2`) for both unidirectional and bidirectional rings. Authors can override per scope via `pl.split(MODE, ring_slots=N)` on the enclosing `pl.at(level=pl.Level.CORE_GROUP, optimizations=[...])`; the override flows from the parser onto the outlined function's `attrs_["ring_slots"]` and is consumed here. Pick a larger value when the scope is latency-bound and has Vec/UB headroom (the historical defaults were 8 unidirectional / 4 bidirectional).
 - `buffer_size`: `slot_num * slot_size`
 - buffer names: `<func>_c2v_slot_buffer` / `<func>_v2c_slot_buffer`
 - reserve-buffer base: `AUTO` on insertion, then resolved to an explicit address by `AllocateMemoryAddr`

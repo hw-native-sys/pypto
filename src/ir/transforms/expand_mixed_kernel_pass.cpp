@@ -751,8 +751,12 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
 
   const std::string aic_name = func->name_ + "_aic";
   const std::string aiv_name = func->name_ + "_aiv";
-  auto automatic_pipe_setup =
-      BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final, func->span_);
+  // ring_slots is the user-supplied override propagated from
+  // pl.split(MODE, ring_slots=N) via OutlineIncoreScopes. Zero means "use the
+  // default" — see cross_core_pipe::GetSlotNumForDirMask.
+  const int ring_slots_override = func->GetAttr<int>("ring_slots", 0);
+  auto automatic_pipe_setup = BuildAutomaticPipeSetup(func->name_, aic_name, aiv_name, aic_final, aiv_final,
+                                                      func->span_, ring_slots_override);
   aic_final = PrependPipeSetup(automatic_pipe_setup.aic_stmts, aic_final);
   aiv_final = PrependPipeSetup(automatic_pipe_setup.aiv_stmts, aiv_final);
 
