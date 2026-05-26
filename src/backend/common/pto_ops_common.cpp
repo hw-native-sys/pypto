@@ -224,10 +224,17 @@ static codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::Tile
   c.v_row_dynamic = true;
   c.v_col_dynamic = true;
 
-  std::vector<ir::ExprPtr> source_valid = source_tile_type.shape_;
-  if (source_tile_type.tile_view_.has_value() && source_tile_type.tile_view_->valid_shape.size() >= 2) {
-    source_valid = source_tile_type.tile_view_->valid_shape;
-  }
+  // PTOAS verifies subview result types against the parent's static type
+  // string. Non-subview tile types always render `v_row=?, v_col=?` regardless
+  // of what `tile_view_.valid_shape` holds in the IR (see ExtractTileTypeInfo
+  // in pto_type_utils.cpp), so PTOAS infers the result's static valid purely
+  // from the slice's `sizes`. Reading `tile_view_.valid_shape` here would
+  // diverge from PTOAS when the IR carries a sentinel — e.g.,
+  // SplitVectorKernel's lane1 [0, 0] via WithZeroValidShape — producing
+  // `v_row=0, v_col=0` against a `v_row=?` parent (issue #1507). Use
+  // `shape_` to mirror PTOAS; the runtime valid is still conveyed via
+  // pto.alloc_tile's valid_row / valid_col SSA operands.
+  const std::vector<ir::ExprPtr>& source_valid = source_tile_type.shape_;
 
   auto infer_dim = [&](size_t dim_idx, int64_t size, int64_t* out_value, bool* out_dynamic) {
     auto offset_const = As<ir::ConstInt>(offset_tuple.elements_[dim_idx]);

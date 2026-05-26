@@ -1090,6 +1090,40 @@ class TestTileSliceCodegen:
             f"v_row/v_col must not be dynamic ('?') when source valid >= slice size, got:\n{subview_lines[0]}"
         )
 
+    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self):
+        """Regression for issue #1507: subview must not emit static v_row=0, v_col=0
+        when the parent's IR carries the lane1 [0, 0] valid_shape sentinel.
+
+        The parent's static type string always renders v_row=?, v_col=? (per
+        ExtractTileTypeInfo in pto_type_utils.cpp), so PTOAS infers the
+        subview's result valid from the slice's `sizes`. Our inference must
+        align — reading the parent's tile_view_.valid_shape (which can be the
+        sentinel [0, 0] after SplitVectorKernel's WithZeroValidShape) would
+        produce v_row=0, v_col=0 that PTOAS rejects.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.Tensor[[16, 8], pl.FP32],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                sentinel_tile: pl.Tile[
+                    [16, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                ] = pl.tile.create([16, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                sliced: pl.Tile[[16, 8], pl.FP32] = pl.tile.slice(sentinel_tile, [16, 8], [0, 0])
+                return pl.store(sliced, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
+        result_type = subview_lines[0].split("->", 1)[-1]
+        assert "v_row=0" not in result_type and "v_col=0" not in result_type, (
+            "Sentinel [0, 0] parent valid_shape must NOT propagate to a static v_row=0/v_col=0 "
+            f"on the subview result (ptoas would reject); got:\n{subview_lines[0]}"
+        )
+
 
 class TestTileAssembleCodegen:
     """Tests for tile.assemble PTO code generation (pto.subview + pto.tmov).
