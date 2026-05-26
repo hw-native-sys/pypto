@@ -19,6 +19,7 @@ Transformation rules
 User writes (JIT style)            Generated DSL (@pl.program style)
 ─────────────────────────────────  ──────────────────────────────────
 a: pl.Tensor                       a: pl.Tensor[[128, 128], pl.FP32]
+a: pl.Tensor[[M, 128], pl.FP32]   a: pl.Tensor[[M, 128], pl.FP32]  (M kept dynamic)
 param: pl.INDEX                    param: pl.Scalar[pl.INDEX]  (value substituted)
 M = pl.dynamic("M")               Promoted to module level; shared dynvar_cache
 a.bind_dynamic(0, M)              Deleted (info already used in annotation)
@@ -199,6 +200,77 @@ def _collect_dynvar_names(func_def: ast.FunctionDef) -> dict[str, str]:
             if isinstance(target, ast.Name):
                 result[target.id] = dyn_literal if dyn_literal is not None else target.id
     return result
+
+
+def _collect_annotation_dynamic_dims(
+    func: Any,
+    param_names: set[str],
+) -> tuple[set[tuple[str, int]], dict[str, str], dict[str, str]]:
+    """Scan a JIT function's parameter annotations for ``pl.dynamic()`` dims.
+
+    This makes ``@pl.jit`` honour the same dynamic-shape contract as
+    ``@pl.program``: a :class:`~pypto.language.typing.dynamic.DynVar` used
+    directly in a tensor annotation (e.g. ``pl.Tensor[[M, 128], pl.FP32]``)
+    marks that dimension runtime-dynamic, with no ``bind_dynamic`` call
+    required.  It complements :func:`_collect_dynamic_dims`; callers take the
+    union of both sources.
+
+    Args:
+        func: The JIT-decorated Python function.
+        param_names: Parameter names to consider (excludes ``self``).
+
+    Returns:
+        ``(dims, bindings, literals)`` where:
+
+        - ``dims``: ``{(param_name, dim_idx)}`` marked dynamic via annotation.
+        - ``bindings``: ``{"<param>__<dim_idx>": dynvar_var_name}``.
+        - ``literals``: ``{dynvar_var_name: pl.dynamic() string literal}``.
+
+        ``DynVar.name`` is a validated identifier, so it doubles as both the
+        generated module-level variable name and the ``pl.dynamic("...")``
+        literal.
+    """
+    from pypto.language.typing.dynamic import DynVar  # noqa: PLC0415
+    from pypto.language.typing.tensor import Tensor  # noqa: PLC0415
+
+    dims: set[tuple[str, int]] = set()
+    bindings: dict[str, str] = {}
+    literals: dict[str, str] = {}
+
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return dims, bindings, literals
+
+    # When the user's module uses ``from __future__ import annotations`` the
+    # annotations arrive as strings; evaluate them via get_type_hints so the
+    # Tensor[...] subscripts resolve to real objects carrying the DynVars.
+    resolved_hints: dict[str, Any] | None = None
+    if any(isinstance(p.annotation, str) for p in sig.parameters.values()):
+        try:
+            import typing  # noqa: PLC0415
+
+            resolved_hints = typing.get_type_hints(func)
+        except Exception:  # noqa: BLE001 - best effort; fall back to raw annotations
+            resolved_hints = None
+
+    for name, param in sig.parameters.items():
+        if name not in param_names:
+            continue
+        annotation = param.annotation
+        if resolved_hints is not None and name in resolved_hints:
+            annotation = resolved_hints[name]
+        if not isinstance(annotation, Tensor):
+            continue
+        shape = annotation.shape
+        if shape is None:
+            continue
+        for dim_idx, dim in enumerate(shape):
+            if isinstance(dim, DynVar):
+                dims.add((name, dim_idx))
+                bindings[f"{name}__{dim_idx}"] = dim.name
+                literals[dim.name] = dim.name
+    return dims, bindings, literals
 
 
 def _collect_dep_names(func_def: ast.FunctionDef, jit_func_names: set[str]) -> list[str]:

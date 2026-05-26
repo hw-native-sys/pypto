@@ -231,6 +231,23 @@ class Tensor(metaclass=TensorMeta):
         represented as DynVar nodes (ir.Var) in the generated type annotation
         rather than as compile-time constants.
 
+        Use ``bind_dynamic`` with bare ``pl.Tensor`` parameters, where the
+        annotation carries no shape to hold the DynVar.  When a parameter is
+        already annotated with an explicit shape, prefer placing the
+        ``pl.dynamic()`` variable directly in the annotation instead — that
+        form matches ``@pl.program`` and needs no ``bind_dynamic`` call::
+
+            @pl.jit
+            def kernel(
+                a: pl.Tensor[[M, 128], pl.FP32],          # dim 0 dynamic via annotation
+                c: pl.Out[pl.Tensor[[M, 128], pl.FP32]],  # shares the same DynVar
+            ):
+                K = pl.tensor.dim(a, 1)                    # dim 1 stays constant (128)
+                ...
+
+        Both forms are honoured and may be combined; the dynamic dimensions
+        are the union of the two sources.
+
         Args:
             dim: Zero-based dimension index to mark as dynamic.
             var: The DynVar object (created with pl.dynamic()) to bind.

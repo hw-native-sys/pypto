@@ -69,6 +69,7 @@ from .specializer import (
     Specializer,
     TensorMeta,
     _classify_params,
+    _collect_annotation_dynamic_dims,
     _collect_dynamic_dims,
     build_specialize_context,
 )
@@ -231,9 +232,19 @@ def _collect_all_called_names(func_def: ast.FunctionDef) -> list[str]:
 
 
 def _scan_dynamic_dims(func: Any, param_names: list[str]) -> set[tuple[str, int]]:
-    """Statically scan func for bind_dynamic calls and return dynamic (param, dim) pairs."""
+    """Return dynamic (param, dim) pairs from both bind_dynamic and annotations.
+
+    Two equivalent ways mark a dimension runtime-dynamic, unioned here:
+
+    - ``param.bind_dynamic(dim, dynvar)`` calls in the body (scanned from AST).
+    - A ``pl.dynamic()`` variable used directly in a tensor annotation
+      (``pl.Tensor[[M, 128], pl.FP32]``), matching ``@pl.program`` semantics.
+    """
+    pset = set(param_names)
     func_def = _get_func_def(func)
-    return _collect_dynamic_dims(func_def, set(param_names))
+    bind_dims = _collect_dynamic_dims(func_def, pset)
+    annotation_dims, _, _ = _collect_annotation_dynamic_dims(func, pset)
+    return bind_dims | annotation_dims
 
 
 _PL_DTYPE_MAP: dict[str, Any] = {}
@@ -674,6 +685,27 @@ def _backfill_dynvar_bindings(
                                 literals[var_name] = var_name
 
 
+def _merge_annotation_dynvars(
+    funcs: list[tuple[Any, list[str]]],
+    bindings: dict[str, str],
+    literals: dict[str, str],
+) -> None:
+    """Fold annotation-declared dynvar names/literals into the binding tables.
+
+    ``bind_dynamic``-derived entries (already present) take precedence; the
+    annotation source only fills dims not covered by a ``bind_dynamic`` call.
+    Each ``funcs`` element is ``(func, param_names)`` for the entry and every
+    reachable dep, mirroring how :func:`_scan_dynamic_dims` seeds dynamic dims
+    per function.  Mutates ``bindings`` and ``literals`` in place.
+    """
+    for func, param_names in funcs:
+        _, ann_bindings, ann_literals = _collect_annotation_dynamic_dims(func, set(param_names))
+        for key, var_name in ann_bindings.items():
+            bindings.setdefault(key, var_name)
+        for var_name, literal in ann_literals.items():
+            literals.setdefault(var_name, literal)
+
+
 def _resolve_dep_call_metadata(
     dep: JITFunction,
     caller_func: Any,
@@ -1072,6 +1104,26 @@ class JITFunction:
     # Compilation
     # ------------------------------------------------------------------
 
+    def _resolve_dynvar_bindings(
+        self, contexts: list[SpecializeContext]
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Build the dynvar name/literal tables from all three dynamic sources.
+
+        Combines ``bind_dynamic`` declarations (:func:`_build_dynvar_bindings`),
+        their cross-function propagation (:func:`_backfill_dynvar_bindings`), and
+        annotation-declared dynvars (:func:`_merge_annotation_dynvars`) for the
+        entry and every reachable dep.
+        """
+        bindings, literals = _build_dynvar_bindings(contexts)
+        deps, callers_by_id, _, _, call_args_cache = self._get_dep_graph()
+        _backfill_dynvar_bindings(deps, callers_by_id, bindings, literals, call_args_cache)
+        _merge_annotation_dynvars(
+            [(self._func, self._param_names()), *[(d._func, d._param_names()) for d in deps]],
+            bindings,
+            literals,
+        )
+        return bindings, literals
+
     def _compile(
         self,
         tensor_meta: dict[str, TensorMeta],
@@ -1101,9 +1153,7 @@ class JITFunction:
         from pypto.ir.compile import compile as ir_compile  # noqa: PLC0415
 
         contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
-        dynvar_bindings, dynvar_literals = _build_dynvar_bindings(contexts)
-        deps, callers_by_id, _, _, call_args_cache = self._get_dep_graph()
-        _backfill_dynvar_bindings(deps, callers_by_id, dynvar_bindings, dynvar_literals, call_args_cache)
+        dynvar_bindings, dynvar_literals = self._resolve_dynvar_bindings(contexts)
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals)
         source = specializer.specialize()
@@ -1133,9 +1183,7 @@ class JITFunction:
         requiring the Ascend toolchain.
         """
         contexts = self._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
-        dynvar_bindings, dynvar_literals = _build_dynvar_bindings(contexts)
-        deps, callers_by_id, _, _, call_args_cache = self._get_dep_graph()
-        _backfill_dynvar_bindings(deps, callers_by_id, dynvar_bindings, dynvar_literals, call_args_cache)
+        dynvar_bindings, dynvar_literals = self._resolve_dynvar_bindings(contexts)
         class_name = f"_jit_{self.__name__}"
         specializer = Specializer(class_name, contexts, dynvar_bindings, dynvar_literals)
         source = specializer.specialize()

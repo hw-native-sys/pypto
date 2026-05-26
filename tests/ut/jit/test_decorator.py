@@ -22,6 +22,7 @@ from pypto.jit.decorator import (
     _extract_local_tensor_metas,
     _rewrite_jit_error,
     _run_config_compile_kwargs,
+    _scan_dynamic_dims,
     jit,
 )
 from pypto.jit.specializer import TensorMeta
@@ -230,6 +231,52 @@ class TestJitCaching:
         dyn_kernel2.compile_for_test(a256, c256)
         # K changed (128 → 256), should be different compilations
         assert len(dyn_kernel2._cache) == 2
+
+    def test_annotation_dynvar_scanned_without_bind_dynamic(self):
+        """A pl.dynamic() var in the annotation marks the dim dynamic — no bind_dynamic.
+
+        Mirrors @pl.program semantics so the same kernel works in either style.
+        """
+        M = pl.dynamic("M")
+
+        @jit
+        def ann_kernel(a: pl.Tensor[[M, 128], pl.FP32], c: pl.Out[pl.Tensor[[M, 128], pl.FP32]]):
+            c = a
+            return c
+
+        dims = _scan_dynamic_dims(ann_kernel._func, ann_kernel._param_names())
+        assert ("a", 0) in dims
+        assert ("c", 0) in dims
+        # Static dim (128) must stay static.
+        assert ("a", 1) not in dims
+
+    def test_annotation_dynamic_dim_cache_hit_different_concrete_value(self):
+        """Annotation-declared dynamic dim: different M values hit the same cache entry."""
+        torch = pytest.importorskip("torch")
+
+        M = pl.dynamic("M")
+
+        @jit.incore
+        def _copy_incore_ann(a: pl.Tensor[[M, 128], pl.FP32], c: pl.Out[pl.Tensor[[M, 128], pl.FP32]]):
+            tile_a = pl.load(a, [0, 0], [128, 128])
+            pl.store(tile_a, [0, 0], c)
+            return c
+
+        @jit
+        def ann_dyn_kernel(a: pl.Tensor[[M, 128], pl.FP32], c: pl.Out[pl.Tensor[[M, 128], pl.FP32]]):
+            c = _copy_incore_ann(a, c)
+            return c
+
+        a256 = torch.randn(256, 128)
+        c256 = torch.empty(256, 128)
+        a512 = torch.randn(512, 128)
+        c512 = torch.empty(512, 128)
+
+        ann_dyn_kernel.compile_for_test(a256, c256)
+        assert len(ann_dyn_kernel._cache) == 1
+        ann_dyn_kernel.compile_for_test(a512, c512)
+        # Both M values → same cache entry (M is dynamic via annotation alone).
+        assert len(ann_dyn_kernel._cache) == 1
 
     def test_returns_compiled_program(self):
         """JIT compilation should produce a CompiledProgram in the cache."""

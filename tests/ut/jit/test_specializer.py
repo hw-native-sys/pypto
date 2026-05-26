@@ -21,6 +21,7 @@ from pypto.jit.specializer import (
     TensorMeta,
     _BodyTransformer,
     _classify_params,
+    _collect_annotation_dynamic_dims,
     _collect_dynamic_dims,
     _collect_dynvar_names,
     _infer_return_type,
@@ -109,6 +110,59 @@ class TestCollectDynamicDims:
         func_def = _parse_func(src)
         dims = _collect_dynamic_dims(func_def, {"a"})
         assert len(dims) == 0
+
+
+# ---------------------------------------------------------------------------
+# _collect_annotation_dynamic_dims
+# ---------------------------------------------------------------------------
+
+# Module-level dynvars + functions so inspect.signature sees real annotations.
+_M = pl.dynamic("M")
+_BATCH = pl.dynamic("USER_BATCH")
+
+
+def _ann_dyn_kernel(
+    a: pl.Tensor[[_M, 128], pl.FP32],
+    seq: pl.Tensor[[_M], pl.INT32],
+    weight: pl.Tensor[[128, 128], pl.FP32],
+    out: pl.Out[pl.Tensor[[_M, 256], pl.FP32]],
+):
+    return out
+
+
+def _ann_static_kernel(a: pl.Tensor[[64, 128], pl.FP32], c: pl.Out[pl.Tensor[[64, 128], pl.FP32]]):
+    return c
+
+
+class TestCollectAnnotationDynamicDims:
+    def test_dynvar_in_annotation_detected(self):
+        """A pl.dynamic() var used directly in the annotation marks the dim dynamic."""
+        names = {"a", "seq", "weight", "out"}
+        dims, bindings, literals = _collect_annotation_dynamic_dims(_ann_dyn_kernel, names)
+        assert dims == {("a", 0), ("seq", 0), ("out", 0)}
+        assert bindings == {"a__0": "M", "seq__0": "M", "out__0": "M"}
+        assert literals == {"M": "M"}
+
+    def test_static_annotation_has_no_dynamic_dims(self):
+        dims, bindings, literals = _collect_annotation_dynamic_dims(_ann_static_kernel, {"a", "c"})
+        assert dims == set()
+        assert bindings == {}
+        assert literals == {}
+
+    def test_out_wrapped_annotation_detected(self):
+        """pl.Out[...] annotations unwrap to the inner Tensor and are scanned."""
+        dims, _, _ = _collect_annotation_dynamic_dims(_ann_dyn_kernel, {"out"})
+        assert ("out", 0) in dims
+
+    def test_literal_matches_dynvar_name(self):
+        """The emitted literal is DynVar.name, so generated pl.dynamic() round-trips."""
+
+        def kernel(x: pl.Tensor[[_BATCH, 32], pl.FP32]):
+            return x
+
+        _, bindings, literals = _collect_annotation_dynamic_dims(kernel, {"x"})
+        assert bindings == {"x__0": "USER_BATCH"}
+        assert literals == {"USER_BATCH": "USER_BATCH"}
 
 
 # ---------------------------------------------------------------------------
