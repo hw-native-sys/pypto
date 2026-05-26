@@ -177,14 +177,88 @@ jobs:
         timeout-minutes: 3
         run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938
 
-      - name: Test distributed system tests
-        timeout-minutes: 5
-        run: pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938 --ignore=tests/st/distributed/test_l2_multi_orch.py
-
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
             -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=2c607938
+
+  dist-system-tests:
+    # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
+    # paths from set_env.sh). In docker the chip child silent-crashes in
+    # comm_init.
+    runs-on: [self-hosted, linux, arm64, npu]
+    env:
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
+      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_VERSION: v0.40
+      PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: /home/ci-runner/.cache/ccache
+      CCACHE_MAXSIZE: 5G
+      PIP_CACHE_DIR: /home/ci-runner/.cache/pip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check NPU
+        run: npu-smi info
+
+      - name: Install ptoas (local cache)
+        env:
+          PTOAS_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas
+        run: |
+          CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
+          if [ ! -f "$CACHE_ARCHIVE" ]; then
+            echo "Cache miss — downloading ptoas ${PTOAS_VERSION}"
+            mkdir -p "$PTOAS_CACHE_DIR"
+            curl --fail --location --retry 3 --retry-all-errors \
+              https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+              -o "$CACHE_ARCHIVE.tmp"
+            echo "${PTOAS_SHA256}  $CACHE_ARCHIVE.tmp" | sha256sum -c -
+            mv "$CACHE_ARCHIVE.tmp" "$CACHE_ARCHIVE"
+          else
+            echo "Cache hit — using $CACHE_ARCHIVE"
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
+          tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
+          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
+          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
+
+      - name: Clone pto-isa
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/pto-isa"
+          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$GITHUB_WORKSPACE/pto-isa" \
+            || { rm -rf "$GITHUB_WORKSPACE/pto-isa"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$GITHUB_WORKSPACE/pto-isa"; }
+          cd "$GITHUB_WORKSPACE/pto-isa"
+          git checkout 2c607938
+
+      - name: Bootstrap conda + CANN env
+        # Activate conda py310 + source CANN set_env.sh, then dump the whole
+        # env into $GITHUB_ENV so later steps inherit it.
+        # LD_LIBRARY_PATH is prepended with $CONDA_PREFIX/lib because ptoas
+        # needs GLIBCXX_3.4.29 (system libstdc++ is too old).
+        run: |
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          source /usr/local/Ascend/cann-9.0.0/set_env.sh
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+          env | grep -vE '^(_=|SHLVL=|PWD=|OLDPWD=|PS1=|PROMPT_COMMAND=|GITHUB_|RUNNER_|INPUT_)' >> "$GITHUB_ENV"
+
+      - name: Install project and dependencies
+        run: |
+          rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
+          python -m pip install --upgrade pip
+          pip install scikit-build-core nanobind cmake ninja
+          pip install --no-build-isolation .[dev]
+          pip install --no-build-isolation ./runtime
+
+      - name: Test distributed system tests
+        timeout-minutes: 10
+        run: pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938 --ignore=tests/st/distributed/test_l2_multi_orch.py
 
   pypto-lib-model:
     runs-on: [self-hosted, linux, arm64, npu]
