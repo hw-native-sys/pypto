@@ -977,7 +977,7 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
   // operands are typed tiles produced by the same lowering, so they should
   // either both carry an annotation or (in untyped contexts) both lack one — a
   // one-sided annotation signals a real codegen bug, not a valid input.
-  INTERNAL_CHECK(src_type.empty() == idx_type.empty())
+  INTERNAL_CHECK_SPAN(src_type.empty() == idx_type.empty(), op->span_)
       << "Internal error: tile.scatter src/indexes type annotations must both be present or both "
          "absent, got src_type='"
       << src_type << "', idx_type='" << idx_type << "'";
@@ -1029,8 +1029,8 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
       << ", input=" << input_ssa;
 
   std::ostringstream oss;
-  // maskPattern goes inside ins() after src (mirrors pto.tgather mask form);
-  // the optional type annotation follows the attr dict, still inside ins().
+  // maskPattern rides inside ins() after src, then the type annotation:
+  //   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty) outs(%dst : dst_ty)
   oss << "pto.tscatter ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern)
       << ">}";
   if (!src_type.empty()) {

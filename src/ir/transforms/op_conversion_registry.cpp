@@ -1499,9 +1499,9 @@ void OpConversionRegistry::RegisterScatterOps() {
         // scatter to wrong addresses instead of failing loudly.
         if (idx_dtype == DataType::INT16) {
           CHECK(n * cols <= 32768)
-              << "tensor.scatter with a 2-byte element dtype uses INT16 flattened indices, but the "
-                 "destination is too large: rows("
-              << n << ") * cols(" << cols << ") = " << (n * cols)
+              << "tensor.scatter with element dtype " << input_tile->dtype_.ToString()
+              << " uses INT16 flattened indices, but the destination is too large: rows(" << n << ") * cols("
+              << cols << ") = " << (n * cols)
               << " exceeds the INT16 index range (max flat index 32767). Use a smaller tile or split "
                  "the scatter into chunks.";
         }
