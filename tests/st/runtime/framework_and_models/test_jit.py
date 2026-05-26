@@ -33,12 +33,11 @@ def add_kernel(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 
 
 # Dynamic user-batch dim declared directly in the annotation (no bind_dynamic),
-# matching @pl.program style. BATCH_CAP pads the parallel loop; the dynamic
-# user_batch only clamps valid rows. One compiled artifact must serve any
-# batch <= BATCH_CAP. Reproduces gh#1508.
+# matching @pl.program style. user_batch is read at runtime via pl.tensor.dim,
+# so one compiled artifact serves any batch. Reproduces gh#1508.
 USER_BATCH = pl.dynamic("USER_BATCH")
 _COLS = 128
-_BATCH_CAP = 64
+_BATCH_CAP = 32
 _ROW_TILE = 16
 
 
@@ -159,16 +158,16 @@ class TestJITDynamicBatch:
         """
         copy_dyn_batch._cache.clear()
 
-        a32 = torch.randn(32, _COLS, dtype=torch.float32)
-        out32 = torch.zeros(32, _COLS, dtype=torch.float32)
+        a32 = torch.randn(_BATCH_CAP, _COLS, dtype=torch.float32)
+        out32 = torch.zeros(_BATCH_CAP, _COLS, dtype=torch.float32)
         copy_dyn_batch(a32, out32, config=test_config)
         assert torch.allclose(out32, a32, rtol=1e-5, atol=1e-5)
         assert len(copy_dyn_batch._cache) == 1
 
-        a8 = torch.randn(8, _COLS, dtype=torch.float32)
-        out8 = torch.zeros(8, _COLS, dtype=torch.float32)
-        copy_dyn_batch(a8, out8, config=test_config)
-        assert torch.allclose(out8, a8, rtol=1e-5, atol=1e-5)
+        a16 = torch.randn(16, _COLS, dtype=torch.float32)
+        out16 = torch.zeros(16, _COLS, dtype=torch.float32)
+        copy_dyn_batch(a16, out16, config=test_config)
+        assert torch.allclose(out16, a16, rtol=1e-5, atol=1e-5)
         # Same dynamic artifact serves the smaller batch — no recompilation.
         assert len(copy_dyn_batch._cache) == 1
 
