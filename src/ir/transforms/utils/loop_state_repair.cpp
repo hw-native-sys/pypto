@@ -400,12 +400,29 @@ bool ExprRefsAllDefined(const ExprPtr& expr, const std::unordered_set<const Var*
   return true;
 }
 
-/// Insert every Var defined anywhere within the given statement subtree into `out`.
+/// Insert every Var that would be visible at the *outer* scope of the given
+/// body into `out`. This is scope-aware: only the names that escape each
+/// statement (its result, not its internal locals) are added. Specifically:
+///   - `AssignStmt::var_` (top-level binding)
+///   - `ForStmt::return_vars_` / `WhileStmt::return_vars_` (loop results)
+///   - `IfStmt::return_vars_` (phi-style merge of branch yields)
+/// `SeqStmts` are flattened. Vars defined inside nested loop/if bodies
+/// (loop_vars, iter_args, branch-local AssignStmts) stay scoped to those
+/// inner constructs and are *not* added — they would not be reachable by a
+/// reference written in the outer body.
 void CollectAllDefsInStmts(const std::vector<StmtPtr>& stmts, std::unordered_set<const Var*>& out) {
   for (const auto& s : stmts) {
-    outline_utils::VarDefUseCollector c;
-    c.VisitStmt(s);
-    out.insert(c.var_defs.begin(), c.var_defs.end());
+    if (auto seq = std::dynamic_pointer_cast<const SeqStmts>(s)) {
+      CollectAllDefsInStmts(seq->stmts_, out);
+    } else if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(s)) {
+      out.insert(assign->var_.get());
+    } else if (auto for_stmt = std::dynamic_pointer_cast<const ForStmt>(s)) {
+      for (const auto& rv : for_stmt->return_vars_) out.insert(rv.get());
+    } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(s)) {
+      for (const auto& rv : while_stmt->return_vars_) out.insert(rv.get());
+    } else if (auto if_stmt = std::dynamic_pointer_cast<const IfStmt>(s)) {
+      for (const auto& rv : if_stmt->return_vars_) out.insert(rv.get());
+    }
   }
 }
 
