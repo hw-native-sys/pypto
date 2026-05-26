@@ -866,16 +866,24 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
 void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
   INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Submit has null op";
-  // Submit nodes only appear inside a Program (manual_scope body of a function),
-  // so the callee is always emitted as ``self.<kernel_name>`` and the whole
-  // expression is wrapped in ``pl.submit(...)``. If a Submit ever gets surfaced
-  // outside a Program context we fall through to a generic form that names the
-  // op directly, so the printer never crashes.
-  auto gvar = As<GlobalVar>(op->op_);
-  INTERNAL_CHECK_SPAN(gvar && current_program_, op->span_)
-      << "Submit expects a GlobalVar callee inside a Program context";
-
-  stream_ << prefix_ << ".submit(self." << gvar->name_;
+  // Submit normally appears inside a Program (manual_scope body of a
+  // function), so the callee is emitted as ``self.<kernel_name>``. When a
+  // Submit is printed standalone (debugging, unit tests that build IR by
+  // hand without a Program), fall back to naming the op directly so the
+  // printer never crashes — matches the contract in the comment above.
+  stream_ << prefix_ << ".submit(";
+  if (auto gvar = As<GlobalVar>(op->op_)) {
+    // ``self.<name>`` inside a Program (the canonical case); bare ``<name>``
+    // when the printer is invoked standalone (debugging / unit tests).
+    if (current_program_) {
+      stream_ << "self.";
+    }
+    stream_ << gvar->name_;
+  } else {
+    // Non-GlobalVar callee (Op or other) — fall back to the raw op name so
+    // the printer never crashes on a hand-built Submit.
+    stream_ << op->op_->name_;
+  }
   for (const auto& arg : op->args_) {
     stream_ << ", ";
     VisitExpr(arg);

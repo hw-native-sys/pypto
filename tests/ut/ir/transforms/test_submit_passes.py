@@ -9,10 +9,11 @@
 
 """Tests for IR passes operating on Submit nodes.
 
-The parser does not yet emit Submit (Phase 3); these tests construct
-Submit-bearing IR directly and verify that the passes that have been
-migrated do not crash on Submit and preserve its structural shape (op,
-args, first-class deps_).
+The parser emits ``ir.Submit`` for ``pl.submit(...)``. These tests
+construct Submit-bearing IR directly (bypassing the DSL) and verify that
+DCE / SSA and the printer's round-trip preserve the structural shape
+(op, args, first-class deps_) without leaking Vars or degrading Submit
+to Call.
 """
 
 import pytest

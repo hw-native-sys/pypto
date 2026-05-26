@@ -339,11 +339,11 @@ bool IsRemovableForDefaultDce(const StmtPtr& stmt) {
 }
 
 /// Walk an expression tree and report whether any Call or Submit appears.
-/// Both are side-effecting from the DCE perspective: a Call may invoke a
-/// kernel with arbitrary side effects, and a Submit launches an
-/// asynchronous task. Either form must be preserved conservatively because
-/// the IR has no purity annotations yet.
-class CallFinder : public IRVisitor {
+/// Both are call-like and side-effecting from the DCE perspective: a Call
+/// may invoke a kernel with arbitrary side effects, and a Submit launches
+/// an asynchronous task. Either form must be preserved conservatively
+/// because the IR has no purity annotations yet.
+class CallLikeFinder : public IRVisitor {
  public:
   bool found = false;
 
@@ -362,9 +362,9 @@ class CallFinder : public IRVisitor {
   }
 };
 
-bool ExprContainsCall(const ExprPtr& expr) {
+bool ExprContainsCallLike(const ExprPtr& expr) {
   if (!expr) return false;
-  CallFinder finder;
+  CallLikeFinder finder;
   finder.VisitExpr(expr);
   return finder.found;
 }
@@ -377,7 +377,7 @@ bool IsRemovableScalarAssign(const StmtPtr& stmt) {
   auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
   if (!assign) return false;
   if (!As<ScalarType>(assign->var_->GetType())) return false;
-  if (ExprContainsCall(assign->value_)) return false;
+  if (ExprContainsCallLike(assign->value_)) return false;
   return true;
 }
 

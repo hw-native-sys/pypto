@@ -136,10 +136,10 @@ def test_submit_structural_inequal_to_call_with_same_args():
     assert not ir.structural_equal(submit, call)
 
 
-def test_submit_structural_equal_ignores_deps_order_independence():
-    """Two Submits with the same deps in the same order are equal.
-
-    Order matters — deps are positional, not a set. Confirm hash equality too.
+def test_submit_structural_equal_is_deps_order_sensitive():
+    """Two Submits with the same deps in the same order are equal; swapping
+    the order makes them unequal — deps are positional, not a set. Confirm
+    hash equality matches for the same-order case.
     """
     span = ir.Span.unknown()
     kernel_gvar = ir.GlobalVar("kernel")

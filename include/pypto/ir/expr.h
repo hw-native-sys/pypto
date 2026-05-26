@@ -923,15 +923,26 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
   if (!submit->deps_.empty()) {
     std::vector<VarPtr> dep_vars;
     dep_vars.reserve(submit->deps_.size());
-    for (const auto& d : submit->deps_) {
-      // Submit::deps_ entries are Var-like by construction (Scalar[TASK_ID] /
-      // Array[N, TASK_ID]). Inline the Var/IterArg check here — kind_traits.h
-      // (AsVarLike) depends on this header so we can't call it from inside it.
-      if (!d) continue;
-      auto kind = d->GetKind();
-      if (kind == ObjectKind::Var || kind == ObjectKind::IterArg) {
-        dep_vars.push_back(std::static_pointer_cast<const Var>(d));
+    for (size_t i = 0; i < submit->deps_.size(); ++i) {
+      const auto& d = submit->deps_[i];
+      // Submit::deps_ entries are Var-like by construction (Scalar[TASK_ID]
+      // / Array[N, TASK_ID]) — the parser rejects anything else. Enforce
+      // the invariant here so a stray non-Var entry surfaces as a clear
+      // failure at the view boundary, rather than silently dropping the
+      // dep and losing the manual dependency edge downstream. We throw
+      // pypto::TypeError directly (matching Submit::ValidateArgDirectionsAttr
+      // above) because INTERNAL_CHECK_SPAN lives in logging.h, which expr.h
+      // does not transitively include. The Var/IterArg check is inlined
+      // because kind_traits.h's AsVarLike depends on this header.
+      if (!d) {
+        throw pypto::TypeError("Submit dep at index " + std::to_string(i) + " is null");
       }
+      auto kind = d->GetKind();
+      if (kind != ObjectKind::Var && kind != ObjectKind::IterArg) {
+        throw pypto::TypeError("Submit dep at index " + std::to_string(i) +
+                               " is not Var-like (kind: " + std::to_string(static_cast<int>(kind)) + ")");
+      }
+      dep_vars.push_back(std::static_pointer_cast<const Var>(d));
     }
     attrs = WithManualDepEdgesAttr(std::move(attrs), std::move(dep_vars));
   }

@@ -989,7 +989,12 @@ class ASTParser:
         # via the standard ``override_type`` validation path; the single-LHS
         # Submit handler builds the Submit and binds it to ``var_name`` directly.
         if _is_pl_call(stmt.value, "submit"):
-            assert isinstance(stmt.target, ast.Name)
+            if not isinstance(stmt.target, ast.Name):
+                raise ParserSyntaxError(
+                    "Annotated assignment of pl.submit must target a simple variable name",
+                    span=self.span_tracker.get_span(stmt.target),
+                    hint="Use `result: pl.Tuple[..., TASK_ID] = pl.submit(self.kernel, ...)`.",
+                )
             self._parse_submit_single_lhs(stmt.target, stmt.value)
             return
 
