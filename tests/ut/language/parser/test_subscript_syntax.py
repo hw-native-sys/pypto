@@ -816,6 +816,25 @@ class TestTileSubscriptWrite:
         printed = narrow_tile_write.as_python()
         assert "tile.assemble" in printed
 
+    def test_tile_subscript_write_rank_reduce_1d_src_no_narrowing(self):
+        """1D tile src → 2D tile target with rank-reducing index must still lift
+        cleanly when the source carries no actual narrowing (valid == static).
+        Guards against treating canonical implicit views as narrowed."""
+
+        @pl.function
+        def lift_1d(
+            x: pl.Tensor[[64, 16], pl.FP32],
+            row: pl.Tile[[16], pl.FP32],
+            i: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 16], pl.FP32]:
+            t: pl.Tile[[64, 16], pl.FP32] = pl.tile.load(x, [0, 0], [64, 16])
+            t[i] = row
+            return pl.tile.store(t, [0, 0], x)
+
+        printed = lift_1d.as_python()
+        assert "tile.assemble" in printed
+        assert "pl.tile.reshape(row, [1, 16])" in printed
+
     def test_tile_subscript_write_rank_reduce_narrow_valid_rejected(self):
         """Tile rank-reduce + narrow valid_shape is rejected: tile.reshape
         cannot carry valid_shape, so the rank lift would silently lose the

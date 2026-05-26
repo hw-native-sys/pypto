@@ -172,7 +172,14 @@ def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
 
 
 def _get_source_valid_shape(source_type: ir.Type) -> list[ir.Expr] | None:
-    """Return the source's logical valid_shape, or ``None`` when no narrowing is encoded.
+    """Return the source's valid_shape iff it encodes actual narrowing.
+
+    Returns ``None`` when there is no semantic narrowing — either no view
+    metadata at all, or the effective ``valid_shape`` equals the static shape
+    (the canonical no-narrow case, e.g. a tile's implicit view). Filtering
+    here keeps callers from accidentally treating "valid == static" as
+    narrowing (which would push 1D-tile / non-narrow rank-lift writes onto
+    the issue #1509 path that's intended for actual padding).
 
     TensorType reads ``tensor_view.valid_shape``; TileType uses
     ``get_effective_tile_view()`` so a canonicalized implicit view (stored as
@@ -182,13 +189,17 @@ def _get_source_valid_shape(source_type: ir.Type) -> list[ir.Expr] | None:
         view = source_type.tensor_view
         if view is None or not view.valid_shape:
             return None
-        return list(view.valid_shape)
-    if isinstance(source_type, ir.TileType):
+        valid = list(view.valid_shape)
+    elif isinstance(source_type, ir.TileType):
         view = source_type.get_effective_tile_view()
         if not view.valid_shape:
             return None
-        return list(view.valid_shape)
-    return None
+        valid = list(view.valid_shape)
+    else:
+        return None
+    if _shape_exprs_match(source_type.shape, valid):
+        return None
+    return valid
 
 
 def _shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
