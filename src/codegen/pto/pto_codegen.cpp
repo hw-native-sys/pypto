@@ -1030,12 +1030,10 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
     }
     stream_ << " {layout = #pto.layout<" << layout_str << ">}";
 
-    stream_ << ": !pto.tensor_view<";
-    for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) stream_ << "x";
-      stream_ << "?";
-    }
-    stream_ << "x" << GetTypeString(tensor_type->dtype_) << ">\n";
+    // Issue #1533: keep this in lockstep with GetTensorViewTypeString so the
+    // type signature emitted here matches every other tensor_view consumer
+    // (scf.if results, scf.yield, partition_view source). Use the helper.
+    stream_ << ": " << GetTensorViewTypeString(tensor_type.get()) << "\n";
   }
 }
 
@@ -1624,11 +1622,19 @@ std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
 }
 
 std::string PTOCodegen::GetTensorViewTypeString(const ir::TensorType* tensor_type) const {
+  // Issue #1533: emit static dim values when shape[i] is ConstInt, falling
+  // back to `?` for symbolic dims. ptoas needs the static shape on the type
+  // signature when the SSA producer is an scf.if / scf.for phi — those
+  // phis carry no shape operands to trace back to.
   std::ostringstream oss;
   oss << "!pto.tensor_view<";
   for (size_t i = 0; i < tensor_type->shape_.size(); i++) {
     if (i > 0) oss << "x";
-    oss << "?";
+    if (auto ci = As<ir::ConstInt>(tensor_type->shape_[i])) {
+      oss << ci->value_;
+    } else {
+      oss << "?";
+    }
   }
   oss << "x" << GetTypeString(tensor_type->dtype_) << ">";
   return oss.str();

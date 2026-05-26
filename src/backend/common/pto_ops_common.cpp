@@ -2338,9 +2338,16 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
   std::string peer_view = codegen.NewTemp();
   std::ostringstream view_type;
   view_type << "!pto.tensor_view<";
+  // Issue #1533: emit static dim values when shape[i] is ConstInt so ptoas
+  // can resolve the shape from the type signature in contexts where the
+  // SSA producer is not reachable (e.g. scf.if / scf.for phis).
   for (size_t i = 0; i < rank; ++i) {
     if (i > 0) view_type << "x";
-    view_type << "?";
+    if (auto ci = As<ir::ConstInt>(shape[i])) {
+      view_type << ci->value_;
+    } else {
+      view_type << "?";
+    }
   }
   view_type << "x" << dtype_str << ">";
 
@@ -2975,10 +2982,17 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       oss << stride_names[j];
     }
     oss << "] {layout = #pto.layout<" << layout_str << ">}";
+    // Issue #1533: preserve static dims in the tensor_view type signature so
+    // downstream consumers (scf.if results, partition_view, ...) see the
+    // concrete shape rather than `?`.
     oss << ": !pto.tensor_view<";
     for (size_t j = 0; j < rank; ++j) {
       if (j > 0) oss << "x";
-      oss << "?";
+      if (auto ci = As<ir::ConstInt>(lhs_type->shape_[j])) {
+        oss << ci->value_;
+      } else {
+        oss << "?";
+      }
     }
     oss << "x" << codegen.GetTypeString(lhs_type->dtype_) << ">";
     return oss.str();

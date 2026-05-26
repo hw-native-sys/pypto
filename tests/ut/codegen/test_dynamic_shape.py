@@ -151,7 +151,8 @@ def test_add_kernel_valid_shape_pto_codegen():
     # Static tensor views use constant dims from the 128x128 tensor type
     assert "shape = [%c128_index, %c128_index]" in mlir_code
     assert "strides = [%c128_index, %c1_index]" in mlir_code
-    assert "!pto.tensor_view<?x?xf32>" in mlir_code
+    # Issue #1533: static dims propagate into the tensor_view type signature.
+    assert "!pto.tensor_view<128x128xf32>" in mlir_code
     # partition_view follows valid_shapes (dynamic %arg3, %arg4) so the DMA
     # only fetches the valid region from GM. The partition_view type therefore
     # uses dynamic dims and its sizes use the valid_shape SSA values directly.
