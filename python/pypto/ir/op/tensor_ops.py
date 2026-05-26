@@ -1641,3 +1641,48 @@ def scatter_mask(
     in user code.
     """
     return scatter(input, mask_pattern=mask_pattern, dst=dst, span=span)
+
+
+def get_block_idx(span: Span | None = None) -> Call:
+    """Get the current block index (tensor-scope alias of ``tile.get_block_idx``).
+
+    Lowers to ``tile.get_block_idx`` in ``ConvertTensorToTileOps``.
+
+    Args:
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns an INDEX scalar representing the block index
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.get_block_idx", [], {}, actual_span)
+
+
+def get_subblock_idx(span: Span | None = None) -> Call:
+    """Get the current sub-block (vector core) index (tensor-scope alias of ``tile.get_subblock_idx``).
+
+    Lowers to ``tile.get_subblock_idx`` in ``ConvertTensorToTileOps``.
+
+    Args:
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns an INDEX scalar representing the sub-block index
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.get_subblock_idx", [], {}, actual_span)
+
+
+def get_block_num(span: Span | None = None) -> Call:
+    """Get the total number of blocks in the current SPMD task (tensor-scope alias of ``tile.get_block_num``).
+
+    Lowers to ``tile.get_block_num`` in ``ConvertTensorToTileOps``.
+
+    Args:
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns an INDEX scalar representing the total block count
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.get_block_num", [], {}, actual_span)

@@ -79,6 +79,9 @@ __all__ = [
     "gather",
     "scatter",
     "alloc",
+    "get_block_idx",
+    "get_subblock_idx",
+    "get_block_num",
 ]
 
 from pypto.ir.op import tensor_ops as _ir_ops
@@ -1450,3 +1453,47 @@ def alloc(
     where ``tensor.alloc`` Calls carry ``PtrType``.
     """
     return PtrType()
+
+
+def get_block_idx() -> Scalar:
+    """Get the current block index (tensor-scope alias of ``pl.tile.get_block_idx``).
+
+    Lowers to ``tile.get_block_idx`` in ``ConvertTensorToTileOps``.
+
+    Returns:
+        Scalar wrapping the ``tensor.get_block_idx`` operation (INDEX type)
+
+    Example:
+        >>> block_idx = pl.tensor.get_block_idx()
+    """
+    call_expr = _ir_ops.get_block_idx()
+    return Scalar(expr=call_expr)
+
+
+def get_subblock_idx() -> Scalar:
+    """Get the current sub-block (vector core) index (tensor-scope alias of ``pl.tile.get_subblock_idx``).
+
+    Lowers to ``tile.get_subblock_idx`` in ``ConvertTensorToTileOps``.
+
+    Returns:
+        Scalar wrapping the ``tensor.get_subblock_idx`` operation (INDEX type)
+    """
+    call_expr = _ir_ops.get_subblock_idx()
+    return Scalar(expr=call_expr)
+
+
+def get_block_num() -> Scalar:
+    """Get the total number of blocks in the current SPMD task.
+
+    Tensor-scope alias of ``pl.tile.get_block_num``; lowers to
+    ``tile.get_block_num`` in ``ConvertTensorToTileOps``.
+
+    Returns:
+        Scalar wrapping the ``tensor.get_block_num`` operation (INDEX type)
+
+    Example:
+        >>> block_idx = pl.tensor.get_block_idx()
+        >>> block_num = pl.tensor.get_block_num()
+    """
+    call_expr = _ir_ops.get_block_num()
+    return Scalar(expr=call_expr)

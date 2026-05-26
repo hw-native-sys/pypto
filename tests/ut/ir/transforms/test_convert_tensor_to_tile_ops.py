@@ -2705,5 +2705,120 @@ class TestWrapperForwardPropagation:
         assert ir.structural_equal(after_return_types[0], before_return_types[0])
 
 
+class TestSpmdBlockIdentityConversion:
+    """tensor.get_block_idx / get_subblock_idx / get_block_num lower to tile.* form."""
+
+    def test_get_block_idx_conversion(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                idx: pl.Scalar[pl.INDEX] = pl.tensor.get_block_idx()
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, idx)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                idx = pl.tile.get_block_idx()
+                y__tile = pl.tile.adds(x__tile, idx)
+                ret0__store = pl.store(y__tile, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                ret0__out = pl.create_tensor([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                y = self.main_incore_0(x, ret0__out)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_get_subblock_idx_conversion(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                idx: pl.Scalar[pl.INDEX] = pl.tensor.get_subblock_idx()
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, idx)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                idx = pl.tile.get_subblock_idx()
+                y__tile = pl.tile.adds(x__tile, idx)
+                ret0__store = pl.store(y__tile, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                ret0__out = pl.create_tensor([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                y = self.main_incore_0(x, ret0__out)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_get_block_num_conversion(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                n: pl.Scalar[pl.INDEX] = pl.tensor.get_block_num()
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, n)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                n = pl.tile.get_block_num()
+                y__tile = pl.tile.adds(x__tile, n)
+                ret0__store = pl.store(y__tile, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                ret0__out = pl.create_tensor([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                y = self.main_incore_0(x, ret0__out)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

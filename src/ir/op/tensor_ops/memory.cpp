@@ -651,5 +651,40 @@ REGISTER_OP("tensor.alloc")
       return GetPtrType();
     });
 
+REGISTER_OP("tensor.get_block_idx")
+    .set_op_category("TensorOp")
+    .set_description("Get the current block index (tensor-scope alias of tile.get_block_idx)")
+    .no_argument()
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 0) << "tensor.get_block_idx requires no arguments, but got " << args.size();
+      return std::make_shared<ScalarType>(DataType::INDEX);
+    });
+
+REGISTER_OP("tensor.get_subblock_idx")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Get the current sub-block (vector core) index (tensor-scope alias of tile.get_subblock_idx)")
+    .no_argument()
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 0) << "tensor.get_subblock_idx requires no arguments, but got " << args.size();
+      return std::make_shared<ScalarType>(DataType::INDEX);
+    });
+
+REGISTER_OP("tensor.get_block_num")
+    .set_op_category("TensorOp")
+    .set_description(
+        "Get the total number of blocks in the current SPMD task (tensor-scope alias of tile.get_block_num)")
+    .no_argument()
+    .no_memory_spec()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 0) << "tensor.get_block_num requires no arguments, but got " << args.size();
+      return std::make_shared<ScalarType>(DataType::INDEX);
+    });
+
 }  // namespace ir
 }  // namespace pypto

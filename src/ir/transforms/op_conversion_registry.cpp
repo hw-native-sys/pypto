@@ -578,6 +578,11 @@ void OpConversionRegistry::RegisterMemoryOps() {
         return ConversionResult{nullptr};  // unreachable
       });
 
+  // SPMD block-identity queries: tensor-scope aliases lower 1:1 to tile.* form.
+  RegisterSimple("tensor.get_block_idx", "tile.get_block_idx");
+  RegisterSimple("tensor.get_subblock_idx", "tile.get_subblock_idx");
+  RegisterSimple("tensor.get_block_num", "tile.get_block_num");
+
   RegisterCustom(
       "tensor.expand_clone",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
