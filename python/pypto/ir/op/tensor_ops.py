@@ -214,7 +214,6 @@ def slice(
     shape: list[int | Expr] | _ir_core.MakeTuple,
     offset: list[int | Expr] | _ir_core.MakeTuple,
     valid_shape: list[int | Expr] | _ir_core.MakeTuple | None = None,
-    drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -222,14 +221,9 @@ def slice(
 
     Args:
         tensor: Input tensor expression
-        shape: New shape dimensions, or a MakeTuple. Always full-rank — a
-            scalar-indexed axis contributes a unit dim here and is listed in
-            ``drop_dims`` to be erased from the result type.
+        shape: New shape dimensions, or a MakeTuple
         offset: Offset dimensions for the slice, or a MakeTuple
         valid_shape: Valid shape dimensions (optional, defaults to empty)
-        drop_dims: Optional axes to erase from the result type (numpy-style rank
-            reduction). Each listed axis must be a static unit dim of ``shape``.
-            ``None`` / ``[]`` is fully backward compatible (drops nothing).
         pad_value: Optional padding mode for out-of-valid-shape elements.
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
             the literal sugars ``0``, ``math.inf``, ``-math.inf`` (normalized
@@ -248,15 +242,7 @@ def slice(
     offset_tuple = _to_make_tuple(offset, actual_span)
 
     args = [tensor, shape_tuple, offset_tuple]
-    if drop_dims:
-        # drop_dims is the 5th positional operand, so valid_shape (the 4th) must
-        # be present; an empty MakeTuple stands in for "no valid_shape".
-        args.append(_to_make_tuple(valid_shape if valid_shape is not None else [], actual_span))
-        # `drop_dims` may be ints (direct API) or ConstInt exprs (text parser);
-        # _to_make_tuple normalizes either form. Non-ConstInt exprs are rejected
-        # by the deducer with a clear message.
-        args.append(_to_make_tuple(list(drop_dims), actual_span))
-    elif valid_shape is not None:
+    if valid_shape is not None:
         args.append(_to_make_tuple(valid_shape, actual_span))
 
     kwargs: dict[str, Any] = {}

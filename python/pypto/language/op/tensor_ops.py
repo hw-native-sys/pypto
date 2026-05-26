@@ -251,20 +251,15 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
-    drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
 ) -> Tensor:
     """Create a slice of a tensor with new shape and optional valid shape.
 
     Args:
         tensor: Input tensor
-        shape: New shape dimensions. Always full-rank — a scalar-indexed axis
-            contributes a unit dim here and is listed in ``drop_dims``.
+        shape: New shape dimensions
         offset: Offset dimensions for the slice
         valid_shape: Valid shape dimensions. When omitted, the full shape is valid.
-        drop_dims: Optional axes to erase from the result type (numpy-style rank
-            reduction). Each listed axis must be a static unit dim of ``shape``.
-            ``None`` / ``[]`` drops nothing (fully backward compatible).
         pad_value: Optional padding mode for out-of-valid-shape elements.
             ``None`` or ``PadValue.null`` means no padding (the default).
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
@@ -292,7 +287,6 @@ def slice(
         _normalize_intlike(shape),
         _normalize_intlike(offset),
         normalized_valid_shape,
-        drop_dims,
         pad_value=pad_value,
     )
     return Tensor(expr=call_expr)

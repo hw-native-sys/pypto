@@ -3288,14 +3288,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.slice", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-    // 3-5 args: (tile, shape, offset[, valid_shape[, drop_dims]]). The optional
-    // 5th `drop_dims` operand only affects the result type's rank (already
-    // reflected in the result tile-buf type) — the pto.subview sizes/offset come
-    // from the full-rank shape/offset tuples, so codegen ignores it. An empty
-    // 4th MakeTuple is the "no valid_shape" sentinel that pairs with drop_dims.
-    CHECK(op->args_.size() >= 3 && op->args_.size() <= 5)
-        << "Operation:[tile.slice] requires 3-5 arguments (tile, shape, offset[, valid_shape[, "
-           "drop_dims]]), but got "
+    CHECK(op->args_.size() == 3 || op->args_.size() == 4)
+        << "Operation:[tile.slice] requires 3 or 4 arguments (tile, shape, offset[, valid_shape]), but got "
         << op->args_.size();
 
     auto source_tile_type = ir::As<ir::TileType>(op->args_[0]->GetType());
@@ -3323,11 +3317,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
 
     std::string valid_row;
     std::string valid_col;
-    // valid_shape is the optional 4th operand; an empty MakeTuple means "none"
-    // (the form used when only drop_dims is supplied).
-    auto valid_tuple = op->args_.size() >= 4 ? ir::As<ir::MakeTuple>(op->args_[3]) : nullptr;
-    bool has_explicit_valid_shape = valid_tuple != nullptr && !valid_tuple->elements_.empty();
+    bool has_explicit_valid_shape = op->args_.size() == 4;
     if (has_explicit_valid_shape) {
+      auto valid_tuple = ir::As<ir::MakeTuple>(op->args_[3]);
       INTERNAL_CHECK_SPAN(valid_tuple, op->span_) << "tile.slice valid_shape must be a literal tuple";
       INTERNAL_CHECK_SPAN(valid_tuple->elements_.size() >= 2, op->span_)
           << "tile.slice valid_shape must have at least 2 elements";

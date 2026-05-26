@@ -9,7 +9,6 @@
 
 """Unit tests for subscript syntax on Tensor and Tile types."""
 
-import warnings
 from typing import cast
 
 import pypto.language as pl
@@ -77,12 +76,12 @@ class TestTensorSubscript:
         assert "tensor.slice" in printed
 
     def test_tensor_mixed_subscript(self):
-        """A[0:16, 0] with mixed int and slice -> tensor.slice, scalar axis dropped -> [16]."""
+        """A[0:16, 0] with mixed int and slice -> tensor.slice with shape [16, 1]."""
 
         @pl.function
         def mixed_sub(
             A: pl.Tensor[[64, 128], pl.FP32],
-        ) -> pl.Tensor[[16], pl.FP32]:
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
             return A[0:16, 0]
 
         assert isinstance(mixed_sub, ir.Function)
@@ -114,74 +113,15 @@ class TestTensorSubscript:
             ) -> pl.Tensor[[8, 128], pl.FP32]:
                 return A[0:16:2, :]
 
-    def test_tensor_subscript_too_many_indices(self):
-        """A[i, j, k] on a 2D tensor -> error (more indices than rank)."""
-        with pytest.raises(ParserTypeError, match="3 indices but the tensor is 2D"):
+    def test_tensor_subscript_wrong_rank(self):
+        """A[0] on a 2D tensor -> error (rank mismatch)."""
+        with pytest.raises(ParserTypeError, match="2 indices"):
 
             @pl.function
-            def too_many(
+            def bad_rank(
                 A: pl.Tensor[[64, 128], pl.FP32],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
-                return A[0, 0, 0]
-
-    def test_tensor_partial_index_rank_reduces(self):
-        """A[i] on a 2D tensor -> a 1D view (dim 0 dropped)."""
-
-        @pl.function
-        def partial(
-            A: pl.Tensor[[64, 128], pl.FP32],
-            i: pl.Scalar[pl.INDEX],
-        ) -> pl.Tensor[[128], pl.FP32]:
-            return A[i]
-
-        printed = partial.as_python()
-        assert "tensor.slice" in printed
-        assert "[], [0])" in printed  # drop_dims operand
-
-    def test_tensor_chained_index(self):
-        """C[i][j] on a 4D tensor -> two rank-reducing slices, result 2D."""
-
-        @pl.function
-        def chained(
-            C: pl.Tensor[[64, 64, 64, 64], pl.FP32],
-            i: pl.Scalar[pl.INDEX],
-            j: pl.Scalar[pl.INDEX],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            return C[i][j]
-
-        printed = chained.as_python()
-        # Chained indexing lowers to nested slices (C[i] is a 3D view, then [j]).
-        assert printed.count("tensor.slice") == 2
-
-    def test_tensor_two_index_partial(self):
-        """C[i, j] on a 4D tensor -> a single rank-reducing slice, result 2D."""
-
-        @pl.function
-        def two_index(
-            C: pl.Tensor[[64, 64, 64, 64], pl.FP32],
-            i: pl.Scalar[pl.INDEX],
-            j: pl.Scalar[pl.INDEX],
-        ) -> pl.Tensor[[64, 64], pl.FP32]:
-            return C[i, j]
-
-        printed = two_index.as_python()
-        assert printed.count("tensor.slice") == 1
-        assert "[], [0, 1])" in printed  # drop_dims operand
-
-    def test_tensor_mixed_slice_and_scalar(self):
-        """C[i:i+8, j] on a 4D tensor -> [8, 64, 64] view (dim 1 dropped)."""
-
-        @pl.function
-        def mixed(
-            C: pl.Tensor[[64, 64, 64, 64], pl.FP32],
-            i: pl.Scalar[pl.INDEX],
-            j: pl.Scalar[pl.INDEX],
-        ) -> pl.Tensor[[8, 64, 64], pl.FP32]:
-            return C[i : i + 8, j]
-
-        printed = mixed.as_python()
-        assert "tensor.slice" in printed
-        assert "[], [1])" in printed  # drop_dims operand
+                return A[0]
 
 
 class TestTileSubscript:
@@ -342,33 +282,17 @@ class TestTileSubscript:
         printed = read_var.as_python()
         assert "tile.read" in printed
 
-    def test_tile_subscript_too_many_indices(self):
-        """t[i, j, k] on a 2D tile -> error (more indices than rank)."""
-        with pytest.raises(ParserTypeError, match="3 indices but the tile is 2D"):
+    def test_tile_read_wrong_rank(self):
+        """A[0] on a 2D tile -> error (rank mismatch)."""
+        with pytest.raises(ParserTypeError, match="2 indices"):
 
             @pl.function
-            def too_many(
+            def bad_rank(
                 x: pl.Tensor[[64, 128], pl.FP32],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
                 t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
-                bad: pl.Tile[[1, 128], pl.FP32] = t[0, 0, 0]
-                return pl.store(bad, [0, 0], x)
-
-    def test_tile_partial_index_auto_promotes_to_2d(self):
-        """t[i] on a 2D tile -> a [1, 128] view (dim 0 dropped, clamped to 2D) + warning."""
-        with pytest.warns(UserWarning, match="auto-promoting to 2D shape"):
-
-            @pl.function
-            def partial(
-                x: pl.Tensor[[64, 128], pl.FP32],
-                i: pl.Scalar[pl.INDEX],
-            ) -> pl.Tensor[[64, 128], pl.FP32]:
-                t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
-                row: pl.Tile[[1, 128], pl.FP32] = t[i]
-                return pl.store(row, [0, 0], x)
-
-        printed = partial.as_python()
-        assert "tile.slice" in printed
+                _elem: pl.Scalar[pl.FP32] = t[0]
+                return pl.store(t, [0, 0], x)
 
     def test_tile_subscript_step_error(self):
         """A[0:16:2, :] with step on tile should raise error."""
@@ -503,64 +427,18 @@ class TestTensorSubscriptWrite:
                 out[0:16:2, :] = src
                 return out
 
-    def test_tensor_subscript_write_too_many_indices(self):
-        """A[i, j, k] = src on a 2D tensor must reject (more indices than rank)."""
+    def test_tensor_subscript_write_wrong_rank(self):
+        """A[0:16] = src on a 2D tensor must reject (rank mismatch)."""
 
-        with pytest.raises(ParserTypeError, match="3 indices but the tensor is 2D"):
+        with pytest.raises(ParserTypeError, match="2 indices"):
 
             @pl.function
-            def too_many(
+            def bad_rank(
                 out: pl.Tensor[[64, 128], pl.FP32],
-                src: pl.Tensor[[1, 128], pl.FP32],
+                src: pl.Tensor[[16, 128], pl.FP32],
             ) -> pl.Tensor[[64, 128], pl.FP32]:
-                out[0, 0, 0] = src
+                out[0:16] = src
                 return out
-
-    def test_tensor_subscript_write_partial(self):
-        """A[0:16] = src on a 2D tensor writes rows 0..16 (trailing axis implicit ':')."""
-
-        @pl.function
-        def partial_write(
-            out: pl.Tensor[[64, 128], pl.FP32],
-            src: pl.Tensor[[16, 128], pl.FP32],
-        ) -> pl.Tensor[[64, 128], pl.FP32]:
-            out[0:16] = src
-            return out
-
-        printed = partial_write.as_python()
-        assert "tensor.assemble" in printed
-
-    def test_tensor_subscript_write_rank_reducing(self):
-        """C[i, j] = rhs2d on a 4D tensor lowers the rhs into a [1, 1, 64, 64] window."""
-
-        @pl.function
-        def reduce_write(
-            C: pl.Tensor[[64, 64, 64, 64], pl.FP32],
-            rhs: pl.Tensor[[64, 64], pl.FP32],
-            i: pl.Scalar[pl.INDEX],
-            j: pl.Scalar[pl.INDEX],
-        ) -> pl.Tensor[[64, 64, 64, 64], pl.FP32]:
-            C[i, j] = rhs
-            return C
-
-        printed = reduce_write.as_python()
-        assert "tensor.assemble" in printed
-        assert "tensor.reshape" in printed  # rhs lifted to the full-rank window
-
-    def test_tensor_subscript_write_rank_reducing_bad_source_rank(self):
-        """C[i, j] = rhs with the wrong rhs rank is rejected."""
-
-        with pytest.raises(ParserTypeError, match="must be 2D to match"):
-
-            @pl.function
-            def bad_src(
-                C: pl.Tensor[[64, 64, 64, 64], pl.FP32],
-                rhs: pl.Tensor[[64, 64, 64], pl.FP32],
-                i: pl.Scalar[pl.INDEX],
-                j: pl.Scalar[pl.INDEX],
-            ) -> pl.Tensor[[64, 64, 64, 64], pl.FP32]:
-                C[i, j] = rhs
-                return C
 
     def test_tensor_subscript_write_element_form_unsupported(self):
         """A[i, j] = scalar must be rejected for now (no element-write op wiring)."""
@@ -593,7 +471,7 @@ class TestTensorSubscriptWrite:
     def test_tensor_subscript_write_shape_mismatch_static(self):
         """Static shape mismatch on a slice axis must be reported with axis + extents."""
 
-        with pytest.raises(ParserTypeError, match="shape mismatch on source axis 0"):
+        with pytest.raises(ParserTypeError, match="shape mismatch on axis 0"):
 
             @pl.function
             def bad_shape(
@@ -606,7 +484,7 @@ class TestTensorSubscriptWrite:
     def test_tensor_subscript_write_full_axis_shape_mismatch(self):
         """`out[:, :] = src` requires src to fill the target shape exactly."""
 
-        with pytest.raises(ParserTypeError, match="shape mismatch on source axis 1"):
+        with pytest.raises(ParserTypeError, match="shape mismatch on axis 1"):
 
             @pl.function
             def bad_full(
@@ -648,7 +526,7 @@ class TestTensorSubscriptWrite:
     def test_tensor_subscript_write_symbolic_extent_simplifies_mismatch(self):
         """``out[i:i+8, ...] = src`` simplifies to 8 — must reject when src has 16."""
 
-        with pytest.raises(ParserTypeError, match="shape mismatch on source axis 0"):
+        with pytest.raises(ParserTypeError, match="shape mismatch on axis 0"):
 
             @pl.function
             def bad_symbolic(
@@ -705,29 +583,6 @@ class TestTileSubscriptWrite:
         offset_tuple = assemble_stmt.value.args[2]
         assert isinstance(offset_tuple, ir.MakeTuple)
         assert [cast(ir.ConstInt, e).value for e in offset_tuple.elements] == [0, 0]
-
-    def test_tile_subscript_write_rank_reducing_row(self):
-        """t2d[i] = row_tile (a [1, N] tile, the only shape tile indexing produces)
-        is accepted — the tile 2D-floor is taken into account when checking rhs rank."""
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")  # the t[j] read auto-promotes to [1, N] + warns
-
-            @pl.function
-            def write_row(
-                x: pl.Tensor[[64, 128], pl.FP32],
-                i: pl.Scalar[pl.INDEX],
-                j: pl.Scalar[pl.INDEX],
-            ) -> pl.Tensor[[64, 128], pl.FP32]:
-                t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
-                row: pl.Tile[[1, 128], pl.FP32] = t[j]  # a [1, 128] view
-                t[i] = row
-                return pl.store(t, [0, 0], x)
-
-        printed = write_row.as_python()
-        # window [1, 128] == rhs shape [1, 128], so no reshape is inserted.
-        assert "tile.assemble" in printed
-        assert "tile.reshape" not in printed
 
 
 if __name__ == "__main__":

@@ -1392,22 +1392,16 @@ def slice(
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
-    drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
 ) -> Tile:
     """Create a slice of a tile with static shape and optional valid shape.
 
     Args:
         tile: Input tile
-        shape: Static shape dimensions. Always full-rank — a scalar-indexed axis
-            contributes a unit dim here and is listed in ``drop_dims``.
+        shape: Static shape dimensions (at most 2 for TileType)
         offset: Offset dimensions for the slice
         valid_shape: Valid shape dimensions. When omitted, shape is reused as the
             logical valid shape.
-        drop_dims: Optional axes to erase from the result type (numpy-style rank
-            reduction). Each listed axis must be a static unit dim of ``shape``.
-            Because tiles are physically 2D, the result is clamped back to 2D
-            if reduction would take it below 2D. ``None`` / ``[]`` drops nothing.
         pad_value: Optional padding mode for out-of-valid-shape elements.
             ``None`` or ``PadValue.null`` means no padding (the default).
             Accepts ``PadValue.zero`` / ``PadValue.max`` / ``PadValue.min``, or
@@ -1435,7 +1429,6 @@ def slice(
         _normalize_intlike(shape),
         _normalize_intlike(offset),
         normalized_valid_shape,
-        drop_dims,
         pad_value=pad_value,
     )
     return Tile(expr=call_expr)
