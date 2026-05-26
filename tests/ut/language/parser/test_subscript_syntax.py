@@ -676,6 +676,54 @@ class TestTensorSubscriptWrite:
         assert isinstance(truly_symbolic, ir.Function)
         assert "tensor.assemble" in truly_symbolic.as_python()
 
+    def test_tensor_subscript_write_accepts_narrow_valid_shape(self):
+        """src.static=[16, 8] padded for ISA alignment, valid_shape=[16, 4];
+        a window expecting 4 cols must be accepted (mirrors pl.store)."""
+
+        @pl.function
+        def narrow_write(
+            out: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tensor[[16, 8], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            narrowed = pl.set_validshape(src, 16, 4)
+            out[0:16, 0:4] = narrowed
+            return out
+
+        assert isinstance(narrow_write, ir.Function)
+        printed = narrow_write.as_python()
+        assert "tensor.assemble" in printed
+
+    def test_tensor_subscript_write_rejects_static_and_valid_mismatch(self):
+        """src.static=[16, 8], valid=[16, 4]; window 6 cols matches neither — still reject."""
+
+        with pytest.raises(ParserTypeError, match="shape mismatch on source axis 1"):
+
+            @pl.function
+            def bad_neither_match(
+                out: pl.Tensor[[64, 128], pl.FP32],
+                src: pl.Tensor[[16, 8], pl.FP32],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                narrowed = pl.set_validshape(src, 16, 4)
+                out[0:16, 0:6] = narrowed
+                return out
+
+    def test_tensor_subscript_write_dynamic_valid_shape_trusted(self):
+        """Dynamic valid_shape (Scalar[INDEX]) cannot be disproven at parse time —
+        parser must trust it (symmetric to dynamic slot / dynamic static_shape)."""
+
+        @pl.function
+        def dynamic_valid(
+            out: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tensor[[16, 8], pl.FP32],
+            valid_cols: pl.Scalar[pl.INDEX],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            narrowed = pl.set_validshape(src, 16, valid_cols)
+            out[0:16, 0:4] = narrowed
+            return out
+
+        assert isinstance(dynamic_valid, ir.Function)
+        assert "tensor.assemble" in dynamic_valid.as_python()
+
 
 class TestTileSubscriptWrite:
     """Tests for tile subscript-write syntax on Tile types."""
@@ -728,6 +776,23 @@ class TestTileSubscriptWrite:
         # window [1, 128] == rhs shape [1, 128], so no reshape is inserted.
         assert "tile.assemble" in printed
         assert "tile.reshape" not in printed
+
+    def test_tile_subscript_write_accepts_narrow_valid_shape(self):
+        """Tile src with static=[16, 8] (ISA padding) and valid=[16, 4] writes into
+        a [16, 4] window — accept, mirroring pl.store's tile-side behavior."""
+
+        @pl.function
+        def narrow_tile_write(
+            x: pl.Tensor[[64, 128], pl.FP32],
+            src: pl.Tile[[16, 8], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t: pl.Tile[[64, 128], pl.FP32] = pl.load(x, [0, 0], [64, 128])
+            narrowed = pl.set_validshape(src, 16, 4)
+            t[0:16, 0:4] = narrowed
+            return pl.store(t, [0, 0], x)
+
+        printed = narrow_tile_write.as_python()
+        assert "tile.assemble" in printed
 
 
 if __name__ == "__main__":

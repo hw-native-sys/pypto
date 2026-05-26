@@ -171,6 +171,26 @@ def _fold_const_slice_extent(upper: object, lower: object) -> int | None:
     return upper_value - lower_value
 
 
+def _get_source_valid_shape(source_type: ir.Type) -> list[ir.Expr] | None:
+    """Return the source's logical valid_shape, or ``None`` when no narrowing is encoded.
+
+    TensorType reads ``tensor_view.valid_shape``; TileType uses
+    ``get_effective_tile_view()`` so a canonicalized implicit view (stored as
+    ``None``) still surfaces its semantic valid_shape.
+    """
+    if isinstance(source_type, ir.TensorType):
+        view = source_type.tensor_view
+        if view is None or not view.valid_shape:
+            return None
+        return list(view.valid_shape)
+    if isinstance(source_type, ir.TileType):
+        view = source_type.get_effective_tile_view()
+        if not view.valid_shape:
+            return None
+        return list(view.valid_shape)
+    return None
+
+
 def _shape_exprs_match(lhs: Sequence[ir.Expr], rhs: Sequence[ir.Expr]) -> bool:
     """Return whether two shape-like expression lists are statically identical."""
     if len(lhs) != len(rhs):
@@ -1565,17 +1585,32 @@ class ASTParser:
         # prepended when the source carries the tile 2D-floor's padding.
         lead_units = src_rank - natural_rank
         expected_extents = [1] * lead_units + [extents[d] for d in kept_dims]
+        # A narrowed source (static_shape padded for ISA alignment, valid_shape
+        # carrying the logical extent — same pattern pl.store accepts on the
+        # tile path) is allowed when its valid_shape matches the window.
+        source_valid_shape = _get_source_valid_shape(source_type)
         for src_axis, want in enumerate(expected_extents):
             requested_const = _fold_const_slice_extent(want, 0)
             source_const = _fold_const_slice_extent(source_type.shape[src_axis], 0)
-            if requested_const is not None and source_const is not None and requested_const != source_const:
-                raise ParserTypeError(
-                    f"Subscript-write shape mismatch on source axis {src_axis}: "
-                    f"window expects {requested_const} elements, source has {source_const}",
-                    span=span,
-                    hint="Make the source's extents match the rank-reduced lhs window, "
-                    "or adjust the slice bounds",
-                )
+            if requested_const is None or source_const is None:
+                continue
+            if requested_const == source_const:
+                continue
+            if source_valid_shape is not None:
+                valid_const = _fold_const_slice_extent(source_valid_shape[src_axis], 0)
+                # Dynamic valid_shape (folds to None) — parser cannot disprove
+                # the match, so trust it, symmetric to dynamic slot / dynamic
+                # static_shape above. Constant valid_shape only accepts on a
+                # match.
+                if valid_const is None or valid_const == requested_const:
+                    continue
+            raise ParserTypeError(
+                f"Subscript-write shape mismatch on source axis {src_axis}: "
+                f"window expects {requested_const} elements, source has {source_const}",
+                span=span,
+                hint="Make the source's static_shape or valid_shape match the "
+                "rank-reduced lhs window, or adjust the slice bounds",
+            )
 
         if src_rank != len(extents):
             # Lift the rank-reduced source back to the full-rank target window
