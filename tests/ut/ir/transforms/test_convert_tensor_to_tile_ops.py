@@ -1989,7 +1989,11 @@ class TestScatterUpdateConversion:
         with passes.PassContext([], passes.VerificationLevel.NONE):
             After = passes.convert_tensor_to_tile_ops()(Before)
         text = ir.python_print(After)
-        assert "tile.scatter" in text
+        # Assert exact op presence: scatter_update must lower to the index-form tile.scatter,
+        # never the mask-form tile.scatter_mask (substring "tile.scatter" would match both).
+        assert "pl.tile.scatter(" in text
+        assert "pl.tile.scatter_mask(" not in text
+        assert text.count("pl.tile.scatter(") >= 1
         assert "scatter_update" not in text
 
 

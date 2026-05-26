@@ -392,23 +392,29 @@ void OpConversionRegistry::RegisterMemoryOps() {
   auto scatter_update_conv = [](const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs,
                                 const Span& span) -> ConversionResult {
-    CHECK(args.size() == 3) << "tensor.scatter_update conversion expects 3 args (input, index, src)";
+    INTERNAL_CHECK_SPAN(args.size() == 3, span)
+        << "tensor.scatter_update conversion expects 3 args (input, index, src)";
     auto& op_reg = OpRegistry::GetInstance();
     auto input_tile = As<TileType>(args[0]->GetType());
     auto idx_tile = As<TileType>(args[1]->GetType());
     auto src_tile = As<TileType>(args[2]->GetType());
-    CHECK(input_tile && idx_tile && src_tile)
+    INTERNAL_CHECK_SPAN(input_tile && idx_tile && src_tile, span)
         << "tensor.scatter_update conversion: input/index/src must be Vec tiles after bridge";
-    CHECK(input_tile->shape_.size() == 2 && src_tile->shape_.size() == 2)
+    INTERNAL_CHECK_SPAN(input_tile->shape_.size() == 2 && src_tile->shape_.size() == 2, span)
         << "tensor.scatter_update conversion currently supports 2D input/src only";
     auto src_rows = As<ConstInt>(src_tile->shape_[0]);
     auto idx_b = As<ConstInt>(idx_tile->shape_[0]);
     auto idx_s = As<ConstInt>(idx_tile->shape_[1]);
     auto dst_rows = As<ConstInt>(input_tile->shape_[0]);
     auto dst_cols = As<ConstInt>(input_tile->shape_[1]);
-    CHECK(src_rows && idx_b && idx_s && dst_rows && dst_cols)
+    INTERNAL_CHECK_SPAN(src_rows && idx_b && idx_s && dst_rows && dst_cols, span)
         << "tensor.scatter_update conversion requires static shapes for index expansion";
     const int64_t n = src_rows->value_;  // b*s flattened scatter rows
+    // src rows must equal the flattened index size, since each src row k is written whole
+    // into dst[index.flat[k]] and flat_idx is built over the [n, d] template (n = b * s).
+    INTERNAL_CHECK_SPAN(n == idx_b->value_ * idx_s->value_, span)
+        << "tensor.scatter_update conversion: src rows (" << n
+        << ") must match index size (b * s = " << idx_b->value_ * idx_s->value_ << ")";
     const int64_t d = dst_cols->value_;  // feature width (= src cols)
     const int64_t m = dst_rows->value_;
     const DataType dt = input_tile->dtype_;
