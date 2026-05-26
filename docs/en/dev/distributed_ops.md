@@ -91,6 +91,7 @@ positional, matching `tile.load`.
 
 ```text
 pld.tensor.put(dst, peer, src, *, atomic: int) -> Unknown
+pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape, *, atomic: int) -> Unknown
 ```
 
 Synchronously writes the local window-bound `src` into the `peer` rank's slice
@@ -100,9 +101,13 @@ views; the VEC staging tile is synthesised at codegen
 appears on the DSL surface.
 
 Verifier: `dst` / `src` must both be `DistributedTensorType`; `peer` must be a
-`ScalarType`; `dst` and `src` must share element type and identical **positive
-static** shape (the staging VEC buffer needs compile-time extents). `atomic`
-selects overwrite vs atomic-add (see `AtomicType`).
+`ScalarType`; `dst` and `src` must share element type. The 3-argument form
+writes the full local `src` slice to the full peer `dst` slice and therefore
+requires identical **positive static** shapes. The 6-argument form writes
+`src[src_offsets:src_offsets+shape]` into the peer rank's
+`dst[dst_offsets:dst_offsets+shape]`; offsets must match tensor rank and
+`shape` must be positive static so the staging VEC buffer has compile-time
+extents. `atomic` selects overwrite vs atomic-add (see `AtomicType`).
 
 ### `pld.system.notify` (TNOTIFY)
 

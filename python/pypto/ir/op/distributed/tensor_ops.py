@@ -74,7 +74,10 @@ def put(
     dst: Expr,
     peer: int | Expr,
     src: Expr,
-    atomic: AtomicType,
+    dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    atomic: AtomicType = AtomicType.None_,
     *,
     span: Span | None = None,
 ) -> Call:
@@ -85,12 +88,26 @@ def put(
     ``atomic`` (:class:`ir.AtomicType`) selects plain-store vs atomic-add and is
     packed as an ``int`` attr. Side-effect only — the result is an
     ``UnknownType`` Call. The verifier rejects a non-:class:`ir.DistributedTensorType`
-    ``dst`` / ``src`` and requires both to share element type and static shape.
+    ``dst`` / ``src``. With no offsets/shape it writes the full source slice
+    into the full destination slice. When offsets and shape are provided it
+    writes ``src[src_offsets:src_offsets+shape]`` into the peer rank's
+    ``dst[dst_offsets:dst_offsets+shape]``.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    args: list[Expr] = [dst, peer_expr, src]
+    if (dst_offsets is None) != (src_offsets is None) or (dst_offsets is None) != (shape is None):
+        raise ValueError("pld.tensor.put dst_offsets, src_offsets, and shape must be provided together")
+    if dst_offsets is not None and src_offsets is not None and shape is not None:
+        args.extend(
+            [
+                _to_make_tuple(dst_offsets, actual_span),
+                _to_make_tuple(src_offsets, actual_span),
+                _to_make_tuple(shape, actual_span),
+            ]
+        )
     return _ir_core.create_op_call(
-        "pld.tensor.put", [dst, peer_expr, src], {"atomic": int(atomic)}, actual_span
+        "pld.tensor.put", args, {"atomic": int(atomic)}, actual_span
     )
 
 

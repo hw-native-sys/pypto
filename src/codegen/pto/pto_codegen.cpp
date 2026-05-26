@@ -451,15 +451,16 @@ std::string PTOCodegen::GetCommRemoteOffsetFuncName(const DataType& dtype) {
 namespace {
 
 // Walks every function body in the program and accumulates the
-// DistributedTensor element DataType consumed by each
-// ``pld.tile.remote_load`` / ``pld.system.notify`` call.
+// DistributedTensor element DataType consumed by each remote op that calls a
+// per-dtype ``CommRemoteOffset`` helper.
 class RemoteOffsetDtypeCollector : public ir::IRVisitor {
  public:
   explicit RemoteOffsetDtypeCollector(std::set<DataType, DtypeCodeLess>* dtypes) : dtypes_(dtypes) {}
 
  protected:
   void VisitExpr_(const ir::CallPtr& op) override {
-    if (op->op_ && (op->op_->name_ == "pld.tile.remote_load" || op->op_->name_ == "pld.system.notify")) {
+    if (op->op_ && (op->op_->name_ == "pld.tile.remote_load" || op->op_->name_ == "pld.system.notify" ||
+                    op->op_->name_ == "pld.tensor.put")) {
       INTERNAL_CHECK_SPAN(!op->args_.empty(), op->span_)
           << "Internal error: " << op->op_->name_ << " expects DistributedTensor as first arg";
       auto dist_type = ir::As<ir::DistributedTensorType>(op->args_[0]->GetType());

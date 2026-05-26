@@ -510,6 +510,25 @@ def test_put_returns_unknown_type():
     assert isinstance(call.type, ir.UnknownType)
 
 
+def test_put_subregion_returns_unknown_type():
+    """Positive: offset put writes matching subregions and is side-effect-only."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [8, 64], DataType.FP16, span)
+    dst_offsets = _make_shape_tuple([3, 0], span)
+    src_offsets = _make_shape_tuple([1, 0], span)
+    shape = _make_shape_tuple([1, 64], span)
+
+    call = ir.create_op_call(
+        "pld.tensor.put",
+        [dst, peer, src, dst_offsets, src_offsets, shape],
+        {"atomic": ir.AtomicType.None_},
+        span,
+    )
+    assert isinstance(call.type, ir.UnknownType)
+
+
 def test_put_rejects_plain_tensor_dst():
     """Negative: a plain pl.Tensor dst is refused — must be window-bound."""
     span = ir.Span.unknown()
@@ -570,6 +589,25 @@ def test_put_rejects_shape_mismatch():
             "pld.tensor.put",
             [dst, peer, src],
             {"atomic": ir.AtomicType.Add},
+            span,
+        )
+
+
+def test_put_subregion_rejects_mismatched_offsets_rank():
+    """Negative: subregion offsets and shape must match tensor rank."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    bad_dst_offsets = _make_shape_tuple([0], span)
+    src_offsets = _make_shape_tuple([0, 0], span)
+    shape = _make_shape_tuple([1, 64], span)
+
+    with pytest.raises(Exception, match="dst_offsets rank"):
+        ir.create_op_call(
+            "pld.tensor.put",
+            [dst, peer, src, bad_dst_offsets, src_offsets, shape],
+            {"atomic": ir.AtomicType.None_},
             span,
         )
 

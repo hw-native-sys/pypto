@@ -385,7 +385,7 @@ class PTOCodegen : public CodegenBase {
    * DistributedTensor parameter at the end of the func.func signature
    * (after explicit tensor/scalar params, before dynamic-shape ``index``
    * params). The mapping ``dist_tensor_var → ctx_ssa`` lets the
-   * pld.tile.remote_load / pld.system.notify / pld.system.wait codegen
+   * pld.tile.remote_load / pld.tensor.put / pld.system.notify / pld.system.wait codegen
    * recover the matching context pointer.
    *
    * @param dist_var DistributedTensor parameter variable.
@@ -409,7 +409,8 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Name of the module-level ``@CommRemoteOffset_<dtype>`` helper.
    *
-   * Distributed remote ops (``pld.tile.remote_load`` / ``pld.system.notify``)
+   * Distributed remote ops (``pld.tile.remote_load`` / ``pld.tensor.put`` /
+   * ``pld.system.notify``)
    * lower their per-call peer-rank addressing to a ``func.call`` of a
    * per-dtype module-level helper that returns the **element offset**
    * (``index``) between the local rank's window slice and the peer
@@ -540,7 +541,7 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Walk the program and collect distinct DistributedTensor
    *        element dtypes consumed by ``pld.tile.remote_load`` /
-   *        ``pld.system.notify``.
+   *        ``pld.tensor.put`` / ``pld.system.notify``.
    *
    * One ``@CommRemoteOffset_<dtype>`` helper is emitted per distinct
    * dtype at module scope (see :func:`EmitCommRemoteOffsetHelpers`).
@@ -677,7 +678,7 @@ class PTOCodegen : public CodegenBase {
     /// Mapping from DistributedTensor parameter Var → CommContext pointer
     /// arg SSA name. Populated in GenerateFunction when appending the
     /// trailing ``!pto.ptr<i64>`` ctx params. Consumed by
-    /// pld.tile.remote_load / pld.system.notify / pld.system.wait codegen
+    /// pld.tile.remote_load / pld.tensor.put / pld.system.notify / pld.system.wait codegen
     /// to recover the per-tensor CommContext pointer.
     std::map<const ir::Var*, std::string> dist_tensor_to_ctx;
 
@@ -738,7 +739,7 @@ class PTOCodegen : public CodegenBase {
   std::map<std::pair<int, int>, int64_t> gm_slot_buffer_offsets_;
 
   /// Element DataTypes of DistributedTensors consumed by
-  /// ``pld.tile.remote_load`` / ``pld.system.notify`` somewhere in the
+  /// ``pld.tile.remote_load`` / ``pld.tensor.put`` / ``pld.system.notify`` somewhere in the
   /// module. Each one drives a single ``@CommRemoteOffset_<dtype>``
   /// helper emission at module scope. Storing the DataType (not the MLIR
   /// string) lets the emitter derive both the MLIR type name and the

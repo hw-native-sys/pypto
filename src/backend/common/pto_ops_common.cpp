@@ -2419,6 +2419,7 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
 //   dst_pv   = pto.partition_view dst_view,  offsets=[0,..], sizes=<shape>
 //   src_pv   = pto.partition_view <src_local_view>, offsets=[0,..], sizes=<shape>
 //   %stage   = pto.alloc_tile : !pto.tile_buf<loc=vec, ...>     (auto-allocated)
+//   pto.barrier <PIPE_ALL>
 //   pto.comm.tput(dst_pv, src_pv, buf(%stage)
 //       : <ptype>, <ptype>, <stage_type>) {atomicType = #pto<atomic_type (atomic_none|atomic_add)>}
 //
@@ -2435,8 +2436,10 @@ static constexpr uint64_t kTputVecStagingFractal = 512;
 
 static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "pld.tensor.put requires 3 arguments (dst, peer, src), got "
-                               << op->args_.size();
+  CHECK(op->args_.size() == 3 || op->args_.size() == 6)
+      << "pld.tensor.put requires 3 arguments (dst, peer, src) or 6 arguments "
+         "(dst, peer, src, dst_offsets, src_offsets, shape), got "
+      << op->args_.size();
 
   // dst: remote (peer-addressed) DistributedTensor destination.
   auto dst_binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.tensor.put");
@@ -2456,24 +2459,49 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   const std::string atomic_attr =
       atomic_int == static_cast<int>(ir::AtomicType::kAdd) ? "atomic_add" : "atomic_none";
 
-  const auto& shape = dst_binding.type->shape_;
-  const size_t rank = shape.size();
+  const auto& dst_shape = dst_binding.type->shape_;
+  const size_t rank = dst_shape.size();
   INTERNAL_CHECK_SPAN(rank >= 1, op->span_) << "pld.tensor.put requires rank >= 1";
   const std::string dtype_str = codegen.GetTypeString(dst_binding.type->dtype_);
 
-  // Full-slice partition views: offsets all-zero, sizes = full shape. dst and
-  // src share the same partition_tensor_view type (same dtype + static shape).
-  std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
-  std::vector<std::string> zero_offsets(rank, c0);
-  std::vector<std::string> size_ssa = GetSizeCodes(shape, codegen);
-  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(shape), dtype_str);
+  std::vector<std::string> dst_offsets;
+  std::vector<std::string> src_offsets;
+  std::vector<std::string> size_ssa;
+  std::vector<ExprPtr> transfer_shape;
+
+  if (op->args_.size() == 3) {
+    std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+    dst_offsets.assign(rank, c0);
+    src_offsets.assign(rank, c0);
+    transfer_shape = dst_shape;
+    size_ssa = GetSizeCodes(transfer_shape, codegen);
+  } else {
+    auto dst_offsets_tuple = As<ir::MakeTuple>(op->args_[3]);
+    auto src_offsets_tuple = As<ir::MakeTuple>(op->args_[4]);
+    auto shape_tuple = As<ir::MakeTuple>(op->args_[5]);
+    INTERNAL_CHECK_SPAN(dst_offsets_tuple, op->span_) << "pld.tensor.put dst_offsets must be MakeTuple";
+    INTERNAL_CHECK_SPAN(src_offsets_tuple, op->span_) << "pld.tensor.put src_offsets must be MakeTuple";
+    INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << "pld.tensor.put shape must be MakeTuple";
+    INTERNAL_CHECK_SPAN(dst_offsets_tuple->elements_.size() == rank, op->span_)
+        << "pld.tensor.put dst_offsets rank must match tensor rank";
+    INTERNAL_CHECK_SPAN(src_offsets_tuple->elements_.size() == rank, op->span_)
+        << "pld.tensor.put src_offsets rank must match tensor rank";
+    INTERNAL_CHECK_SPAN(shape_tuple->elements_.size() == rank, op->span_)
+        << "pld.tensor.put shape rank must match tensor rank";
+    dst_offsets = GetExprCodes(dst_offsets_tuple->elements_, codegen);
+    src_offsets = GetExprCodes(src_offsets_tuple->elements_, codegen);
+    transfer_shape = shape_tuple->elements_;
+    size_ssa = GetSizeCodes(transfer_shape, codegen);
+  }
+
+  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(transfer_shape), dtype_str);
 
   // dst: CommRemoteOffset + addptr + make_tensor_view at the call site, then
   // a full-slice partition_view.
   auto dst_peer_view = EmitCommRemoteView(dst_binding, op->args_[1], codegen);
   std::string dst_pview =
       EmitPartitionViewPTO(dst_binding.var->name_hint_ + "_peer", dst_peer_view.ssa,
-                           dst_peer_view.view_type_str, partition_type, zero_offsets, size_ssa, codegen);
+                           dst_peer_view.view_type_str, partition_type, dst_offsets, size_ssa, codegen);
 
   // src: local tensor_view + full-slice partition_view (no peer arithmetic).
   // Use the shared helper for the source view type so it matches the dynamic-dim
@@ -2483,19 +2511,29 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   std::string src_local_view = codegen.GetOrCreateTensorView(src_var);
   std::string src_view_type = codegen.GetTensorViewTypeString(src_dist.get());
   std::string src_pview = EmitPartitionViewPTO(src_var->name_hint_ + "_local", src_local_view, src_view_type,
-                                               partition_type, zero_offsets, size_ssa, codegen);
+                                               partition_type, src_offsets, size_ssa, codegen);
 
   // Synthesise a VEC staging tile_buf sized to the 2-D-flattened transfer:
   // rows = product of leading dims, cols = innermost dim (rank-1 -> 1xN).
-  int64_t cols = codegen.GetConstIntValue(shape[rank - 1]);
+  int64_t cols = codegen.GetConstIntValue(transfer_shape[rank - 1]);
   int64_t rows = 1;
   for (size_t i = 0; i + 1 < rank; ++i) {
-    rows *= codegen.GetConstIntValue(shape[i]);
+    rows *= codegen.GetConstIntValue(transfer_shape[i]);
   }
   std::string stage_type = codegen::FormatTileBufTypeString(
       "vec", dtype_str, rows, cols, ir::TileLayout::row_major, ir::TileLayout::none_box,
       kTputVecStagingFractal, ir::PadValue::null, /*v_row=*/rows, /*v_col=*/cols);
-  std::string stage = codegen.AllocNewTileBuf(stage_type, "tput_stage");
+  // This synthetic staging buffer is not backed by an IR MemRef, so the normal
+  // AllocateMemoryAddr pass cannot attach an address to it. L3 PTOAS requires
+  // every alloc_tile to carry an explicit addr operand.
+  std::string stage_addr = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INT64);
+  std::string stage = codegen.AllocNewTileBuf(stage_type, "tput_stage", stage_addr);
+
+  // TPUT reads the local source GM through MTE2. If the caller populated that
+  // source via an immediately preceding TSTORE, order the store before TPUT's
+  // source read; otherwise one rank can observe stale zeros while another wins
+  // the timing race.
+  codegen.Emit("pto.barrier <PIPE_ALL>");
 
   std::ostringstream tput;
   tput << "pto.comm.tput(" << dst_pview << ", " << src_pview << ", buf(" << stage << ") : " << partition_type

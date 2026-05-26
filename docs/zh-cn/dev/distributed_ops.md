@@ -84,6 +84,7 @@ DSL（`python/pypto/language/distributed/op/tile_ops.py`）把 `peer` / `offsets
 
 ```text
 pld.tensor.put(dst, peer, src, *, atomic: int) -> Unknown
+pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape, *, atomic: int) -> Unknown
 ```
 
 同步地把本地窗口绑定的 `src` 写入 `peer` rank 的窗口绑定 `dst` 切片。两个操作数
