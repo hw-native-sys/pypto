@@ -32,7 +32,7 @@ def _build_program_with_submit(reassign: bool = False) -> ir.Program:
         "kernel",
         [kernel_x],
         [ir.ScalarType(DataType.INDEX)],
-        ir.YieldStmt([kernel_x], span),
+        ir.ReturnStmt([kernel_x], span),
         span,
     )
     kernel_gvar = ir.GlobalVar("kernel")
@@ -52,7 +52,7 @@ def _build_program_with_submit(reassign: bool = False) -> ir.Program:
 
     submit = ir.Submit(kernel_gvar, [caller_arg], [tid_arg], submit_ret_ty, span)
     stmts.append(ir.AssignStmt(res_var, submit, span))
-    stmts.append(ir.YieldStmt([res_var], span))
+    stmts.append(ir.ReturnStmt([res_var], span))
 
     body = ir.SeqStmts(stmts, span)
     caller = ir.Function("caller", [caller_arg, tid_arg], [submit_ret_ty], body, span)
@@ -72,22 +72,13 @@ def _find_submit_in_function(func: ir.Function) -> ir.Submit | None:
     return None
 
 
-# Disable the RoundtripInstrument (BASIC verification level) — the parser
-# still expects ``out, tid = pl.submit(...)`` 2-tuple unpacking syntax and
-# does not yet accept the single-LHS ``res: Tuple[..., TASK_ID] = pl.submit(...)``
-# form the printer emits when given a hand-built Submit. The parser flip
-# (Phase 3) plus the unpacking-emission printer work make the full
-# round-trip valid; until then, exercise the passes with verification
-# disabled so we can assert their structural behaviour on Submit.
-_NO_VERIFY_CTX = passes.PassContext([], passes.VerificationLevel.NONE)
-
-
 def test_ssa_preserves_submit_node_kind():
     """convert_to_ssa() must preserve Submit-ness — the result still has a
-    Submit on the assignment RHS, not a degraded plain Call."""
+    Submit on the assignment RHS, not a degraded plain Call. Default
+    VerificationLevel.BASIC enables the print → re-parse round-trip
+    instrument, which now accepts the single-LHS Submit print form."""
     program_before = _build_program_with_submit(reassign=False)
-    with _NO_VERIFY_CTX:
-        program_after = passes.convert_to_ssa()(program_before)
+    program_after = passes.convert_to_ssa()(program_before)
 
     caller_after = program_after.get_function("caller")
     assert caller_after is not None
@@ -103,8 +94,7 @@ def test_ssa_renames_submit_args_and_deps():
     references in args or deps, the rebuilt Submit must reference the new
     version (verifies the IRMutator default walks both fields)."""
     program_before = _build_program_with_submit(reassign=True)
-    with _NO_VERIFY_CTX:
-        program_after = passes.convert_to_ssa()(program_before)
+    program_after = passes.convert_to_ssa()(program_before)
 
     caller_after = program_after.get_function("caller")
     assert caller_after is not None
@@ -122,11 +112,24 @@ def test_ssa_renames_submit_args_and_deps():
 def test_submit_round_trips_through_ssa():
     """An SSA-converted Submit-bearing program prints the pl.submit form."""
     program_before = _build_program_with_submit(reassign=False)
-    with _NO_VERIFY_CTX:
-        program_after = passes.convert_to_ssa()(program_before)
+    program_after = passes.convert_to_ssa()(program_before)
 
     text = program_after.as_python()
     assert "pl.submit(self.kernel" in text, text
+
+
+def test_submit_single_lhs_form_round_trips():
+    """The single-LHS print form ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)``
+    is re-accepted by the parser, which means
+    ``passes.convert_to_ssa()`` with default ``VerificationLevel.BASIC``
+    (round-trip enabled) accepts a Submit-bearing program. Regression
+    guard against the parser-side fix.
+    """
+    program_before = _build_program_with_submit(reassign=False)
+    # No explicit PassContext — default verification is BASIC, which runs
+    # the RoundtripInstrument on every pass. If the parser had still
+    # required ``out, tid = ...`` unpacking, this call would raise.
+    passes.convert_to_ssa()(program_before)
 
 
 if __name__ == "__main__":

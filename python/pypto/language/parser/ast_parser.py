@@ -984,6 +984,15 @@ class ASTParser:
             self._parse_alloc_window_buffer_assignment(stmt.target, stmt.value)
             return
 
+        # Printer round-trip: ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)``.
+        # The annotation is checked against the inferred Submit type below
+        # via the standard ``override_type`` validation path; the single-LHS
+        # Submit handler builds the Submit and binds it to ``var_name`` directly.
+        if _is_pl_call(stmt.value, "submit"):
+            assert isinstance(stmt.target, ast.Name)
+            self._parse_submit_single_lhs(stmt.target, stmt.value)
+            return
+
         value_expr = self.parse_expression(stmt.value)
 
         # Validate annotation against inferred type; use annotation as override only for memref
@@ -1122,7 +1131,7 @@ class ASTParser:
             return existing_var
         return self.builder.let(var_name, value_expr, type=override_type, span=span)
 
-    def parse_assignment(self, stmt: ast.Assign) -> None:
+    def parse_assignment(self, stmt: ast.Assign) -> None:  # noqa: PLR0912
         """Parse regular assignment: var = value or tuple unpacking.
 
         Args:
@@ -1180,6 +1189,16 @@ class ASTParser:
             if isinstance(target, ast.Name):
                 var_name = target.id
                 span = self.span_tracker.get_span(stmt)
+
+                # ``result = pl.submit(self.kernel, ...)`` — single-LHS bind of
+                # a Submit to a Tuple-typed Var. Round-trips the printer's
+                # single-LHS form for a Submit whose AssignStmt LHS is a fresh
+                # tuple temp (e.g. after a pass rewrite). The unpacking form
+                # ``out, tid = pl.submit(...)`` continues to go through
+                # ``_parse_submit_assignment``.
+                if _is_pl_call(stmt.value, "submit"):
+                    self._parse_submit_single_lhs(target, stmt.value)
+                    return
 
                 # Check if this is a yield assignment: var = pl.yield_(...)
                 if isinstance(stmt.value, ast.Call):
@@ -1345,6 +1364,40 @@ class ASTParser:
         task_id_expr = ir.TupleGetItemExpr(submit_var, n_outs, span)
         tid_var = self._assign_or_let(tid_target.id, task_id_expr, span)
         self.scope_manager.define_var(tid_target.id, tid_var, span=span)
+
+    def _parse_submit_single_lhs(self, target: ast.Name, call: ast.Call) -> None:
+        """Parse the single-LHS form ``result = pl.submit(self.kernel, ...)``.
+
+        The printer emits this shape when an IR-level Submit is the RHS of an
+        ``AssignStmt`` whose LHS is a single Tuple-typed Var (no projection
+        statements) — most commonly after a pass rewrites a Submit and the
+        round-trip needs to be parser-accepted. Unlike
+        :meth:`_parse_submit_assignment`, no kernel-result / task-id projections
+        are synthesised: the whole flat ``Tuple{*<kernel results>, TaskId}``
+        is bound to a single Var, matching what the printer produced.
+        """
+        span = self.span_tracker.get_span(call)
+        if not call.args:
+            raise ParserSyntaxError(
+                "pl.submit(...) requires the kernel as its first argument",
+                span=span,
+                hint="Use `result = pl.submit(self.kernel, *kernel_args, deps=[...])`.",
+            )
+        method_attr = call.args[0]
+        if not (
+            isinstance(method_attr, ast.Attribute)
+            and isinstance(method_attr.value, ast.Name)
+            and method_attr.value.id == "self"
+        ):
+            raise ParserSyntaxError(
+                "pl.submit(...) first argument must be a `self.<kernel>` method reference",
+                span=span,
+                hint="Pass the kernel itself, not a call: "
+                "`pl.submit(self.kernel, x, y)` — not `pl.submit(self.kernel(x, y))`.",
+            )
+        call_expr = self._parse_kernel_call(method_attr, call.args[1:], call.keywords, span, as_submit=True)
+        var = self._assign_or_let(target.id, call_expr, span)
+        self.scope_manager.define_var(target.id, var, span=span)
 
     def _parse_alloc_window_buffer_assignment(self, target: ast.expr, value: ast.Call) -> None:
         """Parse ``buf = pld.[tensor.]alloc_window_buffer(size)``.

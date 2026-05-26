@@ -572,15 +572,10 @@ class TestFlattenPreservesAttrs:
     """
 
     def test_manual_dep_edges_survive_arg_flatten(self):
-        # Disable round-trip verification — the printer emits
-        # ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)`` for a single-LHS
-        # Submit binding, which the parser does not yet re-accept (it
-        # requires ``out, tid = pl.submit(...)`` unpacking). Property
-        # verification still runs through the BEFORE_AND_AFTER instrument.
         instruments: list[_core_passes.PassInstrument] = [
             _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
         ]
-        ctx = _core_passes.PassContext(instruments, _core_passes.VerificationLevel.NONE)
+        ctx = _core_passes.PassContext(instruments)
 
         @pl.program
         class Prog:

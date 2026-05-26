@@ -27,17 +27,11 @@ from pypto import passes
 def _ssa_then_print(prog) -> str:
     """Run only the early passes (through ConvertToSSA / Simplify) and return
     the printed IR. This mirrors what a mid-pipeline dump captures."""
-    # Drop verification to side-step the parser-shape round-trip (the parser
-    # still requires ``out, tid = pl.submit(...)`` 2-tuple unpacking syntax;
-    # the printed single-LHS-tuple form is functionally correct but doesn't
-    # re-parse yet).
-    ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-    with ctx:
-        prog = passes.inline_functions()(prog)
-        prog = passes.unroll_loops()(prog)
-        prog = passes.ctrl_flow_transform()(prog)
-        prog = passes.convert_to_ssa()(prog)
-        prog = passes.simplify()(prog)
+    prog = passes.inline_functions()(prog)
+    prog = passes.unroll_loops()(prog)
+    prog = passes.ctrl_flow_transform()(prog)
+    prog = passes.convert_to_ssa()(prog)
+    prog = passes.simplify()(prog)
     return prog.as_python()
 
 

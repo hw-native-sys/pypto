@@ -215,21 +215,40 @@ class TestManualScopeParsing:
                         pl.submit(self.k1, x)
                     return x
 
-    def test_submit_single_target_is_rejected(self):
-        """pl.submit must be unpacked as exactly ``(result, task_id)``."""
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+    def test_submit_single_target_binds_full_tuple(self):
+        """``result = pl.submit(self.k, ...)`` is the single-LHS form. The
+        whole flat ``Tuple{<kernel result>, TaskId}`` binds to one Var.
+        Mostly emitted by the printer (round-trip path) when an IR pass
+        rewrites a Submit whose LHS is a single tuple-typed Var; user code
+        usually still writes the unpacked ``a, tid = pl.submit(...)`` form.
+        """
 
-            @pl.program
-            class _Prog:
-                @pl.function(type=pl.FunctionType.InCore)
-                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    return x
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
 
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    with pl.manual_scope():
-                        a = pl.submit(self.k1, x)
-                    return a
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a = pl.submit(self.k1, x)  # noqa: F841 — checked via IR
+                return x
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        scope = _first_runtime_scope(fn.body)
+        assert scope is not None
+        k1_calls = [c for c in _calls_in(scope.body) if c.op.name == "k1"]
+        assert len(k1_calls) == 1
+        submit = k1_calls[0]
+        assert isinstance(submit, ir.Submit)
+        # Single-LHS bind: the AssignStmt's LHS Var has the flat tuple type;
+        # no separate result / TaskId projection statements are synthesised.
+        assert isinstance(submit.type, ir.TupleType)
+        assert len(submit.type.types) == 2
+        assert isinstance(submit.type.types[1], ir.ScalarType)
+        assert submit.type.types[1].dtype == pl.TASK_ID
 
     def test_pl_at_deps_and_as_tid_attach_scope_attrs(self):
         """``with pl.at(..., deps=[d1]) as tid:`` attaches metadata to the
