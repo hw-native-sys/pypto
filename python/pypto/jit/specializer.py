@@ -47,22 +47,58 @@ from pypto.pypto_core import DataType
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class DynDim:
+    """A shape dim bound to a DynVar at JIT specialization time.
+
+    Attributes:
+        name:        Python variable name used in user source (e.g. ``"M"``).
+        literal:     String passed to ``pl.dynamic("...")``; usually equals
+                     ``name`` but may diverge (e.g. ``rows = pl.dynamic("M")``).
+        static_bound: Concrete extent at this specialization. Replaced by
+                     ``None`` in the cache key so different bounds reuse the
+                     same compilation, but still available as the static-shape
+                     fallback wherever a numeric dim is required (e.g.
+                     ``pl.slice`` parent-dim inheritance, ``ir.compile``).
+    """
+
+    name: str
+    literal: str
+    static_bound: int
+
+
+ShapeDim = int | DynDim
+
+
 @dataclass
 class TensorMeta:
     """Runtime metadata for a single tensor parameter.
 
     Attributes:
-        shape: Concrete shape tuple from the torch tensor.
+        shape: Per-dim entries. Each entry is either a static ``int`` or a
+            :class:`DynDim` capturing a JIT-time-bound dynamic dim.
         dtype: DataType resolved from the torch tensor.
     """
 
-    shape: tuple[int, ...]
+    shape: tuple[ShapeDim, ...]
     dtype: DataType
+
+    def static_shape(self) -> tuple[int, ...]:
+        """Concrete shape tuple — DynDim dims collapse to their static_bound."""
+        return tuple(d.static_bound if isinstance(d, DynDim) else d for d in self.shape)
+
+    def dynamic_dim_indices(self) -> set[int]:
+        """Indices of dims that are DynDim-bound at this specialization."""
+        return {i for i, d in enumerate(self.shape) if isinstance(d, DynDim)}
 
 
 @dataclass
 class SpecializeContext:
     """All information needed to specialize a single JIT function.
+
+    Dynamic dims live as :class:`DynDim` entries inside each meta's
+    ``shape`` tuple — the legacy ``(param, dim_idx)`` view is derived
+    on demand via the :attr:`dynamic_dims` property.
 
     Attributes:
         func_name: Python function name.
@@ -73,7 +109,6 @@ class SpecializeContext:
         tensor_meta: TensorMeta per tensor param name.
         scalar_values: Concrete value per scalar param name.
         scalar_dtypes: DataType annotation per scalar param name.
-        dynamic_dims: Set of (param_name, dim_index) pairs marked dynamic.
         dep_names: Names of dep functions called from this function.
         py_globals: The originating function's ``__globals__``. The specializer
             uses this to resolve module-level int/float/bool constants (e.g.
@@ -89,9 +124,37 @@ class SpecializeContext:
     tensor_meta: dict[str, TensorMeta]
     scalar_values: dict[str, int | float | bool]
     scalar_dtypes: dict[str, DataType]
-    dynamic_dims: set[tuple[str, int]] = field(default_factory=set)
     dep_names: list[str] = field(default_factory=list)
     py_globals: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def dynamic_dims(self) -> set[tuple[str, int]]:
+        """The legacy ``(param_name, dim_idx)`` set, derived from tensor_meta."""
+        return {(p, i) for p, m in self.tensor_meta.items() for i in m.dynamic_dim_indices()}
+
+    def dynvar_for(self, param: str, dim_idx: int) -> str | None:
+        """Return the DynVar variable name bound to ``param``'s ``dim_idx``, or None."""
+        meta = self.tensor_meta.get(param)
+        if meta is None or dim_idx >= len(meta.shape):
+            return None
+        d = meta.shape[dim_idx]
+        return d.name if isinstance(d, DynDim) else None
+
+    def dynvar_literals(self) -> dict[str, str]:
+        """Map ``dynvar_name → pl.dynamic("...") literal`` across all metas.
+
+        Used by :class:`Specializer` to emit module-level
+        ``M = pl.dynamic("M")`` declarations. A given DynVar name should map
+        to a single literal — if two metas disagree, the last one wins (this
+        would already be a user bug since ``pl.dynamic()`` returns a singleton
+        per literal).
+        """
+        out: dict[str, str] = {}
+        for meta in self.tensor_meta.values():
+            for d in meta.shape:
+                if isinstance(d, DynDim):
+                    out[d.name] = d.literal
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -305,57 +368,19 @@ def _collect_dep_names(func_def: ast.FunctionDef, jit_func_names: set[str]) -> l
 # ---------------------------------------------------------------------------
 
 
-def _build_tensor_annotation(
-    param_name: str,
-    meta: TensorMeta,
-    dynamic_dims: set[tuple[str, int]],
-    dynvar_names: dict[str, str],
-    is_out: bool,
-) -> str:
-    """Build the full type annotation string for a tensor parameter.
+def _build_tensor_annotation(meta: TensorMeta, is_out: bool) -> str:
+    """Build the type annotation string for a tensor parameter.
 
-    Args:
-        param_name: Parameter name (for dynamic dim lookup).
-        meta: TensorMeta with concrete shape and dtype.
-        dynamic_dims: Set of (param_name, dim_idx) dynamic pairs.
-        dynvar_names: Maps dimension variable name → DynVar Python variable name
-            used in the generated module scope.
-        is_out: Whether the parameter is annotated Out[...].
+    Static dims emit as integer literals; DynDim entries emit as their
+    DynVar variable name.
 
     Returns:
-        Annotation string such as ``pl.Tensor[[M_dyn, 128], pl.FP32]`` or
+        Annotation string such as ``pl.Tensor[[M, 128], pl.FP32]`` or
         ``pl.Out[pl.Tensor[[128, 128], pl.FP32]]``.
     """
-    dims: list[str] = []
-    for i, dim in enumerate(meta.shape):
-        if (param_name, i) in dynamic_dims:
-            # Find the dynvar name for this dim.  We look up by searching
-            # dynvar_names for a matching variable; if multiple dynvars cover
-            # different dims of the same param we rely on the caller having
-            # collected them correctly.  Fall back to a generated name.
-            dv_name = _dynvar_name_for_dim(param_name, i, dynvar_names)
-            dims.append(dv_name)
-        else:
-            dims.append(str(dim))
+    dims = [d.name if isinstance(d, DynDim) else str(d) for d in meta.shape]
     inner = f"pl.Tensor[[{', '.join(dims)}], {_dtype_str(meta.dtype)}]"
-    if is_out:
-        return f"pl.Out[{inner}]"
-    return inner
-
-
-def _dynvar_name_for_dim(
-    param_name: str,
-    dim_idx: int,
-    dynvar_names: dict[str, str],
-) -> str:
-    """Return the Python variable name to use for a dynamic dimension.
-
-    ``dynvar_names`` maps (param_name, dim_idx) encoded as
-    ``"<param>__<idx>"`` to the DynVar variable name.  Falls back to a
-    generated name if no explicit binding is found.
-    """
-    key = f"{param_name}__{dim_idx}"
-    return dynvar_names.get(key, f"_dyn_{param_name}_{dim_idx}")
+    return f"pl.Out[{inner}]" if is_out else inner
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +405,7 @@ class _BodyTransformer(ast.NodeTransformer):
         self,
         tensor_meta: dict[str, TensorMeta],
         scalar_values: dict[str, int | float | bool],
-        dynamic_dims: set[tuple[str, int]],
-        dynvar_python_names: dict[str, str],
         dep_names: set[str],
-        dynvar_var_names: set[str],
         param_names: list[str] | None = None,
         initial_used_names: set[str] | None = None,
         py_globals: dict[str, Any] | None = None,
@@ -392,11 +414,26 @@ class _BodyTransformer(ast.NodeTransformer):
         super().__init__()
         self._meta = tensor_meta
         self._scalars = scalar_values
-        self._dynamic_dims = dynamic_dims
-        # Maps "<param>__<dim_idx>" → python var name for the DynVar
-        self._dv_names = dynvar_python_names
         self._dep_names = dep_names
-        self._dynvar_var_names = dynvar_var_names
+        # DynVar name → ``pl.tensor.dim(<anchor_param>, <anchor_dim>)`` AST
+        # expression. ``visit_Name`` uses these to rewrite runtime references
+        # like ``pl.create_tensor([M, 128], ...)`` so the annotation-only
+        # DynVar doesn't leak past SSA conversion. Each DynVar anchors at the
+        # first parameter dim it's bound to.
+        self._dynvar_anchors: dict[str, ast.expr] = {}
+        for pname, meta in tensor_meta.items():
+            for i, dim in enumerate(meta.shape):
+                if isinstance(dim, DynDim) and dim.name not in self._dynvar_anchors:
+                    pl_tensor = ast.Attribute(
+                        value=ast.Name(id="pl", ctx=ast.Load()),
+                        attr="tensor",
+                        ctx=ast.Load(),
+                    )
+                    self._dynvar_anchors[dim.name] = ast.Call(
+                        func=ast.Attribute(value=pl_tensor, attr="dim", ctx=ast.Load()),
+                        args=[ast.Name(id=pname, ctx=ast.Load()), ast.Constant(value=i)],
+                        keywords=[],
+                    )
         # Maps dep_name → ordered parameter list. Used by ``visit_Call`` to
         # normalise keyword args to positional, so generated
         # ``self.<dep>(a, out=out)`` calls become parser-accepted
@@ -503,20 +540,18 @@ class _BodyTransformer(ast.NodeTransformer):
     def _shape_tuple_node(self, param_name: str) -> ast.Tuple:
         meta = self._meta[param_name]
         elts: list[ast.expr] = []
-        for i, dim in enumerate(meta.shape):
-            if (param_name, i) in self._dynamic_dims:
-                dv = _dynvar_name_for_dim(param_name, i, self._dv_names)
-                elts.append(ast.Name(id=dv, ctx=ast.Load()))
+        for d in meta.shape:
+            if isinstance(d, DynDim):
+                elts.append(ast.Name(id=d.name, ctx=ast.Load()))
             else:
-                elts.append(ast.Constant(value=dim))
+                elts.append(ast.Constant(value=d))
         return ast.Tuple(elts=elts, ctx=ast.Load())
 
     def _shape_dim_node(self, param_name: str, dim_idx: int) -> ast.expr:
-        meta = self._meta[param_name]
-        if (param_name, dim_idx) in self._dynamic_dims:
-            dv = _dynvar_name_for_dim(param_name, dim_idx, self._dv_names)
-            return ast.Name(id=dv, ctx=ast.Load())
-        return ast.Constant(value=meta.shape[dim_idx])
+        d = self._meta[param_name].shape[dim_idx]
+        if isinstance(d, DynDim):
+            return ast.Name(id=d.name, ctx=ast.Load())
+        return ast.Constant(value=d)
 
     # ------------------------------------------------------------------
     # Statement-level transforms
@@ -569,32 +604,32 @@ class _BodyTransformer(ast.NodeTransformer):
             target_names = node.targets[0].elts
             if len(target_names) == len(meta.shape):
                 stmts: list[ast.stmt] = []
-                for tgt, (i, dim) in zip(target_names, enumerate(meta.shape)):
-                    if isinstance(tgt, ast.Name):
-                        if (param_name, i) in self._dynamic_dims:
-                            # Dynamic dim: emit assignment (M = <dynvar ref>),
-                            # but skip if it would be a no-op (LHS name == RHS name).
-                            val: ast.expr = self._shape_dim_node(param_name, i)
-                            if not (isinstance(val, ast.Name) and val.id == tgt.id):
-                                lhs_name = tgt.id
-                                if lhs_name in self._assign_count:
-                                    lhs_name = self._rebind(lhs_name)
-                                else:
-                                    self._record_first_assign(tgt.id)
-                                stmts.append(
-                                    ast.Assign(
-                                        targets=[ast.Name(id=lhs_name, ctx=ast.Store())],
-                                        value=val,
-                                        lineno=node.lineno,
-                                        col_offset=node.col_offset,
-                                    )
-                                )
-                            else:
-                                self._record_first_assign(tgt.id)
-                        else:
-                            # Static dim: inline constant, suppress assignment
+                for tgt, dim in zip(target_names, meta.shape):
+                    if not isinstance(tgt, ast.Name):
+                        continue
+                    if isinstance(dim, DynDim):
+                        # Dynamic dim: emit assignment (M = <dynvar ref>),
+                        # but skip if it would be a no-op (LHS name == RHS name).
+                        if dim.name == tgt.id:
                             self._record_first_assign(tgt.id)
-                            self._shape_inlined[tgt.id] = dim
+                            continue
+                        lhs_name = tgt.id
+                        if lhs_name in self._assign_count:
+                            lhs_name = self._rebind(lhs_name)
+                        else:
+                            self._record_first_assign(tgt.id)
+                        stmts.append(
+                            ast.Assign(
+                                targets=[ast.Name(id=lhs_name, ctx=ast.Store())],
+                                value=ast.Name(id=dim.name, ctx=ast.Load()),
+                                lineno=node.lineno,
+                                col_offset=node.col_offset,
+                            )
+                        )
+                    else:
+                        # Static dim: inline constant, suppress assignment
+                        self._record_first_assign(tgt.id)
+                        self._shape_inlined[tgt.id] = dim
                 return stmts if stmts else None
 
         # Case 3: K = a.shape[1]  →  inline static dim, suppress assignment
@@ -611,9 +646,9 @@ class _BodyTransformer(ast.NodeTransformer):
         ):
             param_name = node.value.value.value.id
             dim_idx = node.value.slice.value
-            if (param_name, dim_idx) not in self._dynamic_dims:
-                meta = self._meta[param_name]
-                self._shape_inlined[node.targets[0].id] = meta.shape[dim_idx]
+            dim = self._meta[param_name].shape[dim_idx]
+            if not isinstance(dim, DynDim):
+                self._shape_inlined[node.targets[0].id] = dim
                 self._record_first_assign(node.targets[0].id)
                 return None
 
@@ -655,7 +690,7 @@ class _BodyTransformer(ast.NodeTransformer):
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
         """Replace scalar param references, inlined shape constants, renamed rebindings,
-        and module-level int/float/bool constants imported from globals."""
+        DynVar runtime references, and module-level int/float/bool constants from globals."""
         if isinstance(node.ctx, ast.Load):
             # Check active renames first — a rebinding supersedes any earlier inlining.
             if node.id in self._var_renames:
@@ -664,6 +699,26 @@ class _BodyTransformer(ast.NodeTransformer):
                 return ast.Constant(value=self._scalars[node.id])
             if node.id in self._shape_inlined:
                 return ast.Constant(value=self._shape_inlined[node.id])
+            # DynVar runtime references — e.g. pl.create_tensor([M, HIDDEN], ...).
+            # Substitute M with pl.tensor.dim(P, k) where (P, k) is the first
+            # parameter dim bound to M. This keeps the IR free of annotation-only
+            # DynVar references in runtime expressions; without it ConvertToSSA
+            # raises "Variable 'M' used outside its defining scope".
+            #
+            # Skipped when the name was assigned earlier in the body (a
+            # ``M, N = a.shape`` Case 2 rebind, the ``M = pl.dynamic("M")``
+            # assignment, or any user shadowing) — ``_used_names`` covers all
+            # those cases. Otherwise the substitution fires for the bare
+            # module-level DynVar reference.
+            if node.id in self._dynvar_anchors and node.id not in self._used_names:
+                anchor = self._dynvar_anchors[node.id]
+                return ast.fix_missing_locations(
+                    ast.Call(
+                        func=anchor.func,  # type: ignore[attr-defined]
+                        args=list(anchor.args),  # type: ignore[attr-defined]
+                        keywords=[],
+                    )
+                )
             # Module-level constant inlining: only when the name is not also a
             # local (function param or assigned-in-body) — those take priority.
             if node.id not in self._used_names:
@@ -985,8 +1040,6 @@ class _BodyTransformer(ast.NodeTransformer):
 def _infer_return_type(
     func_def: ast.FunctionDef,
     tensor_meta: dict[str, TensorMeta],
-    dynamic_dims: set[tuple[str, int]],
-    dynvar_names: dict[str, str],
     out_params: list[str],
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
@@ -1018,10 +1071,7 @@ def _infer_return_type(
         for elt in return_node.value.elts:
             if not isinstance(elt, ast.Name) or elt.id not in tensor_meta:
                 return None  # Can't infer this element — drop the annotation
-            meta = tensor_meta[elt.id]
-            elt_annotations.append(
-                _build_tensor_annotation(elt.id, meta, dynamic_dims, dynvar_names, is_out=False)
-            )
+            elt_annotations.append(_build_tensor_annotation(tensor_meta[elt.id], is_out=False))
         return f"tuple[{', '.join(elt_annotations)}]"
 
     # `return f(...)`: the result type depends on f's declared return types,
@@ -1036,14 +1086,11 @@ def _infer_return_type(
         and isinstance(return_node.value, ast.Name)
         and return_node.value.id in tensor_meta
     ):
-        target_param = return_node.value.id
-        meta = tensor_meta[target_param]
-        return _build_tensor_annotation(target_param, meta, dynamic_dims, dynvar_names, is_out=False)
+        return _build_tensor_annotation(tensor_meta[return_node.value.id], is_out=False)
 
     # Fallback: first Out param's tensor type (legacy single-return convention).
     if out_params and out_params[0] in tensor_meta:
-        meta = tensor_meta[out_params[0]]
-        return _build_tensor_annotation(out_params[0], meta, dynamic_dims, dynvar_names, is_out=False)
+        return _build_tensor_annotation(tensor_meta[out_params[0]], is_out=False)
 
     return None
 
@@ -1182,36 +1229,29 @@ class Specializer:
 
     Usage::
 
-        s = Specializer(class_name, contexts, dynvar_bindings)
+        s = Specializer(class_name, contexts)
         source_code = s.specialize()
         program = pl.parse(source_code)
+
+    DynVar names and ``pl.dynamic("...")`` literals are read directly from
+    each context's :class:`TensorMeta`-embedded :class:`DynDim` entries (see
+    :meth:`SpecializeContext.dynvar_for` and
+    :meth:`SpecializeContext.dynvar_literals`).
     """
 
     def __init__(
         self,
         class_name: str,
         contexts: list[SpecializeContext],
-        dynvar_bindings: dict[str, str],
-        dynvar_literals: dict[str, str] | None = None,
     ) -> None:
         """
         Args:
             class_name: Name for the generated @pl.program class.
             contexts: List of SpecializeContext, one per function.
                 The entry-point (Orchestration) function must be last.
-            dynvar_bindings: Maps "<param>__<dim_idx>" → DynVar Python variable
-                name used in the generated source.
-            dynvar_literals: Maps DynVar Python variable name → string literal
-                passed to pl.dynamic().  For example, if the user wrote
-                ``rows = pl.dynamic("M")``, this should be ``{"rows": "M"}``
-                so the generated code emits ``rows = pl.dynamic("M")`` rather
-                than ``rows = pl.dynamic("rows")``.  Defaults to using the
-                variable name as the literal when not provided.
         """
         self._class_name = class_name
         self._contexts = contexts
-        self._dv_bindings = dynvar_bindings
-        self._dv_literals = dynvar_literals or {}
         # Accumulated alias→original map across all specialized functions.
         self._rename_map: dict[str, str] = {}
         # Param order per function — lets the body transformer rewrite
@@ -1240,15 +1280,13 @@ class Specializer:
             "",
         ]
 
-        # Emit module-level DynVar declarations (deduplicated)
+        # Emit module-level DynVar declarations (deduplicated across contexts)
         dv_seen: set[str] = set()
         for ctx in self._contexts:
-            for dv_varname in self._iter_dynvar_names(ctx):
-                if dv_varname not in dv_seen:
-                    dv_seen.add(dv_varname)
-                    # Use the original string literal if available, else fall back to var name
-                    dv_literal = self._dv_literals.get(dv_varname, dv_varname)
-                    lines.append(f'{dv_varname} = pl.dynamic("{dv_literal}")')
+            for dv_name, dv_literal in ctx.dynvar_literals().items():
+                if dv_name not in dv_seen:
+                    dv_seen.add(dv_name)
+                    lines.append(f'{dv_name} = pl.dynamic("{dv_literal}")')
         if dv_seen:
             lines.append("")
 
@@ -1267,15 +1305,6 @@ class Specializer:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _iter_dynvar_names(self, ctx: SpecializeContext) -> list[str]:
-        """Return all DynVar Python variable names referenced in ctx."""
-        names: list[str] = []
-        for param, dim_idx in ctx.dynamic_dims:
-            dv = _dynvar_name_for_dim(param, dim_idx, self._dv_bindings)
-            if dv not in names:
-                names.append(dv)
-        return names
 
     def _specialize_function(self, ctx: SpecializeContext) -> list[str]:
         """Generate lines for a single @pl.function method."""
@@ -1318,18 +1347,11 @@ class Specializer:
         )
 
         # Infer return type
-        ret_type = _infer_return_type(
-            func_def,
-            ctx.tensor_meta,
-            ctx.dynamic_dims,
-            self._dv_bindings,
-            out_params,
-        )
+        ret_type = _infer_return_type(func_def, ctx.tensor_meta, out_params)
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
         # Transform body
         dep_names = set(ctx.dep_names)
-        dynvar_var_names = set(self._iter_dynvar_names(ctx))
         # Collect all names defined anywhere in the function to seed collision avoidance.
         all_defined = {
             node.id
@@ -1339,10 +1361,7 @@ class Specializer:
         transformer = _BodyTransformer(
             tensor_meta=ctx.tensor_meta,
             scalar_values=ctx.scalar_values,
-            dynamic_dims=ctx.dynamic_dims,
-            dynvar_python_names=self._dv_bindings,
             dep_names=dep_names,
-            dynvar_var_names=dynvar_var_names,
             param_names=all_param_names,
             initial_used_names=all_defined,
             py_globals=ctx.py_globals,
@@ -1454,13 +1473,7 @@ class Specializer:
                         "ensure any intermediate pl.create_tensor() used for this parameter "
                         "has a statically inferable shape and dtype."
                     )
-                ann = _build_tensor_annotation(
-                    name,
-                    meta,
-                    ctx.dynamic_dims,
-                    self._dv_bindings,
-                    is_out=is_out,
-                )
+                ann = _build_tensor_annotation(meta, is_out=is_out)
                 result.append(f"{name}: {ann}")
             elif name in scalar_dtype_strs:
                 dtype_s = scalar_dtype_strs[name]
@@ -1481,25 +1494,17 @@ def _level_to_str(level: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def specialize(
-    class_name: str,
-    contexts: list[SpecializeContext],
-    dynvar_bindings: dict[str, str],
-    dynvar_literals: dict[str, str] | None = None,
-) -> str:
+def specialize(class_name: str, contexts: list[SpecializeContext]) -> str:
     """Specialize one or more JIT functions into @pl.program source.
 
     Args:
         class_name: Name for the generated @pl.program class.
         contexts: SpecializeContext per function (deps first, entry last).
-        dynvar_bindings: Maps "<param>__<dim_idx>" → DynVar variable name.
-        dynvar_literals: Maps DynVar variable name → string literal passed to
-            pl.dynamic().  Falls back to variable name when not provided.
 
     Returns:
         Source code string ready to pass to ``pl.parse()``.
     """
-    return Specializer(class_name, contexts, dynvar_bindings, dynvar_literals).specialize()
+    return Specializer(class_name, contexts).specialize()
 
 
 def build_specialize_context(
@@ -1510,7 +1515,6 @@ def build_specialize_context(
     tensor_meta: dict[str, TensorMeta],
     scalar_values: dict[str, int | float | bool],
     scalar_dtypes: dict[str, DataType],
-    dynamic_dims: set[tuple[str, int]],
     dep_names: list[str],
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
@@ -1523,8 +1527,10 @@ def build_specialize_context(
         tensor_meta: TensorMeta per tensor param name.
         scalar_values: Concrete scalar values from the call site.
         scalar_dtypes: DataType per scalar param name.
-        dynamic_dims: Set of (param_name, dim_idx) dynamic pairs.
         dep_names: Names of @pl.jit.incore functions called from this function.
+
+    Dynamic dims live inside ``tensor_meta`` as :class:`DynDim` entries —
+    no separate set is passed in.
 
     Returns:
         SpecializeContext ready for use in Specializer.
@@ -1551,13 +1557,14 @@ def build_specialize_context(
         tensor_meta=tensor_meta,
         scalar_values=scalar_values,
         scalar_dtypes=scalar_dtypes,
-        dynamic_dims=dynamic_dims,
         dep_names=dep_names,
         py_globals=getattr(func, "__globals__", {}),
     )
 
 
 __all__ = [
+    "DynDim",
+    "ShapeDim",
     "SpecializeContext",
     "TensorMeta",
     "Specializer",

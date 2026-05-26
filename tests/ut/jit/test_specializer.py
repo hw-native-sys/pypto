@@ -16,6 +16,7 @@ import warnings
 import pypto.language as pl
 import pytest
 from pypto.jit.specializer import (
+    DynDim,
     SpecializeContext,
     Specializer,
     TensorMeta,
@@ -48,9 +49,10 @@ def _make_ctx(
     tensor_meta: dict[str, TensorMeta] | None = None,
     scalar_values: dict | None = None,
     scalar_dtypes: dict | None = None,
-    dynamic_dims: set | None = None,
     dep_names: list[str] | None = None,
 ) -> SpecializeContext:
+    # Dynamic dims now live as DynDim entries inside tensor_meta.shape — tests
+    # construct them directly when they need dynamic behavior.
     return SpecializeContext(
         func_name=func_name,
         source=source,
@@ -60,7 +62,6 @@ def _make_ctx(
         tensor_meta=tensor_meta or {},
         scalar_values=scalar_values or {},
         scalar_dtypes=scalar_dtypes or {},
-        dynamic_dims=dynamic_dims or set(),
         dep_names=dep_names or [],
     )
 
@@ -276,17 +277,16 @@ class TestClassifyParams:
 
 
 class TestBodyTransformer:
-    def _transform(self, src: str, tensor_meta: dict, dynamic_dims=None, dep_names=None):
+    def _transform(self, src: str, tensor_meta: dict, dep_names=None):
         src = textwrap.dedent(src)
         tree = ast.parse(src)
         func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+        # DynDim info now lives inside tensor_meta.shape — tests inject it there
+        # directly when needed (see test_shape_unpack_expanded_dynamic / etc.).
         transformer = _BodyTransformer(
             tensor_meta=tensor_meta,
             scalar_values={},
-            dynamic_dims=dynamic_dims or set(),
-            dynvar_python_names={},
             dep_names=dep_names or set(),
-            dynvar_var_names=set(),
         )
         new_body = []
         for stmt in func_def.body:
@@ -394,10 +394,7 @@ class TestBodyTransformer:
         transformer = _BodyTransformer(
             tensor_meta=tensor_meta,
             scalar_values=scalar_values,
-            dynamic_dims=set(),
-            dynvar_python_names={},
             dep_names=set(),
-            dynvar_var_names=set(),
         )
         new_body = []
         for stmt in func_def.body:
@@ -448,7 +445,6 @@ class TestSpecializer:
         param_names: list[str],
         tensor_meta: dict[str, TensorMeta],
         func_type: str = "orchestration",
-        dynamic_dims: set | None = None,
         dep_names: list[str] | None = None,
     ) -> str:
         ctx = _make_ctx(
@@ -457,10 +453,9 @@ class TestSpecializer:
             func_type=func_type,
             param_names=param_names,
             tensor_meta=tensor_meta,
-            dynamic_dims=dynamic_dims or set(),
             dep_names=dep_names or [],
         )
-        return specialize("_TestClass", [ctx], {})
+        return specialize("_TestClass", [ctx])
 
     def test_generated_has_pl_program(self):
         src = """
@@ -531,19 +526,20 @@ class TestSpecializer:
                 c.bind_dynamic(0, M)
                 return c
         """
+        # DynDim entries inside tensor_meta.shape replace the previous
+        # parallel dynamic_dims / dynvar_bindings tables.
+        m_dim = DynDim(name="M", literal="M", static_bound=256)
         ctx = _make_ctx(
             func_name="kernel",
             source=textwrap.dedent(src),
             func_type="orchestration",
             param_names=["a", "c"],
             tensor_meta={
-                "a": TensorMeta((256, 128), DataType.FP32),
-                "c": TensorMeta((256, 128), DataType.FP32),
+                "a": TensorMeta((m_dim, 128), DataType.FP32),
+                "c": TensorMeta((m_dim, 128), DataType.FP32),
             },
-            dynamic_dims={("a", 0), ("c", 0)},
         )
-        dynvar_bindings = {"a__0": "M", "c__0": "M"}
-        out = specialize("_Dyn", [ctx], dynvar_bindings)
+        out = specialize("_Dyn", [ctx])
         # DynVar declaration should appear before the class
         class_pos = out.index("class _Dyn")
         dv_pos = out.index('pl.dynamic("M")')
@@ -645,7 +641,7 @@ class TestSpecializerIntegration:
                 "c": TensorMeta((128, 128), DataType.FP32),
             },
         )
-        generated = specialize("_JitAddKernel", [ctx], {})
+        generated = specialize("_JitAddKernel", [ctx])
         prog = pl.parse(generated)
 
         assert isinstance(prog, ir.Program)
@@ -692,7 +688,7 @@ class TestSpecializerIntegration:
                 "c": TensorMeta((128, 128), DataType.FP32),
             },
         )
-        generated_src = specialize("add_kernel", [ctx], {})
+        generated_src = specialize("add_kernel", [ctx])
         got = pl.parse(generated_src)
 
         ir.assert_structural_equal(got, Expected)
@@ -719,10 +715,7 @@ class TestVariableRebinding:
         transformer = _BodyTransformer(
             tensor_meta=tensor_meta or {},
             scalar_values={},
-            dynamic_dims=set(),
-            dynvar_python_names={},
             dep_names=set(),
-            dynvar_var_names=set(),
             param_names=param_names,
             initial_used_names=all_defined,
         )
@@ -1038,7 +1031,7 @@ class TestInferReturnType:
             """
         )
         meta = {"a": self._meta(), "out0": self._meta(), "out1": self._meta()}
-        ann = _infer_return_type(func_def, meta, set(), {}, ["out0", "out1"])
+        ann = _infer_return_type(func_def, meta, ["out0", "out1"])
         assert ann == ("tuple[pl.Tensor[[32, 32], pl.FP32], pl.Tensor[[32, 32], pl.FP32]]")
 
     def test_tuple_return_with_unknown_element_drops_annotation(self):
@@ -1051,7 +1044,7 @@ class TestInferReturnType:
         )
         meta = {"a": self._meta(), "out": self._meta()}
         # `a_local` isn't in tensor_meta — can't infer it.
-        assert _infer_return_type(func_def, meta, set(), {}, ["out"]) is None
+        assert _infer_return_type(func_def, meta, ["out"]) is None
 
     def test_return_call_drops_annotation(self):
         """`return f(...)` can't be inferred — caller may have multi-return."""
@@ -1062,7 +1055,7 @@ class TestInferReturnType:
             """
         )
         meta = {"a": self._meta(), "out": self._meta()}
-        assert _infer_return_type(func_def, meta, set(), {}, ["out"]) is None
+        assert _infer_return_type(func_def, meta, ["out"]) is None
 
     def test_bare_tensor_param_return_inferred(self):
         """Bare `pl.Tensor` returns (no `pl.Out`) — issue #1304 deprecation case."""
@@ -1074,7 +1067,7 @@ class TestInferReturnType:
         )
         meta = {"a": self._meta(), "out": self._meta()}
         # No out_params at all (bare pl.Tensor params).
-        ann = _infer_return_type(func_def, meta, set(), {}, [])
+        ann = _infer_return_type(func_def, meta, [])
         assert ann == "pl.Tensor[[32, 32], pl.FP32]"
 
 
@@ -1083,7 +1076,7 @@ class TestSpecializerInlineDeprecation:
 
     def _spec(self, ctx_args: dict) -> str:
         ctx = _make_ctx(**ctx_args)
-        return Specializer("Generated", [ctx], {}).specialize()
+        return Specializer("Generated", [ctx]).specialize()
 
     def test_inline_strips_pl_out_and_warns(self):
         """Inline helpers with pl.Out -> bare pl.Tensor + DeprecationWarning."""

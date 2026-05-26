@@ -762,6 +762,129 @@ class TestSliceAndDepReturnMetadata:
             bad_entry.compile_for_test(cfg, out)
 
 
+# Module-level dynvar + constant for TestDynamicLocalTensorMetadata.
+# Module-level so the generated @pl.program source sees them in the
+# originating module's globals when it's parsed.
+_M_1524 = pl.dynamic("M_1524")
+_HIDDEN_1524 = 128
+
+
+class TestDynamicLocalTensorMetadata:
+    """Regression tests for issue #1524: `pl.create_tensor` whose shape is
+    derived from `pl.tensor.dim` on a dynamic-bound parameter, or from a
+    bind_dynamic'd DynVar, must inherit the matching :class:`DynDim` so the
+    local can flow into a sub-function's annotation as `pl.Tensor[[M, ...], ...]`.
+    """
+
+    def test_dim_alias_propagates_dyndim_to_local(self):
+        """`tokens = pl.tensor.dim(P, 0)` then `pl.create_tensor([tokens, K], ...)`
+        stamps the parent's DynDim onto the local's shape."""
+        from pypto.jit.specializer import DynDim  # noqa: PLC0415
+
+        m_dim = DynDim(name="M", literal="M", static_bound=7)
+        seed = {
+            "hidden_states": TensorMeta(shape=(m_dim, 128), dtype=DataType.BF16),
+            "out": TensorMeta(shape=(m_dim, 128), dtype=DataType.BF16),
+        }
+
+        def body(hidden_states, out):
+            tokens = pl.tensor.dim(hidden_states, 0)
+            current = pl.create_tensor([tokens, 128], dtype=pl.BF16)
+            nxt = pl.create_tensor([tokens, 128], dtype=pl.BF16)
+            return current, nxt
+
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert "current" in metas
+        assert "nxt" in metas
+        assert metas["current"].shape == (m_dim, 128)
+        assert metas["nxt"].shape == (m_dim, 128)
+
+    def test_dim_alias_static_dim_stays_int(self):
+        """Aliasing a static parent dim resolves to the plain int (no DynDim)."""
+        from pypto.jit.specializer import DynDim  # noqa: PLC0415
+
+        m_dim = DynDim(name="M", literal="M", static_bound=7)
+        seed = {"x": TensorMeta(shape=(m_dim, 128), dtype=DataType.BF16)}
+
+        def body(x):
+            hidden = pl.tensor.dim(x, 1)  # static dim 1 = 128
+            buf = pl.create_tensor([4, hidden], dtype=pl.FP32)
+            return buf
+
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["buf"].shape == (4, 128)
+
+    def test_dynvar_in_create_tensor_substituted(self):
+        """``pl.create_tensor([M, HIDDEN], ...)`` — M is a DynVar bound to a
+        param dim. The body transformer rewrites the runtime ``M`` reference
+        to ``pl.tensor.dim(P, k)`` so the generated IR doesn't leak the
+        annotation-only DynVar past SSA conversion."""
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def layer_dv(
+            hidden_states: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+            out: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+        ) -> pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]:
+            hidden_states.bind_dynamic(0, _M_1524)
+            out.bind_dynamic(0, _M_1524)
+            return out
+
+        @jit
+        def fwd_dv(
+            hidden_states: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+            out: pl.Out[pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]],
+        ) -> pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]:
+            hidden_states.bind_dynamic(0, _M_1524)
+            out.bind_dynamic(0, _M_1524)
+            # Direct DynVar in the allocation shape — the issue's "alternative
+            # workaround" form that previously failed with "Variable 'M' used
+            # outside its defining scope".
+            current = pl.create_tensor([_M_1524, _HIDDEN_1524], dtype=pl.BF16)
+            nxt = pl.create_tensor([_M_1524, _HIDDEN_1524], dtype=pl.BF16)
+            current = layer_dv(current, nxt)
+            return current
+
+        hidden = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
+        out = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
+        fwd_dv.compile_for_test(hidden, out)
+
+    def test_issue_1524_repro_compiles(self):
+        """The exact failing pattern from issue #1524."""
+        torch = pytest.importorskip("torch")
+
+        # Both M_1524 and _HIDDEN_1524 are module-level — the generated
+        # @pl.program source picks them up from the originating module's
+        # globals when it's parsed.
+        @jit.inline
+        def layer_1524(
+            hidden_states: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+            out: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+        ) -> pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]:
+            hidden_states.bind_dynamic(0, _M_1524)
+            out.bind_dynamic(0, _M_1524)
+            return out
+
+        @jit
+        def fwd_1524(
+            hidden_states: pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16],
+            out: pl.Out[pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]],
+        ) -> pl.Tensor[[_M_1524, _HIDDEN_1524], pl.BF16]:
+            hidden_states.bind_dynamic(0, _M_1524)
+            out.bind_dynamic(0, _M_1524)
+            tokens = pl.tensor.dim(hidden_states, 0)
+            current = pl.create_tensor([tokens, _HIDDEN_1524], dtype=pl.BF16)
+            nxt = pl.create_tensor([tokens, _HIDDEN_1524], dtype=pl.BF16)
+            current = layer_1524(current, nxt)
+            return current
+
+        hidden = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
+        out = torch.empty(7, _HIDDEN_1524, dtype=torch.bfloat16)
+        # Should not raise — previously failed with
+        # "missing inferred tensor metadata for parameter 'hidden_states'".
+        fwd_1524.compile_for_test(hidden, out)
+
+
 class TestInlineFuncIntegration:
     """End-to-end @pl.jit.inline: dep body is spliced into entry by the IR pass."""
 
@@ -884,7 +1007,7 @@ class TestInlineFuncIntegration:
             out = mid(a, out)
             return out
 
-        deps_topo, callers_by_id, callees_by_id, _, _ = entry._get_dep_graph()
+        deps_topo, callers_by_id, callees_by_id, _ = entry._get_dep_graph()
         assert [d.__name__ for d in deps_topo] == ["leaf", "mid"]
         assert callers_by_id[id(leaf._func)] == [mid._func]
         assert callers_by_id[id(mid._func)] == [entry._func]
@@ -954,7 +1077,7 @@ class TestInlineFuncIntegration:
             out = b_helper(a, out)
             return out
 
-        deps_topo, callers_by_id, _, _, _ = entry_diamond._get_dep_graph()
+        deps_topo, callers_by_id, _, _ = entry_diamond._get_dep_graph()
         assert len(deps_topo) == 3, f"expected dedup'd shared leaf + a_helper + b_helper, got {deps_topo}"
         assert {d.__name__ for d in deps_topo} == {"shared", "a_helper", "b_helper"}
 
@@ -1263,7 +1386,7 @@ class TestVariableRebinding:
             },
             scalar_values={},
             scalar_dtypes={},
-            per_func_dyn={id(kernel._func): set()},
+            per_func_dyn={id(kernel._func): {}},
             pl=pl,
         )
         assert result is not None
@@ -1392,7 +1515,7 @@ class TestCompileKwargForwarding:
             },
             scalar_values={},
             scalar_dtypes={},
-            per_func_dyn={id(fwd_kernel._func): set()},
+            per_func_dyn={id(fwd_kernel._func): {}},
             pl=pl,
             platform="a2a3sim",
             **_run_config_compile_kwargs(cfg),
@@ -1430,7 +1553,7 @@ class TestCompileKwargForwarding:
             },
             scalar_values={},
             scalar_dtypes={},
-            per_func_dyn={id(plain_kernel._func): set()},
+            per_func_dyn={id(plain_kernel._func): {}},
             pl=pl,
         )
         assert set(captured) == {"skip_ptoas", "platform"}
