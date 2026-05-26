@@ -469,6 +469,9 @@ def _execute_on_device(
     platform: str,
     device_id: int,
     dfx: _DfxOpts = _DfxOpts(),
+    *,
+    block_dim: int | None = None,
+    aicpu_thread_num: int | None = None,
 ) -> None:
     """Load inputs, execute on device, and validate against golden.
 
@@ -488,6 +491,17 @@ def _execute_on_device(
         dfx: Runtime DFX toggles. When any flag is enabled the artefacts
             land under ``<work_dir>/dfx_outputs/`` and the matching
             post-run converter is invoked.
+        block_dim: Optional override of the logical SPMD block count.
+            ``None`` falls back to the simpler runtime default. Callers
+            should forward the value from ``compile_and_assemble``'s
+            ``runtime_config["block_dim"]`` so it matches the value baked
+            into ``kernel_config.py``.
+        aicpu_thread_num: Optional override of the AICPU thread count.
+            ``None`` falls back to the simpler runtime default (currently
+            3). The ``tensormap_and_ringbuffer`` runtime requires 4
+            threads (3 schedulers + 1 orchestrator); callers should
+            forward ``runtime_config["aicpu_thread_num"]`` so that AICPU
+            stream sync does not time out.
     """
     from .device_runner import (  # noqa: PLC0415
         build_orch_args_from_inputs,
@@ -529,6 +543,8 @@ def _execute_on_device(
         platform,
         runtime_name,
         device_id,
+        block_dim=block_dim,
+        aicpu_thread_num=aicpu_thread_num,
         output_prefix=str(dfx_dir) if dfx_dir is not None else None,
         enable_l2_swimlane=dfx.enable_l2_swimlane,
         enable_dump_tensor=dfx.enable_dump_tensor,
