@@ -19,6 +19,13 @@
  *
  * Both ops are DPS — `dst` is the in/out buffer; the IR result aliases `dst`
  * via `set_output_reuses_input(...)`. There is no compare form for scatter.
+ *
+ * Duplicate-index ordering: when two index entries map to the same destination
+ * slot, pto.tscatter resolves the collision in ascending element order (the
+ * later/higher-index write wins), matching torch `scatter_`'s last-wins
+ * semantics along the scan axis. Callers that build flat indices
+ * (ConvertTensorToTileOps) and the ST reference both rely on this order; it is
+ * a pto.tscatter ABI guarantee, not a PyPTO-side choice.
  */
 
 #include <any>

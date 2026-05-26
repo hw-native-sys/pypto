@@ -973,7 +973,14 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
   std::ostringstream oss;
   oss << "pto.tscatter ins(" << src << ", " << idx;
   // Emit the type clause only when both annotations are present; printing one
-  // alone would produce malformed PTOAS (": , idx" or ": src, ").
+  // alone would produce malformed PTOAS (": , idx" or ": src, "). The two
+  // operands are typed tiles produced by the same lowering, so they should
+  // either both carry an annotation or (in untyped contexts) both lack one — a
+  // one-sided annotation signals a real codegen bug, not a valid input.
+  INTERNAL_CHECK(src_type.empty() == idx_type.empty())
+      << "Internal error: tile.scatter src/indexes type annotations must both be present or both "
+         "absent, got src_type='"
+      << src_type << "', idx_type='" << idx_type << "'";
   if (!src_type.empty() && !idx_type.empty()) {
     oss << " : " << src_type << ", " << idx_type;
   }
@@ -988,16 +995,17 @@ static std::string MakeScatterCodegenPTO(const CallPtr& op, codegen::CodegenBase
 }
 
 // Helper for tile.scatter_mask (TSCATTER mask form, DPS):
-//   pto.tscatter ins(%src : src_ty) outs(%dst : dst_ty)
-//                {maskPattern = #pto.mask_pattern<Pxxxx>}
+//   pto.tscatter ins(%src, {maskPattern = #pto.mask_pattern<Pxxxx>} : src_ty)
+//                outs(%dst : dst_ty)
 //
-// Unlike pto.tgather's mask form (which carries maskPattern inside ins()),
-// pto.tscatter only accepts SSA operands in ins() — the maskPattern must be a
-// trailing op attribute dict (same placement as gather_compare's cmpMode).
+// The maskPattern rides *inside* ins() right after the src operand, exactly
+// like pto.tgather's mask form — PTOAS parses ins() as "src, attr-dict :
+// type" and rejects a bare ins(%src ...) ("expected ',' after src operand").
+// The type annotation follows the attr dict, still inside ins().
 //
 // IR surface: 2-input op (dst, src) + mask_pattern attr; dst aliased via
-// set_output_reuses_input(0). Mask form is targeted at A3 / CPU-sim style
-// backends; A5 rejects it on the PTOAS side.
+// set_output_reuses_input(0). Mask form is targeted at A2/A3 backends; A5
+// (Ascend950) rejects it on the PTOAS side.
 static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == 2) << "tile.scatter_mask requires 2 arguments (dst, src), but got "
@@ -1021,7 +1029,10 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
       << ", input=" << input_ssa;
 
   std::ostringstream oss;
-  oss << "pto.tscatter ins(" << src;
+  // maskPattern goes inside ins() after src (mirrors pto.tgather mask form);
+  // the optional type annotation follows the attr dict, still inside ins().
+  oss << "pto.tscatter ins(" << src << ", {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern)
+      << ">}";
   if (!src_type.empty()) {
     oss << " : " << src_type;
   }
@@ -1029,7 +1040,7 @@ static std::string MakeScatterMaskCodegenPTO(const CallPtr& op, codegen::Codegen
   if (!dst_type.empty()) {
     oss << " : " << dst_type;
   }
-  oss << ") {maskPattern = #pto.mask_pattern<" << mask_patterns.at(pattern) << ">}";
+  oss << ")";
 
   codegen.Emit(oss.str());
   return "";

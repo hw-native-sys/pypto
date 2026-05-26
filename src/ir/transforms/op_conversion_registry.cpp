@@ -1476,6 +1476,10 @@ void OpConversionRegistry::RegisterScatterOps() {
         //   flat_idx = index + row_base   (row-broadcast add)
         auto& op_reg = OpRegistry::GetInstance();
         auto src_rows = As<ConstInt>(src_tile->shape_[0]);
+        // `cols` is the flat-layout column count of the scattered destination.
+        // input/output and the inner tile.scatter dst all share this width (S),
+        // so reading it off `input` is equivalent to the dst column count used
+        // in the `i * dst_cols` flat-index formula above.
         auto dst_cols_c = As<ConstInt>(input_tile->shape_[1]);
         CHECK(src_rows && dst_cols_c)
             << "tensor.scatter conversion requires static src rows and dst cols for index expansion";
@@ -1485,6 +1489,22 @@ void OpConversionRegistry::RegisterScatterOps() {
         // keeps satisfying the pto.tscatter element-size matching rule (INT32
         // for 4-byte dst, INT16 for 2/1-byte dst).
         const DataType idx_dtype = idx_tile->dtype_;
+
+        // INT16 flat-index range guard. For 2-byte element dtypes the flattened
+        // destination indices are INT16, whose largest representable value is
+        // 32767. The biggest index this lowering produces is
+        // (n-1)*cols + (cols-1) == n*cols - 1, so n*cols must stay <= 32768.
+        // 4-byte dtypes use INT32 indices and are effectively unbounded here.
+        // Without this check an oversized tile would silently overflow INT16 and
+        // scatter to wrong addresses instead of failing loudly.
+        if (idx_dtype == DataType::INT16) {
+          CHECK(n * cols <= 32768)
+              << "tensor.scatter with a 2-byte element dtype uses INT16 flattened indices, but the "
+                 "destination is too large: rows("
+              << n << ") * cols(" << cols << ") = " << (n * cols)
+              << " exceeds the INT16 index range (max flat index 32767). Use a smaller tile or split "
+                 "the scatter into chunks.";
+        }
 
         auto make_idx = [&](int64_t v) -> ExprPtr {
           return std::make_shared<ConstInt>(v, DataType::INDEX, span);

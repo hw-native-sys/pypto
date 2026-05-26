@@ -1940,6 +1940,12 @@ class TestScatterCodegen:
         assert "ins(" in line and "outs(" in line, (
             f"pto.tscatter mask form must use the ins(...) outs(...) DPS form, got:\n{line}"
         )
+        # maskPattern must ride inside ins() after src (like pto.tgather), not as
+        # a trailing attr after outs() — PTOAS rejects a bare ins(%src ...) with
+        # "expected ',' after src operand".
+        assert line.index("maskPattern") < line.index("outs("), (
+            f"maskPattern must appear inside ins(...) before outs(...), got:\n{line}"
+        )
 
 
 if __name__ == "__main__":
