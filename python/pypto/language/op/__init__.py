@@ -42,7 +42,21 @@ from .system_ops import (
 )
 
 # Promoted tensor-only ops (accessible as pl.create_tensor, etc.)
-from .tensor_ops import assemble, cos, dim, expand_clone, full, gather, mrgsort, scatter_update, sin, sort32
+from .tensor_ops import (
+    assemble,
+    cos,
+    dim,
+    expand_clone,
+    full,
+    gather,
+    get_block_idx,
+    get_block_num,
+    get_subblock_idx,
+    mrgsort,
+    scatter_update,
+    sin,
+    sort32,
+)
 from .tensor_ops import ci as arange
 from .tensor_ops import create as create_tensor
 
@@ -236,6 +250,9 @@ __all__ = [
     "scatter_update",
     "sin",
     "gather",
+    "get_block_idx",
+    "get_block_num",
+    "get_subblock_idx",
     "mrgsort",
     "sort32",
     # Promoted system ops

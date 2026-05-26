@@ -2819,6 +2819,50 @@ class TestSpmdBlockIdentityConversion:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_top_level_pl_aliases(self):
+        """``pl.get_block_idx`` / ``get_subblock_idx`` / ``get_block_num`` emit tensor-scope
+        ops and lower 1:1 to ``tile.*`` via ConvertTensorToTileOps."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                i: pl.Scalar[pl.INDEX] = pl.get_block_idx()
+                s: pl.Scalar[pl.INDEX] = pl.get_subblock_idx()
+                n: pl.Scalar[pl.INDEX] = pl.get_block_num()
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, i + s + n)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_incore_0(x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                i = pl.tile.get_block_idx()
+                s = pl.tile.get_subblock_idx()
+                n = pl.tile.get_block_num()
+                y__tile = pl.tile.adds(x__tile, i + s + n)
+                ret0__store = pl.store(y__tile, [0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                ret0__out = pl.create_tensor([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                y = self.main_incore_0(x, ret0__out)
+                return y
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
