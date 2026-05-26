@@ -97,11 +97,16 @@ class PriorWriterCollector {
     AnalyzeScope(body, seen);
   }
 
-  /// Per-Call set of roots for which the call is the first writer in its scope.
-  /// Roots not in the set (or Calls absent from the map) are by definition
-  /// preceded by another writer-unit and therefore subject to R-prior promotion.
-  /// Includes both locally-allocated roots and enclosing-param-rooted ones.
-  std::unordered_map<const Call*, std::unordered_set<const Var*>> first_writer_roots;
+  /// Per-call-like set of roots for which the call (or submit) is the first
+  /// writer in its scope. Roots not in the set (or call-like exprs absent
+  /// from the map) are by definition preceded by another writer-unit and
+  /// therefore subject to R-prior promotion. Includes both locally-allocated
+  /// roots and enclosing-param-rooted ones. Keyed by the original Expr*
+  /// pointer so both Call and Submit nodes get tracked under their stable
+  /// identity (Submit IRs are folded to Call via SubmitToCallView for the
+  /// per-arg direction analysis, but that synthesised Call's pointer is
+  /// transient — we register under the original Submit's pointer instead).
+  std::unordered_map<const Expr*, std::unordered_set<const Var*>> first_writer_roots;
 
  private:
   /// Compute (and cache) the set of local roots written by any non-builtin Call
@@ -206,10 +211,20 @@ class PriorWriterCollector {
     // Other stmts (Yield/Return/Break/Continue): no Calls to analyze.
   }
 
-  /// For a single Call expression, mark "first writer" roots and update `seen`.
+  /// For a single Call or Submit expression, mark "first writer" roots and
+  /// update `seen`. Submits go through SubmitToCallView so the args walk
+  /// is identical; the synthesised Call is only used for analysis — first
+  /// writer is registered under the original Submit's stable pointer
+  /// (`expr.get()`) so the consumer in CallDirectionMutator can look it up.
   void AnalyzeCall(const ExprPtr& expr, std::unordered_set<const Var*>& seen) {
-    auto call = As<Call>(expr);
-    if (!call) return;
+    CallPtr call;
+    if (auto c = As<Call>(expr)) {
+      call = c;
+    } else if (auto s = As<Submit>(expr)) {
+      call = SubmitToCallView(s);
+    } else {
+      return;
+    }
     if (IsBuiltinOp(call->op_->name_)) return;
     auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
     if (!callee) return;
@@ -224,7 +239,7 @@ class PriorWriterCollector {
       const Var* root = ResolveAnyRoot(call->args_[i], buffer_roots_);
       if (!root) continue;
       if (dirs[i] == ParamDirection::Out && seen.count(root) == 0) {
-        first_writer_roots[call.get()].insert(root);
+        first_writer_roots[expr.get()].insert(root);
       }
       roots_this_call.insert(root);
     }
@@ -259,7 +274,7 @@ class CallDirectionMutator : public IRMutator {
  public:
   CallDirectionMutator(
       ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
-      const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots,
+      const std::unordered_map<const Expr*, std::unordered_set<const Var*>>& first_writer_roots,
       const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root)
       : program_(std::move(program)),
         buffer_roots_(buffer_roots),
@@ -291,7 +306,18 @@ class CallDirectionMutator : public IRMutator {
     auto base = IRMutator::VisitExpr_(op);
     auto call = As<Call>(base);
     if (!call) return base;
+    // Key first-writer lookups by the original input Call's pointer so
+    // we match what the FirstWriterCollector registered. Submit takes a
+    // different path via DeriveCallArgDirections — see VisitExpr_(SubmitPtr).
+    return DeriveCallArgDirections(call, op.get());
+  }
 
+  /// Body of the Call rewrite, parameterised by the identity key used to
+  /// look up first_writer_roots_. For a real Call, the key is the Call's
+  /// own pointer; for a Submit lowered via SubmitToCallView, the key must
+  /// be the original Submit's pointer (since the synthesised Call is
+  /// transient and was never registered by FirstWriterCollector).
+  ExprPtr DeriveCallArgDirections(const CallPtr& call, const Expr* identity_key) {
     if (IsBuiltinOp(call->op_->name_)) {
       return call;
     }
@@ -317,11 +343,12 @@ class CallDirectionMutator : public IRMutator {
       return call;
     }
 
-    // Look up first-writer info computed against the *original* Call object.
-    // The mutator may produce a new shared_ptr above (when nested Calls are
-    // rewritten), but the prior-writer collector keyed on the original op.
-    const Call* original_call = op.get();
-    auto fw_it = first_writer_roots_.find(original_call);
+    // Look up first-writer info computed against the *original* expression
+    // object. The mutator may produce a new shared_ptr above (when nested
+    // exprs are rewritten), but the prior-writer collector keyed on the
+    // original op — passed in here as ``identity_key`` (the Call's own
+    // pointer for the Call path, the Submit's pointer for the Submit path).
+    auto fw_it = first_writer_roots_.find(identity_key);
     const std::unordered_set<const Var*>* first_writer_set =
         fw_it != first_writer_roots_.end() ? &fw_it->second : nullptr;
 
@@ -417,14 +444,17 @@ class CallDirectionMutator : public IRMutator {
     auto view_call = SubmitToCallView(submit);
     // Run the Call-side derivation on the synthesised view; the result is
     // a Call (possibly with arg_directions populated) which we return as
-    // the rewrite. The Submit kind ends here.
-    return VisitExpr_(view_call);
+    // the rewrite. Pass the ORIGINAL Submit's pointer as the identity key
+    // so first_writer_roots_ — populated by AnalyzeCall against the Submit
+    // — actually matches. The synthesised view's own pointer is transient
+    // and would always miss the lookup, leaving Out args misclassified.
+    return DeriveCallArgDirections(view_call, op.get());
   }
 
  private:
   ProgramPtr program_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
-  const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots_;
+  const std::unordered_map<const Expr*, std::unordered_set<const Var*>>& first_writer_roots_;
   const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root_;
   int sequential_depth_ = 0;
 };

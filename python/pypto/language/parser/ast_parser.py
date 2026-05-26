@@ -995,10 +995,14 @@ class ASTParser:
                     span=self.span_tracker.get_span(stmt.target),
                     hint="Use `result: pl.Tuple[..., TASK_ID] = pl.submit(self.kernel, ...)`.",
                 )
-            self._parse_submit_single_lhs(stmt.target, stmt.value)
-            return
-
-        value_expr = self.parse_expression(stmt.value)
+            # Build the Submit Expr and fall through to the standard
+            # annotation-consistency / override_type validation path below —
+            # so ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)`` actually
+            # validates the annotation against the inferred Submit return
+            # type the way every other annotated RHS does.
+            value_expr = self._build_submit_single_lhs_expr(stmt.value)
+        else:
+            value_expr = self.parse_expression(stmt.value)
 
         # Validate annotation against inferred type; use annotation as override only for memref
         override_type = None
@@ -1370,16 +1374,14 @@ class ASTParser:
         tid_var = self._assign_or_let(tid_target.id, task_id_expr, span)
         self.scope_manager.define_var(tid_target.id, tid_var, span=span)
 
-    def _parse_submit_single_lhs(self, target: ast.Name, call: ast.Call) -> None:
-        """Parse the single-LHS form ``result = pl.submit(self.kernel, ...)``.
+    def _build_submit_single_lhs_expr(self, call: ast.Call) -> ir.Expr:
+        """Build the ``ir.Submit`` expression for the single-LHS form
+        ``result = pl.submit(self.kernel, ...)`` without binding it.
 
-        The printer emits this shape when an IR-level Submit is the RHS of an
-        ``AssignStmt`` whose LHS is a single Tuple-typed Var (no projection
-        statements) — most commonly after a pass rewrites a Submit and the
-        round-trip needs to be parser-accepted. Unlike
-        :meth:`_parse_submit_assignment`, no kernel-result / task-id projections
-        are synthesised: the whole flat ``Tuple{*<kernel results>, TaskId}``
-        is bound to a single Var, matching what the printer produced.
+        Separated from :meth:`_parse_submit_single_lhs` so the annotated
+        assignment path can feed the inferred Submit type through the
+        standard annotation-consistency / ``override_type`` validation flow
+        that all other RHS expressions go through.
         """
         span = self.span_tracker.get_span(call)
         if not call.args:
@@ -1400,7 +1402,18 @@ class ASTParser:
                 hint="Pass the kernel itself, not a call: "
                 "`pl.submit(self.kernel, x, y)` — not `pl.submit(self.kernel(x, y))`.",
             )
-        call_expr = self._parse_kernel_call(method_attr, call.args[1:], call.keywords, span, as_submit=True)
+        return self._parse_kernel_call(method_attr, call.args[1:], call.keywords, span, as_submit=True)
+
+    def _parse_submit_single_lhs(self, target: ast.Name, call: ast.Call) -> None:
+        """Parse the bare single-LHS form ``result = pl.submit(self.kernel, ...)``.
+
+        Used by :meth:`parse_assignment` (no annotation). The annotated form
+        ``result: pl.Tuple[..., TASK_ID] = pl.submit(...)`` builds the Submit
+        via :meth:`_build_submit_single_lhs_expr` and runs the regular
+        annotation-consistency flow before binding.
+        """
+        span = self.span_tracker.get_span(call)
+        call_expr = self._build_submit_single_lhs_expr(call)
         var = self._assign_or_let(target.id, call_expr, span)
         self.scope_manager.define_var(target.id, var, span=span)
 
