@@ -224,17 +224,32 @@ static codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::Tile
   c.v_row_dynamic = true;
   c.v_col_dynamic = true;
 
-  // PTOAS verifies subview result types against the parent's static type
-  // string. Non-subview tile types always render `v_row=?, v_col=?` regardless
-  // of what `tile_view_.valid_shape` holds in the IR (see ExtractTileTypeInfo
-  // in pto_type_utils.cpp), so PTOAS infers the result's static valid purely
-  // from the slice's `sizes`. Reading `tile_view_.valid_shape` here would
-  // diverge from PTOAS when the IR carries a sentinel — e.g.,
-  // SplitVectorKernel's lane1 [0, 0] via WithZeroValidShape — producing
-  // `v_row=0, v_col=0` against a `v_row=?` parent (issue #1507). Use
-  // `shape_` to mirror PTOAS; the runtime valid is still conveyed via
-  // pto.alloc_tile's valid_row / valid_col SSA operands.
-  const std::vector<ir::ExprPtr>& source_valid = source_tile_type.shape_;
+  // PTOAS infers the subview result's static valid from the slice's `sizes`
+  // whenever the parent's static type string carries `v_row=?, v_col=?`.
+  // Non-subview tile types always render that way (see ExtractTileTypeInfo in
+  // pto_type_utils.cpp) — even when the IR's `tile_view_.valid_shape` is set —
+  // so reading the parent's IR valid here can diverge from PTOAS. The case
+  // that surfaces in practice is SplitVectorKernel's lane1 [0, 0] sentinel
+  // (set by WithZeroValidShape on cloned lane1 ops): the parent prints as `?`
+  // but its IR valid is `[0, 0]`, producing a `v_row=0, v_col=0` result that
+  // PTOAS rejects (issue #1507).
+  //
+  // Special-case only the all-zero sentinel; for every other narrow valid
+  // (e.g., parent subviews whose deducer propagated a real `v_row/v_col`)
+  // keep the existing inference so nested subviews still type correctly.
+  std::vector<ir::ExprPtr> source_valid = source_tile_type.shape_;
+  if (source_tile_type.tile_view_.has_value() &&
+      source_tile_type.tile_view_->valid_shape.size() >= 2) {
+    const auto& parent_valid = source_tile_type.tile_view_->valid_shape;
+    const bool is_zero_sentinel =
+        std::all_of(parent_valid.begin(), parent_valid.end(), [](const ir::ExprPtr& e) {
+          auto c = As<ir::ConstInt>(e);
+          return c && c->value_ == 0;
+        });
+    if (!is_zero_sentinel) {
+      source_valid = parent_valid;
+    }
+  }
 
   auto infer_dim = [&](size_t dim_idx, int64_t size, int64_t* out_value, bool* out_dynamic) {
     auto offset_const = As<ir::ConstInt>(offset_tuple.elements_[dim_idx]);

@@ -1090,6 +1090,38 @@ class TestTileSliceCodegen:
             f"v_row/v_col must not be dynamic ('?') when source valid >= slice size, got:\n{subview_lines[0]}"
         )
 
+    def test_tile_slice_preserves_non_sentinel_parent_valid_shape(self):
+        """Counterpart to the [0, 0] sentinel regression: when the parent's
+        IR carries a genuine narrow valid_shape (not the lane1 sentinel),
+        InferSubviewTileTypeComponents must still honour it so the subview's
+        static v_row/v_col reflects the narrower extent.
+
+        Parent valid [12, 12], slice sizes [8, 8] at offset [6, 6]:
+          remain = 12 - 6 = 6;  result v = min(8, 6) = 6.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.Tensor[[8, 8], pl.FP32],
+            ) -> pl.Tensor[[8, 8], pl.FP32]:
+                narrow_parent: pl.Tile[
+                    [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[12, 12])
+                ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                sliced: pl.Tile[[8, 8], pl.FP32] = pl.tile.slice(narrow_parent, [8, 8], [6, 6])
+                return pl.store(sliced, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
+        result_type = subview_lines[0].split("->", 1)[-1]
+        assert "v_row=6" in result_type and "v_col=6" in result_type, (
+            "Parent narrow valid [12, 12] with offset [6, 6] and sizes [8, 8] must yield "
+            f"v_row=6, v_col=6 (min(size, valid - offset)) on the subview result; got:\n{subview_lines[0]}"
+        )
+
     def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self):
         """Regression for issue #1507: subview must not emit static v_row=0, v_col=0
         when the parent's IR carries the lane1 [0, 0] valid_shape sentinel.
