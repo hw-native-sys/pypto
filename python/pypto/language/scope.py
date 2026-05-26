@@ -9,7 +9,7 @@
 
 """Runtime scope context managers and submit primitive for the PyPTO Language DSL."""
 
-from typing import Any, NoReturn
+from typing import Any
 
 
 class manual_scope:
@@ -57,7 +57,7 @@ class manual_scope:
         return False
 
 
-def submit(*args: Any, **kwargs: Any) -> NoReturn:
+def submit(*args: Any, **kwargs: Any) -> Any:
     """Submit a kernel and capture its producer TaskId.
 
     ``pl.submit`` is a **parser construct**, not a runtime function — the
@@ -70,16 +70,23 @@ def submit(*args: Any, **kwargs: Any) -> NoReturn:
         out, tid    = pl.submit(self.stage1, x, scratch, deps=[prev_tid])
         (a, b), tid = pl.submit(self.multi_out_kernel, x)
 
-    The kernel ``Call`` natively returns ``Tuple[<kernel return>, TASK_ID]``;
-    element 0 is the tensor result(s), element 1 is the producer TaskId
-    (``Scalar[TASK_ID]``). The optional ``deps=[...]`` kwarg lists TaskId
-    scalars / arrays this submit must wait on.
+    The kernel-side ``ir.Submit`` natively returns
+    ``Tuple[<kernel return>, TASK_ID]``; element 0 is the tensor result(s),
+    element 1 is the producer TaskId (``Scalar[TASK_ID]``). The optional
+    ``deps=[...]`` kwarg lists TaskId scalars / arrays this submit must
+    wait on. The single-LHS form ``res = pl.submit(...)`` is also accepted
+    and binds the whole flat tuple to one variable.
 
     ``pl.submit`` and its ``deps=`` kwarg work in **both auto and manual
     scope**: ``Arg::set_dependencies`` is orthogonal to OverlapMap
     auto-tracking (final fanin = auto ∪ explicit). In auto scope, use
     ``deps=[...]`` as a precision tool to patch edges the runtime cannot
     infer; in ``pl.manual_scope()``, use it to declare every edge.
+
+    The return annotation is ``Any`` (not ``NoReturn``) because the parser
+    intercepts the call and binds a 2-tuple to the LHS — downstream code
+    that does ``out, tid = pl.submit(...)`` would not type-check under
+    ``NoReturn``.
     """
     raise RuntimeError(
         "pl.submit is a DSL parser construct and cannot be called directly; "
