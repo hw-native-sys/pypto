@@ -120,6 +120,11 @@ class Array(metaclass=ArrayMeta):
             raise ValueError("Cannot unwrap annotation-only Array (used in type hints)")
         return self._expr
 
+    @classmethod
+    def __class_getitem__(cls, item: tuple[int, DataType]) -> "Array":
+        """Support static type checkers for ``Array[extent, dtype]`` syntax."""
+        return type(cls).__getitem__(cls, item)
+
     # --- Indexing sugar -----------------------------------------------------
 
     def __getitem__(self, index: "int | Expr | Scalar") -> "Scalar":  # noqa: F821

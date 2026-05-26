@@ -47,6 +47,7 @@ __all__ = [
     "import_peer_buffer",
     "tfree_to_aic",
     "tfree_to_aiv",
+    "task_invalid",
 ]
 
 
@@ -143,3 +144,21 @@ def import_peer_buffer(*, name: str, peer_func: str, span: Span | None = None) -
     """
     call = _ir_ops.import_peer_buffer(name=name, peer_func=peer_func, span=span)
     return Scalar(DataType.INT32, call)
+
+
+def task_invalid(*, span: Span | None = None) -> Scalar:
+    """Sentinel ``pl.Scalar[pl.TASK_ID]`` for the "no producer" TaskId.
+
+    DSL surface of the IR-level ``system.task_invalid`` op. The printer emits
+    ``pl.system.task_invalid()`` for auto-scope TaskId placeholders so dumps
+    are valid Python; user code in ``pl.manual_scope`` normally writes ``None``
+    and the parser lowers it to this op.
+
+    Args:
+        span: Optional source span.
+
+    Returns:
+        ``pl.Scalar[pl.TASK_ID]`` wrapping the ``system.task_invalid`` IR call.
+    """
+    call = _ir_ops.task_invalid(span=span)
+    return Scalar(DataType.TASK_ID, call)

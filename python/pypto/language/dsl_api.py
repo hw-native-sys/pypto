@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union, cast, overload
 
 if TYPE_CHECKING:
-    from pypto.language.typing import Scalar, Tensor, Tile
+    from pypto.language.typing import Array, Scalar, Tensor, Tile
     from pypto.pypto_core import ir
 
 from pypto.pypto_core import ir as _ir
@@ -86,18 +86,18 @@ RangeArg = Union[int, "Scalar"]
 # Condition argument type: bool literal or Scalar variable
 CondArg = Union[bool, "Scalar"]
 
-ExprType = TypeVar("ExprType", int, float, "Scalar", "Tensor", "Tile")
+ExprType = TypeVar("ExprType", int, float, "Scalar", "Tensor", "Tile", "Array")
 
 
 T = TypeVar("T")
 W = TypeVar("W")
 
 # TypeVars for overloads (int/float included so yield_(1) is valid in DSL)
-T1 = TypeVar("T1", int, float, "Scalar", "Tensor", "Tile")
-T2 = TypeVar("T2", int, float, "Scalar", "Tensor", "Tile")
-T3 = TypeVar("T3", int, float, "Scalar", "Tensor", "Tile")
-T4 = TypeVar("T4", int, float, "Scalar", "Tensor", "Tile")
-T5 = TypeVar("T5", int, float, "Scalar", "Tensor", "Tile")
+T1 = TypeVar("T1", int, float, "Scalar", "Tensor", "Tile", "Array")
+T2 = TypeVar("T2", int, float, "Scalar", "Tensor", "Tile", "Array")
+T3 = TypeVar("T3", int, float, "Scalar", "Tensor", "Tile", "Array")
+T4 = TypeVar("T4", int, float, "Scalar", "Tensor", "Tile", "Array")
+T5 = TypeVar("T5", int, float, "Scalar", "Tensor", "Tile", "Array")
 
 
 class RangeIterator(Generic[T]):
