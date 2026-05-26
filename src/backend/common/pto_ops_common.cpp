@@ -238,8 +238,7 @@ static codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::Tile
   // (e.g., parent subviews whose deducer propagated a real `v_row/v_col`)
   // keep the existing inference so nested subviews still type correctly.
   std::vector<ir::ExprPtr> source_valid = source_tile_type.shape_;
-  if (source_tile_type.tile_view_.has_value() &&
-      source_tile_type.tile_view_->valid_shape.size() >= 2) {
+  if (source_tile_type.tile_view_.has_value() && source_tile_type.tile_view_->valid_shape.size() >= 2) {
     const auto& parent_valid = source_tile_type.tile_view_->valid_shape;
     const bool is_zero_sentinel =
         std::all_of(parent_valid.begin(), parent_valid.end(), [](const ir::ExprPtr& e) {
