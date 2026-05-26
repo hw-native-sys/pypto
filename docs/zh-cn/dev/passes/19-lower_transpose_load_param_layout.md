@@ -9,8 +9,9 @@
 对每个被 `tile.load(p, ..., transpose=True)` 加载的 InCore 参数 `p`：
 
 - **在 InCore body 顶部插入** `p_dn = tensor.as_layout(p, layout=DN)`。新 Var `p_dn` 携带 canonical `[..., b, a] DN` 视图（末两维 shape 互换 + DN layout 标签 + `tensor.as_layout` 的 deduce-type 填入的 packed canonical strides）。
-- body 中对 `p` 的引用被替换为 `p_dn`。`p` 的参数签名保持不变 —— orch 侧继续按原 row-major ND 形式传 tensor（与 runtime 的 torch tensor 一致）。
+- `p` 的参数签名保持不变 —— orch 侧继续按原 row-major ND 形式传 tensor（与 runtime 的 torch tensor 一致）。
 - body 中每个 `tile.load(p, offsets, shapes, valid_shapes, ..., transpose=True)`（源是已提升参数）被改写为 `tile.load(p_dn, ...)`，三个 tuple 的末两维互换为 canonical 坐标，`transpose=True` 翻为 `transpose=False`。`DeduceTileLoadType` 通过 `p_dn` 的 DN 布局推出 Mat tile-view 的 layout —— 两种信号在 §4.2 canonical pair 下等价。
+- body 中对 `p` 的其它引用 —— 包括同一参数上的 `tile.load(p, ..., transpose=False)` —— 保持不动。同一参数同时被 `transpose=True` 和 `transpose=False` 加载时，结果是两条共存的 cube load：一条读 `p`（ND），一条读 `p_dn`（DN）。这解锁了 FlashAttention 类共享 KV 张量上的 fused QK+PV 模式（issue #1532）。
 
 非 InCore（orch）函数完全不动。DN 重解释是单函数（InCore）内部的关注点，由用到它的 body 自己拥有；跨函数边界保持简单：orch 永远传 row-major ND tensor。
 
@@ -42,19 +43,19 @@ program_canonical = p(program)
 
 ```text
 对每个 InCore 函数 f：
-  扫描 body → 得到 P_t  = {tile.load(p, ..., transpose=True) 命中的 param 索引}
-              得到 P_nt = {tile.load(p, ..., transpose=False/缺省) 命中的 param 索引}
-  拒绝 P_t ∩ P_nt  （混用）
+  扫描 body → 得到 P_t = {tile.load(p, ..., transpose=True) 命中的 param 索引}
   对每个 idx in P_t：
     let p = f.params[idx]
     若 p 已经是 DN（用户写的 / 预先 canonical 化的情形）则跳过
     构造 p_dn := tensor.as_layout(p, layout=DN)  —— 类型由 op deduce 推出
     将 (p_dn = ...) AssignStmt 插入 body 顶部
-    记录 p → p_dn 的替换映射
-  按映射替换 body 中所有对已提升 p 的引用为 p_dn
-  改写 body 中每个 tile.load(p_dn, off, shp, vs, transpose=True)：
+    记录 p → p_dn
+  改写 body 中每个 tile.load(p, off, shp, vs, transpose=True)（已提升的 p）：
+    源由 p 切到 p_dn
     交换 off / shp / vs 末两维
-    丢弃 transpose=True kwarg
+    transpose=True 翻为 transpose=False
+  （p 的其它引用 —— 包括同一参数上 tile.load(p, ..., transpose=False) ——
+   完全不动）
 
 （非 InCore 函数原样保留）
 ```
@@ -63,10 +64,10 @@ program_canonical = p(program)
 
 | 行为 | 触发条件 |
 | ---- | -------- |
-| 插入 `p_dn = tensor.as_layout(p, DN)` 并改写 tile.load | InCore 参数是 `tile.load(..., transpose=True)` 的源 |
+| 插入 `p_dn = tensor.as_layout(p, DN)` 并改写转置 tile.load | InCore 参数是 `tile.load(..., transpose=True)` 的源 |
+| 两条 cube load 共存（`p` ND + `p_dn` DN） | 同一参数同时存在 `transpose=True` 与 `transpose=False` load |
 | 跳过参数 | 已经是 DN，或没有转置 load |
 | 整个函数跳过 | 函数为 Orchestration / Opaque / Group |
-| 拒绝 | 同一参数既被 transpose=True 也被 transpose=False 加载 |
 | 拒绝 | DN + 显式物理 stride 源（与 tile.load 转置会叠成双重转置） |
 
 ## 示例
@@ -147,9 +148,9 @@ def orchestrator(self, a, b):
 
 | 参数状态 | 行为 |
 | -------- | ---- |
-| 是 `tile.load(..., transpose=True)` 的源，layout != DN，rank ≥ 2 | 插入 `tensor.as_layout` 视图；body 中引用被替换 |
+| 是 `tile.load(..., transpose=True)` 的源，layout != DN，rank ≥ 2 | 插入 `tensor.as_layout` 视图；转置 load 重定向到该视图 |
 | 是 `tile.load(..., transpose=True)` 的源，已是 DN | 跳过 —— `DeduceTileLoadType` 已经处理 DN-源 XOR transpose |
-| 同一参数既 transpose=True 又 transpose=False | `CHECK` 失败 |
+| 同一参数既 transpose=True 又 transpose=False | 插入 `tensor.as_layout` 视图；只把转置 load 重定向到该视图，非转置 load 仍读原 ND 参数 |
 | 没有转置 load 引用 | 保持不变 |
 | Rank < 2 候选 | `CHECK` 失败 |
 

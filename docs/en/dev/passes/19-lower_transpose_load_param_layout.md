@@ -17,9 +17,9 @@ For each InCore parameter ``p`` loaded via ``tile.load(p, ..., transpose=True)``
   The new Var ``p_dn`` carries the canonical ``[..., b, a] DN`` view (trailing-pair
   shape swap + DN layout tag with packed canonical strides set by the
   ``tensor.as_layout`` deduce-type).
-- Body uses of ``p`` are substituted with ``p_dn``. ``p``'s parameter
-  signature is left unchanged — the orch side keeps passing its original
-  row-major ND tensor (which matches the runtime torch tensor's layout).
+- ``p``'s parameter signature is left unchanged — the orch side keeps passing
+  its original row-major ND tensor (which matches the runtime torch tensor's
+  layout).
 - Every ``tile.load(p, offsets, shapes, valid_shapes, ..., transpose=True)``
   whose source is a promoted parameter is rewritten to ``tile.load(p_dn, ...)``,
   with the three tuples' trailing pair swapped to canonical coords and
@@ -27,6 +27,12 @@ For each InCore parameter ``p`` loaded via ``tile.load(p, ..., transpose=True)``
   ``DeduceTileLoadType`` reads ``p_dn``'s DN layout to derive the Mat tile-view
   layout that the legacy ``transpose=True`` swap produced — the two signals are
   equivalent (§4.2 canonical pair).
+- Any other use of ``p`` in the body — including ``tile.load(p, ..., transpose=False)``
+  on the same param — is left untouched. A param loaded with both
+  ``transpose=True`` and ``transpose=False`` in the same body therefore resolves
+  to two coexisting cube loads: one reading ``p`` (ND) and one reading ``p_dn``
+  (DN). This unblocks FlashAttention-style fused QK+PV on a shared KV tensor
+  (issue #1532).
 
 Non-InCore (orch) functions are not touched. The DN reinterpret is a
 single-function concern owned by the InCore body that needs it, which keeps the
@@ -62,19 +68,19 @@ program_canonical = p(program)
 
 ```text
 For each InCore function f:
-  scan body → set P_t  = {param idx with tile.load(p, ..., transpose=True)}
-              set P_nt = {param idx with tile.load(p, ..., transpose=False/absent)}
-  reject P_t ∩ P_nt  (mixed-use)
+  scan body → set P_t = {param idx with tile.load(p, ..., transpose=True)}
   for each idx in P_t:
     let p = f.params[idx]
     skip if p is already DN-tagged (the user-written / pre-canonical case)
     build p_dn := tensor.as_layout(p, layout=DN)  — type derived by op deducer
     prepend (p_dn = ...) AssignStmt to body
-    record p → p_dn in substitution map
-  substitute body uses of every promoted p with p_dn
-  rewrite each tile.load(p_dn, off, shp, vs, transpose=True) in body:
+    record p → p_dn
+  rewrite each tile.load(p, off, shp, vs, transpose=True) on a promoted p:
+    redirect source from p to p_dn
     swap last two dims of off / shp / vs
-    drop transpose=True kwarg
+    flip transpose=True → transpose=False
+  (other uses of p — including tile.load(p, ..., transpose=False) on the same
+   param — are left untouched)
 
 (Non-InCore functions are untouched.)
 ```
@@ -83,10 +89,10 @@ For each InCore function f:
 
 | Behavior | Trigger |
 | -------- | ------- |
-| Prepend ``p_dn = tensor.as_layout(p, DN)`` and rewrite tile.load | InCore param is source of ``tile.load(..., transpose=True)`` |
+| Prepend ``p_dn = tensor.as_layout(p, DN)`` and rewrite the transposed tile.loads | InCore param is source of ``tile.load(..., transpose=True)`` |
+| Coexist as two cube loads (``p`` ND + ``p_dn`` DN) | Same param has both ``transpose=True`` and ``transpose=False`` loads |
 | Skip param | Already DN, or no transposed load |
 | Skip whole function | Function is Orchestration / Opaque / Group |
-| Reject | Mixed transpose=True / transpose=False on same param |
 | Reject | DN + explicit physical stride source (would compose as double transpose) |
 
 ## Example
@@ -171,9 +177,9 @@ touched — it passes its own row-major ``b`` straight through.
 
 | Parameter state | Action |
 | --------------- | ------ |
-| Sourced by ``tile.load(..., transpose=True)``, layout != DN, rank ≥ 2 | ``tensor.as_layout`` view prepended; body uses substituted |
+| Sourced by ``tile.load(..., transpose=True)``, layout != DN, rank ≥ 2 | ``tensor.as_layout`` view prepended; transposed loads redirected to the view |
 | Sourced by ``tile.load(..., transpose=True)``, already DN | Skipped — ``DeduceTileLoadType`` already handles DN-source XOR transpose |
-| Mixed transpose=True / transpose=False on same param | ``CHECK`` failure |
+| Mixed transpose=True / transpose=False on same param | ``tensor.as_layout`` view prepended; only the transposed loads redirected to the view — non-transposed loads keep reading the original ND param |
 | Not sourced by any transposed load | Unchanged |
 | Rank < 2 candidate | ``CHECK`` failure |
 

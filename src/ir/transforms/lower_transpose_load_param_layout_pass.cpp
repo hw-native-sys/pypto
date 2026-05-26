@@ -33,13 +33,10 @@
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
-#include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
 namespace pypto {
 namespace ir {
-
-using transform_utils::Substitute;
 
 namespace {
 
@@ -56,23 +53,13 @@ class TransposeLoadScanner : public IRVisitor {
   // Returns the set of param indices that need DN promotion.
   const std::unordered_set<size_t>& GetPromoted() const { return promoted_; }
 
-  // Returns the set of param indices whose `tile.load` calls all carry
-  // `transpose=False` (or absent). Used to reject mixed-use parameters.
-  const std::unordered_set<size_t>& GetNonTransposedUses() const { return non_transposed_uses_; }
-
   void VisitExpr_(const CallPtr& call) override {
     if (call && call->op_ && call->op_->name_ == "tile.load" && !call->args_.empty()) {
       auto src_var = As<Var>(call->args_[0]);
       if (src_var) {
         auto it = param_ptr_to_index_.find(src_var.get());
-        if (it != param_ptr_to_index_.end()) {
-          const size_t param_idx = it->second;
-          bool transpose = call->GetKwarg<bool>("transpose", false);
-          if (transpose) {
-            promoted_.insert(param_idx);
-          } else {
-            non_transposed_uses_.insert(param_idx);
-          }
+        if (it != param_ptr_to_index_.end() && call->GetKwarg<bool>("transpose", false)) {
+          promoted_.insert(it->second);
         }
       }
     }
@@ -82,7 +69,6 @@ class TransposeLoadScanner : public IRVisitor {
  private:
   std::unordered_map<const Var*, size_t> param_ptr_to_index_;
   std::unordered_set<size_t> promoted_;
-  std::unordered_set<size_t> non_transposed_uses_;
 };
 
 /// Swap the last two elements of a ``MakeTuple`` (offsets / shapes /
@@ -98,16 +84,22 @@ MakeTuplePtr SwapTrailingPair(const MakeTuplePtr& tuple) {
   return std::make_shared<MakeTuple>(std::move(new_elements), tuple->span_);
 }
 
-/// Rewrite tile.load calls whose first arg is one of the body-local
-/// ``b_dn = tensor.as_layout(b, DN)`` bindings (one per promoted param), so:
+/// Rewrite ``tile.load(p, ..., transpose=True)`` calls whose source ``p`` is a
+/// promoted InCore parameter to read from the body-local
+/// ``p_dn = tensor.as_layout(p, DN)`` binding instead. For each rewritten call:
+///   - the source arg is redirected from ``p`` to ``p_dn``;
 ///   - offsets / shapes / valid_shapes are swapped to canonical coords;
-///   - the ``transpose=True`` kwarg is dropped (DN source + Mat target now
-///     drives the tile-view swap inside ``DeduceTileLoadType``).
-/// All other Calls are passed through unchanged.
+///   - the ``transpose=True`` kwarg is flipped to ``transpose=False`` (the DN
+///     source + Mat target now drives the tile-view swap inside
+///     ``DeduceTileLoadType``).
+/// Loads on the same ``p`` with ``transpose=False`` (or any other use of ``p``)
+/// are passed through unchanged so a single param can be loaded under both
+/// orientations in the same body — the two orientations end up as two distinct
+/// cube loads, one reading ``p`` (ND) and one reading ``p_dn`` (DN).
 class TileLoadBodyRewriter : public IRMutator {
  public:
-  explicit TileLoadBodyRewriter(const std::unordered_set<const Var*>& dn_view_vars)
-      : dn_view_vars_(dn_view_vars) {}
+  explicit TileLoadBodyRewriter(const std::unordered_map<const Var*, VarPtr>& param_to_dn_view)
+      : param_to_dn_view_(param_to_dn_view) {}
 
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
@@ -116,9 +108,11 @@ class TileLoadBodyRewriter : public IRMutator {
     if (call->args_.empty()) return base;
 
     auto src_var = As<Var>(call->args_[0]);
-    if (!src_var || dn_view_vars_.find(src_var.get()) == dn_view_vars_.end()) {
-      return base;
-    }
+    if (!src_var) return base;
+    auto it = param_to_dn_view_.find(src_var.get());
+    if (it == param_to_dn_view_.end()) return base;
+    // Only rewrite the transposed loads; non-transposed loads on the same
+    // promoted param keep reading the ND param straight through.
     if (!call->GetKwarg<bool>("transpose", false)) return base;
 
     // tile.load(tensor, offsets, shapes, valid_shapes, ...) — swap the trailing
@@ -133,6 +127,7 @@ class TileLoadBodyRewriter : public IRMutator {
         << "LowerTransposeLoadParamLayout: tile.load offsets/shapes/valid_shapes must be MakeTuple";
 
     std::vector<ExprPtr> new_args = call->args_;
+    new_args[0] = it->second;
     new_args[1] = SwapTrailingPair(offsets);
     new_args[2] = SwapTrailingPair(shapes);
     new_args[3] = SwapTrailingPair(valid_shapes);
@@ -158,23 +153,26 @@ class TileLoadBodyRewriter : public IRMutator {
   }
 
  private:
-  const std::unordered_set<const Var*>& dn_view_vars_;
+  const std::unordered_map<const Var*, VarPtr>& param_to_dn_view_;
 };
 
 /// Rewrite an InCore function: keep params unchanged; prepend
 /// ``b_dn = tensor.as_layout(b, layout=DN)`` AssignStmts at the top of the
-/// body for every param ``b`` loaded with ``transpose=True``; substitute body
-/// uses of ``b`` with ``b_dn``; rewrite each transposed tile.load to swap the
-/// trailing pair of offsets/shapes/valid_shapes and drop ``transpose=True``.
+/// body for every param ``b`` loaded with ``transpose=True``; rewrite each
+/// transposed tile.load on those params to read from ``b_dn`` with the
+/// trailing pair of offsets/shapes/valid_shapes swapped and ``transpose=True``
+/// flipped to ``transpose=False``.
+///
+/// A param loaded with both ``transpose=True`` and ``transpose=False`` in the
+/// same body is supported: the non-transposed loads keep reading the original
+/// ND param, while the transposed loads get redirected to ``b_dn``. The two
+/// orientations coexist as two distinct cube loads (issue #1532).
 ///
 /// Returns the rewritten Function (or the original if no rewrite was needed).
-/// Throws if any promoted parameter is also loaded without ``transpose=True``
-/// in the same body (mixed use would corrupt non-transpose loads).
 FunctionPtr LowerInCoreFunction(const FunctionPtr& func) {
   TransposeLoadScanner scanner(func->params_);
   scanner.VisitStmt(func->body_);
   const auto& promoted = scanner.GetPromoted();
-  const auto& non_transposed = scanner.GetNonTransposedUses();
   if (promoted.empty()) {
     return func;
   }
@@ -182,25 +180,15 @@ FunctionPtr LowerInCoreFunction(const FunctionPtr& func) {
   // Build, in deterministic param-index order:
   //   - the prepend AssignStmts (one per promoted param), each of the form
   //     ``b_dn = tensor.as_layout(b, layout=DN)``;
-  //   - the substitution map ``b -> b_dn`` used to rewrite body uses;
-  //   - the set of body-local ``b_dn`` Vars used by ``TileLoadBodyRewriter``
-  //     to recognize which tile.loads need the trailing-pair swap.
+  //   - the ``param -> b_dn`` map used by ``TileLoadBodyRewriter`` to redirect
+  //     each transposed tile.load to its body-local DN view.
   std::vector<size_t> sorted_promoted(promoted.begin(), promoted.end());
   std::sort(sorted_promoted.begin(), sorted_promoted.end());
 
   std::vector<StmtPtr> prepend;
-  std::unordered_map<const Var*, VarPtr> substitutions;
-  std::unordered_set<const Var*> dn_view_vars;
+  std::unordered_map<const Var*, VarPtr> param_to_dn_view;
 
   for (size_t idx : sorted_promoted) {
-    // Mixed-use rejection: a body-local DN view derived from ``b`` only
-    // makes sense if every load of ``b`` agrees on ``transpose=True``.
-    CHECK(non_transposed.find(idx) == non_transposed.end())
-        << "LowerTransposeLoadParamLayout: parameter at index " << idx
-        << " is loaded both with transpose=True and transpose=False — only one "
-           "mode is supported per InCore parameter. Split the parameter or unify "
-           "the load direction.";
-
     const auto& param = func->params_[idx];
     auto param_tensor_type = As<TensorType>(param->GetType());
     CHECK(param_tensor_type) << "LowerTransposeLoadParamLayout: promoted parameter at index " << idx
@@ -234,25 +222,20 @@ FunctionPtr LowerInCoreFunction(const FunctionPtr& func) {
     auto bridge_var =
         std::make_shared<Var>(param->name_hint_ + "_dn_view", bridge_call->GetType(), param->span_);
     prepend.push_back(std::make_shared<AssignStmt>(bridge_var, bridge_call, param->span_));
-    substitutions[param.get()] = bridge_var;
-    dn_view_vars.insert(bridge_var.get());
+    param_to_dn_view[param.get()] = bridge_var;
   }
 
   if (prepend.empty()) {
     return func;
   }
 
-  // Substitute body uses of each promoted param ``b`` with the body-local
-  // ``b_dn``. ``Substitute`` walks the entire body — the prepend stmts are
-  // built using the original ``param`` Vars *before* substitution, so they
-  // are not affected.
-  auto subbed_body = Substitute(func->body_, substitutions);
-
-  // Rewrite each ``tile.load(b_dn, ..., transpose=True)`` to canonical
-  // (DN-coord) form: swap offsets/shapes/valid_shapes trailing pair, drop
-  // ``transpose=True``.
-  TileLoadBodyRewriter body_rewriter(dn_view_vars);
-  auto rewritten_body = body_rewriter.VisitStmt(subbed_body);
+  // Rewrite each ``tile.load(b, ..., transpose=True)`` on a promoted param to
+  // ``tile.load(b_dn, ..., transpose=False)`` with the trailing pair of
+  // offsets/shapes/valid_shapes swapped. Other uses of ``b`` (including
+  // ``tile.load(b, ..., transpose=False)``) are left untouched, so mixed-mode
+  // loads on the same param resolve to two coexisting cube loads.
+  TileLoadBodyRewriter body_rewriter(param_to_dn_view);
+  auto rewritten_body = body_rewriter.VisitStmt(func->body_);
 
   // Concatenate: new body = SeqStmts([prepend stmts..., rewritten original body]).
   std::vector<StmtPtr> new_body_stmts = std::move(prepend);

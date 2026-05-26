@@ -497,10 +497,13 @@ class TestStridedParamFlipsCorrectly:
         ir.assert_structural_equal(After, Expected)
 
 
-class TestMixedUseRejected:
-    """A param loaded with both transpose=True and transpose=False is rejected."""
+class TestMixedUseAccepted:
+    """A param loaded with both transpose=True and transpose=False coexists as two
+    cube loads: the transposed load is redirected to a body-local DN view, while
+    the non-transposed load keeps reading the original ND param. This unblocks
+    FlashAttention-style fused QK+PV on a shared KV tensor (issue #1532)."""
 
-    def test_mixed_transpose_modes_rejected(self):
+    def test_mixed_transpose_modes_split_into_two_loads(self):
         M, K, N = 64, 128, 32
 
         @pl.program
@@ -528,8 +531,54 @@ class TestMixedUseRejected:
                 c_result = self.matmul_incore(a, b, c)
                 return c_result
 
-        with pytest.raises(Exception, match="only one mode is supported per InCore parameter"):
-            passes.lower_transpose_load_param_layout()(Before)
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def matmul_incore(
+                a: pl.Tensor[[32, 128], pl.FP32],
+                b: pl.Tensor[[32, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                # Body prepends a DN view binding for ``a`` (only ``a`` is promoted —
+                # ``b`` has no transposed load). ``tile_a`` redirects to ``a_dn_view``
+                # with the load window swapped to canonical DN coords; ``tile_b``
+                # still reads ``a`` directly with ``transpose=False``.
+                a_dn_view: pl.Tensor[
+                    [128, 32], pl.FP32, pl.TensorView(stride=[1, 128], layout=pl.TensorLayout.DN)
+                ] = pl.tensor.as_layout(a, layout=pl.TensorLayout.DN)
+                tile_a: pl.Tile[
+                    [128, 32],
+                    pl.FP32,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.tile.load(
+                    a_dn_view, [0, 0], [128, 32], [128, 32], target_memory=pl.Mem.Mat, transpose=False
+                )
+                tile_b: pl.Tile[[32, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [32, 128], [32, 128], target_memory=pl.Mem.Mat, transpose=False
+                )
+                tile_a_l0a: pl.Tile[[128, 32], pl.FP32, pl.Mem.Left] = pl.tile.move(
+                    tile_a, target_memory=pl.Mem.Left
+                )
+                tile_b_l0b: pl.Tile[[32, 128], pl.FP32, pl.Mem.Right] = pl.tile.move(
+                    tile_b, target_memory=pl.Mem.Right
+                )
+                tile_c: pl.Tile[[128, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(tile_a_l0a, tile_b_l0b)
+                c_store: pl.Tensor[[64, 32], pl.FP32] = pl.tile.store(tile_c, [0, 0], c)
+                return c_store
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def orchestrator(
+                self, a: pl.Tensor[[32, 128], pl.FP32], b: pl.Tensor[[32, 128], pl.FP32]
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                c: pl.Tensor[[64, 32], pl.FP32] = pl.tensor.create(
+                    [64, 32], dtype=pl.FP32, layout=pl.TensorLayout.ND
+                )
+                c_result: pl.Tensor[[64, 32], pl.FP32] = self.matmul_incore(a, b, c)
+                return c_result
+
+        After = passes.lower_transpose_load_param_layout()(Before)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestPartialLoadPromotion:
