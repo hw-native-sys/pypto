@@ -277,6 +277,87 @@ class TestManualScopeParsing:
         assert len(scope2_attrs["manual_dep_edges"]) == 1
         assert scope2_attrs["manual_dep_edges"][0] is scope1_attrs["task_id_var"]
 
+    def test_pl_at_deps_and_as_tid_print_parse_roundtrip(self):
+        """The Python printer must surface the ``deps=`` and ``as <tid>:``
+        clauses (and suppress the parser's transient ``system.task_invalid()``
+        placeholder), so a print → parse cycle reproduces the same IR.
+        Without this, ``manual_dep_edges`` and ``task_id_var`` would silently
+        vanish across a round-trip.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="s1") as t1:
+                    y: pl.Tensor[[64], pl.FP32] = x
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="s2", deps=[t1]) as _t2:
+                    z: pl.Tensor[[64], pl.FP32] = y
+                return z
+
+        printed = str(Prog)
+        # Surface checks: the two attr-driven clauses must be in the dump.
+        assert "as t1" in printed
+        assert "deps=[t1]" in printed
+        assert "as _t2" in printed
+        # The placeholder must NOT round-trip — the printer omits it because
+        # the reparser will recreate it from the ``as <tid>`` clause.
+        assert "task_invalid" not in printed
+
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Prog, reparsed)
+
+    def test_pl_at_no_dep_args_print_parse_roundtrip(self):
+        """``no_dep_args=`` survives a print → parse round-trip on its own."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                w: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, no_dep_args=[w]):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, w)
+                return y
+
+        printed = str(Prog)
+        assert "no_dep_args=[w]" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Prog, reparsed)
+
+    def test_pl_at_deps_no_dep_args_and_tid_combined_roundtrip(self):
+        """All three attr-driven kwargs in one ``pl.at(...)`` round-trip
+        together."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                w: pl.Tensor[[64], pl.FP32],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="s1") as t1:
+                    a: pl.Tensor[[64], pl.FP32] = x
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    name_hint="s2",
+                    deps=[t1],
+                    no_dep_args=[w],
+                ) as _t2:
+                    b: pl.Tensor[[64], pl.FP32] = pl.add(a, w)
+                return b
+
+        printed = str(Prog)
+        assert "as t1" in printed
+        assert "deps=[t1]" in printed
+        assert "no_dep_args=[w]" in printed
+        assert "as _t2" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Prog, reparsed)
+
     def test_pl_at_as_on_non_at_scope_is_rejected(self):
         """``as`` is only meaningful on ``pl.at(...)``; other constructs reject it."""
         with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
