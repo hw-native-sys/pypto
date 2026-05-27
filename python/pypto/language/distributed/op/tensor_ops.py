@@ -20,8 +20,9 @@ Layout mirrors the ``tile.alloc`` / ``MemRef`` / ``TileType`` triple:
   view by specifying the per-rank ``shape`` and ``dtype``.
 * ``put`` is a synchronous cross-rank bulk write (HCCL TPUT): both ``dst`` and
   ``src`` are window-bound :class:`pld.DistributedTensor` (GM/tensor-level)
-  views — the VEC staging tile that TPUT bounces through is synthesised at
-  codegen, so it stays a tensor-level op rather than a tile-level one.
+  views. ``ConvertTensorToTileOps`` rewrites it to a ``tile.create`` VEC
+  staging tile plus a ``pld.tile.put`` call so the stage participates in
+  memory allocation/lowering before backend codegen.
 * ``get`` is a synchronous cross-rank bulk read: both ``dst`` and ``src`` are
   window-bound :class:`pld.DistributedTensor` (GM/tensor-level) views — the
   VEC staging tile that TGET bounces through is synthesised at codegen, so it
@@ -128,12 +129,15 @@ def put(
 ) -> Call:
     """Cross-rank put: write the local slice ``src`` into the peer rank's slice of ``dst``.
 
-    Side-effect-only (the returned Call carries ``UnknownType``). Lowers to
+    Side-effect-only (the returned Call carries ``UnknownType``). Rewritten by
+    ``ConvertTensorToTileOps`` to a ``tile.create``-allocated VEC staging tile plus
+    a ``pld.tile.put`` call so the staging tile flows through PyPTO's memory
+    allocator (required at ``--pto-level=level3``); backend codegen then emits
     ``CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + partition_view +
-    a synthesised VEC staging tile + TPUT`` at codegen. Both operands are
-    GM/tensor-level window views (the staging tile is internal), so this is a
-    ``pld.tensor`` op, paired with the GM-to-GM TGET rather than the
-    tile-producing ``pld.tile.remote_load``.
+    TPUT`` against that pre-allocated tile. Both operands are GM/tensor-level
+    window views (the staging tile is internal), so this is a ``pld.tensor`` op,
+    paired with the GM-to-GM TGET rather than the tile-producing
+    ``pld.tile.remote_load``.
 
     ``dst`` / ``peer`` / ``src`` are positional-or-keyword so the printed IR
     (which emits them positionally) round-trips through the parser; ``atomic``

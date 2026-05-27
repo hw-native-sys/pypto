@@ -1004,6 +1004,26 @@ static bool AreTileViewsEqual(const TileView& a, const TileView& b) {
          a.blayout == b.blayout && a.slayout == b.slayout && a.fractal == b.fractal && a.pad == b.pad;
 }
 
+// A tile with no TileView has default physical storage: contiguous (empty
+// stride), zero start offset, row-major / none-box layouts, default fractal,
+// no pad.  A tile that *does* carry a view whose storage-governing fields are
+// all at those defaults is physically identical to a no-view tile -- only
+// `valid_shape` (per-use metadata, excluded from storage identity) may differ.
+// Recognising this lets reuse span constructs where structurally-cloned tiles
+// end up with asymmetric views, e.g. the two arms of a dual-AIV dispatch `if`
+// where one arm's tiles carry a trivial `valid_shape` view and the other's
+// carry none.  See issue #1547.
+static bool IsStorageTrivialTileView(const TileView& v) {
+  if (!v.stride.empty()) return false;
+  if (v.start_offset) {
+    auto c = As<ConstInt>(v.start_offset);
+    if (!c || c->value_ != 0) return false;
+  }
+  static const TileView kDefault;
+  return v.blayout == kDefault.blayout && v.slayout == kDefault.slayout && v.fractal == kDefault.fractal &&
+         v.pad == kDefault.pad;
+}
+
 /**
  * @brief Check if two TileType variables have compatible storage attributes.
  *
@@ -1028,7 +1048,14 @@ bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
 
   bool has_view1 = t1->tile_view_.has_value();
   bool has_view2 = t2->tile_view_.has_value();
-  if (has_view1 != has_view2) return false;
+  if (has_view1 != has_view2) {
+    // One tile carries a view, the other does not.  They are storage-compatible
+    // only if the present view is physically equivalent to "no view" (default
+    // contiguous storage) -- see IsStorageTrivialTileView.  valid_shape is
+    // per-use metadata and is allowed to differ (the no-view side has none).
+    const TileView& present = has_view1 ? t1->tile_view_.value() : t2->tile_view_.value();
+    return IsStorageTrivialTileView(present);
+  }
   if (has_view1) {
     const auto& v1 = t1->tile_view_.value();
     const auto& v2 = t2->tile_view_.value();

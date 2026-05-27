@@ -48,6 +48,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -66,55 +67,99 @@ namespace ir {
 
 namespace {
 
+void ValidatePutContract(const ExprPtr& dst, const ExprPtr& peer, const ExprPtr& src,
+                         const std::vector<std::pair<std::string, std::any>>& kwargs,
+                         const std::string& op_name) {
+  CHECK(dst) << op_name << " dst argument must not be null";
+  CHECK(peer) << op_name << " peer argument must not be null";
+  CHECK(src) << op_name << " src argument must not be null";
+
+  auto dst_type = As<DistributedTensorType>(dst->GetType());
+  CHECK(dst_type) << op_name << " dst must be a DistributedTensor (window-bound), got "
+                  << dst->GetType()->TypeName();
+
+  CHECK(IsA<ScalarType>(peer->GetType()))
+      << op_name << " peer must be a scalar (rank index), got " << peer->GetType()->TypeName();
+
+  auto src_type = As<DistributedTensorType>(src->GetType());
+  CHECK(src_type) << op_name << " src must be a DistributedTensor (window-bound), got "
+                  << src->GetType()->TypeName();
+
+  // TPUT contract: dst and src cover the same region — identical element type
+  // and identical positive static shape. Static shape is required because the
+  // staging VEC buffer needs compile-time extents.
+  CHECK(dst_type->dtype_ == src_type->dtype_)
+      << op_name << " dst and src must have the same element type, got dst " << dst->GetType()->TypeName()
+      << " vs src " << src->GetType()->TypeName();
+
+  const auto& dst_shape = dst_type->shape_;
+  const auto& src_shape = src_type->shape_;
+  CHECK(!dst_shape.empty()) << op_name << " requires at least one dimension on dst/src";
+  CHECK(dst_shape.size() == src_shape.size())
+      << op_name << " dst rank (" << dst_shape.size() << ") must match src rank (" << src_shape.size() << ")";
+  for (size_t i = 0; i < dst_shape.size(); ++i) {
+    auto d = As<ConstInt>(dst_shape[i]);
+    auto s = As<ConstInt>(src_shape[i]);
+    CHECK(d && s) << op_name
+                  << " requires static (compile-time constant) shapes on dst and src; "
+                     "dimension "
+                  << i << " is dynamic";
+    CHECK(d->value_ > 0) << op_name << " shape dimension " << i << " must be positive, got " << d->value_;
+    CHECK(d->value_ == s->value_) << op_name << " dst and src must have the same static shape; dimension "
+                                  << i << " differs (dst=" << d->value_ << ", src=" << s->value_ << ")";
+  }
+
+  auto atomic_value = GetRequiredKwarg<int>(kwargs, "atomic", op_name);
+  CHECK(atomic_value == static_cast<int>(AtomicType::kNone) ||
+        atomic_value == static_cast<int>(AtomicType::kAdd))
+      << op_name << " atomic must be AtomicType.None_ or AtomicType.Add (got int " << atomic_value << ")";
+}
+
 TypePtr DeducePutType(const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 3) << "pld.tensor.put requires exactly 3 positional arguments "
                              "(dst, peer, src), but got "
                           << args.size();
-  for (size_t i = 0; i < args.size(); ++i) {
-    CHECK(args[i]) << "pld.tensor.put positional argument #" << i << " must not be null";
-  }
+  ValidatePutContract(args[0], args[1], args[2], kwargs, "pld.tensor.put");
+  // Side-effect-only — no SSA result for downstream consumers.
+  return GetUnknownType();
+}
+
+TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
+                          const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  CHECK(args.size() == 4) << "pld.tile.put requires exactly 4 positional arguments "
+                             "(dst, peer, src, stage), but got "
+                          << args.size();
+  ValidatePutContract(args[0], args[1], args[2], kwargs, "pld.tile.put");
+
+  CHECK(args[3]) << "pld.tile.put stage argument must not be null";
+  auto stage_type = As<TileType>(args[3]->GetType());
+  CHECK(stage_type) << "pld.tile.put stage must be a TileType, got " << args[3]->GetType()->TypeName();
 
   auto dst_type = As<DistributedTensorType>(args[0]->GetType());
-  CHECK(dst_type) << "pld.tensor.put dst must be a DistributedTensor (window-bound), got "
-                  << args[0]->GetType()->TypeName();
+  CHECK(stage_type->dtype_ == dst_type->dtype_)
+      << "pld.tile.put stage dtype must match dst dtype, got stage=" << stage_type->dtype_.ToString()
+      << " dst=" << dst_type->dtype_.ToString();
 
-  CHECK(IsA<ScalarType>(args[1]->GetType()))
-      << "pld.tensor.put peer must be a scalar (rank index), got " << args[1]->GetType()->TypeName();
-
-  auto src_type = As<DistributedTensorType>(args[2]->GetType());
-  CHECK(src_type) << "pld.tensor.put src must be a DistributedTensor (window-bound), got "
-                  << args[2]->GetType()->TypeName();
-
-  // TPUT contract: dst and src cover the same region — identical element type
-  // and identical positive static shape. Static shape is required because the
-  // staging VEC buffer synthesised at codegen needs compile-time extents.
-  CHECK(dst_type->dtype_ == src_type->dtype_)
-      << "pld.tensor.put dst and src must have the same element type, got dst "
-      << args[0]->GetType()->TypeName() << " vs src " << args[2]->GetType()->TypeName();
-
-  const auto& dst_shape = dst_type->shape_;
-  const auto& src_shape = src_type->shape_;
-  CHECK(!dst_shape.empty()) << "pld.tensor.put requires at least one dimension on dst/src";
-  CHECK(dst_shape.size() == src_shape.size()) << "pld.tensor.put dst rank (" << dst_shape.size()
-                                              << ") must match src rank (" << src_shape.size() << ")";
-  for (size_t i = 0; i < dst_shape.size(); ++i) {
-    auto d = As<ConstInt>(dst_shape[i]);
-    auto s = As<ConstInt>(src_shape[i]);
-    CHECK(d && s) << "pld.tensor.put requires static (compile-time constant) shapes on dst and src; "
-                     "dimension "
-                  << i << " is dynamic";
-    CHECK(d->value_ > 0) << "pld.tensor.put shape dimension " << i << " must be positive, got " << d->value_;
-    CHECK(d->value_ == s->value_) << "pld.tensor.put dst and src must have the same static shape; dimension "
-                                  << i << " differs (dst=" << d->value_ << ", src=" << s->value_ << ")";
+  int64_t dst_elems = 1;
+  for (const auto& dim : dst_type->shape_) {
+    auto d = As<ConstInt>(dim);
+    INTERNAL_CHECK_SPAN(d, args[0]->span_)
+        << "Internal error: pld.tile.put dst shape was not static after ValidatePutContract";
+    dst_elems *= d->value_;
   }
+  int64_t stage_elems = 1;
+  for (const auto& dim : stage_type->shape_) {
+    auto d = As<ConstInt>(dim);
+    INTERNAL_CHECK_SPAN(d, args[3]->span_) << "Internal error: pld.tile.put stage dim is not ConstInt";
+    INTERNAL_CHECK_SPAN(d->value_ > 0, args[3]->span_)
+        << "Internal error: pld.tile.put stage dim not positive (" << d->value_ << ")";
+    stage_elems *= d->value_;
+  }
+  INTERNAL_CHECK_SPAN(stage_elems == dst_elems, args[3]->span_)
+      << "Internal error: pld.tile.put stage holds " << stage_elems << " elements, expected " << dst_elems
+      << " (prod(dst.shape))";
 
-  auto atomic_value = GetRequiredKwarg<int>(kwargs, "atomic", "pld.tensor.put");
-  CHECK(atomic_value == static_cast<int>(AtomicType::kNone) ||
-        atomic_value == static_cast<int>(AtomicType::kAdd))
-      << "pld.tensor.put atomic must be AtomicType.None_ or AtomicType.Add (got int " << atomic_value << ")";
-
-  // Side-effect-only — no SSA result for downstream consumers.
   return GetUnknownType();
 }
 
@@ -128,9 +173,9 @@ REGISTER_OP("pld.tensor.put")
     .set_description(
         "Cross-rank put: synchronously write the local window-bound DistributedTensor `src` "
         "into the `peer` rank's slice of the window-bound DistributedTensor `dst`. `atomic` "
-        "selects plain-store vs atomic-add combine semantics. Lowers to "
-        "CommRemoteOffset(ctx, peer) + addptr + make_tensor_view + partition_view (dst) + "
-        "partition_view (src) + a synthesised VEC staging tile + TPUT at codegen.")
+        "selects plain-store vs atomic-add combine semantics. Lowered by ConvertTensorToTileOps "
+        "to a `tile.create`-allocated VEC staging tile plus a `pld.tile.put` call, so the "
+        "staging tile flows through PyPTO's memory allocator (required at --pto-level=level3).")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")
@@ -138,6 +183,23 @@ REGISTER_OP("pld.tensor.put")
     .set_attr<int>("atomic")
     .no_memory_spec()
     .f_deduce_type(DeducePutType);
+
+// ============================================================================
+// pld.tile.put — tile-level form with explicit VEC staging tile (post-conversion)
+// ============================================================================
+
+REGISTER_OP("pld.tile.put")
+    .set_description(
+        "Tile-level form of pld.tensor.put with an explicit VEC staging tile (4th arg). "
+        "Created by ConvertTensorToTileOps; not user-facing.")
+    .set_op_category("DistributedOp")
+    .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
+    .add_argument("peer", "Peer rank index (ScalarType, integer)")
+    .add_argument("src", "Local window-bound DistributedTensor source (same dtype + static shape as dst)")
+    .add_argument("stage", "VEC staging TileType (rows × cols == prod(dst.shape))")
+    .set_attr<int>("atomic")
+    .no_memory_spec()
+    .f_deduce_type(DeducePutTileType);
 
 }  // namespace ir
 }  // namespace pypto

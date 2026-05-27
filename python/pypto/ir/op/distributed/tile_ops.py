@@ -15,10 +15,11 @@ keeps ``peer`` / ``offsets`` / ``shape`` keyword-only for readability.
 
 from collections.abc import Sequence
 
+from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, Expr, Span
+from pypto.pypto_core.ir import AtomicType, Call, Expr, Span
 
-from ...utils import _get_span_or_capture, _to_make_tuple
+from ...utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
 def remote_load(
@@ -55,4 +56,21 @@ def remote_load(
     )
 
 
-__all__ = ["remote_load"]
+def put(
+    dst: Expr,
+    peer: int | Expr,
+    src: Expr,
+    stage: Expr,
+    atomic: AtomicType,
+    *,
+    span: Span | None = None,
+) -> Call:
+    """Build a ``pld.tile.put(dst, peer, src, stage)`` Call (post-conversion form)."""
+    actual_span = _get_span_or_capture(span, frame_offset=1)
+    peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
+    return _ir_core.create_op_call(
+        "pld.tile.put", [dst, peer_expr, src, stage], {"atomic": int(atomic)}, actual_span
+    )
+
+
+__all__ = ["remote_load", "put"]

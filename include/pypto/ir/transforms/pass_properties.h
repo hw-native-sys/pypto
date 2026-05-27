@@ -37,6 +37,13 @@ inline const PassProperties kInlineFunctionsProperties{.produced = {IRProperty::
 
 inline const PassProperties kCollectCommGroupsProperties{.produced = {IRProperty::CommGroupsCollected}};
 
+// -- MaterializeRuntimeScopes pass (runs last, after the final Simplify) ------
+//    Inserts explicit AUTO RuntimeScopeStmt nodes for the orchestration function
+//    body and for/if bodies so codegen emits PTO2_SCOPE 1:1 from the IR.
+inline const PassProperties kMaterializeRuntimeScopesProperties{
+    .required = {IRProperty::SplitIncoreOrch, IRProperty::CallDirectionsResolved},
+    .produced = {IRProperty::RuntimeScopesMaterialized}};
+
 // -- Loop unrolling pass (runs before SSA) ------------------------------------
 
 inline const PassProperties kUnrollLoopsProperties{};

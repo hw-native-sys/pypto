@@ -51,9 +51,22 @@ def _ensure_arg_directions(program):
     return passes.derive_call_directions()(program)
 
 
+def _materialize_scopes(program):
+    """Codegen requires explicit RuntimeScopeStmt wrappers (PTO2_SCOPE blocks).
+
+    Tests that hand-build IR (without going through PassManager) need to invoke
+    MaterializeRuntimeScopes before codegen so the orchestration function body
+    and for/if bodies carry explicit AUTO RuntimeScopeStmt nodes. Codegen no
+    longer emits implicit PTO2_SCOPE() wrappers. This is a no-op when the program
+    was already produced by the pass pipeline. Must run after DeriveCallDirections
+    (a declared requirement of the pass).
+    """
+    return passes.materialize_runtime_scopes()(program)
+
+
 def _generate_orch_code(program) -> str:
     """Generate orchestration code using backend-agnostic codegen."""
-    program = _ensure_arg_directions(program)
+    program = _materialize_scopes(_ensure_arg_directions(program))
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             result = codegen.generate_orchestration(program, func)
@@ -63,7 +76,7 @@ def _generate_orch_code(program) -> str:
 
 def _generate_orch_result(program) -> "codegen.OrchestrationResult":
     """Generate orchestration result using backend-agnostic codegen."""
-    program = _ensure_arg_directions(program)
+    program = _materialize_scopes(_ensure_arg_directions(program))
     for func in program.functions.values():
         if func.func_type == ir.FunctionType.Orchestration:
             return codegen.generate_orchestration(program, func)

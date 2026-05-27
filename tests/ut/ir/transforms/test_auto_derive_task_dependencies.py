@@ -450,6 +450,77 @@ class TestAutoDeriveTaskDependencies:
         edges = _compiler_edges(consume_call)
         assert [edge.name_hint for edge in edges] == ["left_tid", "right_tid"]
 
+    def test_if_yield_mixed_known_and_unresolved_location_falls_back(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                scratch: pl.Tensor[[4, 8], pl.FP32],
+                src: pl.Tensor[[4, 16], pl.FP32],
+                index: pl.Tensor[[4, 8], pl.INT32],
+                cond: pl.Scalar[pl.BOOL],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                with pl.manual_scope():
+                    produced, _producer_tid = pl.submit(self.fill, scratch)
+                    dynamic = pl.tensor.gather(src, -1, index)
+                    if cond:
+                        selected = pl.yield_(produced)
+                    else:
+                        selected = pl.yield_(dynamic)
+                    out, _ = pl.submit(self.consume, selected)
+                return out
+
+        out = _run_auto_deps(Prog)
+        scopes = _runtime_scopes(out)
+        assert len(scopes) == 1
+        assert scopes[0].manual is False
+
+    def test_loop_yield_mixed_known_and_unresolved_location_falls_back(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                scratch: pl.Tensor[[4, 8], pl.FP32],
+                src: pl.Tensor[[4, 16], pl.FP32],
+                index: pl.Tensor[[4, 8], pl.INT32],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                with pl.manual_scope():
+                    produced, _producer_tid = pl.submit(self.fill, scratch)
+                    dynamic = pl.tensor.gather(src, -1, index)
+                    for _i, (selected_iter,) in pl.range(0, 4, init_values=(produced,)):
+                        selected = pl.yield_(dynamic)
+                    out, _ = pl.submit(self.consume, selected)
+                return out
+
+        out = _run_auto_deps(Prog)
+        scopes = _runtime_scopes(out)
+        assert len(scopes) == 1
+        assert scopes[0].manual is False
+
     def test_memref_may_alias_adds_compiler_edge(self):
         @pl.program
         class Prog:

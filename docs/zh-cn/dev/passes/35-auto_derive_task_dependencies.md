@@ -4,7 +4,7 @@
 
 `AutoDeriveTaskDependencies` 在 `with pl.manual_scope():` 区域内保守推导
 task-to-task 依赖边。它运行在
-[`DeriveCallDirections`](33-derive_call_directions.md) 之后，读取已经解析的
+[`DeriveCallDirections`](34-derive_call_directions.md) 之后，读取已经解析的
 `Call.attrs["arg_directions"]`，并把编译器推导出的 producer TaskId 边写入
 `Call.attrs["compiler_manual_dep_edges"]`。
 

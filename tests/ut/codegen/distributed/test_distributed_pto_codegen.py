@@ -398,7 +398,7 @@ def test_nranks_emits_pto_load_scalar_plus_shrui_32_plus_trunci():
 
 
 def test_put_emits_comm_tput_with_attr_and_staging_tile():
-    """put codegen emits pto.comm.tput with #pto<atomic_type …> attr + a VEC staging tile."""
+    """put codegen emits pto.comm.tput with #pto<atomic_type …> attr + an IR-allocated VEC staging tile."""
 
     @pl.program
     class PNone:
@@ -417,9 +417,18 @@ def test_put_emits_comm_tput_with_attr_and_staging_tile():
     assert "#pto<atomic_type atomic_none>" in tput_line
     # dst (peer-addressed) and src (local) full-slice partition views, same type.
     assert tput_line.count("!pto.partition_tensor_view<16x64xf16>") == 2
-    # A VEC staging tile_buf is synthesised and threaded through buf(...).
+    # A VEC staging tile_buf is materialised in IR (via tile.create) and threaded through buf(...).
     assert "buf(" in tput_line
     assert "!pto.tile_buf<loc=vec" in mlir
+    # The staging tile must carry an explicit UB address — PTOAS level3 requires
+    # PyPTO to do all tile allocation, so the synthesized stage from ConvertTensorToTileOps
+    # must flow through AllocateMemoryAddr.
+    stage_alloc_line = next(
+        line for line in mlir.splitlines() if "pto.alloc_tile" in line and "tput_stage" in line
+    )
+    assert "addr = " in stage_alloc_line, (
+        f"staging tile must have an explicit addr at level3, got: {stage_alloc_line}"
+    )
     # dst is peer-addressed (CommRemoteOffset + addptr); src is local (no addptr
     # needed for its own view).
     assert "func.call @CommRemoteOffset_f16" in mlir

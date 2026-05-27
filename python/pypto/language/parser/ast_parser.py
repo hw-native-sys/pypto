@@ -3087,6 +3087,30 @@ class ASTParser:
         finally:
             self._manual_scope_depth -= 1
 
+    def _parse_auto_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+        """Parse ``with pl.auto_scope():`` into a Runtime scope with manual=False.
+
+        AUTO scopes are the explicit IR form of the orchestration codegen's
+        ``PTO2_SCOPE()`` block (inserted by MaterializeRuntimeScopes). They may
+        nest in one another but not inside a ``manual_scope`` — the runtime
+        forbids AUTO nested in MANUAL.
+        """
+        if context_expr.args or context_expr.keywords:
+            raise ParserSyntaxError(
+                "pl.auto_scope() does not accept arguments",
+                span=self.span_tracker.get_span(stmt),
+                hint="Use 'with pl.auto_scope():' without arguments",
+            )
+        if self._manual_scope_depth > 0:
+            raise ParserSyntaxError(
+                "pl.auto_scope() may not be nested inside a manual scope",
+                span=self.span_tracker.get_span(stmt),
+                hint="The runtime forbids AUTO scope nested in MANUAL scope; "
+                "move the 'with pl.auto_scope():' block outside the manual scope.",
+            )
+        span = self.span_tracker.get_span(stmt)
+        self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=False)
+
     def _parse_legacy_scope(
         self,
         stmt: ast.With,
@@ -3740,6 +3764,11 @@ class ASTParser:
                 # Manual scope: with pl.manual_scope(): ...
                 if func.attr == "manual_scope":
                     self._parse_manual_scope(stmt, context_expr)
+                    return
+
+                # Auto scope: with pl.auto_scope(): ...
+                if func.attr == "auto_scope":
+                    self._parse_auto_scope(stmt, context_expr)
                     return
 
                 # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
@@ -6231,7 +6260,27 @@ class ASTParser:
             elif isinstance(stmt, ast.If):
                 pass
 
+            # Descend into `with pl.auto_scope():` blocks — they are transparent
+            # to yield association, so a trailing `var = pl.yield_(...)` inside
+            # the scope still defines the enclosing for/if return-var. These are
+            # inserted by the MaterializeRuntimeScopes pass.
+            elif isinstance(stmt, ast.With) and self._is_auto_scope_with(stmt):
+                yield_vars.extend(self._scan_for_yields(stmt.body))
+
         return yield_vars
+
+    @staticmethod
+    def _is_auto_scope_with(stmt: ast.With) -> bool:
+        """True if @p stmt is a ``with pl.auto_scope():`` block."""
+        for item in stmt.items:
+            ce = item.context_expr
+            if (
+                isinstance(ce, ast.Call)
+                and isinstance(ce.func, ast.Attribute)
+                and ce.func.attr == "auto_scope"
+            ):
+                return True
+        return False
 
 
 __all__ = ["ASTParser"]

@@ -414,10 +414,14 @@ class StorageRootAnalysis : public IRVisitor {
       if (i >= then_yield->value_.size() || i >= else_yield->value_.size()) break;
       auto then_location = ResolveExpr(then_yield->value_[i]);
       auto else_location = ResolveExpr(else_yield->value_[i]);
+      if (!HasLocation(then_location) || !HasLocation(else_location)) {
+        RegisterUnsupportedLocation(op->return_vars_[i]);
+        continue;
+      }
       auto merged = MergeLocations(then_location, else_location);
       if (ExceedsRootAlternativeLimit(merged)) {
         RegisterUnsupportedLocation(op->return_vars_[i]);
-      } else if (HasLocation(merged)) {
+      } else {
         RegisterVarLocation(op->return_vars_[i], std::move(merged));
       }
     }
@@ -439,7 +443,12 @@ class StorageRootAnalysis : public IRVisitor {
     for (size_t i = 0; i < op->iter_args_.size() && i < op->return_vars_.size(); ++i) {
       auto location = init_locations[i];
       if (yield && i < yield->value_.size()) {
-        location = MergeLocations(location, ResolveExpr(yield->value_[i]));
+        auto yield_location = ResolveExpr(yield->value_[i]);
+        if (!HasLocation(location) || !HasLocation(yield_location)) {
+          RegisterUnsupportedLocation(op->return_vars_[i]);
+          continue;
+        }
+        location = MergeLocations(location, yield_location);
       }
       location = UnknownRegionsFor(location);
       if (ExceedsRootAlternativeLimit(location)) {
@@ -466,7 +475,12 @@ class StorageRootAnalysis : public IRVisitor {
     for (size_t i = 0; i < op->iter_args_.size() && i < op->return_vars_.size(); ++i) {
       auto location = init_locations[i];
       if (yield && i < yield->value_.size()) {
-        location = MergeLocations(location, ResolveExpr(yield->value_[i]));
+        auto yield_location = ResolveExpr(yield->value_[i]);
+        if (!HasLocation(location) || !HasLocation(yield_location)) {
+          RegisterUnsupportedLocation(op->return_vars_[i]);
+          continue;
+        }
+        location = MergeLocations(location, yield_location);
       }
       location = UnknownRegionsFor(location);
       if (ExceedsRootAlternativeLimit(location)) {

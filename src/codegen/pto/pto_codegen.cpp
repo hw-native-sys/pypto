@@ -372,19 +372,9 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   gm_slot_buffer_offsets_.clear();
   remote_offset_dtypes_.clear();
   PrepareGMSlotBufferLayout(program);
-  CollectRemoteOffsetDtypes(program);
 
   const std::string target_arch = backend_->GetHandler()->GetPtoTargetArch();
   stream_ << "module attributes {pto.target_arch = \"" << target_arch << "\"} {\n";
-
-  // Emit one `@CommRemoteOffset_<dtype>` helper per element dtype
-  // referenced by distributed remote ops in this module. The helper
-  // returns the peer-vs-local element offset (an `index`); call sites
-  // emit `pto.addptr` + `pto.make_tensor_view` on the returned offset
-  // inside the user kernel so PTOAS's per-func "addptr must feed
-  // make_tensor_view" check is satisfied locally — see EmitCommRemoteView
-  // (call-site emitter) in src/backend/common/pto_ops_common.cpp.
-  EmitCommRemoteOffsetHelpers();
 
   for (const auto& [gvar, func] : program->functions_) {
     INTERNAL_CHECK_SPAN(ir::IsInCoreType(func->func_type_), func->span_)
@@ -392,6 +382,13 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
         << func->name_ << "' has type " << ir::FunctionTypeToString(func->func_type_);
     GenerateFunction(func);
   }
+
+  // Emit `@CommRemoteOffset_<dtype>` helpers at module end. Dtypes were
+  // registered lazily during op lowering via RegisterCommRemoteOffsetHelper
+  // (see EmitCommRemoteView in src/backend/common/pto_ops_common.cpp). MLIR
+  // resolves func.call symbols whole-module, so call sites in user functions
+  // above can forward-reference these helpers without issue.
+  EmitCommRemoteOffsetHelpers();
 
   stream_ << "}\n";
   return stream_.str();
@@ -456,42 +453,16 @@ std::string PTOCodegen::GetCommRemoteOffsetFuncName(const DataType& dtype) {
   return "CommRemoteOffset_" + DataTypeToMLIR(dtype);
 }
 
-namespace {
-
-// Walks every function body in the program and accumulates the
-// DistributedTensor element DataType consumed by each
-// ``pld.tile.remote_load`` / ``pld.system.notify`` call.
-class RemoteOffsetDtypeCollector : public ir::IRVisitor {
- public:
-  explicit RemoteOffsetDtypeCollector(std::set<DataType, DtypeCodeLess>* dtypes) : dtypes_(dtypes) {}
-
- protected:
-  void VisitExpr_(const ir::CallPtr& op) override {
-    if (op->op_ && (op->op_->name_ == "pld.tile.remote_load" || op->op_->name_ == "pld.system.notify")) {
-      INTERNAL_CHECK_SPAN(!op->args_.empty(), op->span_)
-          << "Internal error: " << op->op_->name_ << " expects DistributedTensor as first arg";
-      auto dist_type = ir::As<ir::DistributedTensorType>(op->args_[0]->GetType());
-      if (dist_type) {
-        dtypes_->insert(dist_type->dtype_);
-      }
-    }
-    ir::IRVisitor::VisitExpr_(op);
-  }
-
- private:
-  std::set<DataType, DtypeCodeLess>* dtypes_;
-};
-
-}  // namespace
-
-void PTOCodegen::CollectRemoteOffsetDtypes(const ProgramPtr& program) {
-  RemoteOffsetDtypeCollector collector(&remote_offset_dtypes_);
-  for (const auto& [gvar, func] : program->functions_) {
-    (void)gvar;
-    if (func->body_) {
-      collector.VisitStmt(func->body_);
-    }
-  }
+std::string PTOCodegen::RegisterCommRemoteOffsetHelper(const DataType& dtype) {
+  // Sub-byte dtypes (bool / 4-bit) have no whole-byte element stride, so the
+  // byte→element division at the bottom of the helper body is ill-defined.
+  // Fail at the op call site, where the CHECK message still has caller context.
+  const size_t elem_bits = dtype.GetBit();
+  CHECK(elem_bits >= 8 && elem_bits % 8 == 0)
+      << "Distributed remote ops only support byte-sized element types, got " << dtype.ToString() << " ("
+      << elem_bits << " bits)";
+  remote_offset_dtypes_.insert(dtype);
+  return GetCommRemoteOffsetFuncName(dtype);
 }
 
 void PTOCodegen::EmitCommRemoteOffsetHelpers() {
@@ -507,18 +478,9 @@ void PTOCodegen::EmitCommRemoteOffsetHelpers() {
 
   const std::string body_indent = std::string(4, ' ');
   for (const DataType& dtype : remote_offset_dtypes_) {
-    // Element size in bytes — used to convert the raw byte delta between
-    // local_base and peer_base into an element offset for ``pto.addptr``.
-    // Derived directly from the DataType bit width (pinned in
-    // include/pypto/core/dtype.h); any byte-sized dtype already known to
-    // DataTypeToMLIR is handled without a per-dtype branch here. Sub-byte
-    // dtypes (bool / 4-bit) have no whole-byte element stride, so cross-rank
-    // addressing is rejected.
-    const size_t elem_bits = dtype.GetBit();
-    CHECK(elem_bits >= 8 && elem_bits % 8 == 0)
-        << "Distributed remote ops only support byte-sized element types, got " << dtype.ToString() << " ("
-        << elem_bits << " bits)";
-    const int64_t elem_size_bytes = static_cast<int64_t>(elem_bits / 8);
+    // Bit-width validated at registration time (RegisterCommRemoteOffsetHelper),
+    // so the division below is always well-defined.
+    const int64_t elem_size_bytes = static_cast<int64_t>(dtype.GetBit() / 8);
     const std::string func_name = GetCommRemoteOffsetFuncName(dtype);
 
     // ``private`` visibility tells PTOAS to emit the helper with C++
