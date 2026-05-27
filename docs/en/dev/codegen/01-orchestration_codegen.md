@@ -470,6 +470,25 @@ becomes an array carry of the same N, slot-by-slot copied on outer yield.
 This propagation is the structural source of the multi-iter fence semantics
 in topologies like case1 (outer SEQ × inner PARALLEL).
 
+### Phase-fence dummy barriers
+
+After `DeriveCallDirections`, the `ExpandManualPhaseFence` pass may compress a
+profitable full-array manual dependency by rewriting selected
+`manual_dep_edges=[tids]` consumer calls to `manual_dep_edges=[barrier_tid]`.
+It inserts a marked `system.task_dummy` call whose own `manual_dep_edges` still
+references the original TaskId array. Orchestration codegen lowers that marked
+call to `rt_submit_dummy_task(...)`, then emits ordinary scalar dependency
+lowering for the rewritten consumers.
+
+This preserves the phase boundary while avoiding repeated all-to-all fanout:
+
+```text
+tids[N] -> dummy barrier -> consumers[M]
+```
+
+Shapes that are not clearly safe or profitable stay on the direct
+`manual_dep_edges` lowering path.
+
 **Constraints checked at codegen entry (with user-facing CHECK messages):**
 
 - The `pl.parallel` trip count must be a Python literal (statically known).

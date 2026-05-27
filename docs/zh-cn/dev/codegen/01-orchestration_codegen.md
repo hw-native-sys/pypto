@@ -457,6 +457,23 @@ dep 数组填充条目在 source 是 iter_arg / 数组槽 carry 时会被
 外层 yield 时按槽位拷贝。这种结构上的传播就是 case1（外层 SEQ × 内层 PARALLEL）
 等拓扑中"多 iter fence 语义"的来源。
 
+### Phase-fence dummy barrier
+
+`DeriveCallDirections` 之后，`ExpandManualPhaseFence` pass 可能压缩有收益的完整数组
+manual dependency：它把选中的 `manual_dep_edges=[tids]` consumer call 改写为
+`manual_dep_edges=[barrier_tid]`。该 pass 会插入一个带标记的 `system.task_dummy`
+call；这个 dummy call 自己的 `manual_dep_edges` 仍然引用原始 TaskId 数组。Orchestration
+codegen 会把带标记的 call 降低为 `rt_submit_dummy_task(...)`，随后对被改写的 consumer
+继续使用普通标量 dependency lowering。
+
+这会保留 phase boundary，同时避免重复 all-to-all fanout：
+
+```text
+tids[N] -> dummy barrier -> consumers[M]
+```
+
+如果形状、安全性或收益不够明确，则继续走原有直接 `manual_dep_edges` lowering 路径。
+
 **codegen 入口检查的约束（带用户友好 CHECK 消息）：**
 
 - `pl.parallel` 的 trip count 必须是 Python 字面量（编译期常量）。

@@ -3933,12 +3933,13 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
         assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
         assert f"PTO2TaskId params_phase_fence_barrier_0_deps[{ABOVE_LEGACY_CAP}];" in code, code
-        assert "PTO2TaskId params_t0_deps[1];" in code, code
-        assert (
-            "if (phase_fence_barrier_0_tid.is_valid()) "
-            "params_t0_deps[params_t0_deps_count++] = phase_fence_barrier_0_tid;"
-        ) in code, code
-        assert f"PTO2TaskId params_t0_deps[{ABOVE_LEGACY_CAP}];" not in code, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+        assert re.search(
+            r"if \(phase_fence_barrier_0_tid\.is_valid\(\)\) "
+            r"(params_t\d+)_deps\[\1_deps_count\+\+\] = phase_fence_barrier_0_tid;",
+            code,
+        ), code
+        assert not re.search(rf"PTO2TaskId params_t\d+_deps\[{ABOVE_LEGACY_CAP}\];", code), code
 
     def test_manual_scope_phase_fence_scalar_dep_does_not_emit_dummy_barrier(self):
         """Scalar TaskId deps remain on the legacy single-edge lowering path."""
@@ -4023,7 +4024,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "rt_submit_dummy_task" not in code, code
-        assert "PTO2TaskId params_t1_deps[5];" in code, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[5\];", code), code
 
     def test_auto_scope_array_dep_does_not_emit_dummy_barrier(self):
         """Array deps outside manual_scope keep the existing explicit-deps lowering."""
@@ -4069,7 +4070,7 @@ class TestManualScopeCodegen:
         code = _generate_orch_code(transformed)
 
         assert "rt_submit_dummy_task" not in code, code
-        assert "PTO2TaskId params_t0_deps[4];" in code, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
 
     def test_manual_scope_submit_task_id_dep(self):
         """The producer TaskId of a ``pl.submit(...)`` threaded into a later

@@ -13,7 +13,7 @@ The two layers must agree but are not identical: under `DeriveCallDirections`, a
 
 `DeriveCallDirections` is the pass that bridges the two layers. It walks every non-builtin `Call` in every `Function` body and writes the resolved per-argument vector to `Call.attrs["arg_directions"]` (the reserved key `kAttrArgDirections`, value type `std::vector<ArgDirection>`). Downstream consumers — orchestration codegen and the runtime task-submission layer — read `Call.attrs["arg_directions"]` instead of recomputing it from raw param directions.
 
-**Manual-scope deps are not this pass's concern.** Inside `with pl.manual_scope():` regions, the user-declared `pl.submit(..., deps=[...])` edges are written **directly by the parser** into `Call.attrs["manual_dep_edges"]` (a `vector<VarPtr>` whose entries are `Scalar[TASK_ID]` variables or `Array[N, TASK_ID]` carries). No pass synthesises or lowers them; `DeriveCallDirections` reads and writes only `arg_directions`.
+**Manual-scope deps are a separate layer.** Inside `with pl.manual_scope():` regions, the user-declared `pl.submit(..., deps=[...])` edges are written **directly by the parser** into `Call.attrs["manual_dep_edges"]` (a `vector<VarPtr>` whose entries are `Scalar[TASK_ID]` variables or `Array[N, TASK_ID]` carries). `DeriveCallDirections` reads and writes only `arg_directions`; the later `ExpandManualPhaseFence` pass may rewrite selected `manual_dep_edges` from a full TaskId array to a dummy-barrier TaskId.
 
 **When to use**: Run after the tile pipeline has stabilized (`SplitIncoreOrch` is required) and before any consumer that observes `Call.attrs["arg_directions"]`. In the `Default` strategy it sits between `FuseCreateAssembleToSlice` and the final `Simplify`.
 
