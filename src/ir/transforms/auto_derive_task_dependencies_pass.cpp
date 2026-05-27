@@ -13,9 +13,12 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -261,6 +264,34 @@ bool ContainsVar(const std::vector<VarPtr>& vars, const VarPtr& candidate) {
     if (var && var->UniqueId() == candidate->UniqueId()) return true;
   }
   return false;
+}
+
+bool AutoDepsLoopCarryDebugEnabled() {
+  static const bool enabled = []() {
+    const char* value = std::getenv("PYPTO_AUTO_DEPS_LOOP_CARRY_DEBUG");
+    if (!value) return false;
+    std::string text(value);
+    return !text.empty() && text != "0" && text != "false" && text != "False";
+  }();
+  return enabled;
+}
+
+std::string DebugVar(const VarPtr& var) {
+  if (!var) return "<null>";
+  std::ostringstream oss;
+  oss << var->name_hint_ << "#" << var->UniqueId();
+  return oss.str();
+}
+
+std::string DebugVarList(const std::vector<VarPtr>& vars) {
+  std::ostringstream oss;
+  oss << "[";
+  for (size_t i = 0; i < vars.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << DebugVar(vars[i]);
+  }
+  oss << "]";
+  return oss.str();
 }
 
 YieldStmtPtr GetTrailingYield(const StmtPtr& stmt) {
@@ -733,8 +764,19 @@ class AutoDepMutator : public IRMutator {
     VarPtr task_id = LookupTaskId(op.get());
     bool needs_fallback = false;
     auto user_edges = CanonicalizeTaskIds(GetDepAttr(call, kAttrManualDepEdges));
+    const bool debug_loop_carry = AutoDepsLoopCarryDebugEnabled() && loop_depth_ == 0 && call->op_ &&
+                                  call->op_->name_ == "consume" && !user_edges.empty();
     auto summary = SummarizeAccesses(call, op, user_edges, &needs_fallback);
+    if (debug_loop_carry) {
+      std::cerr << "[auto-deps-loop-debug] call=" << call->op_->name_ << " task_id=" << DebugVar(task_id)
+                << " user_edges=" << DebugVarList(user_edges)
+                << " summary_accesses=" << summary.accesses.size()
+                << " needs_fallback_from_summary=" << (needs_fallback ? "true" : "false") << std::endl;
+    }
     if (needs_fallback) {
+      if (debug_loop_carry) {
+        std::cerr << "[auto-deps-loop-debug] fallback_reason=summary_unknown_location" << std::endl;
+      }
       fallback_stack_.back() = true;
       return call;
     }
@@ -747,8 +789,21 @@ class AutoDepMutator : public IRMutator {
         if (!storage_ || !storage_->MayAlias(access.location.root, prior.location.root)) continue;
         if (!RegionsMayOverlap(access.location.region, prior.location.region)) continue;
         if (!HasHazard(access.kind, prior.kind)) continue;
-        if (ContainsVar(user_edges, prior.task_id_var)) continue;
+        const bool covered_by_user_edge = ContainsVar(user_edges, prior.task_id_var);
+        if (debug_loop_carry) {
+          std::cerr << "[auto-deps-loop-debug] prior_task_id=" << DebugVar(prior.task_id_var)
+                    << " covered_by_user_edge=" << (covered_by_user_edge ? "true" : "false")
+                    << " dynamic_producer=" << (prior.dynamic_producer ? "true" : "false")
+                    << " current_task_id=" << DebugVar(task_id) << std::endl;
+        }
+        if (covered_by_user_edge) continue;
         if (prior.dynamic_producer || !prior.task_id_var) {
+          if (debug_loop_carry) {
+            std::cerr << "[auto-deps-loop-debug] fallback_reason="
+                      << (prior.dynamic_producer ? "dynamic_prior_producer" : "missing_prior_task_id")
+                      << " user_edges=" << DebugVarList(user_edges)
+                      << " prior_task_id=" << DebugVar(prior.task_id_var) << std::endl;
+          }
           fallback_stack_.back() = true;
           return call;
         }
