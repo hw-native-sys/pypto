@@ -54,9 +54,17 @@ class Split(Optimization):
     Args:
         mode: Split mode (``SplitMode.NONE``, ``SplitMode.UP_DOWN``, or
             ``SplitMode.LEFT_RIGHT``).
+        ring_slots: Optional override for the cross-core consumer-side ring
+            depth (a.k.a. PTOAS ``local_slot_num``). Sizes the UB
+            ``reserve_buffer`` as ``ring_slots * slot_size`` and lets a
+            UB-constrained scope trade pipelining depth for footprint.
+            Must be in ``[1, 8]`` for unidirectional pipes and ``[1, 4]``
+            for bidirectional. ``None`` keeps the platform default
+            (8 single-direction / 4 bidirectional).
     """
 
     mode: SplitMode
+    ring_slots: int | None = None
 
 
 @dataclass(frozen=True)
@@ -71,18 +79,22 @@ class AutoChunk(Optimization):
     """
 
 
-def split(mode: SplitMode) -> Split:
+def split(mode: SplitMode, *, ring_slots: int | None = None) -> Split:
     """Create a ``Split`` optimization entry.
 
     Args:
         mode: Split mode. May be ``SplitMode.NONE``,
             ``SplitMode.UP_DOWN``, or ``SplitMode.LEFT_RIGHT``.
+        ring_slots: Optional cross-core consumer ring depth override
+            (lowers to PTOAS ``local_slot_num``). Range ``[1, 8]`` for
+            unidirectional pipes, ``[1, 4]`` for bidirectional. ``None``
+            uses the platform default (8 / 4).
 
     Returns:
         ``Split`` instance for use in ``pl.at(..., optimizations=[...])``.
 
     """
-    return Split(mode=mode)
+    return Split(mode=mode, ring_slots=ring_slots)
 
 
 auto_chunk: AutoChunk = AutoChunk()

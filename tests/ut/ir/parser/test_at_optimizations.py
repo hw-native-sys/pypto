@@ -419,5 +419,98 @@ def test_fully_qualified_split():
     assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
 
 
+# ─── ring_slots kwarg on pl.split(...) ───────────────────────────────────────
+
+
+def _scope_attr(scope: ir.ScopeStmt, key: str) -> object | None:
+    for k, v in scope.attrs.items():
+        if k == key:
+            return v
+    return None
+
+
+def test_split_ring_slots_attaches_to_scope_attrs():
+    """pl.split(MODE, ring_slots=N) stores N on the scope's attrs."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(
+            level=pl.Level.CORE_GROUP,
+            optimizations=[pl.split(pl.SplitMode.UP_DOWN, ring_slots=2)],
+        ):
+            y = pl.add(x, x)
+        return y
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert scope.scope_kind == ir.ScopeKind.InCore
+    assert cast(_HasSplit, scope).split == ir.SplitMode.UP_DOWN
+    assert _scope_attr(scope, "ring_slots") == 2
+
+
+def test_split_without_ring_slots_leaves_attr_unset():
+    """Plain pl.split(MODE) does not set a ring_slots attr (platform default)."""
+
+    @pl.function
+    def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+            y = pl.add(x, x)
+        return y
+
+    scope = _find_scope_stmt(f.body)
+    assert scope is not None
+    assert _scope_attr(scope, "ring_slots") is None
+
+
+def test_split_ring_slots_out_of_range_errors():
+    """Parser rejects ring_slots outside [1, 8]."""
+    with pytest.raises(ParserSyntaxError, match="ring_slots=9"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                optimizations=[pl.split(pl.SplitMode.UP_DOWN, ring_slots=9)],
+            ):
+                y = pl.add(x, x)
+            return y
+
+
+def test_split_ring_slots_zero_errors():
+    """ring_slots=0 is rejected at parse time."""
+    with pytest.raises(ParserSyntaxError, match=r"ring_slots=0"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                optimizations=[pl.split(pl.SplitMode.UP_DOWN, ring_slots=0)],
+            ):
+                y = pl.add(x, x)
+            return y
+
+
+def test_split_unknown_kwarg_errors():
+    """Any kwarg other than ring_slots is still rejected."""
+    with pytest.raises(ParserSyntaxError, match="unexpected keyword argument 'depth'"):
+
+        @pl.function
+        def f(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            with pl.at(
+                level=pl.Level.CORE_GROUP,
+                optimizations=[pl.split(pl.SplitMode.UP_DOWN, depth=2)],  # type: ignore[call-arg]
+            ):
+                y = pl.add(x, x)
+            return y
+
+
+def test_split_factory_accepts_ring_slots_at_runtime():
+    """pl.split() runtime constructor accepts ring_slots= and stores it."""
+
+    entry = pl.split(pl.SplitMode.UP_DOWN, ring_slots=4)
+    assert entry.mode == ir.SplitMode.UP_DOWN
+    assert entry.ring_slots == 4
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

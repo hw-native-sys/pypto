@@ -1826,7 +1826,17 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
     CHECK(id >= 0) << "Frontend initialize_pipe 'id' attribute must be non-negative, got " << id;
     oss << "id = " << id << ", ";
   }
-  oss << "dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
+  oss << "dir_mask = " << dir_mask << ", slot_size = " << slot_size;
+  if (op->HasKwarg("local_slot_num")) {
+    const int local_slot_num = op->GetKwarg<int>("local_slot_num", 0);
+    // Range is enforced upstream (cross_core_pipe::BuildAutomaticPipeSetup and
+    // PTOAS's verifier). Guard against zero here so we never emit an invalid
+    // attr if a future caller forgets to validate.
+    CHECK(local_slot_num >= 1)
+        << "Frontend initialize_pipe 'local_slot_num' attribute must be >= 1, got " << local_slot_num;
+    oss << ", local_slot_num = " << local_slot_num;
+  }
+  oss << "}";
   return oss.str();
 }
 

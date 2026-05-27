@@ -491,5 +491,163 @@ def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
         )
 
 
+def test_ring_slots_attr_shrinks_reserve_buffer_and_emits_local_slot_num():
+    """``ring_slots=2`` on the InCore scope shrinks the consumer-side ring.
+
+    With slot_size=4096 and default unidirectional slot_num=8 the consumer
+    ``reserve_buffer`` is 32768 B and the initialize_pipe call carries no
+    ``local_slot_num`` kwarg. Setting ``ring_slots=2`` (forwarded as the
+    Function attr ``ring_slots``) must:
+
+    1. Shrink the consumer-side ``reserve_buffer`` size to ``slot_size * 2``.
+    2. Emit ``local_slot_num=2`` on the matching aic/aiv initialize_pipe calls.
+
+    AIC-side (no consumer FIFO buffer in this C2V example) still carries the
+    new ``local_slot_num=2`` so PTOAS instantiates the matching TPipe template.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "ring_slots": 2},
+        )
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile = pl.matmul(x_left, y_right)
+            z_vec = pl.move(
+                z_tile,
+                target_memory=pl.MemorySpace.Vec,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+    @pl.program
+    class Expected:
+        @pl.function(
+            type=pl.FunctionType.AIC,
+            attrs={"split": pl.SplitMode.UP_DOWN, "ring_slots": 2},
+        )
+        def main_incore_0_aic(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ):
+            main_incore_0_c2v_slot_buffer_import = pl.import_peer_buffer(
+                name="main_incore_0_c2v_slot_buffer", peer_func="main_incore_0_aiv"
+            )
+            pl.aic_initialize_pipe(
+                main_incore_0_c2v_slot_buffer_import,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=4096,
+                local_slot_num=2,
+            )
+            x_mat: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat
+            )
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat: pl.Tile[[128, 64], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat
+            )
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile = pl.matmul(x_left, y_right)
+            pl.tpush_to_aiv(z_tile, split=0)
+
+        @pl.function(
+            type=pl.FunctionType.AIV,
+            attrs={"split": pl.SplitMode.UP_DOWN, "ring_slots": 2},
+        )
+        def main_incore_0_aiv(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            # 4096 (slot_size) * 2 (ring_slots) = 8192 — 4x smaller than the
+            # default 32768 B reservation, which is exactly what the issue
+            # asks for.
+            main_incore_0_c2v_slot_buffer = pl.reserve_buffer(
+                name="main_incore_0_c2v_slot_buffer", size=8192, base=-1
+            )
+            pl.aiv_initialize_pipe(
+                main_incore_0_c2v_slot_buffer,
+                pl.const(0, pl.INT32),
+                dir_mask=1,
+                slot_size=4096,
+                local_slot_num=2,
+            )
+            z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=0)
+            out_0_store: pl.Tensor[[16, 64], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
+            pl.tfree_to_aic(z_vec)
+            return out_0_store
+
+        @pl.function(
+            type=pl.FunctionType.Group,
+            attrs={"split": pl.SplitMode.UP_DOWN, "ring_slots": 2},
+        )
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            self.main_incore_0_aic(x, y, out_0)
+            result: pl.Tensor[[16, 64], pl.FP32] = self.main_incore_0_aiv(x, y, out_0)
+            return result
+
+    After = _run_pipeline(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_ring_slots_out_of_range_for_bidir_errors():
+    """``ring_slots=8`` is invalid on a bidirectional pipe (PTOAS caps it at 4).
+
+    BuildAutomaticPipeSetup must reject the configuration with a clear error
+    rather than emitting IR that PTOAS will later refuse.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(
+            type=pl.FunctionType.InCore,
+            attrs={"split": pl.SplitMode.UP_DOWN, "ring_slots": 8},
+        )
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            # Bidirectional: AIV->AIC for x_left, AIC->AIV for z_vec.
+            x_tile = pl.load(x, [0, 0], [16, 128])
+            x_left = pl.move(x_tile, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile = pl.matmul(x_left, y_right)
+            z_vec = pl.move(
+                z_tile,
+                target_memory=pl.MemorySpace.Vec,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+    with pytest.raises(Exception, match="ring_slots=8.*bidirectional"):
+        _run_pipeline(Before)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

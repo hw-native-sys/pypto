@@ -322,6 +322,9 @@ class _AtKwargState:
     name_hint: str = ""
     requests_auto_chunk: bool = False
     split_mode: "ir.SplitMode | None" = None
+    # Consumer-side ring depth override from ``pl.split(MODE, ring_slots=N)``.
+    # None keeps the platform default (PTOAS local_slot_num: 8 single-dir / 4 bidir).
+    ring_slots: int | None = None
     # Tracks which kwarg produced the AutoChunk / split state so the validation
     # step can reject mixing the new `optimizations=` list with the deprecated
     # `optimization=`/`split=` kwargs and emit DeprecationWarning at the end.
@@ -2756,7 +2759,11 @@ class ASTParser:
                 span=self.span_tracker.get_span(kw),
             )
         state.new_optimizations_kw = kw
-        state.requests_auto_chunk, state.split_mode = self._parse_optimizations_list(kw.value)
+        (
+            state.requests_auto_chunk,
+            state.split_mode,
+            state.ring_slots,
+        ) = self._parse_optimizations_list(kw.value)
 
     def _handle_at_legacy_optimization_kw(self, kw: ast.keyword, state: "_AtKwargState") -> None:
         if state.legacy_optimization_kw is not None:
@@ -2827,16 +2834,17 @@ class ASTParser:
         owner: str = "pl.at",
         list_hint: str | None = None,
         entry_hint: str | None = None,
-    ) -> tuple[bool, "ir.SplitMode | None"]:
+    ) -> tuple[bool, "ir.SplitMode | None", "int | None"]:
         """Parse ``optimizations=[...]`` for ``pl.at`` or ``pl.spmd``.
 
         Each entry must be one of:
 
         - ``pl.auto_chunk`` — request AutoInCore semantics.
-        - ``pl.split(MODE)`` — set the cross-core split mode.
+        - ``pl.split(MODE)`` or ``pl.split(MODE, ring_slots=N)`` — set the
+          cross-core split mode and optionally override the consumer ring depth.
 
         Both fully qualified forms (``pl.optimizations.auto_chunk``,
-        ``pl.optimizations.split(MODE)``) are also accepted.
+        ``pl.optimizations.split(...)``) are also accepted.
 
         Args:
             owner: API name used in error messages (e.g. ``"pl.at"``, ``"pl.spmd"``).
@@ -2844,7 +2852,9 @@ class ASTParser:
             entry_hint: Override hint for unsupported list entries.
 
         Returns:
-            Tuple ``(requests_auto_chunk, split_mode)``.
+            Tuple ``(requests_auto_chunk, split_mode, ring_slots)``.
+            ``ring_slots`` is ``None`` unless the user passed
+            ``pl.split(..., ring_slots=N)``.
         """
         if list_hint is None:
             list_hint = (
@@ -2867,6 +2877,7 @@ class ASTParser:
 
         requests_auto_chunk = False
         split_mode: ir.SplitMode | None = None
+        ring_slots: int | None = None
         seen_auto_chunk = False
         seen_split = False
 
@@ -2879,14 +2890,14 @@ class ASTParser:
                     )
                 seen_auto_chunk = True
                 requests_auto_chunk = True
-            elif (mode := self._try_parse_pl_split(entry)) is not None:
+            elif (split_entry := self._try_parse_pl_split(entry)) is not None:
                 if seen_split:
                     raise ParserSyntaxError(
                         "Duplicate 'pl.split(...)' in optimizations=[...]",
                         span=self.span_tracker.get_span(entry),
                     )
                 seen_split = True
-                split_mode = mode
+                split_mode, ring_slots = split_entry
             else:
                 raise ParserSyntaxError(
                     f"Unsupported entry in {owner}(optimizations=[...])",
@@ -2894,18 +2905,20 @@ class ASTParser:
                     hint=entry_hint,
                 )
 
-        return requests_auto_chunk, split_mode
+        return requests_auto_chunk, split_mode, ring_slots
 
     def _parse_spmd_optimizations_list(
         self, value: ast.expr, *, span_anchor: ast.AST
-    ) -> "ir.SplitMode | None":
+    ) -> "tuple[ir.SplitMode | None, int | None]":
         """Parse ``pl.spmd(..., optimizations=[...])`` — ``pl.split`` only.
 
         ``pl.auto_chunk`` is not supported on ``pl.spmd``; use
         ``pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])`` inside
         the scope body instead.
+
+        Returns ``(split_mode, ring_slots)``.
         """
-        requests_auto_chunk, split_mode = self._parse_optimizations_list(
+        requests_auto_chunk, split_mode, ring_slots = self._parse_optimizations_list(
             value,
             owner="pl.spmd",
             list_hint="Use optimizations=[pl.split(pl.SplitMode.NONE)].",
@@ -2919,7 +2932,7 @@ class ASTParser:
                 "or move pl.auto_chunk into an inner "
                 "pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]).",
             )
-        return split_mode
+        return split_mode, ring_slots
 
     @staticmethod
     def _is_pl_auto_chunk(node: ast.expr) -> bool:
@@ -2939,10 +2952,12 @@ class ASTParser:
             return True
         return False
 
-    def _try_parse_pl_split(self, node: ast.expr) -> "ir.SplitMode | None":
-        """Return the SplitMode if the AST node is ``pl.split(MODE)``; else None.
+    def _try_parse_pl_split(self, node: ast.expr) -> "tuple[ir.SplitMode, int | None] | None":
+        """Return ``(SplitMode, ring_slots)`` if the AST node is
+        ``pl.split(MODE)`` or ``pl.split(MODE, ring_slots=N)``; else None.
 
-        Also accepts the fully qualified form ``pl.optimizations.split(MODE)``.
+        Also accepts the fully qualified form ``pl.optimizations.split(...)``.
+        ``ring_slots`` is ``None`` when the user did not request an override.
         """
         if not isinstance(node, ast.Call):
             return None
@@ -2963,20 +2978,40 @@ class ASTParser:
         else:
             return None
 
-        if node.keywords:
-            raise ParserSyntaxError(
-                "pl.split() does not accept keyword arguments",
-                span=self.span_tracker.get_span(node),
-                hint="Use pl.split(pl.SplitMode.NONE).",
-            )
         if len(node.args) != 1:
             raise ParserSyntaxError(
                 f"pl.split() takes exactly 1 positional argument, got {len(node.args)}",
                 span=self.span_tracker.get_span(node),
-                hint="Use pl.split(pl.SplitMode.NONE).",
+                hint="Use pl.split(pl.SplitMode.NONE) or pl.split(pl.SplitMode.UP_DOWN, ring_slots=2).",
             )
+
+        ring_slots: int | None = None
+        for kw in node.keywords:
+            if kw.arg != "ring_slots":
+                raise ParserSyntaxError(
+                    f"pl.split() got unexpected keyword argument '{kw.arg}'",
+                    span=self.span_tracker.get_span(kw),
+                    hint="Only 'ring_slots' is supported.",
+                )
+            if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, int) \
+                    or isinstance(kw.value.value, bool):
+                raise ParserSyntaxError(
+                    "pl.split(ring_slots=...) must be an integer literal",
+                    span=self.span_tracker.get_span(kw.value),
+                    hint="Use pl.split(MODE, ring_slots=2).",
+                )
+            value = kw.value.value
+            if not 1 <= value <= 8:
+                raise ParserSyntaxError(
+                    f"pl.split(ring_slots={value}) out of range; must be in [1, 8]",
+                    span=self.span_tracker.get_span(kw.value),
+                    hint="Bidirectional pipes additionally require ring_slots <= 4 "
+                    "(checked at the cross-core pipe setup).",
+                )
+            ring_slots = value
+
         mode = extract_enum_value(node.args[0], SPLIT_MODE_MAP, "SplitMode", "pl.SplitMode")
-        return mode
+        return mode, ring_slots
 
     def _parse_chunked_loop_optimizer(self, value: ast.expr) -> "ir.SplitMode | None":
         """Parse pl.chunked_loop_optimizer or pl.chunked_loop_optimizer(split=...) AST node.
@@ -3163,15 +3198,16 @@ class ASTParser:
         call: ast.Call,
         *,
         usage_hint: str,
-    ) -> tuple["ir.Expr", bool, str, "ir.SplitMode | None"]:
+    ) -> tuple["ir.Expr", bool, str, "ir.SplitMode | None", "int | None"]:
         """Parse ``pl.spmd(core_num, *, sync_start=, name_hint=, optimizations=)`` arguments.
 
         The first positional argument is ``core_num`` (range-like). Returns
-        ``(core_num, sync_start, name_hint, split_mode)`` with ``sync_start``
-        defaulting to ``False`` and ``split_mode`` to ``None``.
+        ``(core_num, sync_start, name_hint, split_mode, ring_slots)`` with
+        ``sync_start`` defaulting to ``False`` and ``split_mode`` / ``ring_slots``
+        to ``None``.
 
-        ``optimizations=[...]`` accepts only ``pl.split(MODE)`` — see
-        :meth:`_parse_spmd_optimizations_list`.
+        ``optimizations=[...]`` accepts only ``pl.split(MODE[, ring_slots=N])`` —
+        see :meth:`_parse_spmd_optimizations_list`.
         """
 
         integer_dtypes = frozenset(
@@ -3223,6 +3259,7 @@ class ASTParser:
         sync_start: bool = False
         name_hint = ""
         split_mode: ir.SplitMode | None = None
+        ring_slots: int | None = None
         for kw in call.keywords:
             if kw.arg is None:
                 # `pl.spmd(**cfg)` — ast.keyword.arg is None for **kwargs unpacking.
@@ -3251,7 +3288,7 @@ class ASTParser:
                     )
                 sync_start = kw.value.value
             elif kw.arg == "optimizations":
-                split_mode = self._parse_spmd_optimizations_list(kw.value, span_anchor=anchor)
+                split_mode, ring_slots = self._parse_spmd_optimizations_list(kw.value, span_anchor=anchor)
             else:
                 raise ParserSyntaxError(
                     f"pl.spmd() got unexpected keyword argument '{kw.arg}'",
@@ -3264,7 +3301,7 @@ class ASTParser:
                 span=self.span_tracker.get_span(anchor),
                 hint=usage_hint,
             )
-        return core_num, sync_start, name_hint, split_mode
+        return core_num, sync_start, name_hint, split_mode, ring_slots
 
     def _parse_spmd_scope(
         self,
@@ -3274,7 +3311,7 @@ class ASTParser:
     ) -> None:
         """Parse ``with pl.spmd(...):`` into a ScopeStmt(Spmd)."""
         with_hint = "Use 'with pl.spmd(4):' with a single function call inside."
-        core_num, sync_start, name_hint, split_mode = self._parse_spmd_kwargs(
+        core_num, sync_start, name_hint, split_mode, ring_slots = self._parse_spmd_kwargs(
             stmt, context_expr, usage_hint=with_hint
         )
         # Validate body is exactly one statement that is a function call.
@@ -3320,6 +3357,9 @@ class ASTParser:
             # split= hint requires an inner InCoreScopeStmt to carry the
             # split_ field. Build SpmdScopeStmt(InCoreScopeStmt(split_=mode, <call>)).
             spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
+            incore_attrs: list[tuple[str, Any]] | None = (
+                [("ring_slots", ring_slots)] if ring_slots is not None else None
+            )
             with self.builder.scope(
                 scope_kind,
                 span,
@@ -3334,6 +3374,7 @@ class ASTParser:
                         span,
                         split=split_mode,
                         name_hint=incore_name_hint,
+                        attrs=incore_attrs,
                     ):
                         with self._scope_kind_context(ir.ScopeKind.InCore):
                             self.scope_manager.enter_scope("spmd_with_incore")
@@ -3373,10 +3414,13 @@ class ASTParser:
                     hint=spmd_hint,
                 )
 
-        core_num, sync_start, name_hint, split_mode = self._parse_spmd_kwargs(
+        core_num, sync_start, name_hint, split_mode, ring_slots = self._parse_spmd_kwargs(
             stmt, iter_call, usage_hint=spmd_hint
         )
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
+        incore_attrs: list[tuple[str, Any]] | None = (
+            [("ring_slots", ring_slots)] if ring_slots is not None else None
+        )
 
         span = self.span_tracker.get_span(stmt)
         with self.builder.scope(
@@ -3389,7 +3433,11 @@ class ASTParser:
             with self._scope_kind_context(ir.ScopeKind.Spmd):
                 self.scope_manager.enter_scope("spmd_for")
                 with self.builder.scope(
-                    ir.ScopeKind.InCore, span, split=split_mode, name_hint=incore_name_hint
+                    ir.ScopeKind.InCore,
+                    span,
+                    split=split_mode,
+                    name_hint=incore_name_hint,
+                    attrs=incore_attrs,
                 ):
                     with self._scope_kind_context(ir.ScopeKind.InCore):
                         # Bind `i = pl.tile.get_block_idx()` as the first
@@ -3448,6 +3496,7 @@ class ASTParser:
         role = state.role
         requests_auto_chunk = state.requests_auto_chunk
         split_mode = state.split_mode
+        ring_slots = state.ring_slots
         name_hint = state.name_hint
         deps_kw = state.deps_kw
         no_dep_args_kw = state.no_dep_args_kw
@@ -3489,6 +3538,15 @@ class ASTParser:
         # fresh ``Scalar[TASK_ID]`` Var in the outer scope; the outliner
         # later wires it to ``TupleGetItem(call_lhs, last_idx)``.
         scope_attrs = self._parse_at_meta(deps_kw, no_dep_args_kw, optional_vars, span)
+
+        # Attach ``ring_slots`` (from ``pl.split(MODE, ring_slots=N)``) as a
+        # scope attr. The outliner copies it to the outlined function's attrs;
+        # cross_core_pipe reads it to size the consumer-side ring buffer and
+        # propagate it as ``local_slot_num`` on the initialize_pipe call.
+        if ring_slots is not None:
+            if scope_attrs is None:
+                scope_attrs = []
+            scope_attrs.append(("ring_slots", ring_slots))
 
         # ``with pl.at(...) as tid:`` allocates ``tid`` as an outer-scope Var
         # whose real definition is synthesised later by ``OutlineIncoreScopes``

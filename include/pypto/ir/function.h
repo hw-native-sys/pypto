@@ -494,6 +494,21 @@ class Function : public IRNode {
         << "Invalid split mode value in attrs: " << val;
     return static_cast<SplitMode>(val);
   }
+
+  /**
+   * @brief Convenience: extract user-requested ring slot count from attrs
+   *
+   * Set by ``pl.split(MODE, ring_slots=N)`` and forwarded to PTOAS as
+   * ``local_slot_num`` on the frontend initialize_pipe op. Returns nullopt
+   * when no override was requested (codegen then keeps the platform default
+   * of 8 single-direction / 4 bidirectional).
+   */
+  [[nodiscard]] std::optional<int> GetRingSlots() const {
+    if (!HasAttr("ring_slots")) return std::nullopt;
+    int val = GetAttr<int>("ring_slots", 0);
+    if (val <= 0) return std::nullopt;
+    return val;
+  }
 };
 
 using FunctionPtr = std::shared_ptr<const Function>;

@@ -770,10 +770,23 @@ class ScopeOutliner : public IRMutator {
         outlined_attrs.emplace_back("split", static_cast<int>(split.value()));
       }
     };
+    // Forward the scope's "ring_slots" attr (set by pl.split(MODE, ring_slots=N))
+    // onto the outlined function so cross_core_pipe can size the consumer ring
+    // buffer and emit local_slot_num on the initialize_pipe call.
+    auto forward_ring_slots_attr = [&]() {
+      for (const auto& [k, v] : op->attrs_) {
+        if (k == "ring_slots") {
+          outlined_attrs.emplace_back(k, v);
+          return;
+        }
+      }
+    };
     if (auto incore = As<InCoreScopeStmt>(op)) {
       append_split_attr(incore->split_);
+      forward_ring_slots_attr();
     } else if (auto auto_incore = As<AutoInCoreScopeStmt>(op)) {
       append_split_attr(auto_incore->split_);
+      forward_ring_slots_attr();
     } else if (auto spmd = As<SpmdScopeStmt>(op)) {
       outlined_attrs.emplace_back("core_num", spmd->core_num_);
       if (spmd->sync_start_) {

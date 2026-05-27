@@ -169,6 +169,7 @@ def aic_initialize_pipe(
     *,
     dir_mask: int,
     slot_size: int,
+    local_slot_num: int | None = None,
     id: int | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -179,11 +180,15 @@ def aic_initialize_pipe(
         v2c_consumer_buf: V2C consumer buffer base (Expr, int, or DSL ``Scalar``; default 0)
         dir_mask: Direction mask for pipe
         slot_size: Size of each pipe slot
+        local_slot_num: Optional consumer-side ring depth (PTOAS ``local_slot_num``).
+            Omit to keep the platform default (8 single-direction / 4 bidirectional).
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     kwargs = {"dir_mask": dir_mask, "slot_size": slot_size}
+    if local_slot_num is not None:
+        kwargs["local_slot_num"] = local_slot_num
     if id is not None:
         kwargs["id"] = id
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)
@@ -196,6 +201,7 @@ def aiv_initialize_pipe(
     *,
     dir_mask: int,
     slot_size: int,
+    local_slot_num: int | None = None,
     id: int | None = None,
     span: Span | None = None,
 ) -> Call:
@@ -206,11 +212,15 @@ def aiv_initialize_pipe(
         v2c_consumer_buf: V2C consumer buffer base (Expr, int, or DSL ``Scalar``; default 0)
         dir_mask: Direction mask for pipe
         slot_size: Size of each pipe slot
+        local_slot_num: Optional consumer-side ring depth (PTOAS ``local_slot_num``).
+            Omit to keep the platform default (8 single-direction / 4 bidirectional).
         id: Optional frontend pipe id. Omit to use PTOAS default id 0.
         span: Optional source span
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     kwargs = {"dir_mask": dir_mask, "slot_size": slot_size}
+    if local_slot_num is not None:
+        kwargs["local_slot_num"] = local_slot_num
     if id is not None:
         kwargs["id"] = id
     args = _build_pipe_init_args(c2v_consumer_buf, v2c_consumer_buf, actual_span)

@@ -76,6 +76,9 @@ REGISTER_OP("system.aic_initialize_pipe")
     .add_argument("v2c_consumer_buf", "V2C consumer buffer base (i32 SSA)")
     .set_attr<int>("dir_mask")
     .set_attr<int>("slot_size")
+    // Consumer-side ring depth (PTOAS local_slot_num). Optional — when absent,
+    // PTOAS uses the platform default (8 single-direction / 4 bidirectional).
+    .set_attr<int>("local_slot_num")
     .set_attr<int>("id")
     .f_deduce_type(DeduceUnknownType);
 
@@ -89,6 +92,7 @@ REGISTER_OP("system.aiv_initialize_pipe")
     .add_argument("v2c_consumer_buf", "V2C consumer buffer base (i32 SSA)")
     .set_attr<int>("dir_mask")
     .set_attr<int>("slot_size")
+    .set_attr<int>("local_slot_num")
     .set_attr<int>("id")
     .f_deduce_type(DeduceUnknownType);
 
