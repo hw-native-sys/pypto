@@ -21,6 +21,7 @@ __all__ = [
     "create_tensor",
     "create",
     "no_dep",
+    "dump_tag",
     "read",
     "write",
     "dim",
@@ -187,6 +188,64 @@ def no_dep(tensor: Tensor) -> Tensor:
 
     Args:
         tensor: The tensor to pass through. Must be a ``Tensor`` value.
+
+    Returns:
+        The tensor unchanged. The marker is consumed at parse time.
+    """
+    return tensor
+
+
+def dump_tag(tensor: Tensor) -> Tensor:
+    """Mark a tensor for selective dump within the enclosing orchestration.
+
+    Sticky orch-scoped marker — writing ``pl.dump_tag(q)`` as a standalone
+    statement inside an orchestration function body tells the codegen that
+    every kernel call in this orch that consumes ``q`` should mark its
+    ``Arg`` slot for tensor dump via the runtime's ``Arg::dump(...)`` API
+    (simpler#844 selective tensor dump).
+
+    Use this to keep ``enable_dump_tensor=True`` viable on large workloads
+    (e.g. paged-attention 64bat/8192ctx) where the host-side dump collector
+    drain rate (~42 MB/s) would otherwise be saturated by unconditional
+    full-tensor dump of every binding, eventually triggering a STARS
+    op-timeout kill on the AICPU side. By tagging only the tensors of
+    interest, the runtime filters out large bindings (1 GB kv-cache,
+    output buffers, etc.) from the collector queue.
+
+    Semantics:
+
+    * Sticky over the orch scope where written — one ``pl.dump_tag(q)``
+      statement affects all subsequent kernel calls in the same orch that
+      consume ``q`` (matched by IR Var name).
+    * No-op when ``RunConfig.enable_dump_tensor`` is ``False`` — selective
+      dump only filters within an enabled dump pipeline; without the
+      pipeline there is nothing to filter.
+    * Consumed at parse time — the parser records the tagged Var name on
+      the enclosing Function's attrs and emits no IR statement.
+
+    Only valid as a standalone statement inside an Orchestration function;
+    the parser rejects ``pl.dump_tag`` written in any other function type
+    (AIV / AIC / Mix kernel bodies) with a clear error::
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
+            pl.dump_tag(q)           # mark q for selective dump
+            pl.dump_tag(out)         # mark out for selective dump
+            s = self.qk_matmul(q, k_cache, scratch)  # q is dumped here
+            out = self.pv_matmul(s, k_cache, out)    # out is dumped here
+
+    Limitations (MVP):
+
+    * Not supported inside kernel-call argument positions
+      (``self.k(pl.dump_tag(q))``) — write ``pl.dump_tag(q)`` as a separate
+      statement above the call instead.
+    * Distributed L3+ programs: only chip-level orchestration tasks honour
+      the tag; HOST-tier Python SubWorker tensors are not covered by the
+      runtime's selective dump path.
+
+    Args:
+        tensor: The tensor to mark. Must be a ``Tensor`` value bound in
+            the enclosing orchestration's scope.
 
     Returns:
         The tensor unchanged. The marker is consumed at parse time.

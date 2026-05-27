@@ -57,6 +57,33 @@ pytest tests/st/runtime/ \
     --platform a2a3sim --enable-l2-swimlane --enable-dep-gen
 ```
 
+## Selective tensor dump
+
+`enable_dump_tensor=True` writes every binding of every task to
+`tensor_dump/`. On large workloads this can saturate the host-side dump
+collector (~42 MB/s drain) and the AICPU will be killed by the STARS
+op-execute timeout — large bindings such as a 1 GB KV-cache fill the
+queue faster than it drains. Mark the *interesting* tensors with the
+[`pl.dump_tag`](../../../python/pypto/language/op/tensor_ops.py) marker
+at orchestration scope to limit dump to those tensors:
+
+```python
+@pl.function(type=pl.FunctionType.Orchestration)
+def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
+    pl.dump_tag(q)
+    pl.dump_tag(out)
+    out = self.qk_pv(q, k_cache, out)
+```
+
+The marker is sticky over the orch scope — every kernel call in the
+same orch that consumes `q` or `out` dumps them; `k_cache` is filtered
+out of the collector queue. When `enable_dump_tensor=False` the marker
+is inert (the whole dump pipeline is dormant). See [`examples/models/
+09_paged_attention_spmd.py`](../../../examples/models/09_paged_attention_spmd.py)
+for a production-shape example. Backed by the runtime
+`enable_dump_tensor_selective()` toggle + `Arg::dump(...)` API from
+simpler#844.
+
 ## Rendering `deps.json` to HTML
 
 `enable_dep_gen` only emits the raw `deps.json`; the HTML pan/zoom graph

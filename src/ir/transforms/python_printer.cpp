@@ -1773,7 +1773,14 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     bool has_type = func->func_type_ != FunctionType::Opaque;
     bool has_level = func->level_.has_value();
     bool has_role = func->role_.has_value();
-    bool has_attrs = !func->attrs_.empty();
+    // ``kAttrDumpTaggedNames`` round-trips through the function *body* as
+    // ``pl.dump_tag(<name>)`` statements (the parser pre-scans those into the
+    // attr), so it must NOT be re-emitted as a decorator kwarg — doing so
+    // would either be unrecognised by the decorator parser or duplicate the
+    // tag set on reparse.
+    bool has_attrs =
+        std::any_of(func->attrs_.begin(), func->attrs_.end(),
+                    [](const auto& kv) { return kv.first != kAttrDumpTaggedNames; });
     auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
       if (key == "split") {
         int split_value = AnyCast<int>(value, "func attr key: " + key);
@@ -1818,6 +1825,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << "attrs={";
         bool first_attr = true;
         for (const auto& [key, value] : func->attrs_) {
+          if (key == kAttrDumpTaggedNames) continue;  // round-tripped via body
           if (!first_attr) stream_ << ", ";
           stream_ << std::quoted(key) << ": ";
           print_func_attr_value(key, value);
@@ -1877,6 +1885,17 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
 
   // Print body - convert yield to return in function context
   IncreaseIndent();
+  // Re-emit ``pl.dump_tag(<name>)`` markers at the top of the body so the
+  // parser's pre-scan re-populates ``Function::attrs_[kAttrDumpTaggedNames]``
+  // on roundtrip. The attr is invisible on the decorator (see the has_attrs
+  // logic above) — the DSL body call is the canonical surface.
+  if (func->HasAttr(kAttrDumpTaggedNames)) {
+    auto names =
+        func->GetAttr<std::vector<std::string>>(kAttrDumpTaggedNames, std::vector<std::string>{});
+    for (const auto& name : names) {
+      stream_ << GetIndent() << prefix_ << ".dump_tag(" << name << ")\n";
+    }
+  }
   if (func->body_) {
     if (auto seq_stmts = As<SeqStmts>(func->body_)) {
       if (seq_stmts->stmts_.empty()) {

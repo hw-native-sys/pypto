@@ -665,6 +665,14 @@ class StructuralEqualImpl {
             }
           }
         }
+      } else if (lhs_val.type() == typeid(std::vector<std::string>)) {
+        // ``kAttrDumpTaggedNames`` on Orchestration Functions: an order-
+        // preserving list of Var name_hints marked via ``pl.dump_tag(...)``.
+        const auto& lhs_names =
+            AnyCast<std::vector<std::string>>(lhs_val, "comparing kwarg: " + lhs[i].first);
+        const auto& rhs_names =
+            AnyCast<std::vector<std::string>>(rhs_val, "comparing kwarg: " + lhs[i].first);
+        values_equal = (lhs_names == rhs_names);
       } else if (lhs_val.type() == typeid(VarPtr)) {
         // ``kAttrTaskIdVar`` on ScopeStmts.
         const auto& lhs_var = AnyCast<VarPtr>(lhs_val, "comparing kwarg: " + lhs[i].first);

@@ -55,6 +55,30 @@ pytest tests/st/runtime/ \
     --platform a2a3sim --enable-l2-swimlane --enable-dep-gen
 ```
 
+## 选择性张量 Dump
+
+`enable_dump_tensor=True` 会把每个 task 的每个绑定都写入 `tensor_dump/`。
+在大规模工作负载下，host 端 dump 收集器（约 42 MB/s 排空速率）会被打满，
+进而 AICPU 会被 STARS 算子执行超时机制杀掉 —— 1 GB 量级的 KV-cache 等
+大绑定填充队列的速度远快于排空速度。可以在 orchestration 作用域内用
+[`pl.dump_tag`](../../../python/pypto/language/op/tensor_ops.py) 标记
+只关注的张量，把 dump 范围收窄：
+
+```python
+@pl.function(type=pl.FunctionType.Orchestration)
+def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
+    pl.dump_tag(q)
+    pl.dump_tag(out)
+    out = self.qk_pv(q, k_cache, out)
+```
+
+标记对整段 orch 作用域生效 —— 同一个 orch 内所有消费 `q` 或 `out` 的
+kernel call 都会 dump 这两个张量；`k_cache` 则被过滤掉，不进入收集器
+队列。`enable_dump_tensor=False` 时该标记不起作用（dump 流水线整体关闭）。
+完整的生产规模示例见 [`examples/models/09_paged_attention_spmd.py`](../../../examples/models/09_paged_attention_spmd.py)。
+底层由 runtime 的 `enable_dump_tensor_selective()` 开关 +
+`Arg::dump(...)` API（simpler#844）支撑。
+
 ## 将 `deps.json` 渲染为 HTML
 
 `enable_dep_gen` 只产出原始的 `deps.json`；对应的 pan/zoom HTML 依赖图由

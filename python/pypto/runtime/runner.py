@@ -94,7 +94,11 @@ class RunConfig:
         enable_dump_tensor: Dump per-task tensor I/O into
             ``<work_dir>/dfx_outputs/tensor_dump/``. Inspect with
             ``python -m simpler_setup.tools.dump_viewer``. Mirrors
-            ``--dump-tensor``.
+            ``--dump-tensor``. When the workload is too large for the host-side
+            dump collector (~42 MB/s drain rate) the AICPU may be killed by a
+            STARS op-execute timeout — use the DSL marker ``pl.dump_tag(t)``
+            at orchestration scope to limit dump to specific tensors and avoid
+            saturating the collector (simpler#844 selective tensor dump).
         enable_pmu: AICore PMU event type. ``0`` disables collection;
             ``>0`` enables and selects the event (``2`` = PIPE_UTILIZATION,
             ``4`` = MEMORY — see ``runtime/docs/dfx/pmu-profiling.md``).
