@@ -151,7 +151,7 @@ class After:
 | `python/pypto/pypto_core/passes.pyi`（`resolve_backend_op_layouts`） | 类型存根 |
 | `tests/ut/ir/transforms/test_resolve_backend_op_layouts_pass.py` | 单元测试（`[N, 1]` 向量上的 binary、unary、tile×scalar，以及通过 `tile.move` 进行矩阵 layout 修复） |
 
-Layout 约束通过 `BackendOpRegistryEntry::set_input_layout` / `set_output_layout` 在 `src/backend/common/pto_ops_common.cpp` 中按 op 注册（如 `RequiresRowMajorLayout` 列表中的 row-major elementwise op、`tile.rsqrt`、`tile.cmps`、`tile.sort32`、`tile.mscatter` 等）。
+Layout 约束通过 `BackendOpRegistryEntry::set_input_layout` / `set_output_layout` 在 `src/backend/common/pto_ops_common.cpp` 中按 op 注册（如 `RequiresRowMajorLayout` 列表中的 row-major elementwise op、`tile.cast`、`tile.rsqrt`、`tile.cmps`、`tile.sort32`、`tile.mscatter` 等）。
 
 Pass 源文件中的关键 helper：
 

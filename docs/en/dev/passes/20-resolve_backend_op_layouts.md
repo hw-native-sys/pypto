@@ -151,7 +151,7 @@ class After:
 | `python/pypto/pypto_core/passes.pyi` (`resolve_backend_op_layouts`) | Type stub |
 | `tests/ut/ir/transforms/test_resolve_backend_op_layouts_pass.py` | Unit tests (binary, unary, scalar-binary on `[N, 1]` vectors, plus matrix layout coercion through `tile.move`) |
 
-Layout constraints are registered per op via `BackendOpRegistryEntry::set_input_layout` / `set_output_layout` in `src/backend/common/pto_ops_common.cpp` (e.g. row-major elementwise ops listed in `RequiresRowMajorLayout`, `tile.rsqrt`, `tile.cmps`, `tile.sort32`, `tile.mscatter`, ...).
+Layout constraints are registered per op via `BackendOpRegistryEntry::set_input_layout` / `set_output_layout` in `src/backend/common/pto_ops_common.cpp` (e.g. row-major elementwise ops listed in `RequiresRowMajorLayout`, `tile.cast`, `tile.rsqrt`, `tile.cmps`, `tile.sort32`, `tile.mscatter`, ...).
 
 Key helpers in the pass source:
 

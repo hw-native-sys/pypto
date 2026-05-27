@@ -132,6 +132,52 @@ class TestResolveBackendOpLayouts:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_rewrites_column_vector_cast_through_row_major_reshape(self):
+        """`tile.cast` narrowing on a `[N, 1]` col_major vector must be repaired.
+
+        Regression for #1549: `pto.tcvt` mis-orders elements when its source tile
+        is col_major (e.g. a reshaped `[n, 1]` index vector narrowed `i32 -> i16`).
+        The repair reshapes the source to `[1, N] row_major`, casts in row-major
+        form, then reshapes the result back to `[N, 1]`.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 1], pl.INT16]],
+            ) -> pl.Tensor[[16, 1], pl.INT16]:
+                src: pl.Tile[[16, 1], pl.INT32] = pl.tile.create(
+                    [16, 1], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                )
+                narrowed: pl.Tile[[16, 1], pl.INT16] = pl.tile.cast(src, target_type=pl.INT16)
+                stored: pl.Tensor[[16, 1], pl.INT16] = pl.store(narrowed, [0, 0], out)
+                return stored
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 1], pl.INT16]],
+            ) -> pl.Tensor[[16, 1], pl.INT16]:
+                src: pl.Tile[[16, 1], pl.INT32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [16, 1], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                )
+                src_rm: pl.Tile[[1, 16], pl.INT32, pl.MemorySpace.Vec] = pl.tile.reshape(src, [1, 16])
+                narrowed_rm: pl.Tile[[1, 16], pl.INT16, pl.MemorySpace.Vec] = pl.tile.cast(
+                    src_rm, target_type=pl.INT16
+                )
+                narrowed: pl.Tile[[16, 1], pl.INT16, pl.MemorySpace.Vec] = pl.tile.reshape(
+                    narrowed_rm, [16, 1]
+                )
+                stored: pl.Tensor[[16, 1], pl.INT16] = pl.store(narrowed, [0, 0], out)
+                return stored
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_rewrites_column_vector_muls_through_row_major_reshape(self):
         """`tile.muls` (tile x scalar) on `[N, 1]` col_major should repair only the tile input."""
 
