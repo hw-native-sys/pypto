@@ -341,7 +341,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// emit-side prefix — ``pl.dump_tag(<name>)`` matches against the base
   /// ``name_hint``, so dump filtering needs the un-prefixed form.
   [[nodiscard]] std::string GetIrBaseName(const ir::ExprPtr& expr) const {
-    if (auto v = AsVarLike(expr)) return GetSSABaseName(v->name_hint_);
+    if (auto v = AsVarLike(expr)) return auto_name::GetCompatibleBaseName(v->name_hint_);
     return "";
   }
   [[nodiscard]] std::string GetTensorShapeDim(const std::string& name, int64_t axis) const override {
@@ -1581,8 +1581,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
           std::string value = FormatConstFloatValue(const_float, cpp_type);
           params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type), ""});
         } else if (auto const_bool = As<ConstBool>(inner_arg)) {
-          params.push_back(
-              {ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0", ""});
+          params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0", ""});
         } else {
           INTERNAL_CHECK_SPAN(false, inner_call->span_) << "Internal error: inner call arg " << inner_idx
                                                         << " is neither a variable nor a recognized constant";
@@ -1625,8 +1624,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         std::string value = FormatConstFloatValue(const_float, cpp_type);
         params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type), ""});
       } else if (auto const_bool = As<ConstBool>(outer_arg)) {
-        params.push_back(
-            {ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0", ""});
+        params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0", ""});
       } else {
         INTERNAL_CHECK_SPAN(false, outer_call->span_)
             << "Outer call to wrapper '" << wrapper_func->name_ << "' arg " << outer_idx

@@ -489,16 +489,22 @@ class InlineCallsMutator : public IRMutator {
     if (!gv) return nullptr;
     auto it = inline_fns_.find(gv->name_);
     if (it == inline_fns_.end()) return nullptr;
-    inlined_callees_.insert(it->second);
+    if (inlined_callees_seen_.insert(it->second).second) {
+      inlined_callees_ordered_.push_back(it->second);
+    }
     return it->second;
   }
 
  public:
-  /// Inline callees actually spliced by this mutator instance. The outer pass
-  /// reads this to migrate function-level attrs (e.g. ``kAttrDumpTaggedNames``)
-  /// from each inlined callee onto the caller before the inline function is
-  /// dropped at the end of ``InlineFunctions``.
-  const std::unordered_set<FunctionPtr>& GetInlinedCallees() const { return inlined_callees_; }
+  /// Inline callees actually spliced by this mutator instance, in
+  /// first-resolved order. The outer pass reads this to migrate
+  /// function-level attrs (e.g. ``kAttrDumpTaggedNames``) from each inlined
+  /// callee onto the caller before the inline function is dropped at the end
+  /// of ``InlineFunctions``. Ordered (not just deduped) so the merged
+  /// ``kAttrDumpTaggedNames`` vector is deterministic across runs —
+  /// ``structural_equal`` compares it element-by-element and
+  /// ``IRPythonPrinter`` re-emits ``pl.dump_tag(...)`` in vector order.
+  const std::vector<FunctionPtr>& GetInlinedCallees() const { return inlined_callees_ordered_; }
 
  private:
   const std::unordered_map<std::string, FunctionPtr>& inline_fns_;
@@ -510,8 +516,11 @@ class InlineCallsMutator : public IRMutator {
   std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_subs_;
   // Inline callees recorded by LookupInlineCallee on every successful resolve.
   // Mutable because LookupInlineCallee is logically const but records side
-  // information for the outer pass.
-  mutable std::unordered_set<FunctionPtr> inlined_callees_;
+  // information for the outer pass. Tracked as a (set, vector) pair so
+  // GetInlinedCallees can return first-resolved order while the set keeps
+  // O(1) dedup.
+  mutable std::unordered_set<FunctionPtr> inlined_callees_seen_;
+  mutable std::vector<FunctionPtr> inlined_callees_ordered_;
 };
 
 // Union the ``kAttrDumpTaggedNames`` lists (``pl.dump_tag`` markers, see
@@ -522,9 +531,10 @@ class InlineCallsMutator : public IRMutator {
 // attr.
 //
 // Order preservation: caller's existing names appear first, then names from
-// each callee in iteration order, with duplicates dropped on first sight.
+// each callee in first-resolved order (deterministic across runs), with
+// duplicates dropped on first sight.
 void MergeDumpTaggedNames(const std::shared_ptr<Function>& caller,
-                          const std::unordered_set<FunctionPtr>& inlined_callees) {
+                          const std::vector<FunctionPtr>& inlined_callees) {
   std::vector<std::string> merged;
   std::unordered_set<std::string> seen;
   auto append_names = [&](const std::vector<std::string>& names) {

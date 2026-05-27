@@ -1938,8 +1938,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   // on roundtrip. The attr is invisible on the decorator (see the has_attrs
   // logic above) — the DSL body call is the canonical surface.
   if (func->HasAttr(kAttrDumpTaggedNames)) {
-    auto names =
-        func->GetAttr<std::vector<std::string>>(kAttrDumpTaggedNames, std::vector<std::string>{});
+    auto names = func->GetAttr<std::vector<std::string>>(kAttrDumpTaggedNames, std::vector<std::string>{});
     for (const auto& name : names) {
       stream_ << GetIndent() << prefix_ << ".dump_tag(" << name << ")\n";
     }
