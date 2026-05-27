@@ -805,9 +805,7 @@ class TestValidShapeDivergence:
                     input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
                 )
                 _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output_a)
-                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
-                    input_a, [0, 0], [64, 64]
-                )
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
                 result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output_b)
                 return result
 
@@ -833,10 +831,8 @@ class TestValidShapeDivergence:
                 _res_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
                     tile_a, [0, 0], output_a
                 )
-                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = (
-                    pl.tile.load(
-                        input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
-                    )
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
                 )
                 result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 16384)] = pl.tile.store(
                     tile_b, [0, 0], output_b
