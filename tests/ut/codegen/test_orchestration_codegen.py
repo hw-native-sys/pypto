@@ -3919,14 +3919,14 @@ class TestManualScopeCodegen:
             ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
                 with pl.manual_scope():
                     tids = pl.array.create(ABOVE_LEGACY_CAP, pl.TASK_ID)
-                    for i in pl.range(4):
+                    for i, (tids_iter,) in pl.range(4, init_values=(tids,)):
                         tids_next = pl.array.create(ABOVE_LEGACY_CAP, pl.TASK_ID)
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(ABOVE_LEGACY_CAP):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
-                            out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
+                            out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids_iter])
                             tids_next[j] = tid
-                        tids = tids_next
+                        tids = pl.yield_(tids_next)
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)

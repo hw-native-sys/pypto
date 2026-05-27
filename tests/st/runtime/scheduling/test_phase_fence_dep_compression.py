@@ -154,14 +154,18 @@ def _build_submit_flattened_program(*, epochs: int, layers: int, phases: int):
         ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
             with pl.manual_scope():
                 tids = pl.array.create(branches, pl.TASK_ID)
-                for epoch in pl.range(epochs):
-                    for layer in pl.range(layers):
-                        for phase in pl.range(phases):
+                for epoch, (tids_epoch,) in pl.range(epochs, init_values=(tids,)):
+                    for layer, (tids_layer,) in pl.range(layers, init_values=(tids_epoch,)):
+                        for phase, (tids_iter,) in pl.range(phases, init_values=(tids_layer,)):
                             stage: pl.Scalar[pl.INDEX] = (epoch * layers + layer) * phases + phase
+                            tids_next = pl.array.create(branches, pl.TASK_ID)
                             for branch in pl.parallel(branches):
                                 row: pl.Scalar[pl.INDEX] = (stage * branches + branch) * tile_m
-                                out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[tids])
-                                tids[branch] = tid
+                                out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[tids_iter])
+                                tids_next[branch] = tid
+                            tids_phase = pl.yield_(tids_next)
+                        tids_layer_out = pl.yield_(tids_phase)
+                    tids = pl.yield_(tids_layer_out)
             return out
 
     return SubmitFlattenedPhaseFence
@@ -184,18 +188,20 @@ def _build_pl_at_flattened_program(*, epochs: int, phases: int):
         ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
             with pl.manual_scope():
                 tids = pl.array.create(branches, pl.TASK_ID)
-                for epoch in pl.range(epochs):
-                    for phase in pl.range(phases):
+                for epoch, (tids_epoch,) in pl.range(epochs, init_values=(tids,)):
+                    for phase, (tids_iter,) in pl.range(phases, init_values=(tids_epoch,)):
                         stage: pl.Scalar[pl.INDEX] = epoch * phases + phase
+                        tids_next = pl.array.create(branches, pl.TASK_ID)
                         for branch in pl.parallel(branches):
                             row: pl.Scalar[pl.INDEX] = (stage * branches + branch) * tile_m
-                            with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase_tile", deps=[tids]) as tid:
+                            with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase_tile", deps=[tids_iter]) as tid:
                                 tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(
                                     data, [row, 0], [tile_m, big_n]
                                 )
                                 result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, 1.0)
                                 out = pl.store(result, [row, 0], out)
-                            tids[branch] = tid
+                            tids_next[branch] = tid
+                        tids = pl.yield_(tids_next)
             return out
 
     return PlAtFlattenedPhaseFence

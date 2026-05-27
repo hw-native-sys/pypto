@@ -95,14 +95,14 @@ class TestPhaseFenceDepCompressionCodegen:
             ) -> pl.Tensor[[rows, cols], pl.FP32]:
                 with pl.manual_scope():
                     tids = pl.array.create(branches, pl.TASK_ID)
-                    for phase in pl.range(3):
+                    for phase, (tids_iter,) in pl.range(3, init_values=(tids,)):
                         tids_next = pl.array.create(branches, pl.TASK_ID)
                         row: pl.Scalar[pl.INDEX] = phase * tile_r
                         for branch in pl.parallel(branches):
                             col: pl.Scalar[pl.INDEX] = branch * tile_c
-                            out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
+                            out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids_iter])
                             tids_next[branch] = tid
-                        tids = tids_next
+                        tids = pl.yield_(tids_next)
                 return out
 
         code = _compile_program(Prog)
@@ -123,19 +123,19 @@ class TestPhaseFenceDepCompressionCodegen:
             ) -> pl.Tensor[[rows, cols], pl.FP32]:
                 with pl.manual_scope():
                     tids = pl.array.create(branches, pl.TASK_ID)
-                    for phase in pl.range(3):
+                    for phase, (tids_iter,) in pl.range(3, init_values=(tids,)):
                         tids_next = pl.array.create(branches, pl.TASK_ID)
                         row: pl.Scalar[pl.INDEX] = phase * tile_r
                         for branch in pl.parallel(branches):
                             col: pl.Scalar[pl.INDEX] = branch * tile_c
-                            with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase_tile", deps=[tids]) as tid:
+                            with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase_tile", deps=[tids_iter]) as tid:
                                 t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(
                                     x, [row, col], [tile_r, tile_c]
                                 )
                                 r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
                                 out = pl.store(r, [row, col], out)
                             tids_next[branch] = tid
-                        tids = tids_next
+                        tids = pl.yield_(tids_next)
                 return out
 
         code = _compile_program(Prog)
@@ -169,16 +169,17 @@ class TestPhaseFenceDepCompressionCodegen:
             ) -> pl.Tensor[[rows, cols], pl.FP32]:
                 with pl.manual_scope():
                     tids = pl.array.create(branches, pl.TASK_ID)
-                    for epoch in pl.range(2):
-                        for phase in pl.range(3):
+                    for epoch, (tids_epoch,) in pl.range(2, init_values=(tids,)):
+                        for phase, (tids_iter,) in pl.range(3, init_values=(tids_epoch,)):
                             tids_next = pl.array.create(branches, pl.TASK_ID)
                             base: pl.Scalar[pl.INDEX] = (epoch * 3 + phase) * branches
                             for branch in pl.parallel(branches):
                                 row: pl.Scalar[pl.INDEX] = (base + branch) * tile_r
                                 col: pl.Scalar[pl.INDEX] = branch * tile_c
-                                out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
+                                out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids_iter])
                                 tids_next[branch] = tid
-                            tids = tids_next
+                            tids_phase = pl.yield_(tids_next)
+                        tids = pl.yield_(tids_phase)
                 return out
 
         code = _compile_program(Prog)
@@ -905,8 +906,7 @@ class TestPhaseFenceDepCompressionCodegen:
 
         code = _compile_program(Prog)
         assert "rt_submit_dummy_task" not in code, code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+        assert len(re.findall(r"PTO2TaskId params_t\d+_deps\[4\];", code)) >= 2, code
 
 
 if __name__ == "__main__":
