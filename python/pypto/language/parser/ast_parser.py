@@ -2993,8 +2993,11 @@ class ASTParser:
                     span=self.span_tracker.get_span(kw),
                     hint="Only 'ring_slots' is supported.",
                 )
-            if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, int) \
-                    or isinstance(kw.value.value, bool):
+            if (
+                not isinstance(kw.value, ast.Constant)
+                or not isinstance(kw.value.value, int)
+                or isinstance(kw.value.value, bool)
+            ):
                 raise ParserSyntaxError(
                     "pl.split(ring_slots=...) must be an integer literal",
                     span=self.span_tracker.get_span(kw.value),

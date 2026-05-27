@@ -297,14 +297,16 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   int effective_slot_num = default_slot_num;
   if (ring_slots.has_value()) {
     const int requested = ring_slots.value();
-    CHECK(requested >= 1) << "pl.split(ring_slots=" << requested
-                          << ") must be >= 1 (function '" << func_name << "')";
+    // The AST parser already validates ring_slots >= 1 (and <= 8); reaching
+    // here with a smaller value would mean the parser was bypassed — an
+    // internal invariant violation rather than a user error.
+    INTERNAL_CHECK_SPAN(requested >= 1, span)
+        << "pl.split(ring_slots=" << requested << ") must be >= 1 (function '" << func_name << "')";
     CHECK(requested <= default_slot_num)
-        << "pl.split(ring_slots=" << requested << ") exceeds the platform maximum of "
-        << default_slot_num << " for "
-        << (dir_mask == (core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C)
-                ? "bidirectional"
-                : "unidirectional")
+        << "pl.split(ring_slots=" << requested << ") exceeds the platform maximum of " << default_slot_num
+        << " for "
+        << (dir_mask == (core_affinity::kDirMaskC2V | core_affinity::kDirMaskV2C) ? "bidirectional"
+                                                                                  : "unidirectional")
         << " cross-core pipes (function '" << func_name << "')";
     effective_slot_num = requested;
   }
