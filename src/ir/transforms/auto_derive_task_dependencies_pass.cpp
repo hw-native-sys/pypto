@@ -299,6 +299,18 @@ std::string DebugVarList(const std::vector<VarPtr>& vars) {
   return oss.str();
 }
 
+std::string DebugLocationStatus(LocationStatus status) {
+  switch (status) {
+    case LocationStatus::Unknown:
+      return "Unknown";
+    case LocationStatus::Known:
+      return "Known";
+    case LocationStatus::Unsupported:
+      return "Unsupported";
+  }
+  return "Invalid";
+}
+
 YieldStmtPtr GetTrailingYield(const StmtPtr& stmt) {
   if (auto yield = As<YieldStmt>(stmt)) return yield;
   auto seq = As<SeqStmts>(stmt);
@@ -358,15 +370,25 @@ class StorageRootAnalysis : public IRVisitor {
 
   ResolvedLocation ResolveExprStatus(const ExprPtr& expr) const {
     auto var = AsVarLike(expr);
-    if (!var) return ResolvedLocation{LocationStatus::Unknown, {}};
+    if (!var) {
+      DebugLog("resolve_expr_status expr=<non-var> status=Unknown");
+      return ResolvedLocation{LocationStatus::Unknown, {}};
+    }
     if (unsupported_locations_.count(var.get()) != 0) {
+      DebugLog("resolve_expr_status expr=" + DebugVar(var) + " status=Unsupported");
       return ResolvedLocation{LocationStatus::Unsupported, {}};
     }
     auto location = ResolveExpr(expr);
-    if (!HasLocation(location)) return ResolvedLocation{LocationStatus::Unknown, {}};
+    if (!HasLocation(location)) {
+      DebugLog("resolve_expr_status expr=" + DebugVar(var) + " status=Unknown");
+      return ResolvedLocation{LocationStatus::Unknown, {}};
+    }
     if (ExceedsRootAlternativeLimit(location)) {
+      DebugLog("resolve_expr_status expr=" + DebugVar(var) + " status=Unsupported reason=too_many_roots");
       return ResolvedLocation{LocationStatus::Unsupported, std::move(location)};
     }
+    DebugLog("resolve_expr_status expr=" + DebugVar(var) +
+             " status=Known roots=" + std::to_string(location.alternatives.size()));
     return ResolvedLocation{LocationStatus::Known, std::move(location)};
   }
 
@@ -890,6 +912,12 @@ class AutoDepMutator : public IRMutator {
     auto dirs = call->GetArgDirections();
     if (dirs.size() != call->args_.size()) return out;
 
+    const bool debug_loop_carry = AutoDepsLoopCarryDebugEnabled();
+    if (debug_loop_carry) {
+      DebugLog("summarize_accesses_start call=" + call->op_->name_ +
+               " args=" + std::to_string(call->args_.size()) + " user_edges=" + DebugVarList(user_edges));
+    }
+
     for (size_t i = 0; i < dirs.size(); ++i) {
       std::optional<AccessKind> kind;
       switch (dirs[i]) {
@@ -909,13 +937,32 @@ class AutoDepMutator : public IRMutator {
       }
       if (kind.has_value()) {
         auto resolved = storage_ ? storage_->ResolveExprStatus(call->args_[i]) : ResolvedLocation{};
+        if (debug_loop_carry) {
+          const auto& original_arg =
+              i < original_call->args_.size() ? original_call->args_[i] : call->args_[i];
+          DebugLog("summarize_access_arg call=" + call->op_->name_ + " index=" + std::to_string(i) +
+                   " status=" + DebugLocationStatus(resolved.status) +
+                   " original_task_id=" + DebugVar(LookupTaskIdForVar(original_arg)));
+        }
         if (resolved.status != LocationStatus::Known) {
           const auto& original_arg =
               i < original_call->args_.size() ? original_call->args_[i] : call->args_[i];
-          if (kind == AccessKind::Read && ContainsVar(user_edges, LookupTaskIdForVar(original_arg))) {
+          const VarPtr original_task_id = LookupTaskIdForVar(original_arg);
+          const bool covered_by_user_edge =
+              kind == AccessKind::Read && ContainsVar(user_edges, original_task_id);
+          if (debug_loop_carry) {
+            DebugLog("summarize_access_unresolved call=" + call->op_->name_ + " index=" + std::to_string(i) +
+                     " covered_by_user_edge=" + (covered_by_user_edge ? std::string("true") : "false") +
+                     " original_task_id=" + DebugVar(original_task_id));
+          }
+          if (covered_by_user_edge) {
             continue;
           }
           if (needs_fallback) *needs_fallback = true;
+          if (debug_loop_carry) {
+            DebugLog("summarize_access_fallback call=" + call->op_->name_ + " index=" + std::to_string(i) +
+                     " reason=unresolved_location");
+          }
           return {};
         }
         for (const auto& alternative : resolved.location.alternatives) {
