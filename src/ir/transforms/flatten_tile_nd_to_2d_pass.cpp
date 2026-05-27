@@ -1622,9 +1622,21 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
         auto [merged, last] = ComputeMergedShape(result_tile->shape_, "tile.load result");
 
         auto flat_shape_exprs = Make2DShapeExprs(merged, last, span);
-        // Assign the implicit TileView for the flattened 2D shape+memory_space.
-        auto flat_tile_view = std::make_optional(
-            tile_view_semantics::GetImplicitTileView(flat_shape_exprs, result_tile->memory_space_));
+        // Preserve any TileView (blayout/slayout/fractal/pad) the source tile
+        // already carried — e.g. LowerCompositeOps tags a transposed-load Mat
+        // rhs with TileView(blayout=row_major, slayout=col_major) so the
+        // downstream TLOAD matches the DN2ZN pattern. The implicit Mat default
+        // (col/row = ND) would otherwise emit an unsupported DN2ND TLOAD
+        // (#1540). Mirrors ExtractBatchPage Strategy 1 above.
+        std::optional<TileView> flat_tile_view;
+        if (result_tile->tile_view_.has_value()) {
+          const auto& orig_tv = *result_tile->tile_view_;
+          flat_tile_view = TileView(flat_shape_exprs, /*stride=*/{}, /*start_offset=*/nullptr,
+                                    orig_tv.blayout, orig_tv.slayout, orig_tv.fractal, orig_tv.pad);
+        } else {
+          flat_tile_view =
+              tile_view_semantics::GetImplicitTileView(flat_shape_exprs, result_tile->memory_space_);
+        }
         auto flat_tile_type = std::make_shared<TileType>(flat_shape_exprs, result_tile->dtype_, std::nullopt,
                                                          flat_tile_view, result_tile->memory_space_);
         auto flat_call =
