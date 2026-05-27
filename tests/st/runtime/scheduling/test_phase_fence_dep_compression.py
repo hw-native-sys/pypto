@@ -188,20 +188,24 @@ def _build_pl_at_flattened_program(*, epochs: int, phases: int):
         ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
             with pl.manual_scope():
                 tids = pl.array.create(branches, pl.TASK_ID)
-                for epoch, (tids_epoch,) in pl.range(epochs, init_values=(tids,)):
-                    for phase, (tids_iter,) in pl.range(phases, init_values=(tids_epoch,)):
+                for epoch, (tids_epoch, out_epoch) in pl.range(epochs, init_values=(tids, out)):
+                    for phase, (tids_iter, out_iter) in pl.range(phases, init_values=(tids_epoch, out_epoch)):
                         stage: pl.Scalar[pl.INDEX] = epoch * phases + phase
                         tids_next = pl.array.create(branches, pl.TASK_ID)
-                        for branch in pl.parallel(branches):
+                        for branch, (out_branch, tids_next_iter) in pl.parallel(
+                            branches, init_values=(out_iter, tids_next)
+                        ):
                             row: pl.Scalar[pl.INDEX] = (stage * branches + branch) * tile_m
                             with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase_tile", deps=[tids_iter]) as tid:
                                 tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(
                                     data, [row, 0], [tile_m, big_n]
                                 )
                                 result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, 1.0)
-                                out = pl.store(result, [row, 0], out)
-                            tids_next[branch] = tid
-                        tids = pl.yield_(tids_next)
+                                out_next = pl.store(result, [row, 0], out_branch)
+                            tids_next_out = pl.array.update_element(tids_next_iter, branch, tid)
+                            out_branch_out, tids_branch_out = pl.yield_(out_next, tids_next_out)
+                        tids_phase, out_phase = pl.yield_(tids_branch_out, out_branch_out)
+                    tids, out = pl.yield_(tids_phase, out_phase)
             return out
 
     return PlAtFlattenedPhaseFence

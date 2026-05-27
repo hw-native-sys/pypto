@@ -123,19 +123,22 @@ class TestPhaseFenceDepCompressionCodegen:
             ) -> pl.Tensor[[rows, cols], pl.FP32]:
                 with pl.manual_scope():
                     tids = pl.array.create(branches, pl.TASK_ID)
-                    for phase, (tids_iter,) in pl.range(3, init_values=(tids,)):
+                    for phase, (tids_iter, out_iter) in pl.range(3, init_values=(tids, out)):
                         tids_next = pl.array.create(branches, pl.TASK_ID)
                         row: pl.Scalar[pl.INDEX] = phase * tile_r
-                        for branch in pl.parallel(branches):
+                        for branch, (out_branch, tids_next_iter) in pl.parallel(
+                            branches, init_values=(out_iter, tids_next)
+                        ):
                             col: pl.Scalar[pl.INDEX] = branch * tile_c
                             with pl.at(level=pl.Level.CORE_GROUP, name_hint="phase_tile", deps=[tids_iter]) as tid:
                                 t: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.load(
                                     x, [row, col], [tile_r, tile_c]
                                 )
                                 r: pl.Tile[[tile_r, tile_c], pl.FP32] = pl.add(t, t)
-                                out = pl.store(r, [row, col], out)
-                            tids_next[branch] = tid
-                        tids = pl.yield_(tids_next)
+                                out_next = pl.store(r, [row, col], out_branch)
+                            tids_next_out = pl.array.update_element(tids_next_iter, branch, tid)
+                            out_branch_out, tids_branch_out = pl.yield_(out_next, tids_next_out)
+                        tids, out = pl.yield_(tids_branch_out, out_branch_out)
                 return out
 
         code = _compile_program(Prog)
