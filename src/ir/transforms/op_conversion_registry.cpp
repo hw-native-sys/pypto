@@ -400,8 +400,11 @@ void OpConversionRegistry::RegisterMemoryOps() {
     auto src_tile = As<TileType>(args[2]->GetType());
     INTERNAL_CHECK_SPAN(input_tile && idx_tile && src_tile, span)
         << "tensor.scatter_update conversion: input/index/src must be Vec tiles after bridge";
-    INTERNAL_CHECK_SPAN(input_tile->shape_.size() == 2 && src_tile->shape_.size() == 2, span)
-        << "tensor.scatter_update conversion currently supports 2D input/src only";
+    // 4D input/src is accepted by the op's type deduction but not yet lowered, so a 4D call
+    // type-checks and would otherwise hit an internal error here — surface it as a user error.
+    CHECK(input_tile->shape_.size() == 2 && src_tile->shape_.size() == 2)
+        << "scatter_update: only 2D input/src is currently supported in lowering, got input rank "
+        << input_tile->shape_.size() << " and src rank " << src_tile->shape_.size();
     auto src_rows = As<ConstInt>(src_tile->shape_[0]);
     auto idx_b = As<ConstInt>(idx_tile->shape_[0]);
     auto idx_s = As<ConstInt>(idx_tile->shape_[1]);
@@ -421,6 +424,13 @@ void OpConversionRegistry::RegisterMemoryOps() {
     // pto.tscatter requires the index element size to match dst (4B→i32, 2/1B→i16).
     const DataType idx_dtype =
         (static_cast<int>(dt.GetBit()) / 8 == 4) ? DataType(DataType::INT32) : DataType(DataType::INT16);
+    // For 2-byte dst the tscatter index is i16, so the largest flat destination index
+    // (m*d - 1) must fit in i16; otherwise it silently overflows and scatters to wrong rows.
+    if (idx_dtype == DataType(DataType::INT16)) {
+      CHECK(m * d <= 32767) << "scatter_update: " << dt.ToString() << " dst has m*d = " << m * d
+                            << " elements, exceeding the i16 flat-index limit (32767); "
+                            << "reduce dst rows*cols or use a 4-byte dtype";
+    }
     // Build the flat-index math entirely in i32, then narrow only the finished [n, d] flat_idx
     // to idx_dtype. Every intermediate tile stays in the canonical i32 layout — identical to
     // the FP32 path — which avoids narrowing a small/odd-shaped tile: the i32 [b, s] index has

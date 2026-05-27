@@ -1996,6 +1996,62 @@ class TestScatterUpdateConversion:
         assert text.count("pl.tile.scatter(") >= 1
         assert "scatter_update" not in text
 
+    def test_scatter_update_fp16_rejects_oversized_flat_index(self):
+        """2-byte dst with m*d > 32767 overflows the i16 flat index — must raise, not miscompile."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                index: pl.Tensor[[2, 4], pl.INT32],
+                src: pl.Tensor[[8, 256], pl.FP16],
+            ) -> pl.Tensor[[128, 256], pl.FP16]:  # m*d = 32768 > 32767
+                buf: pl.Tensor[[128, 256], pl.FP16] = pl.create_tensor([128, 256], dtype=pl.FP16)
+                result: pl.Tensor[[128, 256], pl.FP16] = pl.scatter_update(buf, -2, index, src)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                index: pl.Tensor[[2, 4], pl.INT32],
+                src: pl.Tensor[[8, 256], pl.FP16],
+            ) -> pl.Tensor[[128, 256], pl.FP16]:
+                result: pl.Tensor[[128, 256], pl.FP16] = self.main_incore_0(index, src)
+                return result
+
+        with pytest.raises(Exception, match="i16 flat-index limit"):
+            with passes.PassContext([], passes.VerificationLevel.NONE):
+                passes.convert_tensor_to_tile_ops()(Before)
+
+    def test_scatter_update_rejects_4d(self):
+        """4D input type-checks but is not yet lowered — must raise a clear user error, not crash."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                index: pl.Tensor[[2, 4], pl.INT32],
+                src: pl.Tensor[[2, 4, 1, 64], pl.FP32],
+            ) -> pl.Tensor[[4, 4, 1, 64], pl.FP32]:
+                buf: pl.Tensor[[4, 4, 1, 64], pl.FP32] = pl.create_tensor([4, 4, 1, 64], dtype=pl.FP32)
+                result: pl.Tensor[[4, 4, 1, 64], pl.FP32] = pl.scatter_update(buf, -2, index, src)
+                return result
+
+            @pl.function
+            def main(
+                self,
+                index: pl.Tensor[[2, 4], pl.INT32],
+                src: pl.Tensor[[2, 4, 1, 64], pl.FP32],
+            ) -> pl.Tensor[[4, 4, 1, 64], pl.FP32]:
+                result: pl.Tensor[[4, 4, 1, 64], pl.FP32] = self.main_incore_0(index, src)
+                return result
+
+        with pytest.raises(Exception, match="only 2D input/src is currently supported"):
+            with passes.PassContext([], passes.VerificationLevel.NONE):
+                passes.convert_tensor_to_tile_ops()(Before)
+
 
 class TestTensorFullConversion:
     def test_tensor_full_conversion(self):
