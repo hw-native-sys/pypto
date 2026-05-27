@@ -421,13 +421,20 @@ void OpConversionRegistry::RegisterMemoryOps() {
     // pto.tscatter requires the index element size to match dst (4B→i32, 2/1B→i16).
     const DataType idx_dtype =
         (static_cast<int>(dt.GetBit()) / 8 == 4) ? DataType(DataType::INT32) : DataType(DataType::INT16);
+    // Build the flat-index math entirely in i32, then narrow only the finished [n, d] flat_idx
+    // to idx_dtype. Every intermediate tile stays in the canonical i32 layout — identical to
+    // the FP32 path — which avoids narrowing a small/odd-shaped tile: the i32 [b, s] index has
+    // a 32-byte-aligned row (cols * 4), whereas a 2-byte [b, s] tile (cols * 2) does not, and
+    // the reshaped [n, 1] view is col_major. The final flat_idx is row-major [n, d] with a
+    // 32-byte-aligned row, so casting it to i16 is both alignment-legal and layout-canonical.
+    const DataType compute_dtype(DataType::INT32);
 
     auto make_idx = [&](int64_t v) -> ExprPtr {
       return std::make_shared<ConstInt>(v, DataType::INDEX, span);
     };
-    auto make_idx_dt = [&](int64_t v) -> ExprPtr { return std::make_shared<ConstInt>(v, idx_dtype, span); };
+    auto make_cd = [&](int64_t v) -> ExprPtr { return std::make_shared<ConstInt>(v, compute_dtype, span); };
     ExprPtr one = make_idx(1);
-    std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", idx_dtype}, {"descending", false}};
+    std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", compute_dtype}, {"descending", false}};
     std::vector<StmtPtr> prologue;
     auto emit = [&](const std::string& name_op, const std::vector<ExprPtr>& a,
                     const std::vector<std::pair<std::string, std::any>>& kw,
@@ -439,19 +446,23 @@ void OpConversionRegistry::RegisterMemoryOps() {
     };
     // col_nd[k, c] = c: column arange [1, d] expanded across n rows (tile.ci needs a
     // single-row source, so build [1, d] then col_expand into the [n, d] template).
-    auto col_ar =
-        emit("tile.ci", {make_idx_dt(0), MakeShapeTuple({one, make_idx(d)}, span)}, ci_kw, "su_col");
-    auto tmpl = emit("tile.full", {MakeShapeTuple({make_idx(n), make_idx(d)}, span), make_idx_dt(0)},
-                     {{"dtype", idx_dtype}}, "su_tmpl");
+    auto col_ar = emit("tile.ci", {make_cd(0), MakeShapeTuple({one, make_idx(d)}, span)}, ci_kw, "su_col");
+    auto tmpl = emit("tile.full", {MakeShapeTuple({make_idx(n), make_idx(d)}, span), make_cd(0)},
+                     {{"dtype", compute_dtype}}, "su_tmpl");
     auto col_nd = emit("tile.col_expand", {tmpl, col_ar}, {}, "su_col_nd");
     // row_base[k] = index.flat[k] * d, broadcast across cols; flat_idx = index.flat[k]*d + c.
-    auto idx_flat =
-        emit("tile.reshape", {args[1], MakeShapeTuple({make_idx(n), one}, span)}, {}, "su_idx_flat");
-    if (idx_tile->dtype_ != idx_dtype) {
-      idx_flat = emit("tile.cast", {idx_flat}, {{"target_type", idx_dtype}}, "su_idx_cast");
+    ExprPtr idx_src = args[1];
+    if (idx_tile->dtype_ != compute_dtype) {
+      idx_src = emit("tile.cast", {idx_src}, {{"target_type", compute_dtype}}, "su_idx_i32");
     }
-    auto row_base = emit("tile.muls", {idx_flat, make_idx_dt(d)}, {}, "su_row_base");
+    auto idx_flat =
+        emit("tile.reshape", {idx_src, MakeShapeTuple({make_idx(n), one}, span)}, {}, "su_idx_flat");
+    auto row_base = emit("tile.muls", {idx_flat, make_cd(d)}, {}, "su_row_base");
     auto flat_idx = emit("tile.row_expand_add", {col_nd, row_base}, {}, "su_flat_idx");
+    // Narrow the finished row-major [n, d] flat indices to the tscatter-required width.
+    if (idx_dtype != compute_dtype) {
+      flat_idx = emit("tile.cast", {flat_idx}, {{"target_type", idx_dtype}}, "su_flat_idx_cast");
+    }
 
     const int dt_bytes = static_cast<int>(dt.GetBit()) / 8;
     const DataType mask_dt = (dt_bytes == 4)   ? DataType(DataType::FP32)
