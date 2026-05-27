@@ -2124,6 +2124,142 @@ class TestOrchestration:
         assert "from_u64<float>(orch_args.scalar(2))" in code
         assert ".expected_arg_count = 5," in code
 
+    def test_dump_tag_emits_toggle_and_per_task_dump(self):
+        """``pl.dump_tag(t)`` at orchestration scope makes codegen emit the
+        ``enable_dump_tensor_selective()`` toggle plus a per-task
+        ``Arg::dump(...)`` carrying only the tagged tensors.
+
+        Two kernel calls both consume ``a`` and ``b``; only ``a`` is tagged,
+        so both tasks should dump ``ext_a`` and neither should dump ``ext_b``.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DumpTagProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_with_tag(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pl.dump_tag(a)
+                c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                c = self.kernel_add(a, b, c)
+                d = self.kernel_add(a, b, d)
+                return d
+
+        code = _generate_orch_code(DumpTagProgram)
+
+        # Toggle emitted exactly once at orch entry.
+        assert code.count("enable_dump_tensor_selective();") == 1
+
+        # Both tasks dump only the tagged arg (ext_a), never ext_b.
+        assert code.count("params_t0.dump(ext_a);") == 1
+        assert code.count("params_t1.dump(ext_a);") == 1
+        assert "ext_b" not in [line.strip() for line in code.split("\n") if ".dump(" in line]
+        # Stronger check: no dump call references ext_b anywhere.
+        for line in code.split("\n"):
+            if ".dump(" in line:
+                assert "ext_b" not in line, f"Untagged ext_b should not be dumped: {line!r}"
+
+    def test_no_dump_tag_emits_no_toggle_or_dump(self):
+        """Without any ``pl.dump_tag`` the legacy full-dump path is preserved:
+        no selective-mode toggle, no ``.dump(...)`` calls. The runtime's
+        ``CallConfig::enable_dump_tensor`` flag then drives the "dump every
+        tensor of every task" path as before #844.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class NoDumpTagProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_plain(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.kernel_add(a, b, d)
+                return d
+
+        code = _generate_orch_code(NoDumpTagProgram)
+
+        assert "enable_dump_tensor_selective" not in code
+        for line in code.split("\n"):
+            assert ".dump(" not in line, f"Plain orch should not emit any dump call: {line!r}"
+
+    def test_dump_tag_with_no_kernel_use_emits_nothing(self):
+        """Tagging a Var that no kernel call consumes is a user mistake we
+        keep quiet about: zero hits → no toggle, no ``.dump(...)``. Emitting
+        only the toggle would switch the runtime to selective mode with no
+        selected slots and silently drop *all* tensor dump output, which is
+        worse than the no-op behaviour we deliver here.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class StrayTagProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_stray(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                unused: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pl.dump_tag(unused)  # unused never reaches a kernel call
+                d = self.kernel_add(a, b, d)
+                return d
+
+        code = _generate_orch_code(StrayTagProgram)
+
+        assert "enable_dump_tensor_selective" not in code
+        for line in code.split("\n"):
+            assert ".dump(" not in line, f"Stray tag should not emit any dump call: {line!r}"
+
 
 class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""

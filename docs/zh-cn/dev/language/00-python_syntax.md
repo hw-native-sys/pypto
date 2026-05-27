@@ -525,13 +525,15 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 | ---- | ---- | ------ |
 | `pl.static_print(*args)` | 将变量类型/值打印到 stdout | 需要 ≥1 个参数 |
 | `pl.static_assert(cond, msg="")` | 断言编译期条件 | 抛出 `ParserError` |
+| `pl.dump_tag(tensor)` | 把某个张量标记为运行期选择性 dump 的目标（仅限 orchestration 作用域 —— 见 [运行期 DFX](../03-runtime-dfx.md#选择性张量-dump)） | 在非 Orchestration 函数中使用、或参数不是裸变量名时抛出 `ParserSyntaxError` |
 
 **要点：**
 
-- 两者均为语句级构造（不能用在表达式中）
+- 三者均为语句级构造（不能用在表达式中）
 - `static_print` 接受变量、常量、字符串标签（原样打印）和 f-string 的简单 `{expr}` 占位符（格式化为 IR）。不支持转换标志（`!r`、`!s`、`!a`）和格式说明符（`:...`）。
 - `static_assert` 支持闭包变量表达式（如 `N > 32`）和 IR 常量
 - `static_assert` 的消息参数必须是字符串字面量
+- `dump_tag` 接受单个绑定在外层 orchestration 作用域内的张量变量名，标记在解析期被消耗并写入外层 `Function` 的 `attrs`，供 codegen 读取
 - 即使后续解析失败，输出仍会显示——适用于调试解析错误
 
 ### 语句序列

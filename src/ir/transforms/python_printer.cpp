@@ -1815,9 +1815,15 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     // ``auto_scope`` rides in attrs_ but prints as a dedicated kwarg (and is
     // filtered from the attrs={...} dict). Absent ⇒ default True ⇒ not printed.
     bool auto_scope_off = !func->GetAttr<bool>("auto_scope", true);
-    auto is_auto_scope_key = [](const std::string& k) { return k == "auto_scope"; };
+    // Both ``auto_scope`` (dedicated kwarg) and ``kAttrDumpTaggedNames`` (round-
+    // tripped via the function body as ``pl.dump_tag(<name>)`` statements, which
+    // the parser pre-scans back into the attr) must be filtered from the
+    // attrs={...} dict, else they would duplicate or fail to reparse.
+    auto is_filtered_attr_key = [](const std::string& k) {
+      return k == "auto_scope" || k == kAttrDumpTaggedNames;
+    };
     bool has_attrs = std::any_of(func->attrs_.begin(), func->attrs_.end(),
-                                 [&](const auto& kv) { return !is_auto_scope_key(kv.first); });
+                                 [&](const auto& kv) { return !is_filtered_attr_key(kv.first); });
     auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
       if (key == "split") {
         int split_value = AnyCast<int>(value, "func attr key: " + key);
@@ -1867,7 +1873,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << "attrs={";
         bool first_attr = true;
         for (const auto& [key, value] : func->attrs_) {
-          if (is_auto_scope_key(key)) continue;
+          if (is_filtered_attr_key(key)) continue;
           if (!first_attr) stream_ << ", ";
           stream_ << std::quoted(key) << ": ";
           print_func_attr_value(key, value);
@@ -1927,6 +1933,17 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
 
   // Print body - convert yield to return in function context
   IncreaseIndent();
+  // Re-emit ``pl.dump_tag(<name>)`` markers at the top of the body so the
+  // parser's pre-scan re-populates ``Function::attrs_[kAttrDumpTaggedNames]``
+  // on roundtrip. The attr is invisible on the decorator (see the has_attrs
+  // logic above) — the DSL body call is the canonical surface.
+  if (func->HasAttr(kAttrDumpTaggedNames)) {
+    auto names =
+        func->GetAttr<std::vector<std::string>>(kAttrDumpTaggedNames, std::vector<std::string>{});
+    for (const auto& name : names) {
+      stream_ << GetIndent() << prefix_ << ".dump_tag(" << name << ")\n";
+    }
+  }
   if (func->body_) {
     if (auto seq_stmts = As<SeqStmts>(func->body_)) {
       if (seq_stmts->stmts_.empty()) {

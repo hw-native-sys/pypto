@@ -485,6 +485,10 @@ class ASTParser:
         # Current function level (set during parse_function). Drives
         # context-scoped op constraints (e.g. pld.system.world_size is host-only).
         self._func_level: ir.Level | None = None
+        # Current function type (set during parse_function). Used by markers
+        # whose validity is scoped to a specific function type — e.g.
+        # ``pl.dump_tag`` only makes sense in Orchestration functions.
+        self._func_type: ir.FunctionType = ir.FunctionType.Opaque
 
         # Current function's auto_scope flag (set during parse_function). When
         # True (default) the compiler owns AUTO scope placement, so a hand-placed
@@ -585,10 +589,29 @@ class ASTParser:
         self._func_level = func_level
         # auto_scope rides in func_attrs (key "auto_scope"); absent ⇒ default True.
         self._func_auto_scope = bool((func_attrs or {}).get("auto_scope", True))
+        self._func_type = func_type
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
         self.scope_manager.enter_scope("function")
+
+        # Pre-scan the body for ``pl.dump_tag(<Name>)`` statement-position
+        # markers (sticky selective tensor dump, simpler#844). The orchestration
+        # codegen needs the tagged-Var-name set as a Function attr before any
+        # task emit, so we collect it up-front and pass it as initial attrs.
+        # The in-body ``parse_evaluation_statement`` still intercepts the call
+        # to validate form and prevent EvalStmt emission. Only Orchestration
+        # functions consume the attr; for any other function type the marker
+        # is rejected at statement position (see ``_handle_dump_tag``), so the
+        # pre-scan is also restricted to orch scope to keep the two paths in
+        # sync and avoid stashing an unread attr on non-orch functions.
+        is_orch = func_type == ir.FunctionType.Orchestration
+        dump_tagged = (
+            self._collect_dump_tag_names(func_def.body) if (inline_body is None and is_orch) else []
+        )
+        if dump_tagged:
+            func_attrs = dict(func_attrs or {})
+            func_attrs["dump_tagged_names"] = dump_tagged
 
         # Begin building function
         with self.builder.function(
@@ -2468,6 +2491,91 @@ class ASTParser:
             hint=f"Condition `{condition_src}` produced a non-constant IR expression",
         )
 
+    def _handle_dump_tag(self, stmt: ast.Expr) -> None:
+        """Handle ``pl.dump_tag(<name>)`` at statement position.
+
+        Validates the scope (Orchestration-only) and call shape. The actual
+        name is harvested by :meth:`_collect_dump_tag_names` during the
+        pre-pass before the function body is parsed, so no IR or attr mutation
+        happens here — the marker is consumed (no EvalStmt emitted).
+        """
+        call = stmt.value
+        assert isinstance(call, ast.Call)
+        span = self.span_tracker.get_span(stmt)
+
+        if self._func_type != ir.FunctionType.Orchestration:
+            raise ParserSyntaxError(
+                "pl.dump_tag() is only valid inside an Orchestration function",
+                span=span,
+                hint=(
+                    "Move the pl.dump_tag(...) marker into the @pl.function(type=pl."
+                    "FunctionType.Orchestration) function whose tasks consume the tagged "
+                    "tensor. Selective tensor dump is filtered per kernel call by the "
+                    "orchestration codegen; kernel-body usage has no effect."
+                ),
+            )
+        if len(call.args) != 1 or call.keywords:
+            raise ParserSyntaxError(
+                "pl.dump_tag() takes exactly one positional argument (no keywords)",
+                span=span,
+                hint="Use: pl.dump_tag(tensor_var)",
+            )
+        if not isinstance(call.args[0], ast.Name):
+            raise ParserSyntaxError(
+                "pl.dump_tag() argument must be a bare variable name",
+                span=self.span_tracker.get_span(call.args[0]),
+                hint=(
+                    "Write pl.dump_tag(q) where q is a tensor variable bound in this "
+                    "orchestration scope. Attribute / subscript / call expressions are "
+                    "not supported."
+                ),
+            )
+        # Pre-scan already captured this name into the enclosing function's
+        # attrs["dump_tagged_names"]; nothing more to do at the statement site.
+
+    @staticmethod
+    def _collect_dump_tag_names(body: list[ast.stmt]) -> list[str]:
+        """Walk the function body AST and collect names from every
+        ``pl.dump_tag(<Name>)`` statement, regardless of nesting depth.
+
+        Returns the names in source order with duplicates dropped. The
+        orchestration codegen reads this list off the Function's
+        ``attrs["dump_tagged_names"]`` and emits ``Arg::dump(...)`` for every
+        kernel-call arg whose IR Var name (after ``GetSSABaseName``) matches.
+
+        Cases that are *not* a valid dump_tag marker (call args at expression
+        position, attribute access on a non-``pl`` namespace, etc.) are simply
+        skipped here — the in-body interceptor surfaces precise errors when
+        the malformed form appears at statement position.
+        """
+        seen: set[str] = set()
+        ordered: list[str] = []
+
+        def visit(node: ast.AST) -> None:
+            if (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr == "dump_tag"
+                and isinstance(node.value.func.value, ast.Name)
+                and node.value.func.value.id == "pl"
+                and len(node.value.args) == 1
+                and not node.value.keywords
+                and isinstance(node.value.args[0], ast.Name)
+            ):
+                name = node.value.args[0].id
+                if name not in seen:
+                    seen.add(name)
+                    ordered.append(name)
+                # Don't descend further — the call has no nested DSL stmts.
+                return
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+        for s in body:
+            visit(s)
+        return ordered
+
     def _validate_while_call_args(self, while_call: ast.Call) -> None:
         """Validate that pl.while_() has no positional arguments."""
         if len(while_call.args) > 0:
@@ -4067,6 +4175,9 @@ class ASTParser:
             return
         if self._is_dsl_call(stmt, "static_assert"):
             self._handle_static_assert(stmt)
+            return
+        if self._is_dsl_call(stmt, "dump_tag"):
+            self._handle_dump_tag(stmt)
             return
 
         # Special case: bare pl.yield_() emits a YieldStmt via parse_yield_call.

@@ -704,6 +704,24 @@ inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
 inline constexpr const char* kAttrDummyTask = "dummy_task";
 
 /**
+ * @brief Function-level attr key: set of orchestration-scope Var name_hints
+ * the user marked with ``pl.dump_tag(t)``. When non-empty, orchestration
+ * codegen emits ``enable_dump_tensor_selective()`` once at orch entry plus
+ * a per-task ``Arg::dump(<tagged tensors of that task>)`` after each kernel
+ * call's ``add_*`` block, opting the orch into the runtime's selective
+ * tensor dump mode (simpler#844).
+ *
+ * Value type: ``std::set<std::string>``. Lives on
+ * ``Function::attrs_`` exclusively for Orchestration-type Functions —
+ * other function types never carry this attr.
+ *
+ * Empty / absent attr preserves legacy full-dump behaviour: when
+ * ``CallConfig::enable_dump_tensor`` is set without any ``pl.dump_tag``,
+ * the runtime dumps every tensor of every task.
+ */
+inline constexpr const char* kAttrDumpTaggedNames = "dump_tagged_names";
+
+/**
  * @brief Reserved attr key for the producer-TaskId Var captured by a
  * ``with pl.at(...) as tid:`` block.
  *
