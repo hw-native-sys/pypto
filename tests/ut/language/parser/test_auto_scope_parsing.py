@@ -17,9 +17,8 @@ the MaterializeRuntimeScopes pass inserts.
 
 import pypto.language as pl
 import pytest
-from pypto.ir.printer import python_print
-
 from pypto import ir
+from pypto.ir.printer import python_print
 
 
 def _first_runtime_scope(stmt):

@@ -22,9 +22,8 @@ Before only. ``Expected`` is hand-written with explicit ``pl.auto_scope()``.
 
 import pypto.language as pl
 import pytest
-from pypto.backend import BackendType
-
 from pypto import backend, ir, passes
+from pypto.backend import BackendType
 
 
 @pytest.fixture(autouse=True)

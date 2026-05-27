@@ -13,9 +13,8 @@ import os
 
 import pypto.language as pl
 import pytest
-from pypto.backend import BackendType
-
 from pypto import DataType, backend, ir, passes
+from pypto.backend import BackendType
 
 TENSOR_ONLY_PASSES = [
     "SplitChunkedLoops",
