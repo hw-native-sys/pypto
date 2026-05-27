@@ -16,9 +16,8 @@ own a2a3 boundary behaviour without running InjectGMPipeBuffer.
 
 import pypto.language as pl
 import pytest
-from pypto.backend import BackendType
-
 from pypto import backend, ir, passes
+from pypto.backend import BackendType
 
 
 @pytest.fixture(autouse=True)
@@ -278,13 +277,18 @@ def test_c2v_boundary_preserves_vec_pop_layout_on_a2a3():
 def test_split_c2v_only_pipe_sizes_aiv_reserve_per_subblock_tile():
     """Regression for issue #1471.
 
-    Under ``pl.split(pl.SplitMode.UP_DOWN | LEFT_RIGHT)`` on a C2V-only pipe,
-    each AIV only consumes its half of each cube push once ``SplitVectorKernel``
-    halves ``tile.tpop_from_aic``. ``BuildAutomaticPipeSetup`` must pre-halve
-    the C2V slot so the AIV's ``reserve_buffer`` reflects per-AIV consumption,
-    not the unsplit producer tile. With a [32, 256] FP32 push (32 KiB) the
-    unfixed sizing would inflate the AIV reservation to ``32768 * 8 = 262144``
-    bytes; the fix brings it to ``16384 * 8 = 131072`` bytes.
+    Under ``pl.split(pl.SplitMode.UP_DOWN)`` on a C2V-only pipe, each AIV only
+    consumes its half of each cube push once ``SplitVectorKernel`` halves
+    ``tile.tpop_from_aic``. UP_DOWN splits the outer (row) dim, so each AIV's
+    half is a *contiguous* block of the producer slot, and
+    ``BuildAutomaticPipeSetup`` can pre-halve the C2V slot so the AIV's
+    ``reserve_buffer`` reflects per-AIV consumption rather than the unsplit
+    producer tile. With a [32, 256] FP32 push (32 KiB) the unfixed sizing would
+    inflate the AIV reservation to ``32768 * 8 = 262144`` bytes; the fix brings
+    it to ``16384 * 8 = 131072`` bytes.
+
+    LEFT_RIGHT is intentionally *not* halved — see
+    ``test_split_left_right_c2v_pipe_keeps_full_slot_size`` below.
     """
 
     @pl.program
@@ -351,6 +355,78 @@ def test_split_c2v_only_pipe_sizes_aiv_reserve_per_subblock_tile():
     assert init_pipes[0].kwargs["slot_size"] == PER_AIV_SLOT_BYTES, (
         f"aiv_initialize_pipe slot_size should be {PER_AIV_SLOT_BYTES} B "
         f"(post-split per-AIV tile), got {init_pipes[0].kwargs['slot_size']} B"
+    )
+
+
+def test_split_left_right_c2v_pipe_keeps_full_slot_size():
+    """Regression for issue #1471: LEFT_RIGHT must NOT pre-halve the C2V slot.
+
+    UP_DOWN splits the outer (row) dim, so each AIV's half is a contiguous block
+    that can be flat-halved (see the UP_DOWN test above). LEFT_RIGHT splits the
+    inner (column) dim, so each AIV consumes *strided* columns spread across the
+    full producer slot and must address the full-sized slot; halving its
+    slot_size corrupts the cross-core ring layout and produces wrong results
+    (the C2V left-right runtime parity case). So under LEFT_RIGHT the AIV
+    reserve_buffer and aiv_initialize_pipe slot_size stay at the full producer
+    tile: [32, 256] FP32 = 32768 B, reserve 32768 * 8 = 262144 B.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.LEFT_RIGHT})
+        def main_incore_0(
+            self,
+            x: pl.Tensor[[32, 128], pl.BF16],
+            y: pl.Tensor[[128, 256], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[32, 256], pl.FP32]],
+        ) -> pl.Tensor[[32, 256], pl.FP32]:
+            x_mat = pl.load(x, [0, 0], [32, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_tile = pl.matmul(x_left, y_right)
+            z_vec = pl.move(
+                z_tile,
+                target_memory=pl.MemorySpace.Vec,
+                blayout=pl.TileLayout.row_major,
+                slayout=pl.TileLayout.none_box,
+            )
+            out_0 = pl.store(z_vec, [0, 0], out_0)
+            return out_0
+
+    After = _run_pipeline(Before)
+    aiv = After.get_function("main_incore_0_aiv")
+    assert aiv is not None, "Expected the InCore function to be split into an AIV half"
+
+    reserves = []
+    init_pipes = []
+    for stmt in ir.flatten_to_stmts(aiv.body):
+        call = None
+        if isinstance(stmt, ir.AssignStmt) and isinstance(stmt.value, ir.Call):
+            call = stmt.value
+        elif isinstance(stmt, ir.EvalStmt) and isinstance(stmt.expr, ir.Call):
+            call = stmt.expr
+        if call is None or not isinstance(call.op, ir.Op):
+            continue
+        if call.op.name == "system.reserve_buffer":
+            reserves.append(call)
+        elif call.op.name == "system.aiv_initialize_pipe":
+            init_pipes.append(call)
+
+    # Full cube tile is [32, 256] FP32 = 32768 B; LEFT_RIGHT keeps it unsplit.
+    FULL_SLOT_BYTES = 32 * 256 * 4  # 32768
+    UNIDIR_SLOT_NUM = 8
+    EXPECTED_BYTES = FULL_SLOT_BYTES * UNIDIR_SLOT_NUM  # 262144
+
+    assert len(reserves) == 1, f"Expected one reserve_buffer on AIV, got {len(reserves)}"
+    assert reserves[0].kwargs["size"] == EXPECTED_BYTES, (
+        f"LEFT_RIGHT AIV c2v reserve_buffer must keep the full producer slot "
+        f"({EXPECTED_BYTES} B), got {reserves[0].kwargs['size']} B — see issue #1471"
+    )
+    assert len(init_pipes) == 1, f"Expected one aiv_initialize_pipe, got {len(init_pipes)}"
+    assert init_pipes[0].kwargs["slot_size"] == FULL_SLOT_BYTES, (
+        f"LEFT_RIGHT aiv_initialize_pipe slot_size must stay full "
+        f"({FULL_SLOT_BYTES} B), got {init_pipes[0].kwargs['slot_size']} B"
     )
 
 

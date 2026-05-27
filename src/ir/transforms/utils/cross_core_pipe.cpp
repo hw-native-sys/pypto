@@ -284,24 +284,37 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
     return {};
   }
 
-  // Under split-AIV dispatch (UP_DOWN / LEFT_RIGHT), each AIV consumes only
-  // half of each C2V slot once SplitVectorKernel halves tpop_from_aic shapes.
-  // For C2V-only pipes we can pre-halve the slot size here so each AIV's
-  // reserve_buffer reflects actual per-AIV consumption (see issue #1471).
+  // Under UP_DOWN split-AIV dispatch, each AIV consumes only half of each C2V
+  // slot once SplitVectorKernel halves tpop_from_aic shapes. UP_DOWN splits the
+  // outer (row) dim, so each AIV's half is a *contiguous* block of the producer
+  // slot — safe to pre-halve here so each AIV's reserve_buffer reflects actual
+  // per-AIV consumption (see issue #1471).
+  //
+  // LEFT_RIGHT splits the inner (column) dim (see SplitVectorKernel's
+  // SplitDimension), so each AIV consumes *strided* columns spread across the
+  // full producer slot and must address the full-sized slot; flat-halving its
+  // slot_size corrupts the cross-core ring layout. So LEFT_RIGHT is left at
+  // full size here.
+  //
   // Bidirectional pipes share one slot_size attribute across both directions,
   // which cannot encode the asymmetry V2C needs (SplitVectorKernel keeps
   // tpop_from_aiv at full tile), so those are left unchanged here.
   int64_t effective_slot_size = common_slot_size.value();
-  const bool split_active = (split_mode == SplitMode::UpDown || split_mode == SplitMode::LeftRight);
+  const bool split_active = (split_mode == SplitMode::UpDown);
   const bool c2v_only = (dir_mask == core_affinity::kDirMaskC2V);
   if (split_active && c2v_only) {
-    CHECK(effective_slot_size % 2 == 0)
+    INTERNAL_CHECK_SPAN(effective_slot_size % 2 == 0, span)
         << "Cross-core C2V slot_size must be even under split mode, got " << effective_slot_size;
     effective_slot_size /= 2;
   }
 
-  const int64_t buffer_size = effective_slot_size * GetSlotNumForDirMask(dir_mask);
-  CHECK(effective_slot_size <= std::numeric_limits<int>::max())
+  const int slot_num = GetSlotNumForDirMask(dir_mask);
+  INTERNAL_CHECK_SPAN(slot_num > 0, span) << "Invalid cross-core slot_num: " << slot_num;
+  INTERNAL_CHECK_SPAN(effective_slot_size <= std::numeric_limits<int64_t>::max() / slot_num, span)
+      << "Cross-core reserve_buffer size overflow: slot_size=" << effective_slot_size
+      << ", slot_num=" << slot_num;
+  const int64_t buffer_size = effective_slot_size * slot_num;
+  INTERNAL_CHECK_SPAN(effective_slot_size <= std::numeric_limits<int>::max(), span)
       << "Cross-core slot_size out of range: " << effective_slot_size;
   const int slot_size_bytes = static_cast<int>(effective_slot_size);
   AutomaticPipeSetup setup;
