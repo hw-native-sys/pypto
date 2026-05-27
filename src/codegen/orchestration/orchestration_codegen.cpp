@@ -92,7 +92,13 @@ constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 // scopes are intentionally left opaque — they were never auto-wrapped.
 StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
   if (auto scope = As<RuntimeScopeStmt>(stmt); scope && !scope->manual_) {
-    return scope->body_;
+    return UnwrapAutoScope(scope->body_);
+  }
+  // A user-written ``with pl.auto_scope():`` body may arrive as a single-statement
+  // SeqStmts wrapper (before NormalizeStmtStructure collapses it); peek through it
+  // (and any nested AUTO scopes) so the analyses still reach the real statements.
+  if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {
+    return UnwrapAutoScope(seq->stmts_[0]);
   }
   return stmt;
 }

@@ -32,8 +32,17 @@ namespace {
 /// Used to keep the pass idempotent and to avoid double-wrapping a body that
 /// the DSL already expressed as an AUTO scope.
 bool IsAutoScope(const StmtPtr& stmt) {
-  auto scope = As<RuntimeScopeStmt>(stmt);
-  return scope && !scope->manual_;
+  if (!stmt) return false;
+  if (auto scope = As<RuntimeScopeStmt>(stmt)) {
+    return !scope->manual_;
+  }
+  // A user-written `with pl.auto_scope():` body may arrive as a single-statement
+  // SeqStmts wrapper (before NormalizeStmtStructure collapses it). Peek through
+  // so the wrap stays idempotent.
+  if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {
+    return IsAutoScope(seq->stmts_[0]);
+  }
+  return false;
 }
 
 /// Wrap @p body in an AUTO RuntimeScopeStmt (manual_ = false). Mirrors the

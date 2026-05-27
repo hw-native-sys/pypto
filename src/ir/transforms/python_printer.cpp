@@ -1615,6 +1615,15 @@ void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return
 }
 
 void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+  // A single-statement SeqStmts is a transparent wrapper (e.g. a user-written
+  // `with pl.auto_scope():` body before NormalizeStmtStructure collapses it).
+  // Unwrap it first so an AUTO scope reaches the rscope branch below with
+  // return_vars intact — otherwise a trailing return-var yield inside the scope
+  // would lose its `var = pl.yield_(...)` assignment LHS.
+  if (auto seq = As<SeqStmts>(body); seq && seq->stmts_.size() == 1) {
+    VisitStmtBody(seq->stmts_[0], return_vars);
+    return;
+  }
   // Helper to visit statement body and wrap YieldStmt with assignment if needed
   if (auto yield_stmt = As<YieldStmt>(body)) {
     // If parent has return_vars, wrap yield as assignment

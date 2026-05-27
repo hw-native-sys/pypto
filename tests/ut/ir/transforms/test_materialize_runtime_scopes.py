@@ -207,6 +207,54 @@ def test_idempotent():
     ir.assert_structural_equal(once, twice)
 
 
+def test_user_written_auto_scope_not_double_wrapped():
+    # A user-written `with pl.auto_scope():` for-body must not be wrapped again
+    # (the body may arrive as a single-statement SeqStmts around the scope).
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+            r: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+            return r
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(self, a: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+            for i in pl.range(4):
+                with pl.auto_scope():
+                    out = self.kernel(a, out)
+            return out
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def kernel(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP32]:
+            t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+            r: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+            return r
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def orch(self, a: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+            # Function body wrapped once; the existing for-body auto_scope is kept
+            # as-is — NOT nested inside a second auto_scope.
+            with pl.auto_scope():
+                for i in pl.range(4):
+                    with pl.auto_scope():
+                        out = self.kernel(a, out)
+                return out
+
+    after = _materialize(Before)
+    ir.assert_structural_equal(after, _derive(Expected))
+
+
 def test_non_orchestration_function_untouched():
     @pl.program
     class Prog:
