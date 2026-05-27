@@ -600,14 +600,21 @@ class ASTParser:
         # codegen needs the tagged-Var-name set as a Function attr before any
         # task emit, so we collect it up-front and pass it as initial attrs.
         # The in-body ``parse_evaluation_statement`` still intercepts the call
-        # to validate form and prevent EvalStmt emission. Only Orchestration
-        # functions consume the attr; for any other function type the marker
-        # is rejected at statement position (see ``_handle_dump_tag``), so the
-        # pre-scan is also restricted to orch scope to keep the two paths in
-        # sync and avoid stashing an unread attr on non-orch functions.
-        is_orch = func_type == ir.FunctionType.Orchestration
+        # to validate form and prevent EvalStmt emission. Two scopes accept
+        # the marker:
+        #   * Orchestration — codegen consumes the attr directly.
+        #   * Inline — InlineFunctions pass merges the inline's attr onto its
+        #     caller orchestration before the inline function is dropped (see
+        #     ``src/ir/transforms/inline_functions_pass.cpp::MergeDumpTaggedNames``).
+        # Any other function type rejects the marker at statement position
+        # (see ``_handle_dump_tag``), so the pre-scan is also restricted to
+        # these two scopes to keep the two paths in sync and avoid stashing
+        # an unread attr on AIV / AIC / Mix kernel bodies.
+        accepts_dump_tag = func_type in (ir.FunctionType.Orchestration, ir.FunctionType.Inline)
         dump_tagged = (
-            self._collect_dump_tag_names(func_def.body) if (inline_body is None and is_orch) else []
+            self._collect_dump_tag_names(func_def.body)
+            if (inline_body is None and accepts_dump_tag)
+            else []
         )
         if dump_tagged:
             func_attrs = dict(func_attrs or {})
@@ -2494,24 +2501,33 @@ class ASTParser:
     def _handle_dump_tag(self, stmt: ast.Expr) -> None:
         """Handle ``pl.dump_tag(<name>)`` at statement position.
 
-        Validates the scope (Orchestration-only) and call shape. The actual
-        name is harvested by :meth:`_collect_dump_tag_names` during the
+        Validates the scope (Orchestration / Inline only) and call shape. The
+        actual name is harvested by :meth:`_collect_dump_tag_names` during the
         pre-pass before the function body is parsed, so no IR or attr mutation
         happens here — the marker is consumed (no EvalStmt emitted).
+
+        ``FunctionType.Inline`` is accepted because the InlineFunctions pass
+        merges callee ``kAttrDumpTaggedNames`` onto the caller orchestration
+        before the inline function is dropped (see
+        ``src/ir/transforms/inline_functions_pass.cpp::MergeDumpTaggedNames``).
+        Markers inside ``@pl.jit.inline`` therefore reach the entry orch by
+        the time codegen reads them.
         """
         call = stmt.value
         assert isinstance(call, ast.Call)
         span = self.span_tracker.get_span(stmt)
 
-        if self._func_type != ir.FunctionType.Orchestration:
+        if self._func_type not in (ir.FunctionType.Orchestration, ir.FunctionType.Inline):
             raise ParserSyntaxError(
-                "pl.dump_tag() is only valid inside an Orchestration function",
+                "pl.dump_tag() is only valid inside an Orchestration or Inline function",
                 span=span,
                 hint=(
                     "Move the pl.dump_tag(...) marker into the @pl.function(type=pl."
                     "FunctionType.Orchestration) function whose tasks consume the tagged "
-                    "tensor. Selective tensor dump is filtered per kernel call by the "
-                    "orchestration codegen; kernel-body usage has no effect."
+                    "tensor, or into an @pl.jit.inline / @pl.function(type=pl."
+                    "FunctionType.Inline) helper that the orchestration inlines. Selective "
+                    "tensor dump is filtered per kernel call by the orchestration codegen; "
+                    "kernel-body (AIV / AIC / Group) usage has no effect."
                 ),
             )
         if len(call.args) != 1 or call.keywords:

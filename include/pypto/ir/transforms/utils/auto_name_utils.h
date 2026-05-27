@@ -232,12 +232,55 @@ inline std::string StripLegacyBaseName(const std::string& name) {
   return current;
 }
 
-inline std::string GetCompatibleBaseName(const std::string& name) {
-  ParsedName parsed = Parse(name);
-  if (parsed.has_auto_suffix) {
-    return parsed.base_name;
+/// Strip every trailing ``_inline<digits>`` suffix introduced by the
+/// ``InlineFunctions`` pass when alpha-renaming inline body-local Vars
+/// (see ``src/ir/transforms/inline_functions_pass.cpp::FreshName``).
+///
+/// The suffix uses a single underscore intentionally — ``__`` is reserved by
+/// :func:`ValidateBaseName` for the ``name__role__version`` auto-name scheme
+/// — so :func:`Parse` does not see it as a recognised auto-suffix. This
+/// helper exists to give downstream name-based matching (e.g. orchestration
+/// codegen's ``kAttrDumpTaggedNames`` lookup) a way back to the user-written
+/// base name for Vars that originated inside an inlined function body.
+///
+/// Multi-level inlining stacks the suffix (e.g. inner inline produces
+/// ``q_inline0``; outer inline of the surrounding function renames again to
+/// ``q_inline0_inline1``). Loop until no more ``_inline<digits>`` tail remains
+/// so each successive inline level is unpeeled before any auto-name parse:
+///   * ``q``                          → ``q``                (no-op)
+///   * ``q_inline7``                  → ``q``                (1 strip)
+///   * ``q_inline0_inline1``          → ``q``                (2 strips)
+///   * ``x_inline`` (no digits)       → ``x_inline``          (no strip — guard)
+///   * ``foo__ssa_v1`` (no _inline)   → ``foo__ssa_v1``       (no strip)
+inline std::string StripInlineFreshNameSuffix(const std::string& name) {
+  static const std::string kTok = "_inline";
+  std::string current = name;
+  while (true) {
+    size_t end = current.size();
+    while (end > 0 && std::isdigit(static_cast<unsigned char>(current[end - 1]))) {
+      --end;
+    }
+    if (end == current.size()) break;  // no trailing digits
+    if (end < kTok.size() || current.compare(end - kTok.size(), kTok.size(), kTok) != 0) {
+      break;
+    }
+    current.resize(end - kTok.size());
   }
-  return parsed.base_name;
+  return current;
+}
+
+inline std::string GetCompatibleBaseName(const std::string& name) {
+  // The InlineFunctions pass appends ``_inline<N>`` at splice time, and the
+  // SSA-conversion pass independently appends ``__role__version`` later. The
+  // two suffixes compose in either order, e.g.
+  //   * ``tmp_inline0``                      — inline rename only
+  //   * ``tmp_inline0__ssa_v1``              — inline rename then SSA
+  //   * ``tmp__ssa_v1`` (unrelated to inline) — SSA only
+  // Strip ``_inline<N>`` both before and after auto-name Parse so all three
+  // shapes collapse to the user's original base name.
+  std::string pre_stripped = StripInlineFreshNameSuffix(name);
+  ParsedName parsed = Parse(pre_stripped);
+  return StripInlineFreshNameSuffix(parsed.base_name);
 }
 
 inline std::string GetLegacyCompatibleBaseName(const std::string& name) {

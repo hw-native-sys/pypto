@@ -537,14 +537,14 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 | -------- | ------- | ---------- |
 | `pl.static_print(*args)` | Print variable types/values to stdout | Requires ≥1 argument |
 | `pl.static_assert(cond, msg="")` | Assert compile-time condition | Raises `ParserError` |
-| `pl.dump_tag(tensor)` | Mark a tensor for selective runtime tensor dump (orchestration scope only — see [Runtime DFX](../03-runtime-dfx.md#selective-tensor-dump)) | Raises `ParserSyntaxError` outside an Orchestration function, or for non-`Name` arguments |
+| `pl.dump_tag(tensor)` | Mark a tensor for selective runtime tensor dump (valid in Orchestration scope, or in an Inline helper that the orch inlines — see [Runtime DFX](../03-runtime-dfx.md#selective-tensor-dump)) | Raises `ParserSyntaxError` outside an Orchestration or Inline function, or for non-`Name` arguments |
 
 **Key points:**
 
 - All three are statement-only (cannot be used in expressions)
 - `static_print` accepts variables, constants, string labels (printed as-is), and f-strings with plain `{expr}` placeholders (formatted as IR). Conversions (`!r`, `!s`, `!a`) and format specs (`:...`) are not supported.
 - `static_assert` supports closure variable expressions (e.g. `N > 32`) and IR constants; message must be a string literal
-- `dump_tag` takes one bare tensor variable name bound in the enclosing orchestration scope; the marker is consumed at parse time and recorded on the enclosing `Function`'s `attrs` for the codegen
+- `dump_tag` takes one bare tensor variable name bound in the enclosing Orchestration (or Inline) scope; the marker is consumed at parse time and recorded on the enclosing `Function`'s `attrs` for the codegen. Markers written inside an Inline helper are merged onto the caller orchestration by the `InlineFunctions` pass (the inline function is dropped after inlining)
 - Output appears even if parsing fails later — useful for debugging parse errors
 
 ### Statement Sequences
