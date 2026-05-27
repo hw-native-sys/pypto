@@ -34,6 +34,7 @@ from .unified_ops import (
     nranks,
     rank,
     remote_load,
+    remote_store,
     window,
     world_size,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "nranks",
     "rank",
     "remote_load",
+    "remote_store",
     "system",
     "tensor",
     "tile",

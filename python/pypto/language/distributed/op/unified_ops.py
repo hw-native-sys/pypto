@@ -18,7 +18,7 @@ help with zero call-chain indirection.
 
 from .system_ops import get_comm_ctx, nranks, rank, world_size
 from .tensor_ops import alloc_window_buffer, window
-from .tile_ops import remote_load
+from .tile_ops import remote_load, remote_store
 
 __all__ = [
     "alloc_window_buffer",
@@ -26,6 +26,7 @@ __all__ = [
     "nranks",
     "rank",
     "remote_load",
+    "remote_store",
     "window",
     "world_size",
 ]
