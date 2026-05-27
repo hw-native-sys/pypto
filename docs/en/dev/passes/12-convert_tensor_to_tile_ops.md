@@ -99,6 +99,39 @@ y_tile = pl.tile.transpose(x_tile, 0, 1, tmp_tile=transpose_tmp)
 
 When users call `pl.tile.transpose(tile, axis1, axis2)` without an explicit `tmp_tile`, the Python IR helper auto-inserts a `tile.create` as the trailing operand.
 
+## Scatter Update Lowering
+
+`tensor.scatter_update` / `tile.scatter_update` (whole-row scatter, `dim=-2` only) lower to a per-element `tile.scatter` (`pto.tscatter`) plus a `tile.sel` preserve-blend. The hardware `pto.tscatter` writes per element using a flattened destination index (`dst.flat[idx[k, c]] = src[k, c]`) and treats its `dst` operand as **write-only** (unwritten slots are not preserved), so the pass reconstructs the "keep `input` on unwritten rows" semantics itself.
+
+The whole-row update `input[index.flat[k], :] = src[k, :]` is expressed as a flat index:
+
+```text
+flat_idx[k, c] = index.flat[k] * d + c          # d = feature width (= src cols)
+```
+
+The flat-index arithmetic is built **entirely in i32**, and only the finished row-major `[n, d]` index is narrowed to the `pto.tscatter`-required width (i16 for 2-byte data, i32 for 4-byte) via a single trailing `tile.cast`. Computing in i32 keeps every intermediate tile in a canonical, 32-byte-aligned, row-major layout — narrowing earlier would either cast a `col_major [n, 1]` view (which `tile.cast` mis-orders) or produce an unaligned 2-byte `[b, s]` tile (`cols * 2` bytes is not 32-byte aligned).
+
+Generated PTO op sequence (FP32 `[32, 32]` input, `[2, 8]` index, `[16, 32]` src):
+
+| # | PTO op | Produces |
+| - | ------ | -------- |
+| 1–3 | `pto.tload` ×3 | `input_tile`, `index_tile`, `src_tile` |
+| 4 | `pto.tci` | column arange `[1, d]` = `0..d-1` |
+| 5 | `pto.texpands` | zero template `[n, d]` |
+| 6 | `pto.tcolexpand` | `col_nd[k, c] = c` |
+| 7 | `pto.tmuls` | `row_base[k] = index.flat[k] * d` (index reshaped to `[n, 1]`) |
+| 8 | `pto.trowexpandadd` | `flat_idx = col_nd + row_base` → `[n, d]` |
+| 8a | `pto.tcvt` | narrow `flat_idx` i32→i16 (**2-byte dtypes only**) |
+| 9 | `pto.texpands` | zeroed scatter base `[m, d]` |
+| 10 | `pto.tscatter` | `scattered` = src into zeroed base (written = src, unwritten = 0) |
+| 11–12 | `pto.texpands` ×2 | mask zero base `[m, d]`, ones src `[n, d]` |
+| 13 | `pto.tscatter` | `mask` = ones into zeroed base (written = 1, unwritten = 0) |
+| 14 | `pto.tcmps` | `pred = (mask != 0)` |
+| 15 | `pto.tsel` | `out = sel(pred, scattered, input_tile)` |
+| 16 | `pto.tstore` | write `out` to the output tensor |
+
+`tile.sel` (not `input * mask`) reconstructs the preserve blend so the lowering emits no `pto.tmul`, which A2/A3 reject for bf16/i8. The index `reshape [b, s] → [n, 1]` is a buffer-view realias, not a separate PTO op.
+
 ## Example
 
 **Before**:
