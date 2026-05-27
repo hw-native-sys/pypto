@@ -39,6 +39,7 @@ program_inlined = inline_pass(program)
      - 对内联体中每个本地绑定的 `Var` 做 alpha 重命名(`<orig>_inline<counter>`),避免多个调用点之间冲突。
      - 在调用点之前插入重命名+替换后的函数体语句。
      - 用 `LHS = renamed_return`(单返回值)或 `LHS = MakeTuple([renamed_returns...])`(多返回值)替换调用。当 `LHS` 与替换后的返回 `Var` 是同一个 `Var` 时,赋值被省略以避免冗余 SSA 拷贝。
+   - **合并函数级属性**(详见[下文](#函数级属性合并))把被展开的 callee 上的 attrs 迁移到 caller。
 4. **删除**所有 Inline 函数。
 
 重命名后缀使用单下划线(`_inline`),因为 `__` 被 IR 自动命名约定保留(参见 `auto_name_utils.h`)。
@@ -120,6 +121,14 @@ scope 被原样保留,稍后由 `OutlineIncoreScopes` 提取为独立的 InCore 
 | 递归 Inline(自递归或互相调用) | 在任何展开发生之前抛出 `pypto::ValueError`,消息中标明环路径(`a -> b -> a`)。 |
 | 多返回值 Inline | 在调用点发出 `LHS = MakeTuple([rets...])`。后续 `Simplify` 可能把 `TupleGetItemExpr(MakeTuple(...), i)` 折叠掉。 |
 | 嵌套 Call 到 Inline(如 `pl.add(inline_fn(x), y)`) | v1 不处理 — 保持原样。`InlineFunctionsEliminated` verifier 会标记任何残留的 Call。 |
+
+## 函数级属性合并
+
+每个 Inline callee 被展开到 caller 时,callee `Function::attrs_` 上的**函数级属性**会在第 4 步丢弃 callee *之前*先合并到 caller。否则挂在 Inline helper 上的 attr 会随 callee 被裁剪而静默蒸发。
+
+目前唯一被跨函数迁移的 attr 是 **`kAttrDumpTaggedNames`** —— 用户通过 [`pl.dump_tag(...)`](../03-runtime-dfx.md#选择性张量-dump) 标记的 `Var` 名集合。合并对 callee 的标记列表做并集,按首次出现顺序拼接、去重。多层内联(`A` 调 `B` 调 `C`,最里层 `C` 写了 `dump_tag`)在 pass 的 fixpoint 中自动收敛 —— 每次迭代向上传递一层,直到抵达最外层 orchestration。
+
+下游消费者(orchestration codegen)通过 `auto_name_utils::GetCompatibleBaseName` 剥掉 `_inline<N>` 重命名后缀,因此即使展开后 Var 名变成 `tmp_inline42`,仍能匹配到 inline 体内原始的 `dump_tag` 标记。叠加后缀(`tmp_inline12_inline7`,出现在一个 inline callee 自己又被内联到另一个 inline 的情形)会被循环剥除。
 
 ## 验证
 

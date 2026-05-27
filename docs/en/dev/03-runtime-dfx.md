@@ -95,7 +95,19 @@ orchestration before the inline function is dropped, so markers written
 inside an inline body take effect at the inlined call sites. Markers on
 both inline parameters and inline body-local `pl.create_tensor(...)`
 results are supported, and multi-level inlining (inline → inline →
-inline) is handled at the pass's fixpoint.
+inline) is handled at the pass's fixpoint. See
+[`01-inline_functions.md`](passes/01-inline_functions.md#function-level-attribute-merge)
+for the merge mechanics.
+
+### Limitations
+
+| Marker location / target | Status |
+| --- | --- |
+| Standalone statement in an Orchestration or Inline body | Supported. |
+| Inside a kernel-call argument position (e.g. `self.k(pl.dump_tag(q))`) | **Silently ineffective** — the marker is passed through (the DSL wrapper is an identity function and the pre-scan only collects statement-position markers), so no name is tagged and no error is raised. Write `pl.dump_tag(q)` on its own line. |
+| Synthetic outputs of `pl.submit(...)` (implicit `Out`) | Not supported — synth outputs carry no source-level `Var` name to match against. |
+| HOST-tier Python `SubWorker` tensors | Not supported — runtime exposes no equivalent `Arg::dump` hook. |
+| After a `pl.reshape(x, ...)` (or any view-producing) rebind | The rebound result is a **new `Var`** with a new `name_hint`; a previous `pl.dump_tag(x)` does **not** carry over. Re-tag the rebound name (`y = pl.reshape(x, ...); pl.dump_tag(y)`) if the kernel consumes the rebound form. |
 
 ## Rendering `deps.json` to HTML
 

@@ -39,6 +39,7 @@ program_inlined = inline_pass(program)
      - Alpha-rename every locally-bound `Var` in the inlined body to a fresh name (`<orig>_inline<counter>`) to avoid collisions across multiple call sites.
      - Splice the renamed-and-substituted body's statements before the call site.
      - Replace the call with: `LHS = renamed_return` (single-return) or `LHS = MakeTuple([renamed_returns...])` (multi-return). When `LHS` resolves to the same `Var` as the substituted return value, the assignment is omitted to avoid a redundant SSA copy.
+   - **Merge function-level attrs** (see [below](#function-level-attribute-merge)) from each spliced callee onto the caller.
 4. **Drop** all Inline functions from the program.
 
 The pass uses a single underscore (`_inline`) in the rename suffix because `__` is reserved by the IR's auto-naming convention (see `auto_name_utils.h`).
@@ -120,6 +121,14 @@ The scope is preserved verbatim and gets outlined by `OutlineIncoreScopes` later
 | Recursive Inline (self or mutual) | `pypto::ValueError` raised before any splicing, with the cycle named (`a -> b -> a`). |
 | Multi-return inline | `LHS = MakeTuple([rets...])` emitted at the call site. Subsequent `Simplify` may fold `TupleGetItemExpr(MakeTuple(...), i)`. |
 | Nested call to Inline (e.g. `pl.add(inline_fn(x), y)`) | Not handled in v1 — left as-is. The `InlineFunctionsEliminated` verifier flags any surviving Call. |
+
+## Function-level attribute merge
+
+As each Inline callee is spliced into a caller, any **function-level attributes** the callee carries on `Function::attrs_` are merged onto the caller *before* the callee is dropped in step 4. Without this step, attrs attached to Inline helpers would silently vanish when the helper is pruned.
+
+Currently the only attribute migrated across is **`kAttrDumpTaggedNames`** — the set of `Var` names a user marked with [`pl.dump_tag(...)`](../03-runtime-dfx.md#selective-tensor-dump). The merge unions the callee's tagged-name list into the caller, preserving first-seen order and deduping. Multi-level inlining (`A` calls `B` calls `C`, with a `dump_tag` in `C`) converges at the pass fixpoint — the names propagate one inlining level per iteration until they reach the outermost orchestration.
+
+The downstream name-matching consumer (orchestration codegen) strips the `_inline<N>` rename suffix via `auto_name_utils::GetCompatibleBaseName` so a tag written in the inline body still matches the FreshName-renamed `Var` (e.g. `tmp_inline42`) at the spliced call site. Stacked suffixes (`tmp_inline12_inline7`, produced when an inline callee is itself inlined into another inline) are stripped iteratively.
 
 ## Verification
 
