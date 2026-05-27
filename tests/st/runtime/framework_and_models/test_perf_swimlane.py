@@ -119,13 +119,24 @@ class TestSwimlaneOutput:
         assert swimlane_file.exists(), f"Swimlane file not found: {swimlane_file}"
 
     def test_top_level_structure(self, swimlane_data: dict):
-        """Top-level 'version' and 'tasks' fields are present and non-empty."""
-        assert "version" in swimlane_data, "Missing top-level field: 'version'"
+        """Top-level 'tasks' field is present and non-empty.
+
+        The legacy top-level ``version`` field was dropped by simpler #863
+        (``Refactor: drop fanout from L2PerfRecord hot path``) — it had
+        drifted into a duplicate of ``L2PerfLevel`` and is no longer emitted
+        by the a2a3 collector.
+        """
         assert "tasks" in swimlane_data, "Missing top-level field: 'tasks'"
         assert len(swimlane_data["tasks"]) > 0, "tasks list is empty"
 
     def test_task_required_fields(self, swimlane_data: dict):
-        """Each task contains all required fields with the correct types."""
+        """Each task contains all required fields with the correct types.
+
+        ``fanout`` / ``fanout_count`` were removed from the per-task record
+        by simpler #863 — fanout edges are now reconstructed offline by
+        dep_gen replay (``deps.json``) rather than carried on the device
+        hot path.
+        """
         required: dict[str, type | tuple] = {
             "task_id": int,
             "func_id": int,
@@ -134,8 +145,6 @@ class TestSwimlaneOutput:
             "start_time_us": (int, float),
             "end_time_us": (int, float),
             "duration_us": (int, float),
-            "fanout": list,
-            "fanout_count": int,
         }
         for task in swimlane_data["tasks"]:
             for field, expected_type in required.items():
