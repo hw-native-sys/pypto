@@ -70,7 +70,8 @@ class TileScatterUpdateFP16Program:
         result: pl.Tile[[32, 32], pl.FP16] = pl.tile.scatter_update(
             input_tile, dim=-2, index=index_tile, src=src_tile
         )
-        return pl.store(result, [0, 0], dst_t)
+        dst_t = pl.store(result, [0, 0], dst_t)
+        return dst_t
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
@@ -100,7 +101,8 @@ class TileScatterUpdateSingleBatchProgram:
         result: pl.Tile[[32, 32], pl.FP32] = pl.tile.scatter_update(
             input_tile, dim=-2, index=index_tile, src=src_tile
         )
-        return pl.store(result, [0, 0], dst_t)
+        dst_t = pl.store(result, [0, 0], dst_t)
+        return dst_t
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
@@ -130,7 +132,8 @@ class TileScatterUpdateProgram:
         result: pl.Tile[[32, 32], pl.FP32] = pl.tile.scatter_update(
             input_tile, dim=-2, index=index_tile, src=src_tile
         )
-        return pl.store(result, [0, 0], dst_t)
+        dst_t = pl.store(result, [0, 0], dst_t)
+        return dst_t
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
@@ -173,7 +176,8 @@ class IndexCastFromTileReadProgram:
         src_tile: pl.Tile[[1, 32], pl.FP32] = pl.load(src_t, [0, 0], [1, 32])
         row: pl.Scalar[pl.INT32] = pl.tile.read(index_tile, [0, 0])
         row_idx: pl.Scalar[pl.INDEX] = pl.cast(row, pl.INDEX)
-        return pl.store(src_tile, [row_idx, 0], dst_t)
+        dst_t = pl.store(src_tile, [row_idx, 0], dst_t)
+        return dst_t
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
@@ -202,7 +206,8 @@ class IndexCastToTileInsertProgram:
         row: pl.Scalar[pl.INT32] = pl.tile.read(index_tile, [0, 0])
         row_idx: pl.Scalar[pl.INDEX] = pl.cast(row, pl.INDEX)
         result: pl.Tile[[32, 32], pl.FP32] = pl.tile.assemble(input_tile, src_tile, [row_idx, 0])
-        return pl.store(result, [0, 0], dst_t)
+        dst_t = pl.store(result, [0, 0], dst_t)
+        return dst_t
 
     @pl.function(type=pl.FunctionType.Orchestration)
     def orchestrator(
