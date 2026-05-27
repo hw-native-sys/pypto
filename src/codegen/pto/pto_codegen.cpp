@@ -241,7 +241,7 @@ class TupleConsumerCollector : public ir::IRVisitor {
   explicit TupleConsumerCollector(const ir::Var* tuple_var, size_t arity)
       : tuple_var_(tuple_var), elements_(arity, nullptr) {}
 
-  const std::vector<ir::VarPtr>& elements() const { return elements_; }
+  [[nodiscard]] const std::vector<ir::VarPtr>& elements() const { return elements_; }
 
  protected:
   void VisitStmt_(const ir::AssignStmtPtr& op) override {

@@ -87,7 +87,13 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
     // only scalar yields, so this does not affect their lowering.
     if (As<TensorType>(expr->GetType())) {
       if (auto tensor_var = ir::AsVarLike(expr)) {
-        yielded_values.push_back(GetOrCreateTensorView(tensor_var));
+        std::string view = GetOrCreateTensorView(tensor_var);
+        // Cache view → base ptr so an IfStmt rebinding its phi return_var to this
+        // shared view can also restore the base ptr (else GetTensorBasePtr would
+        // fall back to the view SSA). Both branches yield the same backing, so
+        // the recorded base ptr is consistent.
+        fs_.view_ssa_to_base_ptr[view] = GetTensorBasePtr(tensor_var);
+        yielded_values.push_back(view);
         continue;
       }
     }
@@ -261,6 +267,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       BindVarToMlir(return_var, inplace_return_ssa[i]);
       if (is_tensor) {
         BindTensorView(return_var, inplace_return_ssa[i]);
+        // Restore the base ptr too, so element-wise pl.read / pl.write on the
+        // merged tensor resolve to the backing pointer rather than the view SSA.
+        auto base_it = fs_.view_ssa_to_base_ptr.find(inplace_return_ssa[i]);
+        if (base_it != fs_.view_ssa_to_base_ptr.end()) {
+          RegisterBasePtr(return_var, base_it->second);
+        }
       }
     }
   }

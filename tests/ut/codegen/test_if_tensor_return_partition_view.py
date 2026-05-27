@@ -113,7 +113,7 @@ def test_no_tensor_view_scf_if_result(scratch_mlir: str):
     offending = [line for line in _scf_if_header_lines(scratch_mlir) if "tensor_view" in line]
     assert not offending, (
         "scf.if must not yield !pto.tensor_view results for in-place tensors; "
-        f"found:\n" + "\n".join(offending) + f"\n\nfull MLIR:\n{scratch_mlir}"
+        "found:\n" + "\n".join(offending) + f"\n\nfull MLIR:\n{scratch_mlir}"
     )
 
 
