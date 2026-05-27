@@ -39,6 +39,7 @@ _DENSE_DEEP_PHASES = 1
 _DENSE_CORRECTNESS_BRANCHES = 3
 _DENSE_SWIMLANE_BRANCHES = 4
 _EXTRA_SWIMLANE_ENV = "PYPTO_PHASE_FENCE_EXTRA_SWIMLANE"
+_CHAINED_SNAPSHOT_BRANCHES_ENV = "PYPTO_PHASE_FENCE_CHAINED_SNAPSHOT_BRANCHES"
 
 
 def _require_extra_swimlane_case(label: str) -> None:
@@ -103,6 +104,17 @@ def _assert_multiloop_chain_shape(swimlane_data: dict) -> None:
 def _assert_dense_mixed_shape(swimlane_data: dict, *, branches: int) -> None:
     expected = _dense_mixed_task_bands(branches=branches)
     _assert_min_task_count(swimlane_data, expected=expected)
+
+
+def _snapshot_swimlane_branches_from_env() -> int:
+    raw = os.environ.get(_CHAINED_SNAPSHOT_BRANCHES_ENV, str(_BRANCHES))
+    try:
+        branches = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{_CHAINED_SNAPSHOT_BRANCHES_ENV} must be an integer, got {raw!r}") from exc
+    if branches <= 0:
+        raise ValueError(f"{_CHAINED_SNAPSHOT_BRANCHES_ENV} must be positive, got {branches}")
+    return branches
 
 
 def _new_swimlane_file(test_runner, case: PTOTestCase, *, label: str) -> Path:
@@ -209,6 +221,54 @@ def _build_pl_at_flattened_program(*, epochs: int, phases: int):
             return out
 
     return PlAtFlattenedPhaseFence
+
+
+def _build_chained_snapshot_program(*, branches: int):
+    tile_m = _TILE_M
+    big_n = _BIG_N
+    stages = 4
+    big_m = stages * branches * tile_m
+
+    @pl.program
+    class ChainedSnapshotPhaseFence:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel_stripe(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            bias: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row_offset, 0], [tile_m, big_n])
+            result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, bias)
+            ret: pl.Tensor[[big_m, big_n], pl.FP32] = pl.store(result, [row_offset, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            with pl.manual_scope():
+                tids = pl.array.create(branches, pl.TASK_ID)
+                for a_phase, (tids_a,) in pl.range(2, init_values=(tids,)):
+                    tids_next = pl.array.create(branches, pl.TASK_ID)
+                    for branch in pl.parallel(branches):
+                        row: pl.Scalar[pl.INDEX] = (a_phase * branches + branch) * tile_m
+                        out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[tids_a])
+                        tids_next[branch] = tid
+                    tids = pl.yield_(tids_next)
+                for b_phase, (tids_b,) in pl.range(2, init_values=(tids,)):
+                    tids_next = pl.array.create(branches, pl.TASK_ID)
+                    for branch in pl.parallel(branches):
+                        row: pl.Scalar[pl.INDEX] = ((2 + b_phase) * branches + branch) * tile_m
+                        out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[tids_b])
+                        tids_next[branch] = tid
+                    tids = pl.yield_(tids_next)
+            return out
+
+    return ChainedSnapshotPhaseFence
 
 
 def _build_reset_per_outer_program():
@@ -334,12 +394,14 @@ def _build_if_consumer_program():
         ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
             with pl.manual_scope():
                 tids = pl.array.create(branches, pl.TASK_ID)
-                for phase in pl.range(phases):
+                for phase, (tids_phase,) in pl.range(phases, init_values=(tids,)):
+                    tids_next = pl.array.create(branches, pl.TASK_ID)
                     for branch in pl.parallel(branches):
                         if branch >= 0:
                             row: pl.Scalar[pl.INDEX] = (phase * branches + branch) * tile_m
-                            out, tid = pl.submit(self.kernel_stripe, data, row, out, deps=[tids])
-                            tids[branch] = tid
+                            out, tid = pl.submit(self.kernel_stripe, data, row, out, deps=[tids_phase])
+                            tids_next[branch] = tid
+                    tids = pl.yield_(tids_next)
             return out
 
     return IfConsumerPhaseFence
@@ -782,6 +844,16 @@ def _partial_reduce_chain_case(*, platform: str | None = None):
     )
 
 
+def _chained_snapshot_case(*, branches: int = _BRANCHES, name: str, platform: str | None = None):
+    rows = 4 * branches * _TILE_M
+    return _PhaseFenceCase(
+        name,
+        lambda: _build_chained_snapshot_program(branches=branches),
+        rows=rows,
+        platform=platform,
+    )
+
+
 class TestPhaseFenceDepCompressionCorrectness:
     @pytest.fixture(autouse=True)
     def _skip_when_collecting_l2_swimlane(self, test_runner):
@@ -838,6 +910,17 @@ class TestPhaseFenceDepCompressionCorrectness:
     def test_partial_reduce_chain_correctness(self, test_runner, platform):
         result = test_runner.run(_partial_reduce_chain_case(platform=platform))
         assert result.passed, f"partial-reduce chain phase-fence failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_chained_snapshot_correctness(self, test_runner, platform):
+        result = test_runner.run(
+            _chained_snapshot_case(
+                branches=_BRANCHES,
+                name="phase_fence_chained_snapshot",
+                platform=platform,
+            )
+        )
+        assert result.passed, f"chained snapshot phase-fence failed: {result.error}"
 
 
 class TestPhaseFenceDepCompressionSwimlane:
@@ -919,6 +1002,19 @@ class TestPhaseFenceDepCompressionSwimlane:
             f"partial-reduce consumers start at {consumer_start:.2f}us "
             f"before reducer ends at {reducer_end:.2f}us"
         )
+
+    def test_chained_snapshot_strict(self, test_runner):
+        _require_extra_swimlane_case("chained snapshot swimlane")
+        branches = _snapshot_swimlane_branches_from_env()
+        data = _new_swimlane_json(
+            test_runner,
+            _chained_snapshot_case(
+                branches=branches,
+                name=f"phase_fence_chained_snapshot_b{branches}_swimlane",
+            ),
+            label="chained snapshot phase-fence",
+        )
+        _assert_flattened_stage_strict(data, stages=4, branches=branches)
 
 
 if __name__ == "__main__":
