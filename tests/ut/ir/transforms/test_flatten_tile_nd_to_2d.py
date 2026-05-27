@@ -1627,6 +1627,103 @@ class TestFlattenTileNdTo2DBatchMatmul:
         # that Strategy 1 produces.
         assert op_names == ["tile.load", "tile.load", "tile.matmul", "tile.store"]
 
+    def test_rank3_mat_load_under_if_preserves_explicit_tile_view(self):
+        """Regression for #1540: a rank>2 ``tile.load`` whose downstream
+        ``tile.batch_matmul`` use is hidden inside an ``if/else`` block must
+        still carry its explicit ``TileView`` (blayout=row_major,
+        slayout=col_major) onto the flattened 2D load.
+
+        The pre-scan at the top of ``TransformBody`` walks only top-level
+        statements, so when the matmul lives inside an ``IfStmt`` body the
+        load is not added to ``batch_matmul_only_vars`` and Strategy 1 cannot
+        re-emit per-batch loads. The load instead takes the fallback rewrite
+        path. Before #1540 that path computed a fresh implicit ``TileView``
+        from (shape, memory_space), clobbering the upstream NZ-layout
+        annotation that ``LowerCompositeOps`` set on transposed-load Mat rhs
+        operands. Downstream codegen then emitted ``pto.tload DN→ND``, which
+        ``pto-isa`` rejects.
+        """
+        T, K, N = 16, 128, 64
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                h: pl.Tensor[[T, K], pl.BF16],
+                w: pl.Tensor[[1, N, K], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+                out_0: pl.Out[pl.Tensor[[1, T, N], pl.FP32]],
+            ) -> pl.Tensor[[1, T, N], pl.FP32]:
+                lhs: pl.Tile[[T, K], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    h, [0, 0], [T, K], target_memory=pl.Mem.Mat
+                )
+                # Explicit NZ-layout annotation — matches what LowerCompositeOps
+                # emits for transposed-load Mat rhs operands of pl.matmul.
+                # transpose=True swaps the last two dims: source slice [1, N, K]
+                # becomes tile [1, K, N].
+                rhs: pl.Tile[
+                    [1, K, N],
+                    pl.BF16,
+                    pl.Mem.Mat,
+                    pl.TileView(
+                        blayout=pl.TileLayout.row_major,
+                        slayout=pl.TileLayout.col_major,
+                    ),
+                ] = pl.tile.load(w, [0, 0, 0], [1, N, K], target_memory=pl.Mem.Mat, transpose=True)
+                # The use lives inside an if/else; the pre-scan does not see it,
+                # so the fallback rewrite path runs on ``rhs``.
+                if cond == 0:
+                    mm0: pl.Tile[[1, T, N], pl.FP32] = pl.tile.batch_matmul(lhs, rhs)
+                    out_tile = pl.yield_(mm0)
+                else:
+                    mm1: pl.Tile[[1, T, N], pl.FP32] = pl.tile.batch_matmul(lhs, rhs)
+                    out_tile = pl.yield_(mm1)
+                out_0 = pl.tile.store(out_tile, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                h: pl.Tensor[[T, K], pl.BF16],
+                w: pl.Tensor[[1, N, K], pl.BF16],
+                cond: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[1, T, N], pl.FP32]:
+                out_0 = pl.create_tensor([1, T, N], dtype=pl.FP32)
+                return self.main_incore_0(h, w, cond, out_0)
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        after_func = After.get_function("main_incore_0")
+        assert after_func is not None
+
+        # Locate the rhs load — the only ``tile.load`` with ``transpose=True``.
+        rhs_loads = [
+            stmt
+            for stmt in cast(ir.SeqStmts, after_func.body).stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == "tile.load"
+            and stmt.value.kwargs.get("transpose") is True
+        ]
+        assert len(rhs_loads) == 1, (
+            f"expected exactly one transposed rhs tile.load after flatten, got {len(rhs_loads)}"
+        )
+        rhs_load = rhs_loads[0]
+        result_type = cast(ir.TileType, rhs_load.value.type)
+
+        # Result must be 2D (rank>2 was the input).
+        assert len(result_type.shape) == 2
+
+        # Use the effective view to compare layouts robustly against
+        # canonicalization (implicit views collapse to ``tile_view is None``).
+        eff = result_type.get_effective_tile_view()
+        assert eff.blayout == ir.TileLayout.row_major, (
+            f"flattened rhs Mat tile lost NZ blayout (#1540): blayout={eff.blayout}, slayout={eff.slayout}"
+        )
+        assert eff.slayout == ir.TileLayout.col_major, (
+            f"flattened rhs Mat tile lost NZ slayout (#1540): blayout={eff.blayout}, slayout={eff.slayout}"
+        )
+
 
 # ----------------------------------------------------------------------------
 # tile.batch_matmul_acc lowering

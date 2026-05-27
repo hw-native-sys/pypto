@@ -1407,6 +1407,92 @@ class Call(Expr):
     def __repr__(self) -> str:
         """Detailed representation of the call expression."""
 
+class Submit(Expr):
+    """Task-launch expression — ``pl.submit(self.kernel, args, deps=[...])``.
+
+    Produced by ``pl.submit(...)`` inside a ``pl.manual_scope`` body. Distinct
+    from :class:`Call`: launches an asynchronous task and produces a TaskId in
+    addition to the callee's logical return. The result type is always
+    ``Tuple[<callee return>..., Scalar[TASK_ID]]`` (or just
+    ``Scalar[TASK_ID]`` when the callee has no value return); callers unpack
+    as ``out, tid = pl.submit(...)``.
+
+    ``deps`` is a first-class field carrying the explicit cross-task
+    dependencies passed as ``deps=[tid1, tid2, ...]``.
+    """
+
+    op: Final[Op]
+    """Callee (typically a :class:`GlobalVar`)."""
+
+    args: Final[Sequence[Expr]]
+    """Positional arguments."""
+
+    deps: Final[Sequence[Expr]]
+    """Cross-task dependencies — each entry is a ``Scalar[TASK_ID]`` or
+    ``Array[N, TASK_ID]`` Var."""
+
+    @property
+    def arg_directions(self) -> Sequence[ArgDirection]:
+        """Resolved per-argument call-site directions (see :attr:`Call.arg_directions`)."""
+
+    @property
+    def attrs(self) -> Mapping[str, Any]:
+        """Compiler-internal node metadata (see :attr:`Call.attrs`)."""
+
+    kwargs: Final[Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue]]
+    """Keyword arguments (metadata)."""
+
+    @overload
+    def __init__(
+        self,
+        op: Op,
+        args: Sequence[Expr],
+        deps: Sequence[Expr],
+        type: Type,
+        span: Span,
+    ) -> None:
+        """Create a Submit expression.
+
+        Args:
+            op: Callee (typically a :class:`GlobalVar`)
+            args: List of argument expressions
+            deps: TaskId dependency expressions
+            type: Explicit result type (Tuple[..., Scalar[TASK_ID]])
+            span: Source location
+        """
+        ...
+
+    @overload
+    def __init__(
+        self,
+        op: Op,
+        args: Sequence[Expr],
+        deps: Sequence[Expr],
+        kwargs: Mapping[str, int | bool | str | float | DataType | MemorySpace | PadValue],
+        attrs: Mapping[str, object] | Sequence[tuple[str, object]] | None,
+        type: Type,
+        span: Span,
+    ) -> None:
+        """Create a Submit expression with kwargs and explicit attrs and type.
+
+        Args:
+            op: Callee
+            args: List of argument expressions
+            deps: TaskId dependency expressions
+            kwargs: Keyword arguments (metadata)
+            attrs: Compiler-internal node metadata. Reserved keys:
+                ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
+            type: Explicit result type
+            span: Source location
+        """
+        ...
+
+    def __str__(self) -> str:
+        """String representation of the submit expression."""
+
+    def __repr__(self) -> str:
+        """Detailed representation of the submit expression."""
+
 class MakeTuple(Expr):
     """Tuple construction expression."""
 

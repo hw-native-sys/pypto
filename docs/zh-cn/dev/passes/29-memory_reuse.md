@@ -57,6 +57,7 @@ program_optimized = reuse_pass(program)
   - 相同 shape（所有维度必须精确匹配）
   - 相同 dtype（例如 FP32 与 BF16 阻止复用，自动处理 `tile.cast`）
   - 相同 TileView 存储属性：`stride`、`start_offset`、`blayout`、`slayout`、`fractal`、`pad` 必须都结构相等（例如 `tile.fillpad` 改变 `pad`，因此其输出不能复用其输入 —— 仅 `pad` 不一致即阻止复用）
+  - 当存在的 view 在存储上是平凡的（trivial）时，view 的**有无**可以不同：无 TileView 的 tile 具有默认物理存储（连续、零偏移、row-major/none-box、默认 fractal、无 pad），因此它与一个仅设置了 `valid_shape`（其余存储字段均为默认值）的 view tile 兼容。这使得复用可以跨越带有非对称 view 的结构克隆 tile，例如 `SplitVectorKernel` 产生的 dual-AIV 派发 `if` 的两个互斥分支 —— 其中一个分支的 tile 带有平凡的 `valid_shape` view，另一个分支的 tile 没有 view。若某个 view 的存储字段偏离默认值，则它仍与无 view 的 tile 不兼容。
   - 对于 2D tile，`valid_shape` 不要求匹配：复用后每个 tile 在自己的 TileType 中保留各自的 `valid_shape`，PTO codegen 会为每个变量发射带有各自静态 valid 范围的 `alloc_tile` 声明，它们共享底层 buffer。这样，`PartialUnrollTileLoops` 产生的仅在边界守护 `valid_shape` 上不同的兄弟分支 tile 可以共用一个后备分配。对于 N-D tile，`valid_shape` 不一致仍然阻止复用。
 
 **Alloc 清理**：

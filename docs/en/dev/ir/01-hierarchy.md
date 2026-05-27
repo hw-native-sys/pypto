@@ -73,6 +73,7 @@ is present, `memory_space` must also be present on the `TileType`.
 | **ConstBool** | `value_` | Boolean constant (always BOOL dtype) |
 | **ConstFloat** | `value_`, `dtype_` | Floating-point constant |
 | **Call** | `op_`, `args_`, `kwargs_`, `attrs_` | Function/operator call (see [Call attrs vs kwargs](#call-attrs-vs-kwargs)) |
+| **Submit** | `op_`, `args_`, `deps_`, `kwargs_`, `attrs_` | Task-launch (`pl.submit(...)` inside `pl.manual_scope`). See [Submit vs Call](#submit-vs-call). |
 | **TupleGetItemExpr** | `tuple_`, `index_` | Tuple element access |
 
 ### Var Identity
@@ -151,6 +152,33 @@ thin wrappers over this attr; `WithArgDirectionsAttr(...)` is the canonical way
 to construct an `attrs` vector with the entry set. The existence of this attr
 is what `IRProperty::CallDirectionsResolved` verifies after the
 `DeriveCallDirections` pass.
+
+### Submit vs Call
+
+`Submit` is a first-class IR kind sibling to `Call`, representing a task
+launch from `pl.submit(...)` inside a `pl.manual_scope` body. The two are
+semantically distinct and pass authors must consider both — see
+[`.claude/rules/pass-submit-awareness.md`](../../../../.claude/rules/pass-submit-awareness.md)
+for the dispatch rule.
+
+| Aspect | `Call` | `Submit` |
+| ------ | ------ | -------- |
+| Semantics | Synchronous function call | Asynchronous task launch |
+| Where it appears | Anywhere | Inside `manual_scope` bodies (parser-produced; lowered to `Call` at `DeriveCallDirections`) |
+| Return type | Callee's declared return | `Tuple[<callee return>..., Scalar[TASK_ID]]` |
+| Has `deps` | No (uses `attrs["manual_dep_edges"]` only on `ScopeStmt` from `pl.at`) | First-class `deps_` field — `Scalar[TASK_ID]` Vars / `Array[N, TASK_ID]` Vars |
+| Use-def chain | `args_` only | `args_` **and** `deps_` |
+| Python syntax | `out = self.foo(...)` | `out, tid = pl.submit(self.foo, ...)` |
+
+The parser emits `Submit`; printer / structural-equal / structural-hash /
+visitor / mutator / DCE / SSA all dispatch on the `Submit` kind directly.
+`DeriveCallDirections` is the lowering point: it consumes the `Submit`,
+runs the standard direction-derivation logic on a synthesised
+`SubmitToCallView` (`Submit::deps_` folded back into
+`attrs["manual_dep_edges"]`), and replaces the `Submit` in the IR with the
+resulting `Call`. Late passes and codegen see `Call` as they did before
+the Submit kind landed; the structural distinction is preserved for the
+~33 dumps captured between parse and `DeriveCallDirections`.
 
 ### IterArg - Loop-Carried Values
 
@@ -336,13 +364,17 @@ runtime = ir.RuntimeScopeStmt(manual=True, name_hint="", body=body, span=span)
   - `OutlineClusterScopes` extracts `ClusterScopeStmt` into `Function(Group)`
     and standalone `SpmdScopeStmt` into `Function(Spmd)`
   - `OutlineHierarchyScopes` extracts `HierarchyScopeStmt`
-  - Inside `RuntimeScopeStmt(manual=true)` blocks, the parser writes
-    `Call.attrs["manual_dep_edges"]` directly from the user's
-    `pl.submit(kernel, ..., deps=[tid1, tid2])` kwarg (each entry a
-    `Scalar[TASK_ID]` — the producer TaskId returned by a prior
-    `pl.submit(...)`, a TaskId loop iter_arg, or the literal `None`,
-    which is dropped); codegen fills a fixed-size stack array and emits
-    one `params.set_dependencies(arr, count)` call per task.
+  - Inside `RuntimeScopeStmt(manual=true)` blocks, the parser emits a
+    `Submit` node for each `pl.submit(kernel, ..., deps=[tid1, tid2])`
+    call and populates its first-class `deps_` field directly from the
+    user's `deps=` kwarg (each entry a `Scalar[TASK_ID]` — the producer
+    TaskId returned by a prior `pl.submit(...)`, a TaskId loop iter_arg,
+    or the literal `None`, which is dropped). `DeriveCallDirections`
+    lowers each `Submit` to an equivalent `Call` via `SubmitToCallView`,
+    folding `Submit::deps_` back into `Call.attrs["manual_dep_edges"]`
+    so the orchestration codegen — which still operates on `Call` —
+    fills a fixed-size stack array and emits one
+    `params.set_dependencies(arr, count)` call per task.
 - `RuntimeScopeStmt` lowers to `PTO2_SCOPE()` for `manual=false` and
   `PTO2_SCOPE(PTO2ScopeMode::MANUAL)` for `manual=true`. It is created by
   `pl.manual_scope()` (manual mode) and by the orchestration codegen path

@@ -83,6 +83,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "ArrayNotEscaped";
     case IRProperty::CommGroupsCollected:
       return "CommGroupsCollected";
+    case IRProperty::RuntimeScopesMaterialized:
+      return "RuntimeScopesMaterialized";
     default:
       return "Unknown";
   }

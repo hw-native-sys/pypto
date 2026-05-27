@@ -94,6 +94,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterGatherOps();
   RegisterScatterOps();
   RegisterCmpOps();
+  RegisterDistributedOps();
 }
 
 // ============================================================================
@@ -378,57 +379,129 @@ void OpConversionRegistry::RegisterMemoryOps() {
         return ConversionResult{op_reg.Create("tensor.assemble", args, kwargs, span)};
       });
 
-  // tensor.scatter_update → tile.create + tile.scatter_update(input, index, src, scratch).
-  // Mirrors the rsqrt high-precision pattern: prologue allocates a [1, d] scratch row tile
-  // via tile.create, which is then passed as the 4th arg to tile.scatter_update.
+  // tensor.scatter_update → tile.scatter (whole-row scatter via flat indices).
+  //   input [m, d], index [b, s] (row numbers), src [b*s, d]: input[index.flat[k]] = src[k].
+  //   pto.tscatter writes per-element: dst.flat[flat_idx[k, c]] = src[k, c], so each src
+  //   row k is written whole into dst row index.flat[k] when flat_idx[k, c] = index.flat[k]*d + c.
+  //   Build flat_idx = ci([n,d]) + (index.flat - k)*d, where ci[k,c]=k*d+c, then reconstruct the
+  //   DPS row-preserve with the same zeroed-scatter + mask + select blend as tensor.scatter.
   std::unordered_map<size_t, InputSpaceReq> scatter_update_input_reqs = {
       {0, {MemorySpace::Vec, std::nullopt}},
       {1, {MemorySpace::Vec, std::nullopt}},
       {2, {MemorySpace::Vec, std::nullopt}},
   };
-  RegisterCustom(
-      "tensor.scatter_update",
-      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
-         const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3) << "tensor.scatter_update conversion expects 3 args (input, index, src)";
-        auto& op_reg = OpRegistry::GetInstance();
+  auto scatter_update_conv = [](const std::vector<ExprPtr>& args,
+                                const std::vector<std::pair<std::string, std::any>>& kwargs,
+                                const Span& span) -> ConversionResult {
+    INTERNAL_CHECK_SPAN(args.size() == 3, span)
+        << "tensor.scatter_update conversion expects 3 args (input, index, src)";
+    auto& op_reg = OpRegistry::GetInstance();
+    auto input_tile = As<TileType>(args[0]->GetType());
+    auto idx_tile = As<TileType>(args[1]->GetType());
+    auto src_tile = As<TileType>(args[2]->GetType());
+    INTERNAL_CHECK_SPAN(input_tile && idx_tile && src_tile, span)
+        << "tensor.scatter_update conversion: input/index/src must be Vec tiles after bridge";
+    // 4D input/src is accepted by the op's type deduction but not yet lowered, so a 4D call
+    // type-checks and would otherwise hit an internal error here — surface it as a user error.
+    CHECK(input_tile->shape_.size() == 2 && src_tile->shape_.size() == 2)
+        << "scatter_update: only 2D input/src is currently supported in lowering, got input rank "
+        << input_tile->shape_.size() << " and src rank " << src_tile->shape_.size();
+    auto src_rows = As<ConstInt>(src_tile->shape_[0]);
+    auto idx_b = As<ConstInt>(idx_tile->shape_[0]);
+    auto idx_s = As<ConstInt>(idx_tile->shape_[1]);
+    auto dst_rows = As<ConstInt>(input_tile->shape_[0]);
+    auto dst_cols = As<ConstInt>(input_tile->shape_[1]);
+    INTERNAL_CHECK_SPAN(src_rows && idx_b && idx_s && dst_rows && dst_cols, span)
+        << "tensor.scatter_update conversion requires static shapes for index expansion";
+    const int64_t n = src_rows->value_;  // b*s flattened scatter rows
+    // src rows must equal the flattened index size, since each src row k is written whole
+    // into dst[index.flat[k]] and flat_idx is built over the [n, d] template (n = b * s).
+    INTERNAL_CHECK_SPAN(n == idx_b->value_ * idx_s->value_, span)
+        << "tensor.scatter_update conversion: src rows (" << n
+        << ") must match index size (b * s = " << idx_b->value_ * idx_s->value_ << ")";
+    const int64_t d = dst_cols->value_;  // feature width (= src cols)
+    const int64_t m = dst_rows->value_;
+    const DataType dt = input_tile->dtype_;
+    // pto.tscatter requires the index element size to match dst (4B→i32, 2/1B→i16).
+    const DataType idx_dtype =
+        (static_cast<int>(dt.GetBit()) / 8 == 4) ? DataType(DataType::INT32) : DataType(DataType::INT16);
+    // For 2-byte dst the tscatter index is i16, so the largest flat destination index
+    // (m*d - 1) must fit in i16; otherwise it silently overflows and scatters to wrong rows.
+    if (idx_dtype == DataType(DataType::INT16)) {
+      CHECK(m * d <= 32767) << "scatter_update: " << dt.ToString() << " dst has m*d = " << m * d
+                            << " elements, exceeding the i16 flat-index limit (32767); "
+                            << "reduce dst rows*cols or use a 4-byte dtype";
+    }
+    // Build the flat-index math entirely in i32, then narrow only the finished [n, d] flat_idx
+    // to idx_dtype. Every intermediate tile stays in the canonical i32 layout — identical to
+    // the FP32 path — which avoids narrowing a small/odd-shaped tile: the i32 [b, s] index has
+    // a 32-byte-aligned row (cols * 4), whereas a 2-byte [b, s] tile (cols * 2) does not, and
+    // the reshaped [n, 1] view is col_major. The final flat_idx is row-major [n, d] with a
+    // 32-byte-aligned row, so casting it to i16 is both alignment-legal and layout-canonical.
+    const DataType compute_dtype(DataType::INT32);
 
-        const auto& input = args[0];
-        const auto& index = args[1];
-        const auto& src = args[2];
+    auto make_idx = [&](int64_t v) -> ExprPtr {
+      return std::make_shared<ConstInt>(v, DataType::INDEX, span);
+    };
+    auto make_cd = [&](int64_t v) -> ExprPtr { return std::make_shared<ConstInt>(v, compute_dtype, span); };
+    ExprPtr one = make_idx(1);
+    std::vector<std::pair<std::string, std::any>> ci_kw = {{"dtype", compute_dtype}, {"descending", false}};
+    std::vector<StmtPtr> prologue;
+    auto emit = [&](const std::string& name_op, const std::vector<ExprPtr>& a,
+                    const std::vector<std::pair<std::string, std::any>>& kw,
+                    const std::string& nm) -> VarPtr {
+      auto call = kw.empty() ? op_reg.Create(name_op, a, span) : op_reg.Create(name_op, a, kw, span);
+      auto var = std::make_shared<Var>(nm, call->GetType(), span);
+      prologue.push_back(std::make_shared<AssignStmt>(var, call, span));
+      return var;
+    };
+    // col_nd[k, c] = c: column arange [1, d] expanded across n rows (tile.ci needs a
+    // single-row source, so build [1, d] then col_expand into the [n, d] template).
+    auto col_ar = emit("tile.ci", {make_cd(0), MakeShapeTuple({one, make_idx(d)}, span)}, ci_kw, "su_col");
+    auto tmpl = emit("tile.full", {MakeShapeTuple({make_idx(n), make_idx(d)}, span), make_cd(0)},
+                     {{"dtype", compute_dtype}}, "su_tmpl");
+    auto col_nd = emit("tile.col_expand", {tmpl, col_ar}, {}, "su_col_nd");
+    // row_base[k] = index.flat[k] * d, broadcast across cols; flat_idx = index.flat[k]*d + c.
+    ExprPtr idx_src = args[1];
+    if (idx_tile->dtype_ != compute_dtype) {
+      idx_src = emit("tile.cast", {idx_src}, {{"target_type", compute_dtype}}, "su_idx_i32");
+    }
+    auto idx_flat =
+        emit("tile.reshape", {idx_src, MakeShapeTuple({make_idx(n), one}, span)}, {}, "su_idx_flat");
+    auto row_base = emit("tile.muls", {idx_flat, make_cd(d)}, {}, "su_row_base");
+    auto flat_idx = emit("tile.row_expand_add", {col_nd, row_base}, {}, "su_flat_idx");
+    // Narrow the finished row-major [n, d] flat indices to the tscatter-required width.
+    if (idx_dtype != compute_dtype) {
+      flat_idx = emit("tile.cast", {flat_idx}, {{"target_type", idx_dtype}}, "su_flat_idx_cast");
+    }
 
-        auto input_tile_type = As<TileType>(input->GetType());
-        CHECK(input_tile_type) << "tensor.scatter_update: unexpected input type: "
-                               << input->GetType()->TypeName();
-        CHECK(As<TileType>(index->GetType()))
-            << "tensor.scatter_update conversion: index must become TileType, got "
-            << index->GetType()->TypeName();
-        auto src_tile_type = As<TileType>(src->GetType());
-        CHECK(src_tile_type) << "tensor.scatter_update conversion: src must become TileType, got "
-                             << src->GetType()->TypeName();
-        CHECK(src_tile_type->shape_.size() == 2)
-            << "tensor.scatter_update conversion currently supports 2D src tiles, got rank "
-            << src_tile_type->shape_.size();
-
-        // Allocate the [1, d] scratch row tile that tile.scatter_update needs as its
-        // per-row staging buffer. Same dtype + Vec memory as the input.
-        auto row_shape = std::make_shared<MakeTuple>(
-            std::vector<ExprPtr>{std::make_shared<ConstInt>(1, DataType::INDEX, span),
-                                 input_tile_type->shape_.back()},
-            span);
-        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", input_tile_type->dtype_},
-                                                                       {"target_memory", MemorySpace::Vec}};
-        auto create_call = op_reg.Create("tile.create", {row_shape}, create_kwargs, span);
-
-        auto scratch_var = std::make_shared<Var>("scatter_row", create_call->GetType(), span);
-        std::vector<StmtPtr> prologue;
-        prologue.push_back(std::make_shared<AssignStmt>(scratch_var, create_call, span));
-
-        auto scatter_call =
-            op_reg.Create("tile.scatter_update", {input, index, src, scratch_var}, kwargs, span);
-        return ConversionResult{std::move(prologue), scatter_call};
-      },
-      std::move(scatter_update_input_reqs));
+    const int dt_bytes = static_cast<int>(dt.GetBit()) / 8;
+    const DataType mask_dt = (dt_bytes == 4)   ? DataType(DataType::FP32)
+                             : (dt_bytes == 2) ? DataType(DataType::FP16)
+                                               : DataType(DataType::INT8);
+    auto make_full = [&](const DataType& f, int64_t r, int64_t c, double v, const std::string& nm) -> VarPtr {
+      ExprPtr val = f.IsFloat() ? ExprPtr(std::make_shared<ConstFloat>(v, f, span))
+                                : ExprPtr(std::make_shared<ConstInt>(static_cast<int64_t>(v), f, span));
+      return emit("tile.full", {MakeShapeTuple({make_idx(r), make_idx(c)}, span), val}, {{"dtype", f}}, nm);
+    };
+    auto scattered =
+        emit("tile.scatter", {make_full(dt, m, d, 0.0, "su_v0"), args[2], flat_idx}, {}, "su_vals");
+    auto mask =
+        emit("tile.scatter",
+             {make_full(mask_dt, m, d, 0.0, "su_m0"), make_full(mask_dt, n, d, 1.0, "su_ones"), flat_idx}, {},
+             "su_mask");
+    ExprPtr zero_s = mask_dt.IsFloat() ? ExprPtr(std::make_shared<ConstFloat>(0.0, mask_dt, span))
+                                       : ExprPtr(std::make_shared<ConstInt>(0, mask_dt, span));
+    auto pred = emit("tile.cmps", {mask, zero_s}, {{"cmp_type", 1}}, "su_pred");
+    auto tmp = emit("tile.create", {MakeShapeTuple({one, make_idx(32)}, span)},
+                    {{"dtype", DataType(DataType::UINT8)}, {"target_memory", MemorySpace::Vec}}, "su_tmp");
+    auto out = op_reg.Create("tile.sel", {pred, scattered, args[0], tmp}, span);
+    return ConversionResult{std::move(prologue), out};
+  };
+  // Both the tensor entry and the DSL tile.scatter_update op expand to tile.scatter.
+  RegisterCustom("tensor.scatter_update", scatter_update_conv,
+                 std::unordered_map<size_t, InputSpaceReq>(scatter_update_input_reqs));
+  RegisterCustom("tile.scatter_update", scatter_update_conv, std::move(scatter_update_input_reqs));
 
   // tensor.create → tile.create with static buffer size validation
   RegisterCustom(
@@ -1605,6 +1678,58 @@ void OpConversionRegistry::RegisterCmpOps() {
   };
 
   RegisterCustom("tensor.cmp", CmpConv);
+}
+
+// ============================================================================
+// Distributed (pld.*) ops: synthesise auxiliary tile scratch buffers so the
+// memory allocator assigns UB addresses before codegen (--pto-level=level3)
+// ============================================================================
+
+void OpConversionRegistry::RegisterDistributedOps() {
+  // pld.tensor.put → tile.create(stage) + pld.tile.put(dst, peer, src, stage).
+  // Stage shape is [rows, cols] with rows = ∏ leading dims, cols = innermost —
+  // the 2-D-flattened transfer extent codegen previously synthesised inline.
+  RegisterCustom(
+      "pld.tensor.put",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        CHECK(args.size() == 3) << "pld.tensor.put conversion expects 3 args (dst, peer, src), got "
+                                << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+
+        auto dst_type = As<DistributedTensorType>(args[0]->GetType());
+        CHECK(dst_type) << "pld.tensor.put conversion: dst must be DistributedTensorType, got "
+                        << args[0]->GetType()->TypeName();
+        const auto& shape = dst_type->shape_;
+        CHECK(!shape.empty()) << "pld.tensor.put conversion: dst requires rank >= 1";
+
+        // Flatten N-D to [rows, cols]: rows = ∏ leading dims, cols = innermost.
+        int64_t cols_val = 0;
+        {
+          auto last = As<ConstInt>(shape.back());
+          CHECK(last) << "pld.tensor.put conversion: dst innermost dimension must be ConstInt";
+          cols_val = last->value_;
+        }
+        int64_t rows_val = 1;
+        for (size_t i = 0; i + 1 < shape.size(); ++i) {
+          auto d = As<ConstInt>(shape[i]);
+          CHECK(d) << "pld.tensor.put conversion: dst dimension " << i << " must be ConstInt";
+          rows_val *= d->value_;
+        }
+        auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);
+        auto cols_expr = std::make_shared<ConstInt>(cols_val, DataType::INDEX, span);
+        auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);
+
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dst_type->dtype_},
+                                                                       {"target_memory", MemorySpace::Vec}};
+        auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+        auto stage_var = std::make_shared<Var>("tput_stage", create_call->GetType(), span);
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(stage_var, create_call, span));
+
+        auto put_call = op_reg.Create("pld.tile.put", {args[0], args[1], args[2], stage_var}, kwargs, span);
+        return ConversionResult{std::move(prologue), put_call};
+      });
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,

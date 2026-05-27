@@ -9,7 +9,7 @@
 
 """Runtime scope context managers and submit primitive for the PyPTO Language DSL."""
 
-from typing import Any, NoReturn
+from typing import Any
 
 
 class manual_scope:
@@ -57,7 +57,38 @@ class manual_scope:
         return False
 
 
-def submit(*args: Any, **kwargs: Any) -> NoReturn:
+class auto_scope:
+    """Context manager that marks an AUTO runtime scope (``PTO2_SCOPE()``).
+
+    An AUTO scope is the default OverlapMap auto-dep-tracking region — the
+    inverse of :class:`manual_scope`. It is the explicit IR form of the
+    ``PTO2_SCOPE()`` block the orchestration codegen wraps around the function
+    body and around each ``for`` / ``if`` body.
+
+    The compiler inserts these automatically (the ``MaterializeRuntimeScopes``
+    pass), so user code rarely writes ``with pl.auto_scope():`` directly. It
+    exists primarily so the IR round-trips through the DSL printer/parser. AUTO
+    scopes may nest in one another, but not inside a :class:`manual_scope` (the
+    runtime forbids AUTO nested in MANUAL).
+
+    Usage::
+
+        with pl.auto_scope():
+            out = self.kernel(a, b, out)
+
+    Restrictions:
+      - Must appear inside an Orchestration function (not InCore).
+      - Cannot be nested inside a ``manual_scope``.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+def submit(*args: Any, **kwargs: Any) -> Any:
     """Submit a kernel and capture its producer TaskId.
 
     ``pl.submit`` is a **parser construct**, not a runtime function — the
@@ -70,16 +101,23 @@ def submit(*args: Any, **kwargs: Any) -> NoReturn:
         out, tid    = pl.submit(self.stage1, x, scratch, deps=[prev_tid])
         (a, b), tid = pl.submit(self.multi_out_kernel, x)
 
-    The kernel ``Call`` natively returns ``Tuple[<kernel return>, TASK_ID]``;
-    element 0 is the tensor result(s), element 1 is the producer TaskId
-    (``Scalar[TASK_ID]``). The optional ``deps=[...]`` kwarg lists TaskId
-    scalars / arrays this submit must wait on.
+    The kernel-side ``ir.Submit`` natively returns
+    ``Tuple[<kernel return>, TASK_ID]``; element 0 is the tensor result(s),
+    element 1 is the producer TaskId (``Scalar[TASK_ID]``). The optional
+    ``deps=[...]`` kwarg lists TaskId scalars / arrays this submit must
+    wait on. The single-LHS form ``res = pl.submit(...)`` is also accepted
+    and binds the whole flat tuple to one variable.
 
     ``pl.submit`` and its ``deps=`` kwarg work in **both auto and manual
     scope**: ``Arg::set_dependencies`` is orthogonal to OverlapMap
     auto-tracking (final fanin = auto ∪ explicit). In auto scope, use
     ``deps=[...]`` as a precision tool to patch edges the runtime cannot
     infer; in ``pl.manual_scope()``, use it to declare every edge.
+
+    The return annotation is ``Any`` (not ``NoReturn``) because the parser
+    intercepts the call and binds a 2-tuple to the LHS — downstream code
+    that does ``out, tid = pl.submit(...)`` would not type-check under
+    ``NoReturn``.
     """
     raise RuntimeError(
         "pl.submit is a DSL parser construct and cannot be called directly; "
@@ -88,4 +126,4 @@ def submit(*args: Any, **kwargs: Any) -> NoReturn:
     )
 
 
-__all__ = ["manual_scope", "submit"]
+__all__ = ["auto_scope", "manual_scope", "submit"]

@@ -202,6 +202,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitExpr_(const ConstFloatPtr& op) override;
   void VisitExpr_(const ConstBoolPtr& op) override;
   void VisitExpr_(const CallPtr& op) override;
+  void VisitExpr_(const SubmitPtr& op) override;
   void VisitExpr_(const MakeTuplePtr& op) override;
   void VisitExpr_(const TupleGetItemExprPtr& op) override;
 
@@ -309,6 +310,12 @@ class IRPythonPrinter : public IRVisitor {
   // Print a statement block at current indent level.
   // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
+
+  // Emit the `with pl.{auto,manual}_scope():` header for a RuntimeScopeStmt.
+  // Callers emit the leading indent themselves (it differs by call site).
+  void PrintRuntimeScopeHeader(bool manual) {
+    stream_ << "with " << prefix_ << (manual ? ".manual_scope():\n" : ".auto_scope():\n");
+  }
 
   // Emit a comma-prefixed kwarg ``, <kwarg_name>=[v1, v2, ...]`` from the
   // list-of-VarPtr attr keyed by ``attr_key`` on ``op``. Skips null entries so
@@ -860,6 +867,58 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     }
   }
 
+  stream_ << ")";
+}
+
+void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
+  INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Submit has null op";
+  // Submit normally appears inside a Program (manual_scope body of a
+  // function), so the callee is emitted as ``self.<kernel_name>``. When a
+  // Submit is printed standalone (debugging, unit tests that build IR by
+  // hand without a Program), fall back to naming the op directly so the
+  // printer never crashes — matches the contract in the comment above.
+  stream_ << prefix_ << ".submit(";
+  if (auto gvar = As<GlobalVar>(op->op_)) {
+    // ``self.<name>`` inside a Program (the canonical case); bare ``<name>``
+    // when the printer is invoked standalone (debugging / unit tests).
+    if (current_program_) {
+      stream_ << "self.";
+    }
+    stream_ << gvar->name_;
+  } else {
+    // Non-GlobalVar callee (Op or other) — fall back to the raw op name so
+    // the printer never crashes on a hand-built Submit.
+    stream_ << op->op_->name_;
+  }
+  for (const auto& arg : op->args_) {
+    stream_ << ", ";
+    VisitExpr(arg);
+  }
+
+  if (!op->deps_.empty()) {
+    stream_ << ", deps=[";
+    for (size_t i = 0; i < op->deps_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      INTERNAL_CHECK_SPAN(op->deps_[i], op->span_) << "Submit dep at index " << i << " is null";
+      VisitExpr(op->deps_[i]);
+    }
+    stream_ << "]";
+  }
+
+  // Surface ``attrs["arg_directions"]`` post-DeriveCallDirections on Submit
+  // the same way Call does, so the round-trip recovers the metadata.
+  auto submit_arg_directions = op->GetArgDirections();
+  if (!submit_arg_directions.empty()) {
+    INTERNAL_CHECK_SPAN(submit_arg_directions.size() == op->args_.size(), op->span_)
+        << "Submit arg_directions size (" << submit_arg_directions.size() << ") must match args size ("
+        << op->args_.size() << ")";
+    stream_ << ", attrs={\"arg_directions\": [";
+    for (size_t i = 0; i < submit_arg_directions.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << prefix_ << ".adir." << ArgDirectionToDslName(submit_arg_directions[i]);
+    }
+    stream_ << "]}";
+  }
   stream_ << ")";
 }
 
@@ -1504,17 +1563,12 @@ void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
 }
 
 void IRPythonPrinter::VisitStmt_(const RuntimeScopeStmtPtr& op) {
-  // Only the manual=true form has a DSL surface today.
-  // Auto scope (manual=false) is reserved; printer falls back to a
-  // transparent body emit so that round-trip never fails on legacy IR.
-  if (op->manual_) {
-    stream_ << "with " << prefix_ << ".manual_scope():\n";
-    IncreaseIndent();
-    PrintStmtBlock(op->body_);
-    DecreaseIndent();
-  } else {
-    PrintStmtBlock(op->body_);
-  }
+  // Both AUTO (manual=false) and MANUAL (manual=true) runtime scopes have a DSL
+  // surface and round-trip: `with pl.auto_scope():` / `with pl.manual_scope():`.
+  PrintRuntimeScopeHeader(op->manual_);
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
 }
 
 void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {
@@ -1561,6 +1615,15 @@ void IRPythonPrinter::PrintYieldAssignmentVars(const std::vector<VarPtr>& return
 }
 
 void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
+  // A single-statement SeqStmts is a transparent wrapper (e.g. a user-written
+  // `with pl.auto_scope():` body before NormalizeStmtStructure collapses it).
+  // Unwrap it first so an AUTO scope reaches the rscope branch below with
+  // return_vars intact — otherwise a trailing return-var yield inside the scope
+  // would lose its `var = pl.yield_(...)` assignment LHS.
+  if (auto seq = As<SeqStmts>(body); seq && seq->stmts_.size() == 1) {
+    VisitStmtBody(seq->stmts_[0], return_vars);
+    return;
+  }
   // Helper to visit statement body and wrap YieldStmt with assignment if needed
   if (auto yield_stmt = As<YieldStmt>(body)) {
     // If parent has return_vars, wrap yield as assignment
@@ -1616,6 +1679,16 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         stream_ << "\n";
       }
     }
+  } else if (auto rscope = As<RuntimeScopeStmt>(body); rscope && !rscope->manual_) {
+    // An AUTO RuntimeScopeStmt wrapping a for/if body (inserted by
+    // MaterializeRuntimeScopes): emit the `with pl.auto_scope():` header and
+    // recurse with return_vars so a trailing return-var yield *inside* the
+    // scope still prints its `var = pl.yield_(...)` assignment LHS.
+    stream_ << GetIndent();
+    PrintRuntimeScopeHeader(/*manual=*/false);
+    IncreaseIndent();
+    VisitStmtBody(rscope->body_, return_vars);
+    DecreaseIndent();
   } else {
     PrintStmtBlock(body);
   }
@@ -1861,6 +1934,17 @@ class GlobalVarCollector : public IRVisitor {
       collected_gvars.insert(gvar);
     }
     // Visit arguments
+    IRVisitor::VisitExpr_(op);
+  }
+
+  void VisitExpr_(const SubmitPtr& op) override {
+    // Submit's callee is a GlobalVar (the kernel being launched). Treat the
+    // same as Call so cross-function dependencies through pl.submit are
+    // captured by the topological sort.
+    INTERNAL_CHECK_SPAN(op->op_, op->span_) << "Submit has null op";
+    if (auto gvar = As<GlobalVar>(op->op_)) {
+      collected_gvars.insert(gvar);
+    }
     IRVisitor::VisitExpr_(op);
   }
 };

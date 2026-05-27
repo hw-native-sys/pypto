@@ -778,6 +778,70 @@ class TestValidShapeDivergence:
             f"3D divergent-valid_shape tiles should NOT share a MemRef, but both bind to {tile_a_base}"
         )
 
+    def test_view_present_vs_absent_can_reuse(self):
+        """A tile carrying a storage-trivial view and a no-view tile share a MemRef.
+
+        Reproduces the scenario from issue #1547: after SplitVectorKernel the
+        two mutually-exclusive arms of a dual-AIV ``if`` are structural clones,
+        but one arm's tiles carry a trivial ``valid_shape`` view while the
+        other's carry none. A tile with no TileView has default physical
+        storage; a tile whose view sets only ``valid_shape`` (default stride /
+        offset / layout / fractal / pad) is physically identical, so the two
+        must be allowed to share a backing allocation. Here ``tile_a`` (view)
+        and the later ``tile_b`` (no view) have non-overlapping lifetimes and
+        reuse one MemRef -- before the fix the ``has_view`` mismatch blocked it.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32],
+                output_a: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_a, [0, 0], [64, 64], valid_shapes=[48, 64]
+                )
+                _res_a: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_a, [0, 0], output_a)
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [64, 64])
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output_b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+                output_a: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
+                output_b: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 16384)]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                tile_a: pl.Tile[
+                    [64, 64],
+                    pl.FP32,
+                    pl.MemRef(mem_vec_3, 0, 16384),
+                    pl.Mem.Vec,
+                    pl.TileView(valid_shape=[48, 64]),
+                ] = pl.tile.load(
+                    input_a, [0, 0], [64, 64], [48, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                _res_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                    tile_a, [0, 0], output_a
+                )
+                tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_2", 0, 16384)] = pl.tile.store(
+                    tile_b, [0, 0], output_b
+                )
+                return result
+
+        After = _run_pipeline(Before)
+        ir.assert_structural_equal(After, Expected, enable_auto_mapping=True)
+
 
 def _collect_tile_memref_bases(program: ir.Program) -> dict[str, str]:
     """Return ``{tile_var_name: memref_base_name}`` for every AssignStmt in the program.

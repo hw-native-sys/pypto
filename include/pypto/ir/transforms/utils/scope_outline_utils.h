@@ -814,21 +814,25 @@ class ScopeOutliner : public IRMutator {
 
     // ``with pl.at(..., deps=[...]) as tid:`` attaches metadata to the
     // ScopeStmt via ``attrs_``. The outliner propagates it onto the
-    // synthesised Call:
-    //   * ``task_id_var`` (a ``Scalar[TASK_ID]`` Var) → augment the Call's
-    //     return type with a trailing ``Scalar[TASK_ID]`` tuple element so
-    //     codegen's ``IsSubmitCall`` detection fires and binds it to
-    //     ``task_<n>_outs.task_id()`` on demand.
-    //   * ``manual_dep_edges`` → attach verbatim to ``Call.attrs[manual_dep_edges]``
-    //     (codegen's ``EmitManualDeps`` packs them into a stack
-    //     ``PTO2TaskId[]`` and emits a single ``set_dependencies`` call).
+    // synthesised call-like expression:
+    //   * ``task_id_var`` (a ``Scalar[TASK_ID]`` Var) → emit an ``ir.Submit``
+    //     instead of a plain ``ir.Call``. The Submit's return type is the
+    //     augmented ``Tuple{*<scope outputs>, Scalar[TASK_ID]}`` so the
+    //     trailing TupleGetItem binds the producer TaskId. Mid-pipeline
+    //     dumps print the synthesised call as ``pl.submit(self.<outlined>,
+    //     ..., deps=[...])`` — visually distinct from a plain function call,
+    //     matching the explicit ``pl.submit(...)`` surface.
+    //   * ``manual_dep_edges`` → fold into ``Submit::deps_`` when
+    //     ``task_id_var`` is set; otherwise (no-TaskId path) attach as
+    //     ``Call.attrs[manual_dep_edges]`` so codegen still emits the
+    //     ``set_dependencies`` call.
     //   * ``arg_direction_overrides_vars`` (from ``pl.at(no_dep_args=[...])``) →
     //     translate the captured-Var list into positional indices into
     //     ``call_args`` (using the ``input_vars`` order, which call_args
-    //     mirrors 1:1) and attach as ``Call.attrs[arg_direction_overrides]``.
-    //     ``DeriveCallDirections`` then overwrites those slots to
-    //     ``ArgDirection::NoDep`` — the same path as ``pl.no_dep(t)``
-    //     wrappers at explicit kernel call sites.
+    //     mirrors 1:1) and attach as ``attrs[arg_direction_overrides]``
+    //     on whichever node we emit. ``DeriveCallDirections`` then
+    //     overwrites those slots to ``ArgDirection::NoDep`` — the same path
+    //     as ``pl.no_dep(t)`` wrappers at explicit kernel call sites.
     VarPtr scope_task_id_var = op->GetAttr<VarPtr>(kAttrTaskIdVar);
     std::vector<VarPtr> scope_dep_edges = op->GetAttr<std::vector<VarPtr>>(kAttrManualDepEdges);
     std::vector<VarPtr> scope_no_dep_vars = op->GetAttr<std::vector<VarPtr>>(kAttrArgDirOverrideVars);
@@ -882,24 +886,49 @@ class ScopeOutliner : public IRMutator {
       call_return_type = std::make_shared<TupleType>(effective_return_types);
     }
 
-    std::vector<std::pair<std::string, std::any>> call_attrs;
-    if (!scope_dep_edges.empty()) {
-      call_attrs.emplace_back(kAttrManualDepEdges, std::move(scope_dep_edges));
-    }
-    if (!arg_dir_override_indices.empty()) {
-      call_attrs.emplace_back(kAttrArgDirectionOverrides, std::move(arg_dir_override_indices));
-    }
-
-    std::shared_ptr<Call> call_expr;
-    if (!call_attrs.empty()) {
-      call_expr = std::make_shared<Call>(
-          global_var, call_args, std::vector<std::pair<std::string, std::any>>{}, std::move(call_attrs),
-          call_return_type ? call_return_type : std::make_shared<UnknownType>(), op->span_);
-    } else if (call_return_type) {
-      call_expr = std::make_shared<Call>(global_var, call_args, call_return_type, op->span_);
+    // Build the synthesised call expression. When ``scope_task_id_var`` is
+    // set the scope captures a producer TaskId, so we emit an ``ir.Submit``
+    // (matching the explicit ``pl.submit(...)`` surface): deps_ comes from
+    // the scope's ``kAttrManualDepEdges`` attr, and only the non-deps attrs
+    // (arg_direction_overrides) land in ``attrs_``. Otherwise we keep the
+    // legacy Call shape with deps attached via ``attrs[manual_dep_edges]``.
+    ExprPtr synthesised_call_expr;
+    if (scope_task_id_var) {
+      std::vector<ExprPtr> submit_deps;
+      submit_deps.reserve(scope_dep_edges.size());
+      for (const auto& v : scope_dep_edges) {
+        submit_deps.push_back(v);
+      }
+      std::vector<std::pair<std::string, std::any>> submit_attrs;
+      if (!arg_dir_override_indices.empty()) {
+        submit_attrs.emplace_back(kAttrArgDirectionOverrides, std::move(arg_dir_override_indices));
+      }
+      synthesised_call_expr = std::make_shared<Submit>(
+          global_var, call_args, std::move(submit_deps), std::vector<std::pair<std::string, std::any>>{},
+          std::move(submit_attrs), call_return_type ? call_return_type : std::make_shared<UnknownType>(),
+          op->span_);
     } else {
-      call_expr = std::make_shared<Call>(global_var, call_args, op->span_);
+      std::vector<std::pair<std::string, std::any>> call_attrs;
+      if (!scope_dep_edges.empty()) {
+        call_attrs.emplace_back(kAttrManualDepEdges, std::move(scope_dep_edges));
+      }
+      if (!arg_dir_override_indices.empty()) {
+        call_attrs.emplace_back(kAttrArgDirectionOverrides, std::move(arg_dir_override_indices));
+      }
+      if (!call_attrs.empty()) {
+        synthesised_call_expr = std::make_shared<Call>(
+            global_var, call_args, std::vector<std::pair<std::string, std::any>>{}, std::move(call_attrs),
+            call_return_type ? call_return_type : std::make_shared<UnknownType>(), op->span_);
+      } else if (call_return_type) {
+        synthesised_call_expr = std::make_shared<Call>(global_var, call_args, call_return_type, op->span_);
+      } else {
+        synthesised_call_expr = std::make_shared<Call>(global_var, call_args, op->span_);
+      }
     }
+    // Keep the original name (``call_expr``) for the rest of the function —
+    // AssignStmt / EvalStmt accept any ExprPtr, so the type widening from
+    // ``shared_ptr<Call>`` to ``ExprPtr`` is transparent at the use sites.
+    const ExprPtr& call_expr = synthesised_call_expr;
 
     // Resolve the call-site Var for an output variable. Scope-defined vars come from
     // scope_var_collector; store targets (external tensors) fall back to the outer symbol table.

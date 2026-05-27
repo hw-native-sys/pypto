@@ -148,6 +148,9 @@ KNOWN_ISSUES.md
 # Per-developer worktrees managed by AI agents
 .claude/worktrees/
 
+# Local scratch space (per-developer, not shared)
+.scratch/
+
 # Documentation build
 docs/_build/
 site/

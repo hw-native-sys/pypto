@@ -59,6 +59,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "ExpandManualPhaseFence",
     "CollectCommGroups",
     "Simplify",
+    "MaterializeRuntimeScopes",
 ]
 
 DEBUG_TILE_OPTIMIZATION_PASSES = [
@@ -93,6 +94,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "ExpandManualPhaseFence",
     "CollectCommGroups",
     "Simplify",
+    "MaterializeRuntimeScopes",
 ]
 
 

@@ -48,6 +48,7 @@ class IRProperty(Enum):
     TensorViewCanonical = ...
     ArrayNotEscaped = ...
     CommGroupsCollected = ...
+    RuntimeScopesMaterialized = ...
 
 class IRPropertySet:
     """A set of IR properties backed by a bitset."""
@@ -572,6 +573,21 @@ def collect_comm_groups() -> Pass:
 
     Runs immediately after :func:`inline_functions` — L2 orchestrations are
     never inlined into L3, so the dispatch chain survives inlining.
+    """
+
+def materialize_runtime_scopes() -> Pass:
+    """Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.
+
+    For every ``FunctionType.Orchestration`` function, inserts AUTO
+    ``RuntimeScopeStmt`` (``manual=False``) nodes wrapping the function body and
+    each ``ForStmt`` / ``IfStmt`` branch body, while skipping insertion inside a
+    manual ``RuntimeScopeStmt`` (the runtime forbids AUTO nested in MANUAL).
+    Codegen then emits ``PTO2_SCOPE`` only from ``RuntimeScopeStmt`` nodes, 1:1
+    with the IR.
+
+    Runs last in the pipeline (after the final :func:`simplify`) so no other
+    transform has to reason about the inserted scopes. Only Orchestration
+    functions are touched.
     """
 
 class NestedCallErrorType(Enum):

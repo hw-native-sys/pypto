@@ -37,7 +37,13 @@ def _flatten(stmt):
 
 
 def _calls_in(stmt):
-    return [s.value for s in _flatten(stmt) if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call)]
+    """Return Call AND Submit RHS expressions — both are call-like and share
+    the ``.op.name`` accessor."""
+    return [
+        s.value
+        for s in _flatten(stmt)
+        if isinstance(s, ir.AssignStmt) and isinstance(s.value, (ir.Call, ir.Submit))
+    ]
 
 
 class TestTaskIdNamespace:
@@ -128,8 +134,8 @@ class TestDepsKwargAcceptsTaskId:
         assert fn is not None
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
-        k2_call = next(c for c in _calls_in(scope.body) if c.op.name == "k2")
-        edges = k2_call.attrs.get("manual_dep_edges", [])
+        k2_call = next(c for c in _calls_in(scope.body) if isinstance(c, ir.Submit) and c.op.name == "k2")
+        edges = list(k2_call.deps)
         assert len(edges) == 1
         assert isinstance(edges[0].type, ir.ScalarType)
         assert edges[0].type.dtype == DataType.TASK_ID

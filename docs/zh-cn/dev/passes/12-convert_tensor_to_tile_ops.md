@@ -94,6 +94,39 @@ y_tile = pl.tile.transpose(x_tile, 0, 1, tmp_tile=transpose_tmp)
 
 当用户调用 `pl.tile.transpose(tile, axis1, axis2)` 不传 `tmp_tile` 时，Python IR 构造层自动在末尾插入一个 `tile.create` 作为 tmp。
 
+## Scatter Update 下沉
+
+`tensor.scatter_update` / `tile.scatter_update`（整行散射，仅支持 `dim=-2`）下沉为逐元素的 `tile.scatter`（`pto.tscatter`）加上 `tile.sel` 保留混合。硬件 `pto.tscatter` 按扁平目标下标逐元素写入（`dst.flat[idx[k, c]] = src[k, c]`），且其 `dst` 操作数是 **write-only**（未写入的槽位不保留），因此本 pass 自行重建“未命中行保留 `input`”的语义。
+
+整行更新 `input[index.flat[k], :] = src[k, :]` 被表达为扁平下标：
+
+```text
+flat_idx[k, c] = index.flat[k] * d + c          # d = 特征宽度（= src 列数）
+```
+
+扁平下标的算术**全程在 i32 中计算**，仅在最后把成品 row-major `[n, d]` 下标通过一条 `tile.cast` 窄化到 `pto.tscatter` 要求的宽度（2 字节数据用 i16，4 字节用 i32）。全程 i32 保证每个中间 tile 都是规范的、32 字节对齐的 row-major 布局——更早窄化要么作用在 `col_major [n, 1]` 视图上（`tile.cast` 会错位），要么产生不对齐的 2 字节 `[b, s]` tile（`cols * 2` 字节不满足 32 字节对齐）。
+
+生成的 PTO 算子时序（FP32，`[32, 32]` input、`[2, 8]` index、`[16, 32]` src）：
+
+| # | PTO 算子 | 产出 |
+| - | -------- | ---- |
+| 1–3 | `pto.tload` ×3 | `input_tile`、`index_tile`、`src_tile` |
+| 4 | `pto.tci` | 列 arange `[1, d]` = `0..d-1` |
+| 5 | `pto.texpands` | 零模板 `[n, d]` |
+| 6 | `pto.tcolexpand` | `col_nd[k, c] = c` |
+| 7 | `pto.tmuls` | `row_base[k] = index.flat[k] * d`（index reshape 成 `[n, 1]`） |
+| 8 | `pto.trowexpandadd` | `flat_idx = col_nd + row_base` → `[n, d]` |
+| 8a | `pto.tcvt` | 把 `flat_idx` 窄化 i32→i16（**仅 2 字节 dtype**） |
+| 9 | `pto.texpands` | 置零的散射基底 `[m, d]` |
+| 10 | `pto.tscatter` | `scattered` = src 散射进零基底（命中位 = src，未命中 = 0） |
+| 11–12 | `pto.texpands` ×2 | mask 零基底 `[m, d]`、ones 源 `[n, d]` |
+| 13 | `pto.tscatter` | `mask` = ones 散射进零基底（命中位 = 1，未命中 = 0） |
+| 14 | `pto.tcmps` | `pred = (mask != 0)` |
+| 15 | `pto.tsel` | `out = sel(pred, scattered, input_tile)` |
+| 16 | `pto.tstore` | 把 `out` 写回输出张量 |
+
+用 `tile.sel`（而非 `input * mask`）重建保留混合，使下沉不产生 `pto.tmul`（A2/A3 对 bf16/i8 拒绝 `tmul`）。index 的 `reshape [b, s] → [n, 1]` 是 buffer 视图重命名，不是单独的 PTO 算子。
+
 ## 示例
 
 **转换前**：

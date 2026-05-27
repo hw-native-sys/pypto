@@ -83,6 +83,26 @@ namespace {
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 
+// MaterializeRuntimeScopes wraps the orchestration function body and each
+// ForStmt / IfStmt branch body in an AUTO ``RuntimeScopeStmt`` so codegen emits
+// ``PTO2_SCOPE()`` 1:1 from the IR. The structural analyses below inspect those
+// bodies with hand-written traversals (GetLastYieldStmt, FlattenToStmts) that do
+// not descend through a scope node. ``UnwrapAutoScope`` peeks through a single
+// leading AUTO scope so those analyses see the original statements. Manual
+// scopes are intentionally left opaque — they were never auto-wrapped.
+StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
+  if (auto scope = As<RuntimeScopeStmt>(stmt); scope && !scope->manual_) {
+    return UnwrapAutoScope(scope->body_);
+  }
+  // A user-written ``with pl.auto_scope():`` body may arrive as a single-statement
+  // SeqStmts wrapper (before NormalizeStmtStructure collapses it); peek through it
+  // (and any nested AUTO scopes) so the analyses still reach the real statements.
+  if (auto seq = As<SeqStmts>(stmt); seq && seq->stmts_.size() == 1) {
+    return UnwrapAutoScope(seq->stmts_[0]);
+  }
+  return stmt;
+}
+
 // The runtime primitive ``Arg::set_dependencies(ptr, count)`` has no upper
 // bound on the explicit dep count, and codegen sizes each call's
 // ``PTO2TaskId <task>_deps[K]`` stack array to its exact edge count, so there
@@ -136,6 +156,11 @@ int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const Function
         }
       } else if (auto while_stmt = As<WhileStmt>(stmt)) {
         scan_stmts(transform_utils::FlattenToStmts(while_stmt->body_));
+      } else if (auto scope = As<RuntimeScopeStmt>(stmt)) {
+        // MaterializeRuntimeScopes wraps the function body and for/if bodies in
+        // AUTO RuntimeScopeStmt; descend so nested initialize_pipe calls and
+        // loops remain visible to GM-pipe workspace sizing.
+        scan_stmts(transform_utils::FlattenToStmts(scope->body_));
       }
     }
   };
@@ -297,14 +322,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     return CodegenBase::TryGetVarName(expr);
   }
-  [[nodiscard]] std::string GetTensorDataPtr(const std::string& name) const override {
-    auto it = param_name_to_orch_index_.find(name);
-    if (it != param_name_to_orch_index_.end()) {
-      return "orch_args.tensor(" + std::to_string(it->second) + ").data_as<void>()";
-    }
-    return name + ".data";
-  }
-
   [[nodiscard]] std::string GetTensorShapeDim(const std::string& name, int64_t axis) const override {
     auto it = param_name_to_orch_index_.find(name);
     if (it != param_name_to_orch_index_.end()) {
@@ -366,8 +383,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     //     issue #1286.
     //
     // We need to know which case applies before visiting the body, so we look
-    // up the yield once here.
-    auto yield = transform_utils::GetLastYieldStmt(for_stmt->body_);
+    // up the yield once here. The body may be wrapped in an AUTO scope by
+    // MaterializeRuntimeScopes; peek through it so the trailing yield is found.
+    auto yield = transform_utils::GetLastYieldStmt(UnwrapAutoScope(for_stmt->body_));
     std::vector<bool> is_rebind(for_stmt->iter_args_.size(), false);
     if (yield) {
       INTERNAL_CHECK_SPAN(yield->value_.size() == for_stmt->iter_args_.size(), for_stmt->span_)
@@ -729,14 +747,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     indent_ += 4;
     PushCppScope();
 
-    // Inside a MANUAL scope, the runtime forbids nested AUTO scope, so we
-    // omit the implicit ``PTO2_SCOPE()`` wrapper around the loop body.
-    bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
-    if (emit_implicit_scope) {
-      code_ << Indent() << "PTO2_SCOPE() {\n";
-      indent_ += 4;
-      PushCppScope();
-    }
+    // The implicit ``PTO2_SCOPE()`` wrapper around the loop body is now an
+    // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
+    // (suppressed inside a manual scope); visiting the body emits it 1:1.
 
     auto saved = current_return_vars_;
     // Only register return_vars whose yield is a true rebind. Trivial slots
@@ -768,11 +781,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     current_loop_slot_exprs_.pop_back();
     current_return_vars_ = saved;
 
-    if (emit_implicit_scope) {
-      PopCppScope();
-      indent_ -= 4;
-      code_ << Indent() << "}\n";
-    }
     PopCppScope();
     indent_ -= 4;
     code_ << Indent() << "}\n";
@@ -786,10 +794,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     decltype(array_carry_vars_) saved_array_carry;
     if (scope->manual_) {
       ++in_manual_scope_depth_;
-      saved_map = std::move(manual_task_id_map_);
-      saved_array_carry = std::move(array_carry_vars_);
-      manual_task_id_map_.clear();
-      array_carry_vars_.clear();
+      // Snapshot the outer maps by COPY (not move) so the live map keeps
+      // the outer entries visible inside the manual scope — a kernel inside
+      // a manual scope must be able to fence on TaskIds produced by tasks
+      // emitted in the enclosing (auto or outer-manual) scope. On exit we
+      // restore the outer-only snapshot, discarding the inner-scope adds
+      // (those reference C++ identifiers that die with the inner block).
+      saved_map = manual_task_id_map_;
+      saved_array_carry = array_carry_vars_;
     }
     VisitStmt(scope->body_);
     if (scope->manual_) {
@@ -834,7 +846,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     if (tensor_phi_init.empty()) {
       auto find_in_scope_tensor_var = [&](const StmtPtr& body) -> std::string {
-        auto y = transform_utils::GetLastYieldStmt(body);
+        // The branch body may be wrapped in an AUTO scope by
+        // MaterializeRuntimeScopes; peek through it to reach the trailing yield.
+        auto y = transform_utils::GetLastYieldStmt(UnwrapAutoScope(body));
         if (!y) return {};
         for (const auto& v : y->value_) {
           auto var = AsVarLike(v);
@@ -885,7 +899,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitStmt_(const AssignStmtPtr& assign) override {
     std::string var_name = ReserveVarEmitName(assign->var_.get());
 
-    if (auto call = As<Call>(assign->value_)) {
+    // Funnel Submit through the existing Call codepath via the synthetic
+    // SubmitToCallView adapter (deps_ → attrs[manual_dep_edges]). The IR
+    // still has Submit as the canonical form; only this view is consumed
+    // by the Call-shaped codegen logic.
+    CallPtr call = As<Call>(assign->value_);
+    if (!call) {
+      if (auto submit = As<Submit>(assign->value_)) {
+        call = SubmitToCallView(submit);
+      }
+    }
+    if (call) {
       const std::string& op_name = call->op_->name_;
 
       // Special-case TaskId ops emitted from the DSL surface. The producer
@@ -1199,6 +1223,78 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string value;
   };
 
+  /// Build one ParamEntry from the call-site arg at `arg_idx`. Centralises the
+  /// var/const/scalar dispatch that BuildTaskParams used to inline, so the
+  /// per-callee-param iteration (which interleaves args-derived and
+  /// synthesised entries) can call into it cleanly.
+  ParamEntry BuildOneArgParam(const CallPtr& call, const std::string& callee_name,
+                              const std::vector<ArgDirection>& call_arg_directions, size_t arg_idx) {
+    const auto& arg = call->args_[arg_idx];
+    std::string var_name = TryGetVarName(arg);
+    if (!var_name.empty()) {
+      if (auto scalar_type = As<ScalarType>(arg->GetType())) {
+        std::string cpp_type = scalar_type->dtype_.ToCTypeString();
+        return {ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)};
+      }
+      std::string ext_name = GetExternalTensorName(var_name);
+      return {call_arg_directions[arg_idx], ext_name};
+    }
+    if (auto const_int = As<ConstInt>(arg)) {
+      std::string cpp_type = const_int->dtype().ToCTypeString();
+      std::string value = FormatConstIntValue(const_int, cpp_type);
+      return {ArgDirection::Scalar, "(uint64_t)" + value};
+    }
+    if (auto const_float = As<ConstFloat>(arg)) {
+      std::string cpp_type = const_float->dtype().ToCTypeString();
+      std::string value = FormatConstFloatValue(const_float, cpp_type);
+      return {ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)};
+    }
+    if (auto const_bool = As<ConstBool>(arg)) {
+      return {ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"};
+    }
+    INTERNAL_CHECK_SPAN(false, call->span_) << "Call to '" << callee_name << "' arg " << arg_idx
+                                            << " is neither a variable nor a recognized constant literal "
+                                            << "(unsupported expression kind for orchestration codegen).";
+    return {};  // unreachable
+  }
+
+  /// For a Submit's Out param at callee position `param_idx` that is *not*
+  /// passed in Submit::args_, emit a TensorCreateInfo declaration the runtime
+  /// can use to allocate the output, and return the ParamEntry that consumes
+  /// it via `add_output(<ci>)`. The runtime's TaskOutputTensors exposes
+  /// allocated outputs via `get_ref(i)` in add_output / add_inout order, so
+  /// this entry's runtime position is determined by where it lands in the
+  /// caller's `params` vector relative to other tensor entries.
+  ParamEntry EmitSubmitSynthOutputEntry(const FunctionPtr& callee_func, size_t param_idx) {
+    const auto& param = callee_func->params_[param_idx];
+    auto tensor_ty = As<TensorType>(param->GetType());
+    INTERNAL_CHECK_SPAN(tensor_ty, param->span_)
+        << "Submit synthesised output for callee '" << callee_func->name_ << "' param[" << param_idx
+        << "] must have TensorType, got " << param->GetType()->TypeName();
+
+    const size_t ndim = tensor_ty->shape_.size();
+    std::string ci_var =
+        "params_t" + std::to_string(task_counter_) + "_synth_out_" + std::to_string(param_idx);
+    std::string ind = Indent();
+
+    code_ << ind << "uint32_t " << ci_var << "_shapes[" << ndim << "] = {";
+    for (size_t i = 0; i < ndim; ++i) {
+      if (i > 0) code_ << ", ";
+      std::string dim_str = GenerateExprString(tensor_ty->shape_[i]);
+      if (As<ConstInt>(tensor_ty->shape_[i])) {
+        code_ << dim_str;
+      } else {
+        code_ << "static_cast<uint32_t>(" << dim_str << ")";
+      }
+    }
+    code_ << "};\n";
+
+    code_ << ind << "TensorCreateInfo " << ci_var << "(" << ci_var << "_shapes, " << ndim << ", "
+          << GetRuntimeDataTypeString(tensor_ty->dtype_) << ");\n";
+
+    return {ArgDirection::Output, ci_var};
+  }
+
   std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
     std::vector<ParamEntry> params;
     const std::string& callee_name = callee_func->name_;
@@ -1212,38 +1308,40 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << " but args size " << call->args_.size()
         << ". DeriveCallDirections must run before orchestration codegen.";
 
+    // Args use positional identity mapping against the callee param list
+    // (args_[i] ↔ params_[i]) in both kinds. The difference is *coverage*:
+    //   - Call: args_.size() == params_.size() (full coverage).
+    //   - Submit: args_.size() <= params_.size() (prefix). The trailing
+    //     callee params (indices [args_.size() .. params_.size())) are
+    //     runtime-allocated outputs that must be Out — the IR builder
+    //     appends them at the tail of the callee signature, so we synth an
+    //     add_output(TensorCreateInfo) entry for each. See
+    //     `.claude/rules/pass-submit-awareness.md` §5.
+    params.reserve(callee_func->params_.size());
     for (size_t arg_idx = 0; arg_idx < call->args_.size(); ++arg_idx) {
-      const auto& arg = call->args_[arg_idx];
-      std::string var_name = TryGetVarName(arg);
-      if (!var_name.empty()) {
-        if (auto scalar_type = As<ScalarType>(arg->GetType())) {
-          std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-          params.push_back({ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)});
-          continue;
-        }
-
-        std::string ext_name = GetExternalTensorName(var_name);
-        params.push_back({call_arg_directions[arg_idx], ext_name});
-      } else if (auto const_int = As<ConstInt>(arg)) {
-        std::string cpp_type = const_int->dtype().ToCTypeString();
-        std::string value = FormatConstIntValue(const_int, cpp_type);
-        params.push_back({ArgDirection::Scalar, "(uint64_t)" + value});
-      } else if (auto const_float = As<ConstFloat>(arg)) {
-        std::string cpp_type = const_float->dtype().ToCTypeString();
-        std::string value = FormatConstFloatValue(const_float, cpp_type);
-        params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
-      } else if (auto const_bool = As<ConstBool>(arg)) {
-        params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
-      } else {
-        INTERNAL_CHECK_SPAN(false, call->span_) << "Call to '" << callee_name << "' arg " << arg_idx
-                                                << " is neither a variable nor a recognized constant literal "
-                                                << "(unsupported expression kind for orchestration codegen).";
-      }
+      params.push_back(BuildOneArgParam(call, callee_name, call_arg_directions, arg_idx));
     }
-
-    INTERNAL_CHECK_SPAN(params.size() == call->args_.size(), call->span_)
-        << "Call to '" << callee_name << "' built " << params.size() << " params for " << call->args_.size()
-        << " call args (1:1 invariant violated).";
+    if (IsSubmitCall(call)) {
+      INTERNAL_CHECK_SPAN(call->args_.size() <= callee_func->params_.size(), call->span_)
+          << "Submit to '" << callee_name << "' has args_ size " << call->args_.size()
+          << " but callee has only " << callee_func->params_.size() << " params.";
+      for (size_t param_idx = call->args_.size(); param_idx < callee_func->params_.size(); ++param_idx) {
+        INTERNAL_CHECK_SPAN(callee_func->param_directions_[param_idx] == ParamDirection::Out,
+                            callee_func->params_[param_idx]->span_)
+            << "Submit to '" << callee_name << "' missing positional arg for callee param[" << param_idx
+            << "] which is declared " << ParamDirectionToString(callee_func->param_directions_[param_idx])
+            << " (only Out params may be runtime-allocated).";
+        params.push_back(EmitSubmitSynthOutputEntry(callee_func, param_idx));
+      }
+    } else {
+      // Plain Call: full coverage required (args.size() == callee params).
+      // The trivial `params.size() == call->args_.size()` invariant holds by
+      // construction; the meaningful invariant is callee-side coverage.
+      INTERNAL_CHECK_SPAN(call->args_.size() == callee_func->params_.size(), call->span_)
+          << "Call to '" << callee_name << "' has " << call->args_.size() << " args but callee declares "
+          << callee_func->params_.size()
+          << " params (Call requires full coverage; only Submit may be a prefix).";
+    }
 
     // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
     std::stable_partition(params.begin(), params.end(),
@@ -2116,12 +2214,26 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   /// Emit aliases for a ``pl.submit(...)`` kernel call. Tuple elements
-  /// ``0..N-1`` are the kernel's results — the Out/InOut-tensor elements are
-  /// aliased to the corresponding call args, exactly like an ordinary
-  /// multi-output kernel call. Element ``N`` (the trailing ``Scalar[TASK_ID]``)
-  /// is the producer TaskId: it is bound to ``task_<idx>_outs.task_id()`` and
-  /// registered in ``manual_task_id_map_`` so a downstream ``deps=[tid]``
-  /// resolves to the emitted name.
+  /// ``0..N-1`` are the kernel's results — element ``N`` (the trailing
+  /// ``Scalar[TASK_ID]``) is the producer TaskId, bound to
+  /// ``task_<idx>_outs.task_id()`` and registered in ``manual_task_id_map_``
+  /// so a downstream ``deps=[tid]`` resolves to it.
+  ///
+  /// For the Out/InOut tuple elements, the aliasing target depends on whether
+  /// the callee param is *caller-allocated* (in Submit's args_) or
+  /// *runtime-allocated* (callee param index >= Submit args_.size()):
+  ///   - Caller-allocated (param_idx < args_.size()): alias to
+  ///     ``call->args_[param_idx]`` — the original tensor variable the user
+  ///     passed in. The runtime's ``TaskOutputTensors`` stores only
+  ///     ``add_output`` entries (see runtime/.../pto_types.h:72 — "Only
+  ///     runtime-created outputs are stored here"), so ``add_inout`` /
+  ///     in-args ``add_output(Tensor&)`` slots do **not** appear in
+  ///     ``task_<idx>_outs`` and ``get_ref`` would skip past them or assert.
+  ///   - Runtime-allocated (param_idx >= args_.size()): alias to
+  ///     ``task_<idx>_outs.get_ref(runtime_out_pos)`` where
+  ///     ``runtime_out_pos = param_idx - args_.size()`` because
+  ///     ``BuildTaskParams`` appends one synth ``add_output`` per callee Out
+  ///     in the tail, in callee param order.
   void GenerateSubmitReturnAliases(const CallPtr& call, int task_idx) {
     auto tuple_key_it = call_to_tuple_key_.find(call.get());
     if (tuple_key_it == call_to_tuple_key_.end()) return;
@@ -2146,7 +2258,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // referencing the SSA result still need a binding to the runtime output
     // tensor. Looking only at ``ArgDirection`` would drop those bindings and
     // produce undeclared ``__rv_*`` symbols in the emitted code.
-    auto call_arg_directions = call->GetArgDirections();
     auto effective_dirs = GetEffectiveDirections(callee);
     std::vector<size_t> out_indices;
     for (size_t i = 0; i < effective_dirs.size(); ++i) {
@@ -2156,7 +2267,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     // Map the kernel-result portion (tuple elements ``[0, n_outs)``) onto the
-    // Out/InOut args. Some wrappers (notably SPMD helpers) return auxiliary
+    // Out/InOut params. Some wrappers (notably SPMD helpers) return auxiliary
     // scalars *before* the tensor outputs — mirror ``GenerateTupleReturnAliases``
     // and tail-align: result element ``elem_pos`` is an Out/InOut tensor iff
     // ``elem_pos >= tuple_out_base``, where ``tuple_out_base`` skips the
@@ -2184,34 +2295,38 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (out_pos >= out_indices.size()) continue;
       if (!effective_uses_.count(elem.var)) continue;
       size_t param_idx = out_indices[out_pos];
-      INTERNAL_CHECK_SPAN(param_idx < call->args_.size(), call->span_)
-          << "Internal error: submit output element " << elem_pos << " maps to param_idx " << param_idx
-          << " out of range for " << call->op_->name_;
       std::string elem_name = ReserveVarEmitName(elem.var);
-      EmitTensorAlias(elem_name, call, param_idx);
+      if (param_idx < call->args_.size()) {
+        // Caller-allocated: the param was passed positionally as an arg.
+        // Alias to the arg's emit name — runtime tracks producer via the
+        // submitted task, but TaskOutputTensors does NOT contain this slot.
+        EmitTensorAlias(elem_name, call, param_idx);
+      } else {
+        // Runtime-allocated: BuildTaskParams synthesised an add_output for
+        // this param at runtime output position (param_idx - args_.size()).
+        size_t runtime_out_pos = param_idx - call->args_.size();
+        std::string source =
+            "task_" + std::to_string(task_idx) + "_outs.get_ref(" + std::to_string(runtime_out_pos) + ")";
+        if (IsMutableTensorNameInCurrentScope(elem_name)) {
+          code_ << Indent() << elem_name << " = " << source << ";\n";
+        } else {
+          code_ << Indent() << "const Tensor& " << elem_name << " = " << source << ";\n";
+        }
+      }
     }
   }
 
   void VisitScopedBranchBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
     indent_ += 4;
     PushCppScope();
-    bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
-    if (emit_implicit_scope) {
-      code_ << Indent() << "PTO2_SCOPE() {\n";
-      indent_ += 4;
-      PushCppScope();
-    }
-
+    // The implicit ``PTO2_SCOPE()`` wrapper around the branch body is now an
+    // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
+    // (suppressed inside a manual scope); visiting the body emits it 1:1.
     auto saved = current_return_vars_;
     current_return_vars_.assign(return_vars.begin(), return_vars.end());
     VisitStmt(body);
     current_return_vars_ = saved;
 
-    if (emit_implicit_scope) {
-      PopCppScope();
-      indent_ -= 4;
-      code_ << Indent() << "}\n";
-    }
     PopCppScope();
     indent_ -= 4;
   }
@@ -2380,7 +2495,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return EvalConstTripCount(for_stmt);
     }
     if (for_stmt->kind_ != ForKind::Sequential) return 0;
-    auto yield = transform_utils::GetLastYieldStmt(for_stmt->body_);
+    // Body may be wrapped in an AUTO scope by MaterializeRuntimeScopes.
+    auto yield = transform_utils::GetLastYieldStmt(UnwrapAutoScope(for_stmt->body_));
     if (!yield || idx >= yield->value_.size()) return 0;
     auto yield_var = AsVarLike(yield->value_[idx]);
     if (!yield_var) return 0;
@@ -2432,7 +2548,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///     across iterations). Each element of the vector is the C++ expression
   ///     naming one slot of the array (e.g. ``out_arr[0]``, ``out_arr[1]``).
   ///     EmitManualDeps fills each valid slot into the ``<task>_deps`` array.
-  /// Cleared on entry to each manual scope.
+  /// On entry to a manual scope, snapshotted (by copy) and restored on exit
+  /// so the outer entries remain visible *inside* the inner scope while the
+  /// inner-scope adds — which reference C++ identifiers that die with the
+  /// inner block — are discarded once the manual scope exits.
   std::unordered_map<const Var*, std::variant<int, std::string, std::vector<std::string>>>
       manual_task_id_map_;
   /// Records the C++ array allocation backing a TaskId carry that holds an
@@ -2548,7 +2667,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
   stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
-  stmt_codegen.SetInitialIndent(8);
+  // MaterializeRuntimeScopes wraps the whole body in an AUTO RuntimeScopeStmt,
+  // so the outermost ``PTO2_SCOPE()`` is now emitted by the scope handler at the
+  // base indent (4) rather than by a hardcoded wrapper below; the body lands at 8.
+  stmt_codegen.SetInitialIndent(4);
   stmt_codegen.VisitStmt(func->body_);
 
   oss << GenerateIncludes(false);
@@ -2588,9 +2710,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     }
   }
 
-  oss << "\n    PTO2_SCOPE() {\n";
+  // The outermost PTO2_SCOPE() is now an explicit RuntimeScopeStmt emitted by
+  // stmt_codegen (see MaterializeRuntimeScopes); just splice its output in.
+  oss << "\n";
   oss << stmt_codegen.GetGeneratedCode();
-  oss << "    }\n";
 
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";

@@ -869,6 +869,30 @@ void BindIR(nb::module_& m) {
 
   BindFields<Call>(call_class);
 
+  // Submit - task-launch expression (see include/pypto/ir/expr.h Submit class)
+  auto submit_class = nb::class_<Submit, Expr>(ir, "Submit", "Task-launch expression (pl.submit)");
+
+  submit_class.def(nb::init<const OpPtr&, const std::vector<ExprPtr>&, const std::vector<ExprPtr>&,
+                            const TypePtr&, const Span&>(),
+                   nb::arg("op"), nb::arg("args"), nb::arg("deps"), nb::arg("type"), nb::arg("span"),
+                   "Create a Submit expression");
+
+  submit_class.def(
+      "__init__",
+      [](Submit* self, const OpPtr& op, const std::vector<ExprPtr>& args, const std::vector<ExprPtr>& deps,
+         const nb::dict& kwargs_dict, const nb::object& attrs_or_none, const TypePtr& type,
+         const Span& span) {
+        auto kwargs = ConvertKwargsDict(kwargs_dict);
+        auto attrs = ConvertAttrsFromPython(attrs_or_none);
+        new (self) Submit(op, args, deps, std::move(kwargs), std::move(attrs), type, span);
+      },
+      nb::arg("op"), nb::arg("args"), nb::arg("deps"), nb::arg("kwargs"), nb::arg("attrs").none(),
+      nb::arg("type"), nb::arg("span"),
+      "Create a Submit expression with kwargs and explicit attrs map and type. "
+      "Reserved attrs keys: 'arg_directions' -> list[ArgDirection].");
+
+  BindFields<Submit>(submit_class);
+
   // Convert a vector<pair<string, any>> kwargs/attrs container to a Python dict.
   auto kwargs_to_pydict = [](const std::vector<std::pair<std::string, std::any>>& items) {
     nb::dict result;
@@ -944,6 +968,27 @@ void BindIR(nb::module_& m) {
   call_class.def_prop_ro(
       "arg_directions",
       [](const CallPtr& self) {
+        nb::list result;
+        for (auto d : self->GetArgDirections()) {
+          result.append(nb::cast(d));
+        }
+        return result;
+      },
+      "Resolved per-argument call-site directions (empty list when not yet derived). "
+      "Stored under attrs['arg_directions'].");
+
+  submit_class.def_prop_ro(
+      "kwargs", [kwargs_to_pydict](const SubmitPtr& self) { return kwargs_to_pydict(self->kwargs_); },
+      "Keyword arguments (metadata) for this submit");
+
+  submit_class.def_prop_ro(
+      "attrs", [kwargs_to_pydict](const SubmitPtr& self) { return kwargs_to_pydict(self->attrs_); },
+      "Compiler-internal node metadata. Reserved keys: 'arg_directions' -> list[ArgDirection]. "
+      "Note: 'manual_dep_edges' is intentionally NOT used on Submit — see Submit.deps.");
+
+  submit_class.def_prop_ro(
+      "arg_directions",
+      [](const SubmitPtr& self) {
         nb::list result;
         for (auto d : self->GetArgDirections()) {
           result.append(nb::cast(d));

@@ -226,9 +226,30 @@ static codegen::TileTypeComponents InferSubviewTileTypeComponents(const ir::Tile
   c.v_row_dynamic = true;
   c.v_col_dynamic = true;
 
+  // PTOAS infers the subview result's static valid from the slice's `sizes`
+  // whenever the parent's static type string carries `v_row=?, v_col=?`.
+  // Non-subview tile types always render that way (see ExtractTileTypeInfo in
+  // pto_type_utils.cpp) — even when the IR's `tile_view_.valid_shape` is set —
+  // so reading the parent's IR valid here can diverge from PTOAS. The case
+  // that surfaces in practice is SplitVectorKernel's lane1 [0, 0] sentinel
+  // (set by WithZeroValidShape on cloned lane1 ops): the parent prints as `?`
+  // but its IR valid is `[0, 0]`, producing a `v_row=0, v_col=0` result that
+  // PTOAS rejects (issue #1507).
+  //
+  // Special-case only the all-zero sentinel; for every other narrow valid
+  // (e.g., parent subviews whose deducer propagated a real `v_row/v_col`)
+  // keep the existing inference so nested subviews still type correctly.
   std::vector<ir::ExprPtr> source_valid = source_tile_type.shape_;
   if (source_tile_type.tile_view_.has_value() && source_tile_type.tile_view_->valid_shape.size() >= 2) {
-    source_valid = source_tile_type.tile_view_->valid_shape;
+    const auto& parent_valid = source_tile_type.tile_view_->valid_shape;
+    const bool is_zero_sentinel =
+        std::all_of(parent_valid.begin(), parent_valid.end(), [](const ir::ExprPtr& e) {
+          auto c = As<ir::ConstInt>(e);
+          return c && c->value_ == 0;
+        });
+    if (!is_zero_sentinel) {
+      source_valid = parent_valid;
+    }
   }
 
   auto infer_dim = [&](size_t dim_idx, int64_t size, int64_t* out_value, bool* out_dynamic) {
@@ -1118,122 +1139,6 @@ static std::string MakeMrgSort1CodegenPTO(const std::string& pto_op_name, const 
   codegen.Emit(oss.str());
   return "";
 }
-
-// Helper function for tile.scatter_update:
-// Implements scatter_update as an in-place update on the input tile in Vec memory:
-//   for i in [0, b):
-//     for j in [0, s):
-//       row = index[i, j]
-//       row_tile = pto.textract(src, i*s + j, 0)   // whole [1, d] row
-//       pto.tinsert(row_tile -> input, row, 0)     // write [1, d] row in-place
-//
-// Using pto.textract / pto.tinsert avoids an inner per-element scalar loop over
-// the feature dim (d), which is the performance-sensitive axis.
-static std::string MakeScatterUpdateCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
-  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 4) << op->op_->name_ << " requires 4 arguments (input, index, src, scratch), got "
-                               << op->args_.size();
-
-  auto input_type = ir::As<ir::TileType>(op->args_[0]->GetType());
-  auto index_type = ir::As<ir::TileType>(op->args_[1]->GetType());
-  auto src_type = ir::As<ir::TileType>(op->args_[2]->GetType());
-  INTERNAL_CHECK(input_type && index_type && src_type)
-      << "Internal error: tile.scatter_update arguments must be TileType";
-  CHECK(input_type->shape_.size() == 2 && src_type->shape_.size() == 2)
-      << "tile.scatter_update PTO lowering currently supports 2D input/src only, got input rank "
-      << input_type->shape_.size() << ", src rank " << src_type->shape_.size();
-
-  std::string index_ssa = codegen.GetExprAsCode(op->args_[1]);
-  std::string src_ssa = codegen.GetExprAsCode(op->args_[2]);
-
-  std::string index_type_str = codegen.GetExprTypeAnnotation(op->args_[1]);
-  std::string src_type_str = codegen.GetExprTypeAnnotation(op->args_[2]);
-
-  std::string input_ssa = codegen.GetExprAsCode(op->args_[0]);
-  std::string dst = codegen.GetCurrentResultTarget();
-  std::string dst_type_str = codegen.GetCurrentResultTileBufTypeString();
-
-  // Dimensions: index is [b, s], input is [rows, d], src is [b*s, d].
-  int64_t b_val = codegen.GetConstIntValue(index_type->shape_[0]);
-  int64_t s_val = codegen.GetConstIntValue(index_type->shape_[1]);
-
-  // Emit constants
-  std::string c0 = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
-  std::string c1 = codegen.GetOrEmitConstant(int64_t{1}, DataType::INDEX);
-  std::string cb = codegen.GetOrEmitConstant(int64_t{b_val}, DataType::INDEX);
-  std::string cs = codegen.GetOrEmitConstant(int64_t{s_val}, DataType::INDEX);
-
-  // Scalar type for the scalar index read
-  std::string index_scalar_type = codegen.GetTypeString(index_type->dtype_);
-
-  // scatter_update is marked output_reuses_input(0), so dst aliases input in Vec memory.
-  INTERNAL_CHECK(!dst.empty()) << "tile.scatter_update requires a result buffer";
-  INTERNAL_CHECK(dst == input_ssa)
-      << "Internal error: tile.scatter_update result SSA must alias input SSA, got dst=" << dst
-      << ", input=" << input_ssa;
-
-  // Caller-allocated [1, d] scratch tile (4th arg) — gives PTO an addressed alloc_tile
-  // for the per-row staging buffer, avoiding ad-hoc codegen-side allocations.
-  std::string row_tile = codegen.GetExprAsCode(op->args_[3]);
-  std::string row_tile_type_str = codegen.GetExprTypeAnnotation(op->args_[3]);
-
-  // for i in [0, b)
-  std::string i_var = codegen.NewNamedTemp("i");
-  codegen.Emit("scf.for " + i_var + " = " + c0 + " to " + cb + " step " + c1 + " {");
-  codegen.IncreaseIndent();
-
-  // for j in [0, s)
-  std::string j_var = codegen.NewNamedTemp("j");
-  codegen.Emit("scf.for " + j_var + " = " + c0 + " to " + cs + " step " + c1 + " {");
-  codegen.IncreaseIndent();
-
-  // idx = i * s + j  — flat offset into index and also src row index (src is [b*s, d]).
-  std::string idx = EmitFlatOffsetSSAFromValues({i_var, j_var}, index_type->shape_, codegen, "idx");
-
-  // row_i32 = index[i, j]  (scalar read from the index tile)
-  std::string row_i32 = codegen.NewNamedTemp("row_i32");
-  {
-    std::ostringstream tgetval;
-    tgetval << row_i32 << " = pto.tgetval ins(" << index_ssa << ", " << idx;
-    if (!index_type_str.empty()) tgetval << " : " << index_type_str << ", index";
-    tgetval << ") outs : " << index_scalar_type;
-    codegen.Emit(tgetval.str());
-  }
-
-  std::string row_idx = codegen.NewNamedTemp("row_idx");
-  codegen.Emit(row_idx + " = arith.index_cast " + row_i32 + " : " + index_scalar_type + " to index");
-
-  // row_tile = src[idx, 0 : 1, d]
-  {
-    std::ostringstream textract;
-    textract << "pto.textract ins(" << src_ssa << ", " << idx << ", " << c0;
-    if (!src_type_str.empty()) textract << " : " << src_type_str << ", index, index";
-    textract << ") outs(" << row_tile;
-    if (!row_tile_type_str.empty()) textract << " : " << row_tile_type_str;
-    textract << ")";
-    codegen.Emit(textract.str());
-  }
-
-  // dst[row_idx, 0 : 1, d] = row_tile
-  {
-    std::ostringstream tinsert;
-    tinsert << "pto.tinsert ins(" << row_tile << ", " << row_idx << ", " << c0;
-    if (!row_tile_type_str.empty()) tinsert << " : " << row_tile_type_str << ", index, index";
-    tinsert << ") outs(" << dst;
-    if (!dst_type_str.empty()) tinsert << " : " << dst_type_str;
-    tinsert << ")";
-    codegen.Emit(tinsert.str());
-  }
-
-  codegen.DecreaseIndent();
-  codegen.Emit("}");
-
-  codegen.DecreaseIndent();
-  codegen.Emit("}");
-
-  return "";
-}
-
 // Helper function for Print
 static std::string MakePrintCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                        codegen::CodegenBase& codegen_base) {
@@ -2303,8 +2208,10 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
   // EmitCastToIndex (no-op when already index-typed).
   std::string peer_ssa = codegen.EmitCastToIndex(peer_expr, codegen.GetExprAsCode(peer_expr));
 
-  // (1) Call the per-dtype offset helper.
-  const std::string func_name = codegen::PTOCodegen::GetCommRemoteOffsetFuncName(target.type->dtype_);
+  // (1) Call the per-dtype offset helper. Registering here causes the helper
+  //     definition to be emitted at module-flush time — any new op that calls
+  //     EmitCommRemoteView is wired up automatically, no codegen-side opt-in.
+  const std::string func_name = codegen.RegisterCommRemoteOffsetHelper(target.type->dtype_);
   std::string delems = codegen.NewTemp();
   codegen.Emit(delems + " = func.call @" + func_name + "(" + target.ctx_ssa + ", " + peer_ssa +
                ") : (!pto.ptr<i64>, index) -> index");
@@ -2514,55 +2421,43 @@ static std::string MakeWaitCodegenPTO(const CallPtr& op, codegen::CodegenBase& c
   return "";
 }
 
-// pld.tensor.put(dst, peer, src, *, atomic) — synchronous cross-rank bulk write
-// of the local slice `src` into the peer rank's slice of `dst`. dst and src
-// share dtype and (verified) static shape. Lowers to:
+// pld.tile.put(dst, peer, src, stage, *, atomic) — synchronous cross-rank bulk
+// write of the local slice `src` into the peer rank's slice of `dst`. `stage`
+// is a VEC scratch TileType pre-allocated by an IR-level `tile.create` (so the
+// memory allocator gives it a UB address before codegen — --pto-level=level3).
+// Lowers to:
 //   delems   = func.call @CommRemoteOffset_<dtype>(ctx, peer) : ... -> index
 //   dst_ptr  = pto.addptr <dst_local_ptr>, delems
 //   dst_view = pto.make_tensor_view dst_ptr, shape=..., strides=...
 //   dst_pv   = pto.partition_view dst_view,  offsets=[0,..], sizes=<shape>
 //   src_pv   = pto.partition_view <src_local_view>, offsets=[0,..], sizes=<shape>
-//   %stage   = pto.alloc_tile : !pto.tile_buf<loc=vec, ...>     (auto-allocated)
 //   pto.comm.tput(dst_pv, src_pv, buf(%stage)
 //       : <ptype>, <ptype>, <stage_type>) {atomicType = #pto<atomic_type (atomic_none|atomic_add)>}
-//
-// The VEC staging tile is synthesised here (the user never sees it): TPUT
-// copies GM->GM through a VEC bounce buffer, so codegen sizes one ping tile to
-// the (2-D flattened) transfer extent. PTOAS validates the staging type
-// against the partition views — a mismatch surfaces there rather than as
-// silently garbled DMA.
-// VEC staging tile_buf fractal for the TPUT lowering. 512 is the codebase-wide
-// default tile_buf fractal (see TileTypeComponents::fractal in
-// include/pypto/codegen/pto/pto_type_utils.h and tile_buf_signature.h); the
-// staging tile carries no special layout requirement, so it inherits that default.
-static constexpr uint64_t kTputVecStagingFractal = 512;
-
 static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "pld.tensor.put requires 3 arguments (dst, peer, src), got "
+  CHECK(op->args_.size() == 4) << "pld.tile.put requires 4 arguments (dst, peer, src, stage), got "
                                << op->args_.size();
 
   // dst: remote (peer-addressed) DistributedTensor destination.
-  auto dst_binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.tensor.put");
+  auto dst_binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.tile.put");
 
   // src: local DistributedTensor source — reuses the local tensor_view created
   // by EmitMakeTensorViews (no peer arithmetic, like wait's signal).
   auto src_var = AsVarLike(op->args_[2]);
-  CHECK(src_var) << "pld.tensor.put src must be a Var-like expression";
+  CHECK(src_var) << "pld.tile.put src must be a Var-like expression";
   auto src_dist = As<ir::DistributedTensorType>(src_var->GetType());
-  CHECK(src_dist) << "pld.tensor.put src must be DistributedTensorType, got "
-                  << src_var->GetType()->TypeName();
+  CHECK(src_dist) << "pld.tile.put src must be DistributedTensorType, got " << src_var->GetType()->TypeName();
 
   const int atomic_int = op->GetKwarg<int>("atomic", 0);
   CHECK(atomic_int == static_cast<int>(ir::AtomicType::kNone) ||
         atomic_int == static_cast<int>(ir::AtomicType::kAdd))
-      << "pld.tensor.put atomic kwarg must encode AtomicType::kNone or kAdd, got " << atomic_int;
+      << "pld.tile.put atomic kwarg must encode AtomicType::kNone or kAdd, got " << atomic_int;
   const std::string atomic_attr =
       atomic_int == static_cast<int>(ir::AtomicType::kAdd) ? "atomic_add" : "atomic_none";
 
   const auto& shape = dst_binding.type->shape_;
   const size_t rank = shape.size();
-  INTERNAL_CHECK_SPAN(rank >= 1, op->span_) << "pld.tensor.put requires rank >= 1";
+  INTERNAL_CHECK_SPAN(rank >= 1, op->span_) << "pld.tile.put requires rank >= 1";
   const std::string dtype_str = codegen.GetTypeString(dst_binding.type->dtype_);
 
   // Full-slice partition views: offsets all-zero, sizes = full shape. dst and
@@ -2589,17 +2484,10 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   std::string src_pview = EmitPartitionViewPTO(src_var->name_hint_ + "_local", src_local_view, src_view_type,
                                                partition_type, zero_offsets, size_ssa, codegen);
 
-  // Synthesise a VEC staging tile_buf sized to the 2-D-flattened transfer:
-  // rows = product of leading dims, cols = innermost dim (rank-1 -> 1xN).
-  int64_t cols = codegen.GetConstIntValue(shape[rank - 1]);
-  int64_t rows = 1;
-  for (size_t i = 0; i + 1 < rank; ++i) {
-    rows *= codegen.GetConstIntValue(shape[i]);
-  }
-  std::string stage_type = codegen::FormatTileBufTypeString(
-      "vec", dtype_str, rows, cols, ir::TileLayout::row_major, ir::TileLayout::none_box,
-      kTputVecStagingFractal, ir::PadValue::null, /*v_row=*/rows, /*v_col=*/cols);
-  std::string stage = codegen.AllocNewTileBuf(stage_type, "tput_stage");
+  std::string stage = codegen.GetExprAsCode(op->args_[3]);
+  std::string stage_type = codegen.GetExprTypeAnnotation(op->args_[3]);
+  INTERNAL_CHECK_SPAN(!stage_type.empty(), op->span_)
+      << "Internal error: pld.tile.put stage tile " << stage << " has no tile_buf type annotation";
 
   std::ostringstream tput;
   tput << "pto.comm.tput(" << dst_pview << ", " << src_pview << ", buf(" << stage << ") : " << partition_type
@@ -3073,7 +2961,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("pld.tensor.get",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeGetCodegenPTO(op, codegen); });
-  reg("pld.tensor.put",
+  reg("pld.tile.put",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakePutCodegenPTO(op, codegen); });
   reg("tile.transpose", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileTransposeCodegenPTO(op, codegen);
@@ -3190,10 +3078,6 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   // TupleGetItemExpr consumers (parser desugars `dst, cdst = ...`).
   reg("tile.gather_compare", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeGatherCompareCodegenPTO(op, codegen);
-  });
-  // tile.scatter_update: update input rows at scatter indices with src rows
-  reg("tile.scatter_update", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
-    return MakeScatterUpdateCodegenPTO(op, codegen);
   });
   // tile.scatter (TSCATTER index form, DPS): 3-input op (dst, src, indexes).
   reg("tile.scatter", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

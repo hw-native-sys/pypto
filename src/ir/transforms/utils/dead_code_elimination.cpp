@@ -66,6 +66,13 @@ bool IsSideEffectOp(const StmtPtr& stmt) {
                                                                   "system.import_peer_buffer",
                                                                   "system.aic_initialize_pipe",
                                                                   "system.aiv_initialize_pipe"};
+  // A Submit launches an asynchronous task — intrinsically side-effecting
+  // regardless of the kernel's body. Short-circuit so a Submit assignment is
+  // never classified as a removal candidate.
+  ExprPtr value;
+  if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) value = assign->value_;
+  if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) value = eval->expr_;
+  if (value && As<Submit>(value)) return true;
   return side_effect_ops.count(GetStmtOpName(stmt)) > 0;
 }
 
@@ -331,11 +338,12 @@ bool IsRemovableForDefaultDce(const StmtPtr& stmt) {
   return std::dynamic_pointer_cast<const AssignStmt>(stmt) != nullptr && !IsSideEffectOp(stmt);
 }
 
-/// Walk an expression tree and report whether any Call appears — a direct
-/// top-level Call OR a Call nested inside an arithmetic expression. Since
-/// the IR has no purity annotations, any expression containing a Call must
-/// be preserved conservatively.
-class CallFinder : public IRVisitor {
+/// Walk an expression tree and report whether any Call or Submit appears.
+/// Both are call-like and side-effecting from the DCE perspective: a Call
+/// may invoke a kernel with arbitrary side effects, and a Submit launches
+/// an asynchronous task. Either form must be preserved conservatively
+/// because the IR has no purity annotations yet.
+class CallLikeFinder : public IRVisitor {
  public:
   bool found = false;
 
@@ -348,11 +356,15 @@ class CallFinder : public IRVisitor {
     // size which is small.
     IRVisitor::VisitExpr_(op);
   }
+  void VisitExpr_(const SubmitPtr& op) override {
+    found = true;
+    IRVisitor::VisitExpr_(op);
+  }
 };
 
-bool ExprContainsCall(const ExprPtr& expr) {
+bool ExprContainsCallLike(const ExprPtr& expr) {
   if (!expr) return false;
-  CallFinder finder;
+  CallLikeFinder finder;
   finder.VisitExpr(expr);
   return finder.found;
 }
@@ -365,7 +377,7 @@ bool IsRemovableScalarAssign(const StmtPtr& stmt) {
   auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
   if (!assign) return false;
   if (!As<ScalarType>(assign->var_->GetType())) return false;
-  if (ExprContainsCall(assign->value_)) return false;
+  if (ExprContainsCallLike(assign->value_)) return false;
   return true;
 }
 

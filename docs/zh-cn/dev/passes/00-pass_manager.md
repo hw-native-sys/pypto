@@ -87,6 +87,7 @@ struct PassProperties {
 | ExpandManualPhaseFence | SSAForm, NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved | SSAForm, NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved | — |
 | CollectCommGroups | — | CommGroupsCollected | — |
 | Simplify | — | — | — |
+| MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
 
 > **注意**：VerifySSA 和 TypeCheck 是**属性验证器 (PropertyVerifier)**（验证规则），不是 Pass。它们通过 `VerificationInstrument` 或 `run_verifier()` 工具函数运行——参见[验证器](99-verifier.md)。
 
@@ -395,6 +396,7 @@ with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.A
 22. [`ExpandManualPhaseFence`](35-expand_manual_phase_fence.md)（manual-scope phase-fence TaskId 依赖压缩）
 23. [`CollectCommGroups`](36-collect_comm_groups.md)（分布式：构造 WindowBuffer 并写 Program.comm_groups_；无通信程序为 no-op）
 24. `Simplify`
+25. [`MaterializeRuntimeScopes`](37-materialize_runtime_scopes.md)（插入 AUTO RuntimeScopeStmt，使 orchestration codegen 1:1 emit PTO2_SCOPE）
 
 `DebugTileOptimization` 只是用于排查 PTO tile 阶段的调试策略，会跳过
 tensor-only 前缀 pass。正常编译和非 strategy 专项测试都应优先使用

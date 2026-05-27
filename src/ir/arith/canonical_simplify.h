@@ -94,6 +94,7 @@ class CanonicalSimplifier::Impl : public ExprFunctor<ExprPtr> {
   ExprPtr VisitExpr_(const MemRefPtr& op) override;
   ExprPtr VisitExpr_(const WindowBufferPtr& op) override;
   ExprPtr VisitExpr_(const CallPtr& op) override;
+  ExprPtr VisitExpr_(const SubmitPtr& op) override;
   ExprPtr VisitExpr_(const MakeTuplePtr& op) override;
   ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override;
 

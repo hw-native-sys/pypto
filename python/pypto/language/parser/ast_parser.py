@@ -984,7 +984,25 @@ class ASTParser:
             self._parse_alloc_window_buffer_assignment(stmt.target, stmt.value)
             return
 
-        value_expr = self.parse_expression(stmt.value)
+        # Printer round-trip: ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)``.
+        # The annotation is checked against the inferred Submit type below
+        # via the standard ``override_type`` validation path; the single-LHS
+        # Submit handler builds the Submit and binds it to ``var_name`` directly.
+        if _is_pl_call(stmt.value, "submit"):
+            if not isinstance(stmt.target, ast.Name):
+                raise ParserSyntaxError(
+                    "Annotated assignment of pl.submit must target a simple variable name",
+                    span=self.span_tracker.get_span(stmt.target),
+                    hint="Use `result: pl.Tuple[..., TASK_ID] = pl.submit(self.kernel, ...)`.",
+                )
+            # Build the Submit Expr and fall through to the standard
+            # annotation-consistency / override_type validation path below —
+            # so ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)`` actually
+            # validates the annotation against the inferred Submit return
+            # type the way every other annotated RHS does.
+            value_expr = self._build_submit_single_lhs_expr(stmt.value)
+        else:
+            value_expr = self.parse_expression(stmt.value)
 
         # Validate annotation against inferred type; use annotation as override only for memref
         override_type = None
@@ -1122,7 +1140,7 @@ class ASTParser:
             return existing_var
         return self.builder.let(var_name, value_expr, type=override_type, span=span)
 
-    def parse_assignment(self, stmt: ast.Assign) -> None:
+    def parse_assignment(self, stmt: ast.Assign) -> None:  # noqa: PLR0912
         """Parse regular assignment: var = value or tuple unpacking.
 
         Args:
@@ -1180,6 +1198,16 @@ class ASTParser:
             if isinstance(target, ast.Name):
                 var_name = target.id
                 span = self.span_tracker.get_span(stmt)
+
+                # ``result = pl.submit(self.kernel, ...)`` — single-LHS bind of
+                # a Submit to a Tuple-typed Var. Round-trips the printer's
+                # single-LHS form for a Submit whose AssignStmt LHS is a fresh
+                # tuple temp (e.g. after a pass rewrite). The unpacking form
+                # ``out, tid = pl.submit(...)`` continues to go through
+                # ``_parse_submit_assignment``.
+                if _is_pl_call(stmt.value, "submit"):
+                    self._parse_submit_single_lhs(target, stmt.value)
+                    return
 
                 # Check if this is a yield assignment: var = pl.yield_(...)
                 if isinstance(stmt.value, ast.Call):
@@ -1345,6 +1373,49 @@ class ASTParser:
         task_id_expr = ir.TupleGetItemExpr(submit_var, n_outs, span)
         tid_var = self._assign_or_let(tid_target.id, task_id_expr, span)
         self.scope_manager.define_var(tid_target.id, tid_var, span=span)
+
+    def _build_submit_single_lhs_expr(self, call: ast.Call) -> ir.Expr:
+        """Build the ``ir.Submit`` expression for the single-LHS form
+        ``result = pl.submit(self.kernel, ...)`` without binding it.
+
+        Separated from :meth:`_parse_submit_single_lhs` so the annotated
+        assignment path can feed the inferred Submit type through the
+        standard annotation-consistency / ``override_type`` validation flow
+        that all other RHS expressions go through.
+        """
+        span = self.span_tracker.get_span(call)
+        if not call.args:
+            raise ParserSyntaxError(
+                "pl.submit(...) requires the kernel as its first argument",
+                span=span,
+                hint="Use `result = pl.submit(self.kernel, *kernel_args, deps=[...])`.",
+            )
+        method_attr = call.args[0]
+        if not (
+            isinstance(method_attr, ast.Attribute)
+            and isinstance(method_attr.value, ast.Name)
+            and method_attr.value.id == "self"
+        ):
+            raise ParserSyntaxError(
+                "pl.submit(...) first argument must be a `self.<kernel>` method reference",
+                span=span,
+                hint="Pass the kernel itself, not a call: "
+                "`pl.submit(self.kernel, x, y)` — not `pl.submit(self.kernel(x, y))`.",
+            )
+        return self._parse_kernel_call(method_attr, call.args[1:], call.keywords, span, as_submit=True)
+
+    def _parse_submit_single_lhs(self, target: ast.Name, call: ast.Call) -> None:
+        """Parse the bare single-LHS form ``result = pl.submit(self.kernel, ...)``.
+
+        Used by :meth:`parse_assignment` (no annotation). The annotated form
+        ``result: pl.Tuple[..., TASK_ID] = pl.submit(...)`` builds the Submit
+        via :meth:`_build_submit_single_lhs_expr` and runs the regular
+        annotation-consistency flow before binding.
+        """
+        span = self.span_tracker.get_span(call)
+        call_expr = self._build_submit_single_lhs_expr(call)
+        var = self._assign_or_let(target.id, call_expr, span)
+        self.scope_manager.define_var(target.id, var, span=span)
 
     def _parse_alloc_window_buffer_assignment(self, target: ast.expr, value: ast.Call) -> None:
         """Parse ``buf = pld.[tensor.]alloc_window_buffer(size)``.
@@ -3010,6 +3081,30 @@ class ASTParser:
         finally:
             self._manual_scope_depth -= 1
 
+    def _parse_auto_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+        """Parse ``with pl.auto_scope():`` into a Runtime scope with manual=False.
+
+        AUTO scopes are the explicit IR form of the orchestration codegen's
+        ``PTO2_SCOPE()`` block (inserted by MaterializeRuntimeScopes). They may
+        nest in one another but not inside a ``manual_scope`` — the runtime
+        forbids AUTO nested in MANUAL.
+        """
+        if context_expr.args or context_expr.keywords:
+            raise ParserSyntaxError(
+                "pl.auto_scope() does not accept arguments",
+                span=self.span_tracker.get_span(stmt),
+                hint="Use 'with pl.auto_scope():' without arguments",
+            )
+        if self._manual_scope_depth > 0:
+            raise ParserSyntaxError(
+                "pl.auto_scope() may not be nested inside a manual scope",
+                span=self.span_tracker.get_span(stmt),
+                hint="The runtime forbids AUTO scope nested in MANUAL scope; "
+                "move the 'with pl.auto_scope():' block outside the manual scope.",
+            )
+        span = self.span_tracker.get_span(stmt)
+        self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=False)
+
     def _parse_legacy_scope(
         self,
         stmt: ast.With,
@@ -3663,6 +3758,11 @@ class ASTParser:
                 # Manual scope: with pl.manual_scope(): ...
                 if func.attr == "manual_scope":
                     self._parse_manual_scope(stmt, context_expr)
+                    return
+
+                # Auto scope: with pl.auto_scope(): ...
+                if func.attr == "auto_scope":
+                    self._parse_auto_scope(stmt, context_expr)
                     return
 
                 # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
@@ -4759,15 +4859,26 @@ class ASTParser:
             attrs["device"] = device_expr
 
         if augment_task_id:
-            # pl.submit: the Call natively returns a flat
-            # Tuple{*<kernel results>, TaskId}. Keeping it flat (rather than
-            # nesting the kernel's own TupleType) lets codegen's existing
-            # tuple-return aliasing map elements 0..N-2 straight to the
-            # kernel's output params and element N-1 to the producer TaskId.
+            # pl.submit emits a first-class Submit node (not an augmented
+            # Call) so passes / printers can dispatch on the kind directly
+            # and the typed deps_ field replaces the prior attrs-encoded
+            # manual_dep_edges. The return type is still the flat
+            # Tuple{*<kernel results>, TaskId} so tuple projection of the
+            # producer TaskId continues to work the same way as before.
             return_type = ir.TupleType([*return_types, ir.ScalarType(DataType.TASK_ID)])
+            deps_list: list[ir.Expr] = list(user_dep_vars) if user_dep_vars else []
+            # manual_dep_edges lives on Submit::deps_ now; strip it from
+            # attrs so the Submit's attrs_ matches the post-flip invariant
+            # documented in include/pypto/ir/expr.h (and enforced by
+            # the pass-submit-awareness rule).
+            submit_attrs: dict[str, Any] | None = None
             if attrs is not None:
-                return ir.Call(gvar, args, {}, attrs, return_type, span)
-            return ir.Call(gvar, args, return_type, span)
+                submit_attrs = {k: v for k, v in attrs.items() if k != "manual_dep_edges"}
+                if not submit_attrs:
+                    submit_attrs = None
+            if submit_attrs is not None:
+                return ir.Submit(gvar, args, deps_list, {}, submit_attrs, return_type, span)
+            return ir.Submit(gvar, args, deps_list, return_type, span)
 
         if attrs is not None:
             return ir.Call(gvar, args, {}, attrs, return_type, span)
@@ -6105,7 +6216,27 @@ class ASTParser:
             elif isinstance(stmt, ast.If):
                 pass
 
+            # Descend into `with pl.auto_scope():` blocks — they are transparent
+            # to yield association, so a trailing `var = pl.yield_(...)` inside
+            # the scope still defines the enclosing for/if return-var. These are
+            # inserted by the MaterializeRuntimeScopes pass.
+            elif isinstance(stmt, ast.With) and self._is_auto_scope_with(stmt):
+                yield_vars.extend(self._scan_for_yields(stmt.body))
+
         return yield_vars
+
+    @staticmethod
+    def _is_auto_scope_with(stmt: ast.With) -> bool:
+        """True if @p stmt is a ``with pl.auto_scope():`` block."""
+        for item in stmt.items:
+            ce = item.context_expr
+            if (
+                isinstance(ce, ast.Call)
+                and isinstance(ce.func, ast.Attribute)
+                and ce.func.attr == "auto_scope"
+            ):
+                return True
+        return False
 
 
 __all__ = ["ASTParser"]

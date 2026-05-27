@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from pypto.ir.op.distributed import tile_ops as _ir_tile
 from pypto.language.typing import IntLike, Tile
 from pypto.pypto_core import ir as _ir
-from pypto.pypto_core.ir import Expr
+from pypto.pypto_core.ir import AtomicType, Call, Expr
 
 from ..typing.distributed_tensor import DistributedTensor
 from ._utils import _normalize_intlike, _unwrap
@@ -69,4 +69,26 @@ def remote_load(
     return Tile(expr=call)
 
 
-__all__ = ["remote_load"]
+def put(
+    dst: DistributedTensor,
+    peer: IntLike,
+    src: DistributedTensor,
+    stage: Tile,
+    atomic: AtomicType = AtomicType.None_,
+) -> Call:
+    """Tile-level form of :func:`pld.tensor.put` with an explicit VEC staging tile.
+
+    Emitted by ``ConvertTensorToTileOps``; defined here only so the printer's
+    output roundtrips through the parser. User code calls :func:`pld.tensor.put`.
+    """
+    dst_expr = _unwrap(dst)
+    src_expr = _unwrap(src)
+    stage_expr = _unwrap(stage)
+    for role, expr in (("dst", dst_expr), ("src", src_expr)):
+        if not isinstance(expr, Expr) or not isinstance(expr.type, _ir.DistributedTensorType):
+            got = _ir.python_print_type(expr.type) if isinstance(expr, Expr) else type(expr).__name__
+            raise TypeError(f"pld.tile.put expects a DistributedTensor {role} (window-bound); got {got}")
+    return _ir_tile.put(dst_expr, _unwrap(peer), src_expr, stage_expr, atomic)
+
+
+__all__ = ["remote_load", "put"]

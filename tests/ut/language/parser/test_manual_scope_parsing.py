@@ -38,10 +38,13 @@ def _flatten(stmt):
 
 
 def _calls_in(stmt):
-    """Collect every ir.Call that is the RHS of an AssignStmt in the subtree."""
+    """Collect every call-like RHS (Call OR Submit) of an AssignStmt in the
+    subtree. Submit shares ``.op.name`` with Call, so most assertions remain
+    valid; tests that probe dep info use ``submit.deps`` instead of
+    ``call.attrs['manual_dep_edges']``."""
     calls = []
     for s in _flatten(stmt):
-        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call):
+        if isinstance(s, ir.AssignStmt) and isinstance(s.value, (ir.Call, ir.Submit)):
             calls.append(s.value)
     return calls
 
@@ -112,9 +115,9 @@ class TestManualScopeParsing:
             assert isinstance(c.type.types[1], ir.ScalarType)
             assert c.type.types[1].dtype == pl.TASK_ID
         # Producer k1 has no dep edges of its own.
-        assert "manual_dep_edges" not in k1_call.attrs
+        assert list(k1_call.deps) == []
         # Consumer k2 records one dep edge, naming the TaskId scalar `a_tid`.
-        k2_deps = k2_call.attrs.get("manual_dep_edges", [])
+        k2_deps = list(k2_call.deps)
         assert len(k2_deps) == 1
         assert isinstance(k2_deps[0].type, ir.ScalarType)
         assert k2_deps[0].type.dtype == pl.TASK_ID
@@ -139,8 +142,8 @@ class TestManualScopeParsing:
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
         k1_call = next(c for c in _calls_in(scope.body) if c.op.name == "k1")
-        # ``deps=[None]`` drops the only entry, so no edge attr is recorded.
-        assert k1_call.attrs.get("manual_dep_edges", []) == []
+        # ``deps=[None]`` drops the only entry, so the Submit's deps_ stays empty.
+        assert list(k1_call.deps) == []
 
     def test_plain_call_rejects_deps_kwarg(self):
         """``deps=`` on a plain ``self.kernel(...)`` call is rejected — use pl.submit."""
@@ -192,7 +195,7 @@ class TestManualScopeParsing:
         # No RuntimeScopeStmt: the program stays in the implicit auto scope.
         assert _first_runtime_scope(fn.body) is None
         k2_call = next(c for c in _calls_in(fn.body) if c.op.name == "k2")
-        edges = k2_call.attrs.get("manual_dep_edges", [])
+        edges = list(k2_call.deps)
         assert len(edges) == 1
         assert isinstance(edges[0].type, ir.ScalarType)
         assert edges[0].type.dtype == pl.TASK_ID
@@ -212,21 +215,40 @@ class TestManualScopeParsing:
                         pl.submit(self.k1, x)
                     return x
 
-    def test_submit_single_target_is_rejected(self):
-        """pl.submit must be unpacked as exactly ``(result, task_id)``."""
-        with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+    def test_submit_single_target_binds_full_tuple(self):
+        """``result = pl.submit(self.k, ...)`` is the single-LHS form. The
+        whole flat ``Tuple{<kernel result>, TaskId}`` binds to one Var.
+        Mostly emitted by the printer (round-trip path) when an IR pass
+        rewrites a Submit whose LHS is a single tuple-typed Var; user code
+        usually still writes the unpacked ``a, tid = pl.submit(...)`` form.
+        """
 
-            @pl.program
-            class _Prog:
-                @pl.function(type=pl.FunctionType.InCore)
-                def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    return x
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
 
-                @pl.function(type=pl.FunctionType.Orchestration)
-                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                    with pl.manual_scope():
-                        a = pl.submit(self.k1, x)
-                    return a
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a = pl.submit(self.k1, x)  # noqa: F841 — checked via IR
+                return x
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        scope = _first_runtime_scope(fn.body)
+        assert scope is not None
+        k1_calls = [c for c in _calls_in(scope.body) if c.op.name == "k1"]
+        assert len(k1_calls) == 1
+        submit = k1_calls[0]
+        assert isinstance(submit, ir.Submit)
+        # Single-LHS bind: the AssignStmt's LHS Var has the flat tuple type;
+        # no separate result / TaskId projection statements are synthesised.
+        assert isinstance(submit.type, ir.TupleType)
+        assert len(submit.type.types) == 2
+        assert isinstance(submit.type.types[1], ir.ScalarType)
+        assert submit.type.types[1].dtype == pl.TASK_ID
 
     def test_pl_at_deps_and_as_tid_attach_scope_attrs(self):
         """``with pl.at(..., deps=[d1]) as tid:`` attaches metadata to the
@@ -532,10 +554,11 @@ _FORM2_INDEX_LIST = [0, 2]
 
 
 def _all_calls(stmt):
-    """Collect every ``ir.Call`` reachable as the RHS of any ``AssignStmt`` in
-    the subtree, recursing into ForStmt / IfStmt / RuntimeScopeStmt / SeqStmts
-    bodies. The shallow ``_calls_in`` only walks a flat SeqStmts which is
-    fine for direct-submit tests but misses calls nested inside loops.
+    """Collect every call-like RHS (``ir.Call`` OR ``ir.Submit``) reachable
+    as the value of any ``AssignStmt`` in the subtree, recursing into ForStmt /
+    IfStmt / RuntimeScopeStmt / SeqStmts bodies. Submit shares ``op.name``
+    with Call, so most filter-by-name tests remain valid; dep-probing tests
+    use ``submit.deps`` instead of ``call.attrs['manual_dep_edges']``.
     """
     calls: list = []
 
@@ -546,7 +569,7 @@ def _all_calls(stmt):
             for sub in s.stmts:
                 _walk(sub)
             return
-        if isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Call):
+        if isinstance(s, ir.AssignStmt) and isinstance(s.value, (ir.Call, ir.Submit)):
             calls.append(s.value)
         for attr in ("body", "then_body", "else_body"):
             sub = getattr(s, attr, None)
@@ -598,7 +621,7 @@ class TestSubmitDepsPerElementAndComprehension:
         # must be a Var of type Array[1, TASK_ID] — the synthesized buffer.
         consumer_calls = [c for c in calls if c.op.name == "consumer"]
         assert len(consumer_calls) == 1
-        edges = consumer_calls[0].attrs.get("manual_dep_edges", [])
+        edges = consumer_calls[0].deps
         assert len(edges) == 1
         edge = edges[0]
         assert isinstance(edge, ir.Var)
@@ -641,7 +664,7 @@ class TestSubmitDepsPerElementAndComprehension:
         calls = _all_calls(scope.body)
         consumer_calls = [c for c in calls if c.op.name == "consumer"]
         assert len(consumer_calls) == 1
-        edges = consumer_calls[0].attrs.get("manual_dep_edges", [])
+        edges = consumer_calls[0].deps
         # One Array[3, TASK_ID] entry (the synthesized buffer) after desugar.
         assert len(edges) == 1
         edge = edges[0]
@@ -686,7 +709,7 @@ class TestSubmitDepsPerElementAndComprehension:
         calls = _all_calls(scope.body)
         consumer_calls = [c for c in calls if c.op.name == "consumer"]
         assert len(consumer_calls) == 1
-        edges = consumer_calls[0].attrs.get("manual_dep_edges", [])
+        edges = consumer_calls[0].deps
         assert len(edges) == 1
         edge = edges[0]
         assert isinstance(edge.type, ir.ArrayType)
@@ -732,7 +755,7 @@ class TestSubmitDepsPerElementAndComprehension:
         assert scope is not None
         calls = _all_calls(scope.body)
         consumer_call = next(c for c in calls if c.op.name == "consumer")
-        edges = consumer_call.attrs.get("manual_dep_edges", [])
+        edges = consumer_call.deps
         assert len(edges) == 1
         edge = edges[0]
         assert isinstance(edge.type, ir.ArrayType)
@@ -768,7 +791,7 @@ class TestSubmitDepsPerElementAndComprehension:
         scope = _first_runtime_scope(fn.body)
         assert scope is not None
         consumer_call = next(c for c in _all_calls(scope.body) if c.op.name == "consumer")
-        edges = consumer_call.attrs.get("manual_dep_edges", [])
+        edges = consumer_call.deps
         assert len(edges) == 1
         edge = edges[0]
         assert isinstance(edge.type, ir.ArrayType)
@@ -863,7 +886,7 @@ class TestSubmitDepsPerElementAndComprehension:
         assert scope is not None
         calls = _all_calls(scope.body)
         consumer_call = next(c for c in calls if c.op.name == "consumer")
-        edges = consumer_call.attrs.get("manual_dep_edges", [])
+        edges = consumer_call.deps
         # Two SCALAR entries — direct path, no Array[N, TASK_ID] synthesis.
         assert len(edges) == 2
         for edge in edges:
@@ -1048,6 +1071,8 @@ class TestSubmitDepsPerElementAndComprehension:
         # Three producer pl.at scopes + one consumer pl.at scope.
         assert len(scopes) == 4
         consumer_scope = scopes[-1]
+        # pl.at scope still uses attrs['manual_dep_edges'] — Submit replaces
+        # only the Call-side dep encoding, not ScopeStmt's.
         edges = consumer_scope.attrs.get("manual_dep_edges", [])
         assert len(edges) == 1
         edge = edges[0]

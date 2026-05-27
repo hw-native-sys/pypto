@@ -1090,6 +1090,72 @@ class TestTileSliceCodegen:
             f"v_row/v_col must not be dynamic ('?') when source valid >= slice size, got:\n{subview_lines[0]}"
         )
 
+    def test_tile_slice_preserves_non_sentinel_parent_valid_shape(self):
+        """Counterpart to the [0, 0] sentinel regression: when the parent's
+        IR carries a genuine narrow valid_shape (not the lane1 sentinel),
+        InferSubviewTileTypeComponents must still honour it so the subview's
+        static v_row/v_col reflects the narrower extent.
+
+        Parent valid [12, 12], slice sizes [8, 8] at offset [6, 6]:
+          remain = 12 - 6 = 6;  result v = min(8, 6) = 6.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.Tensor[[8, 8], pl.FP32],
+            ) -> pl.Tensor[[8, 8], pl.FP32]:
+                narrow_parent: pl.Tile[
+                    [16, 16], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[12, 12])
+                ] = pl.tile.create([16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                sliced: pl.Tile[[8, 8], pl.FP32] = pl.tile.slice(narrow_parent, [8, 8], [6, 6])
+                return pl.store(sliced, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
+        result_type = subview_lines[0].split("->", 1)[-1]
+        assert "v_row=6" in result_type and "v_col=6" in result_type, (
+            "Parent narrow valid [12, 12] with offset [6, 6] and sizes [8, 8] must yield "
+            f"v_row=6, v_col=6 (min(size, valid - offset)) on the subview result; got:\n{subview_lines[0]}"
+        )
+
+    def test_tile_slice_with_zero_valid_sentinel_parent_does_not_emit_zero_result_valid(self):
+        """Regression for issue #1507: subview must not emit static v_row=0, v_col=0
+        when the parent's IR carries the lane1 [0, 0] valid_shape sentinel.
+
+        The parent's static type string always renders v_row=?, v_col=? (per
+        ExtractTileTypeInfo in pto_type_utils.cpp), so PTOAS infers the
+        subview's result valid from the slice's `sizes`. Our inference must
+        align — reading the parent's tile_view_.valid_shape (which can be the
+        sentinel [0, 0] after SplitVectorKernel's WithZeroValidShape) would
+        produce v_row=0, v_col=0 that PTOAS rejects.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pl.Tensor[[16, 8], pl.FP32],
+            ) -> pl.Tensor[[16, 8], pl.FP32]:
+                sentinel_tile: pl.Tile[
+                    [16, 32], pl.FP32, pl.MemorySpace.Vec, pl.TileView(valid_shape=[0, 0])
+                ] = pl.tile.create([16, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+                sliced: pl.Tile[[16, 8], pl.FP32] = pl.tile.slice(sentinel_tile, [16, 8], [0, 0])
+                return pl.store(sliced, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert subview_lines, f"no pto.subview line emitted; got:\n{mlir}"
+        result_type = subview_lines[0].split("->", 1)[-1]
+        assert "v_row=0" not in result_type and "v_col=0" not in result_type, (
+            "Sentinel [0, 0] parent valid_shape must NOT propagate to a static v_row=0/v_col=0 "
+            f"on the subview result (ptoas would reject); got:\n{subview_lines[0]}"
+        )
+
 
 class TestTileAssembleCodegen:
     """Tests for tile.assemble PTO code generation (pto.subview + pto.tmov).
@@ -1563,231 +1629,6 @@ class TestTileExtractCodegen:
         assert operand_count == 3, (
             f"pto.textract should have 3 ins operands (src, row, col), got {operand_count}: {line}"
         )
-
-
-class TestTileScatterUpdateCodegen:
-    """Tests for tile.scatter_update PTO code generation.
-
-    tile.scatter_update(input, index, src) should update the input tile in place.
-    PTO codegen lowers this to nested scf.for loops plus pto.tgetval/pto.textract/pto.tinsert.
-    """
-
-    def _generate_mlir(self, program_cls) -> str:
-        """Run PassManager and PTOCodegen on the given program, return MLIR string."""
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-
-        pm = PassManager.get_strategy(OptimizationStrategy.Default)
-        optimized = pm.run_passes(program_cls)
-        codegen_instance = codegen.PTOCodegen()
-        funcs = list(optimized.functions.values())
-        assert funcs, "Program has no functions"
-        # ExpandMixedKernel may wrap the kernel in a Group function plus AIC/AIV
-        # variants. PTOCodegen rejects Group; pick the first InCore-variant func.
-        target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
-        single = ir.Program([target], target.name, optimized.span)
-        return codegen_instance.generate(single)
-
-    def test_tile_scatter_update_emits_scf_for(self):
-        """tile.scatter_update should generate a scf.for loop over b*s iterations."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                input_t: pl.Tensor[[16, 32], pl.FP32],
-                index_t: pl.Tensor[[2, 4], pl.INT32],
-                src_t: pl.Tensor[[8, 32], pl.FP32],
-                dst_t: pl.Tensor[[16, 32], pl.FP32],
-            ) -> pl.Tensor[[16, 32], pl.FP32]:
-                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
-                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
-                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
-                scratch_tile: pl.Tile[[1, 32], pl.FP32] = pl.tile.create(
-                    [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
-                    input_tile, index_tile, src_tile, scratch_tile, dim=-2
-                )
-                return pl.store(result, [0, 0], dst_t)
-
-        mlir = self._generate_mlir(Prog)
-        assert "scf.for" in mlir, f"scatter_update should generate scf.for loop, got:\n{mlir}"
-
-    def test_tile_scatter_update_emits_row_extract_and_insert(self):
-        """tile.scatter_update should read index scalar, extract src row, and insert row into dst."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                input_t: pl.Tensor[[16, 32], pl.FP32],
-                index_t: pl.Tensor[[2, 4], pl.INT32],
-                src_t: pl.Tensor[[8, 32], pl.FP32],
-                dst_t: pl.Tensor[[16, 32], pl.FP32],
-            ) -> pl.Tensor[[16, 32], pl.FP32]:
-                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
-                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
-                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
-                scratch_tile: pl.Tile[[1, 32], pl.FP32] = pl.tile.create(
-                    [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
-                    input_tile, index_tile, src_tile, scratch_tile, dim=-2
-                )
-                return pl.store(result, [0, 0], dst_t)
-
-        mlir = self._generate_mlir(Prog)
-        assert "pto.tgetval" in mlir, f"scatter_update should emit pto.tgetval for index read, got:\n{mlir}"
-        assert "pto.textract" in mlir, (
-            f"scatter_update should emit pto.textract for src row read, got:\n{mlir}"
-        )
-        assert "pto.tinsert" in mlir, (
-            f"scatter_update should emit pto.tinsert for dst row write, got:\n{mlir}"
-        )
-        assert "pto.tsetval" not in mlir, f"scatter_update should not emit scalar row writes, got:\n{mlir}"
-
-    def test_tensor_scatter_update_scratch_has_alloc_addr(self):
-        """tensor.scatter_update lowering should materialize an addressed scratch row tile."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                input_t: pl.Tensor[[16, 32], pl.FP32],
-                index_t: pl.Tensor[[2, 4], pl.INT32],
-                src_t: pl.Tensor[[8, 32], pl.FP32],
-                dst_t: pl.Tensor[[16, 32], pl.FP32],
-            ) -> pl.Tensor[[16, 32], pl.FP32]:
-                result: pl.Tensor[[16, 32], pl.FP32] = pl.scatter_update(input_t, -2, index_t, src_t)
-                return result
-
-        mlir = self._generate_mlir(Prog)
-        scatter_allocs = [
-            line.strip() for line in mlir.splitlines() if "scatter_row" in line and "pto.alloc_tile" in line
-        ]
-        assert scatter_allocs, f"Expected scatter_row alloc_tile, got:\n{mlir}"
-        assert all("addr =" in line for line in scatter_allocs), (
-            f"scatter_row alloc_tile must carry addr operand, got: {scatter_allocs}"
-        )
-
-    def test_tile_scatter_update_loop_bound(self):
-        """scf.for upper bound should equal b*s (here 2*4=8)."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                input_t: pl.Tensor[[16, 32], pl.FP32],
-                index_t: pl.Tensor[[2, 4], pl.INT32],
-                src_t: pl.Tensor[[8, 32], pl.FP32],
-                dst_t: pl.Tensor[[16, 32], pl.FP32],
-            ) -> pl.Tensor[[16, 32], pl.FP32]:
-                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
-                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
-                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
-                scratch_tile: pl.Tile[[1, 32], pl.FP32] = pl.tile.create(
-                    [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
-                    input_tile, index_tile, src_tile, scratch_tile, dim=-2
-                )
-                return pl.store(result, [0, 0], dst_t)
-
-        mlir = self._generate_mlir(Prog)
-        # b=2, s=4 → b*s=8; constant "8" should appear as loop upper bound
-        assert "8" in mlir, f"Expected loop bound 8 (b*s=2*4) in MLIR:\n{mlir}"
-
-    def test_tile_scatter_update_index_cast(self):
-        """arith.index_cast should be emitted to convert i32 index to index type."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                input_t: pl.Tensor[[16, 32], pl.FP32],
-                index_t: pl.Tensor[[2, 4], pl.INT32],
-                src_t: pl.Tensor[[8, 32], pl.FP32],
-                dst_t: pl.Tensor[[16, 32], pl.FP32],
-            ) -> pl.Tensor[[16, 32], pl.FP32]:
-                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
-                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
-                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
-                scratch_tile: pl.Tile[[1, 32], pl.FP32] = pl.tile.create(
-                    [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
-                    input_tile, index_tile, src_tile, scratch_tile, dim=-2
-                )
-                return pl.store(result, [0, 0], dst_t)
-
-        mlir = self._generate_mlir(Prog)
-        assert "arith.index_cast" in mlir, f"Expected arith.index_cast in MLIR:\n{mlir}"
-
-    def test_tile_scatter_update_is_inplace(self):
-        """tile.scatter_update should reuse the input tile buffer instead of copying it."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                input_t: pl.Tensor[[16, 32], pl.FP32],
-                index_t: pl.Tensor[[2, 4], pl.INT32],
-                src_t: pl.Tensor[[8, 32], pl.FP32],
-                dst_t: pl.Tensor[[16, 32], pl.FP32],
-            ) -> pl.Tensor[[16, 32], pl.FP32]:
-                input_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(input_t, [0, 0], [16, 32])
-                index_tile: pl.Tile[[2, 4], pl.INT32] = pl.load(index_t, [0, 0], [2, 4])
-                src_tile: pl.Tile[[8, 32], pl.FP32] = pl.load(src_t, [0, 0], [8, 32])
-                scratch_tile: pl.Tile[[1, 32], pl.FP32] = pl.tile.create(
-                    [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[16, 32], pl.FP32] = pl.tile.scatter_update(
-                    input_tile, index_tile, src_tile, scratch_tile, dim=-2
-                )
-                return pl.store(result, [0, 0], dst_t)
-
-        mlir = self._generate_mlir(Prog)
-        assert "pto.tmov" not in mlir, f"scatter_update should update in place, got:\n{mlir}"
-        assert "result = pto.alloc_tile" not in mlir, (
-            f"scatter_update result should alias input tile, got:\n{mlir}"
-        )
-
-    def test_tile_scatter_update_avoids_runtime_treshape(self):
-        """tile.scatter_update should access original 2D tile buffers directly."""
-
-        @pl.program
-        class Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
-                self,
-                input_t: pl.Tensor[[32, 32], pl.FP32],
-                index_t: pl.Tensor[[2, 8], pl.INT32],
-                src_t: pl.Tensor[[16, 32], pl.FP32],
-                dst_t: pl.Tensor[[32, 32], pl.FP32],
-            ) -> pl.Tensor[[32, 32], pl.FP32]:
-                input_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(input_t, [0, 0], [32, 32])
-                index_tile: pl.Tile[[2, 8], pl.INT32] = pl.load(index_t, [0, 0], [2, 8])
-                src_tile: pl.Tile[[16, 32], pl.FP32] = pl.load(src_t, [0, 0], [16, 32])
-                scratch_tile: pl.Tile[[1, 32], pl.FP32] = pl.tile.create(
-                    [1, 32], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
-                )
-                result: pl.Tile[[32, 32], pl.FP32] = pl.tile.scatter_update(
-                    input_tile, index_tile, src_tile, scratch_tile, dim=-2
-                )
-                return pl.store(result, [0, 0], dst_t)
-
-        mlir = self._generate_mlir(Prog)
-        assert "pto.treshape" not in mlir, f"scatter_update should not emit runtime treshape, got:\n{mlir}"
-        assert "rows=2, cols=8" in mlir, f"Expected original index tile shape in MLIR:\n{mlir}"
-        assert "rows=16, cols=32" in mlir, f"Expected original src tile shape in MLIR:\n{mlir}"
-        assert "rows=32, cols=32" in mlir, f"Expected original dst tile shape in MLIR:\n{mlir}"
 
 
 class TestTileMoveAccNoopElision:

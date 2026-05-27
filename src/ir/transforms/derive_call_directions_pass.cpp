@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,7 +28,6 @@
 #include "pypto/ir/program.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
-#include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/type.h"
@@ -58,6 +58,30 @@ std::vector<ParamDirection> ResolveCalleeDirections(const ProgramPtr& program, c
     return ComputeGroupEffectiveDirections(callee, program);
   }
   return callee->param_directions_;
+}
+
+/// Uniform view of a call-like expression's positional args for direction
+/// analysis. Both Call and Submit use identity positional mapping:
+/// args_[i] ↔ callee->params_[i].
+///
+/// The kinds differ only in *coverage*:
+///   - Call: args_.size() == callee->params_.size() (full coverage).
+///   - Submit: args_.size() <= callee->params_.size() (prefix). The trailing
+///     callee params (indices [args_.size() .. params_.size())) are
+///     runtime-allocated outputs materialised via TaskOutputTensors / the
+///     Submit's return-tuple elements, not passed positionally. The IR
+///     builder (e.g. ConvertTensorToTileOps) appends those Out params at the
+///     tail of the callee signature.
+struct CallLikeArgs {
+  std::vector<ExprPtr> args;
+  OpPtr op;
+};
+
+/// Extract args/op for a Call or Submit. Returns nullopt for any other Expr.
+std::optional<CallLikeArgs> BuildCallLikeArgs(const ExprPtr& expr) {
+  if (auto c = As<Call>(expr)) return CallLikeArgs{c->args_, c->op_};
+  if (auto s = As<Submit>(expr)) return CallLikeArgs{s->args_, s->op_};
+  return std::nullopt;
 }
 
 /// Resolve the buffer root for an argument expression, regardless of whether
@@ -97,11 +121,16 @@ class PriorWriterCollector {
     AnalyzeScope(body, seen);
   }
 
-  /// Per-Call set of roots for which the call is the first writer in its scope.
-  /// Roots not in the set (or Calls absent from the map) are by definition
-  /// preceded by another writer-unit and therefore subject to R-prior promotion.
-  /// Includes both locally-allocated roots and enclosing-param-rooted ones.
-  std::unordered_map<const Call*, std::unordered_set<const Var*>> first_writer_roots;
+  /// Per-call-like set of roots for which the call (or submit) is the first
+  /// writer in its scope. Roots not in the set (or call-like exprs absent
+  /// from the map) are by definition preceded by another writer-unit and
+  /// therefore subject to R-prior promotion. Includes both locally-allocated
+  /// roots and enclosing-param-rooted ones. Keyed by the original Expr*
+  /// pointer so both Call and Submit nodes get tracked under their stable
+  /// identity (Submit IRs are folded to Call via SubmitToCallView for the
+  /// per-arg direction analysis, but that synthesised Call's pointer is
+  /// transient — we register under the original Submit's pointer instead).
+  std::unordered_map<const Expr*, std::unordered_set<const Var*>> first_writer_roots;
 
  private:
   /// Compute (and cache) the set of local roots written by any non-builtin Call
@@ -143,19 +172,22 @@ class PriorWriterCollector {
     return result;
   }
 
-  /// If `expr` is a non-builtin Call, add every Out/InOut root it writes
-  /// (local or enclosing-param-rooted) into `out`.
+  /// If `expr` is a non-builtin Call or Submit, add every Out/InOut root it
+  /// writes (local or enclosing-param-rooted) into `out`. Submit's args_ is
+  /// a positional *prefix* of callee->params_ — runtime-allocated outputs
+  /// occupy the trailing positions and aren't reached here. Within the
+  /// prefix, args_[i] ↔ params_[i] is identity, same as Call.
   void CollectCallWrittenRoots(const ExprPtr& expr, std::unordered_set<const Var*>& out) {
-    auto call = As<Call>(expr);
-    if (!call) return;
-    if (IsBuiltinOp(call->op_->name_)) return;
-    auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+    auto cl = BuildCallLikeArgs(expr);
+    if (!cl) return;
+    if (IsBuiltinOp(cl->op->name_)) return;
+    auto callee = program_ ? program_->GetFunction(cl->op->name_) : nullptr;
     if (!callee) return;
 
-    auto dirs = ResolveCalleeDirections(program_, call, callee);
-    for (size_t i = 0; i < dirs.size() && i < call->args_.size(); ++i) {
+    auto dirs = ResolveCalleeDirections(program_, /*call=*/{}, callee);
+    for (size_t i = 0; i < cl->args.size() && i < dirs.size(); ++i) {
       if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
-      if (const Var* root = ResolveAnyRoot(call->args_[i], buffer_roots_)) {
+      if (const Var* root = ResolveAnyRoot(cl->args[i], buffer_roots_)) {
         out.insert(root);
       }
     }
@@ -206,25 +238,30 @@ class PriorWriterCollector {
     // Other stmts (Yield/Return/Break/Continue): no Calls to analyze.
   }
 
-  /// For a single Call expression, mark "first writer" roots and update `seen`.
+  /// For a single Call or Submit expression, mark "first writer" roots and
+  /// update `seen`. Both kinds use positional identity mapping over the args
+  /// they actually carry (Submit may carry a prefix; the trailing runtime-
+  /// allocated outputs aren't reached here). First-writer is registered
+  /// under the original expression's stable pointer (`expr.get()`) so the
+  /// CallDirectionMutator can look it up regardless of kind.
   void AnalyzeCall(const ExprPtr& expr, std::unordered_set<const Var*>& seen) {
-    auto call = As<Call>(expr);
-    if (!call) return;
-    if (IsBuiltinOp(call->op_->name_)) return;
-    auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+    auto cl = BuildCallLikeArgs(expr);
+    if (!cl) return;
+    if (IsBuiltinOp(cl->op->name_)) return;
+    auto callee = program_ ? program_->GetFunction(cl->op->name_) : nullptr;
     if (!callee) return;
 
-    auto dirs = ResolveCalleeDirections(program_, call, callee);
+    auto dirs = ResolveCalleeDirections(program_, /*call=*/{}, callee);
     std::unordered_set<const Var*> roots_this_call;
-    for (size_t i = 0; i < dirs.size() && i < call->args_.size(); ++i) {
+    for (size_t i = 0; i < cl->args.size() && i < dirs.size(); ++i) {
       // Only Out is decision-relevant for promotion (InOut is already InOut).
       // We still register InOut roots into `roots_this_call` so subsequent
       // siblings see them as prior writers.
       if (dirs[i] != ParamDirection::Out && dirs[i] != ParamDirection::InOut) continue;
-      const Var* root = ResolveAnyRoot(call->args_[i], buffer_roots_);
+      const Var* root = ResolveAnyRoot(cl->args[i], buffer_roots_);
       if (!root) continue;
       if (dirs[i] == ParamDirection::Out && seen.count(root) == 0) {
-        first_writer_roots[call.get()].insert(root);
+        first_writer_roots[expr.get()].insert(root);
       }
       roots_this_call.insert(root);
     }
@@ -259,7 +296,7 @@ class CallDirectionMutator : public IRMutator {
  public:
   CallDirectionMutator(
       ProgramPtr program, const std::unordered_map<const Var*, const Var*>& buffer_roots,
-      const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots,
+      const std::unordered_map<const Expr*, std::unordered_set<const Var*>>& first_writer_roots,
       const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root)
       : program_(std::move(program)),
         buffer_roots_(buffer_roots),
@@ -291,7 +328,50 @@ class CallDirectionMutator : public IRMutator {
     auto base = IRMutator::VisitExpr_(op);
     auto call = As<Call>(base);
     if (!call) return base;
+    // Call path: args_[i] ↔ params_[i] (identity mapping). Submit takes a
+    // separate visitor below, since its args_ excludes declared-Out callee
+    // params (those materialise as return-tuple elements).
+    return DeriveDirectionsForCallLike(call, op.get(), /*is_submit=*/false);
+  }
 
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    // DeriveCallDirections is the natural lowering point for Submit → Call.
+    // Earlier passes see Submit so users get a clear `pl.submit(...)` print
+    // form, and post-DeriveCallDirections consumers (codegen, verifiers) stay
+    // on the existing Call codepath with deps_ folded into
+    // attrs[manual_dep_edges] via SubmitToCallView.
+    //
+    // We deliberately split this from VisitExpr_(CallPtr): Submit's args_
+    // doesn't positionally line up with the callee's full param list (Out
+    // callee params are excluded), so derivation must thread the
+    // SubmitArgParamIndices mapping through to the per-arg loop. Routing
+    // through the Call visitor via a synthesised view used to mask this
+    // asymmetry and trip the size-equality guard, silently leaving
+    // arg_directions empty.
+    auto base = IRMutator::VisitExpr_(op);
+    auto submit = std::static_pointer_cast<const Submit>(base);
+    // SubmitToCallView is the *lowering* step (Submit deps_ → Call
+    // attrs[manual_dep_edges]); it is not a direction-derivation device.
+    auto lowered = SubmitToCallView(submit);
+    // Pass the ORIGINAL Submit's pointer as the identity key so
+    // first_writer_roots_ — populated by AnalyzeCall against the Submit —
+    // actually matches.
+    return DeriveDirectionsForCallLike(lowered, op.get(), /*is_submit=*/true);
+  }
+
+  /// Shared core that derives the ArgDirection vector for a Call-shaped node.
+  /// Args use identity positional mapping in both kinds (args_[i] ↔
+  /// callee->params_[i]); the kinds differ only in coverage. The size check
+  /// is relaxed for Submit because Submit's args_ may be a *prefix* of the
+  /// callee param list (the trailing callee params are runtime-allocated
+  /// outputs materialised via the Submit's return tuple, not passed
+  /// positionally). For Call we require full positional 1:1.
+  ///
+  /// `identity_key` is the address of the original IR node (Call::get() or
+  /// Submit::get()) used to look up first_writer_roots_; we don't key off the
+  /// `call` argument here because the Submit path passes a SubmitToCallView
+  /// whose pointer is transient and was never registered by AnalyzeCall.
+  ExprPtr DeriveDirectionsForCallLike(const CallPtr& call, const Expr* identity_key, bool is_submit) {
     if (IsBuiltinOp(call->op_->name_)) {
       return call;
     }
@@ -303,9 +383,12 @@ class CallDirectionMutator : public IRMutator {
     }
 
     auto effective = ResolveCalleeDirections(program_, call, callee);
-    if (effective.size() != call->args_.size()) {
-      // Safety: if the length disagrees we can't produce a sound mapping.
-      // Leave directions empty so the verify pass surfaces a clear error.
+    // Submit: prefix coverage allowed (args.size() <= effective.size()).
+    // Call: full coverage required (args.size() == effective.size()).
+    const bool size_ok =
+        is_submit ? (call->args_.size() <= effective.size()) : (call->args_.size() == effective.size());
+    if (!size_ok) {
+      // Safety: leave directions empty so the verify pass surfaces it clearly.
       return call;
     }
 
@@ -317,11 +400,7 @@ class CallDirectionMutator : public IRMutator {
       return call;
     }
 
-    // Look up first-writer info computed against the *original* Call object.
-    // The mutator may produce a new shared_ptr above (when nested Calls are
-    // rewritten), but the prior-writer collector keyed on the original op.
-    const Call* original_call = op.get();
-    auto fw_it = first_writer_roots_.find(original_call);
+    auto fw_it = first_writer_roots_.find(identity_key);
     const std::unordered_set<const Var*>* first_writer_set =
         fw_it != first_writer_roots_.end() ? &fw_it->second : nullptr;
 
@@ -409,7 +488,7 @@ class CallDirectionMutator : public IRMutator {
  private:
   ProgramPtr program_;
   const std::unordered_map<const Var*, const Var*>& buffer_roots_;
-  const std::unordered_map<const Call*, std::unordered_set<const Var*>>& first_writer_roots_;
+  const std::unordered_map<const Expr*, std::unordered_set<const Var*>>& first_writer_roots_;
   const std::unordered_map<const Var*, ParamDirection>& enclosing_param_dir_by_root_;
   int sequential_depth_ = 0;
 };

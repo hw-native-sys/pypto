@@ -92,6 +92,33 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
   }
 }
 
+void IRVisitor::VisitExpr_(const SubmitPtr& op) {
+  for (size_t i = 0; i < op->args_.size(); ++i) {
+    INTERNAL_CHECK_SPAN(op->args_[i], op->span_) << "Submit has null argument at index " << i;
+    VisitExpr(op->args_[i]);
+  }
+  // deps_ is a first-class field on Submit — every entry is a Scalar[TASK_ID]
+  // or Array[N, TASK_ID] Var defined elsewhere in the IR. Visit them so
+  // analyses (unused-var detection, SSA liveness) see the cross-task uses.
+  for (size_t i = 0; i < op->deps_.size(); ++i) {
+    INTERNAL_CHECK_SPAN(op->deps_[i], op->span_) << "Submit has null dep at index " << i;
+    VisitExpr(op->deps_[i]);
+  }
+  // Var-typed attr ``arg_direction_overrides_vars`` references Vars defined
+  // elsewhere in the IR. IRMutator::VisitExpr_(SubmitPtr) already rewrites
+  // those Vars on substitution; the visitor must walk them too so unused-var
+  // / def-use / SSA-liveness analyses do not silently drop a Var that is
+  // referenced only through this attr.
+  for (const auto& [k, v] : op->attrs_) {
+    if (k != kAttrArgDirOverrideVars) continue;
+    const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+    if (!edges) continue;
+    for (const auto& e : *edges) {
+      if (e) VisitExpr(e);
+    }
+  }
+}
+
 void IRVisitor::VisitExpr_(const MakeTuplePtr& op) {
   for (size_t i = 0; i < op->elements_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->elements_[i], op->span_) << "MakeTuple has null element at index " << i;

@@ -713,6 +713,29 @@ Pass ExpandManualPhaseFence();
 Pass FoldNoOpReshape();
 
 /**
+ * @brief Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes
+ *
+ * The simpler runtime wraps regions of an Orchestration function in
+ * ``PTO2_SCOPE()`` blocks. Historically the orchestration codegen decided where
+ * to emit those wrappers from the for/if structure: the whole function body, and
+ * each ForStmt / IfStmt branch body, were wrapped implicitly (suppressed inside a
+ * manual ``RuntimeScopeStmt``). That embedded codegen policy in the printer.
+ *
+ * This pass moves the policy into the IR. For every ``FunctionType::Orchestration``
+ * function it inserts explicit AUTO ``RuntimeScopeStmt`` (``manual_ = false``) nodes:
+ *  - wrapping the entire function body, and
+ *  - wrapping each ForStmt body and each IfStmt then/else body,
+ *
+ * while skipping insertion anywhere inside a manual ``RuntimeScopeStmt`` (the
+ * runtime forbids AUTO nested in MANUAL). Codegen then emits ``PTO2_SCOPE`` only
+ * from ``RuntimeScopeStmt`` nodes, staying 1:1 with the IR.
+ *
+ * Runs last in the pipeline (after the final Simplify) so no other transform has
+ * to reason about the inserted scopes. Only Orchestration functions are touched.
+ */
+Pass MaterializeRuntimeScopes();
+
+/**
  * @brief Verify properties on a program and throw on errors
  *
  * Uses PropertyVerifierRegistry to verify the given properties and throws
