@@ -327,6 +327,7 @@ for (x,) in pl.while_(init_values=(x_init,)):
 | `with pl.spmd(N)` / `for i in pl.spmd(N)` | `Spmd` (for-form wraps inner `InCore`) | SPMD multi-block dispatch — see [pl.spmd](#plspmd-multi-block-dispatch) |
 | `pl.spmd(N, optimizations=[pl.split(MODE)])` | `Spmd(InCore(split=MODE))` | Split hint applies to the inner InCore (both forms) |
 | `pl.manual_scope()` | `Runtime(manual=true)` | Orchestrator region where the user manages task ordering — see [Manual dependency primitives](#manual-dependency-primitives) |
+| `pl.auto_scope()` | `Runtime(manual=false)` | Orchestrator AUTO scope (`PTO2_SCOPE()`); the explicit IR form the compiler inserts (MaterializeRuntimeScopes). Rarely written by hand; round-trip surface for inserted scopes |
 | `pl.incore()` *(deprecated)* | `InCore` | Use `pl.at(level=pl.Level.CORE_GROUP)` instead |
 | `pl.auto_incore(split=...)` *(deprecated)* | `AutoInCore` | Use `pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk, pl.split(...)])` |
 | `pl.at(..., optimization=pl.chunked_loop_optimizer[(split=...)])` *(deprecated)* | `AutoInCore` | Use `pl.at(..., optimizations=[pl.auto_chunk, pl.split(...)])` |

@@ -311,6 +311,12 @@ class IRPythonPrinter : public IRVisitor {
   // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
 
+  // Emit the `with pl.{auto,manual}_scope():` header for a RuntimeScopeStmt.
+  // Callers emit the leading indent themselves (it differs by call site).
+  void PrintRuntimeScopeHeader(bool manual) {
+    stream_ << "with " << prefix_ << (manual ? ".manual_scope():\n" : ".auto_scope():\n");
+  }
+
   // Emit a comma-prefixed kwarg ``, <kwarg_name>=[v1, v2, ...]`` from the
   // list-of-VarPtr attr keyed by ``attr_key`` on ``op``. Skips null entries so
   // the rendered Python stays syntactically valid. Returns false when the attr
@@ -1557,17 +1563,12 @@ void IRPythonPrinter::PrintStmtBlock(const StmtPtr& stmt) {
 }
 
 void IRPythonPrinter::VisitStmt_(const RuntimeScopeStmtPtr& op) {
-  // Only the manual=true form has a DSL surface today.
-  // Auto scope (manual=false) is reserved; printer falls back to a
-  // transparent body emit so that round-trip never fails on legacy IR.
-  if (op->manual_) {
-    stream_ << "with " << prefix_ << ".manual_scope():\n";
-    IncreaseIndent();
-    PrintStmtBlock(op->body_);
-    DecreaseIndent();
-  } else {
-    PrintStmtBlock(op->body_);
-  }
+  // Both AUTO (manual=false) and MANUAL (manual=true) runtime scopes have a DSL
+  // surface and round-trip: `with pl.auto_scope():` / `with pl.manual_scope():`.
+  PrintRuntimeScopeHeader(op->manual_);
+  IncreaseIndent();
+  PrintStmtBlock(op->body_);
+  DecreaseIndent();
 }
 
 void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {
@@ -1669,6 +1670,16 @@ void IRPythonPrinter::VisitStmtBody(const StmtPtr& body, const std::vector<VarPt
         stream_ << "\n";
       }
     }
+  } else if (auto rscope = As<RuntimeScopeStmt>(body); rscope && !rscope->manual_) {
+    // An AUTO RuntimeScopeStmt wrapping a for/if body (inserted by
+    // MaterializeRuntimeScopes): emit the `with pl.auto_scope():` header and
+    // recurse with return_vars so a trailing return-var yield *inside* the
+    // scope still prints its `var = pl.yield_(...)` assignment LHS.
+    stream_ << GetIndent();
+    PrintRuntimeScopeHeader(/*manual=*/false);
+    IncreaseIndent();
+    VisitStmtBody(rscope->body_, return_vars);
+    DecreaseIndent();
   } else {
     PrintStmtBlock(body);
   }

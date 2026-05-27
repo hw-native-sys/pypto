@@ -48,6 +48,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 33 | `33-fuse_create_assemble_to_slice.md` | 33rd pass |
 | 34 | `34-derive_call_directions.md` | 34th pass (two-phase: arg directions + manual-scope lowering) |
 | 35 | `35-collect_comm_groups.md` | 35th pass (distributed: WindowBuffer + Program.comm_groups_; runs immediately before the final Simplify) |
+| 36 | `36-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

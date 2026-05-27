@@ -57,6 +57,37 @@ class manual_scope:
         return False
 
 
+class auto_scope:
+    """Context manager that marks an AUTO runtime scope (``PTO2_SCOPE()``).
+
+    An AUTO scope is the default OverlapMap auto-dep-tracking region — the
+    inverse of :class:`manual_scope`. It is the explicit IR form of the
+    ``PTO2_SCOPE()`` block the orchestration codegen wraps around the function
+    body and around each ``for`` / ``if`` body.
+
+    The compiler inserts these automatically (the ``MaterializeRuntimeScopes``
+    pass), so user code rarely writes ``with pl.auto_scope():`` directly. It
+    exists primarily so the IR round-trips through the DSL printer/parser. AUTO
+    scopes may nest in one another, but not inside a :class:`manual_scope` (the
+    runtime forbids AUTO nested in MANUAL).
+
+    Usage::
+
+        with pl.auto_scope():
+            out = self.kernel(a, b, out)
+
+    Restrictions:
+      - Must appear inside an Orchestration function (not InCore).
+      - Cannot be nested inside a ``manual_scope``.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
 def submit(*args: Any, **kwargs: Any) -> Any:
     """Submit a kernel and capture its producer TaskId.
 
@@ -95,4 +126,4 @@ def submit(*args: Any, **kwargs: Any) -> Any:
     )
 
 
-__all__ = ["manual_scope", "submit"]
+__all__ = ["auto_scope", "manual_scope", "submit"]

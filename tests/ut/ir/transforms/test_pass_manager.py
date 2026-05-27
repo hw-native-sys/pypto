@@ -13,8 +13,9 @@ import os
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, backend, ir, passes
 from pypto.backend import BackendType
+
+from pypto import DataType, backend, ir, passes
 
 TENSOR_ONLY_PASSES = [
     "SplitChunkedLoops",
@@ -58,6 +59,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "DeriveCallDirections",
     "CollectCommGroups",
     "Simplify",
+    "MaterializeRuntimeScopes",
 ]
 
 DEBUG_TILE_OPTIMIZATION_PASSES = [
@@ -91,6 +93,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "DeriveCallDirections",
     "CollectCommGroups",
     "Simplify",
+    "MaterializeRuntimeScopes",
 ]
 
 

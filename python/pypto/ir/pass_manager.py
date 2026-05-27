@@ -178,6 +178,11 @@ class PassManager:
             # collected sizes is applied uniformly.
             ("CollectCommGroups", lambda: passes.collect_comm_groups()),
             ("Simplify", lambda: passes.simplify()),
+            # Insert explicit AUTO RuntimeScopeStmt nodes (function body + for/if
+            # bodies) into Orchestration functions so codegen emits PTO2_SCOPE
+            # 1:1 from the IR. Runs dead last, after the final Simplify, so no
+            # other transform has to reason about the inserted scope wrappers.
+            ("MaterializeRuntimeScopes", lambda: passes.materialize_runtime_scopes()),
         ]
         cls._strategy_passes = {
             OptimizationStrategy.Default: tensor_prefix_passes + tensor_only_passes + tile_pto_passes,

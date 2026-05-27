@@ -83,6 +83,20 @@ namespace {
 
 constexpr const char* kDualAivDispatchAttr = "dual_aiv_dispatch";
 
+// MaterializeRuntimeScopes wraps the orchestration function body and each
+// ForStmt / IfStmt branch body in an AUTO ``RuntimeScopeStmt`` so codegen emits
+// ``PTO2_SCOPE()`` 1:1 from the IR. The structural analyses below inspect those
+// bodies with hand-written traversals (GetLastYieldStmt, FlattenToStmts) that do
+// not descend through a scope node. ``UnwrapAutoScope`` peeks through a single
+// leading AUTO scope so those analyses see the original statements. Manual
+// scopes are intentionally left opaque — they were never auto-wrapped.
+StmtPtr UnwrapAutoScope(const StmtPtr& stmt) {
+  if (auto scope = As<RuntimeScopeStmt>(stmt); scope && !scope->manual_) {
+    return scope->body_;
+  }
+  return stmt;
+}
+
 // The runtime primitive ``Arg::set_dependencies(ptr, count)`` has no upper
 // bound on the explicit dep count, and codegen sizes each call's
 // ``PTO2TaskId <task>_deps[K]`` stack array to its exact edge count, so there
@@ -136,6 +150,11 @@ int64_t ComputeGMPipeWorkspaceElements(const ProgramPtr& program, const Function
         }
       } else if (auto while_stmt = As<WhileStmt>(stmt)) {
         scan_stmts(transform_utils::FlattenToStmts(while_stmt->body_));
+      } else if (auto scope = As<RuntimeScopeStmt>(stmt)) {
+        // MaterializeRuntimeScopes wraps the function body and for/if bodies in
+        // AUTO RuntimeScopeStmt; descend so nested initialize_pipe calls and
+        // loops remain visible to GM-pipe workspace sizing.
+        scan_stmts(transform_utils::FlattenToStmts(scope->body_));
       }
     }
   };
@@ -358,8 +377,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     //     issue #1286.
     //
     // We need to know which case applies before visiting the body, so we look
-    // up the yield once here.
-    auto yield = transform_utils::GetLastYieldStmt(for_stmt->body_);
+    // up the yield once here. The body may be wrapped in an AUTO scope by
+    // MaterializeRuntimeScopes; peek through it so the trailing yield is found.
+    auto yield = transform_utils::GetLastYieldStmt(UnwrapAutoScope(for_stmt->body_));
     std::vector<bool> is_rebind(for_stmt->iter_args_.size(), false);
     if (yield) {
       INTERNAL_CHECK_SPAN(yield->value_.size() == for_stmt->iter_args_.size(), for_stmt->span_)
@@ -721,14 +741,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     indent_ += 4;
     PushCppScope();
 
-    // Inside a MANUAL scope, the runtime forbids nested AUTO scope, so we
-    // omit the implicit ``PTO2_SCOPE()`` wrapper around the loop body.
-    bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
-    if (emit_implicit_scope) {
-      code_ << Indent() << "PTO2_SCOPE() {\n";
-      indent_ += 4;
-      PushCppScope();
-    }
+    // The implicit ``PTO2_SCOPE()`` wrapper around the loop body is now an
+    // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
+    // (suppressed inside a manual scope); visiting the body emits it 1:1.
 
     auto saved = current_return_vars_;
     // Only register return_vars whose yield is a true rebind. Trivial slots
@@ -760,11 +775,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     current_loop_slot_exprs_.pop_back();
     current_return_vars_ = saved;
 
-    if (emit_implicit_scope) {
-      PopCppScope();
-      indent_ -= 4;
-      code_ << Indent() << "}\n";
-    }
     PopCppScope();
     indent_ -= 4;
     code_ << Indent() << "}\n";
@@ -826,7 +836,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     if (tensor_phi_init.empty()) {
       auto find_in_scope_tensor_var = [&](const StmtPtr& body) -> std::string {
-        auto y = transform_utils::GetLastYieldStmt(body);
+        // The branch body may be wrapped in an AUTO scope by
+        // MaterializeRuntimeScopes; peek through it to reach the trailing yield.
+        auto y = transform_utils::GetLastYieldStmt(UnwrapAutoScope(body));
         if (!y) return {};
         for (const auto& v : y->value_) {
           auto var = AsVarLike(v);
@@ -2262,23 +2274,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
   void VisitScopedBranchBody(const StmtPtr& body, const std::vector<VarPtr>& return_vars) {
     indent_ += 4;
     PushCppScope();
-    bool emit_implicit_scope = (in_manual_scope_depth_ == 0);
-    if (emit_implicit_scope) {
-      code_ << Indent() << "PTO2_SCOPE() {\n";
-      indent_ += 4;
-      PushCppScope();
-    }
-
+    // The implicit ``PTO2_SCOPE()`` wrapper around the branch body is now an
+    // explicit AUTO RuntimeScopeStmt inserted by MaterializeRuntimeScopes
+    // (suppressed inside a manual scope); visiting the body emits it 1:1.
     auto saved = current_return_vars_;
     current_return_vars_.assign(return_vars.begin(), return_vars.end());
     VisitStmt(body);
     current_return_vars_ = saved;
 
-    if (emit_implicit_scope) {
-      PopCppScope();
-      indent_ -= 4;
-      code_ << Indent() << "}\n";
-    }
     PopCppScope();
     indent_ -= 4;
   }
@@ -2447,7 +2450,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       return EvalConstTripCount(for_stmt);
     }
     if (for_stmt->kind_ != ForKind::Sequential) return 0;
-    auto yield = transform_utils::GetLastYieldStmt(for_stmt->body_);
+    // Body may be wrapped in an AUTO scope by MaterializeRuntimeScopes.
+    auto yield = transform_utils::GetLastYieldStmt(UnwrapAutoScope(for_stmt->body_));
     if (!yield || idx >= yield->value_.size()) return 0;
     auto yield_var = AsVarLike(yield->value_[idx]);
     if (!yield_var) return 0;
@@ -2614,7 +2618,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
   stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
   stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
-  stmt_codegen.SetInitialIndent(8);
+  // MaterializeRuntimeScopes wraps the whole body in an AUTO RuntimeScopeStmt,
+  // so the outermost ``PTO2_SCOPE()`` is now emitted by the scope handler at the
+  // base indent (4) rather than by a hardcoded wrapper below; the body lands at 8.
+  stmt_codegen.SetInitialIndent(4);
   stmt_codegen.VisitStmt(func->body_);
 
   oss << GenerateIncludes(false);
@@ -2654,9 +2661,10 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
     }
   }
 
-  oss << "\n    PTO2_SCOPE() {\n";
+  // The outermost PTO2_SCOPE() is now an explicit RuntimeScopeStmt emitted by
+  // stmt_codegen (see MaterializeRuntimeScopes); just splice its output in.
+  oss << "\n";
   oss << stmt_codegen.GetGeneratedCode();
-  oss << "    }\n";
 
   oss << "}\n\n";
   oss << "}  // extern \"C\"\n";

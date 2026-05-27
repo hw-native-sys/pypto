@@ -86,6 +86,7 @@ struct PassProperties {
 | DeriveCallDirections | SplitIncoreOrch | CallDirectionsResolved | — |
 | CollectCommGroups | — | CommGroupsCollected | — |
 | Simplify | — | — | — |
+| MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |
 
 > **Note**: VerifySSA and TypeCheck are **PropertyVerifiers** (verification rules), not Passes. They run via `VerificationInstrument` or the `run_verifier()` utility — see [Verifier](99-verifier.md).
 
@@ -393,6 +394,7 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 21. [`DeriveCallDirections`](34-derive_call_directions.md)
 22. [`CollectCommGroups`](35-collect_comm_groups.md) (distributed: WindowBuffer + Program.comm_groups_; no-op for comm-less programs)
 23. `Simplify`
+24. [`MaterializeRuntimeScopes`](36-materialize_runtime_scopes.md) (inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1)
 
 `DebugTileOptimization` is a debug-only strategy for inspecting this tile stage
 without the tensor-only prefix passes. Use `Default` for normal compilation and

@@ -92,7 +92,10 @@ void BindPass(nb::module_& m) {
              "ArrayType never appears as a function parameter or return type")
       .value("CommGroupsCollected", IRProperty::CommGroupsCollected,
              "Program.comm_groups_ populated and pld.tensor.window result types carry "
-             "DistributedTensorType.window_buffer_ back-references");
+             "DistributedTensorType.window_buffer_ back-references")
+      .value("RuntimeScopesMaterialized", IRProperty::RuntimeScopesMaterialized,
+             "Orchestration functions carry explicit RuntimeScopeStmt nodes for the function body and "
+             "for/if bodies; codegen no longer emits implicit PTO2_SCOPE() wrappers");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");
@@ -487,6 +490,12 @@ void BindPass(nb::module_& m) {
              "DistributedTensorType.window_buffer_ on view Vars, and populate\n"
              "Program.comm_groups_ with the inferred coverage. Runs immediately after\n"
              "InlineFunctions (L2 orch is never inlined into L3).");
+  passes.def("materialize_runtime_scopes", &pass::MaterializeRuntimeScopes,
+             "Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.\n\n"
+             "For every Orchestration function, inserts AUTO RuntimeScopeStmt (manual_=false)\n"
+             "wrapping the function body and each ForStmt / IfStmt branch body (suppressed\n"
+             "inside a manual scope). Codegen then emits PTO2_SCOPE only from RuntimeScopeStmt\n"
+             "nodes, 1:1 with the IR. Runs last in the pipeline, after the final Simplify.");
   passes.def("normalize_stmt_structure", &pass::NormalizeStmtStructure,
              "Create a pass that normalizes statement structure");
   passes.def("derive_call_directions", &pass::DeriveCallDirections,
