@@ -138,9 +138,7 @@ def test_partition_view_not_on_scf_phi(scratch_mlir: str):
     source operand matters.
     """
     sources = [
-        _partition_view_source(line)
-        for line in scratch_mlir.split("\n")
-        if "pto.partition_view" in line
+        _partition_view_source(line) for line in scratch_mlir.split("\n") if "pto.partition_view" in line
     ]
     assert sources, f"Expected at least one pto.partition_view:\n{scratch_mlir}"
     bad = [src for src in sources if "__phi" in src]
