@@ -487,9 +487,19 @@ class InlineCallsMutator : public IRMutator {
     auto gv = As<GlobalVar>(call->op_);
     if (!gv) return nullptr;
     auto it = inline_fns_.find(gv->name_);
-    return (it == inline_fns_.end()) ? nullptr : it->second;
+    if (it == inline_fns_.end()) return nullptr;
+    inlined_callees_.insert(it->second);
+    return it->second;
   }
 
+ public:
+  /// Inline callees actually spliced by this mutator instance. The outer pass
+  /// reads this to migrate function-level attrs (e.g. ``kAttrDumpTaggedNames``)
+  /// from each inlined callee onto the caller before the inline function is
+  /// dropped at the end of ``InlineFunctions``.
+  const std::unordered_set<FunctionPtr>& GetInlinedCallees() const { return inlined_callees_; }
+
+ private:
   const std::unordered_map<std::string, FunctionPtr>& inline_fns_;
   bool changed_ = false;
   // LHS Var → return values, populated by SpliceAssignCallSite for multi-return
@@ -497,7 +507,48 @@ class InlineCallsMutator : public IRMutator {
   // with the corresponding value, so the LHS Var ends up with no references
   // and we never emit a `LHS = MakeTuple(...)` assignment.
   std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_subs_;
+  // Inline callees recorded by LookupInlineCallee on every successful resolve.
+  // Mutable because LookupInlineCallee is logically const but records side
+  // information for the outer pass.
+  mutable std::unordered_set<FunctionPtr> inlined_callees_;
 };
+
+// Union the ``kAttrDumpTaggedNames`` lists (``pl.dump_tag`` markers, see
+// :doc:`expr.h:kAttrDumpTaggedNames`) of every callee just spliced into
+// ``caller`` onto the caller's own list. Inline functions are dropped at the
+// end of the pass, so without this migration any markers written inside
+// ``@pl.jit.inline`` would be lost before orchestration codegen reads the
+// attr.
+//
+// Order preservation: caller's existing names appear first, then names from
+// each callee in iteration order, with duplicates dropped on first sight.
+void MergeDumpTaggedNames(const std::shared_ptr<Function>& caller,
+                          const std::unordered_set<FunctionPtr>& inlined_callees) {
+  std::vector<std::string> merged;
+  std::unordered_set<std::string> seen;
+  auto append_names = [&](const std::vector<std::string>& names) {
+    for (const auto& n : names) {
+      if (seen.insert(n).second) merged.push_back(n);
+    }
+  };
+  if (caller->HasAttr(kAttrDumpTaggedNames)) {
+    append_names(caller->GetAttr<std::vector<std::string>>(kAttrDumpTaggedNames));
+  }
+  for (const auto& callee : inlined_callees) {
+    if (!callee->HasAttr(kAttrDumpTaggedNames)) continue;
+    append_names(callee->GetAttr<std::vector<std::string>>(kAttrDumpTaggedNames));
+  }
+  if (merged.empty()) return;
+  bool replaced = false;
+  for (auto& [k, v] : caller->attrs_) {
+    if (k == kAttrDumpTaggedNames) {
+      v = std::move(merged);
+      replaced = true;
+      break;
+    }
+  }
+  if (!replaced) caller->attrs_.emplace_back(kAttrDumpTaggedNames, std::move(merged));
+}
 
 }  // namespace
 
@@ -581,6 +632,11 @@ Pass InlineFunctions() {
         if (mutator.Changed()) {
           auto updated = MutableCopy(fn);
           updated->body_ = new_body;
+          // Migrate dump_tag markers from each inlined callee onto this
+          // caller before the inline functions are dropped below. The pass
+          // runs at fixpoint, so multi-level inline (A inlines B inlines C)
+          // propagates names up the chain on successive iterations.
+          MergeDumpTaggedNames(updated, mutator.GetInlinedCallees());
           fn = updated;
           any_changed = true;
         }

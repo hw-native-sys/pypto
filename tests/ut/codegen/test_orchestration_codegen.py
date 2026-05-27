@@ -2184,6 +2184,275 @@ class TestOrchestration:
         for line in code.split("\n"):
             assert ".dump(" not in line, f"Stray tag should not emit any dump call: {line!r}"
 
+    def test_dump_tag_inside_inline_function_propagates_to_caller(self):
+        """``pl.dump_tag(<inline param>)`` written inside ``@pl.function(type=Inline)``
+        propagates to the caller orchestration after ``InlineFunctions``
+        merges callee attrs. Codegen then emits the toggle + per-task dump
+        for the matched inline parameter at the inlined call site.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class InlineDumpTagProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def inline_helper(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pl.dump_tag(a)
+                d = self.kernel_add(a, b, d)
+                return d
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.inline_helper(a, b, d)
+                return d
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(InlineDumpTagProgram)
+        code = _generate_orch_code(transformed)
+
+        assert code.count("enable_dump_tensor_selective();") == 1
+        assert code.count("params_t0.dump(ext_a);") == 1
+        for line in code.split("\n"):
+            if ".dump(" in line:
+                assert "ext_b" not in line, f"Untagged ext_b should not be dumped: {line!r}"
+
+    def test_dump_tag_on_inline_body_local_var_after_freshname_rename(self):
+        """``pl.create_tensor`` inside an inline function is alpha-renamed by
+        the inline pass (``FreshName`` appends ``_inline<N>``). The
+        ``GetCompatibleBaseName`` helper strips this suffix so the
+        ``dump_tag`` name match still succeeds against the user's chosen
+        base name after inlining.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class InlineBodyVarDumpTagProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def inline_helper(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tmp: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                pl.dump_tag(tmp)
+                tmp = self.kernel_add(a, b, tmp)
+                d = self.kernel_add(tmp, b, d)
+                return d
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.inline_helper(a, b, d)
+                return d
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(InlineBodyVarDumpTagProgram)
+        code = _generate_orch_code(transformed)
+
+        assert "enable_dump_tensor_selective();" in code
+        # The dump call references the FreshName-renamed local (e.g. ``tmp_inline0``);
+        # ``GetCompatibleBaseName`` strips the ``_inline<N>`` suffix back to ``tmp``
+        # for the allowlist match. Both kernel calls consume the renamed local
+        # (once as output, once as input), so at least one ``.dump(tmp...);`` line
+        # must appear.
+        dump_lines = [line for line in code.split("\n") if ".dump(" in line]
+        assert dump_lines, f"expected at least one dump call, got code:\n{code}"
+        assert any("tmp" in line for line in dump_lines), (
+            f"renamed inline body var should be dumped; got dump lines: {dump_lines}"
+        )
+
+    def test_dump_tag_stacked_inline_renames_body_local_var(self):
+        """A body-local ``pl.create_tensor`` declared in the innermost inline
+        function survives several layers of inlining. Each ``InlineFunctions``
+        pass iteration appends a fresh ``_inline<N>`` suffix to the Var name,
+        so a Var that starts as ``tmp`` can land in the orch body as
+        ``tmp_inlineA_inlineB_inlineC``. ``GetCompatibleBaseName`` must loop
+        the strip until no more ``_inline<digits>`` tail remains; otherwise
+        the dump_tag allowlist would miss the match and the per-task dump
+        wouldn't emit.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class StackedInlineProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def inner(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                tmp: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                pl.dump_tag(tmp)
+                tmp = self.kernel_add(a, b, tmp)
+                d = self.kernel_add(tmp, b, d)
+                return d
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def middle(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.inner(a, b, d)
+                return d
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def outer(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.middle(a, b, d)
+                return d
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.outer(a, b, d)
+                return d
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(StackedInlineProgram)
+        code = _generate_orch_code(transformed)
+
+        # The Var that started as ``tmp`` in ``inner`` is renamed at every
+        # outer inlining step. Confirm we see at least one ``_inline``-
+        # suffixed emit name in the generated code (sanity that the multi-
+        # level stack happened at all), then assert the dump emit picks it
+        # up via the looped suffix strip.
+        assert "_inline" in code, "expected at least one inline-renamed Var in the code"
+        assert code.count("enable_dump_tensor_selective();") == 1
+        dump_lines = [line for line in code.split("\n") if ".dump(" in line]
+        assert dump_lines, f"expected dump calls after multi-level inline, got code:\n{code}"
+        assert any("tmp" in line for line in dump_lines), (
+            f"stacked inline rename should still match base name 'tmp'; got: {dump_lines}"
+        )
+
+    def test_dump_tag_two_level_inline_propagates(self):
+        """Two-level inlining (orch → middle → inner) merges
+        ``kAttrDumpTaggedNames`` up the chain via the InlineFunctions pass
+        fixpoint. The marker written inside the innermost inline takes
+        effect at the orchestration entry.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class TwoLevelInlineDumpTagProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel_add(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
+                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
+                return out
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def inner(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pl.dump_tag(a)
+                d = self.kernel_add(a, b, d)
+                return d
+
+            @pl.function(type=pl.FunctionType.Inline)
+            def middle(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.inner(a, b, d)
+                return d
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                d = self.middle(a, b, d)
+                return d
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(TwoLevelInlineDumpTagProgram)
+        code = _generate_orch_code(transformed)
+
+        assert code.count("enable_dump_tensor_selective();") == 1
+        assert code.count("params_t0.dump(ext_a);") == 1
+
 
 class TestTensorReadWriteOffsetCodegen:
     """Tests verifying that multi-dimensional indices are correctly converted to flat offsets in codegen."""

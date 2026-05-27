@@ -223,9 +223,10 @@ def dump_tag(tensor: Tensor) -> Tensor:
     * Consumed at parse time — the parser records the tagged Var name on
       the enclosing Function's attrs and emits no IR statement.
 
-    Only valid as a standalone statement inside an Orchestration function;
-    the parser rejects ``pl.dump_tag`` written in any other function type
-    (AIV / AIC / Mix kernel bodies) with a clear error::
+    Valid as a standalone statement inside an Orchestration function or an
+    Inline helper (``@pl.jit.inline`` / ``FunctionType.Inline``) that the
+    orchestration inlines. The parser rejects ``pl.dump_tag`` written in any
+    other function type (AIV / AIC / Mix kernel bodies) with a clear error::
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
@@ -233,6 +234,24 @@ def dump_tag(tensor: Tensor) -> Tensor:
             pl.dump_tag(out)         # mark out for selective dump
             s = self.qk_matmul(q, k_cache, scratch)  # q is dumped here
             out = self.pv_matmul(s, k_cache, out)    # out is dumped here
+
+    Inline helpers (``@pl.jit.inline`` / ``FunctionType.Inline``)::
+
+        @pl.jit.inline
+        def helper(q: pl.Tensor[...], out: pl.Out[...]):
+            pl.dump_tag(q)                       # inline param — works after inlining
+            tmp = pl.create_tensor([...], dtype=pl.FP32)
+            pl.dump_tag(tmp)                     # inline body-local — also works
+            tmp = self.kernel(q, tmp)
+            out = self.kernel2(tmp, out)
+            return out
+
+    The ``InlineFunctions`` pass migrates each inline callee's tag set onto
+    the caller orchestration before the inline function is dropped, so
+    markers on both inline parameters and inline body-local
+    ``pl.create_tensor(...)`` results take effect at the inlined call sites.
+    Multi-level inlining (an inline helper that calls another inline helper
+    which writes ``pl.dump_tag``) is handled at the pass's fixpoint.
 
     Limitations (MVP):
 

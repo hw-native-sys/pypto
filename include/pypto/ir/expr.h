@@ -700,9 +700,12 @@ inline constexpr const char* kAttrManualDepEdges = "manual_dep_edges";
  * call's ``add_*`` block, opting the orch into the runtime's selective
  * tensor dump mode (simpler#844).
  *
- * Value type: ``std::set<std::string>``. Lives on
- * ``Function::attrs_`` exclusively for Orchestration-type Functions —
- * other function types never carry this attr.
+ * Value type: ``std::vector<std::string>`` (insertion-ordered, deduplicated
+ * at merge time). Lives on ``Function::attrs_``. Orchestration-type
+ * Functions are the steady-state owners after the ``InlineFunctions`` pass;
+ * Inline-type Functions may transiently carry it until that pass merges the
+ * tagged-name list onto the caller orchestration and drops the inline
+ * function. Other function types (AIV / AIC / Mix) never carry this attr.
  *
  * Empty / absent attr preserves legacy full-dump behaviour: when
  * ``CallConfig::enable_dump_tensor`` is set without any ``pl.dump_tag``,

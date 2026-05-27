@@ -84,6 +84,15 @@ for a production-shape example. Backed by the runtime
 `enable_dump_tensor_selective()` toggle + `Arg::dump(...)` API from
 simpler#844.
 
+`pl.dump_tag` is also accepted inside an Inline helper
+(`@pl.jit.inline` / `FunctionType.Inline`). The `InlineFunctions` pass
+merges each inlined callee's tagged-name list onto the caller
+orchestration before the inline function is dropped, so markers written
+inside an inline body take effect at the inlined call sites. Markers on
+both inline parameters and inline body-local `pl.create_tensor(...)`
+results are supported, and multi-level inlining (inline → inline →
+inline) is handled at the pass's fixpoint.
+
 ## Rendering `deps.json` to HTML
 
 `enable_dep_gen` only emits the raw `deps.json`; the HTML pan/zoom graph
