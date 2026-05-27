@@ -4074,6 +4074,72 @@ class TestManualScopeCodegen:
         assert ".is_valid())" in code, code
         assert ".set_dependencies(" in code, code
 
+    def test_manual_scope_inner_deps_can_reference_outer_scope_tid(self):
+        """Regression: a kernel inside ``with pl.manual_scope():`` can carry
+        ``deps=[outer_tid]`` referencing a TaskId produced by an *outer*
+        (auto-scope) task.
+
+        Previously ``OrchestrationCodegen::VisitStmt_(RuntimeScopeStmtPtr)``
+        wiped ``manual_task_id_map_`` on manual-scope entry (``std::move``
+        the outer map into ``saved_map`` then ``clear()``), so any
+        ``deps=`` edge pointing to an outer-scope producer was silently
+        dropped in ``CountManualDeps`` (early return on the
+        ``manual_task_id_map_.find(edge) == end()`` miss) and no
+        ``set_dependencies(...)`` call was emitted for that inner task.
+        With no explicit edge and no auto-dep (manual scope disables
+        OverlapMap), the inner kernel could race the outer producer.
+
+        The fix snapshots the outer map by *copy* instead of moving + clearing,
+        so the live map keeps the outer entries visible inside the inner scope.
+        The outer-only snapshot is restored on exit so the inner-scope adds —
+        which name C++ identifiers that die with the inner ``{`` block — do
+        not leak back into the parent scope.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k_outer(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k_inner(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                # Outer producer in auto scope — captures TaskId for the
+                # cross-scope fence. ``outer_a`` is bound but unused; the
+                # only edge from outer to inner is the explicit TaskId dep.
+                outer_a, outer_tid = pl.submit(self.k_outer, x)
+                with pl.manual_scope():
+                    # Inner consumer in manual scope. The two kernels share
+                    # no data input (both read ``x``), so the ``deps=`` edge
+                    # is the *only* thing fencing inner behind outer.
+                    inner_b, _ = pl.submit(self.k_inner, x, deps=[outer_tid])
+                return inner_b
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        # Outer producer (Task 0, in auto scope) captures its TaskId; the
+        # ``pl.submit`` tuple-element binds the producer TaskId as ``outer_tid``.
+        assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
+        assert "PTO2TaskId outer_tid = task_0_outs.task_id();" in code, code
+        # Inner kernel runs inside a MANUAL scope.
+        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
+        # The inner kernel's deps array MUST include the outer_tid edge —
+        # this is what the bug used to silently drop. Without these lines
+        # the inner ``rt_submit_*_task`` would have no explicit fence on the
+        # outer task and the regression would re-emerge.
+        assert "Arg params_t1;" in code, code
+        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "if (outer_tid.is_valid()) params_t1_deps[params_t1_deps_count++] = outer_tid;" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
+
 
 class TestTupleReturnNoDepAliasing:
     """``GenerateTupleReturnAliases`` must classify output slots by the

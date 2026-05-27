@@ -778,10 +778,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     decltype(array_carry_vars_) saved_array_carry;
     if (scope->manual_) {
       ++in_manual_scope_depth_;
-      saved_map = std::move(manual_task_id_map_);
-      saved_array_carry = std::move(array_carry_vars_);
-      manual_task_id_map_.clear();
-      array_carry_vars_.clear();
+      // Snapshot the outer maps by COPY (not move) so the live map keeps
+      // the outer entries visible inside the manual scope — a kernel inside
+      // a manual scope must be able to fence on TaskIds produced by tasks
+      // emitted in the enclosing (auto or outer-manual) scope. On exit we
+      // restore the outer-only snapshot, discarding the inner-scope adds
+      // (those reference C++ identifiers that die with the inner block).
+      saved_map = manual_task_id_map_;
+      saved_array_carry = array_carry_vars_;
     }
     VisitStmt(scope->body_);
     if (scope->manual_) {
@@ -2498,7 +2502,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///     across iterations). Each element of the vector is the C++ expression
   ///     naming one slot of the array (e.g. ``out_arr[0]``, ``out_arr[1]``).
   ///     EmitManualDeps fills each valid slot into the ``<task>_deps`` array.
-  /// Cleared on entry to each manual scope.
+  /// On entry to a manual scope, snapshotted (by copy) and restored on exit
+  /// so the outer entries remain visible *inside* the inner scope while the
+  /// inner-scope adds — which reference C++ identifiers that die with the
+  /// inner block — are discarded once the manual scope exits.
   std::unordered_map<const Var*, std::variant<int, std::string, std::vector<std::string>>>
       manual_task_id_map_;
   /// Records the C++ array allocation backing a TaskId carry that holds an
