@@ -87,14 +87,19 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
     // only scalar yields, so this does not affect their lowering.
     if (As<TensorType>(expr->GetType())) {
       if (auto tensor_var = ir::AsVarLike(expr)) {
-        std::string view = GetOrCreateTensorView(tensor_var);
-        // Cache view → base ptr so an IfStmt rebinding its phi return_var to this
-        // shared view can also restore the base ptr (else GetTensorBasePtr would
-        // fall back to the view SSA). Both branches yield the same backing, so
-        // the recorded base ptr is consistent.
-        fs_.view_ssa_to_base_ptr[view] = GetTensorBasePtr(tensor_var);
-        yielded_values.push_back(view);
-        continue;
+        // Only normalize when a tensor_view is actually registered. Some
+        // tensors (e.g. return-value / loop phis without a make_tensor_view)
+        // have no view at yield time; for those fall through to the default
+        // expr lowering rather than hard-failing in GetOrCreateTensorView.
+        if (std::string view = TryGetTensorView(tensor_var); !view.empty()) {
+          // Cache view → base ptr so an IfStmt rebinding its phi return_var to
+          // this shared view can also restore the base ptr (else
+          // GetTensorBasePtr would fall back to the view SSA). Both branches
+          // yield the same backing, so the recorded base ptr is consistent.
+          fs_.view_ssa_to_base_ptr[view] = GetTensorBasePtr(tensor_var);
+          yielded_values.push_back(view);
+          continue;
+        }
       }
     }
     VisitExpr(expr);

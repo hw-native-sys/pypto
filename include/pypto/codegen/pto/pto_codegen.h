@@ -140,6 +140,19 @@ class PTOCodegen : public CodegenBase {
   std::string GetOrCreateTensorView(const ir::VarPtr& tensor);
 
   /**
+   * @brief Look up the tensor view for a variable without creating/failing.
+   *
+   * Like GetOrCreateTensorView but returns an empty string when no view is
+   * registered (and none is reachable via an IterArg init chain), instead of
+   * raising. Callers that have a valid fallback (e.g. yielding a tensor that
+   * has no make_tensor_view) use this to avoid a hard failure.
+   *
+   * @param tensor Tensor variable
+   * @return Tensor view SSA name, or "" if none is registered
+   */
+  [[nodiscard]] std::string TryGetTensorView(const ir::VarPtr& tensor) const;
+
+  /**
    * @brief Get or emit a numeric constant of any dtype (int, index, or float).
    *
    * Both overloads write the constant to the constants section on first use and
