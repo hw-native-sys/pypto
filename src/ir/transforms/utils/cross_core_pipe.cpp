@@ -311,6 +311,13 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
     effective_slot_num = requested;
   }
 
+  // Guard against signed-int64 overflow before the multiplication. In
+  // practice `common_slot_size` is bounded by TryGetTileSlotSizeBytes (which
+  // already capped element_count against bit_width), so this is impractical
+  // to trigger — but the pre-check keeps the multiplication well-defined.
+  CHECK(common_slot_size.value() <= std::numeric_limits<int64_t>::max() / effective_slot_num)
+      << "Cross-core reserve_buffer size overflow: slot_size=" << common_slot_size.value()
+      << ", slot_num=" << effective_slot_num;
   const int64_t buffer_size = common_slot_size.value() * effective_slot_num;
   CHECK(common_slot_size.value() <= std::numeric_limits<int>::max())
       << "Cross-core slot_size out of range: " << common_slot_size.value();

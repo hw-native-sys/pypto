@@ -506,7 +506,11 @@ class Function : public IRNode {
   [[nodiscard]] std::optional<int> GetRingSlots() const {
     if (!HasAttr("ring_slots")) return std::nullopt;
     int val = GetAttr<int>("ring_slots", 0);
-    if (val <= 0) return std::nullopt;
+    // The AST parser validates ring_slots is in [1, 8]; a stored non-positive
+    // value would mean the parser was bypassed (internal invariant violation).
+    // Fail loudly instead of silently treating it as "unset".
+    INTERNAL_CHECK(val > 0) << "Invalid ring_slots in function attrs: " << val
+                            << " (parser should have rejected this)";
     return val;
   }
 };
