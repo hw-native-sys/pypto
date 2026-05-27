@@ -4125,19 +4125,25 @@ class TestManualScopeCodegen:
         transformed = pm.run_passes(Prog)
         code = _generate_orch_code(transformed)
 
-        # Outer producer (Task 0, in auto scope) captures its TaskId; the
-        # ``pl.submit`` tuple-element binds the producer TaskId as ``outer_tid``.
+        # Outer producer (Task 0, in auto scope) captures its TaskId. Use the
+        # same regex-discovery idiom as nearby tests (lines 3730, 3819, 4010)
+        # so the assertion is not brittle to any future SSA renaming /
+        # suffixing the codegen may apply to the producer TaskId emit name.
         assert "TaskOutputTensors task_0_outs = rt_submit_aiv_task(" in code, code
-        assert "PTO2TaskId outer_tid = task_0_outs.task_id();" in code, code
+        producer_tid = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        assert producer_tid, code
         # Inner kernel runs inside a MANUAL scope.
         assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" in code, code
-        # The inner kernel's deps array MUST include the outer_tid edge —
-        # this is what the bug used to silently drop. Without these lines
-        # the inner ``rt_submit_*_task`` would have no explicit fence on the
-        # outer task and the regression would re-emerge.
+        # The inner kernel's deps array MUST include the producer TaskId edge —
+        # this is what the bug used to silently drop. Without these lines the
+        # inner ``rt_submit_*_task`` would have no explicit fence on the outer
+        # task and the regression would re-emerge.
         assert "Arg params_t1;" in code, code
         assert "PTO2TaskId params_t1_deps[1];" in code, code
-        assert "if (outer_tid.is_valid()) params_t1_deps[params_t1_deps_count++] = outer_tid;" in code, code
+        assert (
+            f"if ({producer_tid.group(1)}.is_valid()) params_t1_deps[params_t1_deps_count++] = {producer_tid.group(1)};"
+            in code
+        ), code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
 
