@@ -1189,6 +1189,78 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string value;
   };
 
+  /// Build one ParamEntry from the call-site arg at `arg_idx`. Centralises the
+  /// var/const/scalar dispatch that BuildTaskParams used to inline, so the
+  /// per-callee-param iteration (which interleaves args-derived and
+  /// synthesised entries) can call into it cleanly.
+  ParamEntry BuildOneArgParam(const CallPtr& call, const std::string& callee_name,
+                              const std::vector<ArgDirection>& call_arg_directions, size_t arg_idx) {
+    const auto& arg = call->args_[arg_idx];
+    std::string var_name = TryGetVarName(arg);
+    if (!var_name.empty()) {
+      if (auto scalar_type = As<ScalarType>(arg->GetType())) {
+        std::string cpp_type = scalar_type->dtype_.ToCTypeString();
+        return {ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)};
+      }
+      std::string ext_name = GetExternalTensorName(var_name);
+      return {call_arg_directions[arg_idx], ext_name};
+    }
+    if (auto const_int = As<ConstInt>(arg)) {
+      std::string cpp_type = const_int->dtype().ToCTypeString();
+      std::string value = FormatConstIntValue(const_int, cpp_type);
+      return {ArgDirection::Scalar, "(uint64_t)" + value};
+    }
+    if (auto const_float = As<ConstFloat>(arg)) {
+      std::string cpp_type = const_float->dtype().ToCTypeString();
+      std::string value = FormatConstFloatValue(const_float, cpp_type);
+      return {ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)};
+    }
+    if (auto const_bool = As<ConstBool>(arg)) {
+      return {ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"};
+    }
+    INTERNAL_CHECK_SPAN(false, call->span_) << "Call to '" << callee_name << "' arg " << arg_idx
+                                            << " is neither a variable nor a recognized constant literal "
+                                            << "(unsupported expression kind for orchestration codegen).";
+    return {};  // unreachable
+  }
+
+  /// For a Submit's Out param at callee position `param_idx` that is *not*
+  /// passed in Submit::args_, emit a TensorCreateInfo declaration the runtime
+  /// can use to allocate the output, and return the ParamEntry that consumes
+  /// it via `add_output(<ci>)`. The runtime's TaskOutputTensors exposes
+  /// allocated outputs via `get_ref(i)` in add_output / add_inout order, so
+  /// this entry's runtime position is determined by where it lands in the
+  /// caller's `params` vector relative to other tensor entries.
+  ParamEntry EmitSubmitSynthOutputEntry(const FunctionPtr& callee_func, size_t param_idx) {
+    const auto& param = callee_func->params_[param_idx];
+    auto tensor_ty = As<TensorType>(param->GetType());
+    INTERNAL_CHECK_SPAN(tensor_ty, param->span_)
+        << "Submit synthesised output for callee '" << callee_func->name_ << "' param[" << param_idx
+        << "] must have TensorType, got " << param->GetType()->TypeName();
+
+    const size_t ndim = tensor_ty->shape_.size();
+    std::string ci_var =
+        "params_t" + std::to_string(task_counter_) + "_synth_out_" + std::to_string(param_idx);
+    std::string ind = Indent();
+
+    code_ << ind << "uint32_t " << ci_var << "_shapes[" << ndim << "] = {";
+    for (size_t i = 0; i < ndim; ++i) {
+      if (i > 0) code_ << ", ";
+      std::string dim_str = GenerateExprString(tensor_ty->shape_[i]);
+      if (As<ConstInt>(tensor_ty->shape_[i])) {
+        code_ << dim_str;
+      } else {
+        code_ << "static_cast<uint32_t>(" << dim_str << ")";
+      }
+    }
+    code_ << "};\n";
+
+    code_ << ind << "TensorCreateInfo " << ci_var << "(" << ci_var << "_shapes, " << ndim << ", "
+          << GetRuntimeDataTypeString(tensor_ty->dtype_) << ");\n";
+
+    return {ArgDirection::Output, ci_var};
+  }
+
   std::vector<ParamEntry> BuildTaskParams(const CallPtr& call, const FunctionPtr& callee_func) {
     std::vector<ParamEntry> params;
     const std::string& callee_name = callee_func->name_;
@@ -1202,38 +1274,36 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << " but args size " << call->args_.size()
         << ". DeriveCallDirections must run before orchestration codegen.";
 
+    // Args use positional identity mapping against the callee param list
+    // (args_[i] ↔ params_[i]) in both kinds. The difference is *coverage*:
+    //   - Call: args_.size() == params_.size() (full coverage).
+    //   - Submit: args_.size() <= params_.size() (prefix). The trailing
+    //     callee params (indices [args_.size() .. params_.size())) are
+    //     runtime-allocated outputs that must be Out — the IR builder
+    //     appends them at the tail of the callee signature, so we synth an
+    //     add_output(TensorCreateInfo) entry for each. See
+    //     `.claude/rules/pass-submit-awareness.md` §5.
+    params.reserve(callee_func->params_.size());
     for (size_t arg_idx = 0; arg_idx < call->args_.size(); ++arg_idx) {
-      const auto& arg = call->args_[arg_idx];
-      std::string var_name = TryGetVarName(arg);
-      if (!var_name.empty()) {
-        if (auto scalar_type = As<ScalarType>(arg->GetType())) {
-          std::string cpp_type = scalar_type->dtype_.ToCTypeString();
-          params.push_back({ArgDirection::Scalar, EncodeScalarVar(var_name, cpp_type)});
-          continue;
-        }
-
-        std::string ext_name = GetExternalTensorName(var_name);
-        params.push_back({call_arg_directions[arg_idx], ext_name});
-      } else if (auto const_int = As<ConstInt>(arg)) {
-        std::string cpp_type = const_int->dtype().ToCTypeString();
-        std::string value = FormatConstIntValue(const_int, cpp_type);
-        params.push_back({ArgDirection::Scalar, "(uint64_t)" + value});
-      } else if (auto const_float = As<ConstFloat>(arg)) {
-        std::string cpp_type = const_float->dtype().ToCTypeString();
-        std::string value = FormatConstFloatValue(const_float, cpp_type);
-        params.push_back({ArgDirection::Scalar, EncodeScalarConst(value, cpp_type)});
-      } else if (auto const_bool = As<ConstBool>(arg)) {
-        params.push_back({ArgDirection::Scalar, const_bool->value_ ? "(uint64_t)1" : "(uint64_t)0"});
-      } else {
-        INTERNAL_CHECK_SPAN(false, call->span_) << "Call to '" << callee_name << "' arg " << arg_idx
-                                                << " is neither a variable nor a recognized constant literal "
-                                                << "(unsupported expression kind for orchestration codegen).";
-      }
+      params.push_back(BuildOneArgParam(call, callee_name, call_arg_directions, arg_idx));
     }
-
-    INTERNAL_CHECK_SPAN(params.size() == call->args_.size(), call->span_)
-        << "Call to '" << callee_name << "' built " << params.size() << " params for " << call->args_.size()
-        << " call args (1:1 invariant violated).";
+    if (IsSubmitCall(call)) {
+      INTERNAL_CHECK_SPAN(call->args_.size() <= callee_func->params_.size(), call->span_)
+          << "Submit to '" << callee_name << "' has args_ size " << call->args_.size()
+          << " but callee has only " << callee_func->params_.size() << " params.";
+      for (size_t param_idx = call->args_.size(); param_idx < callee_func->params_.size(); ++param_idx) {
+        INTERNAL_CHECK_SPAN(callee_func->param_directions_[param_idx] == ParamDirection::Out,
+                            callee_func->params_[param_idx]->span_)
+            << "Submit to '" << callee_name << "' missing positional arg for callee param[" << param_idx
+            << "] which is declared " << ParamDirectionToString(callee_func->param_directions_[param_idx])
+            << " (only Out params may be runtime-allocated).";
+        params.push_back(EmitSubmitSynthOutputEntry(callee_func, param_idx));
+      }
+    } else {
+      INTERNAL_CHECK_SPAN(params.size() == call->args_.size(), call->span_)
+          << "Call to '" << callee_name << "' built " << params.size() << " params for " << call->args_.size()
+          << " call args (1:1 invariant violated).";
+    }
 
     // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
     std::stable_partition(params.begin(), params.end(),
@@ -2083,12 +2153,22 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   /// Emit aliases for a ``pl.submit(...)`` kernel call. Tuple elements
-  /// ``0..N-1`` are the kernel's results — the Out/InOut-tensor elements are
-  /// aliased to the corresponding call args, exactly like an ordinary
-  /// multi-output kernel call. Element ``N`` (the trailing ``Scalar[TASK_ID]``)
-  /// is the producer TaskId: it is bound to ``task_<idx>_outs.task_id()`` and
-  /// registered in ``manual_task_id_map_`` so a downstream ``deps=[tid]``
-  /// resolves to the emitted name.
+  /// ``0..N-1`` are the kernel's results — each Out/InOut-tensor element is
+  /// aliased to ``task_<idx>_outs.get_ref(out_pos)``, the runtime's accessor
+  /// for the tensor materialised by the task at output position ``out_pos``.
+  /// Element ``N`` (the trailing ``Scalar[TASK_ID]``) is the producer TaskId
+  /// and is bound to ``task_<idx>_outs.task_id()`` and registered in
+  /// ``manual_task_id_map_`` so a downstream ``deps=[tid]`` resolves to it.
+  ///
+  /// We must NOT alias to ``call->args_[param_idx]`` here: Submit's args_
+  /// excludes declared-Out callee params (they materialise as runtime-allocated
+  /// outputs via TaskOutputTensors), so the per-callee-param index does not
+  /// line up with args_ for those positions. The ``get_ref`` accessor is the
+  /// args-side dual of the return-type TASK_ID rule — see
+  /// ``.claude/rules/pass-submit-awareness.md`` §5. ``BuildTaskParams``
+  /// emits ``add_output`` / ``add_inout`` entries in callee param order
+  /// (see ``EmitSubmitSynthOutputEntry``), so the i-th element of
+  /// ``out_indices`` matches ``task_<idx>_outs.get_ref(i)``.
   void GenerateSubmitReturnAliases(const CallPtr& call, int task_idx) {
     auto tuple_key_it = call_to_tuple_key_.find(call.get());
     if (tuple_key_it == call_to_tuple_key_.end()) return;
@@ -2113,7 +2193,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // referencing the SSA result still need a binding to the runtime output
     // tensor. Looking only at ``ArgDirection`` would drop those bindings and
     // produce undeclared ``__rv_*`` symbols in the emitted code.
-    auto call_arg_directions = call->GetArgDirections();
     auto effective_dirs = GetEffectiveDirections(callee);
     std::vector<size_t> out_indices;
     for (size_t i = 0; i < effective_dirs.size(); ++i) {
@@ -2123,7 +2202,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
 
     // Map the kernel-result portion (tuple elements ``[0, n_outs)``) onto the
-    // Out/InOut args. Some wrappers (notably SPMD helpers) return auxiliary
+    // Out/InOut params. Some wrappers (notably SPMD helpers) return auxiliary
     // scalars *before* the tensor outputs — mirror ``GenerateTupleReturnAliases``
     // and tail-align: result element ``elem_pos`` is an Out/InOut tensor iff
     // ``elem_pos >= tuple_out_base``, where ``tuple_out_base`` skips the
@@ -2150,12 +2229,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
       size_t out_pos = elem_pos - tuple_out_base;
       if (out_pos >= out_indices.size()) continue;
       if (!effective_uses_.count(elem.var)) continue;
-      size_t param_idx = out_indices[out_pos];
-      INTERNAL_CHECK_SPAN(param_idx < call->args_.size(), call->span_)
-          << "Internal error: submit output element " << elem_pos << " maps to param_idx " << param_idx
-          << " out of range for " << call->op_->name_;
       std::string elem_name = ReserveVarEmitName(elem.var);
-      EmitTensorAlias(elem_name, call, param_idx);
+      std::string source =
+          "task_" + std::to_string(task_idx) + "_outs.get_ref(" + std::to_string(out_pos) + ")";
+      if (IsMutableTensorNameInCurrentScope(elem_name)) {
+        code_ << Indent() << elem_name << " = " << source << ";\n";
+      } else {
+        code_ << Indent() << "const Tensor& " << elem_name << " = " << source << ";\n";
+      }
     }
   }
 

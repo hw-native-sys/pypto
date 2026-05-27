@@ -23,7 +23,8 @@ and the bug only surfaces inside `pl.manual_scope` bodies.
 | ------ | ------ | -------- |
 | Semantics | Synchronous function call | Asynchronous task launch |
 | Where it appears | Anywhere | Inside `manual_scope` bodies |
-| Return type | Callee's declared return | `Tuple[<callee return>..., TASK_ID]` |
+| Return type | Callee's declared return | `Tuple[<runtime-allocated Out params>..., <callee return>..., TASK_ID]` |
+| `args_` vs callee `params_` | Identity, full coverage: `args_.size() == params_.size()` | Identity, *prefix*: `args_.size() <= params_.size()` |
 | Has `deps` | No | First-class `deps_` field — TaskId `Var`s / `Array`s |
 | Use-def chain | `args_` only | `args_` **and** `deps_` |
 | Python syntax | `out = self.foo(...)` | `out, tid = pl.submit(self.foo, ...)` |
@@ -96,7 +97,49 @@ tail. If your pass inspects return types of call-like nodes (for tuple
 projection, type inference, etc.), strip / account for the trailing `TASK_ID`
 before comparing against the callee's declared signature.
 
-### 5. Verifier hooks
+### 5. When matching `args_` against callee `params_`
+
+`Submit::args_` is a positional *prefix* of callee `params_`. Mapping is
+identity (`args_[i] ↔ params_[i]`) up to `args_.size()`, but Submit may carry
+fewer args than the callee declares:
+
+- Indices `[0, args_.size())` are caller-supplied (any direction — In, InOut,
+  *or* Out for caller-allocated outputs).
+- Indices `[args_.size(), params_.size())` are **runtime-allocated outputs**:
+  they must be declared `Out` and the IR builder appends them at the *tail*
+  of the callee signature (e.g. `ConvertTensorToTileOps` lowers a local
+  `pl.create_tensor` consumed across scopes into an appended `pl.Out` param).
+  These materialise as leading return-tuple elements before `TASK_ID`.
+
+For a plain `Call`, args is full coverage: `args_.size() == params_.size()`.
+
+A pass that hard-codes `args_.size() == params_.size()` (typical size guard)
+will silently bail on Submit and leave attrs empty. Use a kind-aware bound:
+
+```cpp
+// ❌ Wrong for Submit when callee has tail-appended runtime-allocated outputs
+if (call->args_.size() != callee->params_.size()) return call;  // bails on Submit
+
+// ✅ Identity mapping; relax the size check for Submit (prefix), keep it
+//    exact for Call (full coverage).
+const bool size_ok = is_submit ? (call->args_.size() <= callee->params_.size())
+                               : (call->args_.size() == callee->params_.size());
+if (!size_ok) return call;
+for (size_t i = 0; i < call->args_.size(); ++i) {
+  auto dir = callee->param_directions_[i];   // identity — always safe
+  ...
+}
+// For Submit, callee params beyond args_.size() are runtime-allocated
+// outputs — pass them through the runtime's add_output / TaskOutputTensors
+// path (orchestration codegen) rather than args_-indexed code.
+```
+
+This is the args-side dual of the return-type asymmetry in rule 4. If your
+pass uses a `SubmitToCallView`–style adapter to share code with the Call
+path, the adapter does **not** fix this — `args_` is copied through
+unchanged, so the size-vs-params guard will still mis-fire.
+
+### 6. Verifier hooks
 
 If a pass produces a new IR property that involves `Submit` (e.g. "all submit
 dependencies are dominated by their definitions"), add a `SubmitVerifier` and
@@ -125,6 +168,7 @@ Before merging a new or updated pass that touches calls, verify:
 - [ ] If the pass collects variable uses, `Submit::deps_` is included
 - [ ] If the pass rewrites or clones calls, Submit-ness is preserved
 - [ ] If the pass examines call return types, the `TASK_ID` suffix on `Submit` is accounted for
+- [ ] If the pass matches `args_` against callee `params_`, it allows the Submit prefix invariant (size_ok = `args_.size() <= params_.size()`, not `==`)
 - [ ] If the pass produces a structural invariant, the verifier covers `Submit` too
 - [ ] Tests cover at least one `pl.manual_scope` / `pl.submit` case if the pass is reachable from there
 
