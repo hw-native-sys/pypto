@@ -18,12 +18,14 @@ runtime side effect.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pypto.language as pl
 import pytest
 from pypto.language.parser.diagnostics import ParserSyntaxError
 
 
-def _get_orch(program) -> object:
+def _get_orch(program) -> Any:
     """Return the orchestration ``Function`` from a parsed program."""
     from pypto import ir  # noqa: PLC0415
 
@@ -155,7 +157,7 @@ def test_dump_tag_rejects_non_name_argument() -> None:
                 a: pl.Tensor[[16, 16], pl.FP32],
                 d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
-                pl.dump_tag(self.kernel)  # not a tensor Var
+                pl.dump_tag(self.kernel)  # type: ignore[arg-type]  # not a tensor Var
                 d = self.kernel(a, d)
                 return d
 

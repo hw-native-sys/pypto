@@ -572,9 +572,7 @@ class ASTParser:
         # an unread attr on AIV / AIC / Mix kernel bodies.
         accepts_dump_tag = func_type in (ir.FunctionType.Orchestration, ir.FunctionType.Inline)
         dump_tagged = (
-            self._collect_dump_tag_names(func_def.body)
-            if (inline_body is None and accepts_dump_tag)
-            else []
+            self._collect_dump_tag_names(func_def.body) if (inline_body is None and accepts_dump_tag) else []
         )
         if dump_tagged:
             func_attrs = dict(func_attrs or {})
