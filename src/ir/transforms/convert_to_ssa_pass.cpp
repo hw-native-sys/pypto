@@ -181,7 +181,16 @@ static std::unordered_set<const Var*> ComputeStmtLiveIn(const StmtPtr& stmt) {
     return uc.used;
   }
   if (auto op = As<ScopeStmt>(stmt)) {
-    return ComputeStmtLiveIn(op->body_);
+    auto body_li = ComputeStmtLiveIn(op->body_);
+    // SpmdScopeStmt::core_num_ is a direct ExprPtr field evaluated in the
+    // enclosing scope — its uses are live-in there, same as
+    // ForStmt::start_/stop_/step_ above.
+    if (auto spmd = As<SpmdScopeStmt>(stmt)) {
+      UseCollector uc;
+      uc.CollectExpr(spmd->core_num_);
+      body_li.insert(uc.used.begin(), uc.used.end());
+    }
+    return body_li;
   }
   return {};
 }
@@ -1017,10 +1026,20 @@ class SSAConverter {
     // ``pl.assemble``. The attr must point at the iter_arg, not the rebuilt
     // ``k_cache__rv_*`` from the yielded body.
     auto subst = SubstScopeAttrs(op->attrs_);
+    // SpmdScopeStmt::core_num_ is evaluated in the OUTER scope — substitute
+    // it BEFORE converting the body so it picks up the pre-body ``cur_``
+    // versions (mirrors ConvertFor's handling of start_/stop_/step_).
+    // Other ScopeStmt subclasses have no Var-bearing direct fields.
+    ExprPtr new_core_num;
+    bool core_num_changed = false;
+    if (auto spmd = As<SpmdScopeStmt>(op)) {
+      new_core_num = SubstExpr(spmd->core_num_);
+      core_num_changed = (new_core_num.get() != spmd->core_num_.get());
+    }
     auto body = ConvertStmt(op->body_);
     auto& new_attrs = subst.first;
     const bool attrs_changed = subst.second;
-    if (body == op->body_ && !attrs_changed) return op;
+    if (body == op->body_ && !attrs_changed && !core_num_changed) return op;
     // ScopeStmt is abstract; dispatch on the concrete derived class so MutableCopy
     // can construct the right subclass. Structured bindings are intentionally
     // avoided above — capturing them in this lambda is non-portable C++17
@@ -1035,7 +1054,13 @@ class SSAConverter {
     if (auto auto_in_core = As<AutoInCoreScopeStmt>(op)) return rewrite(auto_in_core);
     if (auto cluster = As<ClusterScopeStmt>(op)) return rewrite(cluster);
     if (auto hier = As<HierarchyScopeStmt>(op)) return rewrite(hier);
-    if (auto spmd = As<SpmdScopeStmt>(op)) return rewrite(spmd);
+    if (auto spmd = As<SpmdScopeStmt>(op)) {
+      auto result = MutableCopy(spmd);
+      result->body_ = body;
+      if (attrs_changed) result->attrs_ = std::move(new_attrs);
+      if (core_num_changed) result->core_num_ = std::move(new_core_num);
+      return result;
+    }
     if (auto runtime_scope = As<RuntimeScopeStmt>(op)) return rewrite(runtime_scope);
     INTERNAL_UNREACHABLE_SPAN(op->span_) << "Unknown ScopeStmt subclass: " << op->TypeName();
     return op;

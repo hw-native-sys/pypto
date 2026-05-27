@@ -1832,5 +1832,108 @@ class TestCallAttrSubstitution:
         assert seen == [0, 1], f"expected device=[0, 1] preserved, got {seen}"
 
 
+class TestSpmdCoreNumSubstitution:
+    """SSA renaming must reach into ``SpmdScopeStmt.core_num_``.
+
+    Regression for issue #1550: ``core_num_`` is a direct ``ExprPtr`` field
+    on ``SpmdScopeStmt`` (not in ``attrs``). ConvertToSSA's ``ConvertScope``
+    rewrote ``body_`` and ``attrs_`` but never touched ``core_num_``, so a
+    Var defined in the enclosing scope was left at its pre-SSA pointer —
+    the printer marked it ``__FREE_VAR`` and the SSA verifier rejected the
+    IR with ``Variable 'n_rows' used outside its defining scope``.
+    """
+
+    @staticmethod
+    def _walk(stmt: ir.Stmt) -> list[ir.Stmt]:
+        """DFS pre-order over all stmts reachable from ``stmt``."""
+        out: list[ir.Stmt] = [stmt]
+        if isinstance(stmt, ir.SeqStmts):
+            for s in stmt.stmts:
+                out.extend(TestSpmdCoreNumSubstitution._walk(s))
+        elif isinstance(stmt, ir.ForStmt):
+            out.extend(TestSpmdCoreNumSubstitution._walk(stmt.body))
+        elif isinstance(stmt, ir.ScopeStmt):
+            out.extend(TestSpmdCoreNumSubstitution._walk(stmt.body))
+        elif isinstance(stmt, ir.IfStmt):
+            out.extend(TestSpmdCoreNumSubstitution._walk(stmt.then_body))
+            if stmt.else_body is not None:
+                out.extend(TestSpmdCoreNumSubstitution._walk(stmt.else_body))
+        return out
+
+    @staticmethod
+    def _collect_var_unique_ids(expr: ir.Expr, name_prefix: str) -> list[tuple[str, int]]:
+        """Return ``(name_hint, unique_id)`` for every Var under ``expr`` whose
+        name_hint starts with ``name_prefix``. ``ir.Var`` is not hashable, so we
+        use the stable ``unique_id`` for identity comparisons."""
+        seen: list[tuple[str, int]] = []
+
+        class _Collector(ir.IRVisitor):
+            def visit_var(self, op: ir.Var) -> None:
+                if op.name_hint.startswith(name_prefix):
+                    seen.append((op.name_hint, op.unique_id))
+
+        _Collector().visit_expr(expr)
+        return seen
+
+    def test_spmd_core_num_substituted_to_outer_scope_var(self):
+        """A scalar bound in a ``pl.parallel`` body must SSA-rename inside
+        the nested ``pl.spmd(core_num=<expr>)`` argument, not just inside
+        the spmd body. Without the fix the SSA verifier raises
+        ``Variable 'n_rows' used outside its defining scope``."""
+        N, T_TILE, T_MAX, SUB_BLOCKS = 8, 32, 192, 4
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def repro(
+                self,
+                counts: pl.Tensor[[N, 1], pl.INT32],
+                out: pl.Out[pl.Tensor[[N, T_MAX], pl.FP32]],
+            ) -> pl.Tensor[[N, T_MAX], pl.FP32]:
+                for i in pl.parallel(N):
+                    n_rows = pl.read(counts, [i, 0])
+                    # n_rows appears in the spmd core_num arg — the broken
+                    # position — and is reused inside the body. Before the fix
+                    # only the body reference is renamed; the printer marks
+                    # the core_num occurrence ``__FREE_VAR``.
+                    for s in pl.spmd(
+                        ((n_rows + T_TILE - 1) // T_TILE) * SUB_BLOCKS,  # pyright: ignore[reportArgumentType]
+                        name_hint="dyn",
+                    ):
+                        t = s // SUB_BLOCKS
+                        t0 = t * T_TILE
+                        offset = pl.min(t0, n_rows)
+                        tile = pl.full([T_TILE, T_TILE], dtype=pl.FP32, value=1.0)
+                        out[i : i + 1, offset : offset + T_TILE] = pl.reshape(pl.row_sum(tile), [1, T_TILE])
+                return out
+
+        After = passes.convert_to_ssa()(Before)
+        # The SSA verifier raises if core_num still references the pre-SSA Var
+        # (which the printer prints as ``__FREE_VAR``). Restrict the verifier
+        # to SSAForm so the test stays focused on the regression — the
+        # default property set includes unrelated checks (NoNestedCall, ...)
+        # that the unsimplified Before IR doesn't satisfy.
+        ssa_only = passes.IRPropertySet()
+        ssa_only.insert(passes.IRProperty.SSAForm)
+        passes.run_verifier(ssa_only)(After)
+
+        # Identity check: the n_rows Var referenced inside core_num must be
+        # the same object as the LHS of the AssignStmt ``n_rows = pl.read(...)``
+        # in the enclosing pl.parallel body — not a stale pre-SSA pointer.
+        fn = next(f for _, f in After.functions.items() if f.name == "repro")
+        stmts = self._walk(fn.body)
+        n_rows_assign = next(
+            s for s in stmts if isinstance(s, ir.AssignStmt) and s.var.name_hint.startswith("n_rows")
+        )
+        spmd = next(s for s in stmts if isinstance(s, ir.SpmdScopeStmt))
+
+        core_num_n_rows = self._collect_var_unique_ids(spmd.core_num, "n_rows")
+        assigned = (n_rows_assign.var.name_hint, n_rows_assign.var.unique_id)
+        assert core_num_n_rows and all(entry == assigned for entry in core_num_n_rows), (
+            f"SpmdScopeStmt.core_num must reference the SSA-versioned n_rows Var "
+            f"({assigned}); got {core_num_n_rows}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
