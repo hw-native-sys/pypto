@@ -144,19 +144,21 @@ TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
   int64_t dst_elems = 1;
   for (const auto& dim : dst_type->shape_) {
     auto d = As<ConstInt>(dim);
-    INTERNAL_CHECK(d) << "Internal error: pld.tile.put dst shape was not static after ValidatePutContract";
+    INTERNAL_CHECK_SPAN(d, args[0]->span_)
+        << "Internal error: pld.tile.put dst shape was not static after ValidatePutContract";
     dst_elems *= d->value_;
   }
   int64_t stage_elems = 1;
   for (const auto& dim : stage_type->shape_) {
     auto d = As<ConstInt>(dim);
-    INTERNAL_CHECK(d) << "Internal error: pld.tile.put stage dim is not ConstInt";
-    INTERNAL_CHECK(d->value_ > 0) << "Internal error: pld.tile.put stage dim not positive (" << d->value_
-                                  << ")";
+    INTERNAL_CHECK_SPAN(d, args[3]->span_) << "Internal error: pld.tile.put stage dim is not ConstInt";
+    INTERNAL_CHECK_SPAN(d->value_ > 0, args[3]->span_)
+        << "Internal error: pld.tile.put stage dim not positive (" << d->value_ << ")";
     stage_elems *= d->value_;
   }
-  INTERNAL_CHECK(stage_elems == dst_elems) << "Internal error: pld.tile.put stage holds " << stage_elems
-                                           << " elements, expected " << dst_elems << " (prod(dst.shape))";
+  INTERNAL_CHECK_SPAN(stage_elems == dst_elems, args[3]->span_)
+      << "Internal error: pld.tile.put stage holds " << stage_elems << " elements, expected " << dst_elems
+      << " (prod(dst.shape))";
 
   return GetUnknownType();
 }

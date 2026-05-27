@@ -20,8 +20,9 @@ Layout mirrors the ``tile.alloc`` / ``MemRef`` / ``TileType`` triple:
   view by specifying the per-rank ``shape`` and ``dtype``.
 * ``put`` is a synchronous cross-rank bulk write (HCCL TPUT): both ``dst`` and
   ``src`` are window-bound :class:`pld.DistributedTensor` (GM/tensor-level)
-  views — the VEC staging tile that TPUT bounces through is synthesised at
-  codegen, so it stays a tensor-level op rather than a tile-level one.
+  views. ``ConvertTensorToTileOps`` rewrites it to a ``tile.create`` VEC
+  staging tile plus a ``pld.tile.put`` call so the stage participates in
+  memory allocation/lowering before backend codegen.
 * ``get`` is a synchronous cross-rank bulk read: both ``dst`` and ``src`` are
   window-bound :class:`pld.DistributedTensor` (GM/tensor-level) views — the
   VEC staging tile that TGET bounces through is synthesised at codegen, so it
