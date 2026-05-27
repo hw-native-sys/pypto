@@ -111,6 +111,20 @@ fewer args than the callee declares:
   `pl.create_tensor` consumed across scopes into an appended `pl.Out` param).
   These materialise as leading return-tuple elements before `TASK_ID`.
 
+**Important runtime caveat for orchestration codegen:** `TaskOutputTensors`
+(returned by `rt_submit_*_task`) stores only `add_output(TensorCreateInfo)`
+entries — runtime-allocated outputs (see `runtime/.../pto_types.h:72` "Only
+runtime-created outputs are stored here"). `add_inout(Tensor&)` and
+in-args caller-allocated `add_output(Tensor&)` slots do **not** appear in
+`task_<n>_outs`. So aliasing a Submit's tuple-return element must dispatch:
+
+- Caller-allocated (callee param at index < `args_.size()`): alias to the
+  arg's emit name (`ext_<arg>` / the user-passed variable).
+- Runtime-allocated (callee param at index `>= args_.size()`): alias to
+  `task_<n>_outs.get_ref(runtime_out_pos)` where `runtime_out_pos =
+  param_idx - args_.size()` (one synth `add_output` per tail Out, appended
+  in callee param order).
+
 For a plain `Call`, args is full coverage: `args_.size() == params_.size()`.
 
 A pass that hard-codes `args_.size() == params_.size()` (typical size guard)

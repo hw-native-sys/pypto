@@ -1300,9 +1300,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         params.push_back(EmitSubmitSynthOutputEntry(callee_func, param_idx));
       }
     } else {
-      INTERNAL_CHECK_SPAN(params.size() == call->args_.size(), call->span_)
-          << "Call to '" << callee_name << "' built " << params.size() << " params for " << call->args_.size()
-          << " call args (1:1 invariant violated).";
+      // Plain Call: full coverage required (args.size() == callee params).
+      // The trivial `params.size() == call->args_.size()` invariant holds by
+      // construction; the meaningful invariant is callee-side coverage.
+      INTERNAL_CHECK_SPAN(call->args_.size() == callee_func->params_.size(), call->span_)
+          << "Call to '" << callee_name << "' has " << call->args_.size() << " args but callee declares "
+          << callee_func->params_.size()
+          << " params (Call requires full coverage; only Submit may be a prefix).";
     }
 
     // New PTOParam API: tensors must precede scalars (see check_add_tensor_valid() in pto_types.h)
@@ -2153,22 +2157,26 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   /// Emit aliases for a ``pl.submit(...)`` kernel call. Tuple elements
-  /// ``0..N-1`` are the kernel's results — each Out/InOut-tensor element is
-  /// aliased to ``task_<idx>_outs.get_ref(out_pos)``, the runtime's accessor
-  /// for the tensor materialised by the task at output position ``out_pos``.
-  /// Element ``N`` (the trailing ``Scalar[TASK_ID]``) is the producer TaskId
-  /// and is bound to ``task_<idx>_outs.task_id()`` and registered in
-  /// ``manual_task_id_map_`` so a downstream ``deps=[tid]`` resolves to it.
+  /// ``0..N-1`` are the kernel's results — element ``N`` (the trailing
+  /// ``Scalar[TASK_ID]``) is the producer TaskId, bound to
+  /// ``task_<idx>_outs.task_id()`` and registered in ``manual_task_id_map_``
+  /// so a downstream ``deps=[tid]`` resolves to it.
   ///
-  /// We must NOT alias to ``call->args_[param_idx]`` here: Submit's args_
-  /// excludes declared-Out callee params (they materialise as runtime-allocated
-  /// outputs via TaskOutputTensors), so the per-callee-param index does not
-  /// line up with args_ for those positions. The ``get_ref`` accessor is the
-  /// args-side dual of the return-type TASK_ID rule — see
-  /// ``.claude/rules/pass-submit-awareness.md`` §5. ``BuildTaskParams``
-  /// emits ``add_output`` / ``add_inout`` entries in callee param order
-  /// (see ``EmitSubmitSynthOutputEntry``), so the i-th element of
-  /// ``out_indices`` matches ``task_<idx>_outs.get_ref(i)``.
+  /// For the Out/InOut tuple elements, the aliasing target depends on whether
+  /// the callee param is *caller-allocated* (in Submit's args_) or
+  /// *runtime-allocated* (callee param index >= Submit args_.size()):
+  ///   - Caller-allocated (param_idx < args_.size()): alias to
+  ///     ``call->args_[param_idx]`` — the original tensor variable the user
+  ///     passed in. The runtime's ``TaskOutputTensors`` stores only
+  ///     ``add_output`` entries (see runtime/.../pto_types.h:72 — "Only
+  ///     runtime-created outputs are stored here"), so ``add_inout`` /
+  ///     in-args ``add_output(Tensor&)`` slots do **not** appear in
+  ///     ``task_<idx>_outs`` and ``get_ref`` would skip past them or assert.
+  ///   - Runtime-allocated (param_idx >= args_.size()): alias to
+  ///     ``task_<idx>_outs.get_ref(runtime_out_pos)`` where
+  ///     ``runtime_out_pos = param_idx - args_.size()`` because
+  ///     ``BuildTaskParams`` appends one synth ``add_output`` per callee Out
+  ///     in the tail, in callee param order.
   void GenerateSubmitReturnAliases(const CallPtr& call, int task_idx) {
     auto tuple_key_it = call_to_tuple_key_.find(call.get());
     if (tuple_key_it == call_to_tuple_key_.end()) return;
@@ -2229,13 +2237,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
       size_t out_pos = elem_pos - tuple_out_base;
       if (out_pos >= out_indices.size()) continue;
       if (!effective_uses_.count(elem.var)) continue;
+      size_t param_idx = out_indices[out_pos];
       std::string elem_name = ReserveVarEmitName(elem.var);
-      std::string source =
-          "task_" + std::to_string(task_idx) + "_outs.get_ref(" + std::to_string(out_pos) + ")";
-      if (IsMutableTensorNameInCurrentScope(elem_name)) {
-        code_ << Indent() << elem_name << " = " << source << ";\n";
+      if (param_idx < call->args_.size()) {
+        // Caller-allocated: the param was passed positionally as an arg.
+        // Alias to the arg's emit name — runtime tracks producer via the
+        // submitted task, but TaskOutputTensors does NOT contain this slot.
+        EmitTensorAlias(elem_name, call, param_idx);
       } else {
-        code_ << Indent() << "const Tensor& " << elem_name << " = " << source << ";\n";
+        // Runtime-allocated: BuildTaskParams synthesised an add_output for
+        // this param at runtime output position (param_idx - args_.size()).
+        size_t runtime_out_pos = param_idx - call->args_.size();
+        std::string source =
+            "task_" + std::to_string(task_idx) + "_outs.get_ref(" + std::to_string(runtime_out_pos) + ")";
+        if (IsMutableTensorNameInCurrentScope(elem_name)) {
+          code_ << Indent() << elem_name << " = " << source << ";\n";
+        } else {
+          code_ << Indent() << "const Tensor& " << elem_name << " = " << source << ";\n";
+        }
       }
     }
   }
