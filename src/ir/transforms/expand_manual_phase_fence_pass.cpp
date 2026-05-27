@@ -128,29 +128,6 @@ static std::vector<VarPtr> CollectDirectManualDepArrays(const StmtPtr& body) {
   return collector.arrays;
 }
 
-static bool ForBodyHasManualDepOnArray(const StmtPtr& body, const Var* target) {
-  class Finder : public IRVisitor {
-   public:
-    bool found = false;
-    const Var* target = nullptr;
-
-    void VisitStmt_(const ForStmtPtr&) override {}
-
-    void VisitExpr_(const CallPtr& call) override {
-      if (found) return;
-      if (ManualDepsExactlyArray(call, target)) {
-        found = true;
-        return;
-      }
-      IRVisitor::VisitExpr_(call);
-    }
-  };
-  Finder finder;
-  finder.target = target;
-  finder.VisitStmt(body);
-  return finder.found;
-}
-
 static bool BodyUpdatesArray(const StmtPtr& body, const Var* target) {
   class Finder : public IRVisitor {
    public:
@@ -373,16 +350,6 @@ class ManualPhaseFenceMutator : public IRMutator {
 
     for (const auto& iter_arg : for_stmt->iter_args_) {
       if (iter_arg) current_iter_args.insert(iter_arg.get());
-      if (!iter_arg || !IsTaskIdArrayVar(iter_arg)) continue;
-      if (!ForBodyHasManualDepOnArray(body, iter_arg.get())) continue;
-      VarPtr barrier_source = iter_arg;
-      if (is_parallel) {
-        barrier_source = AsVarLike(iter_arg->initValue_);
-        if (!barrier_source || !IsTaskIdArrayVar(barrier_source)) continue;
-      }
-      int64_t consumers = CountManualDepConsumersOnArray(body, iter_arg.get());
-      if (is_parallel) consumers *= trip_count;
-      try_add(iter_arg, barrier_source, consumers);
     }
 
     const auto body_defined_vars = CollectBodyDefinedVars(body);

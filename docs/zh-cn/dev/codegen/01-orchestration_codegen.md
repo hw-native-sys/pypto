@@ -459,7 +459,7 @@ dep 数组填充条目在 source 是 iter_arg / 数组槽 carry 时会被
 
 ### Phase-fence dummy barrier
 
-`DeriveCallDirections` 之后，`ExpandManualPhaseFence` pass 可能压缩有收益的完整数组
+`DeriveCallDirections` 之后，`ExpandManualPhaseFence` pass 可能压缩有收益且稳定的完整数组
 manual dependency：它把选中的 `manual_dep_edges=[tids]` consumer call 改写为
 `manual_dep_edges=[barrier_tid]`。该 pass 会插入一个带标记的 `system.task_dummy`
 call；这个 dummy call 自己的 `manual_dep_edges` 仍然引用原始 TaskId 数组。Orchestration
@@ -473,6 +473,11 @@ tids[N] -> dummy barrier -> consumers[M]
 ```
 
 如果形状、安全性或收益不够明确，则继续走原有直接 `manual_dep_edges` lowering 路径。
+尤其在 `manual_scope` 中，用户显式写出的 deps 是权威约束：如果 `pl.parallel`
+body 读取 `deps=[tids]`，随后又更新 `tids[branch]`，这表示 same-carrier
+dependency chain，而不是可在 loop 前压缩的 snapshot source。若用户需要
+layer-parallel snapshot 语义，应写入单独的 `tids_next` carrier，并在 parallel
+body 之后再赋回 `tids`。
 
 **codegen 入口检查的约束（带用户友好 CHECK 消息）：**
 

@@ -44,6 +44,11 @@ def _get_array_slot(name: str, array: ir.Var) -> ir.AssignStmt:
     return ir.AssignStmt(ir.Var(name, TASK_ID, S), call, S)
 
 
+def _update_array_slot(name: str, array: ir.Var, value: ir.Var) -> ir.AssignStmt:
+    call = ir.create_op_call("array.update_element", [array, _const(0), value], {}, S)
+    return ir.AssignStmt(ir.Var(name, array.type, S), call, S)
+
+
 def _program_with_loop(loop_body: ir.Stmt, *, kind: ir.ForKind = ir.ForKind.Parallel) -> ir.Program:
     loop = ir.ForStmt(
         ir.Var("p", ir.ScalarType(DataType.INDEX), S),
@@ -121,7 +126,7 @@ def test_profitable_parallel_array_dep_inserts_dummy_and_rewrites_consumers():
         assert call.attrs["manual_dep_edges"] == [barrier.var]
 
 
-def test_parallel_iter_arg_barrier_uses_visible_init_value():
+def test_parallel_iter_arg_dep_falls_back_even_with_visible_init_value():
     tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
     iter_tids = ir.IterArg("tids_iter", tids.type, tids, S)
     return_tids = ir.Var("tids_rv", tids.type, S)
@@ -148,14 +153,10 @@ def test_parallel_iter_arg_barrier_uses_visible_init_value():
     kernel = ir.Function("kernel", [], [TASK_ID], ir.ReturnStmt([ir.Var("ret_tid", TASK_ID, S)], S), S)
 
     after = _run(ir.Program([orch, kernel], "iter_arg_source", S))
-    scope_stmts = _manual_scope_stmts(after)
 
-    barrier = cast(ir.AssignStmt, scope_stmts[0])
-    barrier_call = cast(ir.Call, barrier.value)
-    assert barrier_call.op.name == "system.task_dummy"
-    assert barrier_call.attrs["manual_dep_edges"] == [tids]
+    assert isinstance(_manual_scope_body(after), ir.ForStmt)
     assert all(
-        cast(ir.Call, cast(ir.AssignStmt, stmt).value).attrs["manual_dep_edges"] == [barrier.var]
+        cast(ir.Call, cast(ir.AssignStmt, stmt).value).attrs["manual_dep_edges"] == [iter_tids]
         for stmt in _loop_body_stmts(after)[:2]
     )
 
@@ -216,6 +217,64 @@ def test_loop_local_dep_array_is_not_moved_before_definition():
         for stmt in _loop_body_stmts(after)[1:]:
             call = cast(ir.Call, cast(ir.AssignStmt, stmt).value)
             assert call.attrs["manual_dep_edges"] == [local_tids]
+
+
+def test_same_carrier_dep_array_update_in_body_falls_back():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    before = _program_with_loop(
+        ir.SeqStmts(
+            [
+                _consumer("a", [tids]),
+                _update_array_slot("tids_after_a", tids, ir.Var("a", TASK_ID, S)),
+                _consumer("b", [tids]),
+            ],
+            S,
+        )
+    )
+
+    after = _run(before)
+
+    assert isinstance(_manual_scope_body(after), ir.ForStmt)
+    consumer_stmts = [stmt for stmt in _loop_body_stmts(after) if isinstance(cast(ir.AssignStmt, stmt).value, ir.Call)]
+    consumer_calls = [
+        cast(ir.Call, cast(ir.AssignStmt, stmt).value)
+        for stmt in consumer_stmts
+        if cast(ir.Call, cast(ir.AssignStmt, stmt).value).op.name == "kernel"
+    ]
+    assert consumer_calls
+    assert all(call.attrs["manual_dep_edges"] == [tids] for call in consumer_calls)
+
+
+def test_double_buffered_dep_array_update_remains_compressible():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    tids_new = ir.Var("tids_new", tids.type, S)
+    before = _program_with_loop(
+        ir.SeqStmts(
+            [
+                ir.AssignStmt(tids_new, tids, S),
+                _consumer("a", [tids]),
+                _consumer("b", [tids]),
+                _update_array_slot("tids_new_after_a", tids_new, ir.Var("a", TASK_ID, S)),
+            ],
+            S,
+        )
+    )
+
+    after = _run(before)
+    scope_stmts = _manual_scope_stmts(after)
+
+    barrier = cast(ir.AssignStmt, scope_stmts[0])
+    barrier_call = cast(ir.Call, barrier.value)
+    assert barrier_call.op.name == "system.task_dummy"
+    assert barrier_call.attrs["manual_dep_edges"] == [tids]
+    consumer_calls = [
+        cast(ir.Call, cast(ir.AssignStmt, stmt).value)
+        for stmt in _loop_body_stmts(after)
+        if isinstance(cast(ir.AssignStmt, stmt).value, ir.Call)
+        and cast(ir.Call, cast(ir.AssignStmt, stmt).value).op.name == "kernel"
+    ]
+    assert consumer_calls
+    assert all(call.attrs["manual_dep_edges"] == [barrier.var] for call in consumer_calls)
 
 
 def test_nested_if_return_dep_array_is_not_moved_before_definition():

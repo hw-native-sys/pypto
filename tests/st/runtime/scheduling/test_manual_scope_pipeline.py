@@ -332,12 +332,11 @@ def _build_phase_fence_program():
             out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
             with pl.manual_scope():
-                # Phase fence: every kernel in phase P+1 must wait for ALL
-                # branches in phase P. Use an explicit ``Array[N_BRANCHES,
-                # TASK_ID]`` to hold one TaskId per branch slot — every
-                # parallel iter writes its own slot, and ``deps=[tids]``
-                # is lowered through a dummy barrier whose fanin is one slot
-                # per branch of the previous phase.
+                # Manual dependency carrier: every task waits on the visible
+                # ``Array[N_BRANCHES, TASK_ID]`` dependency carrier. The
+                # same carrier is read and updated in the loop body, so this
+                # remains a direct-dependency fallback case rather than a
+                # dummy-barrier phase-fence compression witness.
                 # ``pl.array.create`` auto-initializes all slots to
                 # ``PTO2TaskId::invalid()``; the runtime fence skips
                 # invalid entries via ``is_valid()`` so the first phase
@@ -527,11 +526,11 @@ def phase_fence_auto_swimlane_data(phase_fence_auto_swimlane_file: Path) -> dict
 
 
 class TestPhaseFenceSwimlane:
-    """Validate the compressed phase-fence barrier in the runtime swimlane.
+    """Validate the manual-scope phase-fence ordering in the runtime swimlane.
 
-    Codegen may insert synthetic dummy tasks between adjacent phases, so the
-    swimlane witness focuses on the externally required phase ordering rather
-    than requiring direct all-to-all producer fanout.
+    Depending on the carrier shape, codegen may use direct deps or synthetic
+    dummy tasks. The swimlane witness focuses on the externally required phase
+    ordering rather than requiring direct all-to-all producer fanout.
     """
 
     def test_total_task_count(self, phase_fence_swimlane_data: dict):

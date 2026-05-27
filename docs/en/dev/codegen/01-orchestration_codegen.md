@@ -473,7 +473,7 @@ in topologies like case1 (outer SEQ × inner PARALLEL).
 ### Phase-fence dummy barriers
 
 After `DeriveCallDirections`, the `ExpandManualPhaseFence` pass may compress a
-profitable full-array manual dependency by rewriting selected
+profitable stable full-array manual dependency by rewriting selected
 `manual_dep_edges=[tids]` consumer calls to `manual_dep_edges=[barrier_tid]`.
 It inserts a marked `system.task_dummy` call whose own `manual_dep_edges` still
 references the original TaskId array. Orchestration codegen lowers that marked
@@ -487,7 +487,12 @@ tids[N] -> dummy barrier -> consumers[M]
 ```
 
 Shapes that are not clearly safe or profitable stay on the direct
-`manual_dep_edges` lowering path.
+`manual_dep_edges` lowering path. In particular, `manual_scope` treats explicit
+deps as authoritative: a `pl.parallel` body that reads `deps=[tids]` and then
+updates `tids[branch]` is a same-carrier dependency chain, not a snapshot
+source for pre-loop compression. Users who want layer-parallel snapshot
+semantics should write a separate `tids_next` carrier and assign it back after
+the parallel body.
 
 **Constraints checked at codegen entry (with user-facing CHECK messages):**
 

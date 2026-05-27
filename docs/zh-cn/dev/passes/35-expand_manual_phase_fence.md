@@ -4,7 +4,7 @@
 
 `ExpandManualPhaseFence` 会压缩显式 `pl.submit(..., deps=[tids])` 产生的、
 有收益的完整数组 `TaskId` 依赖。它是一个很窄的 orchestration-only pass：
-当 manual-scope consumer fanout 只依赖一个完整的 `Array[TASK_ID]` 时，本 pass
+当 manual-scope consumer fanout 只依赖一个稳定、只读的 `Array[TASK_ID]` 时，本 pass
 插入一个 dependency-only 的 `system.task_dummy` barrier，并把覆盖到的 consumer
 改写为依赖该 barrier 的 `TaskId`。
 
@@ -53,8 +53,9 @@ codegen 会把该 call lowering 为 `rt_submit_dummy_task(...)`。
    `manual_dep_edges=[barrier_tid]` 重建，其它 call attr 保持不变。
 
 对 sequential loop，barrier 插入在 loop 内、改写后的 body 之前。对 parallel loop，
-barrier 插入在 parallel loop 之前，使所有分支都观察 previous phase snapshot，
-而不是同一 phase 中已经被其它分支更新过的 slot。
+只有当依赖 source 在该 loop body 内稳定时，barrier 才可以插在 loop 之前。
+`pl.parallel` 不会削弱 `manual_scope` 中用户显式写出的依赖：如果 body 读取
+`deps=[tids]` 同时又更新 `tids[branch]`，本 pass 会保留直接依赖。
 
 ## Fallback 边界
 
@@ -63,8 +64,8 @@ barrier 插入在 parallel loop 之前，使所有分支都观察 previous phase
 会压缩的形状：
 
 - 有正向 estimated edge savings 的完整数组 manual-scope fanout；
-- loop-carried `Array[TASK_ID]` phase fence，包括 parallel-loop snapshot 场景，
-  此时 barrier source 是进入 loop 的数组值。
+- double-buffered phase fence，即 body 读取一个 `Array[TASK_ID]`，写入另一个
+  carrier，例如 `tids_next`。
 
 保持直接依赖的形状：
 
@@ -72,7 +73,8 @@ barrier 插入在 parallel loop 之前，使所有分支都观察 previous phase
 - mixed scalar + array deps；
 - multiple-array deps；
 - `prev = tids[i]; deps=[prev]` 这类 partial-slot deps；
-- 在同一个 loop body 内定义或更新的非 loop-carried 数组；
+- 当前 loop 的 iter-arg 数组；
+- 在同一个 loop body 内定义或更新的数组；
 - `N -> 1` 或 `2 -> 2` 这类低收益 fanout；
 - 非 manual scope 和非 orchestration 函数。
 

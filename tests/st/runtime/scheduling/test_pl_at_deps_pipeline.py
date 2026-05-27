@@ -282,8 +282,8 @@ class TestPlAtDepsSwimlane:
 #     Phase 3:  a30  a31  a32  a33    (each depends on ALL of phase 2)
 #
 # Every task writes a disjoint ``TILE_M``-row stripe of ``out``. The value of
-# these tests is in the SWIMLANE shape: compressed dummy barriers must still
-# fence on ALL prior-phase tasks, not just the last-dispatched one.
+# these tests is in the SWIMLANE shape: explicit manual deps must still fence
+# on ALL prior visible tasks, not just the last-dispatched one.
 # Same expectations as the pl.submit-variant ``TestPhaseFenceSwimlane``.
 # ---------------------------------------------------------------------------
 
@@ -312,13 +312,11 @@ def _build_phase_fence_program():
             out: pl.Out[pl.Tensor[[BIG_M, BIG_N], pl.FP32]],
         ) -> pl.Tensor[[BIG_M, BIG_N], pl.FP32]:
             with pl.manual_scope():
-                # Phase fence: every block in phase P+1 must wait for ALL
-                # branches in phase P. Use an explicit ``Array[N_BRANCHES,
-                # TASK_ID]`` to hold one TaskId per branch slot — every
-                # parallel iter writes its own slot via ``tids[branch] = tid``
-                # (where ``tid`` is captured by ``as tid`` on the pl.at block),
-                # and ``deps=[tids]`` is lowered through a dummy barrier whose
-                # fanin is one slot per branch of the previous phase.
+                # Manual dependency carrier: every block waits on the visible
+                # ``Array[N_BRANCHES, TASK_ID]`` dependency carrier.
+                # The same carrier is read through ``deps=[tids]`` and updated
+                # via ``tids[branch] = tid``, so this remains a direct-dependency
+                # fallback case rather than a dummy-barrier compression witness.
                 # First phase has no prior-phase producer; ``pl.array.create``
                 # initialises every slot to ``PTO2TaskId::invalid()`` and the
                 # runtime fence skips invalid entries via ``is_valid()``.
@@ -415,7 +413,7 @@ def phase_fence_pl_at_swimlane_data(phase_fence_pl_at_swimlane_file: Path) -> di
 
 
 class TestPhaseFencePlAtSwimlane:
-    """Validate the compressed phase-fence barrier using the pl.at-deps interface.
+    """Validate phase-fence ordering using the pl.at-deps interface.
 
     Mirror of ``TestPhaseFenceSwimlane`` from the pl.submit-variant test —
     the externally required phase ordering must be interface-independent.

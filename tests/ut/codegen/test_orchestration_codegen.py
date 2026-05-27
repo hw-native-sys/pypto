@@ -3879,13 +3879,15 @@ class TestManualScopeCodegen:
         with pytest.raises(Exception, match="statically-known trip count"):
             _generate_orch_code(transformed)
 
-    def test_manual_scope_parallel_array_carry_above_legacy_16_cap(self):
-        """``pl.parallel(N)`` with ``N > 16`` lowers through a dummy barrier.
+    def test_manual_scope_double_buffered_array_carry_above_legacy_16_cap(self):
+        """A stable full-array dep with ``N > 16`` lowers through a dummy barrier.
 
         The runtime's ``Arg::set_dependencies(ptr, count)`` primitive has no
         upper bound on explicit deps. The phase-fence compression keeps the
         N-slot dependency fanin on a synthetic dummy barrier, then makes each
-        real downstream task depend on the barrier's single TaskId.
+        real downstream task depend on the barrier's single TaskId. The witness
+        uses a double-buffered carrier so the dependency source is read-only
+        inside the parallel body.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -3916,16 +3918,15 @@ class TestManualScopeCodegen:
                 out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
             ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
                 with pl.manual_scope():
-                    # Per-slot TaskId array (length = parallel trip count).
-                    # ``deps=[tids]`` is compressed through a dummy barrier;
-                    # the barrier keeps the full ABOVE_LEGACY_CAP-slot fanin.
                     tids = pl.array.create(ABOVE_LEGACY_CAP, pl.TASK_ID)
                     for i in pl.range(4):
+                        tids_next = pl.array.create(ABOVE_LEGACY_CAP, pl.TASK_ID)
                         row: pl.Scalar[pl.INDEX] = i * TILE_R
                         for j in pl.parallel(ABOVE_LEGACY_CAP):
                             col: pl.Scalar[pl.INDEX] = j * TILE_C
                             out, tid = pl.submit(self.kern, x, out, row, col, deps=[tids])
-                            tids[j] = tid
+                            tids_next[j] = tid
+                        tids = tids_next
                 return out
 
         pm = PassManager.get_strategy(OptimizationStrategy.Default)
