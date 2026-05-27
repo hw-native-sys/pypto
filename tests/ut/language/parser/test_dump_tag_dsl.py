@@ -162,9 +162,9 @@ def test_dump_tag_rejects_non_name_argument() -> None:
         _ = P
 
 
-def test_dump_tag_rejects_wrong_arity() -> None:
-    """``pl.dump_tag()`` and ``pl.dump_tag(a, b)`` both fail at the
-    statement-position interceptor — exactly one positional arg is required."""
+def test_dump_tag_rejects_too_many_args() -> None:
+    """``pl.dump_tag(a, b)`` fails at the statement-position interceptor —
+    exactly one positional arg is required."""
     with pytest.raises(ParserSyntaxError, match="dump_tag.*exactly one positional"):
 
         @pl.program
@@ -187,6 +187,36 @@ def test_dump_tag_rejects_wrong_arity() -> None:
                 d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 pl.dump_tag(a, b)  # two args
+                d = self.kernel(a, d)
+                return d
+
+        _ = P
+
+
+def test_dump_tag_rejects_zero_args() -> None:
+    """``pl.dump_tag()`` fails at the statement-position interceptor —
+    exactly one positional arg is required."""
+    with pytest.raises(ParserSyntaxError, match="dump_tag.*exactly one positional"):
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                o: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], output)
+                return o
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                pl.dump_tag()  # no args
                 d = self.kernel(a, d)
                 return d
 

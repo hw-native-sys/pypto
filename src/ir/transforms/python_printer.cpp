@@ -1778,9 +1778,8 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     // attr), so it must NOT be re-emitted as a decorator kwarg — doing so
     // would either be unrecognised by the decorator parser or duplicate the
     // tag set on reparse.
-    bool has_attrs =
-        std::any_of(func->attrs_.begin(), func->attrs_.end(),
-                    [](const auto& kv) { return kv.first != kAttrDumpTaggedNames; });
+    bool has_attrs = std::any_of(func->attrs_.begin(), func->attrs_.end(),
+                                 [](const auto& kv) { return kv.first != kAttrDumpTaggedNames; });
     auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
       if (key == "split") {
         int split_value = AnyCast<int>(value, "func attr key: " + key);
@@ -1890,8 +1889,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
   // on roundtrip. The attr is invisible on the decorator (see the has_attrs
   // logic above) — the DSL body call is the canonical surface.
   if (func->HasAttr(kAttrDumpTaggedNames)) {
-    auto names =
-        func->GetAttr<std::vector<std::string>>(kAttrDumpTaggedNames, std::vector<std::string>{});
+    auto names = func->GetAttr<std::vector<std::string>>(kAttrDumpTaggedNames, std::vector<std::string>{});
     for (const auto& name : names) {
       stream_ << GetIndent() << prefix_ << ".dump_tag(" << name << ")\n";
     }

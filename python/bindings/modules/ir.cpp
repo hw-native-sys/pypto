@@ -1629,8 +1629,7 @@ void BindIR(nb::module_& m) {
           } else if (value.type() == typeid(ExprPtr)) {
             result[key.c_str()] = nb::cast(AnyCast<ExprPtr>(value, "converting to Python: " + key));
           } else if (value.type() == typeid(std::vector<std::string>)) {
-            const auto& names =
-                AnyCast<std::vector<std::string>>(value, "converting to Python: " + key);
+            const auto& names = AnyCast<std::vector<std::string>>(value, "converting to Python: " + key);
             nb::list py_list;
             for (const auto& s : names) py_list.append(nb::str(s.c_str()));
             result[key.c_str()] = py_list;

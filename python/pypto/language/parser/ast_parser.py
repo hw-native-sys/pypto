@@ -2400,7 +2400,8 @@ class ASTParser:
         Returns the names in source order with duplicates dropped. The
         orchestration codegen reads this list off the Function's
         ``attrs["dump_tagged_names"]`` and emits ``Arg::dump(...)`` for every
-        kernel-call arg whose IR Var name (after ``GetSSABaseName``) matches.
+        kernel-call arg whose IR Var name (after ``GetCompatibleBaseName``)
+        matches.
 
         Cases that are *not* a valid dump_tag marker (call args at expression
         position, attribute access on a non-``pl`` namespace, etc.) are simply
@@ -3958,7 +3959,7 @@ class ASTParser:
         if self._is_dsl_call(stmt, "static_assert"):
             self._handle_static_assert(stmt)
             return
-        if self._is_dsl_call(stmt, "dump_tag"):
+        if _is_pl_call(stmt.value, "dump_tag"):
             self._handle_dump_tag(stmt)
             return
 

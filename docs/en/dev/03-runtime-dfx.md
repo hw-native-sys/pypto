@@ -98,7 +98,7 @@ for the merge mechanics.
 ### Limitations
 
 | Marker location / target | Status |
-| --- | --- |
+| ------------------------ | ------ |
 | Standalone statement in an Orchestration or Inline body | Supported. |
 | Inside a kernel-call argument position (e.g. `self.k(pl.dump_tag(q))`) | **Silently ineffective** — the marker is passed through (the DSL wrapper is an identity function and the pre-scan only collects statement-position markers), so no name is tagged and no error is raised. Write `pl.dump_tag(q)` on its own line. |
 | Synthetic outputs of `pl.submit(...)` (implicit `Out`) | Not supported — synth outputs carry no source-level `Var` name to match against. |
