@@ -157,16 +157,16 @@ def _build_atomic_add_program():
         @pl.function(type=pl.FunctionType.InCore)
         def add_step(
             self,
-            inp: pl.Tensor[[1, 1], pl.INT32],
-            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-            src: pld.DistributedTensor[[1, 1], pl.INT32],
-            acc: pld.DistributedTensor[[1, 1], pl.INT32],
+            inp: pl.Tensor[[16, 16], pl.INT32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.INT32]],
+            src: pld.DistributedTensor[[16, 16], pl.INT32],
+            acc: pld.DistributedTensor[[16, 16], pl.INT32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             root: pl.Scalar[pl.INT32],
             nranks: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[1, 1], pl.INT32]:
+        ) -> pl.Tensor[[16, 16], pl.INT32]:
             # Phase 1: stage our contribution into our own src cell.
-            local = pl.load(inp, [0, 0], [1, 1])
+            local = pl.load(inp, [0, 0], [16, 16])
             _ = pl.store(local, [0, 0], src)
 
             # Phase 2: atomically add our contribution into the root rank's acc
@@ -191,35 +191,35 @@ def _build_atomic_add_program():
             )
 
             # Phase 4: the root reads the accumulated sum from its acc cell.
-            recv = pl.load(acc, [0, 0], [1, 1])
+            recv = pl.load(acc, [0, 0], [16, 16])
             return pl.store(recv, [0, 0], out)
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
-            inp: pl.Tensor[[1, 1], pl.INT32],
-            out: pl.Out[pl.Tensor[[1, 1], pl.INT32]],
-            src: pld.DistributedTensor[[1, 1], pl.INT32],
-            acc: pld.DistributedTensor[[1, 1], pl.INT32],
+            inp: pl.Tensor[[16, 16], pl.INT32],
+            out: pl.Out[pl.Tensor[[16, 16], pl.INT32]],
+            src: pld.DistributedTensor[[16, 16], pl.INT32],
+            acc: pld.DistributedTensor[[16, 16], pl.INT32],
             signal: pld.DistributedTensor[[1, 1], pl.INT32],
             root: pl.Scalar[pl.INT32],
             nranks: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[1, 1], pl.INT32]:
+        ) -> pl.Tensor[[16, 16], pl.INT32]:
             return self.add_step(inp, out, src, acc, signal, root, nranks)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(
             self,
-            inputs: pl.Tensor[[2, 1, 1], pl.INT32],
-            outputs: pl.Out[pl.Tensor[[2, 1, 1], pl.INT32]],
-        ) -> pl.Tensor[[2, 1, 1], pl.INT32]:
-            src_buf = pld.alloc_window_buffer(4)  # 1×1 × INT32
-            acc_buf = pld.alloc_window_buffer(4)
+            inputs: pl.Tensor[[2, 16, 16], pl.INT32],
+            outputs: pl.Out[pl.Tensor[[2, 16, 16], pl.INT32]],
+        ) -> pl.Tensor[[2, 16, 16], pl.INT32]:
+            src_buf = pld.alloc_window_buffer(16 * 16 * 4)  # 16×16 × INT32
+            acc_buf = pld.alloc_window_buffer(16 * 16 * 4)
             signal_buf = pld.alloc_window_buffer(4)
 
             for r in pl.range(pld.world_size()):
-                src = pld.window(src_buf, [1, 1], dtype=pl.INT32)
-                acc = pld.window(acc_buf, [1, 1], dtype=pl.INT32)
+                src = pld.window(src_buf, [16, 16], dtype=pl.INT32)
+                acc = pld.window(acc_buf, [16, 16], dtype=pl.INT32)
                 signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
                 # All ranks accumulate into root rank 0.
                 self.chip_orch(inputs[r], outputs[r], src, acc, signal, 0, pld.world_size(), device=r)
@@ -230,11 +230,10 @@ def _build_atomic_add_program():
 
 @pytest.mark.skip(
     reason=(
-        "pld.tensor.put end-to-end requires: (a) tile.store accepting "
-        "DistributedTensor destinations (Phase-1 stage-in), (b) N7 host_orch "
-        "python codegen emitting add_scalar(ctx) per DistributedTensor, "
-        "(c) N8 driver wiring CommGroup window buffers. The InCore PTO codegen "
-        "(N6 P1) is in place — drop this skip once (a)-(c) land."
+        "PTOAS drops the synchronisation between the stage-in tile.store and the "
+        "subsequent pld.tensor.put -- the put can issue before the local window "
+        "slice has been written, so the peer reads stale data. Re-enable once "
+        "PTOAS treats the store -> put pair as an ordered dependency."
     )
 )
 class TestL3Put:
@@ -288,16 +287,24 @@ class TestL3Put:
             ),
         )
 
-        # rank 0 contributes 10, rank 1 contributes 32. The root (rank 0) reads
-        # the atomic sum 42; non-root ranks read whatever their acc cell holds
-        # (unchecked — only the root's output is meaningful).
-        inputs = torch.tensor([[[10]], [[32]]], dtype=torch.int32)
-        outputs = torch.zeros((2, 1, 1), dtype=torch.int32)
+        # rank 0 contributes 10, rank 1 contributes 32 (broadcast across the
+        # [16, 16] tile). The root (rank 0) reads the atomic element-wise sum
+        # 42; non-root ranks read whatever their acc cell holds (unchecked —
+        # only the root's output is meaningful).
+        inputs = torch.stack(
+            [
+                torch.full((16, 16), 10, dtype=torch.int32),
+                torch.full((16, 16), 32, dtype=torch.int32),
+            ]
+        )
+        outputs = torch.zeros((2, 16, 16), dtype=torch.int32)
 
         compiled(inputs, outputs)
 
-        got_root = int(outputs[0].item())
-        assert got_root == 42, f"atomic_add reduce mismatch: root saw {got_root}, expected 42"
+        expected_root = torch.full((16, 16), 42, dtype=torch.int32)
+        assert torch.equal(outputs[0], expected_root), (
+            f"atomic_add reduce mismatch: root max diff = {(outputs[0] - expected_root).abs().max().item()}"
+        )
 
 
 if __name__ == "__main__":

@@ -2303,8 +2303,10 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
   // EmitCastToIndex (no-op when already index-typed).
   std::string peer_ssa = codegen.EmitCastToIndex(peer_expr, codegen.GetExprAsCode(peer_expr));
 
-  // (1) Call the per-dtype offset helper.
-  const std::string func_name = codegen::PTOCodegen::GetCommRemoteOffsetFuncName(target.type->dtype_);
+  // (1) Call the per-dtype offset helper. Registering here causes the helper
+  //     definition to be emitted at module-flush time — any new op that calls
+  //     EmitCommRemoteView is wired up automatically, no codegen-side opt-in.
+  const std::string func_name = codegen.RegisterCommRemoteOffsetHelper(target.type->dtype_);
   std::string delems = codegen.NewTemp();
   codegen.Emit(delems + " = func.call @" + func_name + "(" + target.ctx_ssa + ", " + peer_ssa +
                ") : (!pto.ptr<i64>, index) -> index");
