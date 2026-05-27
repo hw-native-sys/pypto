@@ -78,6 +78,19 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
 
   std::vector<std::string> yielded_values;
   for (const auto& expr : op->value_) {
+    // Tensors are mutable references: a branch may yield either a freshly
+    // stored-into tensor (bound to its tensor_view) or the unchanged input (a
+    // param bound only to its base ptr). Normalize tensor yields to the
+    // canonical tensor_view so consumers — notably the IfStmt in-place
+    // return_var binding — see a consistent SSA across branches that aliases
+    // the same concrete make_tensor_view (issue #1533). For/While loops keep
+    // only scalar yields, so this does not affect their lowering.
+    if (As<TensorType>(expr->GetType())) {
+      if (auto tensor_var = ir::AsVarLike(expr)) {
+        yielded_values.push_back(GetOrCreateTensorView(tensor_var));
+        continue;
+      }
+    }
     VisitExpr(expr);
     yielded_values.push_back(fs_.current_expr_value);
     fs_.current_expr_value = "";
@@ -134,13 +147,6 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         scf_return_names.push_back(ret_name);
         scf_return_types.push_back(GetScalarIterArgTypeString(scalar_type));
         returns_via_scf[i] = true;
-      } else if (auto tensor_type = As<TensorType>(return_var->GetType())) {
-        std::string ret_name = NewNamedTemp(return_var->name_hint_);
-        BindVarToMlir(return_var, ret_name);
-        BindTensorView(return_var, ret_name);
-        scf_return_names.push_back(ret_name);
-        scf_return_types.push_back(GetTensorViewTypeString(tensor_type.get()));
-        returns_via_scf[i] = true;
       } else if (auto tile_type = As<TileType>(return_var->GetType())) {
         INTERNAL_CHECK_SPAN(tile_type->memref_.has_value(), op->span_)
             << "TileType return_var must have a MemRef at codegen stage for var: " << return_var->name_hint_;
@@ -151,11 +157,16 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
         std::string ret_name = AllocNewTileBuf(fields.type_str, return_var->name_hint_, fields.addr_ssa,
                                                fields.valid_row_ssa, fields.valid_col_ssa);
         BindVarToMlir(return_var, ret_name);
-      } else if (As<ir::ArrayType>(return_var->GetType())) {
-        // On-core arrays are mutated in place: both branches write the SAME
-        // backing `pto.declare_local_array`, so the merged value is NOT an
-        // scf.if result. returns_via_scf stays false; the return var is bound to
-        // the shared branch-yield SSA after both branches emit (see below).
+      } else if (As<TensorType>(return_var->GetType()) || As<ir::ArrayType>(return_var->GetType())) {
+        // Tensors and on-core arrays are mutable references mutated in place
+        // (pl.assemble lowers to a tile store into the backing memref; arrays
+        // write the same backing `pto.declare_local_array`). Both branches yield
+        // the SAME underlying SSA, so the merged value is NOT an scf.if result.
+        // Routing a tensor through scf.if would retype it to a fully-dynamic
+        // !pto.tensor_view<?x?> and drop the concrete memref dims that
+        // pto.partition_view requires (issue #1533). returns_via_scf stays
+        // false; the return var is bound to the shared branch-yield SSA after
+        // both branches emit (see below).
       } else {
         INTERNAL_CHECK_SPAN(false, op->span_)
             << "Internal error: unsupported IfStmt return_var type for " << return_var->name_hint_;
@@ -172,11 +183,12 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     }
     indent_level_++;
 
-    // For ArrayType return vars (kept out of scf.if results), capture the
-    // backing-array SSA that the branches yield so it can be bound to the merged
-    // return var after both branches emit. Both branches yield the same SSA
-    // because every array.update_element aliases the input backing array.
-    std::vector<std::string> array_return_ssa(op->return_vars_.size());
+    // For in-place return vars (ArrayType and TensorType, both kept out of
+    // scf.if results), capture the backing SSA that the branches yield so it can
+    // be bound to the merged return var after both branches emit. Both branches
+    // yield the same SSA because every array.update_element / pl.assemble
+    // aliases the one backing array / tensor.
+    std::vector<std::string> inplace_return_ssa(op->return_vars_.size());
 
     auto emit_branch = [&](const StmtPtr& body, const char* branch_name) {
       fs_.yield_buffer.clear();
@@ -191,17 +203,19 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
         if (returns_via_scf[i]) {
           scalar_yields.push_back(branch_yields[i]);
-        } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType())) {
-          // In-place backing-array SSA; bound to the return var after the
-          // branches. Both branches must agree on the same storage SSA (every
-          // array.update_element aliases the one backing array) — assert it so a
-          // future divergence can't silently bind to the last-emitted branch.
-          if (array_return_ssa[i].empty()) {
-            array_return_ssa[i] = branch_yields[i];
+        } else if (As<ir::ArrayType>(op->return_vars_[i]->GetType()) ||
+                   As<TensorType>(op->return_vars_[i]->GetType())) {
+          // In-place backing SSA (array or tensor); bound to the return var
+          // after the branches. Both branches must agree on the same storage SSA
+          // (every array.update_element / pl.assemble aliases the one backing
+          // array / tensor) — assert it so a future divergence can't silently
+          // bind to the last-emitted branch.
+          if (inplace_return_ssa[i].empty()) {
+            inplace_return_ssa[i] = branch_yields[i];
           } else {
-            INTERNAL_CHECK_SPAN(array_return_ssa[i] == branch_yields[i], op->span_)
-                << "Internal error: IfStmt array return_var '" << op->return_vars_[i]->name_hint_
-                << "' yields different backing-array SSAs across branches: " << array_return_ssa[i] << " vs "
+            INTERNAL_CHECK_SPAN(inplace_return_ssa[i] == branch_yields[i], op->span_)
+                << "Internal error: IfStmt in-place return_var '" << op->return_vars_[i]->name_hint_
+                << "' yields different backing SSAs across branches: " << inplace_return_ssa[i] << " vs "
                 << branch_yields[i];
           }
         }
@@ -231,14 +245,22 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
     indent_level_--;
     Emit("}");
 
-    // Bind ArrayType return vars to the shared backing-array SSA both branches
-    // mutated in place. Reads after the IfStmt then resolve to that array.
+    // Bind in-place return vars (array / tensor) to the shared backing SSA both
+    // branches mutated in place. Reads after the IfStmt then resolve to that
+    // backing array / tensor_view (the concrete make_tensor_view), so a later
+    // pto.partition_view keeps its static dims instead of an scf.if-retyped
+    // !pto.tensor_view<?x?> (issue #1533).
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-      if (As<ir::ArrayType>(op->return_vars_[i]->GetType())) {
-        INTERNAL_CHECK_SPAN(!array_return_ssa[i].empty(), op->span_)
-            << "Internal error: array IfStmt return_var '" << op->return_vars_[i]->name_hint_
-            << "' has no branch-yield SSA";
-        BindVarToMlir(op->return_vars_[i], array_return_ssa[i]);
+      const auto& return_var = op->return_vars_[i];
+      const bool is_array = As<ir::ArrayType>(return_var->GetType()) != nullptr;
+      const bool is_tensor = As<TensorType>(return_var->GetType()) != nullptr;
+      if (!is_array && !is_tensor) continue;
+      INTERNAL_CHECK_SPAN(!inplace_return_ssa[i].empty(), op->span_)
+          << "Internal error: in-place IfStmt return_var '" << return_var->name_hint_
+          << "' has no branch-yield SSA";
+      BindVarToMlir(return_var, inplace_return_ssa[i]);
+      if (is_tensor) {
+        BindTensorView(return_var, inplace_return_ssa[i]);
       }
     }
   }
