@@ -460,25 +460,7 @@ def build_paged_attention_spmd_program(
             Each kernel stage dispatched as SPMD across multiple hardware blocks.
             Config: [batch, num_heads, kv_head_num, head_dim,
                      block_size, block_num_capacity, active_block_num]
-
-            Selective tensor dump (simpler#844): the two largest bindings —
-            ``key_cache`` and ``value_cache`` — can each reach ~1 GB at
-            production shapes (64bat / 8192ctx), saturating the host-side
-            dump collector at ~42 MB/s and triggering STARS op-execute
-            kills (simpler issue #860). We mark only the small / interesting
-            tensors with ``pl.dump_tag`` so a ``--dump-tensor`` run filters
-            those two bindings out of the collector queue and still gets
-            query / output / per-batch context. The markers are no-ops when
-            ``--dump-tensor`` is not enabled (the whole dump pipeline is
-            dormant on the runtime side).
             """
-            pl.dump_tag(query)
-            pl.dump_tag(out)
-            pl.dump_tag(block_table)
-            pl.dump_tag(context_lens)
-            pl.dump_tag(scale)
-            pl.dump_tag(config)
-
             batch_cfg = pl.tensor.read(config, [0])
             num_heads_cfg = pl.tensor.read(config, [1])
             block_size_cfg = pl.tensor.read(config, [4])
