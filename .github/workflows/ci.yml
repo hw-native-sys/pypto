@@ -12,175 +12,175 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # pre-commit:
-  #   runs-on: ubuntu-latest
+  pre-commit:
+    runs-on: ubuntu-latest
 
-  #   steps:
-  #   - name: Checkout
-  #     uses: actions/checkout@v4
-  #   - name: pre-commit
-  #     uses: pre-commit/action@v3.0.0
-  #     with:
-  #       extra_args: --all-files
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: pre-commit
+      uses: pre-commit/action@v3.0.0
+      with:
+        extra_args: --all-files
 
-  # clang-tidy:
-  #   runs-on: [self-hosted, linux, arm64, cpu]
-  #   container:
-  #     image: localhost:5000/ci-py310:latest
-  #     options: >-
-  #       -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
+  clang-tidy:
+    runs-on: [self-hosted, linux, arm64, cpu]
+    container:
+      image: localhost:5000/ci-py310:latest
+      options: >-
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
 
-  #   steps:
-  #   - name: Checkout
-  #     uses: actions/checkout@v4
-  #     with:
-  #       submodules: true
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: true
 
-  #   - name: Fetch base branch for diff
-  #     if: github.event_name == 'pull_request'
-  #     run: git fetch origin ${{ github.base_ref }} --depth=1
+    - name: Fetch base branch for diff
+      if: github.event_name == 'pull_request'
+      run: git fetch origin ${{ github.base_ref }} --depth=1
 
-  #   - name: Run clang-tidy
-  #     run: |
-  #       if [ "${{ github.event_name }}" = "pull_request" ]; then
-  #         python tests/lint/clang_tidy.py --jobs=$(nproc) --diff-base=origin/${{ github.base_ref }}
-  #       else
-  #         python tests/lint/clang_tidy.py --jobs=$(nproc)
-  #       fi
+    - name: Run clang-tidy
+      run: |
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          python tests/lint/clang_tidy.py --jobs=$(nproc) --diff-base=origin/${{ github.base_ref }}
+        else
+          python tests/lint/clang_tidy.py --jobs=$(nproc)
+        fi
 
-  # unit-tests:
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       os: [ubuntu-latest, macos-latest]
-  #       python-version: ["3.10"]
+  unit-tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.10"]
 
-  #   steps:
-  #   - name: Checkout
-  #     uses: actions/checkout@v4
-  #     with:
-  #       submodules: true
-  #   - name: Set up Python ${{ matrix.python-version }}
-  #     uses: actions/setup-python@v5
-  #     with:
-  #       python-version: ${{ matrix.python-version }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
 
-  #   - name: Install project and dependencies
-  #     run: |
-  #       python -m pip install --upgrade pip
-  #       pip install torch --index-url https://download.pytorch.org/whl/cpu
-  #       pip install -v .[dev]
+    - name: Install project and dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install -v .[dev]
 
-  #   - name: Test unit tests
-  #     run: pytest tests/ut -n auto --maxprocesses 8 -v
+    - name: Test unit tests
+      run: pytest tests/ut -n auto --maxprocesses 8 -v
 
-  # system-tests:
-  #   runs-on: [self-hosted, linux, arm64, npu]
-  #   env:
-  #     ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
-  #     PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-  #     PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-  #     PTOAS_VERSION: v0.40
-  #     PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
-  #     CMAKE_BUILD_PARALLEL_LEVEL: 16
-  #     CMAKE_C_COMPILER_LAUNCHER: ccache
-  #     CMAKE_CXX_COMPILER_LAUNCHER: ccache
-  #     CCACHE_DIR: /root/.cache/ccache
-  #     CCACHE_MAXSIZE: 5G
-  #     PIP_CACHE_DIR: /root/.cache/pip
-  #   container:
-  #     image: localhost:5000/ci-device-py310:latest
-  #     options: >-
-  #       --privileged
-  #       -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
-  #       -v /usr/local/Ascend:/usr/local/Ascend:ro
-  #       -v /dev:/dev
-  #       -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
-  #       -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
-  #       -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
-  #       -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
-  #       -e DEVICE_ID
-  #       -e DEVICE_RANGE
-  #       -e PTO2_RING_HEAP
-  #       -e PTO2_RING_TASK_WINDOW
-  #       -e PTO2_RING_DEP_POOL
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         submodules: true
+  system-tests:
+    runs-on: [self-hosted, linux, arm64, npu]
+    env:
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
+      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_VERSION: v0.40
+      PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: /root/.cache/ccache
+      CCACHE_MAXSIZE: 5G
+      PIP_CACHE_DIR: /root/.cache/pip
+    container:
+      image: localhost:5000/ci-device-py310:latest
+      options: >-
+        --privileged
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+        -v /usr/local/Ascend:/usr/local/Ascend:ro
+        -v /dev:/dev
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
+        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
+        -e DEVICE_ID
+        -e DEVICE_RANGE
+        -e PTO2_RING_HEAP
+        -e PTO2_RING_TASK_WINDOW
+        -e PTO2_RING_DEP_POOL
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
 
-  #     - name: Check NPU
-  #       run: |
-  #         npu-smi info
+      - name: Check NPU
+        run: |
+          npu-smi info
 
-  #     - name: Show ccache stats (before)
-  #       run: ccache -s || true
+      - name: Show ccache stats (before)
+        run: ccache -s || true
 
-  #     - name: Install project and dependencies
-  #       run: |
-  #         python -m pip install --upgrade pip
-  #         rm -rf ./build ./_skbuild
-  #         test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
-  #         pip install --no-build-isolation .[dev]
+      - name: Install project and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          rm -rf ./build ./_skbuild
+          test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
+          pip install --no-build-isolation .[dev]
 
-  #     - name: Install ptoas (local cache)
-  #       env:
-  #         PTOAS_CACHE_DIR: /opt/ptoas-cache
-  #       run: |
-  #         CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
-  #         if [ ! -f "$CACHE_ARCHIVE" ]; then
-  #           echo "Cache miss — downloading ptoas ${PTOAS_VERSION}"
-  #           mkdir -p "$PTOAS_CACHE_DIR"
-  #           curl --fail --location --retry 3 --retry-all-errors \
-  #             https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
-  #             -o "$CACHE_ARCHIVE.tmp"
-  #           echo "${PTOAS_SHA256}  $CACHE_ARCHIVE.tmp" | sha256sum -c -
-  #           mv "$CACHE_ARCHIVE.tmp" "$CACHE_ARCHIVE"
-  #         else
-  #           echo "Cache hit — using $CACHE_ARCHIVE"
-  #         fi
-  #         mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
-  #         tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
-  #         chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
-  #         chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
+      - name: Install ptoas (local cache)
+        env:
+          PTOAS_CACHE_DIR: /opt/ptoas-cache
+        run: |
+          CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
+          if [ ! -f "$CACHE_ARCHIVE" ]; then
+            echo "Cache miss — downloading ptoas ${PTOAS_VERSION}"
+            mkdir -p "$PTOAS_CACHE_DIR"
+            curl --fail --location --retry 3 --retry-all-errors \
+              https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+              -o "$CACHE_ARCHIVE.tmp"
+            echo "${PTOAS_SHA256}  $CACHE_ARCHIVE.tmp" | sha256sum -c -
+            mv "$CACHE_ARCHIVE.tmp" "$CACHE_ARCHIVE"
+          else
+            echo "Cache hit — using $CACHE_ARCHIVE"
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
+          tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
+          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
+          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
 
-  #     - name: Add Ascend tools to PATH
-  #       run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
+      - name: Add Ascend tools to PATH
+        run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
 
-  #     - name: Clone pto-isa
-  #       run: |
-  #         timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
-  #           || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
-  #         cd $GITHUB_WORKSPACE/pto-isa
-  #         git checkout 2c607938
+      - name: Clone pto-isa
+        run: |
+          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
+            || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
+          cd $GITHUB_WORKSPACE/pto-isa
+          git checkout 2c607938
 
-  #     - name: Install simpler
-  #       run: |
-  #         rm -rf ./runtime/build
-  #         ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
-  #         pip install --no-build-isolation ./runtime
+      - name: Install simpler
+        run: |
+          rm -rf ./runtime/build
+          ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
+          pip install --no-build-isolation ./runtime
 
-  #     - name: Show ccache stats (after)
-  #       run: ccache -s || true
+      - name: Show ccache stats (after)
+        run: ccache -s || true
 
-  #     - name: Test system tests
-  #       timeout-minutes: 15
-  #       run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed
+      - name: Test system tests
+        timeout-minutes: 15
+        run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed
 
-  #     - name: Test multi-orch L2 (isolated pytest invocation)
-  #       # A ``Worker(level=2)`` device session currently leaves runtime
-  #       # state that hangs / segfaults the next ``Worker(level=3)``
-  #       # init in the same Python process (simpler-side state
-  #       # isolation bug). Running this file in its own pytest process
-  #       # keeps the L2 leak from poisoning ``test_l3_distributed``.
-  #       timeout-minutes: 3
-  #       run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938
+      - name: Test multi-orch L2 (isolated pytest invocation)
+        # A ``Worker(level=2)`` device session currently leaves runtime
+        # state that hangs / segfaults the next ``Worker(level=3)``
+        # init in the same Python process (simpler-side state
+        # isolation bug). Running this file in its own pytest process
+        # keeps the L2 leak from poisoning ``test_l3_distributed``.
+        timeout-minutes: 3
+        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938
 
-  #     - name: Test swimlane output
-  #       run: |
-  #         pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
-  #           -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=2c607938
+      - name: Test swimlane output
+        run: |
+          pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
+            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=2c607938
 
   dist-system-tests:
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
@@ -198,8 +198,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/dist-checkout/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/dist-checkout/pto-isa
-      PTOAS_VERSION: v0.40
-      PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
+      PTOAS_VERSION: v0.42
+      PTOAS_SHA256: 216c68fc9bb629a41ae2c9d1d0ec2f912b48b67c7c8f57687d6161e2f07c66a6
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -243,7 +243,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
             || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
           cd "$PTO_ISA_ROOT"
-          git checkout 2c607938
+          git checkout 6909e5c4
 
       - name: Bootstrap conda + per-job venv + write activate.sh
         # Set up a per-job venv layered on conda py310 and generate
@@ -262,6 +262,9 @@ jobs:
           source "$GITHUB_WORKSPACE/dist-checkout/venv/bin/activate"
           source /usr/local/Ascend/cann-9.0.0/set_env.sh
           export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+          # PTO2_RING_* come from the runner's systemd Environment and
+          # break HCCL tests on this host; unset them before pytest.
+          unset PTO2_RING_HEAP PTO2_RING_TASK_WINDOW PTO2_RING_DEP_POOL
           EOF
 
       - name: Install project and dependencies
@@ -277,179 +280,179 @@ jobs:
         timeout-minutes: 10
         run: |
           source activate.sh
-          pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938 --ignore=tests/st/distributed/test_l2_multi_orch.py
+          python -m pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=6909e5c4 --ignore=tests/st/distributed/test_l2_multi_orch.py
 
-  # pypto-lib-model:
-  #   runs-on: [self-hosted, linux, arm64, npu]
-  #   env:
-  #     ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
-  #     PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-  #     PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-  #     PTOAS_VERSION: v0.40
-  #     PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
-  #     CMAKE_BUILD_PARALLEL_LEVEL: 16
-  #     CMAKE_C_COMPILER_LAUNCHER: ccache
-  #     CMAKE_CXX_COMPILER_LAUNCHER: ccache
-  #     CCACHE_DIR: /root/.cache/ccache
-  #     CCACHE_MAXSIZE: 5G
-  #     PIP_CACHE_DIR: /root/.cache/pip
-  #   container:
-  #     image: localhost:5000/ci-device-py310:latest
-  #     options: >-
-  #       --privileged
-  #       -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
-  #       -v /usr/local/Ascend:/usr/local/Ascend:ro
-  #       -v /dev:/dev
-  #       -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
-  #       -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
-  #       -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
-  #       -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
-  #       -e DEVICE_ID
-  #       -e DEVICE_RANGE
-  #       -e PTO2_RING_HEAP
-  #       -e PTO2_RING_TASK_WINDOW
-  #       -e PTO2_RING_DEP_POOL
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         submodules: true
+  pypto-lib-model:
+    runs-on: [self-hosted, linux, arm64, npu]
+    env:
+      ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
+      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
+      PTOAS_VERSION: v0.40
+      PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
+      CMAKE_BUILD_PARALLEL_LEVEL: 16
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: /root/.cache/ccache
+      CCACHE_MAXSIZE: 5G
+      PIP_CACHE_DIR: /root/.cache/pip
+    container:
+      image: localhost:5000/ci-device-py310:latest
+      options: >-
+        --privileged
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+        -v /usr/local/Ascend:/usr/local/Ascend:ro
+        -v /dev:/dev
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
+        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
+        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
+        -e DEVICE_ID
+        -e DEVICE_RANGE
+        -e PTO2_RING_HEAP
+        -e PTO2_RING_TASK_WINDOW
+        -e PTO2_RING_DEP_POOL
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
 
-  #     - name: Check NPU
-  #       run: npu-smi info
+      - name: Check NPU
+        run: npu-smi info
 
-  #     - name: Install project and dependencies
-  #       run: |
-  #         python -m pip install --upgrade pip
-  #         rm -rf ./build ./_skbuild
-  #         test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
-  #         pip install --no-build-isolation .[dev]
+      - name: Install project and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          rm -rf ./build ./_skbuild
+          test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
+          pip install --no-build-isolation .[dev]
 
-  #     - name: Install ptoas (local cache)
-  #       env:
-  #         PTOAS_CACHE_DIR: /opt/ptoas-cache
-  #       run: |
-  #         CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
-  #         if [ ! -f "$CACHE_ARCHIVE" ]; then
-  #           echo "Cache miss — downloading ptoas ${PTOAS_VERSION}"
-  #           mkdir -p "$PTOAS_CACHE_DIR"
-  #           curl --fail --location --retry 3 --retry-all-errors \
-  #             https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
-  #             -o "$CACHE_ARCHIVE.tmp"
-  #           echo "${PTOAS_SHA256}  $CACHE_ARCHIVE.tmp" | sha256sum -c -
-  #           mv "$CACHE_ARCHIVE.tmp" "$CACHE_ARCHIVE"
-  #         else
-  #           echo "Cache hit — using $CACHE_ARCHIVE"
-  #         fi
-  #         mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
-  #         tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
-  #         chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
-  #         chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
+      - name: Install ptoas (local cache)
+        env:
+          PTOAS_CACHE_DIR: /opt/ptoas-cache
+        run: |
+          CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
+          if [ ! -f "$CACHE_ARCHIVE" ]; then
+            echo "Cache miss — downloading ptoas ${PTOAS_VERSION}"
+            mkdir -p "$PTOAS_CACHE_DIR"
+            curl --fail --location --retry 3 --retry-all-errors \
+              https://github.com/hw-native-sys/PTOAS/releases/download/${PTOAS_VERSION}/ptoas-bin-aarch64.tar.gz \
+              -o "$CACHE_ARCHIVE.tmp"
+            echo "${PTOAS_SHA256}  $CACHE_ARCHIVE.tmp" | sha256sum -c -
+            mv "$CACHE_ARCHIVE.tmp" "$CACHE_ARCHIVE"
+          else
+            echo "Cache hit — using $CACHE_ARCHIVE"
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
+          tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
+          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
+          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
 
-  #     - name: Add Ascend tools to PATH
-  #       run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
+      - name: Add Ascend tools to PATH
+        run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
 
-  #     - name: Clone pto-isa
-  #       run: |
-  #         timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
-  #           || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
-  #         cd $GITHUB_WORKSPACE/pto-isa
-  #         git checkout 2c607938
+      - name: Clone pto-isa
+        run: |
+          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
+            || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
+          cd $GITHUB_WORKSPACE/pto-isa
+          git checkout 2c607938
 
-  #     - name: Install simpler
-  #       run: |
-  #         rm -rf ./runtime/build
-  #         ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
-  #         pip install --no-build-isolation ./runtime
+      - name: Install simpler
+        run: |
+          rm -rf ./runtime/build
+          ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
+          pip install --no-build-isolation ./runtime
 
-  #     - name: Clone pypto-lib (Qwen3-14B decode)
-  #       run: git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git $GITHUB_WORKSPACE/pypto-lib
+      - name: Clone pypto-lib (Qwen3-14B decode)
+        run: git clone --depth 1 https://github.com/hw-native-sys/pypto-lib.git $GITHUB_WORKSPACE/pypto-lib
 
-  #     - name: Install pypto-lib runner dependencies
-  #       run: |
-  #         pip install nanobind
-  #         pip install torch
+      - name: Install pypto-lib runner dependencies
+        run: |
+          pip install nanobind
+          pip install torch
 
-  #     - name: Run pypto-lib Qwen3-14B decode example
-  #       working-directory: ${{ github.workspace }}/pypto-lib
-  #       env:
-  #         PYTHONPATH: ${{ github.workspace }}/pypto-lib
-  #       run: python models/qwen3/14b/decode_layer.py -p a2a3 -d "$DEVICE_ID"
+      - name: Run pypto-lib Qwen3-14B decode example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/qwen3/14b/decode_layer.py -p a2a3 -d "$DEVICE_ID"
 
-  #     - name: Run pypto-lib DeepSeek-V4 decode indexer example
-  #       working-directory: ${{ github.workspace }}/pypto-lib
-  #       env:
-  #         PYTHONPATH: ${{ github.workspace }}/pypto-lib
-  #       run: python models/deepseek/v4/decode_indexer.py -p a2a3 -d "$DEVICE_ID"
+      - name: Run pypto-lib DeepSeek-V4 decode indexer example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/deepseek/v4/decode_indexer.py -p a2a3 -d "$DEVICE_ID"
 
-  #     - name: Run pypto-lib DeepSeek-V4 hc_pre example
-  #       working-directory: ${{ github.workspace }}/pypto-lib
-  #       env:
-  #         PYTHONPATH: ${{ github.workspace }}/pypto-lib
-  #       run: python models/deepseek/v4/hc_pre.py -p a2a3 -d "$DEVICE_ID"
+      - name: Run pypto-lib DeepSeek-V4 hc_pre example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/deepseek/v4/hc_pre.py -p a2a3 -d "$DEVICE_ID"
 
-  #     - name: Run pypto-lib DeepSeek-V4 decode_attention_swa example
-  #       working-directory: ${{ github.workspace }}/pypto-lib
-  #       env:
-  #         PYTHONPATH: ${{ github.workspace }}/pypto-lib
-  #       run: python models/deepseek/v4/decode_attention_swa.py -p a2a3 -d "$DEVICE_ID"
+      - name: Run pypto-lib DeepSeek-V4 decode_attention_swa example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/deepseek/v4/decode_attention_swa.py -p a2a3 -d "$DEVICE_ID"
 
-  #     - name: Run pypto-lib DeepSeek-V4 decode_attention_hca example
-  #       working-directory: ${{ github.workspace }}/pypto-lib
-  #       env:
-  #         PYTHONPATH: ${{ github.workspace }}/pypto-lib
-  #       run: python models/deepseek/v4/decode_attention_hca.py -p a2a3 -d "$DEVICE_ID"
+      - name: Run pypto-lib DeepSeek-V4 decode_attention_hca example
+        working-directory: ${{ github.workspace }}/pypto-lib
+        env:
+          PYTHONPATH: ${{ github.workspace }}/pypto-lib
+        run: python models/deepseek/v4/decode_attention_hca.py -p a2a3 -d "$DEVICE_ID"
 
-  # system-tests-a5sim:
-  #   runs-on: ubuntu-latest
-  #   env:
-  #     PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-  #     PTOAS_VERSION: v0.40
-  #     PTOAS_SHA256: 64c835839a9e1c3696617f82f3710705b3bd4b0bc0de3049d21b08885ac41c39
-  #   container:
-  #     image: ghcr.io/hw-native-sys/pypto/github-ci:latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         submodules: true
+  system-tests-a5sim:
+    runs-on: ubuntu-latest
+    env:
+      PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
+      PTOAS_VERSION: v0.40
+      PTOAS_SHA256: 64c835839a9e1c3696617f82f3710705b3bd4b0bc0de3049d21b08885ac41c39
+    container:
+      image: ghcr.io/hw-native-sys/pypto/github-ci:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
 
-  #     - name: Install project and dependencies
-  #       run: |
-  #         python -m pip install --upgrade pip
-  #         pip install -v .[dev]
+      - name: Install project and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -v .[dev]
 
-  #     - name: Cache ptoas binary
-  #       id: cache-ptoas
-  #       uses: actions/cache@v4
-  #       with:
-  #         path: ${{ github.workspace }}/ptoas-bin
-  #         key: ptoas-x86_64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
+      - name: Cache ptoas binary
+        id: cache-ptoas
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/ptoas-bin
+          key: ptoas-x86_64-${{ env.PTOAS_VERSION }}-${{ env.PTOAS_SHA256 }}
 
-  #     - name: Install ptoas
-  #       if: steps.cache-ptoas.outputs.cache-hit != 'true'
-  #       run: |
-  #         curl --fail --location --retry 3 --retry-all-errors \
-  #           https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-x86_64.tar.gz \
-  #            -o /tmp/ptoas-bin-x86_64.tar.gz
-  #         echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-x86_64.tar.gz" | sha256sum -c -
-  #         mkdir -p $GITHUB_WORKSPACE/ptoas-bin
-  #         tar -xzf /tmp/ptoas-bin-x86_64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
-  #         chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
-  #         chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
+      - name: Install ptoas
+        if: steps.cache-ptoas.outputs.cache-hit != 'true'
+        run: |
+          curl --fail --location --retry 3 --retry-all-errors \
+            https://github.com/hw-native-sys/PTOAS/releases/download/${{ env.PTOAS_VERSION }}/ptoas-bin-x86_64.tar.gz \
+             -o /tmp/ptoas-bin-x86_64.tar.gz
+          echo "${{ env.PTOAS_SHA256 }}  /tmp/ptoas-bin-x86_64.tar.gz" | sha256sum -c -
+          mkdir -p $GITHUB_WORKSPACE/ptoas-bin
+          tar -xzf /tmp/ptoas-bin-x86_64.tar.gz -C $GITHUB_WORKSPACE/ptoas-bin
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/ptoas
+          chmod +x $GITHUB_WORKSPACE/ptoas-bin/bin/ptoas
 
-  #     - name: Install simpler
-  #       run: |
-  #         rm -rf ./runtime/build
-  #         pip install -v ./runtime
+      - name: Install simpler
+        run: |
+          rm -rf ./runtime/build
+          pip install -v ./runtime
 
-  #     - name: Test A5 system tests (simulator)
-  #       # TestMscatter is deselected: the a5 simulator compiles incore kernels
-  #       # against the runtime's bundled pto-isa, which still clones from the
-  #       # stale PTO-ISA/pto-isa mirror (lacks pto::Coalesce) until the runtime
-  #       # submodule is bumped past simpler #806. Re-enable once that lands.
-  #       run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=2c607938 -k "not TestMscatter"
+      - name: Test A5 system tests (simulator)
+        # TestMscatter is deselected: the a5 simulator compiles incore kernels
+        # against the runtime's bundled pto-isa, which still clones from the
+        # stale PTO-ISA/pto-isa mirror (lacks pto::Coalesce) until the runtime
+        # submodule is bumped past simpler #806. Re-enable once that lands.
+        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=2c607938 -k "not TestMscatter"
 
-  #     - name: Test A5 cross-core system tests (simulator)
-  #       run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=2c607938
+      - name: Test A5 cross-core system tests (simulator)
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=2c607938
 
-  #     - name: Test A2A3 cross-core system tests (simulator)
-  #       run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=2c607938
+      - name: Test A2A3 cross-core system tests (simulator)
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=2c607938
