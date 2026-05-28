@@ -44,7 +44,7 @@ SIZE = 64  # matches COUNT_PER_RANK in simpler allgather_kernel.cpp
 def _expected_allgather(inputs: torch.Tensor) -> torch.Tensor:
     """Rank-ordered concatenation; identical vector on every rank."""
     gathered = torch.cat([inputs[r, 0] for r in range(inputs.shape[0])])
-    return torch.stack([gathered, gathered])
+    return torch.stack([gathered, gathered]).unsqueeze(1)
 
 
 def _build_allgather_program():

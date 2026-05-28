@@ -74,9 +74,9 @@ def _build_reduce_scatter_program():
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             # Phase 1: stage-in — copy both local chunks into scratch.
             chunk0 = pl.load(inp, [0, 0], [1, SIZE])
-            _ = pl.store(chunk0, [0, 0], scratch)
+            pl.store(chunk0, [0, 0], scratch)
             chunk1 = pl.load(inp, [0, SIZE], [1, SIZE])
-            _ = pl.store(chunk1, [0, SIZE], scratch)
+            pl.store(chunk1, [0, SIZE], scratch)
 
             # Phase 2: barrier — AtomicAdd the peer's signal cell, then
             # wait for ours to be bumped by the rank that targets us.
@@ -160,13 +160,12 @@ class TestL3ReduceScatter:
         )
 
         # Each rank stages nranks*SIZE floats: rank r uses i + r*100 for i in 0..2*SIZE-1.
-        rank0_inp = torch.tensor([float(i) for i in range(2 * SIZE)], dtype=torch.float32).reshape(
-            1, 2 * SIZE
+        inputs = torch.stack(
+            [
+                torch.arange(2 * SIZE, dtype=torch.float32).reshape(1, 2 * SIZE),
+                torch.arange(100.0, 100.0 + 2 * SIZE, dtype=torch.float32).reshape(1, 2 * SIZE),
+            ]
         )
-        rank1_inp = torch.tensor([float(i + 100) for i in range(2 * SIZE)], dtype=torch.float32).reshape(
-            1, 2 * SIZE
-        )
-        inputs = torch.stack([rank0_inp, rank1_inp])
         outputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
 
         compiled(inputs, outputs)
