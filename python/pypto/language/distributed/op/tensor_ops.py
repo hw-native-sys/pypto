@@ -124,6 +124,9 @@ def put(
     dst: DistributedTensor,
     peer: IntLike,
     src: DistributedTensor,
+    dst_offsets: Sequence[IntLike] | None = None,
+    src_offsets: Sequence[IntLike] | None = None,
+    shape: Sequence[IntLike] | None = None,
     *,
     atomic: AtomicType = AtomicType.None_,
 ) -> Call:
@@ -144,12 +147,21 @@ def put(
     stays keyword-only because it lowers to an IR attr (printed as
     ``atomic=<int>``), mirroring ``pld.system.notify``'s ``op``.
 
+    With no offsets/shape this writes the full local ``src`` slice to the full
+    peer ``dst`` slice. Supplying ``dst_offsets``, ``src_offsets``, and
+    ``shape`` narrows the transfer to matching subregions; all three must be
+    provided together.
+
     Args:
         dst: Window-bound :class:`pld.DistributedTensor` destination (the peer
             rank's slice). The C++ verifier refuses a plain :class:`pl.Tensor`.
         peer: Peer rank index.
         src: Window-bound :class:`pld.DistributedTensor` source (the local
-            rank's slice); must share element type and static shape with ``dst``.
+            rank's slice); must share element type with ``dst``.
+        dst_offsets: Optional offsets into the peer ``dst`` slice.
+        src_offsets: Optional offsets into the local ``src`` slice.
+        shape: Optional static transfer shape. Required when either offset
+            argument is provided.
         atomic: :class:`pld.AtomicType` selecting plain-store
             (``AtomicType.None_``, the default) vs atomic-add
             (``AtomicType.Add``) combine semantics (keyword-only).
@@ -160,7 +172,24 @@ def put(
         if not isinstance(expr, Expr) or not isinstance(expr.type, _ir.DistributedTensorType):
             got = _ir.python_print_type(expr.type) if isinstance(expr, Expr) else type(expr).__name__
             raise TypeError(f"pld.tensor.put expects a DistributedTensor {role} (window-bound); got {got}")
-    return _ir_tensor.put(dst_expr, _unwrap(peer), src_expr, atomic)
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tensor.put dst_offsets, src_offsets, and shape must be provided together")
+
+    if not has_region:
+        return _ir_tensor.put(dst_expr, _unwrap(peer), src_expr, atomic=atomic)
+    assert dst_offsets is not None
+    assert src_offsets is not None
+    assert shape is not None
+    return _ir_tensor.put(
+        dst_expr,
+        _unwrap(peer),
+        src_expr,
+        dst_offsets=_normalize_intlike(dst_offsets),
+        src_offsets=_normalize_intlike(src_offsets),
+        shape=_normalize_intlike(shape),
+        atomic=atomic,
+    )
 
 
 def get(
