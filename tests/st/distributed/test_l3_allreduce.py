@@ -29,7 +29,12 @@ Golden: ``outputs[r] == inputs[0] + inputs[1]`` for every rank ``r``.
 
 Driven by 2 devices via ``DistributedConfig(device_ids=device_ids[:2], ...)``,
 matching the runtime example's hardcoded 2-rank requirement.
+
+``make_reduce_step_2rank`` is the canonical allreduce InCore kernel; composed by
+``l3_allreduce_gemm.build_l3_allreduce_gemm_program``.
 """
+
+from __future__ import annotations
 
 import sys
 
@@ -42,82 +47,88 @@ from pypto.ir.distributed_compiled_program import DistributedConfig
 
 SIZE = 256  # matches ALLREDUCE_COUNT in runtime allreduce_kernel.cpp
 
+__all__ = ["SIZE", "make_reduce_step_2rank"]
 
-def _build_allreduce_program():
-    """Build the 2-rank allreduce program at call time.
 
-    Deferred construction lets this file collect even if the embedded body
-    is rejected by the parser.
-    """
+def make_reduce_step_2rank(*, m0: int, n: int):
+    """4-phase peer allreduce InCore (single ``remote_load``; ``nranks=2``)."""
+
+    @pl.function(type=pl.FunctionType.InCore)
+    def reduce_step(
+        self,
+        inp: pl.Tensor[[m0, n], pl.FP32],
+        out: pl.Out[pl.Tensor[[m0, n], pl.FP32]],
+        data: pl.InOut[pld.DistributedTensor[[m0, n], pl.FP32]],
+        signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
+        peer: pl.Scalar[pl.INT32],
+    ) -> pl.Tensor[[m0, n], pl.FP32]:
+        # Phase 1: stage-in — local input → this rank's window slice.
+        local = pl.load(inp, [0, 0], [m0, n])
+        _ = pl.store(local, [0, 0], data)
+
+        # Phase 2: barrier — AtomicAdd the peer's signal cell, then
+        # wait for ours to be bumped by the rank that targets us.
+        pld.system.notify(
+            signal,
+            peer=peer,
+            offsets=[0, 0],
+            value=1,
+            op=pld.NotifyOp.AtomicAdd,
+        )
+        pld.system.wait(
+            signal=signal,
+            offsets=[0, 0],
+            expected=1,
+            cmp=pld.WaitCmp.Ge,
+        )
+
+        # Phase 3: load my own slice, then add the peer's slice via remote_load.
+        acc = pl.load(data, [0, 0], [m0, n])
+        recv = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[m0, n])
+        acc = pl.add(acc, recv)
+
+        # Phase 4: stage-out — reduced accumulator → local output.
+        return pl.store(acc, [0, 0], out)
+
+    return reduce_step
+
+
+def _build_allreduce_program(*, m0: int = 1, n: int = SIZE):
+    """Build the 2-rank allreduce program at call time."""
+
+    nranks = 2
+    inp_shape = [nranks, m0, n]
+    reduce_step = make_reduce_step_2rank(m0=m0, n=n)
 
     @pl.program
     class AllReduceTwoRank:
-        @pl.function(type=pl.FunctionType.InCore)
-        def reduce_step(
-            self,
-            inp: pl.Tensor[[1, SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
-            signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
-            peer: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
-            # Phase 1: stage-in — local input → this rank's window slice.
-            local = pl.load(inp, [0, 0], [1, SIZE])
-            _ = pl.store(local, [0, 0], data)
-
-            # Phase 2: barrier — AtomicAdd the peer's signal cell, then
-            # wait for ours to be bumped by the rank that targets us.
-            # AtomicAdd on a single cell is sufficient for a 2-rank ring;
-            # nranks > 2 would size the signal to nranks and let each rank
-            # set a distinct slot (matching kernels/aiv/allreduce_kernel.cpp).
-            pld.system.notify(
-                signal,
-                peer=peer,
-                offsets=[0, 0],
-                value=1,
-                op=pld.NotifyOp.AtomicAdd,
-            )
-            pld.system.wait(
-                signal=signal,
-                offsets=[0, 0],
-                expected=1,
-                cmp=pld.WaitCmp.Ge,
-            )
-
-            # Phase 3: load my own slice into the accumulator, then add
-            # the peer's slice via cross-rank remote_load. For nranks > 2
-            # this becomes a loop over (nranks - 1) peers.
-            acc = pl.load(data, [0, 0], [1, SIZE])
-            recv = pld.tile.remote_load(data, peer=peer, offsets=[0, 0], shape=[1, SIZE])
-            acc = pl.add(acc, recv)
-
-            # Phase 4: stage-out — reduced accumulator → local output.
-            return pl.store(acc, [0, 0], out)
+        reduce_step = reduce_step
 
         @pl.function(type=pl.FunctionType.Orchestration)
         def chip_orch(
             self,
-            inp: pl.Tensor[[1, SIZE], pl.FP32],
-            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
-            data: pl.InOut[pld.DistributedTensor[[1, SIZE], pl.FP32]],
+            inp: pl.Tensor[[m0, n], pl.FP32],
+            out: pl.Out[pl.Tensor[[m0, n], pl.FP32]],
+            data: pl.InOut[pld.DistributedTensor[[m0, n], pl.FP32]],
             signal: pl.InOut[pld.DistributedTensor[[1, 1], pl.INT32]],
             peer: pl.Scalar[pl.INT32],
-        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+        ) -> pl.Tensor[[m0, n], pl.FP32]:
             return self.reduce_step(inp, out, data, signal, peer)
 
         @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
         def host_orch(
             self,
-            inputs: pl.Tensor[[2, 1, SIZE], pl.FP32],
-            outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
-        ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
-            data_buf = pld.alloc_window_buffer(SIZE * 4)  # 1xSIZE x FP32 (4 bytes)
-            signal_buf = pld.alloc_window_buffer(4)  # 1x1 x INT32
+            inputs: pl.Tensor[inp_shape, pl.FP32],  # type: ignore[valid-type]
+            outputs: pl.Out[pl.Tensor[inp_shape, pl.FP32]],  # type: ignore[valid-type]
+        ) -> pl.Tensor[inp_shape, pl.FP32]:  # type: ignore[valid-type]
+            # FP32 data window: m0*n elements x 4 bytes (must match dtype=pl.FP32 on pld.window).
+            data_buf = pld.alloc_window_buffer(m0 * n * 4)
+            # INT32 signal cell: 1x1 x 4 bytes (must match dtype=pl.INT32 on pld.window).
+            signal_buf = pld.alloc_window_buffer(4)
 
             for r in pl.range(pld.world_size()):
-                data = pld.window(data_buf, [1, SIZE], dtype=pl.FP32)
+                data = pld.window(data_buf, [m0, n], dtype=pl.FP32)
                 signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
-                # Ring partner: rank r notifies / reads peer = (r + 1) % nranks.
                 self.chip_orch(
                     inputs[r],
                     outputs[r],
@@ -138,7 +149,7 @@ class TestL3AllReduce:
         if len(device_ids) < 2:
             pytest.skip(f"allreduce needs 2 devices, got {device_ids}")
 
-        program = _build_allreduce_program()
+        program = _build_allreduce_program(m0=1, n=SIZE)
         compiled = ir.compile(
             program,
             platform=test_config.platform,
@@ -148,9 +159,6 @@ class TestL3AllReduce:
             ),
         )
 
-        # Per-rank input: rank 0 holds [0, 1, …, SIZE-1]; rank 1 holds
-        # [100, 101, …, 100+SIZE-1]. After allreduce, every rank's output
-        # is inputs[0] + inputs[1].
         inputs = torch.stack(
             [
                 torch.arange(SIZE, dtype=torch.float32).reshape(1, SIZE),
