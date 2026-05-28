@@ -7,211 +7,940 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Parser/printer tests for the unified ``with pl.scope(mode=...):`` DSL construct.
-
-``pl.scope()`` is the single block-level runtime-scope primitive (``RuntimeScopeStmt``):
-``pl.scope()`` is AUTO, ``pl.scope(mode=pl.ScopeMode.MANUAL)`` is MANUAL (the former
-``pl.manual_scope()``, kept as an alias). Hand-placed AUTO scopes require
-``@pl.function(auto_scope=False)``; MANUAL scopes are allowed in either mode.
-"""
+"""Unit tests for parsing ScopeStmt with pl.at(level=pl.Level.CORE_GROUP): syntax."""
 
 import pypto.language as pl
 import pytest
 from pypto import ir
-from pypto.ir.printer import python_print
+from pypto.language.parser.diagnostics.exceptions import ParserSyntaxError
+from pypto.language.parser.text_parser import parse_program
 
 
-def _first_runtime_scope(stmt):
-    if isinstance(stmt, ir.RuntimeScopeStmt):
-        return stmt
-    if isinstance(stmt, ir.SeqStmts):
-        for s in stmt.stmts:
-            r = _first_runtime_scope(s)
-            if r is not None:
-                return r
-    return None
+class TestScopeParsing:
+    """Test parsing of with pl.at(level=pl.Level.CORE_GROUP): syntax."""
 
-
-def _first_if(stmt):
-    if isinstance(stmt, ir.IfStmt):
-        return stmt
-    if isinstance(stmt, ir.SeqStmts):
-        for s in stmt.stmts:
-            r = _first_if(s)
-            if r is not None:
-                return r
-    if isinstance(stmt, (ir.ForStmt, ir.RuntimeScopeStmt)):
-        return _first_if(stmt.body)
-    return None
-
-
-def test_scope_auto_requires_opt_out_and_round_trips():
-    @pl.program
-    class Prog:
-        @pl.function(type=pl.FunctionType.InCore)
-        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            return x
-
-        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
-        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.scope():
-                a = self.k1(x)
-            return a
-
-    fn = Prog.get_function("main")
-    assert fn is not None
-    scope = _first_runtime_scope(fn.body)
-    assert scope is not None and scope.manual is False
-
-    printed = python_print(Prog, format=False)
-    assert "pl.scope()" in printed
-    assert "auto_scope=False" in printed
-    ir.assert_structural_equal(Prog, pl.parse(printed))
-
-
-def test_scope_manual_mode_round_trips():
-    @pl.program
-    class Prog:
-        @pl.function(type=pl.FunctionType.InCore)
-        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            return x
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.scope(mode=pl.ScopeMode.MANUAL):
-                a = self.k1(x)
-            return a
-
-    fn = Prog.get_function("main")
-    assert fn is not None
-    scope = _first_runtime_scope(fn.body)
-    assert scope is not None and scope.manual is True
-
-    printed = python_print(Prog, format=False)
-    assert "pl.scope(mode=pl.ScopeMode.MANUAL)" in printed
-    ir.assert_structural_equal(Prog, pl.parse(printed))
-
-
-def test_manual_scope_alias_parses_to_same_ir():
-    @pl.program
-    class Prog:
-        @pl.function(type=pl.FunctionType.InCore)
-        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            return x
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            with pl.manual_scope():
-                a = self.k1(x)
-            return a
-
-    fn = Prog.get_function("main")
-    assert fn is not None
-    scope = _first_runtime_scope(fn.body)
-    assert scope is not None and scope.manual is True
-
-
-def test_scope_rejects_positional_args():
-    with pytest.raises(Exception):  # noqa: B017 — parser raises ParserSyntaxError
+    def test_parse_simple_incore_scope(self):
+        """Test parsing a simple InCore scope."""
 
         @pl.program
-        class _Prog:
-            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+        class TestProgram:
+            @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.scope(1):  # type: ignore[arg-type]  # deliberate: positional arg rejected
-                    a = x
-                return a
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
 
+        # Verify the program was parsed successfully
+        assert TestProgram is not None
+        assert len(TestProgram.functions) == 1
 
-def test_auto_scope_rejected_in_default_mode():
-    with pytest.raises(Exception):  # noqa: B017 — AUTO scope requires auto_scope=False
+        # Get the main function
+        main_func = list(TestProgram.functions.values())[0]
+        assert main_func.name == "main"
+
+        # Verify the body contains a ScopeStmt
+        # The body should be SeqStmts containing ScopeStmt
+        assert isinstance(main_func.body, ir.SeqStmts)
+
+    def test_parse_nested_operations_in_scope(self):
+        """Test parsing multiple operations inside InCore scope."""
 
         @pl.program
-        class _Prog:
+        class TestProgram:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
+        # Verify the program was parsed successfully
+        assert TestProgram is not None
+        assert len(TestProgram.functions) == 1
+
+    def test_parse_multiple_incore_scopes(self):
+        """Test parsing multiple InCore scopes in one function."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
+        # Verify the program was parsed successfully
+        assert TestProgram is not None
+        assert len(TestProgram.functions) == 1
+
+    def test_parse_scope_with_surrounding_code(self):
+        """Test parsing InCore scope with code before and after."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
+                c: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
+                return c
+
+        # Verify the program was parsed successfully
+        assert TestProgram is not None
+        assert len(TestProgram.functions) == 1
+
+    def test_print_and_reparse_scope(self):
+        """Test that printed ScopeStmt can be reparsed."""
+
+        @pl.program
+        class Original:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        # Print the program
+        printed = Original.as_python()
+
+        # Verify it contains the scope syntax
+        assert "with pl.at(level=pl.Level.CORE_GROUP):" in printed
+
+
+class TestScopeNameParsing:
+    """Test parsing of scope name parameter."""
+
+    def test_parse_named_incore_scope(self):
+        """Test parsing with pl.at(level=..., name='my_kernel')."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="my_kernel"):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        assert TestProgram is not None
+        main_func = list(TestProgram.functions.values())[0]
+        # Find the ScopeStmt and verify name field
+        body = main_func.body
+        if isinstance(body, ir.SeqStmts):
+            scope_stmt = body.stmts[0]
+        else:
+            scope_stmt = body
+        assert isinstance(scope_stmt, ir.ScopeStmt)
+        assert scope_stmt.name_hint == "my_kernel"
+        assert scope_stmt.scope_kind == ir.ScopeKind.InCore
+
+    def test_parse_unnamed_scope_has_empty_name(self):
+        """Test that unnamed scopes have empty name."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        main_func = list(TestProgram.functions.values())[0]
+        body = main_func.body
+        if isinstance(body, ir.SeqStmts):
+            scope_stmt = body.stmts[0]
+        else:
+            scope_stmt = body
+        assert isinstance(scope_stmt, ir.ScopeStmt)
+        assert scope_stmt.name_hint == ""
+
+    def test_parse_invalid_name_raises_error(self):
+        """Test that invalid identifier names raise ParserSyntaxError."""
+        with pytest.raises(ParserSyntaxError, match="valid non-keyword identifier"):
+
+            @pl.program
+            class TestProgram:
+                @pl.function
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="has space"):
+                        y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    return y
+
+    def test_named_scope_printer_roundtrip(self):
+        """Test that named scopes roundtrip through the printer."""
+
+        @pl.program
+        class Original:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, name_hint="my_kernel"):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        printed = Original.as_python()
+        assert 'name_hint="my_kernel"' in printed
+
+    def test_parse_named_hierarchy_scope(self):
+        """Test parsing with pl.at(level=HOST, name='host_func')."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.HOST, name_hint="host_func"):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        main_func = list(TestProgram.functions.values())[0]
+        body = main_func.body
+        if isinstance(body, ir.SeqStmts):
+            scope_stmt = body.stmts[0]
+        else:
+            scope_stmt = body
+        assert isinstance(scope_stmt, ir.ScopeStmt)
+        assert scope_stmt.name_hint == "host_func"
+        assert scope_stmt.scope_kind == ir.ScopeKind.Hierarchy
+
+
+class TestSpmdForLoop:
+    """Test parsing of ``for i in pl.spmd(...):`` loop form.
+
+    The loop form is syntactic sugar that expands to
+    ``SpmdScopeStmt(body=InCoreScopeStmt(body=<i = tile.get_block_idx(); ...>))``
+    so inline tile/tensor ops have direct access to the per-block index
+    without a separate ``@pl.function(type=InCore)`` declaration.
+    """
+
+    @staticmethod
+    def _unique_descendant(node, cls):
+        """Return the single descendant of ``node`` that is an instance of ``cls``."""
+        found = []
+
+        def walk(n):
+            if isinstance(n, cls):
+                found.append(n)
+            if isinstance(n, ir.SeqStmts):
+                for s in n.stmts:
+                    walk(s)
+            elif hasattr(n, "body") and n.body is not None:
+                walk(n.body)
+
+        walk(node)
+        assert len(found) == 1, f"expected exactly one {cls.__name__}, got {len(found)}"
+        return found[0]
+
+    def test_for_spmd_builds_spmd_scope_wrapping_incore(self):
+        """Loop form emits SpmdScopeStmt containing an InCoreScopeStmt whose
+        first statement binds the loop var to pl.tile.get_block_idx().
+
+        ``core_num`` is positional — mirroring ``range(n)``.
+        """
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                b: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4):
+                    offset = i * 128
+                    tile_a: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    tile_b: pl.Tile[[128, 128], pl.FP32] = pl.load(b, [offset, 0], [128, 128])
+                    out = pl.store(pl.add(tile_a, tile_b), [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 4
+        assert spmd.sync_start is False
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+
+        body = incore.body
+        first_stmt = body.stmts[0] if isinstance(body, ir.SeqStmts) else body
+        assert isinstance(first_stmt, ir.AssignStmt)
+        call = first_stmt.value
+        assert isinstance(call, ir.Call)
+        assert call.op.name == "tile.get_block_idx"
+        assert first_stmt.var.name_hint == "i"
+
+    def test_for_spmd_accepts_core_num_kwarg(self):
+        """Backward-compat: ``pl.spmd(core_num=N)`` keyword form still parses."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(core_num=4):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 4
+
+    def test_for_spmd_accepts_closure_int_variable(self):
+        """Closure-captured Python ints resolve to ConstInt via parse_name.
+
+        Regression test for issue #1125 — parameterized builder functions
+        need to pass ``core_num`` as a Python variable.
+        """
+        max_ctx_blocks = 64  # Plain Python int in the enclosing scope.
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(core_num=max_ctx_blocks):
+                    offset = i * 8
+                    t: pl.Tile[[8, 128], pl.FP32] = pl.load(a, [offset, 0], [8, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 64
+
+    def test_for_spmd_accepts_closure_binop(self):
+        """Closure arithmetic folds to ConstInt via parse_binop's fold path."""
+        MAX_CTX_BLOCKS = 128
+        SB_BATCH = 2
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(core_num=MAX_CTX_BLOCKS // SB_BATCH):
+                    offset = i * 8
+                    t: pl.Tile[[8, 128], pl.FP32] = pl.load(a, [offset, 0], [8, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 64
+
+    def test_for_spmd_sync_start_and_name_hint(self):
+        """sync_start= and name_hint= pass through to SpmdScopeStmt."""
+
+        @pl.program
+        class TestProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(8, sync_start=True, name_hint="my_kernel"):
+                    offset = i * 64
+                    t: pl.Tile[[64, 128], pl.FP32] = pl.load(a, [offset, 0], [64, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(TestProgram.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert isinstance(spmd.core_num, ir.ConstInt)
+        assert spmd.core_num.value == 8
+        assert spmd.sync_start is True
+        assert spmd.name_hint == "my_kernel_spmd"
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.name_hint == "my_kernel"
+
+    def test_for_spmd_name_hint_split_base_and_spmd_suffix(self):
+        """``name_hint`` on for-spmd splits between outer Spmd and inner InCore."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, name_hint="q_proj"):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert spmd.name_hint == "q_proj_spmd"
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.name_hint == "q_proj"
+
+    def test_for_spmd_name_hint_already_has_spmd_suffix(self):
+        """A user-provided ``*_spmd`` hint is kept on Spmd; InCore drops the suffix."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, name_hint="gate_proj_spmd"):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        assert spmd.name_hint == "gate_proj_spmd"
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.name_hint == "gate_proj"
+
+    def test_with_spmd_single_call_still_supported(self):
+        """Regression: the existing ``with pl.spmd(...):`` single-call form
+        still builds a direct SpmdScopeStmt(body=Call), no InCore wrapping."""
+
+        @pl.program
+        class TestProgram:
             @pl.function(type=pl.FunctionType.InCore)
-            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return x
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                out = pl.store(t, [0, 0], out)
+                return out
 
             @pl.function(type=pl.FunctionType.Orchestration)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.scope():
-                    a = self.k1(x)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.kernel(a, out)
+                return out
+
+        main_func = TestProgram.functions[list(TestProgram.functions.keys())[-1]]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        # Walk body — should NOT contain an InCoreScopeStmt (no implicit wrap).
+        found_incore = []
+
+        def walk(n):
+            if isinstance(n, ir.InCoreScopeStmt):
+                found_incore.append(n)
+            if isinstance(n, ir.SeqStmts):
+                for s in n.stmts:
+                    walk(s)
+            elif hasattr(n, "body") and n.body is not None:
+                walk(n.body)
+
+        walk(spmd.body)
+        assert not found_incore, "with-form should not insert an implicit InCoreScopeStmt"
+
+    def test_for_spmd_rejects_tuple_target(self):
+        """A tuple target on for-spmd is rejected (single loop var only)."""
+        with pytest.raises(ParserSyntaxError, match="single loop variable"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i, j in pl.spmd(4):  # type: ignore[misc]
+                    _ = i + j
                 return a
 
+    def test_for_spmd_rejects_chunk_kwarg(self):
+        """chunk= is a pl.parallel/pl.range kwarg and not valid on pl.spmd."""
+        with pytest.raises(ParserSyntaxError, match=r"does not accept 'chunk='"):
 
-def test_loop_carried_yield_outside_scope_ok():
-    # Supported pattern: scope wraps the per-iteration work, the loop-carried
-    # yield is a direct for-body child.
-    @pl.program
-    class Prog:
-        @pl.function(type=pl.FunctionType.AIV)
-        def kernel(
-            self,
-            a: pl.Tensor[[16, 16], pl.FP32],
-            out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-        ) -> pl.Tensor[[16, 16], pl.FP32]:
-            t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-            r: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
-            return r
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, chunk=2):  # type: ignore[call-arg]
+                    _ = i
+                return a
 
-        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
-        def orch(self, a: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
-            for i, (acc,) in pl.range(4, init_values=(out,)):
-                with pl.scope():
-                    nxt: pl.Tensor[[16, 16], pl.FP32] = self.kernel(a, acc)
-                acc = pl.yield_(nxt)
-            return acc
+    def test_for_spmd_rejects_init_values(self):
+        """init_values= implies loop-carried state, which SPMD has no notion of."""
+        with pytest.raises(ParserSyntaxError, match=r"does not accept 'init_values='"):
 
-    assert Prog.get_function("orch") is not None
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, init_values=(0,)):  # type: ignore[call-arg]
+                    _ = i
+                return a
 
+    def test_for_spmd_requires_core_num(self):
+        """Missing core_num raises a targeted diagnostic."""
+        with pytest.raises(ParserSyntaxError, match="requires core_num"):
 
-def test_manual_scope_in_if_branch_registers_yield_var():
-    # Regression: a `pl.yield_` wrapped in `with pl.manual_scope():` inside an
-    # if branch must still register as the if's return-var. _scan_for_yields
-    # treats manual_scope (an alias for `pl.scope(mode=MANUAL)`) as transparent,
-    # exactly like `pl.scope()` — otherwise the enclosing if drops `return_var`.
-    @pl.program
-    class Prog:
-        @pl.function(type=pl.FunctionType.InCore)
-        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            return x
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd():  # type: ignore[call-arg]
+                    _ = i
+                return a
 
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-            for i, (acc,) in pl.range(4, init_values=(x,)):
-                if i == 0:
-                    with pl.manual_scope():
-                        a: pl.Tensor[[64], pl.FP32] = self.k1(acc)
-                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(a)
-                else:
-                    with pl.manual_scope():
-                        b: pl.Tensor[[64], pl.FP32] = self.k1(acc)
-                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(b)
-                acc = pl.yield_(val)
-            return acc
+    def test_for_spmd_rejects_zero_core_num(self):
+        """core_num must be a positive integer."""
+        with pytest.raises(ParserSyntaxError, match="must be a positive integer"):
 
-    fn = Prog.get_function("main")
-    assert fn is not None
-    if_stmt = _first_if(fn.body)
-    assert if_stmt is not None
-    names = {v.name_hint for v in if_stmt.return_vars}
-    assert "val" in names
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(0):
+                    _ = i
+                return a
 
+    def test_for_spmd_rejects_float_core_num(self):
+        """core_num must resolve to an integer-typed expression."""
+        with pytest.raises(ParserSyntaxError, match="must be an integer expression"):
 
-def test_auto_scope_rejected_inside_manual_scope():
-    with pytest.raises(Exception):  # noqa: B017 — runtime forbids AUTO nested in MANUAL
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(1.5):  # type: ignore[arg-type]
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_bool_core_num(self):
+        """A boolean literal is not an acceptable core_num."""
+        with pytest.raises(ParserSyntaxError, match="must be an integer expression"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(True):  # type: ignore[arg-type]
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_duplicate_core_num(self):
+        """Supplying ``core_num`` positionally *and* as a kwarg is rejected."""
+        with pytest.raises(ParserSyntaxError, match="multiple values for argument 'core_num'"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, core_num=4):  # type: ignore[misc]
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_extra_positional(self):
+        """``pl.spmd`` takes a single positional ``core_num``; a second one is an error."""
+        with pytest.raises(ParserSyntaxError, match="at most one positional argument"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, 2):  # type: ignore[misc]
+                    _ = i
+                return a
+
+    def test_for_spmd_print_reparse_roundtrip(self):
+        """Printing the for-spmd IR emits the loop form so it reparses cleanly.
+
+        The printer detects the SpmdScopeStmt(InCoreScopeStmt(i = get_block_idx; ...))
+        pattern and emits ``for i in pl.spmd(N):`` (positional). Emitting the
+        with-form here would fail because the body has multiple statements.
+        """
 
         @pl.program
-        class _Prog:
-            @pl.function(type=pl.FunctionType.InCore)
-            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                return x
+        class Original:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
 
-            @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.scope(mode=pl.ScopeMode.MANUAL):
-                    with pl.scope():
-                        a = self.k1(x)
+        printed = Original.as_python()
+        assert "for i in pl.spmd(4):" in printed
+
+        reparsed = parse_program(printed)
+        main_fn = next(f for f in reparsed.functions.values() if f.name == "main")
+        ir.assert_structural_equal(main_fn, list(Original.functions.values())[0])
+
+    def test_for_spmd_rejects_non_bool_sync_start(self):
+        """sync_start must be a boolean literal (True/False)."""
+        with pytest.raises(ParserSyntaxError, match="sync_start must be a boolean literal"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, sync_start=1):  # type: ignore[arg-type]
+                    _ = i
+                return a
+
+    def test_for_spmd_rejects_kwargs_unpacking(self):
+        """``pl.spmd(**cfg)`` raises a targeted diagnostic rather than the
+        confusing default error that tries to format ``kw.arg=None``.
+
+        The parser's kwarg walk sees ``ast.keyword(arg=None, value=...)``
+        for ``**`` unpacking; our handler rejects it before ever attempting
+        to evaluate the unpacked expression, so the value need not be a
+        supported expression kind.
+        """
+        with pytest.raises(ParserSyntaxError, match=r"does not accept \*\*kwargs"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(**a):  # type: ignore[misc]
+                    _ = i
+                return a
+
+    def test_for_spmd_loop_var_survives_ssa_shadowing_in_printer(self):
+        """Regression: when the outer scope already defines ``i``, SSA renames
+        the inner loop variable (e.g., ``i_1``). The printer must emit the
+        renamed name in the ``for ... in`` header so the header matches the
+        body."""
+
+        @pl.program
+        class Original:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                # Outer `i` shadows the loop var; the printer must rename.
+                i = 0  # noqa: F841
+                for i in pl.spmd(4):  # type: ignore[assignment]
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        printed = Original.as_python()
+        # Extract the `for <var> in pl.spmd(4):` header and verify `<var>` is
+        # referenced in the body (e.g. `<var> * 128`).
+        for line in printed.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("for ") and "pl.spmd(" in stripped:
+                header_var = stripped.split()[1]
+                break
+        else:
+            raise AssertionError(f"no for-spmd header in printed output:\n{printed}")
+        assert f"{header_var} * 128" in printed, (
+            f"loop var {header_var!r} from header not referenced in body; "
+            f"printer likely printed a stale raw name_hint:\n{printed}"
+        )
+        parse_program(printed)  # round-trips cleanly
+
+
+class TestSpmdOptimizations:
+    """Test ``pl.spmd(..., optimizations=[pl.split(...)])`` lowering.
+
+    Only ``pl.split(mode)`` is supported on ``pl.spmd``; ``pl.auto_chunk`` must
+    be used on nested ``pl.at(level=CORE_GROUP, ...)`` instead.
+    """
+
+    @staticmethod
+    def _unique_descendant(node, cls):
+        found = []
+
+        def walk(n):
+            if isinstance(n, cls):
+                found.append(n)
+            if isinstance(n, ir.SeqStmts):
+                for s in n.stmts:
+                    walk(s)
+            elif hasattr(n, "body") and n.body is not None:
+                walk(n.body)
+
+        walk(node)
+        assert len(found) == 1, f"expected exactly one {cls.__name__}, got {len(found)}"
+        return found[0]
+
+    def test_for_spmd_split_sets_inner_incore_split(self):
+        """``optimizations=[pl.split(mode)]`` on the for-form sets ``split_``
+        on the auto-generated inner ``InCoreScopeStmt``."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.split == ir.SplitMode.UP_DOWN
+        body = incore.body
+        first_stmt = body.stmts[0] if isinstance(body, ir.SeqStmts) else body
+        assert isinstance(first_stmt, ir.AssignStmt)
+        call = first_stmt.value
+        assert isinstance(call, ir.Call) and isinstance(call.op, ir.Op)
+        assert call.op.name == "tile.get_block_idx"
+
+    def test_for_spmd_qualified_split_sets_inner_incore_split(self):
+        """``pl.optimizations.split(...)`` is accepted on the for-form."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(
+                    4,
+                    optimizations=[pl.optimizations.split(pl.SplitMode.LEFT_RIGHT)],
+                ):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.split == ir.SplitMode.LEFT_RIGHT
+
+    def test_for_spmd_empty_optimizations_matches_no_kwarg(self):
+        """``optimizations=[]`` is equivalent to omitting the kwarg — inner
+        scope is plain ``InCoreScopeStmt`` with ``split_=None``."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, optimizations=[]):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.split is None
+
+    def test_with_spmd_split_wraps_call_in_incore(self):
+        """``with pl.spmd(N, optimizations=[pl.split(mode)]):`` wraps the
+        single call in an ``InCoreScopeStmt(split_=mode)`` under the spmd."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    out = pl.add(a, a)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+                    out = self.kernel(a, out)
+                return out
+
+        main_func = list(Prog.functions.values())[-1]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert incore.split == ir.SplitMode.UP_DOWN
+
+    def test_with_spmd_split_splits_name_hint(self):
+        """``with pl.spmd(..., name_hint=, optimizations=[pl.split]):`` routes hints like for-form."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    out = pl.add(a, a)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(
+                    4,
+                    name_hint="my_kernel",
+                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+                ):
+                    out = self.kernel(a, out)
+                return out
+
+        main_func = list(Prog.functions.values())[-1]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique_descendant(spmd.body, ir.InCoreScopeStmt)
+        assert spmd.name_hint == "my_kernel_spmd"
+        assert incore.name_hint == "my_kernel"
+        assert incore.split == ir.SplitMode.UP_DOWN
+
+    def test_spmd_rejects_auto_chunk_on_with_form(self):
+        """``pl.auto_chunk`` is not supported on ``pl.spmd`` (either form)."""
+        with pytest.raises(ParserSyntaxError, match="not supported in pl.spmd"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[64], pl.FP32],
+                    out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                ) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        out = pl.add(a, a)
+                    return out
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[64], pl.FP32],
+                    out: pl.Out[pl.Tensor[[64], pl.FP32]],
+                ) -> pl.Tensor[[64], pl.FP32]:
+                    with pl.spmd(4, optimizations=[pl.auto_chunk]):
+                        out = self.kernel(a, out)
+                    return out
+
+    def test_spmd_rejects_auto_chunk_on_for_form(self):
+        with pytest.raises(ParserSyntaxError, match="not supported in pl.spmd"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, optimizations=[pl.auto_chunk]):
+                    _ = i
+                return a
+
+    def test_with_spmd_no_optimizations_preserves_ir_shape(self):
+        """Regression: omitting optimizations keeps the historical IR shape
+        (no implicit InCore wrapper around the single call)."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    out = pl.add(a, a)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.kernel(a, out)
+                return out
+
+        main_func = list(Prog.functions.values())[-1]
+        spmd = self._unique_descendant(main_func.body, ir.SpmdScopeStmt)
+        found_incore = []
+
+        def walk(n):
+            if isinstance(n, ir.InCoreScopeStmt):
+                found_incore.append(n)
+            if isinstance(n, ir.SeqStmts):
+                for s in n.stmts:
+                    walk(s)
+            elif hasattr(n, "body") and n.body is not None:
+                walk(n.body)
+
+        walk(spmd.body)
+        assert not found_incore, "with-form without optimizations must not insert an InCoreScopeStmt"
+
+    def test_spmd_rejects_unknown_optimization_entry(self):
+        """Entries other than ``pl.split(...)`` are rejected."""
+        with pytest.raises(ParserSyntaxError, match="Unsupported entry"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, optimizations=[pl.range]):  # type: ignore[list-item]
+                    _ = i
+                return a
+
+    def test_spmd_rejects_duplicate_split(self):
+        """Duplicate ``pl.split(...)`` in the list is rejected."""
+        with pytest.raises(ParserSyntaxError, match=r"Duplicate 'pl\.split"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(
+                    4,
+                    optimizations=[
+                        pl.split(pl.SplitMode.UP_DOWN),
+                        pl.split(pl.SplitMode.LEFT_RIGHT),
+                    ],
+                ):
+                    _ = i
+                return a
+
+    def test_spmd_rejects_non_list_optimizations(self):
+        """``optimizations=`` must be a list literal."""
+        with pytest.raises(ParserSyntaxError, match="must be a list literal"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, optimizations=pl.split(pl.SplitMode.NONE)):  # type: ignore[arg-type]
+                    _ = i
+                return a
+
+    def test_spmd_non_list_optimizations_error_names_api(self):
+        """Invalid ``pl.spmd`` optimizations errors mention ``pl.spmd``, not ``pl.at``."""
+        with pytest.raises(ParserSyntaxError, match=r"pl\.spmd\(optimizations"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, optimizations=pl.split(pl.SplitMode.NONE)):  # type: ignore[arg-type]
+                    _ = i
+                return a
+
+    def test_spmd_unsupported_entry_error_names_api(self):
+        """Unknown ``pl.spmd`` optimization entries mention ``pl.spmd``."""
+        with pytest.raises(ParserSyntaxError, match=r"Unsupported entry in pl\.spmd"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.spmd(4, optimizations=[42]):  # type: ignore[list-item]
+                    _ = i
                 return a
 
 
