@@ -358,7 +358,7 @@ const Var* ResolveTensorOrigin(const Var* var,
 void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
                              const std::unordered_map<const Stmt*, CoreAffinity>& stmt_map,
                              std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
-                             std::multimap<const Stmt*, GmSyncPop>& gm_sync_pops) {
+                             std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
   // Pass 1: build tensor origin chains from tile.store results.
   std::unordered_map<const Var*, const Var*> store_result_to_dest;
   std::function<void(const std::vector<StmtPtr>&)> build_origins = [&](const std::vector<StmtPtr>& ss) {
@@ -544,9 +544,9 @@ void CollectGmCrossLaneSyncs(const std::vector<StmtPtr>& stmts,
     std::string token_name = origin->name_hint_ + "_gm_sync";
 
     gm_sync_pushes[store.stmt] = GmSyncPush{store.side, store.call->args_[0]};
-    // multimap: several GM dependencies can hoist to the same enclosing stmt
-    // (e.g. two scratch loads in one outer loop) — each needs its own fence.
-    gm_sync_pops.emplace(pop_stmt, GmSyncPop{consumer_side, pop_tile_type, std::move(token_name)});
+    // A vector per stmt: several GM dependencies can hoist to the same enclosing
+    // stmt (e.g. two scratch loads in one outer loop) — each needs its own fence.
+    gm_sync_pops[pop_stmt].push_back(GmSyncPop{consumer_side, pop_tile_type, std::move(token_name)});
   }
 }
 
@@ -563,7 +563,7 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
                                    std::unordered_map<const Var*, VarPtr>& tpop_var_remap,
                                    std::unordered_set<const Var*>& superseded_tpop_vars,
                                    const std::map<const Stmt*, GmSyncPush>& gm_sync_pushes,
-                                   const std::multimap<const Stmt*, GmSyncPop>& gm_sync_pops) {
+                                   const std::map<const Stmt*, std::vector<GmSyncPop>>& gm_sync_pops) {
   const auto* handler = PassContext::Current()->GetBackendHandler();
   // AIC keeps CUBE, skips VECTOR; AIV keeps VECTOR, skips CUBE
   CoreAffinity keep_affinity = (side == CoreSide::AIC) ? CoreAffinity::CUBE : CoreAffinity::VECTOR;
@@ -672,15 +672,15 @@ std::vector<StmtPtr> BuildCoreBody(CoreSide side, const std::vector<StmtPtr>& st
     // consumer share a body, or the loop/branch enclosing the load (so the fence
     // is hoisted out of the consumer loop and runs once per producer store). The
     // popped tile is unused; FinalizeTpopTfrees frees it right after. Several GM
-    // dependencies may key on the same enclosing stmt, so emit every fence via
-    // equal_range (multimap preserves insertion order for a deterministic dump).
-    auto pop_range = gm_sync_pops.equal_range(stmt.get());
-    for (auto pop_it = pop_range.first; pop_it != pop_range.second; ++pop_it) {
-      if (side != pop_it->second.consumer_side) continue;
-      const auto& info = pop_it->second;
-      auto pop_var = std::make_shared<Var>(info.token_name, info.pop_tile_type, stmt->span_);
-      result.push_back(std::make_shared<AssignStmt>(
-          pop_var, CreateTpop(pop_op, info.pop_tile_type, stmt->span_, /*kwargs=*/{}), stmt->span_));
+    // dependencies may key on the same enclosing stmt, so emit every fence in the
+    // vector (insertion order is preserved for a deterministic dump).
+    if (auto pop_it = gm_sync_pops.find(stmt.get()); pop_it != gm_sync_pops.end()) {
+      for (const auto& info : pop_it->second) {
+        if (side != info.consumer_side) continue;
+        auto pop_var = std::make_shared<Var>(info.token_name, info.pop_tile_type, stmt->span_);
+        result.push_back(std::make_shared<AssignStmt>(
+            pop_var, CreateTpop(pop_op, info.pop_tile_type, stmt->span_, /*kwargs=*/{}), stmt->span_));
+      }
     }
 
     if (affinity == keep_affinity || affinity == CoreAffinity::SHARED) {
@@ -764,7 +764,7 @@ ExpandedKernel ExpandMixedFunction(const FunctionPtr& func, bool create_group = 
   // Detect GM-mediated cross-lane store/load dependencies (issue #1433) that
   // CollectCVBoundaryMoves misses, and schedule a tpush/tpop fence for each.
   std::map<const Stmt*, GmSyncPush> gm_sync_pushes;
-  std::multimap<const Stmt*, GmSyncPop> gm_sync_pops;
+  std::map<const Stmt*, std::vector<GmSyncPop>> gm_sync_pops;
   CollectGmCrossLaneSyncs(stmts, stmt_map, gm_sync_pushes, gm_sync_pops);
 
   // Build definition map from original body for init value fixup (#533)
