@@ -32,6 +32,19 @@ def _first_runtime_scope(stmt):
     return None
 
 
+def _first_if(stmt):
+    if isinstance(stmt, ir.IfStmt):
+        return stmt
+    if isinstance(stmt, ir.SeqStmts):
+        for s in stmt.stmts:
+            r = _first_if(s)
+            if r is not None:
+                return r
+    if isinstance(stmt, (ir.ForStmt, ir.RuntimeScopeStmt)):
+        return _first_if(stmt.body)
+    return None
+
+
 def test_scope_auto_requires_opt_out_and_round_trips():
     @pl.program
     class Prog:
@@ -150,6 +163,39 @@ def test_loop_carried_yield_outside_scope_ok():
             return acc
 
     assert Prog.get_function("orch") is not None
+
+
+def test_manual_scope_in_if_branch_registers_yield_var():
+    # Regression: a `pl.yield_` wrapped in `with pl.manual_scope():` inside an
+    # if branch must still register as the if's return-var. _scan_for_yields
+    # treats manual_scope (an alias for `pl.scope(mode=MANUAL)`) as transparent,
+    # exactly like `pl.scope()` — otherwise the enclosing if drops `return_var`.
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            for i, (acc,) in pl.range(4, init_values=(x,)):
+                if i == 0:
+                    with pl.manual_scope():
+                        a: pl.Tensor[[64], pl.FP32] = self.k1(acc)
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(a)
+                else:
+                    with pl.manual_scope():
+                        b: pl.Tensor[[64], pl.FP32] = self.k1(acc)
+                        val: pl.Tensor[[64], pl.FP32] = pl.yield_(b)
+                acc = pl.yield_(val)
+            return acc
+
+    fn = Prog.get_function("main")
+    assert fn is not None
+    if_stmt = _first_if(fn.body)
+    assert if_stmt is not None
+    names = {v.name_hint for v in if_stmt.return_vars}
+    assert "val" in names
 
 
 def test_auto_scope_rejected_inside_manual_scope():

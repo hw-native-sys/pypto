@@ -6270,10 +6270,20 @@ class ASTParser:
 
     @staticmethod
     def _is_runtime_scope_with(stmt: ast.With) -> bool:
-        """True if @p stmt is a ``with pl.scope(...):`` block (any mode)."""
+        """True if @p stmt is a runtime-scope block (``with pl.scope(...):`` any
+        mode, or the ``with pl.manual_scope():`` alias).
+
+        Must mirror the ``func.attr`` dispatch in ``parse_with_statement`` —
+        both ``scope`` and ``manual_scope`` build a RuntimeScopeStmt, so both
+        must be transparent to yield scanning.
+        """
         for item in stmt.items:
             ce = item.context_expr
-            if isinstance(ce, ast.Call) and isinstance(ce.func, ast.Attribute) and ce.func.attr == "scope":
+            if (
+                isinstance(ce, ast.Call)
+                and isinstance(ce.func, ast.Attribute)
+                and ce.func.attr in {"scope", "manual_scope"}
+            ):
                 return True
         return False
 

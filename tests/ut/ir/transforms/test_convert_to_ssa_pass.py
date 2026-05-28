@@ -1947,9 +1947,8 @@ class TestScopeTransparentToSSA:
         passes.run_verifier(ps)(program)  # raises on violation
 
     def test_loop_carried_yield_inside_scope_converts_and_verifies(self):
-        from pypto.backend import BackendType  # noqa: PLC0415
-
         from pypto import backend  # noqa: PLC0415
+        from pypto.backend import BackendType  # noqa: PLC0415
 
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
