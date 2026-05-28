@@ -50,19 +50,27 @@ regions and analyzes each loop body:
    barrier shape (`N + M`). Low-benefit shapes such as `N -> 1` and `2 -> 2`
    stay direct.
 3. **Reject unsafe shapes.** The pass skips mixed deps, scalar deps, unresolved
-   arrays, non-loop-carried arrays defined or updated inside the same loop body,
-   non-manual scopes, and non-orchestration functions.
+   arrays, current loop iter-arg arrays, body-defined arrays, arrays updated
+   through same-storage `Array[TASK_ID]` aliases, non-manual scopes, and
+   non-orchestration functions.
 4. **Insert a barrier.** For a profitable safe candidate, the pass creates a
    fresh `Scalar[TASK_ID]` variable and assigns it from `system.task_dummy` with
    `attrs["dummy_task"] = true` and `attrs["manual_dep_edges"] = [source_array]`.
 5. **Rewrite consumers.** Covered consumer calls are rebuilt with
    `manual_dep_edges=[barrier_tid]`, leaving all other call attrs unchanged.
 
-For sequential loops, the barrier is inserted inside the loop before the
-rewritten body. For parallel loops, a barrier may be inserted before the loop
-only when the dependency source is stable for that loop body. `pl.parallel`
-does not weaken explicit `manual_scope` dependencies: if the body reads
-`deps=[tids]` and also updates `tids[branch]`, the pass keeps direct deps.
+For both sequential and parallel loops, accepted barriers are inserted before
+the rewritten loop. This keeps stable sequential dependencies at one dummy
+submission per loop instead of one per iteration. Sequential loops with a known
+zero trip count do not emit a barrier.
+
+The safety index is conservative. It includes nested loop `return_vars_`,
+nested body updates, and transitive `Array[TASK_ID]` iter-arg alias classes.
+Nested loop summaries are cached and merged into parent loop analysis, so the
+pass does not rescan the same nested body for each candidate dependency array.
+`pl.parallel` does not weaken explicit `manual_scope` dependencies: if the body
+reads `deps=[tids]` and also updates `tids[branch]` or an alias of `tids`, the
+pass keeps direct deps.
 
 ## Fallback boundaries
 
@@ -83,6 +91,9 @@ Left direct:
 - partial-slot deps such as `prev = tids[i]; deps=[prev]`;
 - current loop iter-arg arrays;
 - arrays defined or updated inside the same loop body;
+- arrays updated through transitive `Array[TASK_ID]` iter-arg aliases;
+- nested loop return variables used as dependency arrays;
+- known-zero loops;
 - low-benefit fanout such as `N -> 1` or `2 -> 2`;
 - non-manual scopes and non-orchestration functions.
 
