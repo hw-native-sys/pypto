@@ -270,6 +270,7 @@ class CompileArtifact:
     error: str | None = None
     runtime_name: str | None = None
     chip_callable: Any | None = None
+    runtime_config: dict[str, Any] | None = None
 
 
 def _fused_compile_task(
@@ -303,7 +304,7 @@ def _fused_compile_task(
             )
         from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-        chip_callable, runtime_name, _ = compile_and_assemble(
+        chip_callable, runtime_name, runtime_config = compile_and_assemble(
             work_dir, resolved, pto_isa_commit=pto_isa_commit
         )
         return CompileArtifact(
@@ -312,6 +313,7 @@ def _fused_compile_task(
             error=None,
             runtime_name=runtime_name,
             chip_callable=chip_callable,
+            runtime_config=runtime_config,
         )
     except Exception as exc:
         return CompileArtifact(
@@ -355,6 +357,7 @@ def _fused_execute_task(
     device_id = _device_pool.get()
     try:
         _executed_device[cache_key] = device_id
+        runtime_config = artifact.runtime_config or {}
         _execute_on_device(
             artifact.work_dir,
             artifact.work_dir / "golden.py",
@@ -363,6 +366,8 @@ def _fused_execute_task(
             artifact.resolved_platform,
             device_id,
             dfx=_pipeline_ctx.get("dfx", _DfxOpts()),
+            block_dim=runtime_config.get("block_dim"),
+            aicpu_thread_num=runtime_config.get("aicpu_thread_num"),
         )
         return RunResult(
             passed=True,
@@ -643,7 +648,7 @@ class TestRunner:
 
             from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
-            chip_callable, runtime_name, _ = compile_and_assemble(
+            chip_callable, runtime_name, runtime_config = compile_and_assemble(
                 work_dir, resolved_platform, pto_isa_commit=self.config.pto_isa_commit
             )
             _execute_on_device(
@@ -654,6 +659,8 @@ class TestRunner:
                 resolved_platform,
                 self.config.device_id,
                 dfx=_DfxOpts.from_run_config(self.config),
+                block_dim=runtime_config.get("block_dim"),
+                aicpu_thread_num=runtime_config.get("aicpu_thread_num"),
             )
 
             return RunResult(
