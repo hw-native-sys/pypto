@@ -26,6 +26,11 @@ import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
+from examples.utils.phase_fence_dep_compression import (
+    build_chained_snapshot_phase_fence,
+    chained_snapshot_shape,
+)
+
 _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
 
 _BRANCHES = 4
@@ -225,54 +230,6 @@ def _build_pl_at_flattened_program(*, epochs: int, phases: int):
             return out
 
     return PlAtFlattenedPhaseFence
-
-
-def _build_chained_snapshot_program(*, branches: int):
-    tile_m = _TILE_M
-    big_n = _BIG_N
-    stages = 4
-    big_m = stages * branches * tile_m
-
-    @pl.program
-    class ChainedSnapshotPhaseFence:
-        @pl.function(type=pl.FunctionType.InCore)
-        def kernel_stripe(
-            self,
-            data: pl.Tensor[[big_m, big_n], pl.FP32],
-            row_offset: pl.Scalar[pl.INDEX],
-            bias: pl.Scalar[pl.FP32],
-            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
-        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
-            tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row_offset, 0], [tile_m, big_n])
-            result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, bias)
-            ret: pl.Tensor[[big_m, big_n], pl.FP32] = pl.store(result, [row_offset, 0], out)
-            return ret
-
-        @pl.function(type=pl.FunctionType.Orchestration)
-        def main(
-            self,
-            data: pl.Tensor[[big_m, big_n], pl.FP32],
-            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
-        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
-            with pl.manual_scope():
-                tids = pl.array.create(branches, pl.TASK_ID)
-                for a_phase, (tids_a,) in pl.range(2, init_values=(tids,)):
-                    tids_next = pl.array.create(branches, pl.TASK_ID)
-                    for branch in pl.parallel(branches):
-                        row: pl.Scalar[pl.INDEX] = (a_phase * branches + branch) * tile_m
-                        out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[tids_a])
-                        tids_next[branch] = tid
-                    tids = pl.yield_(tids_next)
-                for b_phase, (tids_b,) in pl.range(2, init_values=(tids,)):
-                    tids_next = pl.array.create(branches, pl.TASK_ID)
-                    for branch in pl.parallel(branches):
-                        row: pl.Scalar[pl.INDEX] = ((2 + b_phase) * branches + branch) * tile_m
-                        out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[tids_b])
-                        tids_next[branch] = tid
-                    tids = pl.yield_(tids_next)
-            return out
-
-    return ChainedSnapshotPhaseFence
 
 
 def _build_reset_per_outer_program():
@@ -849,11 +806,12 @@ def _partial_reduce_chain_case(*, platform: str | None = None):
 
 
 def _chained_snapshot_case(*, branches: int = _BRANCHES, name: str, platform: str | None = None):
-    rows = 4 * branches * _TILE_M
+    rows, cols = chained_snapshot_shape(branches=branches)
     return _PhaseFenceCase(
         name,
-        lambda: _build_chained_snapshot_program(branches=branches),
+        lambda: build_chained_snapshot_phase_fence(branches=branches),
         rows=rows,
+        cols=cols,
         platform=platform,
     )
 

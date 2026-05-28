@@ -114,6 +114,8 @@ pass 运行后：
 - 头文件：[include/pypto/ir/transforms/passes.h](../../../../include/pypto/ir/transforms/passes.h)
 - Attr key：[include/pypto/ir/expr.h](../../../../include/pypto/ir/expr.h)
 - Codegen lowering：[src/codegen/orchestration/orchestration_codegen.cpp](../../../../src/codegen/orchestration/orchestration_codegen.cpp)
+- 示例：
+  [examples/utils/phase_fence_dep_compression.py](../../../../examples/utils/phase_fence_dep_compression.py)
 - 测试：
   [tests/ut/ir/transforms/test_expand_manual_phase_fence.py](../../../../tests/ut/ir/transforms/test_expand_manual_phase_fence.py)，
   [tests/ut/codegen/test_phase_fence_dep_compression.py](../../../../tests/ut/codegen/test_phase_fence_dep_compression.py)

@@ -11,6 +11,7 @@
 Utility examples — parsing, cross-function calls, error handling.
 
   - parse_from_text.py      — pl.parse() and pl.loads() guide
-  - cross_function_calls.py — @pl.program with self.method() calls
+  - cross_function_calls.py — @pl.jit cross-function calls
+  - phase_fence_dep_compression.py — manual_scope phase-fence dependency compression example
   - error_handling.py       — SSA violation detection
 """

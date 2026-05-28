@@ -225,16 +225,6 @@ class TestManualScopeSwimlane:
             f"expected at least {_M * _N * 2} tasks (M*N tiles x 2 stages), got {len(tasks)}"
         )
 
-    @pytest.mark.skip("swimlane fanout is partial observability; strict dep wiring is covered by codegen UT")
-    def test_intra_iteration_dep_present(self):
-        """Stage2 must wait for the same iteration's stage1.
-
-        The swimlane export can under-report producer-side fanout for this
-        witness, so the strict dependency wiring belongs in deterministic
-        codegen/IR coverage rather than this runtime trace assertion.
-        """
-        pass
-
     def test_inner_parallel_loop_runs_concurrently(self, manual_scope_swimlane_data: dict):
         """Inner ``pl.parallel(N)`` iterations must overlap across cores.
 

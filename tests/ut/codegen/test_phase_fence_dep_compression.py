@@ -18,6 +18,8 @@ from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.pypto_core import ir
 
+from examples.utils.phase_fence_dep_compression import build_chained_snapshot_phase_fence
+
 
 def _generate_orch_code(program) -> str:
     for func in program.functions.values():
@@ -190,6 +192,22 @@ class TestPhaseFenceDepCompressionCodegen:
         code = _compile_program(Prog)
         _assert_single_barrier_shape(code, fanin=branches)
         assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
+
+    def test_chained_snapshot_example_emits_branch_sized_barriers(self):
+        branches = 4
+        code = _compile_program(build_chained_snapshot_phase_fence(branches=branches))
+        assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 2, code
+        assert "PTO2TaskId params_phase_fence_barrier_0_deps[4];" in code, code
+        assert "PTO2TaskId params_phase_fence_barrier_1_deps[4];" in code, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+        assert not re.search(r"PTO2TaskId params_t\d+_deps\[4\];", code), code
+        _assert_ordered(
+            code,
+            "for (int64_t a_phase =",
+            "rt_submit_dummy_task(params_phase_fence_barrier_0)",
+            "for (int64_t b_phase =",
+            "rt_submit_dummy_task(params_phase_fence_barrier_1)",
+        )
 
     def test_sibling_producer_consumer_loops_emit_invariant_phase_fence(self):
         rows, cols = 256, 128

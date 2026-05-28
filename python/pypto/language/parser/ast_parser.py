@@ -4429,6 +4429,9 @@ class ASTParser:
         arg_directions = self._extract_arg_directions_from_attrs(method_name, keywords, len(arg_nodes), span)
         if arg_directions is None:
             arg_directions = []
+        # Parser/printer round-trip support for post-DeriveCallDirections IR.
+        # User source should spell manual deps with pl.submit(..., deps=[...]).
+        manual_dep_edges = self._extract_manual_dep_edges_from_attrs(method_name, keywords, span)
         # Detect ``pl.no_dep(...)`` wrappers at call-arg positions and collect
         # their indices for the arg_direction_overrides attr.
         unwrapped_args, no_dep_indices = self._strip_no_dep_wrappers(arg_nodes)
@@ -4438,6 +4441,8 @@ class ASTParser:
         user_dep_vars: list[ir.Var] = []
         if as_submit:
             user_dep_vars = self._parse_submit_deps_kwarg(method_name, keywords, span)
+        elif manual_dep_edges is not None:
+            user_dep_vars = manual_dep_edges
         # Orchestration dispatch ``device=`` kwarg: resolves to a ConstInt or
         # an enclosing-loop induction Var.
         device_expr = self._parse_dispatch_device_kwarg(keywords)
@@ -4965,40 +4970,12 @@ class ASTParser:
                     hint=hint,
                 )
 
-    def _extract_arg_directions_from_attrs(
+    def _get_call_attrs_dict(
         self,
         method_name: str,
         keywords: list[ast.keyword],
-        arg_count: int,
         span: ir.Span,
-    ) -> list[ir.ArgDirection] | None:
-        """Extract ``arg_directions`` from an ``attrs={"arg_directions": [...]}`` kwarg.
-
-        Recognized form::
-
-            self.kernel(x, y, attrs={"arg_directions": [pl.adir.input, pl.adir.output]})
-
-        The list elements must be bare attribute references of the form
-        ``pl.adir.<name>`` where ``<name>`` is a valid direction marker.
-
-        Args:
-            method_name: Name of the cross-function method being called (used
-                in error messages).
-            keywords: AST keyword nodes from the call site.
-            arg_count: Number of positional kernel arguments (used to validate
-                the ``arg_directions`` list length).
-            span: Source span of the call (used for error reporting).
-
-        Returns:
-            The parsed direction vector, or ``None`` when no ``attrs=`` keyword
-            argument is present.
-
-        Raises:
-            ParserSyntaxError / ParserTypeError: If the ``attrs=`` value does
-                not match the expected shape or uses an unknown direction name.
-        """
-        from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
-
+    ) -> ast.Dict | None:
         attrs_kw: ast.keyword | None = next((kw for kw in keywords if kw.arg == "attrs"), None)
         if attrs_kw is None:
             return None
@@ -5009,20 +4986,40 @@ class ASTParser:
                 span=self.span_tracker.get_span(attrs_kw.value),
                 hint='e.g. attrs={"arg_directions": [pl.adir.input, ...]}',
             )
-
-        directions: list[ir.ArgDirection] | None = None
-        for key_node, value_node in zip(attrs_kw.value.keys, attrs_kw.value.values):
+        for key_node in attrs_kw.value.keys:
             if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
                 raise ParserSyntaxError(
                     f"'attrs=' on call to '{method_name}' must use string-literal keys",
                     span=self.span_tracker.get_span(key_node) if key_node else span,
                 )
-            if key_node.value != "arg_directions":
+            if key_node.value not in {"arg_directions", "manual_dep_edges"}:
                 raise ParserSyntaxError(
                     f"Unsupported attrs key '{key_node.value}' on call to '{method_name}'",
                     span=self.span_tracker.get_span(key_node),
-                    hint="Only 'arg_directions' is currently recognized",
+                    hint="Only 'arg_directions' and 'manual_dep_edges' are currently recognized",
                 )
+        return attrs_kw.value
+
+    def _extract_arg_directions_from_attrs(
+        self,
+        method_name: str,
+        keywords: list[ast.keyword],
+        arg_count: int,
+        span: ir.Span,
+    ) -> list[ir.ArgDirection] | None:
+        """Extract ``arg_directions`` from an ``attrs={...}`` kwarg."""
+        from pypto.language.arg_direction import NAME_TO_DIRECTION  # noqa: PLC0415
+
+        attrs_dict = self._get_call_attrs_dict(method_name, keywords, span)
+        if attrs_dict is None:
+            return None
+
+        directions: list[ir.ArgDirection] | None = None
+        for key_node, value_node in zip(attrs_dict.keys, attrs_dict.values):
+            if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
+                continue
+            if key_node.value != "arg_directions":
+                continue
             if not isinstance(value_node, ast.List):
                 raise ParserTypeError(
                     f"attrs['arg_directions'] on call to '{method_name}' must be a list literal",
@@ -5061,6 +5058,30 @@ class ASTParser:
                 span=span,
             )
         return directions
+
+    def _extract_manual_dep_edges_from_attrs(
+        self,
+        method_name: str,
+        keywords: list[ast.keyword],
+        span: ir.Span,
+    ) -> list[ir.Var] | None:
+        """Extract ``manual_dep_edges`` from an ``attrs={...}`` kwarg.
+
+        This is intentionally for printed/post-DeriveCallDirections IR shapes.
+        Source user code should continue to spell dependencies as
+        ``pl.submit(..., deps=[...])``.
+        """
+        attrs_dict = self._get_call_attrs_dict(method_name, keywords, span)
+        if attrs_dict is None:
+            return None
+        for key_node, value_node in zip(attrs_dict.keys, attrs_dict.values):
+            if not (isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)):
+                continue
+            if key_node.value != "manual_dep_edges":
+                continue
+            deps_kw = ast.keyword(arg="deps", value=value_node)
+            return self._parse_submit_deps_kwarg(method_name, [deps_kw], span)
+        return None
 
     @staticmethod
     def _validate_call_arg_count(func_name: str, func: ir.Function, got: int, span: ir.Span) -> None:
@@ -5492,7 +5513,32 @@ class ASTParser:
 
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""
+        if op_name == "task_dummy":
+            return self._parse_printed_task_dummy(call)
         return self._dispatch_op(_dsl_system, "pl.system", op_name, call)
+
+    def _parse_printed_task_dummy(self, call: ast.Call) -> ir.Expr:
+        """Parse pass-internal ``pl.system.task_dummy`` from printed/expected IR."""
+        span = self.span_tracker.get_span(call)
+        if call.args:
+            raise InvalidOperationError(
+                "pl.system.task_dummy in printed IR must not use positional arguments",
+                span=span,
+            )
+        allowed_kwargs = {"deps"}
+        for kw in call.keywords:
+            if kw.arg not in allowed_kwargs:
+                raise ParserTypeError(
+                    f"pl.system.task_dummy does not accept keyword argument '{kw.arg}'",
+                    span=span,
+                    hint="Use pl.system.task_dummy(deps=[task_id_array]) in expected IR",
+                )
+        deps = self._parse_submit_deps_kwarg("pl.system.task_dummy", call.keywords, span)
+        base = ir.create_op_call("system.task_dummy", [], {}, span)
+        attrs: list[tuple[str, Any]] = [("dummy_task", True)]
+        if deps:
+            attrs.append(("manual_dep_edges", deps))
+        return ir.Call(base.op, base.args, base.kwargs, attrs, base.type, base.span)
 
     def _parse_array_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse array operation (create / get_element / update_element)."""
