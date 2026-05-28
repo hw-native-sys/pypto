@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: '0 18 * * *'  # UTC 18:00 = Beijing 02:00 (next day)
   workflow_dispatch:
+  # TEMPORARY (drop before merge): validate the #1546 fix on this PR.
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
   qwen3-pypto-lib:
