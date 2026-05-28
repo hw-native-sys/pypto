@@ -2,30 +2,36 @@
 
 Inserts explicit AUTO `RuntimeScopeStmt` nodes into Orchestration functions so
 that PTO orchestration codegen emits `PTO2_SCOPE()` 1:1 from the IR instead of
-deriving the scope structure from `for` / `if` statements.
+deriving the scope structure from `for` / `if` statements — unless the function
+opts out with `@pl.function(auto_scope=False)`, in which case the user places
+every scope by hand.
 
 ## Overview
 
 The simpler runtime wraps regions of an orchestration routine in `PTO2_SCOPE()`
-blocks (auto dependency tracking via the OverlapMap). Historically the
-orchestration codegen decided *where* to emit those blocks from the statement
-structure: it implicitly wrapped the whole function body, every `ForStmt` body,
-and every `IfStmt` branch body in a `PTO2_SCOPE()` — suppressing the wrap inside
-a manual scope, because the runtime forbids AUTO nested in MANUAL.
+blocks (auto dependency tracking via the OverlapMap). It also provides an
+implicit top-level scope, so scopes are a **tuning / placement** mechanism, never
+a correctness requirement — a function may end up with zero compiler scopes.
 
-That embedded scope *policy* inside the printer. This pass moves the policy into
-the IR. For every `FunctionType::Orchestration` function it inserts explicit
-AUTO `RuntimeScopeStmt` (`manual_ = false`) nodes:
+By default (`auto_scope=True`) the compiler owns scope placement: for every
+`FunctionType::Orchestration` function this pass inserts AUTO `RuntimeScopeStmt`
+(`manual_ = false`) nodes wrapping the whole function body and each `ForStmt`
+body and `IfStmt` then/else body (suppressed inside a manual scope, since the
+runtime forbids AUTO nested in MANUAL). Codegen then emits `PTO2_SCOPE` **only**
+from `RuntimeScopeStmt` nodes — staying 1:1 with the IR (see
+[orchestration codegen](../codegen/01-orchestration_codegen.md)).
 
-- wrapping the entire function body, and
-- wrapping each `ForStmt` body and each `IfStmt` then/else body,
+Under `@pl.function(auto_scope=False)` the pass inserts **nothing**: the user
+places scopes with `with pl.scope()` / `with pl.scope(mode=pl.ScopeMode.MANUAL)`,
+which the parser materialises directly into the IR. This is the knob for
+controlling scope granularity (ring isolation), MANUAL dependency regions, and
+full takeover.
 
-while skipping insertion anywhere inside a manual `RuntimeScopeStmt`. Codegen
-then emits `PTO2_SCOPE` **only** from `RuntimeScopeStmt` nodes — staying 1:1 with
-the IR (see [orchestration codegen](../codegen/01-orchestration_codegen.md)).
-
-The inserted scopes have a DSL surface, `with pl.auto_scope():`, so the IR
-round-trips through the printer/parser like any other construct.
+After materialising scopes in the default mode, the pass marks the function
+`auto_scope=False` (scopes are now placed). This makes the pass idempotent and
+lets the output round-trip: the inserted `with pl.scope()` blocks parse back only
+under `auto_scope=False` (the parser rejects hand-placed AUTO scopes in the
+default mode, where the compiler owns placement).
 
 **When to use**: last pass in the `Default` and `DebugTileOptimization`
 strategies, after the final `Simplify`. Running dead last means no other
@@ -47,33 +53,27 @@ from pypto.pypto_core import passes
 scoped = passes.materialize_runtime_scopes()(program)
 ```
 
-## Algorithm
+## Behavior
 
-`InsertAutoScopeMutator` walks each Orchestration function body:
+| Function | for/if + function body | Hand-placed `with pl.scope()` |
+| -------- | ---------------------- | ----------------------------- |
+| `auto_scope=True` (default) | Auto-wrapped in AUTO scope (suppressed inside a manual scope) | Rejected by the parser (use `auto_scope=False`) |
+| `auto_scope=False` | Not auto-wrapped (pass is a no-op) | The only scopes; `with pl.scope(mode=MANUAL)` and the `manual_scope` alias also allowed |
+
+In the default mode the `InsertAutoScopeMutator` walks the body:
 
 1. On entering a **manual** `RuntimeScopeStmt`, a depth counter is incremented;
-   AUTO insertion is suppressed while the counter is non-zero (the runtime
-   forbids AUTO nested in MANUAL). AUTO scopes do not suppress nesting.
-2. For each `ForStmt`, the body is replaced with `RuntimeScopeStmt(manual=false,
-   body)` unless already AUTO-wrapped.
-3. For each `IfStmt`, the then/else bodies are each wrapped the same way.
-
-After the mutator runs, the whole function body is wrapped in one outermost AUTO
-scope (mirroring the always-on outermost `PTO2_SCOPE()` codegen used to emit).
-The wrap is idempotent — an already-AUTO body is left as-is.
-
-| Source | Action |
-| ------ | ------ |
-| Orchestration function body | Wrapped in one AUTO `RuntimeScopeStmt` |
-| `ForStmt` body (not in manual scope) | Wrapped in AUTO `RuntimeScopeStmt` |
-| `IfStmt` then/else body (not in manual scope) | Each wrapped in AUTO `RuntimeScopeStmt` |
-| Any body inside a manual `RuntimeScopeStmt` | Left bare |
-| Non-Orchestration function | Returned unchanged |
+   AUTO insertion is suppressed while the counter is non-zero (AUTO-in-MANUAL is
+   forbidden). AUTO scopes do not suppress nesting.
+2. Each `ForStmt` body is wrapped in `RuntimeScopeStmt(manual=false)` unless
+   already AUTO-wrapped; each `IfStmt` then/else body likewise.
+3. The whole function body is then wrapped in one outermost AUTO scope, and the
+   function is marked `auto_scope=False`.
 
 ## Example
 
 ```python
-# Before
+# Before — default auto_scope=True
 @pl.function(type=pl.FunctionType.Orchestration)
 def orch(self, a, out):
     for i in pl.range(4):
@@ -82,30 +82,40 @@ def orch(self, a, out):
 ```
 
 ```python
-# After MaterializeRuntimeScopes
-@pl.function(type=pl.FunctionType.Orchestration)
+# After MaterializeRuntimeScopes (marked auto_scope=False; round-trips)
+@pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
 def orch(self, a, out):
-    with pl.auto_scope():            # function body
+    with pl.scope():            # function body
         for i in pl.range(4):
-            with pl.auto_scope():    # loop body
+            with pl.scope():    # loop body
                 out = self.kernel(a, out)
+        return out
+```
+
+```python
+# Opt out and place scopes yourself (coarser granularity here: one scope)
+@pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+def orch(self, a, out):
+    with pl.scope():
+        for i in pl.range(4):
+            out = self.kernel(a, out)
         return out
 ```
 
 A trailing return-var `yield` stays inside the scope; the printer recurses
 through the AUTO scope so the `var = pl.yield_(...)` assignment LHS is preserved,
-and the parser treats the yield inside `pl.auto_scope()` as the enclosing
-for/if's return-var.
+and the parser treats the yield inside `pl.scope()` as the enclosing for/if's
+return-var.
 
 ## Verification
 
-**Tests**: `tests/ut/ir/transforms/test_materialize_runtime_scopes.py` (function
-body + for/if wrapping, manual-scope suppression, idempotency, non-Orchestration
-untouched) and `tests/ut/language/parser/test_auto_scope_parsing.py`
-(`pl.auto_scope()` parse / round-trip / nesting restriction). The full
-orchestration codegen suite (`tests/ut/codegen/test_orchestration_codegen.py`)
-verifies the emitted `PTO2_SCOPE` output is byte-identical to the previous
-codegen-driven behavior.
+**Tests**: `tests/ut/ir/transforms/test_materialize_runtime_scopes.py` (auto-mode
+wrapping, manual-scope suppression, idempotency, opt-out no-op / scope
+preservation, AUTO-in-default rejection) and
+`tests/ut/language/parser/test_scope_parsing.py` (`pl.scope()` parse / round-trip
+/ mode / nesting / opt-out rules). The full orchestration codegen suite
+(`tests/ut/codegen/test_orchestration_codegen.py`) verifies the emitted
+`PTO2_SCOPE` output is byte-identical to the previous codegen-driven behavior.
 
 ## Pass Properties
 

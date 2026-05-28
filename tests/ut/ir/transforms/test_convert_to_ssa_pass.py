@@ -1935,5 +1935,52 @@ class TestSpmdCoreNumSubstitution:
         )
 
 
+class TestScopeTransparentToSSA:
+    """RuntimeScopeStmt is transparent to SSA: a for/if body wrapped in a
+    ``with pl.scope()`` keeps its carry-yield *inside* the scope, and
+    ConvertToSSA / SSAVerify must look through the scope to associate it."""
+
+    @staticmethod
+    def _verify_ssa(program):
+        ps = passes.IRPropertySet()
+        ps.insert(passes.IRProperty.SSAForm)
+        passes.run_verifier(ps)(program)  # raises on violation
+
+    def test_loop_carried_yield_inside_scope_converts_and_verifies(self):
+        from pypto.backend import BackendType  # noqa: PLC0415
+
+        from pypto import backend  # noqa: PLC0415
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        try:
+
+            @pl.program
+            class Prog:
+                @pl.function(type=pl.FunctionType.AIV)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[16, 16], pl.FP32],
+                    out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                ) -> pl.Tensor[[16, 16], pl.FP32]:
+                    t: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                    r: pl.Tensor[[16, 16], pl.FP32] = pl.store(t, [0, 0], out)
+                    return r
+
+                @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+                def orch(self, a: pl.Tensor[[16, 16], pl.FP32], out: pl.Out[pl.Tensor[[16, 16], pl.FP32]]):
+                    for i, (acc,) in pl.range(4, init_values=(out,)):
+                        with pl.scope():
+                            nxt: pl.Tensor[[16, 16], pl.FP32] = self.kernel(a, acc)
+                            acc = pl.yield_(nxt)
+                    return acc
+
+            after = passes.convert_to_ssa()(Prog)
+            # Scope is transparent → SSAForm holds (carry-yield seen through scope).
+            self._verify_ssa(after)
+        finally:
+            backend.reset_for_testing()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

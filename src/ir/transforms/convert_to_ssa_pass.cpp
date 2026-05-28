@@ -1114,9 +1114,15 @@ class SSAConverter {
     if (auto y = As<YieldStmt>(s)) {
       return y;
     }
+    // RuntimeScopeStmt is transparent to SSA: a for/if body wrapped in a
+    // ``with pl.scope()`` keeps its trailing carry-yield inside the scope, so
+    // look through it (and through any trailing nested scope) to find it.
+    if (auto scope = As<RuntimeScopeStmt>(s)) {
+      return ExtractYield(scope->body_);
+    }
     if (auto seq = As<SeqStmts>(s)) {
       if (!seq->stmts_.empty()) {
-        return As<YieldStmt>(seq->stmts_.back());
+        return ExtractYield(seq->stmts_.back());
       }
     }
     return nullptr;
@@ -1125,13 +1131,23 @@ class SSAConverter {
   static StmtPtr ReplaceOrAppendYield(const StmtPtr& s, const std::vector<ExprPtr>& vals, const Span& span) {
     AssertNoMidBodyYield(s);
     auto yield = std::make_shared<YieldStmt>(vals, span);
+    // Transparent through a RuntimeScopeStmt: replace the carry-yield *inside*
+    // the scope body and keep the scope wrapper (codegen still needs it).
+    if (auto scope = As<RuntimeScopeStmt>(s)) {
+      auto copy = MutableCopy(scope);
+      copy->body_ = ReplaceOrAppendYield(scope->body_, vals, span);
+      return copy;
+    }
     if (auto seq = As<SeqStmts>(s)) {
       std::vector<StmtPtr> stmts = seq->stmts_;
-      bool has_trailing_yield = !stmts.empty() && As<YieldStmt>(stmts.back());
+      // The trailing statement carries the yield when it is a YieldStmt or a
+      // scope ending in one — replace it in place; otherwise append.
+      bool has_trailing_yield = !stmts.empty() && ExtractYield(stmts.back()) != nullptr;
       if (has_trailing_yield) {
-        stmts.pop_back();
+        stmts.back() = ReplaceOrAppendYield(stmts.back(), vals, span);
+      } else {
+        stmts.push_back(yield);
       }
-      stmts.push_back(yield);
       return SeqStmts::Flatten(std::move(stmts), seq->span_);
     }
     if (As<YieldStmt>(s)) {

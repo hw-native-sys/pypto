@@ -9,11 +9,68 @@
 
 """Runtime scope context managers and submit primitive for the PyPTO Language DSL."""
 
+from enum import Enum
 from typing import Any
 
 
+class ScopeMode(Enum):
+    """Dependency-tracking mode of a runtime scope (``PTO2_SCOPE``).
+
+    - ``AUTO``: OverlapMap auto-dependency tracking is on (``PTO2_SCOPE()``).
+    - ``MANUAL``: auto tracking is off; the user declares every edge via
+      ``pl.submit(..., deps=[...])`` (``PTO2_SCOPE(PTO2ScopeMode::MANUAL)``).
+    """
+
+    AUTO = 0
+    MANUAL = 1
+
+
+class scope:
+    """Context manager marking a runtime scope (``PTO2_SCOPE``) region.
+
+    A runtime scope is a resource-management + dependency-tracking boundary in
+    the simpler runtime: it bounds OverlapMap auto-dependency tracking and gives
+    a per-scope HeapRing level (nested scopes reclaim memory independently). The
+    simpler runtime provides an implicit top-level scope, so writing scopes is
+    a **tuning / control** mechanism, never a correctness requirement.
+
+    By default the compiler inserts AUTO scopes for you (function body + each
+    ``for`` / ``if`` body). To place scopes yourself, set
+    ``@pl.function(auto_scope=False)`` and use this context manager (and the
+    ``pl.range(..., scope=...)`` sugar). See :class:`ScopeMode` for AUTO vs
+    MANUAL.
+
+    Usage::
+
+        with pl.scope():                          # AUTO
+            out = self.kernel(a, b, out)
+
+        with pl.scope(mode=pl.ScopeMode.MANUAL):  # MANUAL — user owns deps
+            out, tid = pl.submit(self.stage1, x, out)
+
+    Rules:
+      - Must appear inside an Orchestration function (not InCore).
+      - ``mode=AUTO`` is only allowed under ``@pl.function(auto_scope=False)``
+        (in the default ``auto_scope=True`` the compiler owns AUTO placement).
+      - ``mode=MANUAL`` is allowed in either mode (it is a dependency-semantics
+        choice, not ring tuning).
+      - AUTO scope may not nest inside a MANUAL scope (runtime forbids).
+    """
+
+    def __init__(self, mode: "ScopeMode" = ScopeMode.AUTO):
+        self.mode = mode
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
 class manual_scope:
-    """Context manager that turns OverlapMap auto dep-tracking off for a region.
+    """Alias for ``pl.scope(mode=pl.ScopeMode.MANUAL)``.
+
+    Turns OverlapMap auto dep-tracking off for a region.
 
     Inside this block, the simpler runtime skips OverlapMap lookup and insert
     for every kernel submit, so the user takes full responsibility for
@@ -48,37 +105,6 @@ class manual_scope:
     Restrictions:
       - Must appear inside an Orchestration function (not InCore).
       - Cannot be nested inside another ``manual_scope`` (runtime forbids).
-    """
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        return False
-
-
-class auto_scope:
-    """Context manager that marks an AUTO runtime scope (``PTO2_SCOPE()``).
-
-    An AUTO scope is the default OverlapMap auto-dep-tracking region — the
-    inverse of :class:`manual_scope`. It is the explicit IR form of the
-    ``PTO2_SCOPE()`` block the orchestration codegen wraps around the function
-    body and around each ``for`` / ``if`` body.
-
-    The compiler inserts these automatically (the ``MaterializeRuntimeScopes``
-    pass), so user code rarely writes ``with pl.auto_scope():`` directly. It
-    exists primarily so the IR round-trips through the DSL printer/parser. AUTO
-    scopes may nest in one another, but not inside a :class:`manual_scope` (the
-    runtime forbids AUTO nested in MANUAL).
-
-    Usage::
-
-        with pl.auto_scope():
-            out = self.kernel(a, b, out)
-
-    Restrictions:
-      - Must appear inside an Orchestration function (not InCore).
-      - Cannot be nested inside a ``manual_scope``.
     """
 
     def __enter__(self):
@@ -126,4 +152,4 @@ def submit(*args: Any, **kwargs: Any) -> Any:
     )
 
 
-__all__ = ["auto_scope", "manual_scope", "submit"]
+__all__ = ["ScopeMode", "manual_scope", "scope", "submit"]

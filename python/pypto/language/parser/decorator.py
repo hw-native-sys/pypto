@@ -317,6 +317,27 @@ def _extract_function_level_role_from_decorator(
     return level, role
 
 
+def _extract_function_auto_scope_from_decorator(node: ast.FunctionDef) -> bool | None:
+    """Extract the ``auto_scope`` flag from a ``@pl.function(auto_scope=...)`` decorator.
+
+    Returns the bool if specified, else None (meaning "use default True"). When
+    False, the compiler stops auto-inserting AUTO runtime scopes for this
+    function and the user places them with ``with pl.scope()``.
+    """
+    decorator = _find_function_decorator_call(node)
+    if decorator is None:
+        return None
+    for keyword in decorator.keywords:
+        if keyword.arg == "auto_scope":
+            if not (isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, bool)):
+                raise ParserSyntaxError(
+                    "`@pl.function(auto_scope=...)` must be a bool literal (True/False)",
+                    hint="Use auto_scope=False to place runtime scopes manually.",
+                )
+            return keyword.value.value
+    return None
+
+
 def _normalize_attrs(attrs: dict[str, Any]) -> dict[str, Any] | None:
     """Normalize function attrs: convert SplitMode enums to int values for C++ storage.
 
@@ -595,6 +616,7 @@ def function(
     level: ir.Level | None = None,
     role: ir.Role | None = None,
     attrs: dict[str, Any] | None = None,
+    auto_scope: bool = True,
     strict_ssa: bool = False,
 ) -> ir.Function: ...
 
@@ -607,6 +629,7 @@ def function(
     level: ir.Level | None = None,
     role: ir.Role | None = None,
     attrs: dict[str, Any] | None = None,
+    auto_scope: bool = True,
     strict_ssa: bool = False,
 ) -> FunctionDecorator: ...
 
@@ -618,6 +641,7 @@ def function(
     level: ir.Level | None = None,
     role: ir.Role | None = None,
     attrs: dict[str, Any] | None = None,
+    auto_scope: bool = True,
     strict_ssa: bool = False,
 ) -> ir.Function | FunctionDecorator:
     """Decorator that parses a DSL function and returns IR Function.
@@ -632,6 +656,10 @@ def function(
         level: Hierarchy level (e.g. pl.Level.HOST)
         role: Function role (e.g. pl.Role.SubWorker)
         attrs: Function-level attributes dict (e.g. {"split": pl.SplitMode.UP_DOWN})
+        auto_scope: If True (default), the compiler inserts AUTO runtime scopes
+                   (PTO2_SCOPE) around the function body and each for/if body.
+                   Set False to place scopes by hand with ``with pl.scope()``
+                   (only meaningful for Orchestration functions).
         strict_ssa: If True, enforce SSA (single assignment per variable).
                    If False (default), allow variable reassignment (non-SSA mode).
 
@@ -692,6 +720,9 @@ def function(
 
             # Normalize attrs: convert enum values to ints for storage
             func_attrs = _normalize_attrs(attrs) if attrs else None
+            # Fold auto_scope=False into attrs (absent ⇒ default True).
+            if auto_scope is False:
+                func_attrs = {**(func_attrs or {}), "auto_scope": False}
 
             try:
                 ir_func = parser.parse_function(
@@ -919,6 +950,11 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                 func_type = _extract_function_type_from_decorator(func_def)
                 func_level, func_role = _extract_function_level_role_from_decorator(func_def)
                 func_attrs = _extract_function_attrs_from_decorator(func_def)
+                # Fold auto_scope=False into attrs (absent ⇒ default True). The pass
+                # MaterializeRuntimeScopes and the parser both read attrs["auto_scope"].
+                func_auto_scope = _extract_function_auto_scope_from_decorator(func_def)
+                if func_auto_scope is False:
+                    func_attrs["auto_scope"] = False
 
                 # HOST SubWorkers carry their pure-Python body inline in the IR
                 # via an InlineStmt — no DSL parsing, no implicit `self` stripping

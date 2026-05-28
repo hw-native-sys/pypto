@@ -48,6 +48,13 @@ SPLIT_MODE_MAP: dict[str, ir.SplitMode] = {
     "LEFT_RIGHT": ir.SplitMode.LEFT_RIGHT,
 }
 
+# Maps pl.ScopeMode names to the RuntimeScopeStmt `manual` bool (the IR carries
+# the mode as a bool, not a dedicated enum): AUTO → False, MANUAL → True.
+SCOPE_MODE_MAP: dict[str, bool] = {
+    "AUTO": False,
+    "MANUAL": True,
+}
+
 LOOP_ORIGIN_MAP: dict[str, ir.LoopOrigin] = {
     "Original": ir.LoopOrigin.Original,
     "ChunkOuter": ir.LoopOrigin.ChunkOuter,

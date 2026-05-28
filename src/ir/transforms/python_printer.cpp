@@ -311,10 +311,12 @@ class IRPythonPrinter : public IRVisitor {
   // SeqStmts is a transparent container - recursed into without extra indent.
   void PrintStmtBlock(const StmtPtr& stmt);
 
-  // Emit the `with pl.{auto,manual}_scope():` header for a RuntimeScopeStmt.
+  // Emit the `with pl.scope(...):` header for a RuntimeScopeStmt. AUTO prints as
+  // the bare `pl.scope()`; MANUAL as `pl.scope(mode=pl.ScopeMode.MANUAL)`.
   // Callers emit the leading indent themselves (it differs by call site).
   void PrintRuntimeScopeHeader(bool manual) {
-    stream_ << "with " << prefix_ << (manual ? ".manual_scope():\n" : ".auto_scope():\n");
+    stream_ << "with " << prefix_
+            << (manual ? ".scope(mode=" + prefix_ + ".ScopeMode.MANUAL):\n" : ".scope():\n");
   }
 
   // Emit a comma-prefixed kwarg ``, <kwarg_name>=[v1, v2, ...]`` from the
@@ -1773,7 +1775,12 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
     bool has_type = func->func_type_ != FunctionType::Opaque;
     bool has_level = func->level_.has_value();
     bool has_role = func->role_.has_value();
-    bool has_attrs = !func->attrs_.empty();
+    // ``auto_scope`` rides in attrs_ but prints as a dedicated kwarg (and is
+    // filtered from the attrs={...} dict). Absent ⇒ default True ⇒ not printed.
+    bool auto_scope_off = !func->GetAttr<bool>("auto_scope", true);
+    auto is_auto_scope_key = [](const std::string& k) { return k == "auto_scope"; };
+    bool has_attrs = std::any_of(func->attrs_.begin(), func->attrs_.end(),
+                                 [&](const auto& kv) { return !is_auto_scope_key(kv.first); });
     auto print_func_attr_value = [&](const std::string& key, const std::any& value) {
       if (key == "split") {
         int split_value = AnyCast<int>(value, "func attr key: " + key);
@@ -1796,7 +1803,7 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
                               << "': " << DemangleTypeName(value.type().name());
       }
     };
-    if (has_type || has_level || has_role || has_attrs) {
+    if (has_type || has_level || has_role || auto_scope_off || has_attrs) {
       stream_ << "(";
       bool first = true;
       if (has_type) {
@@ -1813,11 +1820,17 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
         stream_ << "role=" << prefix_ << ".Role." << RoleToString(*func->role_);
         first = false;
       }
+      if (auto_scope_off) {
+        if (!first) stream_ << ", ";
+        stream_ << "auto_scope=False";
+        first = false;
+      }
       if (has_attrs) {
         if (!first) stream_ << ", ";
         stream_ << "attrs={";
         bool first_attr = true;
         for (const auto& [key, value] : func->attrs_) {
+          if (is_auto_scope_key(key)) continue;
           if (!first_attr) stream_ << ", ";
           stream_ << std::quoted(key) << ": ";
           print_func_attr_value(key, value);

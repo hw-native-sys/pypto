@@ -40,7 +40,14 @@ from .diagnostics import (
     UnsupportedFeatureError,
     concise_error_message,
 )
-from .enum_utils import LEVEL_MAP, LOOP_ORIGIN_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
+from .enum_utils import (
+    LEVEL_MAP,
+    LOOP_ORIGIN_MAP,
+    ROLE_MAP,
+    SCOPE_MODE_MAP,
+    SPLIT_MODE_MAP,
+    extract_enum_value,
+)
 from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
@@ -454,6 +461,12 @@ class ASTParser:
         # context-scoped op constraints (e.g. pld.system.world_size is host-only).
         self._func_level: ir.Level | None = None
 
+        # Current function's auto_scope flag (set during parse_function). When
+        # True (default) the compiler owns AUTO scope placement, so a hand-placed
+        # AUTO `with pl.scope()` is rejected; set False to take control. MANUAL
+        # scopes are allowed regardless (they are a dependency-semantics choice).
+        self._func_auto_scope: bool = True
+
         # Pending comments keyed by 1-based line number, drained by parse_statement.
         # Each entry is (col_offset, text) so the parser can distinguish
         # tail-of-block comments (inside body indent) from outer-scope comments.
@@ -545,6 +558,8 @@ class ASTParser:
         func_name = func_def.name
         self._func_name = func_name
         self._func_level = func_level
+        # auto_scope rides in func_attrs (key "auto_scope"); absent ⇒ default True.
+        self._func_auto_scope = bool((func_attrs or {}).get("auto_scope", True))
         func_span = self.span_tracker.get_span(func_def)
 
         # Enter function scope
@@ -3056,53 +3071,81 @@ class ASTParser:
             )
         return name_hint
 
+    def _parse_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
+        """Parse ``with pl.scope(mode=...):`` into a Runtime scope.
+
+        ``mode`` defaults to ``ScopeMode.AUTO``. AUTO scopes are the explicit IR
+        form of the orchestration ``PTO2_SCOPE()`` block; MANUAL scopes turn off
+        auto dependency tracking (``pl.scope(mode=pl.ScopeMode.MANUAL)`` — the
+        former ``pl.manual_scope()``).
+        """
+        if context_expr.args:
+            raise ParserSyntaxError(
+                "pl.scope() takes only a 'mode=' keyword, not positional arguments",
+                span=self.span_tracker.get_span(stmt),
+                hint="Use 'with pl.scope():' or 'with pl.scope(mode=pl.ScopeMode.MANUAL):'.",
+            )
+        manual = False
+        for kw in context_expr.keywords:
+            if kw.arg == "mode":
+                manual = extract_enum_value(kw.value, SCOPE_MODE_MAP, "ScopeMode", "pl.ScopeMode")
+            else:
+                raise ParserSyntaxError(
+                    f"pl.scope() got an unexpected keyword '{kw.arg}'",
+                    span=self.span_tracker.get_span(stmt),
+                    hint="The only accepted keyword is mode=pl.ScopeMode.AUTO|MANUAL.",
+                )
+        self._emit_runtime_scope(stmt, manual=manual)
+
     def _parse_manual_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
-        """Parse ``with pl.manual_scope():`` into a Runtime scope with manual=True."""
+        """Parse ``with pl.manual_scope():`` — an alias for ``pl.scope(mode=MANUAL)``."""
         if context_expr.args or context_expr.keywords:
             raise ParserSyntaxError(
                 "pl.manual_scope() does not accept arguments",
                 span=self.span_tracker.get_span(stmt),
-                hint="Use 'with pl.manual_scope():' without arguments",
+                hint="Use 'with pl.manual_scope():' (or 'with pl.scope(mode=pl.ScopeMode.MANUAL):').",
             )
-        if self._manual_scope_depth > 0:
-            # The runtime forbids nesting MANUAL inside MANUAL — codegen would
-            # emit nested ``PTO2_SCOPE(PTO2ScopeMode::MANUAL)`` blocks, which
-            # would fail later. Reject at the source location instead.
-            raise ParserSyntaxError(
-                "pl.manual_scope() may not be nested inside another manual scope",
-                span=self.span_tracker.get_span(stmt),
-                hint="Flatten the nested 'with pl.manual_scope():' into the "
-                "enclosing manual scope, or move it outside.",
-            )
-        span = self.span_tracker.get_span(stmt)
-        self._manual_scope_depth += 1
-        try:
-            self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=True)
-        finally:
-            self._manual_scope_depth -= 1
+        self._emit_runtime_scope(stmt, manual=True)
 
-    def _parse_auto_scope(self, stmt: ast.With, context_expr: ast.Call) -> None:
-        """Parse ``with pl.auto_scope():`` into a Runtime scope with manual=False.
+    def _emit_runtime_scope(self, stmt: ast.With, manual: bool) -> None:
+        """Build a RuntimeScopeStmt for a ``with pl.scope(...)`` / ``pl.manual_scope()`` block.
 
-        AUTO scopes are the explicit IR form of the orchestration codegen's
-        ``PTO2_SCOPE()`` block (inserted by MaterializeRuntimeScopes). They may
-        nest in one another but not inside a ``manual_scope`` — the runtime
-        forbids AUTO nested in MANUAL.
+        Enforces the scope-placement rules:
+          - MANUAL may not nest inside another MANUAL (runtime forbids).
+          - AUTO may not nest inside a MANUAL (runtime forbids AUTO-in-MANUAL).
+          - A hand-placed AUTO scope requires ``@pl.function(auto_scope=False)``;
+            in the default auto_scope=True the compiler owns AUTO placement, so a
+            stray ``with pl.scope():`` would be a no-op — reject it instead.
         """
-        if context_expr.args or context_expr.keywords:
+        span = self.span_tracker.get_span(stmt)
+        if manual:
+            if self._manual_scope_depth > 0:
+                raise ParserSyntaxError(
+                    "a manual scope may not be nested inside another manual scope",
+                    span=span,
+                    hint="Flatten the nested manual scope into the enclosing one, or move it outside.",
+                )
+            self._manual_scope_depth += 1
+            try:
+                self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=True)
+            finally:
+                self._manual_scope_depth -= 1
+            return
+
+        # AUTO scope.
+        if self._func_auto_scope:
             raise ParserSyntaxError(
-                "pl.auto_scope() does not accept arguments",
-                span=self.span_tracker.get_span(stmt),
-                hint="Use 'with pl.auto_scope():' without arguments",
+                "a hand-placed AUTO 'with pl.scope()' requires @pl.function(auto_scope=False)",
+                span=span,
+                hint="In the default auto_scope=True mode the compiler places AUTO scopes; set "
+                "auto_scope=False to place them yourself, or use pl.scope(mode=pl.ScopeMode.MANUAL).",
             )
         if self._manual_scope_depth > 0:
             raise ParserSyntaxError(
-                "pl.auto_scope() may not be nested inside a manual scope",
-                span=self.span_tracker.get_span(stmt),
-                hint="The runtime forbids AUTO scope nested in MANUAL scope; "
-                "move the 'with pl.auto_scope():' block outside the manual scope.",
+                "an AUTO scope may not be nested inside a manual scope",
+                span=span,
+                hint="The runtime forbids AUTO scope nested in MANUAL scope; move it outside.",
             )
-        span = self.span_tracker.get_span(stmt)
         self._parse_scope_body(stmt, ir.ScopeKind.Runtime, span, manual=False)
 
     def _parse_legacy_scope(
@@ -3755,14 +3798,14 @@ class ASTParser:
                         "to capture the outlined kernel's producer TaskId.",
                     )
 
-                # Manual scope: with pl.manual_scope(): ...
-                if func.attr == "manual_scope":
-                    self._parse_manual_scope(stmt, context_expr)
+                # Unified runtime scope: with pl.scope(mode=...): ...
+                if func.attr == "scope":
+                    self._parse_scope(stmt, context_expr)
                     return
 
-                # Auto scope: with pl.auto_scope(): ...
-                if func.attr == "auto_scope":
-                    self._parse_auto_scope(stmt, context_expr)
+                # Manual scope alias: with pl.manual_scope(): ...
+                if func.attr == "manual_scope":
+                    self._parse_manual_scope(stmt, context_expr)
                     return
 
                 # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
@@ -6216,25 +6259,21 @@ class ASTParser:
             elif isinstance(stmt, ast.If):
                 pass
 
-            # Descend into `with pl.auto_scope():` blocks — they are transparent
-            # to yield association, so a trailing `var = pl.yield_(...)` inside
-            # the scope still defines the enclosing for/if return-var. These are
-            # inserted by the MaterializeRuntimeScopes pass.
-            elif isinstance(stmt, ast.With) and self._is_auto_scope_with(stmt):
+            # Descend into `with pl.scope():` blocks — they are transparent to
+            # yield association, so a trailing `var = pl.yield_(...)` inside the
+            # scope still defines the enclosing for/if return-var. These are
+            # inserted by the MaterializeRuntimeScopes pass (or written by hand).
+            elif isinstance(stmt, ast.With) and self._is_runtime_scope_with(stmt):
                 yield_vars.extend(self._scan_for_yields(stmt.body))
 
         return yield_vars
 
     @staticmethod
-    def _is_auto_scope_with(stmt: ast.With) -> bool:
-        """True if @p stmt is a ``with pl.auto_scope():`` block."""
+    def _is_runtime_scope_with(stmt: ast.With) -> bool:
+        """True if @p stmt is a ``with pl.scope(...):`` block (any mode)."""
         for item in stmt.items:
             ce = item.context_expr
-            if (
-                isinstance(ce, ast.Call)
-                and isinstance(ce.func, ast.Attribute)
-                and ce.func.attr == "auto_scope"
-            ):
+            if isinstance(ce, ast.Call) and isinstance(ce.func, ast.Attribute) and ce.func.attr == "scope":
                 return True
         return False
 

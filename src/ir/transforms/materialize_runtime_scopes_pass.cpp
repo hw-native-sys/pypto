@@ -9,10 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <any>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -115,17 +117,35 @@ Pass MaterializeRuntimeScopes() {
     // InCore/AIC/AIV/Group/Spmd bodies are never scope-wrapped.
     if (func->func_type_ != FunctionType::Orchestration) return func;
 
+    // ``@pl.function(auto_scope=False)`` opts out of automatic AUTO-scope
+    // insertion: the user places every scope by hand (``with pl.scope()`` /
+    // ``pl.manual_scope()``), which the parser already materialised into the
+    // IR. The simpler runtime's implicit top-level scope covers correctness, so
+    // emitting zero compiler scopes is valid. Leave such functions untouched.
+    if (!func->GetAttr<bool>("auto_scope", true)) return func;
+
     InsertAutoScopeMutator mutator;
     auto inner = mutator.VisitStmt(func->body_);
 
     // Always wrap the whole function body in an AUTO scope, matching the
     // always-on outermost ``PTO2_SCOPE()`` codegen emitted at function entry.
     StmtPtr new_body = IsAutoScope(inner) ? inner : WrapAuto(inner);
-    if (new_body.get() == func->body_.get()) return func;
+
+    // Mark the function ``auto_scope=False`` now that scopes are materialized.
+    // This makes the pass idempotent (a second run early-returns) and lets the
+    // output round-trip: the inserted ``with pl.scope()`` blocks parse back only
+    // under ``auto_scope=False`` (the parser rejects hand-placed AUTO scopes in
+    // the default auto_scope=True mode, where the compiler owns placement).
+    std::vector<std::pair<std::string, std::any>> new_attrs;
+    new_attrs.reserve(func->attrs_.size() + 1);
+    for (const auto& kv : func->attrs_) {
+      if (kv.first != "auto_scope") new_attrs.push_back(kv);
+    }
+    new_attrs.emplace_back("auto_scope", std::any(false));
 
     return std::make_shared<Function>(func->name_, func->params_, func->param_directions_,
                                       func->return_types_, new_body, func->span_, func->func_type_,
-                                      func->level_, func->role_, func->attrs_);
+                                      func->level_, func->role_, std::move(new_attrs));
   };
   return CreateFunctionPass(pass_func, "MaterializeRuntimeScopes", kMaterializeRuntimeScopesProperties);
 }

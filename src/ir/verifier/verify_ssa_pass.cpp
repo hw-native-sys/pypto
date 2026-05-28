@@ -248,10 +248,22 @@ StmtPtr SSAVerifier::GetLastStmt(const StmtPtr& stmt) {
     }
   }
 
+  // A RuntimeScopeStmt is transparent to SSA: a for/if body may be wrapped in a
+  // ``with pl.scope()`` whose trailing statement is the carry-yield. Look
+  // through it so the trailing-yield check finds the yield inside the scope.
+  if (auto scope = As<RuntimeScopeStmt>(stmt)) {
+    return GetLastStmt(scope->body_);
+  }
+
   return stmt;
 }
 
 void SSAVerifier::CheckNoMidBodyYield(const std::string& scope_kind, const StmtPtr& body) {
+  // Transparent through a RuntimeScopeStmt (see GetLastStmt) — check its body.
+  if (auto scope = As<RuntimeScopeStmt>(body)) {
+    CheckNoMidBodyYield(scope_kind, scope->body_);
+    return;
+  }
   auto seq = As<SeqStmts>(body);
   if (!seq) return;
   for (size_t i = 0; i + 1 < seq->stmts_.size(); ++i) {
@@ -263,6 +275,11 @@ void SSAVerifier::CheckNoMidBodyYield(const std::string& scope_kind, const StmtP
                   seq->stmts_[i]->span_);
       return;
     }
+  }
+  // The trailing statement may itself be a scope ending in the yield; recurse
+  // so a yield buried mid-way inside that scope is still caught.
+  if (!seq->stmts_.empty()) {
+    CheckNoMidBodyYield(scope_kind, seq->stmts_.back());
   }
 }
 
