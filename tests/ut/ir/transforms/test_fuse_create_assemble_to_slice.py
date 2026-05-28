@@ -471,6 +471,75 @@ class TestFuseCreateAssembleToSlice:
         expected = _run_prereqs_only(Expected)
         ir.assert_structural_equal(after, expected)
 
+    def test_ambiguous_return_root_skips_fusion(self):
+        """When >1 output-direction param matches the return type, the buffer
+        root is ambiguous, so the pass must NOT guess — it skips fusion rather
+        than risk aliasing the scratch onto the output (PR #1570 review).
+
+        Here the InOut scratch and the real Out share shape+dtype, so neither can
+        be proven to be the return's buffer; the create + assemble stay untouched.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def compute(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                scratch: pl.InOut[pl.Tensor[[1, 8], pl.FP32]],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                s_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [0, 0], [1, 8])
+                scratch_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(s_tile, [0, 0], scratch)
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(scratch_1, [0, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                for r in pl.range(4):
+                    scratch: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    row = self.compute(x, scratch, row)
+                    out = pl.assemble(out, row, [r, 0])
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def compute(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                scratch: pl.InOut[pl.Tensor[[1, 8], pl.FP32]],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                s_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [0, 0], [1, 8])
+                scratch_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(s_tile, [0, 0], scratch)
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(scratch_1, [0, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                for r in pl.range(4):
+                    scratch: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    row = self.compute(x, scratch, row)
+                    out = pl.assemble(out, row, [r, 0])
+                return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Expected)
+        ir.assert_structural_equal(after, expected)
+
     def test_atomic_assemble_not_fused(self):
         """tensor.assemble with atomic=Add → not fused; the atomic assemble must survive.
 

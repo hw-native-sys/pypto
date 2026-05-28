@@ -185,7 +185,10 @@ class BufferRootCollector : public IRVisitor {
       }
     }
     if (match && !ambiguous) return match;
-    return out_roots[0].root;  // unresolved: preserve legacy param-order choice
+    // Ambiguous (>1 distinct match) or no provable match: do not guess. Fusion
+    // is an optimization, so skipping it (no root -> no aliasing) is always safe,
+    // whereas guessing out_roots[0] could re-alias a scratch onto the output.
+    return nullptr;
   }
 
   // Structural shape + dtype equality, ignoring memref / tensor_view: a return
