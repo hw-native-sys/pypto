@@ -75,7 +75,6 @@ def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
 标记对整段 orch 作用域生效 —— 同一个 orch 内所有消费 `q` 或 `out` 的
 kernel call 都会 dump 这两个张量；`k_cache` 则被过滤掉，不进入收集器
 队列。`enable_dump_tensor=False` 时该标记不起作用（dump 流水线整体关闭）。
-完整的生产规模示例见 [`examples/models/09_paged_attention_spmd.py`](../../../examples/models/09_paged_attention_spmd.py)。
 底层由 runtime 的 `enable_dump_tensor_selective()` 开关 +
 `Arg::dump(...)` API（simpler#844）支撑。
 

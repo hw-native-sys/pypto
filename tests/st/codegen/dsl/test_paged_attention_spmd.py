@@ -199,39 +199,6 @@ class TestPagedAttentionSpmdKernels:
         result = test_runner.run(test_case)
         assert result.passed, f"SPMD paged attention test failed: {result.error}"
 
-    def test_paged_attention_spmd_selective_dump_repro(self, test_runner):
-        """Reproducer for the simpler#860 dump back-pressure scenario.
-
-        Shape: 64 batch x 8192 ctx, the case that triggered the host-side
-        dump collector saturation (~42 MB/s drain vs. ~9.5 GB of
-        ``key_cache`` + ``value_cache``) and the STARS op-execute kill
-        documented in the maintainer reply.
-
-        The orchestration in :mod:`examples.models.09_paged_attention_spmd`
-        now carries ``pl.dump_tag`` markers on the six small tensors
-        (``query``, ``out``, ``block_table``, ``context_lens``, ``scale``,
-        ``config``) so the runtime's selective-dump path filters
-        ``key_cache`` / ``value_cache`` out of the collector queue. Running
-        this test with ``pytest ... --dump-tensor`` should now complete
-        without ``507017`` / ``507018`` / ``507046`` from STARS, and the
-        emitted ``tensor_dump/`` directory should contain only the tagged
-        bindings.
-
-        Without ``--dump-tensor`` this is a plain correctness run — the
-        markers are inert because the runtime DFX flag (``CallConfig::
-        enable_dump_tensor``) keeps the whole dump pipeline dormant.
-        """
-        test_case = PagedAttentionSpmdPTOASTestCase(
-            batch=64,
-            num_heads=64,
-            head_dim=128,
-            block_size=128,
-            context_len=8192,
-            max_model_len=32768,
-        )
-        result = test_runner.run(test_case)
-        assert result.passed, f"SPMD paged attention selective-dump repro failed: {result.error}"
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

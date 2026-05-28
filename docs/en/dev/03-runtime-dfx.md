@@ -78,9 +78,7 @@ def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
 The marker is sticky over the orch scope — every kernel call in the
 same orch that consumes `q` or `out` dumps them; `k_cache` is filtered
 out of the collector queue. When `enable_dump_tensor=False` the marker
-is inert (the whole dump pipeline is dormant). See [`examples/models/
-09_paged_attention_spmd.py`](../../../examples/models/09_paged_attention_spmd.py)
-for a production-shape example. Backed by the runtime
+is inert (the whole dump pipeline is dormant). Backed by the runtime
 `enable_dump_tensor_selective()` toggle + `Arg::dump(...)` API from
 simpler#844.
 
