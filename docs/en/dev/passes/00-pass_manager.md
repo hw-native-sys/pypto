@@ -84,7 +84,7 @@ struct PassProperties {
 | FoldNoOpReshape | SplitIncoreOrch, IncoreTileOps, HasMemRefs, TileOps2D | — | — |
 | FuseCreateAssembleToSlice | — | — | — |
 | DeriveCallDirections | SplitIncoreOrch | CallDirectionsResolved | — |
-| ExpandManualPhaseFence | SSAForm, NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved | SSAForm, NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved | — |
+| ExpandManualPhaseFence | NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved | NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved | — |
 | CollectCommGroups | — | CommGroupsCollected | — |
 | Simplify | — | — | — |
 | MaterializeRuntimeScopes | SplitIncoreOrch, CallDirectionsResolved | RuntimeScopesMaterialized | — |

@@ -104,8 +104,8 @@ pass 运行后：
 
 | 字段 | 值 |
 | ---- | -- |
-| `required` | `{SSAForm, NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved}` |
-| `produced` | `{SSAForm, NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved}` |
+| `required` | `{NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved}` |
+| `produced` | `{NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved}` |
 | `invalidated` | `{}` |
 
 ## 参考

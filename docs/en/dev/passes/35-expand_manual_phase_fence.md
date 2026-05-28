@@ -113,8 +113,8 @@ After the pass:
 
 | Field | Value |
 | ----- | ----- |
-| `required` | `{SSAForm, NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved}` |
-| `produced` | `{SSAForm, NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved}` |
+| `required` | `{NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved}` |
+| `produced` | `{NoNestedCalls, NormalizedStmtStructure, CallDirectionsResolved}` |
 | `invalidated` | `{}` |
 
 ## Reference

@@ -262,9 +262,9 @@ inline const PassProperties kDeriveCallDirectionsProperties{.required = {IRPrope
                                                             .produced = {IRProperty::CallDirectionsResolved}};
 
 inline const PassProperties kExpandManualPhaseFenceProperties{
-    .required = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure,
+    .required = {IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure,
                  IRProperty::CallDirectionsResolved},
-    .produced = {IRProperty::SSAForm, IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure,
+    .produced = {IRProperty::NoNestedCalls, IRProperty::NormalizedStmtStructure,
                  IRProperty::CallDirectionsResolved}};
 
 // -- No-op tile.reshape folding pass -----------------------------------------
