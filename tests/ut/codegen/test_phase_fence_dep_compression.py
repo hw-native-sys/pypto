@@ -330,16 +330,18 @@ class TestPhaseFenceDepCompressionCodegen:
                 return out
 
         code = _compile_program(Prog)
-        assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 1, code
+        assert code.count("rt_submit_dummy_task(params_phase_fence_barrier_") == 2, code
         assert "PTO2TaskId params_phase_fence_barrier_0_deps[4];" in code, code
+        assert "PTO2TaskId params_phase_fence_barrier_1_deps[8];" in code, code
         assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
-        assert re.search(r"PTO2TaskId params_t\d+_deps\[8\];", code), code
         _assert_ordered(
             code,
             "for (int64_t r1 =",
             "for (int64_t p1 =",
-            "for (int64_t r2 =",
             "rt_submit_dummy_task(params_phase_fence_barrier_0)",
+            "for (int64_t r2 =",
+            "for (int64_t p2 =",
+            "rt_submit_dummy_task(params_phase_fence_barrier_1)",
             "for (int64_t r3 =",
         )
 

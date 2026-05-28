@@ -195,6 +195,41 @@ def test_parallel_iter_arg_without_visible_init_is_not_hoisted():
     )
 
 
+def test_sequential_iter_arg_dep_falls_back_even_with_visible_init_value():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    iter_tids = ir.IterArg("tids_iter", tids.type, tids, S)
+    return_tids = ir.Var("tids_rv", tids.type, S)
+    loop = ir.ForStmt(
+        ir.Var("p", ir.ScalarType(DataType.INDEX), S),
+        _const(0),
+        _const(4),
+        _const(1),
+        [iter_tids],
+        ir.SeqStmts(
+            [
+                _consumer("a", [iter_tids]),
+                _consumer("b", [iter_tids]),
+                ir.YieldStmt([iter_tids], S),
+            ],
+            S,
+        ),
+        [return_tids],
+        S,
+        kind=ir.ForKind.Sequential,
+    )
+    scope = ir.RuntimeScopeStmt(True, "manual", loop, S)
+    orch = ir.Function("main", [], [], scope, S, type=ir.FunctionType.Orchestration)
+    kernel = ir.Function("kernel", [], [TASK_ID], ir.ReturnStmt([ir.Var("ret_tid", TASK_ID, S)], S), S)
+
+    after = _run(ir.Program([orch, kernel], "sequential_iter_arg_source", S))
+
+    assert isinstance(_manual_scope_body(after), ir.ForStmt)
+    assert all(
+        cast(ir.Call, cast(ir.AssignStmt, stmt).value).attrs["manual_dep_edges"] == [iter_tids]
+        for stmt in _loop_body_stmts(after)[:2]
+    )
+
+
 def test_loop_local_dep_array_is_not_moved_before_definition():
     tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
     for kind in (ir.ForKind.Parallel, ir.ForKind.Sequential):
@@ -269,6 +304,43 @@ def test_iter_arg_alias_update_of_dep_array_falls_back():
     kernel = ir.Function("kernel", [], [TASK_ID], ir.ReturnStmt([ir.Var("ret_tid", TASK_ID, S)], S), S)
 
     after = _run(ir.Program([orch, kernel], "iter_arg_alias_update_fallback", S))
+
+    assert isinstance(_manual_scope_body(after), ir.ForStmt)
+    consumer_calls = []
+    for stmt in _loop_body_stmts(after):
+        if not isinstance(stmt, ir.AssignStmt):
+            continue
+        if not isinstance(stmt.value, ir.Call):
+            continue
+        if stmt.value.op.name == "kernel":
+            consumer_calls.append(stmt.value)
+    assert len(consumer_calls) == 2
+    assert all(call.attrs["manual_dep_edges"] == [tids] for call in consumer_calls)
+
+
+def test_sequential_iter_arg_alias_update_of_dep_array_falls_back():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    tids_branch = ir.IterArg("tids_branch", tids.type, tids, S)
+    return_tids = ir.Var("tids_return", tids.type, S)
+    first = _consumer("a", [tids])
+    update = _update_array_slot("tids_branch_after_a", tids_branch, first.var)
+    second = _consumer("b", [tids])
+    loop = ir.ForStmt(
+        ir.Var("p", ir.ScalarType(DataType.INDEX), S),
+        _const(0),
+        _const(4),
+        _const(1),
+        [tids_branch],
+        ir.SeqStmts([first, update, second, ir.YieldStmt([update.var], S)], S),
+        [return_tids],
+        S,
+        kind=ir.ForKind.Sequential,
+    )
+    scope = ir.RuntimeScopeStmt(True, "manual", loop, S)
+    orch = ir.Function("main", [], [], scope, S, type=ir.FunctionType.Orchestration)
+    kernel = ir.Function("kernel", [], [TASK_ID], ir.ReturnStmt([ir.Var("ret_tid", TASK_ID, S)], S), S)
+
+    after = _run(ir.Program([orch, kernel], "sequential_iter_arg_alias_update_fallback", S))
 
     assert isinstance(_manual_scope_body(after), ir.ForStmt)
     consumer_calls = []
@@ -466,6 +538,34 @@ def test_nested_for_return_dep_array_is_not_moved_before_definition():
         assert call.attrs["manual_dep_edges"] == [local_tids]
 
 
+def test_sequential_nested_for_return_dep_array_is_not_moved_before_definition():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    iter_tids = ir.IterArg("iter_tids", tids.type, tids, S)
+    local_tids = ir.Var("local_tids", tids.type, S)
+    inner_loop = ir.ForStmt(
+        ir.Var("q", ir.ScalarType(DataType.INDEX), S),
+        _const(0),
+        _const(1),
+        _const(1),
+        [iter_tids],
+        ir.YieldStmt([iter_tids], S),
+        [local_tids],
+        S,
+        kind=ir.ForKind.Sequential,
+    )
+    before = _program_with_loop(
+        ir.SeqStmts([inner_loop, _consumer("a", [local_tids]), _consumer("b", [local_tids])], S),
+        kind=ir.ForKind.Sequential,
+    )
+
+    after = _run(before)
+
+    assert isinstance(_manual_scope_body(after), ir.ForStmt)
+    for stmt in _loop_body_stmts(after)[1:]:
+        call = cast(ir.Call, cast(ir.AssignStmt, stmt).value)
+        assert call.attrs["manual_dep_edges"] == [local_tids]
+
+
 def test_non_orchestration_function_is_ignored():
     tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
     loop = _main_loop(_program_with_loop(ir.SeqStmts([_consumer("a", [tids]), _consumer("b", [tids])], S)))
@@ -562,6 +662,52 @@ def test_two_by_two_low_benefit_does_not_insert_dummy():
     assert first_call.op.name != "system.task_dummy"
 
 
+def test_sequential_two_by_two_low_benefit_does_not_insert_dummy():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 2), S)
+    loop = ir.ForStmt(
+        ir.Var("p", ir.ScalarType(DataType.INDEX), S),
+        _const(0),
+        _const(2),
+        _const(1),
+        [],
+        _consumer("a", [tids]),
+        [],
+        S,
+        kind=ir.ForKind.Sequential,
+    )
+    scope = ir.RuntimeScopeStmt(True, "manual", loop, S)
+    orch = ir.Function("main", [], [], scope, S, type=ir.FunctionType.Orchestration)
+    kernel = ir.Function("kernel", [], [TASK_ID], ir.ReturnStmt([ir.Var("ret_tid", TASK_ID, S)], S), S)
+
+    after = _run(ir.Program([orch, kernel], "sequential_low_benefit", S))
+    first_call = cast(ir.Call, cast(ir.AssignStmt, _loop_body_stmts(after)[0]).value)
+    assert first_call.op.name != "system.task_dummy"
+
+
+def test_known_zero_sequential_loop_does_not_insert_dummy():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    loop = ir.ForStmt(
+        ir.Var("p", ir.ScalarType(DataType.INDEX), S),
+        _const(0),
+        _const(0),
+        _const(1),
+        [],
+        _consumer("a", [tids]),
+        [],
+        S,
+        kind=ir.ForKind.Sequential,
+    )
+    scope = ir.RuntimeScopeStmt(True, "manual", loop, S)
+    orch = ir.Function("main", [], [], scope, S, type=ir.FunctionType.Orchestration)
+    kernel = ir.Function("kernel", [], [TASK_ID], ir.ReturnStmt([ir.Var("ret_tid", TASK_ID, S)], S), S)
+
+    after = _run(ir.Program([orch, kernel], "sequential_known_zero", S))
+    scope_stmts = _manual_scope_stmts(after)
+
+    assert len(scope_stmts) == 1
+    assert isinstance(scope_stmts[0], ir.ForStmt)
+
+
 def test_three_by_three_min_profitable_inserts_dummy():
     tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 3), S)
     loop = ir.ForStmt(
@@ -597,13 +743,86 @@ def test_three_by_three_min_profitable_inserts_dummy():
     )
 
 
-def test_pure_range_consumer_does_not_insert_dummy():
+def test_sequential_stable_outer_dep_hoists_barrier_once():
     tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
     before = _program_with_loop(_consumer("a", [tids]), kind=ir.ForKind.Sequential)
 
     after = _run(before)
-    first_call = cast(ir.Call, cast(ir.AssignStmt, _loop_body_stmts(after)[0]).value)
-    assert first_call.op.name != "system.task_dummy"
+    scope_stmts = _manual_scope_stmts(after)
+
+    assert len(scope_stmts) == 2
+    barrier = cast(ir.AssignStmt, scope_stmts[0])
+    barrier_call = cast(ir.Call, barrier.value)
+    assert barrier_call.op.name == "system.task_dummy"
+    assert barrier_call.attrs["manual_dep_edges"] == [tids]
+
+    loop = cast(ir.ForStmt, scope_stmts[1])
+    body = loop.body
+    consumer_stmt = cast(ir.AssignStmt, body)
+    consumer_call = cast(ir.Call, consumer_stmt.value)
+    assert consumer_call.attrs["manual_dep_edges"] == [barrier.var]
+
+
+def test_nested_sequential_stable_outer_dep_hoists_barrier_once():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    inner_loop = ir.ForStmt(
+        ir.Var("q", ir.ScalarType(DataType.INDEX), S),
+        _const(0),
+        _const(2),
+        _const(1),
+        [],
+        _consumer("a", [tids]),
+        [],
+        S,
+        kind=ir.ForKind.Sequential,
+    )
+    before = _program_with_loop(inner_loop, kind=ir.ForKind.Sequential)
+
+    after = _run(before)
+    scope_stmts = _manual_scope_stmts(after)
+
+    assert len(scope_stmts) == 2
+    barrier = cast(ir.AssignStmt, scope_stmts[0])
+    barrier_call = cast(ir.Call, barrier.value)
+    assert barrier_call.op.name == "system.task_dummy"
+    assert barrier_call.attrs["manual_dep_edges"] == [tids]
+
+    outer_loop = cast(ir.ForStmt, scope_stmts[1])
+    inner_after = cast(ir.ForStmt, outer_loop.body)
+    consumer_stmt = cast(ir.AssignStmt, inner_after.body)
+    consumer_call = cast(ir.Call, consumer_stmt.value)
+    assert consumer_call.attrs["manual_dep_edges"] == [barrier.var]
+
+
+def test_nested_parallel_fanout_in_sequential_loop_hoists_barrier_once():
+    tids = ir.Var("tids", ir.ArrayType(DataType.TASK_ID, 4), S)
+    inner_loop = ir.ForStmt(
+        ir.Var("q", ir.ScalarType(DataType.INDEX), S),
+        _const(0),
+        _const(4),
+        _const(1),
+        [],
+        _consumer("a", [tids]),
+        [],
+        S,
+        kind=ir.ForKind.Parallel,
+    )
+    before = _program_with_loop(inner_loop, kind=ir.ForKind.Sequential)
+
+    after = _run(before)
+    scope_stmts = _manual_scope_stmts(after)
+
+    assert len(scope_stmts) == 2
+    barrier = cast(ir.AssignStmt, scope_stmts[0])
+    barrier_call = cast(ir.Call, barrier.value)
+    assert barrier_call.op.name == "system.task_dummy"
+    assert barrier_call.attrs["manual_dep_edges"] == [tids]
+
+    outer_loop = cast(ir.ForStmt, scope_stmts[1])
+    inner_after = cast(ir.ForStmt, outer_loop.body)
+    consumer_stmt = cast(ir.AssignStmt, inner_after.body)
+    consumer_call = cast(ir.Call, consumer_stmt.value)
+    assert consumer_call.attrs["manual_dep_edges"] == [barrier.var]
 
 
 if __name__ == "__main__":

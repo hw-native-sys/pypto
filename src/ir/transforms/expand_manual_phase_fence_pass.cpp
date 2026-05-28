@@ -62,22 +62,27 @@ struct LoopBodyDepIndex {
   std::unordered_set<const Var*> updated_arrays;
 };
 
+struct TripCountInfo {
+  bool known = false;
+  int64_t count = 0;
+};
+
 using ArrayAliasSet = std::unordered_set<const Var*>;
 using ArrayAliasMap = std::unordered_map<const Var*, std::shared_ptr<ArrayAliasSet>>;
-using NestedUpdateCollector = std::function<void(const ForStmtPtr&, std::unordered_set<const Var*>*)>;
+using NestedLoopSummaryCollector = std::function<void(const ForStmtPtr&, LoopBodyDepIndex*, bool)>;
 
 static std::optional<int64_t> EvalConstInt(const ExprPtr& expr) {
   if (auto ci = As<ConstInt>(expr)) return ci->value_;
   return std::nullopt;
 }
 
-static int64_t EvalConstTripCount(const ForStmtPtr& for_stmt) {
+static TripCountInfo EvalConstTripCount(const ForStmtPtr& for_stmt) {
   auto start = EvalConstInt(for_stmt->start_);
   auto stop = EvalConstInt(for_stmt->stop_);
   auto step = EvalConstInt(for_stmt->step_);
-  if (!start || !stop || !step || *step <= 0) return 0;
+  if (!start || !stop || !step || *step <= 0) return TripCountInfo{};
   int64_t trip = (*stop - *start + *step - 1) / *step;
-  return trip > 0 ? trip : 0;
+  return TripCountInfo{true, trip > 0 ? trip : 0};
 }
 
 static bool IsTaskIdArrayVar(const VarPtr& var) {
@@ -119,24 +124,40 @@ static void InsertWithAliases(const Var* var, const ArrayAliasMap& aliases,
   out->insert(it->second->begin(), it->second->end());
 }
 
-static std::vector<StmtPtr> FlattenToVector(const StmtPtr& body) {
-  if (auto seq = As<SeqStmts>(body)) return seq->stmts_;
-  if (!body) return {};
-  return {body};
-}
-
 static StmtPtr MakeSeqOrStmt(std::vector<StmtPtr> stmts, const Span& span) {
   if (stmts.empty()) return std::make_shared<const SeqStmts>(std::vector<StmtPtr>{}, span);
   if (stmts.size() == 1) return stmts[0];
   return SeqStmts::Flatten(std::move(stmts), span);
 }
 
+static void MergeDepArrayInfo(LoopBodyDepIndex* dst, const Var* key, const DepArrayInfo& src,
+                              int64_t consumer_multiplier = 1) {
+  if (!dst || !key || consumer_multiplier <= 0) return;
+  auto [it, inserted] = dst->dep_arrays.emplace(key, DepArrayInfo{});
+  if (inserted) {
+    dst->dep_array_order.push_back(key);
+    it->second.source_var = src.source_var;
+  }
+  it->second.consumer_count += src.consumer_count * consumer_multiplier;
+  it->second.consumers.insert(src.consumers.begin(), src.consumers.end());
+}
+
+static void MergeLoopSafetyInfo(LoopBodyDepIndex* dst, const LoopBodyDepIndex& src) {
+  if (!dst) return;
+  dst->body_defined_vars.insert(src.body_defined_vars.begin(), src.body_defined_vars.end());
+  dst->updated_arrays.insert(src.updated_arrays.begin(), src.updated_arrays.end());
+}
+
 static LoopBodyDepIndex BuildLoopBodyDepIndex(const StmtPtr& body, const ArrayAliasMap& aliases,
-                                              const NestedUpdateCollector& collect_nested_updates) {
+                                              const NestedLoopSummaryCollector& collect_nested_loop_summary,
+                                              bool collect_nested_loop_consumers = false) {
   class Collector : public IRVisitor {
    public:
-    Collector(const ArrayAliasMap& aliases, const NestedUpdateCollector& collect_nested_updates)
-        : aliases_(aliases), collect_nested_updates_(collect_nested_updates) {}
+    Collector(const ArrayAliasMap& aliases, const NestedLoopSummaryCollector& collect_nested_loop_summary,
+              bool collect_nested_loop_consumers)
+        : aliases_(aliases),
+          collect_nested_loop_summary_(collect_nested_loop_summary),
+          collect_nested_loop_consumers_(collect_nested_loop_consumers) {}
 
     LoopBodyDepIndex index;
 
@@ -148,7 +169,12 @@ static LoopBodyDepIndex BuildLoopBodyDepIndex(const StmtPtr& body, const ArrayAl
 
     void VisitStmt_(const ForStmtPtr& for_stmt) override {
       AddVars(for_stmt->return_vars_);
-      if (collect_nested_updates_) collect_nested_updates_(for_stmt, &index.updated_arrays);
+      for (const auto& iter_arg : for_stmt->iter_args_) {
+        if (iter_arg) index.body_defined_vars.insert(iter_arg.get());
+      }
+      if (collect_nested_loop_summary_) {
+        collect_nested_loop_summary_(for_stmt, &index, collect_nested_loop_consumers_);
+      }
     }
 
     void RecordDepConsumer(const CallPtr& call) {
@@ -160,7 +186,7 @@ static LoopBodyDepIndex BuildLoopBodyDepIndex(const StmtPtr& body, const ArrayAl
         index.dep_array_order.push_back(key);
         it->second.source_var = *dep;
       }
-      it->second.consumer_count += 1;
+      it->second.consumer_count += consumer_multiplier_;
       it->second.consumers.insert(call.get());
     }
 
@@ -194,10 +220,12 @@ static LoopBodyDepIndex BuildLoopBodyDepIndex(const StmtPtr& body, const ArrayAl
 
    private:
     const ArrayAliasMap& aliases_;
-    const NestedUpdateCollector& collect_nested_updates_;
+    const NestedLoopSummaryCollector& collect_nested_loop_summary_;
+    const bool collect_nested_loop_consumers_;
+    int64_t consumer_multiplier_ = 1;
   };
 
-  Collector collector(aliases, collect_nested_updates);
+  Collector collector(aliases, collect_nested_loop_summary, collect_nested_loop_consumers);
   collector.VisitStmt(body);
   return std::move(collector.index);
 }
@@ -257,17 +285,6 @@ class ManualPhaseFenceMutator : public IRMutator {
     }
 
     auto body_with_current_rewrites = RewriteCoveredConsumers(op->body_, consumer_to_barrier);
-    if (!decisions.empty() && op->kind_ != ForKind::Parallel) {
-      auto body_stmts = FlattenToVector(body_with_current_rewrites);
-      std::vector<StmtPtr> with_barriers;
-      with_barriers.reserve(decisions.size() + body_stmts.size());
-      for (const auto& decision : decisions) {
-        with_barriers.push_back(decision.barrier_stmt);
-      }
-      with_barriers.insert(with_barriers.end(), body_stmts.begin(), body_stmts.end());
-      body_with_current_rewrites = MakeSeqOrStmt(std::move(with_barriers), op->span_);
-    }
-
     auto body_with_nested = VisitStmt(body_with_current_rewrites);
     auto new_start = VisitExpr(op->start_);
     auto new_stop = VisitExpr(op->stop_);
@@ -275,12 +292,6 @@ class ManualPhaseFenceMutator : public IRMutator {
     const bool loop_changed = body_with_nested.get() != op->body_.get() ||
                               new_start.get() != op->start_.get() || new_stop.get() != op->stop_.get() ||
                               new_step.get() != op->step_.get();
-    if (loop_changed && (decisions.empty() || op->kind_ != ForKind::Parallel)) {
-      return std::make_shared<const ForStmt>(op->loop_var_, std::move(new_start), std::move(new_stop),
-                                             std::move(new_step), op->iter_args_, std::move(body_with_nested),
-                                             op->return_vars_, op->span_, op->kind_, op->chunk_config_,
-                                             op->attrs_, op->leading_comments_);
-    }
     if (!decisions.empty()) {
       auto new_for = std::make_shared<const ForStmt>(
           op->loop_var_, std::move(new_start), std::move(new_stop), std::move(new_step), op->iter_args_,
@@ -293,6 +304,12 @@ class ManualPhaseFenceMutator : public IRMutator {
       }
       with_barriers.push_back(new_for);
       return MakeSeqOrStmt(std::move(with_barriers), op->span_);
+    }
+    if (loop_changed) {
+      return std::make_shared<const ForStmt>(op->loop_var_, std::move(new_start), std::move(new_stop),
+                                             std::move(new_step), op->iter_args_, std::move(body_with_nested),
+                                             op->return_vars_, op->span_, op->kind_, op->chunk_config_,
+                                             op->attrs_, op->leading_comments_);
     }
     return op;
   }
@@ -329,19 +346,34 @@ class ManualPhaseFenceMutator : public IRMutator {
     }
   }
 
-  void CollectNestedArrayUpdates(const ForStmtPtr& for_stmt, std::unordered_set<const Var*>* updated_arrays) {
-    if (!for_stmt || !updated_arrays) return;
+  void MergeNestedLoopSummary(const ForStmtPtr& for_stmt, LoopBodyDepIndex* index, bool include_consumers) {
+    if (!for_stmt || !index) return;
     RegisterLoopArrayAliases(for_stmt);
-    auto [it, inserted] = nested_update_cache_.emplace(for_stmt.get(), std::unordered_set<const Var*>{});
-    if (inserted) {
-      const auto nested_index = BuildLoopBodyDepIndex(
-          for_stmt->body_, array_aliases_,
-          [this](const ForStmtPtr& nested_for, std::unordered_set<const Var*>* nested_updates) {
-            CollectNestedArrayUpdates(nested_for, nested_updates);
-          });
-      it->second = std::move(nested_index.updated_arrays);
+    const auto& summary = GetLoopSummary(for_stmt);
+    MergeLoopSafetyInfo(index, summary);
+    if (!include_consumers) return;
+    const auto trip_count = EvalConstTripCount(for_stmt);
+    if (!trip_count.known || trip_count.count <= 0) return;
+    for (const Var* key : summary.dep_array_order) {
+      auto it = summary.dep_arrays.find(key);
+      if (it == summary.dep_arrays.end()) continue;
+      MergeDepArrayInfo(index, key, it->second, trip_count.count);
     }
-    updated_arrays->insert(it->second.begin(), it->second.end());
+  }
+
+  const LoopBodyDepIndex& GetLoopSummary(const ForStmtPtr& for_stmt) {
+    auto it = loop_summary_cache_.find(for_stmt.get());
+    if (it != loop_summary_cache_.end()) return it->second;
+    auto [inserted_it, inserted] = loop_summary_cache_.emplace(for_stmt.get(), LoopBodyDepIndex{});
+    if (inserted) {
+      inserted_it->second = BuildLoopBodyDepIndex(
+          for_stmt->body_, array_aliases_,
+          [this](const ForStmtPtr& nested_for, LoopBodyDepIndex* nested_index, bool include_consumers) {
+            MergeNestedLoopSummary(nested_for, nested_index, include_consumers);
+          },
+          for_stmt->kind_ == ForKind::Sequential);
+    }
+    return inserted_it->second;
   }
 
   std::vector<BarrierDecision> BuildDecisions(const ForStmtPtr& for_stmt, const StmtPtr& body) {
@@ -350,9 +382,11 @@ class ManualPhaseFenceMutator : public IRMutator {
     std::unordered_set<const Var*> current_iter_args;
     RegisterLoopArrayAliases(for_stmt);
     const auto body_index = BuildLoopBodyDepIndex(
-        body, array_aliases_, [this](const ForStmtPtr& nested_for, std::unordered_set<const Var*>* updates) {
-          CollectNestedArrayUpdates(nested_for, updates);
-        });
+        body, array_aliases_,
+        [this](const ForStmtPtr& nested_for, LoopBodyDepIndex* index, bool include_consumers) {
+          MergeNestedLoopSummary(nested_for, index, include_consumers);
+        },
+        for_stmt->kind_ == ForKind::Sequential);
 
     auto try_add = [&](const VarPtr& match_var, const VarPtr& barrier_source_var, int64_t consumer_count,
                        const std::unordered_set<const Call*>& consumers) {
@@ -369,8 +403,9 @@ class ManualPhaseFenceMutator : public IRMutator {
     };
 
     const bool is_parallel = for_stmt->kind_ == ForKind::Parallel;
-    int64_t trip_count = is_parallel ? EvalConstTripCount(for_stmt) : 1;
-    if (is_parallel && trip_count <= 0) return decisions;
+    const auto trip_count = EvalConstTripCount(for_stmt);
+    if (is_parallel && (!trip_count.known || trip_count.count <= 0)) return decisions;
+    if (for_stmt->kind_ == ForKind::Sequential && trip_count.known && trip_count.count <= 0) return decisions;
 
     for (const auto& iter_arg : for_stmt->iter_args_) {
       if (iter_arg) current_iter_args.insert(iter_arg.get());
@@ -387,7 +422,7 @@ class ManualPhaseFenceMutator : public IRMutator {
         continue;
       }
       int64_t consumers = info.consumer_count;
-      if (is_parallel) consumers *= trip_count;
+      if (trip_count.known && trip_count.count > 0) consumers *= trip_count.count;
       try_add(dep_array, dep_array, consumers, info.consumers);
     }
 
@@ -421,7 +456,7 @@ class ManualPhaseFenceMutator : public IRMutator {
   bool in_manual_scope_ = false;
   int64_t barrier_counter_ = 0;
   ArrayAliasMap array_aliases_;
-  std::unordered_map<const ForStmt*, std::unordered_set<const Var*>> nested_update_cache_;
+  std::unordered_map<const ForStmt*, LoopBodyDepIndex> loop_summary_cache_;
 };
 
 ProgramPtr TransformExpandManualPhaseFence(const ProgramPtr& program) {
