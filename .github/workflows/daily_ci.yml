@@ -186,6 +186,16 @@ jobs:
           pip install -v ./runtime
 
       - name: Run A5 system tests
+        env:
+          # qwen3 decode scope-3 mixed stalls with sched_error_code=100
+          # (PTO2_ERROR_SCHEDULER_TIMEOUT) and orch_error_code=0: the
+          # scheduler idles to its ~20s timeout while the orchestrator is
+          # blocked on a full task ring (it has not yet hit its own
+          # spin-count FATAL detector, so it reports no error). Per
+          # RUNTIME_LOGIC.md §4.5 a task ring smaller than the largest
+          # PTO2_SCOPE deadlocks; the default window (16384) is too small
+          # for this mixed kernel. Size it up.
+          PTO2_RING_TASK_WINDOW: "65536"
         run: |
           task-submit --timeout 1800 --max-time 1800 --device 1 \
             --run "pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --forked --platform=a5 --device=1 --pto-isa-commit=2c607938 \
