@@ -13,19 +13,29 @@ GM rows fused in one ``CORE_GROUP`` scope.
 A single ``pl.matmul`` writes its FP32 result into a scope-local
 ``create_tensor`` (``kv_final``); a per-row loop then casts each row and
 scatters it to a **distinct, strided** GM row of ``cache`` (row ``b * CACHE``).
-On Ascend910B this AIV scatter loop is lowered through SplitVectorKernel's
-no-split dual-AIV dispatch path. Before the fix, lane 1 was replayed as an empty
-no-op (``valid_shape=[0, 0]`` + dropped store), so the rows it owned came back
-all-zero. With iteration-space splitting, each of the two AIV sub-blocks runs a
-disjoint half of the loop and writes real data, so every scattered row is
-populated.
+On Ascend910B this lowers to an AIC cube kernel (the matmul, storing ``kv_final``
+to GM) and an AIV vector kernel (the scatter, reading ``kv_final`` back from GM).
+
+Two independent codegen bugs corrupted the output (both fixed in this change):
+
+1. **Scratch aliased onto the output.** ``FuseCreateAssembleToSlice`` resolved
+   the windowed group call's return to the first ``Out``/``InOut`` param, which
+   was the ``InOut`` scratch ``kv_final``, and fused its ``tensor.create`` into a
+   ``tensor.slice`` of ``cache``. The FP32 matmul result then landed on top of
+   the BF16 output. Fixed by matching the return root by shape+dtype.
+2. **Missing cube->vector fence.** ``ExpandMixedKernel`` only fenced a GM
+   store/load pair in the same body, so the top-level cube store feeding the
+   in-loop vector load got no tpush/tpop. The AIV raced ahead and read
+   ``kv_final`` before the matmul store landed, so the first scatter iterations
+   (``b = 0, 1`` -> rows 0 and 256) came back zero. Fixed by hoisting the fence
+   tpop before the consumer loop.
 
 **Why these inputs are discriminating.** ``x[b, :] = b + 1`` (row-constant,
 distinct per row) and ``w`` is all-ones, so ``kv_final[b, :] = 64 * (b + 1)`` —
 distinct per row and exactly representable in BF16 (≤ 4 significant bits), so the
 cast is bit-exact and the golden matches without tolerance slack. The unwritten
-rows of ``cache`` stay zero. If lane 1's rows (``b = 8..15``) regress to zero,
-they mismatch the nonzero golden immediately.
+rows of ``cache`` stay zero. Any row that regresses (a raced cube->vec read, or
+an FP32 scratch byte scribbled over the output) mismatches the golden at once.
 """
 
 from typing import Any
@@ -79,19 +89,15 @@ class FusedMatmulScatterProgram:
 @pl.program
 class FusedMatmulScatterNoSplitProgram:
     """Exact #1564 repro: identical to ``FusedMatmulScatterProgram`` but the scope
-    requests ``pl.split(pl.SplitMode.NONE)``. This is the **failing** variant.
+    requests ``pl.split(pl.SplitMode.NONE)``. This was the originally-reported
+    failing variant.
 
-    On Ascend910B this mixed (cube + vector) kernel cannot be split, so
-    ``ExpandMixedKernel`` tags the AIV function ``dual_aiv_dispatch=True`` and
-    ``SplitVectorKernel`` takes the no-split dual-AIV path: it wraps the body in
-    ``if subblock_idx == 0: <original> else: <replay>`` where the replay keeps the
-    AIC<->AIV handshake but **drops every tile.store** and forces tile producers
-    to ``valid_shape=[0, 0]``. That model assumes lane 0 alone can do all the real
-    work — true for a wholesale-consumed cube result, but false here: the per-row
-    scatter writes B distinct GM rows and the cube result is partitioned across the
-    two AIV sub-blocks. The rows owned by sub-block 1 are never scattered and come
-    back all-zero, so the test fails. ``FusedMatmulScatterProgram``
-    (``SplitMode.LEFT_RIGHT``) is the passing baseline for the same compute."""
+    The failure was never split-mode-specific: ``NONE`` and ``LEFT_RIGHT`` lower
+    to the same orchestration and the same cube->vector GM handoff, so both hit
+    the two bugs described in the module docstring — the FP32 scratch ``kv_final``
+    aliased onto ``cache`` (``FuseCreateAssembleToSlice``) and the unfenced
+    cube->vector read race (``ExpandMixedKernel``). Both variants are kept as
+    regression coverage; both must pass."""
 
     @pl.function(type=pl.FunctionType.Opaque)
     def fused(
