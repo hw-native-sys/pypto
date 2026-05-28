@@ -153,9 +153,7 @@ def dump_manifest(dump_tag_run, test_config) -> tuple[list[dict], Path, Path]:
     assert manifest_path.exists(), f"tensor_dump.json not found at {manifest_path}"
 
     manifest = json.loads(manifest_path.read_text())
-    assert isinstance(manifest, dict), (
-        f"tensor_dump.json should hold a dict, got {type(manifest).__name__}"
-    )
+    assert isinstance(manifest, dict), f"tensor_dump.json should hold a dict, got {type(manifest).__name__}"
     entries = manifest.get("tensors")
     assert isinstance(entries, list), (
         f"tensor_dump.json['tensors'] should be a list, got {type(entries).__name__}"
@@ -187,9 +185,7 @@ class TestDumpTagManifest:
         entries, manifest_path, _ = dump_manifest
         for i, entry in enumerate(entries):
             for field, expected_type in _REQUIRED_FIELDS.items():
-                assert field in entry, (
-                    f"{manifest_path}: entry[{i}] missing required field {field!r}"
-                )
+                assert field in entry, f"{manifest_path}: entry[{i}] missing required field {field!r}"
                 assert isinstance(entry[field], expected_type), (
                     f"{manifest_path}: entry[{i}].{field} has type "
                     f"{type(entry[field]).__name__}, expected {expected_type}"
@@ -217,15 +213,12 @@ class TestDumpTagManifest:
 
     def test_simpler_dump_viewer_can_decode_a_sample(self, dump_manifest):
         """The simpler-provided ``dump_viewer`` parses the manifest + binary."""
-        from simpler_setup.tools.dump_viewer import decode_elements, read_tensor_data
+        from simpler_setup.tools.dump_viewer import decode_elements, read_tensor_data  # noqa: PLC0415
 
         entries, _, bin_path = dump_manifest
 
         sample = next(
-            (
-                e for e in entries
-                if e["bin_size"] > 0 and not e.get("overwritten") and not e.get("truncated")
-            ),
+            (e for e in entries if e["bin_size"] > 0 and not e.get("overwritten") and not e.get("truncated")),
             None,
         )
         assert sample is not None, "no decodable entry in tensor_dump.json (all overwritten/truncated/empty)"
