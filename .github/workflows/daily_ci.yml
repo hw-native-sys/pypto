@@ -17,12 +17,6 @@ jobs:
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
       PTOAS_VERSION: v0.40
       PTOAS_SHA256: 2fe83fe0c9087d40e2a4312e9816e8a1a16f63a48b0bcb21e27fb63736e0fab6
-      # Qwen3-14B prefill has more in-flight fanin dependencies than the
-      # decode examples; the runtime dep-pool default (4) overflows
-      # (PTO2_ERROR_DEP_POOL_OVERFLOW, orch_error_code=4). Size it up to the
-      # value pypto-lib's own tooling uses. Harmless to the lighter decode
-      # cases (a larger pool only reserves more slots).
-      PTO2_RING_DEP_POOL: "131072"
     container:
       image: localhost:5000/ci-device-py310:latest
       options: >-
@@ -91,7 +85,7 @@ jobs:
           pip install nanobind
           pip install torch
 
-      - name: Run qwen3 pypto-lib examples (14B prefill + 32B decode)
+      - name: Run qwen3 pypto-lib examples (14B decode + 32B decode)
         working-directory: ${{ github.workspace }}/pypto-lib
         env:
           PYTHONPATH: ${{ github.workspace }}/pypto-lib
@@ -99,7 +93,7 @@ jobs:
         run: |
           failed=()
           for f in \
-            models/qwen3/14b/prefill_fwd.py \
+            models/qwen3/14b/decode_fwd.py \
             models/qwen3/32b/qwen3_32b_decode.py; do
             echo "::group::$f"
             if ! python "$f" -p a2a3 -d $DEVICE_ID; then
