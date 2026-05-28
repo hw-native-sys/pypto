@@ -245,20 +245,28 @@ jobs:
           cd "$PTO_ISA_ROOT"
           git checkout 2c607938
 
-      - name: Bootstrap conda + CANN env
-        # Activate conda py310 + source CANN set_env.sh, then dump the whole
-        # env into $GITHUB_ENV so later steps inherit it.
-        # LD_LIBRARY_PATH is prepended with $CONDA_PREFIX/lib because ptoas
-        # needs GLIBCXX_3.4.29 (system libstdc++ is too old).
+      - name: Bootstrap conda + per-job venv + write activate.sh
+        # Set up a per-job venv layered on conda py310 and generate
+        # activate.sh so each later step enters the env with a single
+        # `source activate.sh`
+        #
+        # LD_LIBRARY_PATH is prepended with $CONDA_PREFIX/lib because
+        # ptoas needs GLIBCXX_3.4.29 (system libstdc++ is too old).
         run: |
           source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
           conda activate py310
+          python -m venv venv --system-site-packages
+          cat > activate.sh <<'EOF'
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          source "$GITHUB_WORKSPACE/dist-checkout/venv/bin/activate"
           source /usr/local/Ascend/cann-9.0.0/set_env.sh
           export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-          env | grep -vE '^(_=|SHLVL=|PWD=|OLDPWD=|PS1=|PROMPT_COMMAND=|GITHUB_|RUNNER_|INPUT_)' >> "$GITHUB_ENV"
+          EOF
 
       - name: Install project and dependencies
         run: |
+          source activate.sh
           rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
           python -m pip install --upgrade pip
           pip install scikit-build-core nanobind cmake ninja
@@ -267,7 +275,9 @@ jobs:
 
       - name: Test distributed system tests
         timeout-minutes: 10
-        run: pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938 --ignore=tests/st/distributed/test_l2_multi_orch.py
+        run: |
+          source activate.sh
+          pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938 --ignore=tests/st/distributed/test_l2_multi_orch.py
 
   pypto-lib-model:
     runs-on: [self-hosted, linux, arm64, npu]
