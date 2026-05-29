@@ -1509,14 +1509,27 @@ void OpConversionRegistry::RegisterScatterOps() {
           return emit("tile.reshape", {src, MakeShapeTuple(shape, span)}, {}, name);
         };
 
-        // row_arange[i] = i  (contiguous arange reshaped to [N, 1]).
-        auto row_flat = emit("tile.ci", {make_idx_dt(0), MakeShapeTuple({one, make_idx(n)}, span)}, ci_kw,
-                             "scatter_ci_rows");
-        auto row_ar = reshape_to(row_flat, {make_idx(n), one}, "scatter_row_arange");
-        // row_base[i] = i * dst_cols  (shape [N, 1]).
-        auto row_base = emit("tile.muls", {row_ar, make_idx_dt(cols)}, {}, "scatter_row_base");
-        // flat_idx[i, j] = index[i, j] + row_base[i]  (row-broadcast add → [N, K]).
-        auto flat_idx = emit("tile.row_expand_add", {args[1], row_base}, {}, "scatter_flat_idx");
+        // flat_idx[i, j] = i * dst_cols + index[i, j], built from a per-row base
+        // offset broadcast across the columns.
+        ExprPtr flat_idx;
+        if (n == 1) {
+          // Single source row: the only row base offset is 0 * dst_cols = 0, so
+          // the flat index equals the column index directly. Emitting the row
+          // arange here would create a tile.ci of shape [1, 1], which trips the
+          // pto.tci "innermost dim (Cols) != 1" ISA constraint (see
+          // DeduceTileCiType in src/ir/op/tile_ops/memory.cpp). That constraint
+          // is about column vectors, not a 1-row scatter, so skip the arange.
+          flat_idx = args[1];
+        } else {
+          // row_arange[i] = i  (contiguous arange reshaped to [N, 1]).
+          auto row_flat = emit("tile.ci", {make_idx_dt(0), MakeShapeTuple({one, make_idx(n)}, span)}, ci_kw,
+                               "scatter_ci_rows");
+          auto row_ar = reshape_to(row_flat, {make_idx(n), one}, "scatter_row_arange");
+          // row_base[i] = i * dst_cols  (shape [N, 1]).
+          auto row_base = emit("tile.muls", {row_ar, make_idx_dt(cols)}, {}, "scatter_row_base");
+          // flat_idx[i, j] = index[i, j] + row_base[i]  (row-broadcast add → [N, K]).
+          flat_idx = emit("tile.row_expand_add", {args[1], row_base}, {}, "scatter_flat_idx");
+        }
 
         // pto.tscatter only writes the scattered positions and does NOT preserve
         // the destination's other elements (its `dst` operand is treated as

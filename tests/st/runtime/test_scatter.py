@@ -40,6 +40,10 @@ expected output and passed. To make every test discriminating, here:
 
 Row counts (B) also satisfy the lowering's internal arange alignment
 (rows*sizeof(indexes) % 32 == 0): B=8 for the i32 path, B=16 for the i16 path.
+A separate B=1 FP32 case is the regression for issue #1586: a single-row scatter
+must not emit a ``[1, 1]`` ``tile.ci`` (which the ``pto.tci`` Cols!=1 ISA check
+rejects) — the lone row's base offset is 0, so the column index is the flat index
+directly.
 
 BF16 works because the scatter lowering rebuilds the DPS-preserve blend with a
 select (``out = sel(mask != 0, scattered, input)``) rather than ``input * mask``
@@ -227,6 +231,31 @@ class ScatterINT16Program:
         return output
 
 
+@pl.program
+class Scatter1RowProgram:
+    """Single-row dst/src/index, FP32 + INT32 (regression for issue #1586).
+
+    Before the fix, the scatter lowering built its per-row base arange with a
+    ``tile.ci`` of shape ``[1, rows]``; for ``rows == 1`` that is ``[1, 1]``,
+    which trips the ``pto.tci`` "innermost dim (Cols) != 1" ISA check and fails
+    compilation in ``convert_tensor_to_tile_ops``. With ``rows == 1`` the row
+    base offset is always 0, so the lowering now uses the column index directly.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        base: pl.Tensor[[1, 16], pl.FP32],
+        idx: pl.Tensor[[1, 8], pl.INT32],
+        val: pl.Tensor[[1, 8], pl.FP32],
+        output: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+    ) -> pl.Tensor[[1, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(base, dim=-1, index=idx, src=val)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
 # --- Test cases ---
 
 
@@ -316,6 +345,19 @@ class ScatterRepeatLastWinsTestCase(_ScatterBaseTestCase):
         return ScatterFP32Program
 
 
+class Scatter1RowTestCase(_ScatterBaseTestCase):
+    """Single-row scatter (regression for issue #1586)."""
+
+    def get_name(self) -> str:
+        return "scatter_1row"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_specs(1, 16, 8, DataType.FP32, torch.float32, DataType.INT32, torch.int32)
+
+    def get_program(self) -> Any:
+        return Scatter1RowProgram
+
+
 # --- Tests ---
 
 
@@ -350,6 +392,11 @@ class TestScatterIndexForm:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_scatter_repeat_last_wins(self, test_runner, platform):
         result = test_runner.run(ScatterRepeatLastWinsTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_1row(self, test_runner, platform):
+        result = test_runner.run(Scatter1RowTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
