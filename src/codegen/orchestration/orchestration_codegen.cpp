@@ -2214,7 +2214,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
       if (elem.index < 0) continue;
       size_t elem_pos = static_cast<size_t>(elem.index);
 
-      // Resolve the callee param index this tuple element writes back to.
+      // A scalar return position carries no runtime output tensor — the device
+      // cannot hand a scalar back through task submission. Materialize a safe
+      // default so a downstream reference / loop-carry write-back stays
+      // compilable. This must run *before* the param-writeback aliasing below:
+      // a scalar loop carry reused across scopes (issue #1580) is promoted into
+      // the carry tuple mixed with tensors and traces to a scalar param via the
+      // precise map, so EmitTensorAlias would otherwise bind a ``const Tensor&``
+      // to that ``int64_t`` carry. Also covers an untraced leading aux scalar
+      // (e.g. an SPMD loop iv), the legacy non-param-writeback case.
+      if (auto st = As<ScalarType>(elem.var->GetType())) {
+        if (effective_uses_.count(elem.var)) {
+          std::string elem_name = ReserveVarEmitName(elem.var);
+          code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
+        }
+        continue;
+      }
+
+      // Resolve the callee param index this tensor element writes back to.
       std::optional<size_t> param_idx_opt;
       if (precise) {
         if (elem_pos < ret_param_map.size()) param_idx_opt = ret_param_map[elem_pos];
@@ -2223,18 +2240,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (out_pos < out_indices.size()) param_idx_opt = out_indices[out_pos];
       }
 
-      if (!param_idx_opt) {
-        // Not a param writeback: a leading auxiliary value (e.g. an SPMD loop
-        // iv). They carry no runtime output. If such a scalar is referenced
-        // later, materialize a safe default so generated code stays compilable.
-        if (effective_uses_.count(elem.var)) {
-          std::string elem_name = ReserveVarEmitName(elem.var);
-          if (auto st = As<ScalarType>(elem.var->GetType())) {
-            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
-          }
-        }
-        continue;
-      }
+      // Not a param writeback (untraced tensor / out-of-range): leave it
+      // undeclared, the same fall-through as before.
+      if (!param_idx_opt) continue;
 
       size_t param_idx = *param_idx_opt;
       INTERNAL_CHECK_SPAN(param_idx < call->args_.size(), call->span_)
@@ -2338,6 +2346,22 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
       // A kernel result element. Skip the trailing TaskId / out-of-range.
       if (elem_pos >= n_outs) continue;
+
+      // A scalar return position carries no runtime output (the device cannot
+      // hand a scalar back through task submission). Materialize a safe default
+      // *before* the param-writeback aliasing below — a scalar loop carry
+      // reused across scopes (issue #1580) traces to a scalar param via the
+      // precise map, and EmitTensorAlias would otherwise bind a ``const
+      // Tensor&`` to that ``int64_t`` carry. Also covers an untraced leading
+      // aux scalar (e.g. an SPMD loop iv).
+      if (auto st = As<ScalarType>(elem.var->GetType())) {
+        if (effective_uses_.count(elem.var)) {
+          std::string elem_name = ReserveVarEmitName(elem.var);
+          code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
+        }
+        continue;
+      }
+
       std::optional<size_t> param_idx_opt;
       if (precise) {
         if (elem_pos < ret_param_map.size()) param_idx_opt = ret_param_map[elem_pos];
@@ -2345,18 +2369,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
         size_t out_pos = elem_pos - tuple_out_base;
         if (out_pos < out_indices.size()) param_idx_opt = out_indices[out_pos];
       }
-      if (!param_idx_opt) {
-        // Leading aux scalar / untraced position: no runtime output. If it is
-        // referenced later, materialize a safe scalar default so the generated
-        // code stays compilable (mirrors GenerateTupleReturnAliases).
-        if (effective_uses_.count(elem.var)) {
-          std::string elem_name = ReserveVarEmitName(elem.var);
-          if (auto st = As<ScalarType>(elem.var->GetType())) {
-            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
-          }
-        }
-        continue;
-      }
+      // Not a param writeback (untraced tensor / out-of-range): leave it
+      // undeclared, the same fall-through as before.
+      if (!param_idx_opt) continue;
       if (!effective_uses_.count(elem.var)) continue;
       size_t param_idx = *param_idx_opt;
       INTERNAL_CHECK_SPAN(param_idx < callee->params_.size(), call->span_)
