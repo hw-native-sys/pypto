@@ -246,11 +246,15 @@ class PassContext {
    *        DiagnosticCheck enum (default: UnusedControlFlowResult).
    *        Performance hints are on by default; disable individual hints by
    *        adding their DiagnosticCheck values here.
+   * @param enable_out_window_externalization Allow out-window externalization
+   *        at call sites that are conservatively skipped by default because a
+   *        later full-parent read may need parent/view dependency tracking.
    */
   explicit PassContext(std::vector<PassInstrumentPtr> instruments,
                        VerificationLevel verification_level = VerificationLevel::Basic,
                        DiagnosticPhase diagnostic_phase = DiagnosticPhase::PrePipeline,
-                       DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult});
+                       DiagnosticCheckSet disabled_diagnostics = {DiagnosticCheck::UnusedControlFlowResult},
+                       bool enable_out_window_externalization = false);
 
   /**
    * @brief Push this context onto the thread-local stack
@@ -304,6 +308,11 @@ class PassContext {
   [[nodiscard]] const std::vector<PassInstrumentPtr>& GetInstruments() const;
 
   /**
+   * @brief Whether explicit out-window externalization is enabled for guarded call sites.
+   */
+  [[nodiscard]] bool GetEnableOutWindowExternalization() const;
+
+  /**
    * @brief Get the currently active context (top of thread-local stack)
    * @return Pointer to current context, or nullptr if none
    */
@@ -327,6 +336,7 @@ class PassContext {
   VerificationLevel verification_level_;
   DiagnosticPhase diagnostic_phase_;
   DiagnosticCheckSet disabled_diagnostics_;
+  bool enable_out_window_externalization_;
   PassContext* previous_;
 
   static thread_local PassContext* current_;

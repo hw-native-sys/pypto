@@ -36,6 +36,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
+#include "pypto/ir/transforms/pass_context.h"
 #include "pypto/ir/transforms/pass_properties.h"
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
@@ -2408,7 +2409,11 @@ class OutWindowExternalizer {
 
       if (analysis.outputs.empty()) return std::nullopt;
       if (!ProveCallsiteDisjointness(call_assign, call, analysis)) return std::nullopt;
-      if (HasLaterFullParentReadOfRewrittenOutput(call, analysis)) return std::nullopt;
+      auto* ctx = PassContext::Current();
+      const bool enable_out_window_externalization = ctx && ctx->GetEnableOutWindowExternalization();
+      if (!enable_out_window_externalization && HasLaterFullParentReadOfRewrittenOutput(call, analysis)) {
+        return std::nullopt;
+      }
 
       std::unordered_map<const Var*, ExprPtr> callsite_subst;
       for (size_t i = 0; i < original_func->params_.size() && i < call->args_.size(); ++i) {

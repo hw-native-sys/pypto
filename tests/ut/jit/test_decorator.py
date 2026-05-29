@@ -1502,6 +1502,7 @@ class TestCompileKwargForwarding:
             compile_profiling=True,
             save_kernels_dir=str(artifacts_dir),
             block_dim=8,
+            enable_out_window_externalization=True,
         )
         kwargs = _run_config_compile_kwargs(cfg)
         assert kwargs["strategy"] == OptimizationStrategy.DebugTileOptimization
@@ -1510,6 +1511,7 @@ class TestCompileKwargForwarding:
         assert kwargs["output_dir"] == str(artifacts_dir)  # from RunConfig.save_kernels_dir
         assert "diagnostic_phase" in kwargs
         assert "disabled_diagnostics" in kwargs
+        assert kwargs["enable_out_window_externalization"] is True
         # backend_type is derived from `platform` by ir.compile(); not forwarded.
         assert "backend_type" not in kwargs
         # block_dim is a runtime dispatch param — execute_compiled re-supplies

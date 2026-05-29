@@ -56,6 +56,7 @@ class TestMakeCacheKey:
         scalar_values=None,
         platform=None,
         strategy=None,
+        enable_out_window_externalization=False,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -66,6 +67,7 @@ class TestMakeCacheKey:
             scalar_values=scalar_values or {},
             platform=platform,
             strategy=strategy,
+            enable_out_window_externalization=enable_out_window_externalization,
         )
 
     def test_basic_key_structure(self):
@@ -75,11 +77,12 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
         )
         assert isinstance(key, tuple)
-        assert len(key) == 5
-        source_hash, platform, strategy, tensor_part, scalar_part = key
+        assert len(key) == 6
+        source_hash, platform, strategy, enable_out_window_externalization, tensor_part, scalar_part = key
         assert source_hash == "abc"
         assert platform is None
         assert strategy is None
+        assert enable_out_window_externalization is False
         assert isinstance(tensor_part, tuple)
         assert isinstance(scalar_part, tuple)
 
@@ -89,7 +92,7 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (128, 64)},
             tensor_dtypes={"a": DataType.FP32},
         )
-        _, _, _, tensor_part, _ = key
+        _, _, _, _, tensor_part, _ = key
         assert len(tensor_part) == 1
         info = tensor_part[0]
         assert info.name == "a"
@@ -103,7 +106,7 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
         )
-        _, _, _, tensor_part, _ = key
+        _, _, _, _, tensor_part, _ = key
         assert tensor_part[0].shape == (None, 128)
 
     def test_dynamic_dim_cache_hit_on_different_concrete_value(self):
@@ -151,7 +154,7 @@ class TestMakeCacheKey:
             param_names=["BLOCK_M"],
             scalar_values={"BLOCK_M": 64},
         )
-        _, _, _, _, scalar_part = key
+        _, _, _, _, _, scalar_part = key
         assert len(scalar_part) == 1
         assert scalar_part[0].name == "BLOCK_M"
         assert scalar_part[0].value == 64
@@ -171,7 +174,7 @@ class TestMakeCacheKey:
             dynamic_dims=set(),
             scalar_values={},
         )
-        _, _, _, tensor_part, _ = key
+        _, _, _, _, tensor_part, _ = key
         assert tensor_part[0].name == "b"
         assert tensor_part[1].name == "a"
 
@@ -296,6 +299,22 @@ class TestMakeCacheKey:
             strategy=OptimizationStrategy.Default,
         )
         assert k_none != k_named
+
+    def test_out_window_switch_causes_miss(self):
+        """The out-window switch changes pass output, so it must split JIT cache entries."""
+        k_disabled = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            enable_out_window_externalization=False,
+        )
+        k_enabled = self._make_key(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+            enable_out_window_externalization=True,
+        )
+        assert k_disabled != k_enabled
 
     def test_key_with_strategy_is_hashable(self):
         key = self._make_key(

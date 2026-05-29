@@ -95,6 +95,7 @@ Safety rules:
 - multi-`Out` rewrite is all-or-nothing
 - sequential-loop siblings are rewritten only when every rewritten `Out` can be proven disjoint across sibling iterations
 - call-site externalization is skipped when a rewritten window output's buffer root is later read as a full-parent tensor in the enclosing orchestration scope; until the runtime has root-aware view/parent dependency tracking, this preserves auto dependency tracking on the same parent `Tensor`
+- callers can explicitly opt into those guarded call-site rewrites with `enable_out_window_externalization=True` on `PassContext`, `ir.compile()`, or runtime `RunConfig`; the default remains conservative
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only makes disjoint windows explicit before that pass runs
 
 ## Example (Pattern 1)

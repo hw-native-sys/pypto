@@ -1305,6 +1305,45 @@ class TestOutWindowExternalizer:
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "pl.tensor.slice(out" not in printed_main
 
+    def test_out_window_switch_allows_later_parent_read_externalization(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_stripe(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                ret: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile, [row_offset, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume_full(
+                self,
+                out: pl.Tensor[[256, 64], pl.FP32],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                out: pl.Tensor[[256, 64], pl.FP32] = pl.full([256, 64], dtype=pl.FP32, value=0.0)
+                row: pl.Scalar[pl.INDEX] = 64
+                out_next: pl.Tensor[[256, 64], pl.FP32] = self.kernel_stripe(data, row, out)
+                return self.consume_full(out_next)
+
+        with passes.PassContext([], enable_out_window_externalization=True):
+            After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("kernel_stripe__windowed") is not None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "pl.tensor.slice(out" in printed_main
+        assert "self.kernel_stripe__windowed" in printed_main
+
     def test_loop_returned_output_later_parent_read_stays_baseline(self):
         @pl.program
         class Before:

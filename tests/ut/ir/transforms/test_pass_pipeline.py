@@ -302,11 +302,17 @@ class TestVerificationLevel:
         """PassContext defaults to Basic verification level."""
         ctx = passes.PassContext([])
         assert ctx.get_verification_level() == passes.VerificationLevel.BASIC
+        assert ctx.get_enable_out_window_externalization() is False
 
     def test_pass_context_accepts_none_level(self):
         """PassContext can be created with NONE verification level."""
         ctx = passes.PassContext([], passes.VerificationLevel.NONE)
         assert ctx.get_verification_level() == passes.VerificationLevel.NONE
+
+    def test_pass_context_exposes_out_window_externalization_switch(self):
+        """PassContext carries the explicit out-window externalization switch."""
+        ctx = passes.PassContext([], enable_out_window_externalization=True)
+        assert ctx.get_enable_out_window_externalization() is True
 
     def test_verification_level_exposed_on_ir_module(self):
         """VerificationLevel is re-exported from pypto.ir."""

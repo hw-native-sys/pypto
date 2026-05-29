@@ -346,12 +346,19 @@ class PassManager:
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
         outer_phase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
+        enable_out_window_externalization = ctx.get_enable_out_window_externalization() if ctx else False
         if outer_phase == passes.DiagnosticPhase.POST_PASS:
             inner_phase = passes.DiagnosticPhase.PRE_PIPELINE
         else:
             inner_phase = outer_phase
 
-        with passes.PassContext([*outer_instruments, *extra_instruments], level, inner_phase, disabled):
+        with passes.PassContext(
+            [*outer_instruments, *extra_instruments],
+            level,
+            inner_phase,
+            disabled,
+            enable_out_window_externalization,
+        ):
             try:
                 return self._pipeline.run(input_ir)
             finally:
@@ -382,13 +389,20 @@ class PassManager:
         outer_instruments = list(ctx.get_instruments()) if ctx else []
         level = ctx.get_verification_level() if ctx else passes.get_default_verification_level()
         dphase = ctx.get_diagnostic_phase() if ctx else passes.get_default_diagnostic_phase()
+        enable_out_window_externalization = ctx.get_enable_out_window_externalization() if ctx else False
         if ctx:
             disabled = ctx.get_disabled_diagnostics()
         else:
             disabled = passes.DiagnosticCheckSet()
             disabled.insert(passes.DiagnosticCheck.UnusedControlFlowResult)
 
-        with passes.PassContext([*outer_instruments, timing_instrument], level, dphase, disabled):
+        with passes.PassContext(
+            [*outer_instruments, timing_instrument],
+            level,
+            dphase,
+            disabled,
+            enable_out_window_externalization,
+        ):
             try:
                 return self._pipeline.run(input_ir)
             finally:

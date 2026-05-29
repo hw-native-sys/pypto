@@ -259,8 +259,9 @@ class PassContext:
         verification_level: VerificationLevel = VerificationLevel.BASIC,
         diagnostic_phase: DiagnosticPhase = DiagnosticPhase.PRE_PIPELINE,
         disabled_diagnostics: DiagnosticCheckSet = ...,  # default: {UnusedControlFlowResult}
+        enable_out_window_externalization: bool = False,
     ) -> None:
-        """Create a PassContext with instruments, verification level, phase, and disabled diagnostics."""
+        """Create a PassContext with instruments, pass settings, and the out-window switch."""
         ...
 
     def __enter__(self) -> PassContext: ...
@@ -284,6 +285,10 @@ class PassContext:
 
     def get_instruments(self) -> list[PassInstrument]:
         """Get the instruments registered on this context."""
+        ...
+
+    def get_enable_out_window_externalization(self) -> bool:
+        """Return whether guarded out-window externalization is enabled."""
         ...
 
     @staticmethod

@@ -303,11 +303,13 @@ std::string DiagnosticInstrument::GetName() const { return "DiagnosticInstrument
 // PassContext
 
 PassContext::PassContext(std::vector<PassInstrumentPtr> instruments, VerificationLevel verification_level,
-                         DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics)
+                         DiagnosticPhase diagnostic_phase, DiagnosticCheckSet disabled_diagnostics,
+                         bool enable_out_window_externalization)
     : instruments_(std::move(instruments)),
       verification_level_(verification_level),
       diagnostic_phase_(diagnostic_phase),
       disabled_diagnostics_(disabled_diagnostics),
+      enable_out_window_externalization_(enable_out_window_externalization),
       previous_(nullptr) {}
 
 VerificationLevel PassContext::GetVerificationLevel() const { return verification_level_; }
@@ -317,6 +319,8 @@ DiagnosticPhase PassContext::GetDiagnosticPhase() const { return diagnostic_phas
 const DiagnosticCheckSet& PassContext::GetDisabledDiagnostics() const { return disabled_diagnostics_; }
 
 const std::vector<PassInstrumentPtr>& PassContext::GetInstruments() const { return instruments_; }
+
+bool PassContext::GetEnableOutWindowExternalization() const { return enable_out_window_externalization_; }
 
 void PassContext::EnterContext() {
   previous_ = current_;

@@ -60,6 +60,7 @@ def compile(  # noqa: PLR0913
     verification_level: _passes.VerificationLevel | None = None,
     diagnostic_phase: _passes.DiagnosticPhase | None = None,
     disabled_diagnostics: _passes.DiagnosticCheckSet | None = None,
+    enable_out_window_externalization: bool = False,
     profiling: bool = False,
     platform: str | None = None,
     distributed_config: Any = None,
@@ -93,6 +94,9 @@ def compile(  # noqa: PLR0913
         disabled_diagnostics: Set of diagnostic checks to disable (covers both
             warnings and performance hints). None uses the default
             (UnusedControlFlowResult disabled, perf hints enabled).
+        enable_out_window_externalization: Enable guarded out-window
+            externalization sites that are conservative by default because a
+            later full-parent read may need parent/view dependency tracking.
         profiling: If True, enable compile profiling that records per-stage
             wall-clock timings.  Results are written to ``output_dir/report/``.
         platform: Target execution platform.  One of ``"a2a3sim"``,
@@ -149,6 +153,12 @@ def compile(  # noqa: PLR0913
             "compile() was called with diagnostic_phase while a PassContext is already active. "
             "Set the diagnostic phase on the existing PassContext instead."
         )
+    if enable_out_window_externalization and outer is not None:
+        raise RuntimeError(
+            "compile() was called with enable_out_window_externalization while a "
+            "PassContext is already active. "
+            "Set the out-window externalization switch on the existing PassContext instead."
+        )
 
     # --- Compile profiling ---------------------------------------------------
     prof = get_active_profiler()
@@ -180,7 +190,14 @@ def compile(  # noqa: PLR0913
         )
         dphase = diagnostic_phase if diagnostic_phase is not None else _passes.get_default_diagnostic_phase()
         disabled = disabled_diagnostics if disabled_diagnostics is not None else default_disabled
-    ctx = _passes.PassContext(instruments, vlevel, dphase, disabled)
+    outer_out_window = outer.get_enable_out_window_externalization() if outer is not None else False
+    ctx = _passes.PassContext(
+        instruments,
+        vlevel,
+        dphase,
+        disabled,
+        enable_out_window_externalization or outer_out_window,
+    )
 
     def _stage(name: str) -> AbstractContextManager[Any]:
         if prof is not None:

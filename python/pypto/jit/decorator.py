@@ -951,6 +951,7 @@ def _run_config_compile_kwargs(run_config: Any) -> dict[str, Any]:
         "profiling": run_config.compile_profiling,
         "diagnostic_phase": run_config.diagnostic_phase,
         "disabled_diagnostics": run_config.disabled_diagnostics,
+        "enable_out_window_externalization": run_config.enable_out_window_externalization,
     }
     if run_config.save_kernels_dir is not None:
         kwargs["output_dir"] = run_config.save_kernels_dir
@@ -1214,6 +1215,9 @@ class JITFunction:
 
         platform = run_config.platform if run_config is not None else None
         strategy = run_config.strategy if run_config is not None else OptimizationStrategy.Default
+        enable_out_window_externalization = (
+            run_config.enable_out_window_externalization if run_config is not None else False
+        )
         key = make_cache_key(
             source_hash=self._get_source_hash(),
             param_names=param_names,
@@ -1223,6 +1227,7 @@ class JITFunction:
             scalar_values=scalar_values,
             platform=platform,
             strategy=strategy,
+            enable_out_window_externalization=enable_out_window_externalization,
         )
 
         # L1 cache lookup

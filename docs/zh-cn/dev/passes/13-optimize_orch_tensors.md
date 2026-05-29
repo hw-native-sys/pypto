@@ -95,6 +95,7 @@ out = pl.tensor.assemble(out, out_window_next, offset)
 - multi-`Out` 改写采用全有或全无策略
 - 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写
 - 如果被改写的窗口输出所属 buffer root 后续会在外围 orchestration scope 中以完整 parent tensor 形式读取，则跳过该 call-site externalization；在 runtime 尚未具备 view/parent root-aware 依赖跟踪前，这能让自动依赖继续落在同一个 parent `Tensor` 上
+- 调用方可以在 `PassContext`、`ir.compile()` 或 runtime `RunConfig` 上设置 `enable_out_window_externalization=True`，显式开启这些默认被保护的 call-site 改写；默认行为仍保持保守
 - `DeriveCallDirections` 保持现有 sound 的顺序 `Out -> InOut` 规则；Pattern 5 只是在该 pass 运行前显式化不重叠窗口
 
 ## 示例（模式 1）

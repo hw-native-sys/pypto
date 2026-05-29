@@ -73,12 +73,14 @@ class ScalarCacheInfo:
 
 
 # A cache key is a tuple of
-# (source_hash, platform, strategy, tensor_infos, scalar_infos).
+# (source_hash, platform, strategy, enable_out_window_externalization,
+# tensor_infos, scalar_infos).
 # Using a plain tuple keeps it hashable without a custom __hash__.
 CacheKey = tuple[
     str,
     str | None,
     "OptimizationStrategy | None",
+    bool,
     tuple[TensorCacheInfo, ...],
     tuple[ScalarCacheInfo, ...],
 ]
@@ -113,6 +115,7 @@ def make_cache_key(
     scalar_values: dict[str, int | float | bool],
     platform: str | None = None,
     strategy: "OptimizationStrategy | None" = None,
+    enable_out_window_externalization: bool = False,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -134,6 +137,8 @@ def make_cache_key(
             artifact; without it, calling the same kernel with two strategies
             (an A/B comparison) would return the first-compiled artifact for
             both.
+        enable_out_window_externalization: Out-window externalization switch
+            that changes the compiled pass output.
 
     Returns:
         Hashable CacheKey tuple.
@@ -154,7 +159,14 @@ def make_cache_key(
             continue
         scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
 
-    return (source_hash, platform, strategy, tuple(tensor_infos), tuple(scalar_infos))
+    return (
+        source_hash,
+        platform,
+        strategy,
+        enable_out_window_externalization,
+        tuple(tensor_infos),
+        tuple(scalar_infos),
+    )
 
 
 def _key_to_hash(key: CacheKey) -> str:
