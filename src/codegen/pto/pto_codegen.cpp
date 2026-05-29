@@ -241,7 +241,7 @@ class TupleConsumerCollector : public ir::IRVisitor {
   explicit TupleConsumerCollector(const ir::Var* tuple_var, size_t arity)
       : tuple_var_(tuple_var), elements_(arity, nullptr) {}
 
-  const std::vector<ir::VarPtr>& elements() const { return elements_; }
+  [[nodiscard]] const std::vector<ir::VarPtr>& elements() const { return elements_; }
 
  protected:
   void VisitStmt_(const ir::AssignStmtPtr& op) override {
@@ -1566,21 +1566,22 @@ int64_t PTOCodegen::GetConstIntValue(const ExprPtr& expr) const {
   return 0;
 }
 
-std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
+std::string PTOCodegen::TryGetTensorView(const VarPtr& tensor_var) const {
   auto it = fs_.tensor_to_view.find(GetVarKey(tensor_var));
   if (it != fs_.tensor_to_view.end()) return it->second;
-  // For IterArg, follow initValue_ chain to the original tensor parameter
+  // For IterArg, follow initValue_ chain to the original tensor parameter.
   if (auto iter_arg = As<ir::IterArg>(tensor_var)) {
-    if (auto init_var = As<ir::Var>(iter_arg->initValue_)) {
-      return GetOrCreateTensorView(init_var);
-    }
-    if (auto init_iter = As<ir::IterArg>(iter_arg->initValue_)) {
-      return GetOrCreateTensorView(init_iter);
-    }
+    if (auto init_var = As<ir::Var>(iter_arg->initValue_)) return TryGetTensorView(init_var);
+    if (auto init_iter = As<ir::IterArg>(iter_arg->initValue_)) return TryGetTensorView(init_iter);
   }
-  INTERNAL_CHECK_SPAN(false, tensor_var->span_)
-      << "Tensor view not found for parameter: " << tensor_var->name_hint_;
   return "";
+}
+
+std::string PTOCodegen::GetOrCreateTensorView(const VarPtr& tensor_var) {
+  std::string view = TryGetTensorView(tensor_var);
+  INTERNAL_CHECK_SPAN(!view.empty(), tensor_var->span_)
+      << "Tensor view not found for parameter: " << tensor_var->name_hint_;
+  return view;
 }
 
 std::string PTOCodegen::GetTensorViewTypeString(const ir::TensorType* tensor_type) const {

@@ -110,9 +110,12 @@ class BufferRootCollector : public IRVisitor {
       } else if (op_name.find("tile.") != 0 && op_name.find("tensor.") != 0 && op_name.find("system.") != 0) {
         auto out_roots = CollectCallOutputRoots(call);
         if (As<TupleType>(call->GetType())) {
-          tuple_output_roots_[assign->var_.get()] = std::move(out_roots);
-        } else if (!out_roots.empty() && out_roots[0]) {
-          buffer_roots_[assign->var_.get()] = out_roots[0];
+          std::vector<const Var*> roots;
+          roots.reserve(out_roots.size());
+          for (const auto& entry : out_roots) roots.push_back(entry.root);
+          tuple_output_roots_[assign->var_.get()] = std::move(roots);
+        } else if (const Var* root = SelectReturnRoot(out_roots, call->GetType())) {
+          buffer_roots_[assign->var_.get()] = root;
         }
       }
     } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
@@ -132,23 +135,74 @@ class BufferRootCollector : public IRVisitor {
   }
 
  private:
-  [[nodiscard]] std::vector<const Var*> CollectCallOutputRoots(const CallPtr& call) const {
+  // A candidate output buffer: the resolved root of an Out/InOut arg, paired
+  // with that arg's type so a single return value can be matched to the param
+  // it actually aliases (see SelectReturnRoot).
+  struct OutputRoot {
+    const Var* root;
+    TypePtr type;
+  };
+
+  [[nodiscard]] std::vector<OutputRoot> CollectCallOutputRoots(const CallPtr& call) const {
     auto callee = program_->GetFunction(call->op_->name_);
     if (!callee) return {};
 
-    std::vector<const Var*> roots;
+    std::vector<OutputRoot> roots;
     for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
       if (callee->param_directions_[i] != ParamDirection::Out &&
           callee->param_directions_[i] != ParamDirection::InOut) {
         continue;
       }
+      const Var* root = nullptr;
       if (auto arg_var = AsVarLike(call->args_[i])) {
-        roots.push_back(ResolveVar(arg_var.get()));
-      } else {
-        roots.push_back(nullptr);
+        root = ResolveVar(arg_var.get());
       }
+      roots.push_back(OutputRoot{root, call->args_[i]->GetType()});
     }
     return roots;
+  }
+
+  // Pick the buffer root for a call's single (non-tuple) return value. A
+  // SubWorker group may take an InOut scratch (e.g. a matmul's kv_final)
+  // *before* its real Out param, so the first Out/InOut in param order is not
+  // necessarily the one the return aliases. Match on the return type instead.
+  // Issue #1564: without this, the FP32 scratch was fused onto the BF16 output,
+  // making tensor.create -> tensor.slice(output) alias and corrupt the result.
+  [[nodiscard]] const Var* SelectReturnRoot(const std::vector<OutputRoot>& out_roots,
+                                            const TypePtr& return_type) const {
+    if (out_roots.empty()) return nullptr;
+    if (out_roots.size() == 1) return out_roots[0].root;
+
+    const Var* match = nullptr;
+    bool ambiguous = false;
+    for (const auto& candidate : out_roots) {
+      if (candidate.root && TypesMatchShapeDtype(candidate.type, return_type)) {
+        if (match == nullptr) {
+          match = candidate.root;
+        } else if (match != candidate.root) {
+          ambiguous = true;
+        }
+      }
+    }
+    if (match && !ambiguous) return match;
+    // Ambiguous (>1 distinct match) or no provable match: do not guess. Fusion
+    // is an optimization, so skipping it (no root -> no aliasing) is always safe,
+    // whereas guessing out_roots[0] could re-alias a scratch onto the output.
+    return nullptr;
+  }
+
+  // Structural shape + dtype equality, ignoring memref / tensor_view: a return
+  // value aliases its source buffer with the same logical shape and dtype.
+  [[nodiscard]] static bool TypesMatchShapeDtype(const TypePtr& a, const TypePtr& b) {
+    auto ta = As<TensorType>(a);
+    auto tb = As<TensorType>(b);
+    if (!ta || !tb) return false;
+    if (ta->dtype_ != tb->dtype_) return false;
+    if (ta->shape_.size() != tb->shape_.size()) return false;
+    for (size_t i = 0; i < ta->shape_.size(); ++i) {
+      if (!AreExprsEqual(ta->shape_[i], tb->shape_[i])) return false;
+    }
+    return true;
   }
 
   ProgramPtr program_;

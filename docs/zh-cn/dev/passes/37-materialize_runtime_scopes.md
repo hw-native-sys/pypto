@@ -2,29 +2,32 @@
 
 向 Orchestration 函数中插入显式的 AUTO `RuntimeScopeStmt` 节点，使 PTO
 orchestration codegen 直接从 IR 中 1:1 地 emit `PTO2_SCOPE()`，而不再依据
-`for` / `if` 语句结构推导 scope。
+`for` / `if` 结构推导 scope —— 除非函数用 `@pl.function(auto_scope=False)`
+选择退出，此时由用户手工摆放每个 scope。
 
 ## 概述
 
-simpler 运行时会把 orchestration 例程的若干区域包裹在 `PTO2_SCOPE()` 块中（通过
-OverlapMap 做自动依赖追踪）。过去 orchestration codegen 依据语句结构来决定*在哪里*
-emit 这些块：它隐式地把整个函数体、每个 `ForStmt` 体、每个 `IfStmt` 分支体都包进
-`PTO2_SCOPE()`——并在 manual scope 内部抑制这种包裹，因为运行时禁止 AUTO 嵌套在
-MANUAL 之内。
+simpler 运行时把 orchestration 例程的若干区域包进 `PTO2_SCOPE()` 块（通过
+OverlapMap 做自动依赖追踪），并提供一个隐式顶层 scope。因此 scope 在编译器侧
+是一种**调优 / 放置**手段，从不是正确性要求 —— 一个函数可以一个编译器 scope
+都没有。
 
-这把 scope *策略*埋进了 printer。本 pass 把该策略移入 IR。对每个
-`FunctionType::Orchestration` 函数，它插入显式的 AUTO `RuntimeScopeStmt`
-（`manual_ = false`）节点：
+默认（`auto_scope=True`）由编译器决定 scope 放置：对每个
+`FunctionType::Orchestration` 函数，本 pass 插入 AUTO `RuntimeScopeStmt`
+（`manual_ = false`），包裹整个函数体以及每个 `ForStmt` 体和 `IfStmt` 的
+then/else 体（在 manual scope 内部抑制，因为运行时禁止 AUTO 嵌套在 MANUAL）。
+此后 codegen **只**从 `RuntimeScopeStmt` 节点 emit `PTO2_SCOPE`，与 IR 保持
+1:1（见 [orchestration codegen](../codegen/01-orchestration_codegen.md)）。
 
-- 包裹整个函数体，以及
-- 包裹每个 `ForStmt` 体和每个 `IfStmt` 的 then/else 体，
+在 `@pl.function(auto_scope=False)` 下，本 pass **什么都不插**：用户用
+`with pl.scope()` / `with pl.scope(mode=pl.ScopeMode.MANUAL)` 摆放 scope，由
+parser 直接物化进 IR。这是控制 scope 粒度（ring 隔离）、MANUAL 依赖区域以及
+完全接管的旋钮。
 
-同时在任何 manual `RuntimeScopeStmt` 内部跳过插入。此后 codegen **只**从
-`RuntimeScopeStmt` 节点 emit `PTO2_SCOPE`——与 IR 保持 1:1（参见
-[orchestration codegen](../codegen/01-orchestration_codegen.md)）。
-
-插入的 scope 拥有 DSL 表示 `with pl.auto_scope():`，因此该 IR 能像其它构造一样
-通过 printer/parser 往返（round-trip）。
+默认模式下物化 scope 后，pass 会把函数标记为 `auto_scope=False`（scope 已放置）。
+这让 pass 幂等，并让输出能 round-trip：插入的 `with pl.scope()` 块只有在
+`auto_scope=False` 下才能解析回来（parser 在默认模式下拒绝手写 AUTO scope，
+默认模式由编译器决定放置）。
 
 **何时使用**：在 `Default` 与 `DebugTileOptimization` 策略中作为最后一个 pass
 运行，位于最终的 `Simplify` 之后。放在最末意味着其它任何 transform 都无需处理
@@ -45,31 +48,25 @@ from pypto.pypto_core import passes
 scoped = passes.materialize_runtime_scopes()(program)
 ```
 
-## 算法
+## 行为
 
-`InsertAutoScopeMutator` 遍历每个 Orchestration 函数体：
+| 函数 | for/if + 函数体 | 手写 `with pl.scope()` |
+| ---- | --------------- | ---------------------- |
+| `auto_scope=True`（默认） | 自动包进 AUTO scope（manual scope 内抑制） | parser 拒绝（请用 `auto_scope=False`） |
+| `auto_scope=False` | 不自动包（pass 为 no-op） | 唯一的 scope；`with pl.scope(mode=MANUAL)` 与 `manual_scope` 别名也允许 |
 
-1. 进入 **manual** `RuntimeScopeStmt` 时递增深度计数；当计数非零时抑制 AUTO
-   插入（运行时禁止 AUTO 嵌套在 MANUAL 内）。AUTO scope 不抑制嵌套。
-2. 对每个 `ForStmt`，若其体尚未被 AUTO 包裹，则替换为
-   `RuntimeScopeStmt(manual=false, body)`。
-3. 对每个 `IfStmt`，其 then/else 体各自以相同方式包裹。
+默认模式下，`InsertAutoScopeMutator` 遍历函数体：
 
-mutator 运行后，整个函数体再被包进一个最外层 AUTO scope（对应 codegen 过去恒定
-emit 的最外层 `PTO2_SCOPE()`）。该包裹是幂等的——已是 AUTO 的函数体保持不变。
-
-| 来源 | 处理 |
-| ---- | ---- |
-| Orchestration 函数体 | 包进一个 AUTO `RuntimeScopeStmt` |
-| `ForStmt` 体（不在 manual scope 内） | 包进 AUTO `RuntimeScopeStmt` |
-| `IfStmt` then/else 体（不在 manual scope 内） | 各自包进 AUTO `RuntimeScopeStmt` |
-| manual `RuntimeScopeStmt` 内的任何体 | 保持裸露 |
-| 非 Orchestration 函数 | 原样返回 |
+1. 进入 **manual** `RuntimeScopeStmt` 时递增深度计数；计数非零时抑制 AUTO 插入
+   （禁止 AUTO-in-MANUAL）。AUTO scope 不抑制嵌套。
+2. 每个 `ForStmt` 体若未被 AUTO 包裹则包进 `RuntimeScopeStmt(manual=false)`；
+   每个 `IfStmt` 的 then/else 体同理。
+3. 随后整个函数体被包进一个最外层 AUTO scope，并把函数标记为 `auto_scope=False`。
 
 ## 示例
 
 ```python
-# Before
+# Before —— 默认 auto_scope=True
 @pl.function(type=pl.FunctionType.Orchestration)
 def orch(self, a, out):
     for i in pl.range(4):
@@ -78,26 +75,36 @@ def orch(self, a, out):
 ```
 
 ```python
-# After MaterializeRuntimeScopes
-@pl.function(type=pl.FunctionType.Orchestration)
+# After MaterializeRuntimeScopes（标记 auto_scope=False；可 round-trip）
+@pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
 def orch(self, a, out):
-    with pl.auto_scope():            # function body
+    with pl.scope():            # function body
         for i in pl.range(4):
-            with pl.auto_scope():    # loop body
+            with pl.scope():    # loop body
                 out = self.kernel(a, out)
         return out
 ```
 
-末尾的 return-var `yield` 保留在 scope 内；printer 会递归穿过 AUTO scope，从而
-保留 `var = pl.yield_(...)` 的赋值左值；parser 也会把 `pl.auto_scope()` 内的
-yield 视为外层 for/if 的 return-var。
+```python
+# 选择退出，自己摆放 scope（此处更粗的粒度：只有一个 scope）
+@pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+def orch(self, a, out):
+    with pl.scope():
+        for i in pl.range(4):
+            out = self.kernel(a, out)
+        return out
+```
+
+末尾的 return-var `yield` 保留在 scope 内；printer 会递归穿过 AUTO scope 以保留
+`var = pl.yield_(...)` 的赋值左值；parser 也会把 `pl.scope()` 内的 yield 视为
+外层 for/if 的 return-var。
 
 ## 验证
 
-**测试**：`tests/ut/ir/transforms/test_materialize_runtime_scopes.py`（函数体 +
-for/if 包裹、manual scope 抑制、幂等性、非 Orchestration 不受影响）以及
-`tests/ut/language/parser/test_auto_scope_parsing.py`（`pl.auto_scope()` 的
-解析 / round-trip / 嵌套限制）。完整的 orchestration codegen 测试套件
+**测试**：`tests/ut/ir/transforms/test_materialize_runtime_scopes.py`（auto 模式
+包裹、manual scope 抑制、幂等、opt-out no-op / scope 保留、默认模式拒绝 AUTO）
+以及 `tests/ut/language/parser/test_scope_parsing.py`（`pl.scope()` 解析 /
+round-trip / 模式 / 嵌套 / opt-out 规则）。完整 orchestration codegen 测试套件
 （`tests/ut/codegen/test_orchestration_codegen.py`）验证 emit 的 `PTO2_SCOPE`
 输出与此前由 codegen 驱动的行为逐字节一致。
 

@@ -12,6 +12,7 @@
 #ifndef PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_
 #define PYPTO_CODEGEN_PTO_PTO_CODEGEN_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -137,6 +138,19 @@ class PTOCodegen : public CodegenBase {
    * @return Tensor view name
    */
   std::string GetOrCreateTensorView(const ir::VarPtr& tensor);
+
+  /**
+   * @brief Look up the tensor view for a variable without creating/failing.
+   *
+   * Like GetOrCreateTensorView but returns an empty string when no view is
+   * registered (and none is reachable via an IterArg init chain), instead of
+   * raising. Callers that have a valid fallback (e.g. yielding a tensor that
+   * has no make_tensor_view) use this to avoid a hard failure.
+   *
+   * @param tensor Tensor variable
+   * @return Tensor view SSA name, or "" if none is registered
+   */
+  [[nodiscard]] std::string TryGetTensorView(const ir::VarPtr& tensor) const;
 
   /**
    * @brief Get or emit a numeric constant of any dtype (int, index, or float).
@@ -650,8 +664,10 @@ class PTOCodegen : public CodegenBase {
     std::map<const ir::Var*, std::string> var_to_mlir;
     std::map<const ir::Var*, std::string> tensor_to_view;
     std::map<const ir::Var*, std::string> tensor_to_base_ptr;  ///< tensor var → base ptr SSA
-    std::map<const ir::Var*, std::string> memref_to_mlir;      ///< keyed by base_ Ptr
-    std::map<const ir::Var*, const ir::Var*> var_to_memref;    ///< maps tile var → base_ Ptr
+    std::map<std::string, std::string>
+        view_ssa_to_base_ptr;  ///< tensor_view SSA → base ptr SSA (for rebinding IfStmt phi return_vars)
+    std::map<const ir::Var*, std::string> memref_to_mlir;    ///< keyed by base_ Ptr
+    std::map<const ir::Var*, const ir::Var*> var_to_memref;  ///< maps tile var → base_ Ptr
     std::map<const ir::Var*, std::shared_ptr<const ir::TileType>>
         memref_to_tile_type;  ///< keyed by base_ Ptr
 
@@ -711,6 +727,7 @@ class PTOCodegen : public CodegenBase {
       var_to_mlir.clear();
       tensor_to_view.clear();
       tensor_to_base_ptr.clear();
+      view_ssa_to_base_ptr.clear();
       memref_to_mlir.clear();
       var_to_memref.clear();
       memref_to_tile_type.clear();

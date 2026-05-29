@@ -491,5 +491,133 @@ def test_tpop_yielded_as_branch_result_frees_before_yield_on_a2a3():
         )
 
 
+def test_gm_sync_hoisted_before_consumer_loop_on_a2a3():
+    """Issue #1564: cube->vector GM dependency whose consumer load is nested in a
+    loop.
+
+    The cube stores the matmul result to a GM scratch at the function top level;
+    the vector reads that scratch back per-row inside a ``for`` loop. The fence
+    must be a single tpush (after the store) paired with a single tpop *hoisted
+    before the loop* — not one tpop per iteration (which would be N tpops for one
+    tpush and deadlock). Before the fix the producer/consumer lived in different
+    structural bodies, so no fence was emitted at all and the lanes raced (the
+    first iterations read the scratch before the store landed).
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def gm_relay_loop(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            scratch: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            # AIC lane: matmul, then store the cube result into GM scratch (top level).
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_acc = pl.matmul(x_left, y_right)
+            scratch = pl.store(z_acc, [0, 0], scratch)
+            # AIV lane: read the same GM scratch back per-row, inside a loop.
+            for r in pl.range(16):
+                row = pl.load(scratch, [r, 0], [1, 64], target_memory=pl.MemorySpace.Vec)
+                row = pl.exp(row)
+                out = pl.store(row, [r, 0], out)
+            return out
+
+    After = _run_pipeline(Before)
+    aic = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIC)
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+
+    # Producer lane: exactly one tpush fencing the cube store.
+    aic_stmts = ir.flatten_to_stmts(aic.body)
+    assert sum(_op_name(s) == "tile.tpush_to_aiv" for s in aic_stmts) == 1, (
+        "AIC must emit exactly one tpush_to_aiv after the cube store"
+    )
+
+    # Consumer lane: the fence tpop/tfree must sit before the scatter loop, never
+    # inside it (one tpop per tpush, not one per iteration).
+    aiv_top = ir.flatten_to_stmts(aiv.body)
+    for_idx = next((i for i, s in enumerate(aiv_top) if isinstance(s, ir.ForStmt)), None)
+    assert for_idx is not None, "AIV must still contain the per-row scatter loop"
+    for_stmt = aiv_top[for_idx]
+    assert isinstance(for_stmt, ir.ForStmt)
+    before_loop = aiv_top[:for_idx]
+    assert any(_op_name(s) == "tile.tpop_from_aic" for s in before_loop), (
+        "fence tpop_from_aic must be hoisted before the consumer loop"
+    )
+    assert any(_op_name(s) == "system.tfree_to_aic" for s in before_loop), (
+        "fence tfree_to_aic must be hoisted before the consumer loop"
+    )
+    loop_body = ir.flatten_to_stmts(for_stmt.body)
+    assert not any(_op_name(s) == "tile.tpop_from_aic" for s in loop_body), (
+        "no per-iteration tpop: N tpops for a single tpush would deadlock"
+    )
+
+
+def test_two_gm_syncs_hoisted_to_same_loop_on_a2a3():
+    """Issue #1564 follow-up: two cube->vector GM dependencies whose consumer
+    loads sit in the *same* loop must each get their own hoisted fence.
+
+    Both fences key on the same enclosing loop stmt, so a plain
+    ``map<Stmt*, GmSyncPop>`` would keep only the last one and leave the other
+    scratch unsynchronized. The collection uses a multimap and emits every fence
+    via ``equal_range``, so the AIV must open the loop with two tpop_from_aic.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def gm_relay_two(
+            self,
+            x: pl.Tensor[[16, 128], pl.BF16],
+            y: pl.Tensor[[128, 64], pl.BF16],
+            scratch_a: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            scratch_b: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+        ) -> pl.Tensor[[16, 64], pl.FP32]:
+            # AIC lane: two matmuls -> two GM scratch tensors (top level).
+            x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
+            x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
+            y_mat = pl.load(y, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat)
+            y_right = pl.move(y_mat, target_memory=pl.MemorySpace.Right)
+            z_a = pl.matmul(x_left, y_right)
+            scratch_a = pl.store(z_a, [0, 0], scratch_a)
+            z_b = pl.matmul(x_left, y_right)
+            scratch_b = pl.store(z_b, [0, 0], scratch_b)
+            # AIV lane: read BOTH scratch tensors per-row inside ONE loop.
+            for r in pl.range(16):
+                a = pl.load(scratch_a, [r, 0], [1, 64], target_memory=pl.MemorySpace.Vec)
+                b = pl.load(scratch_b, [r, 0], [1, 64], target_memory=pl.MemorySpace.Vec)
+                s = pl.add(a, b)
+                out = pl.store(s, [r, 0], out)
+            return out
+
+    After = _run_pipeline(Before)
+    aic = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIC)
+    aiv = next(f for f in After.functions.values() if f.func_type == ir.FunctionType.AIV)
+
+    aic_stmts = ir.flatten_to_stmts(aic.body)
+    assert sum(_op_name(s) == "tile.tpush_to_aiv" for s in aic_stmts) == 2, (
+        "two cube stores must produce two tpush_to_aiv fences"
+    )
+
+    aiv_top = ir.flatten_to_stmts(aiv.body)
+    for_idx = next((i for i, s in enumerate(aiv_top) if isinstance(s, ir.ForStmt)), None)
+    assert for_idx is not None, "AIV must still contain the consumer loop"
+    for_stmt = aiv_top[for_idx]
+    assert isinstance(for_stmt, ir.ForStmt)
+    before_loop = aiv_top[:for_idx]
+    n_pop = sum(_op_name(s) == "tile.tpop_from_aic" for s in before_loop)
+    assert n_pop == 2, f"both fences must be hoisted before the loop, got {n_pop}"
+    loop_body = ir.flatten_to_stmts(for_stmt.body)
+    assert not any(_op_name(s) == "tile.tpop_from_aic" for s in loop_body), (
+        "fences must not be emitted per iteration"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
