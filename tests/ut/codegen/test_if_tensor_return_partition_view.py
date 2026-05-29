@@ -224,9 +224,7 @@ def test_spmd_no_tensor_view_scf_if_result(spmd_scratch_mlir: str):
 def test_spmd_partition_view_not_on_scf_phi(spmd_scratch_mlir: str):
     """partition_view inside the spmd kernel must source the concrete base view, not a phi."""
     sources = [
-        _partition_view_source(line)
-        for line in spmd_scratch_mlir.split("\n")
-        if "pto.partition_view" in line
+        _partition_view_source(line) for line in spmd_scratch_mlir.split("\n") if "pto.partition_view" in line
     ]
     assert sources, f"Expected at least one pto.partition_view:\n{spmd_scratch_mlir}"
     bad = [src for src in sources if "__phi" in src]
