@@ -3006,10 +3006,8 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   reg("tile.cmp", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileCmpCodegenPTO("pto.tcmp", op, codegen);
   });
-  // tile.cast (TCVT): pto.tcvt mis-orders elements when the source tile is
-  // col_major (e.g. a reshaped [n, 1] index vector narrowed i32 -> i16), so the
-  // input and output must be row_major per ISA. ResolveBackendOpLayouts repairs
-  // col_major callers by reshaping [n, 1] -> [1, n] row_major around the cast.
+  // tile.cast (TCVT): pto.tcvt mis-orders elements on a col_major source, so per
+  // ISA the input and output must be row_major (see #1549).
   if (exclude_ops.count("tile.cast") == 0) {
     backend.RegisterOp("tile.cast")
         .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

@@ -437,9 +437,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
     // the FP32 path — which avoids narrowing a small/odd-shaped tile: the i32 [b, s] index has
     // a 32-byte-aligned row (cols * 4), whereas a 2-byte [b, s] tile (cols * 2) does not. The
     // final flat_idx is row-major [n, d] with a 32-byte-aligned row, so casting it to i16 is
-    // alignment-legal. (The col_major mis-ordering of narrowing the reshaped [n, 1] view is
-    // now handled generally by the tile.cast row_major layout spec — see #1549 — so this stays
-    // for the alignment/canonical-layout benefit, not to dodge the layout bug.)
+    // alignment-legal.
     const DataType compute_dtype(DataType::INT32);
 
     auto make_idx = [&](int64_t v) -> ExprPtr {
