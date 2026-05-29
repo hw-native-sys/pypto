@@ -53,6 +53,7 @@ program_optimized = reuse_pass(program)
 - Non-overlapping lifetimes (no interference). Two variables do NOT overlap when `prev.last_use <= curr.def` (i.e., the source's last use can be at the same statement as the target's definition, since inputs are read before outputs are written within a single statement).
 - Same memory space
 - Compatible sizes (reuse target must be large enough)
+- **L0 cube-input exception (Left/Right)**: buffers in `Mem.Left` / `Mem.Right` hold sub-tiles produced by view ops (`tile.extract` / `tile.slice` / `tile.reshape`), which PTO codegen materialises per tile var at the buffer base. Two such buffers in the same L0 space, with non-overlapping lifetimes and sufficient **byte** size, may therefore share one slot even when their **shapes differ** — the `AreTileTypesCompatible` shape/dtype/view check below is skipped for them (gated on both producers being view ops, a subset of [`LegalizePtoBufferReuse`](30-legalize_pto_buffer_reuse.md)'s `IsLegalViewOp` so the shared MemRef survives that pass). This lets fused-attention reuse the QK `Right` buffer (`[k, SEQ]`) for the PV `Right` buffer (`[k', HEAD]`), halving peak L0B (issue #1595). All other spaces (Vec/Acc/Mat) keep the strict match:
 - TileType compatibility — checked by `AreTileTypesCompatible`:
   - Same shape (all dimensions must match exactly)
   - Same dtype (e.g., FP32 vs BF16 prevents reuse, handling `tile.cast` automatically)

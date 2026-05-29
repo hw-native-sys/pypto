@@ -1,6 +1,6 @@
 # AutoTileMatmulL0 Pass
 
-L0 tiling for Mat-resident `tile.matmul` / `tile.matmul_acc` ops: pick an L0 tile shape `(m, n, k)` from the active backend's L0 capacities and rewrite the call into a 2-stage pipelined K-loop with per-iter Mat→Left/Right `tile.extract`s.
+L0 tiling for `tile.matmul` / `tile.matmul_acc` ops with a Mat right operand (and a Mat- or Vec-resident left operand): pick an L0 tile shape `(m, n, k)` from the active backend's L0 capacities and rewrite the call into a 2-stage pipelined K-loop with per-iter Mat→Left/Right `tile.extract`s.
 
 ## Overview
 
@@ -33,7 +33,7 @@ program_tiled = l0_tile_pass(program)
 
 For each `tile.matmul` or `tile.matmul_acc` in an InCore-typed function:
 
-1. **Filter** — operand layout: `(lhs, rhs)` for `tile.matmul`, `(acc, lhs, rhs)` for `tile.matmul_acc`. Both `lhs` and `rhs` must be `Var`/`IterArg` (via `AsVarLike`) of `TileType` with static 2D shape and `memory_space == Mat`. Other cases (Vec/Acc operands, dynamic shapes) are skipped silently. `tile.matmul_bias` is **not** rewritten — bias-add only after the final iteration needs extra rewriting that is not yet implemented.
+1. **Filter** — operand layout: `(lhs, rhs)` for `tile.matmul`, `(acc, lhs, rhs)` for `tile.matmul_acc`. Both `lhs` and `rhs` must be `Var`/`IterArg` (via `AsVarLike`) of `TileType` with static 2D shape. The right (B) operand must be `memory_space == Mat` (loaded from DDR into L1, then fed to L0B). The left (A) operand may be `Mat` (the QK pattern) **or** `Vec` — the fused-attention `score·V` (PV) pattern, where the softmax/`exp` output reaches the matmul resident in `Vec` at the cube↔vector boundary. Other cases (Acc operands, a Vec right operand, dynamic shapes) are skipped silently. `tile.matmul_bias` is **not** rewritten — bias-add only after the final iteration needs extra rewriting that is not yet implemented.
 2. **Pick L0 tile shape** — call `utils::ChooseL0Tile(cfg)` with the active `BackendHandler`'s `GetL0{a,b,c}CapacityBytes()` and `GetL0FractalAlignment()`, plus per-operand element width (`bytes_a/b/c`) read from the call's result type so the chooser sees the actual accumulator footprint. `c_read = is_matmul_acc` because `tile.matmul_acc` threads the caller's accumulator through the K-loop's iter-arg (γ_C = 2 in the chooser's traffic model). The chooser returns `(m, n, k)` — closed-form O(1) following the L0 tiling design note (continuous optimum + aligned candidates around it, scored by `(traffic, padded_compute, k_blocks, area, k)`).
 3. **Skip if already L0-sized** — `(m, n, k) == (M, N, K)`.
 4. **Skip with `PerfHint` for unsupported regimes**:
@@ -45,6 +45,7 @@ For each `tile.matmul` or `tile.matmul_acc` in an InCore-typed function:
    - `tile.matmul` — iter-arg init is an Acc-resident `tile.create([m, n], dtype, target_memory=Acc)` placeholder; the loop body branches on `ko == 0` between `tile.matmul` (fresh Acc) and `tile.matmul_acc` (accumulating into the iter-arg). The `IfStmt` materializes a phi return_var that the outer yield carries back to the iter-arg.
    - `tile.matmul_acc` — iter-arg init is the caller's accumulator directly (its type already matches the per-iter `tile.matmul_acc` output); every iteration is uniform `tile.matmul_acc`, so no if-else.
    - Per-iter operand extracts use `tile.extract(src, idx_row, idx_col, [shape], target_memory=Left|Right)` — the SSA-form fusion of the older `tile.slice` (Mat-resident result) + `tile.mov` (Mat→Left/Right) pair. This eliminates the intermediate Mat-resident slice tile and lowers to `pto.textract` rather than `pto.subview`, sidestepping the latter's `valid_row` codegen mismatch.
+   - **Vec left operand staging** — when the left (A) operand is `Vec`-resident (PV / `score·V`), a single `tile.move(lhs, target_memory=Mat)` is emitted **before** the K-loop and the per-iter Left extract slices from that staged Mat tile (so the extract source is Mat exactly like the QK path). Keeping the Vec→Mat crossing a `tile.move` lets [`ExpandMixedKernel`](21-expand_mixed_kernel.md) recognise it (`CollectCVBoundaryMoves` only matches `tile.move`) and lower it to the cross-core `tpop_from_aiv` handshake (which lands the data in Mat). Extracting straight from the Vec tile would instead leave the operand a dangling cross-boundary free variable on the cube side.
    - The K-loop is `ForKind::Pipeline` with `pipeline_stages=2`.
 6. **Rewrite the enclosing `SeqStmts`** — substitute uses of the original matmul's `Var` with the new `ForStmt`'s `return_var`. Substitution is scoped to the `SeqStmts` that contains the rewrite, so it does not leak into sibling regions.
 
@@ -142,8 +143,9 @@ Adding a new backend therefore only needs to provide these handler hooks — the
 
 | Op | Action |
 | -- | ------ |
-| `tile.matmul` over Mat-resident static-2D operands | Rewritten to 2-stage pipelined K-loop |
-| `tile.matmul_acc` over Mat-resident static-2D operands | Rewritten to 2-stage pipelined K-loop (uniform `matmul_acc` body) |
+| `tile.matmul` over static-2D operands (Mat left, or Vec left for PV) + Mat right | Rewritten to 2-stage pipelined K-loop; a Vec left operand is staged to Mat first |
+| `tile.matmul_acc` over static-2D operands (Mat left, or Vec left for PV) + Mat right | Rewritten to 2-stage pipelined K-loop (uniform `matmul_acc` body) |
+| `tile.matmul[_acc]` with a Vec **right** operand | Skipped (the B operand must feed L0B from L1) |
 | `tile.matmul_bias` | Skipped (deferred — bias-add-only-after-final-iter rewrite not yet implemented) |
 | Already L0-sized matmul (`(m, n, k) == (M, N, K)`) | Untouched |
 | Sub-byte dtypes / `m != M` / `n != N` / `K % k != 0` | Skipped with `PerfHint` |

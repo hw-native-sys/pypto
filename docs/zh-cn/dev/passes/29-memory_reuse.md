@@ -53,6 +53,7 @@ program_optimized = reuse_pass(program)
 - 生命周期不重叠（无干涉）。当 `prev.last_use <= curr.def` 时，两个变量不重叠（即源的最后使用可以和目标的定义在同一语句，因为在同一语句内输入先于输出被消费）
 - 相同内存空间
 - 大小兼容（复用目标必须足够大）
+- **L0 cube 输入例外（Left/Right）**：`Mem.Left` / `Mem.Right` 的缓冲区存放的是由 view 算子（`tile.extract` / `tile.slice` / `tile.reshape`）产生的子 tile，PTO codegen 会按每个 tile 变量在缓冲区基址处单独物化。因此同一 L0 空间、生命周期不重叠、**字节**大小足够的两个这类缓冲区，即使 **shape 不同**也可以共享同一槽位 —— 对它们跳过下面的 `AreTileTypesCompatible`（shape/dtype/view）检查（前提是两端的 producer 都是 view 算子，且属于 [`LegalizePtoBufferReuse`](30-legalize_pto_buffer_reuse.md) 的 `IsLegalViewOp` 子集，从而共享的 MemRef 能在该 pass 中存活）。这使 fused-attention 能用 QK 的 `Right` 缓冲区（`[k, SEQ]`）复用 PV 的 `Right` 缓冲区（`[k', HEAD]`），将 L0B 峰值减半（issue #1595）。其它空间（Vec/Acc/Mat）仍保持严格匹配：
 - TileType 兼容性 — 由 `AreTileTypesCompatible` 检查：
   - 相同 shape（所有维度必须精确匹配）
   - 相同 dtype（例如 FP32 与 BF16 阻止复用，自动处理 `tile.cast`）

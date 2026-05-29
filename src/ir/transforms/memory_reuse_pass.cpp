@@ -29,6 +29,7 @@
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/memref.h"
 #include "pypto/ir/op_registry.h"
+#include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/mutator.h"
 #include "pypto/ir/transforms/base/visitor.h"
@@ -1071,6 +1072,24 @@ bool AreTileTypesCompatible(const VarPtr& var1, const VarPtr& var2) {
 }
 
 /**
+ * @brief PTO view ops whose result is a fresh sub-tile materialised at a buffer
+ *        base address, independent of the buffer's other occupants.
+ *
+ * L0 cube-input buffers (``Mem.Left`` / ``Mem.Right``) are *only* ever produced
+ * by these ops, and PTO codegen emits one ``alloc_tile`` per tile var (each
+ * carrying its own shape/dtype/layout) at the buffer base — see
+ * ``LegalizePtoBufferReuse``'s ``IsLegalViewOp``, which classifies the same ops
+ * as views that need no MemRef split.  This means two such buffers in the same
+ * L0 space, with non-overlapping lifetimes and sufficient byte size, may share
+ * one L0A/L0B slot even when their *shapes* differ (e.g. fused-attention QK
+ * ``Right`` ``[k, SEQ]`` reused by PV ``Right`` ``[k', HEAD]``).  Keep this set
+ * a subset of ``IsLegalViewOp`` so the shared MemRef survives that pass.
+ */
+static bool IsL0ViewProducerOp(const std::string& op_name) {
+  return op_name == "tile.extract" || op_name == "tile.slice" || op_name == "tile.reshape";
+}
+
+/**
  * @brief Check if two lifetimes overlap.
  *
  * Uses <= to allow "touching" lifetimes (last_use == def_point) to share
@@ -1133,8 +1152,18 @@ std::map<VarPtr, VarPtr> IdentifyReuseOpportunities(const std::vector<LifetimeIn
           continue;  // Cannot reuse due to overlap with source or insufficient size
         }
 
-        // Check full TileType compatibility (shape, dtype, TileView attributes)
-        if (!AreTileTypesCompatible(curr_var, prev_var)) {
+        // Compatibility gate.  L0 cube-input buffers (Left/Right) hold sub-tiles
+        // produced by PTO view ops (tile.extract / tile.slice / tile.reshape),
+        // which codegen materialises per tile var at the buffer base — so two
+        // non-overlapping sub-tiles of *different* shapes can legally share one
+        // L0A/L0B slot (byte-size sufficiency is enforced by `size_ok` above).
+        // This lets fused-attention reuse the QK Right buffer ([k, SEQ]) for the
+        // PV Right buffer ([k', HEAD]).  All other spaces keep the strict per-var
+        // alloc_tile signature match so reuse cannot create a codegen conflict.
+        const bool l0_byte_reuse = (space == MemorySpace::Left || space == MemorySpace::Right) &&
+                                   IsL0ViewProducerOp(curr_lifetime.def_op_name) &&
+                                   IsL0ViewProducerOp(prev_lifetime.def_op_name);
+        if (!l0_byte_reuse && !AreTileTypesCompatible(curr_var, prev_var)) {
           continue;
         }
 

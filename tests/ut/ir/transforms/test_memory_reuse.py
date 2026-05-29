@@ -2825,5 +2825,103 @@ class TestParallelPlaceholdersInIfThen:
         )
 
 
+class TestL0CrossShapeReuse:
+    """L0 cube-input buffers (Left/Right) hold sub-tiles produced by view ops
+    (tile.extract), which codegen materialises per tile var at the buffer base.
+
+    Two such buffers in the same L0 space, with non-overlapping lifetimes and
+    sufficient byte size, may therefore share one slot even when their *shapes*
+    differ — unlike Vec/Acc/Mat buffers, which keep the strict shape match.
+    This is what lets fused-attention reuse the QK Right buffer ([k, SEQ]) for
+    the PV Right buffer ([k', HEAD]) (issue #1595)."""
+
+    def test_right_buffers_different_shapes_reuse(self):
+        """``rb`` ([64, 256] Right) is dead before ``rd`` ([128, 128] Right) is
+        born; both are 32 KB extract sub-tiles, so ``rd`` reuses ``rb``'s buffer
+        despite the differing shape.  ``lc`` ([16, 128] Left) is *larger* than
+        ``la`` ([16, 64] Left), so the size gate (correctly) keeps them apart."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[16, 64], pl.BF16],
+                b: pl.Tensor[[64, 256], pl.BF16],
+                c: pl.Tensor[[16, 128], pl.BF16],
+                d: pl.Tensor[[128, 128], pl.BF16],
+                out1: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+                out2: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                a_mat: pl.Tile[[16, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [16, 64], target_memory=pl.Mem.Mat
+                )
+                b_mat: pl.Tile[[64, 256], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [64, 256], target_memory=pl.Mem.Mat
+                )
+                la: pl.Tile[[16, 64], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                    a_mat, 0, 0, [16, 64], target_memory=pl.Mem.Left
+                )
+                rb: pl.Tile[[64, 256], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                    b_mat, 0, 0, [64, 256], target_memory=pl.Mem.Right
+                )
+                m1: pl.Tile[[16, 256], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(la, rb)
+                out1 = pl.store(m1, [0, 0], out1)
+                c_mat: pl.Tile[[16, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    c, [0, 0], [16, 128], target_memory=pl.Mem.Mat
+                )
+                d_mat: pl.Tile[[128, 128], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    d, [0, 0], [128, 128], target_memory=pl.Mem.Mat
+                )
+                lc: pl.Tile[[16, 128], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                    c_mat, 0, 0, [16, 128], target_memory=pl.Mem.Left
+                )
+                rd: pl.Tile[[128, 128], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                    d_mat, 0, 0, [128, 128], target_memory=pl.Mem.Right
+                )
+                m2: pl.Tile[[16, 128], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lc, rd)
+                out2 = pl.store(m2, [0, 0], out2)
+                return out2
+
+        After = _run_pipeline(Before)
+
+        # Collect the MemRef base of each extract-produced L0 tile.
+        func = After.get_function("kernel")
+        assert func is not None
+        bases: dict[str, ir.Var] = {}
+
+        def visit(stmt: ir.Stmt) -> None:
+            if isinstance(stmt, ir.AssignStmt) and stmt.var.name_hint in ("la", "rb", "lc", "rd"):
+                t = stmt.var.type
+                assert isinstance(t, ir.TileType)
+                assert t.memref is not None
+                bases[stmt.var.name_hint] = t.memref.base_
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    visit(s)
+            elif isinstance(stmt, ir.IfStmt):
+                visit(stmt.then_body)
+                if stmt.else_body is not None:
+                    visit(stmt.else_body)
+            elif isinstance(stmt, ir.ForStmt):
+                visit(stmt.body)
+
+        visit(func.body)
+        for name in ("la", "rb", "lc", "rd"):
+            assert name in bases, f"{name} not found in After IR"
+
+        # rb ([64,256]) and rd ([128,128]) are different shapes but reuse the
+        # same Right buffer — the cross-shape L0 reuse this pass now allows.
+        assert bases["rb"] is bases["rd"], (
+            f"rd ([128,128] Right) must reuse rb's ([64,256] Right) buffer; "
+            f"got rb@{bases['rb'].name_hint} vs rd@{bases['rd'].name_hint}"
+        )
+        # lc ([16,128] Left, 4 KB) is larger than la ([16,64] Left, 2 KB), so the
+        # size gate keeps them in distinct buffers — reuse must not corrupt.
+        assert bases["la"] is not bases["lc"], (
+            "la ([16,64]) and lc ([16,128]) must NOT share — lc is larger (size gate)"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

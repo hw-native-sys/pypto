@@ -11,10 +11,16 @@
 
 /// AutoTileMatmulL0
 /// ----------------
-/// For each ``tile.matmul`` or ``tile.matmul_acc`` whose Mat operands have
-/// static 2D shape, picks an L0 tile shape ``(m, n, k)`` from the active
-/// ``BackendHandler``'s L0 capacities (via ``utils::ChooseL0Tile``) and
-/// rewrites the call into a K-loop:
+/// For each ``tile.matmul`` or ``tile.matmul_acc`` with static 2D operands,
+/// picks an L0 tile shape ``(m, n, k)`` from the active ``BackendHandler``'s
+/// L0 capacities (via ``utils::ChooseL0Tile``) and rewrites the call into a
+/// K-loop.  The right (B) operand must be ``Mat``-resident; the left (A)
+/// operand may be ``Mat`` (the QK pattern) or ``Vec`` (the fused-attention
+/// ``score·V`` / PV pattern, where the softmax output crosses the cube↔vector
+/// boundary resident in ``Vec``).  Tiling the Vec-fed PV matmul symmetrically
+/// with QK makes its L0B right buffer a reusable sub-tile so ``MemoryReuse``
+/// can alias it onto QK's freed L0B (peak L0B = ``max(QK, PV)`` instead of the
+/// sum).  The K-loop has the shape:
 ///
 ///   * ``tile.matmul`` — the loop body branches on the iteration index
 ///     (``ko == 0``) so the first iteration uses ``tile.matmul`` (fresh
@@ -80,6 +86,7 @@
 #include <any>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <optional>
@@ -131,11 +138,33 @@ ExprPtr MakeIndexTuple(const std::vector<int64_t>& values, const Span& span) {
   return std::make_shared<MakeTuple>(std::move(elements), span);
 }
 
-/// True if `tile`'s 2D shape is static and `tile.memory_space_ == Mat`.
-bool IsMatResidentStatic2D(const TileTypePtr& tile, int64_t& out_d0, int64_t& out_d1) {
+/// True if `tile`'s 2D shape is static and its memory space is one of
+/// `allowed`.  Operand-source residency check for the L0 tiling rewrite:
+///
+///   * The right (B) operand must be ``Mat`` — it is loaded from DDR into L1
+///     and fed into L0B.
+///   * The left (A) operand may be ``Mat`` (the QK pattern) *or* ``Vec`` (the
+///     fused-attention ``score·V`` / PV pattern, where the softmax/``exp``
+///     output crosses the cube↔vector boundary resident in ``Vec`` rather
+///     than ``Mat``).
+///
+/// This is purely a residency/static-shape check.  A ``Vec`` left operand is
+/// not extracted directly: ``BuildKLoopRewrite`` stages it into ``Mat`` first
+/// via ``BuildMoveToMat``, so the per-iter ``tile.extract`` always slices from
+/// a ``Mat`` source regardless of the original operand space.
+bool IsStatic2DInSpaces(const TileTypePtr& tile, std::initializer_list<MemorySpace> allowed, int64_t& out_d0,
+                        int64_t& out_d1) {
   if (!tile || tile->shape_.size() != 2) return false;
   auto mem = tile->GetMemorySpace();
-  if (!mem.has_value() || *mem != MemorySpace::Mat) return false;
+  if (!mem.has_value()) return false;
+  bool space_ok = false;
+  for (auto space : allowed) {
+    if (*mem == space) {
+      space_ok = true;
+      break;
+    }
+  }
+  if (!space_ok) return false;
   auto a = As<ConstInt>(tile->shape_[0]);
   auto b = As<ConstInt>(tile->shape_[1]);
   if (!a || !b) return false;
@@ -158,7 +187,9 @@ uint32_t DTypeBytes(const DataType& dt) {
 /// extract used inside the K-loop.  Offsets are passed as separate scalar
 /// exprs (typically a ConstInt 0 for the static axis and the loop var
 /// ``ko`` for the K axis).  The result tile is already in the destination
-/// memory space, so no follow-up ``tile.mov`` is needed.
+/// memory space, so no follow-up ``tile.mov`` is needed.  The source is
+/// always Mat-resident — a Vec-fed left operand is first staged into Mat by
+/// ``BuildMoveToMat`` (see ``BuildKLoopRewrite``).
 AssignStmtPtr BuildExtract(const VarPtr& source, const std::vector<int64_t>& shape, const ExprPtr& index_row,
                            const ExprPtr& index_col, MemorySpace target, const std::string& name_hint,
                            const Span& span) {
@@ -166,6 +197,26 @@ AssignStmtPtr BuildExtract(const VarPtr& source, const std::vector<int64_t>& sha
   std::vector<ExprPtr> args = {source, index_row, index_col, MakeIndexTuple(shape, span)};
   std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", target}};
   auto call = reg.Create("tile.extract", args, kwargs, span);
+  auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
+  return std::make_shared<AssignStmt>(var, call, span);
+}
+
+/// Build a ``tile.move(source, target_memory=Mat)`` AssignStmt that stages a
+/// Vec-resident left operand into Mat (L1) *before* the K-loop, so the per-iter
+/// ``tile.extract`` slices from Mat exactly like the QK (Mat-fed) path.
+///
+/// This matters for fused cube+vector roots (fused-attention PV / ``score·V``):
+/// the softmax/``exp`` output reaches the matmul resident in ``Vec`` at the
+/// cube↔vector boundary.  Keeping the boundary crossing a ``tile.move`` lets
+/// ``ExpandMixedKernel`` recognise it (``CollectCVBoundaryMoves`` only matches
+/// ``tile.move``) and lower it to the cross-core ``tpop_from_aiv`` handshake
+/// (which lands the data in Mat — ``GetBoundaryTpopMemory(AIC) == Mat``).
+/// Extracting straight from the Vec tile instead would leave the operand a
+/// dangling cross-boundary free variable on the cube side.
+AssignStmtPtr BuildMoveToMat(const VarPtr& source, const std::string& name_hint, const Span& span) {
+  auto& reg = OpRegistry::GetInstance();
+  std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", MemorySpace::Mat}};
+  auto call = reg.Create("tile.move", {source}, kwargs, span);
   auto var = std::make_shared<Var>(name_hint, call->GetType(), span);
   return std::make_shared<AssignStmt>(var, call, span);
 }
@@ -190,10 +241,11 @@ AssignStmtPtr BuildAccInit(int64_t m, int64_t n, const DataType& dtype, const st
 
 struct KLoopRewrite {
   AssignStmtPtr original;
-  VarPtr lhs_mat;             ///< [M, K] Mat-resident operand
-  VarPtr rhs_mat;             ///< [K, N] Mat-resident operand
-  VarPtr acc_init = nullptr;  ///< Caller-provided accumulator for matmul_acc;
-                              ///< nullptr for plain matmul (Vec placeholder is built instead).
+  VarPtr lhs_src;                 ///< [M, K] left operand — Mat- or Vec-resident
+  VarPtr rhs_src;                 ///< [K, N] right operand — Mat-resident
+  bool stage_lhs_to_mat = false;  ///< lhs is Vec-resident: stage Vec→Mat before the K-loop
+  VarPtr acc_init = nullptr;      ///< Caller-provided accumulator for matmul_acc;
+                                  ///< nullptr for plain matmul (Vec placeholder is built instead).
   int64_t M = 0;
   int64_t N = 0;
   int64_t K = 0;
@@ -284,13 +336,25 @@ RewriteResult BuildKLoopRewrite(const KLoopRewrite& r) {
   auto ko_var = std::make_shared<Var>(base + "_l0_ko", std::make_shared<ScalarType>(DataType::INDEX), sp);
   auto c_iter = std::make_shared<IterArg>(base + "_l0_c", iter_type, init_value, sp);
 
+  // A Vec-resident left operand (fused-attention PV / ``score·V``) is staged
+  // into Mat once, before the K-loop, so the per-iter extract slices from Mat
+  // exactly like the QK path — and so ``ExpandMixedKernel`` can lower the
+  // Vec→Mat boundary crossing via its ``tile.move``-based handshake (see
+  // ``BuildMoveToMat``).  Mat-resident left operands extract directly.
+  VarPtr lhs_extract_src = r.lhs_src;
+  if (r.stage_lhs_to_mat) {
+    auto lhs_mat = BuildMoveToMat(r.lhs_src, base + "_l0_lmat", sp);
+    out.push_back(lhs_mat);
+    lhs_extract_src = lhs_mat->var_;
+  }
+
   // Per-iter operand extracts: lhs is sliced along K and lands in Left;
   // rhs is sliced along K and lands in Right.  No intermediate Mat-resident
   // tile and no follow-up tile.mov is needed.
-  auto sa =
-      BuildExtract(r.lhs_mat, {r.M, r.k}, MakeIndex(0, sp), ko_var, MemorySpace::Left, base + "_l0_a", sp);
+  auto sa = BuildExtract(lhs_extract_src, {r.M, r.k}, MakeIndex(0, sp), ko_var, MemorySpace::Left,
+                         base + "_l0_a", sp);
   auto sb =
-      BuildExtract(r.rhs_mat, {r.k, r.N}, ko_var, MakeIndex(0, sp), MemorySpace::Right, base + "_l0_b", sp);
+      BuildExtract(r.rhs_src, {r.k, r.N}, ko_var, MakeIndex(0, sp), MemorySpace::Right, base + "_l0_b", sp);
 
   StmtPtr body = is_acc ? BuildMatmulAccBody(c_iter, sa, sb, base, sp)
                         : BuildMatmulBody(ko_var, c_iter, sa, sb, base, sp);
@@ -355,10 +419,15 @@ std::optional<RewriteResult> MaybeRewriteMatmul(const AssignStmtPtr& assign, std
     if (!acc_tile || acc_tile->shape_.size() != 2) return std::nullopt;
   }
 
-  // lhs / rhs must be Mat-resident with static 2D shape.  Other cases
-  // (Vec/Acc operands, dynamic shapes) are out of scope; return silently.
+  // Operand source residency, with static 2D shapes.  The right (B) operand
+  // must be Mat — it is loaded from DDR into L1 and fed into L0B.  The left (A)
+  // operand may be Mat (the QK pattern) or Vec (the fused-attention PV /
+  // ``score·V`` pattern, where the softmax/``exp`` output crosses the
+  // cube↔vector boundary resident in Vec).  Other cases (Acc operands, a Vec
+  // right operand, dynamic shapes) are out of scope; return silently.
   int64_t M = 0, K_lhs = 0, K_rhs = 0, N = 0;
-  if (!IsMatResidentStatic2D(lhs_tile, M, K_lhs) || !IsMatResidentStatic2D(rhs_tile, K_rhs, N)) {
+  if (!IsStatic2DInSpaces(lhs_tile, {MemorySpace::Mat, MemorySpace::Vec}, M, K_lhs) ||
+      !IsStatic2DInSpaces(rhs_tile, {MemorySpace::Mat}, K_rhs, N)) {
     return std::nullopt;
   }
   // K mismatch is an ill-typed matmul — the op verifier should have caught it
@@ -463,8 +532,12 @@ std::optional<RewriteResult> MaybeRewriteMatmul(const AssignStmtPtr& assign, std
 
   KLoopRewrite r;
   r.original = assign;
-  r.lhs_mat = lhs;
-  r.rhs_mat = rhs;
+  r.lhs_src = lhs;
+  r.rhs_src = rhs;
+  // A Vec-resident left operand is staged into Mat before the K-loop (see
+  // BuildMoveToMat); Mat-resident left operands extract directly.  The right
+  // operand is always Mat (checked above), so it never needs staging.
+  r.stage_lhs_to_mat = lhs_tile->GetMemorySpace() == MemorySpace::Vec;
   r.acc_init = acc_var;  // null for tile.matmul, set for tile.matmul_acc
   r.M = M;
   r.N = N;
