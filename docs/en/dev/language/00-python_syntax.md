@@ -213,6 +213,11 @@ buf = pl.reserve_buffer(name="slot_buf", size=4096, base=pl.AUTO)
 peer = pl.import_peer_buffer(name="slot_buf", peer_func="other_func")
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, id=0)
 pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, id=0)
+# Optional: pin the GM ring-buffer slot count (default 8 unidirectional / 4
+# bidirectional) and, on a2/a3, the local slot count (must be <= slot_num).
+# Size the reserved buffer yourself: a3 -> slot_size * local_slot_num,
+# a5 -> slot_size * slot_num.
+pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
 
 ## Statements

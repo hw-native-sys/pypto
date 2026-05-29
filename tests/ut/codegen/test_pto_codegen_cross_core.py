@@ -264,6 +264,81 @@ class MultiPipeSameDirectionCrossCoreProgram:
 
 
 # ============================================================================
+# Explicit slot_num Test Program (V2C unidirectional)
+# ============================================================================
+
+
+@pl.program
+class CrossCoreExplicitSlotNumProgram:
+    """V2C unidirectional program that pins explicit slot_num and local_slot_num.
+
+    Mirrors CrossCoreTpushTpopProgram but passes slot_num=16 and local_slot_num=4
+    to both init pipes (a3 sizes the buffer slot_size * local_slot_num).
+    """
+
+    @pl.function(type=pl.FunctionType.AIV)
+    def vector_producer(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ):
+        v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
+        pl.aiv_initialize_pipe(
+            dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4, v2c_consumer_buf=v2c_peer
+        )
+
+        tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+        tile_b: pl.Tile[[16, 16], pl.FP16] = pl.load(b, [0, 0], [16, 16])
+        result_add: pl.Tile[[16, 16], pl.FP16] = pl.add(tile_a, tile_b)
+
+        pl.tpush_to_aic(result_add, split=1)
+
+    @pl.function(type=pl.FunctionType.AIC)
+    def cube_consumer(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=2048, base=0x1000)
+        pl.aic_initialize_pipe(
+            dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4, v2c_consumer_buf=pipe_buf
+        )
+
+        received_add: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=1)
+        received_add_left = pl.move(received_add, target_memory=pl.Mem.Left)
+
+        mm_result: pl.Tile[[16, 16], pl.FP32] = pl.matmul(received_add_left, received_add_left)
+
+        pl.tfree_to_aiv(received_add)
+
+        updated: pl.Tensor[[16, 16], pl.FP32] = pl.store(mm_result, [0, 0], output)
+        return updated
+
+    @pl.function(type=pl.FunctionType.Group)
+    def group_func(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ):
+        updated = self.cube_consumer(a, b, output)
+        self.vector_producer(a, b, output)
+        return updated
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[16, 16], pl.FP16],
+        b: pl.Tensor[[16, 16], pl.FP16],
+        output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+    ) -> pl.Tensor[[16, 16], pl.FP32]:
+        out = self.group_func(a, b, output)
+        return out
+
+
+# ============================================================================
 # Test Suite
 # ============================================================================
 
@@ -365,6 +440,30 @@ class TestCrossCoreTpushTpopCodegen:
         tfree_line = next(line for line in cube_code.splitlines() if "pto.tfree_from_aiv" in line)
         assert "{split = " in tfree_line, f"tfree should have split attribute: {tfree_line}"
         assert "pto.tmatmul" in cube_code, "Should contain matmul (Cube op)"
+
+    def test_explicit_slot_num_emitted(self):
+        """Explicit slot_num / local_slot_num flow into both AIV and AIC init pipe PTO ops."""
+        codes = self._compile_and_generate(CrossCoreExplicitSlotNumProgram)
+
+        vector_code = codes["vector_producer"]
+        assert "pto.aiv_initialize_pipe" in vector_code, "Should contain pto.aiv_initialize_pipe"
+        assert "slot_num = 16" in vector_code, f"AIV init pipe should carry slot_num = 16:\n{vector_code}"
+        assert "local_slot_num = 4" in vector_code, (
+            f"AIV init pipe should carry local_slot_num = 4:\n{vector_code}"
+        )
+
+        cube_code = codes["cube_consumer"]
+        assert "pto.aic_initialize_pipe" in cube_code, "Should contain pto.aic_initialize_pipe"
+        assert "slot_num = 16" in cube_code, f"AIC init pipe should carry slot_num = 16:\n{cube_code}"
+        assert "local_slot_num = 4" in cube_code, (
+            f"AIC init pipe should carry local_slot_num = 4:\n{cube_code}"
+        )
+
+    def test_slot_num_omitted_by_default(self):
+        """Without explicit knobs, no slot_num/local_slot_num attribute is emitted (PTOAS default)."""
+        codes = self._compile_and_generate(CrossCoreTpushTpopProgram)
+        assert "slot_num" not in codes["vector_producer"], "Default path must not emit slot_num"
+        assert "slot_num" not in codes["cube_consumer"], "Default path must not emit slot_num"
 
     def test_tpop_dynamic_valid_shape_operands(self):
         """Dynamic tpop result valid_shape should emit PTOAS frontend operands."""

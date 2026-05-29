@@ -212,6 +212,10 @@ buf = pl.reserve_buffer(name="slot_buf", size=4096, base=pl.AUTO)
 peer = pl.import_peer_buffer(name="slot_buf", peer_func="other_func")
 pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, id=0)
 pl.aiv_initialize_pipe(pl.const(0, pl.INT32), peer, dir_mask=2, slot_size=512, id=0)
+# 可选：显式指定 GM 环形缓冲区槽数量（默认单向 8 / 双向 4），
+# 以及（仅 a2/a3）本地槽数量 local_slot_num（必须 <= slot_num）。
+# 缓冲区大小需自行设置：a3 -> slot_size * local_slot_num，a5 -> slot_size * slot_num。
+pl.aic_initialize_pipe(pl.const(0, pl.INT32), buf, dir_mask=2, slot_size=512, slot_num=16, local_slot_num=4)
 ```
 
 ## 语句 (Statement)

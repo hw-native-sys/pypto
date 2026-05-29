@@ -189,6 +189,31 @@ class test_program:
         reparsed = pl.parse_program(printed)
         ir.assert_structural_equal(prog, reparsed)
 
+    def test_initialize_pipe_explicit_slot_num_round_trip(self):
+        """Explicit slot_num / local_slot_num attributes should round-trip through print/parse."""
+        prog = self._build_program_with_system_stmt(
+            "pl.system.aic_initialize_pipe(dir_mask=1, slot_size=256, slot_num=16, local_slot_num=4)"
+        )
+        printed = prog.as_python()
+        assert "slot_num=16" in printed
+        assert "local_slot_num=4" in printed
+        reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(prog, reparsed)
+
+    def test_initialize_pipe_rejects_non_positive_slot_num(self):
+        """A non-positive slot_num is rejected at the DSL boundary."""
+        with pytest.raises(ValueError, match="slot_num must be positive"):
+            pl.aic_initialize_pipe(dir_mask=1, slot_size=256, slot_num=0)
+        with pytest.raises(ValueError, match="slot_num must be positive"):
+            pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, slot_num=-4)
+
+    def test_initialize_pipe_rejects_invalid_local_slot_num(self):
+        """local_slot_num must be positive and not exceed slot_num."""
+        with pytest.raises(ValueError, match="local_slot_num must be positive"):
+            pl.aic_initialize_pipe(dir_mask=1, slot_size=256, local_slot_num=0)
+        with pytest.raises(ValueError, match="local_slot_num .* must be <= slot_num"):
+            pl.aic_initialize_pipe(dir_mask=1, slot_size=256, slot_num=4, local_slot_num=8)
+
     def test_reserve_buffer_round_trip(self):
         """Test round-trip for pl.system.reserve_buffer."""
         prog = self._build_program_with_system_stmt('pl.system.reserve_buffer(name="shared_buf", size=1024)')

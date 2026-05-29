@@ -1731,7 +1731,19 @@ static std::string FormatInitializePipeAttrs(const CallPtr& op, int dir_mask, in
     CHECK(id >= 0) << "Frontend initialize_pipe 'id' attribute must be non-negative, got " << id;
     oss << "id = " << id << ", ";
   }
-  oss << "dir_mask = " << dir_mask << ", slot_size = " << slot_size << "}";
+  oss << "dir_mask = " << dir_mask << ", slot_size = " << slot_size;
+  if (op->HasKwarg("slot_num")) {
+    const int slot_num = op->GetKwarg<int>("slot_num", 0);
+    CHECK(slot_num > 0) << "Frontend initialize_pipe 'slot_num' attribute must be positive, got " << slot_num;
+    oss << ", slot_num = " << slot_num;
+  }
+  if (op->HasKwarg("local_slot_num")) {
+    const int local_slot_num = op->GetKwarg<int>("local_slot_num", 0);
+    CHECK(local_slot_num > 0) << "Frontend initialize_pipe 'local_slot_num' attribute must be positive, got "
+                              << local_slot_num;
+    oss << ", local_slot_num = " << local_slot_num;
+  }
+  oss << "}";
   return oss.str();
 }
 
