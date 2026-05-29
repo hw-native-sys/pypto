@@ -433,9 +433,11 @@ iter_arg carry，或未写入的数组槽——invalid id 绝不能进入
 `pl.submit` call 的 kernel-result tuple 元素与普通多输出 kernel call 一样，
 直接 alias kernel 的 `Out`/`InOut` 参数。
 
-dep 数组填充条目在 source 是 iter_arg / 数组槽 carry 或数组槽读取时会被
-`if (<task_id>.is_valid())` 包裹（首轮迭代种子或未写入的槽位可能仍是 invalid
-哨兵）；对直接 `pl.submit` producer TaskId 绑定则无条件追加。
+每个 dep 数组填充条目都会被 `if (<task_id>.is_valid())` 包裹——包括直接来自
+`pl.submit` 的 producer TaskId。`EmitManualDeps` 对所有标量（string 形式）
+TaskId 统一加守卫，因为任何 TaskId 都可能持有 `PTO2TaskId::invalid()` 哨兵
+（首轮迭代的 iter_arg carry、未写入的数组槽、数组槽读取，或 `None` 种子）。
+array-carry iter_arg 则按元素逐槽生成带守卫的填充。
 
 **词法作用域生命周期。** TaskId 绑定命名的是在其产生所在的 `PTO2_SCOPE { ... }`
 块内声明的 C++ 局部变量（`PTO2TaskId tid = ...`）。每个 `PTO2_SCOPE`（AUTO 或

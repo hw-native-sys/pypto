@@ -4826,8 +4826,8 @@ def test_array_slot_task_id_usable_as_submit_dep():
             out: pl.Out[pl.Tensor[[64], pl.FP32]],
         ) -> pl.Tensor[[64], pl.FP32]:
             tids = pl.array.create(1, pl.TASK_ID)
-            seed, seed_tid = pl.submit(self.k1, x)
-            a, tid = pl.submit(self.k2, x)
+            _seed, seed_tid = pl.submit(self.k1, x)
+            _a, tid = pl.submit(self.k2, x)
             tids[0] = tid
             prev = tids[0]
             b, _ = pl.submit(self.k3, x, deps=[seed_tid, prev])
@@ -4873,7 +4873,7 @@ def test_task_id_binding_does_not_leak_past_pl_scope():
             out: pl.Out[pl.Tensor[[64], pl.FP32]],
         ) -> pl.Tensor[[64], pl.FP32]:
             with pl.scope():
-                a, scoped_tid = pl.submit(self.k1, x)
+                _a, scoped_tid = pl.submit(self.k1, x)
             b, _ = pl.submit(self.k2, x, deps=[scoped_tid])
             return b
 
@@ -4886,6 +4886,54 @@ def test_task_id_binding_does_not_leak_past_pl_scope():
     # It must NOT be referenced after its block closes — the binding is scoped
     # out, so the only occurrence is its declaration (no dangling dep fill).
     assert code.count(tid_name) == 1, f"TaskId local '{tid_name}' leaked past its pl.scope():\n{code}"
+
+
+def test_mixed_in_and_out_of_scope_deps_does_not_crash_codegen():
+    """A deps= list mixing an in-scope TaskId with one scoped out of a closed
+    ``pl.scope()`` must not abort codegen.
+
+    ``CountManualDeps`` skips the out-of-scope edge when sizing the dep stack
+    array, so the count is non-zero (the in-scope edge). ``EmitManualDeps`` must
+    skip the same out-of-scope edge rather than asserting on it — otherwise the
+    mixed case trips an INTERNAL_CHECK and crashes the compiler. The in-scope
+    edge is still wired; the out-of-scope edge is dropped.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k3(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+        def main(
+            self,
+            x: pl.Tensor[[64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            with pl.scope():
+                _a, scoped_tid = pl.submit(self.k1, x)
+            _seed, seed_tid = pl.submit(self.k2, x)
+            b, _ = pl.submit(self.k3, x, deps=[seed_tid, scoped_tid])
+            return b
+
+    # Must not raise (regression: EmitManualDeps used to INTERNAL_CHECK here).
+    code = _generate_orch_full_pipeline(P)
+
+    # The in-scope edge is wired; the out-of-scope ``scoped_tid`` is dropped.
+    assert code.count("set_dependencies(") == 1, code
+    assert re.search(r"if \(seed_tid\w*\.is_valid\(\)\)", code), code
+    m = re.search(r"PTO2TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
+    assert m, code
+    assert code.count(m.group(1)) == 1, code
 
 
 if __name__ == "__main__":

@@ -440,10 +440,12 @@ variables. Each entry resolves at codegen time through
 The kernel-result tuple elements of a `pl.submit` call alias the kernel's
 `Out`/`InOut` args exactly like an ordinary multi-output kernel call.
 
-A dep array-fill entry is wrapped in `if (<task_id>.is_valid())` when the
-source is an iter_arg / array-slot carry or an array-slot read (first-iteration
-seed or unwritten slot may still be the invalid sentinel) and appended
-unconditionally for direct `pl.submit`-producer TaskId bindings.
+Every dep array-fill entry is wrapped in `if (<task_id>.is_valid())` —
+including direct `pl.submit`-producer TaskId bindings. `EmitManualDeps` guards
+every scalar (string-backed) TaskId uniformly because any TaskId may hold the
+`PTO2TaskId::invalid()` sentinel (a first-iteration iter_arg carry, an unwritten
+array slot, an array-slot read, or a `None` seed). Array-carry iter_args fill
+one guarded slot per element.
 
 **Lexical-scope lifetime.** TaskId bindings name C++ locals (`PTO2TaskId tid
 = ...`) declared inside the generated `PTO2_SCOPE { ... }` block they are

@@ -1669,9 +1669,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
       for (const auto& edge : *edges) {
         if (!edge) continue;
         auto it = manual_task_id_map_.find(edge.get());
-        INTERNAL_CHECK_SPAN(it != manual_task_id_map_.end(), call->span_)
-            << "Internal error: manual_dep_edge var '" << edge->name_hint_
-            << "' has no producer task in current manual scope";
+        // Skip edges whose producer TaskId is not visible in the current C++
+        // scope. With per-PTO2_SCOPE lexical scoping, a dep that references a
+        // TaskId declared inside an already-closed scope is legitimately absent
+        // from the map; emitting it would name an out-of-scope identifier. Skip
+        // it — matching ``CountManualDeps``, which sizes the stack array the
+        // same way — so a mixed in-scope / out-of-scope deps list does not abort.
+        if (it == manual_task_id_map_.end()) continue;
         if (std::get_if<int>(&it->second)) {
           // Invariant: a ``manual_dep_edges`` entry should never resolve
           // directly to a kernel-Call LHS (int-variant entry). The parser
