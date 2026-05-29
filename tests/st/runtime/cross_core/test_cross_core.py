@@ -41,6 +41,17 @@ MULTI_PIPE_DIM = 16
 MULTI_PIPE_SLOT_SIZE = MULTI_PIPE_DIM * MULTI_PIPE_DIM * 4
 MULTI_PIPE_BUFFER_SIZE = MULTI_PIPE_SLOT_SIZE * 8
 
+# Explicit slot_num / local_slot_num pipe sizing.
+# slot_num pins the GM ring depth (here 4, below the default 8); local_slot_num
+# pins the local slot count. Reserve-buffer size is arch-dependent:
+#   a3 -> slot_size * local_slot_num ; a5 -> slot_size * slot_num.
+# Keeping local_slot_num == slot_num makes a single buffer size correct on both.
+SLOTNUM_DIM = 16
+SLOTNUM_SLOT_SIZE = SLOTNUM_DIM * SLOTNUM_DIM * 4
+SLOTNUM_SLOT_NUM = 4
+SLOTNUM_LOCAL_SLOT_NUM = 4
+SLOTNUM_BUFFER_SIZE = SLOTNUM_SLOT_SIZE * SLOTNUM_LOCAL_SLOT_NUM
+
 _PLATFORM_TO_BACKEND: dict[str, BackendType] = {
     "a2a3": BackendType.Ascend910B,
     "a2a3sim": BackendType.Ascend910B,
@@ -683,6 +694,128 @@ class MultiPipeNoSplitTest(PTOTestCase):
         tensors["output"][:] = torch.matmul(tensors["a"] + tensors["b"], tensors["a"] - tensors["b"])
 
 
+@pl.program
+class ExplicitSlotNumProgram:
+    """Two explicit V2C pipes with caller-pinned slot_num / local_slot_num."""
+
+    @pl.function(type=pl.FunctionType.AIV, attrs={"dual_aiv_dispatch": True})
+    def vector_slotnum(
+        self,
+        a: pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32],
+        b: pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32],
+        output: pl.Out[pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32]],
+    ):
+        v2c_peer_0 = pl.import_peer_buffer(name="v2c_slotnum_buffer_0", peer_func="cube_slotnum")
+        v2c_peer_1 = pl.import_peer_buffer(name="v2c_slotnum_buffer_1", peer_func="cube_slotnum")
+        pl.aiv_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_peer_0,
+            dir_mask=2,
+            slot_size=SLOTNUM_SLOT_SIZE,
+            slot_num=SLOTNUM_SLOT_NUM,
+            local_slot_num=SLOTNUM_LOCAL_SLOT_NUM,
+            id=0,
+        )
+        pl.aiv_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_peer_1,
+            dir_mask=2,
+            slot_size=SLOTNUM_SLOT_SIZE,
+            slot_num=SLOTNUM_SLOT_NUM,
+            local_slot_num=SLOTNUM_LOCAL_SLOT_NUM,
+            id=1,
+        )
+        a_tile: pl.Tile[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32, pl.Mem.Vec] = pl.load(
+            a, [0, 0], [SLOTNUM_DIM, SLOTNUM_DIM]
+        )
+        b_tile: pl.Tile[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32, pl.Mem.Vec] = pl.load(
+            b, [0, 0], [SLOTNUM_DIM, SLOTNUM_DIM]
+        )
+        sum_tile: pl.Tile[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32, pl.Mem.Vec] = pl.add(a_tile, b_tile)
+        diff_tile: pl.Tile[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32, pl.Mem.Vec] = pl.sub(a_tile, b_tile)
+        pl.tpush_to_aic(diff_tile, split=0, id=1)
+        pl.tpush_to_aic(sum_tile, split=0, id=0)
+
+    @pl.function(type=pl.FunctionType.AIC)
+    def cube_slotnum(
+        self,
+        a: pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32],
+        b: pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32],
+        output: pl.Out[pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32]],
+    ) -> pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32]:
+        v2c_buf_0 = pl.reserve_buffer(name="v2c_slotnum_buffer_0", size=SLOTNUM_BUFFER_SIZE, base=pl.AUTO)
+        v2c_buf_1 = pl.reserve_buffer(name="v2c_slotnum_buffer_1", size=SLOTNUM_BUFFER_SIZE, base=pl.AUTO)
+        pl.aic_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_buf_0,
+            dir_mask=2,
+            slot_size=SLOTNUM_SLOT_SIZE,
+            slot_num=SLOTNUM_SLOT_NUM,
+            local_slot_num=SLOTNUM_LOCAL_SLOT_NUM,
+            id=0,
+        )
+        pl.aic_initialize_pipe(
+            pl.const(0, pl.INT32),
+            v2c_buf_1,
+            dir_mask=2,
+            slot_size=SLOTNUM_SLOT_SIZE,
+            slot_num=SLOTNUM_SLOT_NUM,
+            local_slot_num=SLOTNUM_LOCAL_SLOT_NUM,
+            id=1,
+        )
+        sum_tile: pl.Tile[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32, pl.Mem.Mat] = pl.tpop_from_aiv(split=0, id=0)
+        diff_tile: pl.Tile[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32, pl.Mem.Mat] = pl.tpop_from_aiv(split=0, id=1)
+        sum_left = pl.move(sum_tile, target_memory=pl.Mem.Left)
+        diff_right = pl.move(diff_tile, target_memory=pl.Mem.Right)
+        result: pl.Tile[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32] = pl.matmul(sum_left, diff_right)
+        pl.tfree_to_aiv(sum_tile, id=0)
+        pl.tfree_to_aiv(diff_tile, id=1)
+        return pl.store(result, [0, 0], output)
+
+    @pl.function(type=pl.FunctionType.Group)
+    def group_func(
+        self,
+        a: pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32],
+        b: pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32],
+        output: pl.Out[pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32]],
+    ) -> pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32]:
+        result = self.cube_slotnum(a, b, output)
+        self.vector_slotnum(a, b, output)
+        return result
+
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(
+        self,
+        a: pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32],
+        b: pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32],
+        output: pl.Out[pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32]],
+    ) -> pl.Tensor[[SLOTNUM_DIM, SLOTNUM_DIM], pl.FP32]:
+        result = self.group_func(a, b, output)
+        return result
+
+
+class ExplicitSlotNumTest(PTOTestCase):
+    """Explicit slot_num / local_slot_num V->C setup: output = (a + b) @ (a - b)."""
+
+    __test__ = False
+
+    def get_name(self) -> str:
+        return "cross_core_explicit_slot_num"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [SLOTNUM_DIM, SLOTNUM_DIM], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [SLOTNUM_DIM, SLOTNUM_DIM], DataType.FP32, init_value=torch.randn),
+            TensorSpec("output", [SLOTNUM_DIM, SLOTNUM_DIM], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return ExplicitSlotNumProgram
+
+    def compute_expected(self, tensors: dict[str, torch.Tensor], params=None) -> None:
+        tensors["output"][:] = torch.matmul(tensors["a"] + tensors["b"], tensors["a"] - tensors["b"])
+
+
 class TestCrossCore:
     """Cross-core communication system tests."""
 
@@ -745,6 +878,13 @@ class TestCrossCore:
             pytest.xfail("950 backend explicit multi-pipe no-split not yet validated on sim")
         result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
+
+    def test_explicit_slot_num(self, test_runner, backend_type, platform):
+        """Explicit slot_num / local_slot_num: compile through full pipeline and verify correctness."""
+        if platform == "a5sim":
+            pytest.xfail("950 backend explicit slot_num pipe not yet validated on sim")
+        result = test_runner.run(ExplicitSlotNumTest(backend_type=backend_type))
+        assert result.passed, f"Cross-core explicit slot_num failed: {result.error}"
 
 
 if __name__ == "__main__":
