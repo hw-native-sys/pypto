@@ -696,6 +696,82 @@ class TestOrchestration:
         # PTO2_SCOPE wraps all task submissions
         assert "PTO2_SCOPE" in code
 
+    def test_inout_not_returned_three_outputs_alias(self):
+        """Regression for #1573: 3+ tuple outputs + an InOut that is not returned.
+
+        ``kernel`` takes ``inout_t`` (InOut, written in place but NOT part of the
+        return tuple) followed by three ``Out`` params that ARE returned. The
+        legacy tail-alignment heuristic put ``inout_t`` in the Out/InOut index
+        list, so ``tuple_arity (3) < out_indices (4)`` shifted every result alias
+        by one: each tuple element bound to the wrong source tensor
+        (``o1 = ext_inout_t``, ``o2 = ext_ta``, ``o3 = ext_tb``). Downstream that
+        feeds a reshape/consumer the wrong tensor (AICPU ``valid_reshape`` assert
+        / scheduler timeout). Each result must alias to its own arg, recovered
+        precisely from the callee's ReturnStmt.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class InOutNotReturnedProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                inout_t: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                out_a: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                out_c: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> tuple[
+                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 16], pl.FP32],
+                pl.Tensor[[16, 16], pl.FP32],
+            ]:
+                it: pl.Tile[[16, 16], pl.FP32] = pl.load(inout_t, [0, 0], [16, 16])
+                _io: pl.Tensor[[16, 16], pl.FP32] = pl.store(it, [0, 0], inout_t)
+                a_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(it, [0, 0], out_a)
+                b_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(it, [0, 0], out_b)
+                c_out: pl.Tensor[[16, 16], pl.FP32] = pl.store(it, [0, 0], out_c)
+                return a_out, b_out, c_out
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def combine(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                b: pl.Tensor[[16, 16], pl.FP32],
+                c: pl.Tensor[[16, 16], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                r: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], out)
+                return r
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                inout_t: pl.InOut[pl.Tensor[[16, 16], pl.FP32]],
+                ta: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                tb: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                tc: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                final: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                o1, o2, o3 = self.kernel(inout_t, ta, tb, tc)
+                final = self.combine(o1, o2, o3, final)
+                return final
+
+        code = _generate_orch_code(InOutNotReturnedProgram)
+
+        # inout_t is InOut (written in place) but not part of the return tuple.
+        assert "params_t0.add_inout(ext_inout_t)" in code
+
+        # Each tuple result aliases to its OWN arg — not shifted onto inout_t.
+        assert "const Tensor& o1 = ext_ta;" in code
+        assert "const Tensor& o2 = ext_tb;" in code
+        assert "const Tensor& o3 = ext_tc;" in code
+        # The scrambled (shifted-by-one) bindings must NOT appear.
+        assert "const Tensor& o1 = ext_inout_t;" not in code
+        assert "const Tensor& o2 = ext_ta;" not in code
+        assert "const Tensor& o3 = ext_tb;" not in code
+
     def test_tensor_create(self):
         """Test tensor.create generates TensorCreateInfo with shape/dtype."""
         backend.reset_for_testing()
