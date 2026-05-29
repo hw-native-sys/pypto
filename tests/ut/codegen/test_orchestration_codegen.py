@@ -4686,5 +4686,93 @@ class TestTupleReturnNameHintCollision:
         )
 
 
+class TestScalarCarryPhiCodegen:
+    """Regression tests for scalar loop carries in orchestration codegen."""
+
+    def test_scalar_carry_phi_not_emitted_as_tensor(self):
+        """Regression for #1580: Scalar loop carry must not be aliased as const Tensor&.
+
+        When a Scalar variable is defined before a pl.parallel loop and then
+        reused (reassigned) inside it, alongside Tensor carries, ConvertToSSA
+        promotes the scalar into the parallel-loop carry tuple.  The orchestration
+        codegen must emit the Scalar carry phi as ``int64_t = 0`` (untraced scalar
+        default), NOT as ``const Tensor& = <carry_var>`` (type mismatch that causes
+        a C++ compile error).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        N, TILE = 16, 4
+
+        @pl.program
+        class ScalarCarryProg:
+            @pl.function(type=pl.FunctionType.AIV)
+            def scope_b_kernel(
+                self,
+                x: pl.Tensor[[N, N], pl.FP32],
+                out_b: pl.Out[pl.Tensor[[N, N], pl.FP32]],
+                out_c: pl.Out[pl.Tensor[[N, N], pl.FP32]],
+            ) -> tuple[pl.Tensor[[N, N], pl.FP32], pl.Tensor[[N, N], pl.FP32]]:
+                t: pl.Tile[[N, N], pl.FP32] = pl.load(x, [0, 0], [N, N])
+                out_b = pl.store(t, [0, 0], out_b)
+                out_c = pl.store(t, [0, 0], out_c)
+                return out_b, out_c
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[N, N], pl.FP32],
+                out_b: pl.Out[pl.Tensor[[N, N], pl.FP32]],
+                out_c: pl.Out[pl.Tensor[[N, N], pl.FP32]],
+                row_start: pl.Scalar[pl.INDEX],
+            ) -> tuple[pl.Tensor[[N, N], pl.FP32], pl.Tensor[[N, N], pl.FP32]]:
+                # global_c_idx is assigned from a scalar param before the
+                # parallel loop — ConvertToSSA sees it in 'before' and adds it
+                # as a carry when it is reassigned inside the loop body.
+                global_c_idx = row_start
+
+                # The parallel loop carries global_c_idx (Scalar) mixed with
+                # Tensor carries out_b, out_c.  Before the fix, the Scalar carry
+                # phi was emitted as ``const Tensor&`` causing a C++ compile error.
+                for batch_idx in pl.parallel(0, N // TILE):
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="scope_b"):
+                        for inner in pl.range(TILE):
+                            global_c_idx = batch_idx + inner
+                            out_b, out_c = self.scope_b_kernel(x, out_b, out_c)
+
+                return out_b, out_c
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(ScalarCarryProg)
+        code = _generate_orch_code(transformed)
+
+        # The Scalar carry phi must be emitted as int64_t = 0 (untraced scalar
+        # default), never as const Tensor& = <carry> (type mismatch / #1580).
+        assert "int64_t global_c_idx__rv" in code, (
+            "global_c_idx carry phi should be emitted as int64_t, not const Tensor&\n" + code
+        )
+        assert "const Tensor& global_c_idx" not in code, (
+            "global_c_idx must not be aliased as const Tensor& (scalar/tensor type mismatch)\n" + code
+        )
+
+        # out_b and out_c Tensor carries must each alias to their own carry.
+        # The scrambled (shifted-by-one) bindings must NOT appear.
+        for line in code.splitlines():
+            stripped = line.strip()
+            if "=" not in stripped:
+                continue
+            lhs, _, rhs = stripped.partition("=")
+            # out_c phi must not be initialized from out_b's carry value
+            if "out_c" in lhs and "out_b" in rhs and "out_c" not in rhs:
+                raise AssertionError(
+                    f"Wrong phi: out_c assigned from out_b value (scrambled):\n  {stripped}"
+                )
+            # out_b phi must not be initialized from out_c's carry value
+            if "out_b" in lhs and "out_c" in rhs and "out_b" not in rhs:
+                raise AssertionError(
+                    f"Wrong phi: out_b assigned from out_c value (scrambled):\n  {stripped}"
+                )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

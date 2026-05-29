@@ -228,7 +228,15 @@ void VarLineageCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
     const Var* param = ResolveExpr(iter_arg->initValue_);
     if (param) {
       var_to_param[iter_arg.get()] = param;
-      if (i < for_stmt->return_vars_.size()) {
+      // Only propagate buffer lineage to the return_var for Tensor-type carries.
+      // Scalar carries (e.g. a loop counter ``idx = batch_base + inner``) are
+      // value-typed: the body may overwrite them with a freshly computed value
+      // that has no relationship to the init param.  Propagating param lineage
+      // to a Scalar return_var makes FindReturnedParamIndices incorrectly map
+      // a Scalar return element to a param index, causing EmitTensorAlias to
+      // emit ``const Tensor&`` for an int64_t variable (issue #1580).
+      if (i < for_stmt->return_vars_.size() &&
+          AsTensorTypeLike(for_stmt->return_vars_[i]->GetType())) {
         var_to_param[for_stmt->return_vars_[i].get()] = param;
       }
     }
@@ -242,7 +250,9 @@ void VarLineageCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
     const Var* param = ResolveExpr(iter_arg->initValue_);
     if (param) {
       var_to_param[iter_arg.get()] = param;
-      if (i < while_stmt->return_vars_.size()) {
+      // Same guard as ForStmt: only propagate to Tensor return_vars.
+      if (i < while_stmt->return_vars_.size() &&
+          AsTensorTypeLike(while_stmt->return_vars_[i]->GetType())) {
         var_to_param[while_stmt->return_vars_[i].get()] = param;
       }
     }
