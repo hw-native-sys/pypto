@@ -298,11 +298,16 @@ def _build_submit_dumps_program():
         def stage1(
             self,
             x: pl.Tensor[[ROWS, COLS], pl.FP32],
-            scratch: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            scratch: pl.InOut[pl.Tensor[[ROWS, COLS], pl.FP32]],
         ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
             t: pl.Tile[[ROWS, COLS], pl.FP32] = pl.load(x, [0, 0], [ROWS, COLS])
             r: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(t, 1.0)  # x + 1
-            ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(r, [0, 0], scratch)
+            # Read scratch (init 0.0) so it is a genuine InOut slot: adding the
+            # zero-initialised buffer leaves the result == x + 1, and the read
+            # makes codegen register scratch via add_inout (dump role "inout").
+            s: pl.Tile[[ROWS, COLS], pl.FP32] = pl.load(scratch, [0, 0], [ROWS, COLS])
+            acc: pl.Tile[[ROWS, COLS], pl.FP32] = pl.add(r, s)  # (x + 1) + 0
+            ret: pl.Tensor[[ROWS, COLS], pl.FP32] = pl.store(acc, [0, 0], scratch)
             return ret
 
         @pl.function(type=pl.FunctionType.InCore)
@@ -320,7 +325,7 @@ def _build_submit_dumps_program():
         def main(
             self,
             x: pl.Tensor[[ROWS, COLS], pl.FP32],
-            scratch: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
+            scratch: pl.InOut[pl.Tensor[[ROWS, COLS], pl.FP32]],
             out: pl.Out[pl.Tensor[[ROWS, COLS], pl.FP32]],
         ) -> pl.Tensor[[ROWS, COLS], pl.FP32]:
             with pl.manual_scope():

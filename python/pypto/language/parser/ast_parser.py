@@ -4838,6 +4838,59 @@ class ASTParser:
             hint="Use pl.*, pl.tensor.*, pl.tile.*, or pl.system.* operations",
         )
 
+    @staticmethod
+    def _validate_kernel_call_kwargs(
+        method_name: str,
+        func_obj: ir.Function | None,
+        keywords: list[ast.keyword],
+        as_submit: bool,
+        as_spmd: bool,
+        span: ir.Span,
+    ) -> None:
+        """Reject unknown keyword arguments on a cross-function kernel call.
+
+        ``attrs=`` surfaces call-site directions and is always allowed.
+        ``deps=`` / ``dumps=`` are accepted only on ``pl.submit(...)``;
+        ``core_num=`` / ``sync_start=`` only on ``pl.spmd_submit(...)``;
+        ``device=`` only when the callee is an Orchestrator. Raises
+        ``ParserTypeError`` with a targeted hint for the common
+        deps/dumps-on-a-plain-call mistakes.
+        """
+        allowed_kwargs = {"attrs"}
+        if as_submit:
+            allowed_kwargs.add("deps")
+            allowed_kwargs.add("dumps")
+        if as_spmd:
+            allowed_kwargs.update({"core_num", "sync_start"})
+        if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
+            allowed_kwargs.add("device")
+        for kw in keywords:
+            if kw.arg in allowed_kwargs:
+                continue
+            hint = f"Allowed keyword arguments: {sorted(allowed_kwargs)}"
+            if kw.arg == "deps" and not as_submit:
+                hint = (
+                    "Plain self.kernel(...) is fire-and-forget. To attach "
+                    "dependency edges, submit it: "
+                    "`out, tid = pl.submit(self.kernel, ..., deps=[...])`."
+                )
+            elif kw.arg in ("core_num", "sync_start") and not as_spmd:
+                hint = (
+                    f"'{kw.arg}' is an SPMD launch parameter. Launch the kernel "
+                    "across multiple blocks with "
+                    "`out, tid = pl.spmd_submit(self.kernel, ..., core_num=N)`."
+                )
+            elif kw.arg == "dumps" and not as_submit:
+                hint = (
+                    "dumps= is only valid on pl.submit(...). For a plain kernel "
+                    "call, wrap the arg: `self.kernel(pl.dump(x), ...)`."
+                )
+            raise ParserTypeError(
+                f"Function '{method_name}' does not accept keyword argument '{kw.arg}'",
+                span=span,
+                hint=hint,
+            )
+
     def _parse_kernel_call(
         self,
         method_attr: ast.Attribute,
@@ -4883,44 +4936,10 @@ class ASTParser:
         gvar = self.global_vars[method_name]
         func_obj = self.gvar_to_func.get(gvar)
 
-        # ``attrs={"arg_directions": [...]}`` surfaces call-site directions on
-        # any cross-function call. ``deps=[...]`` attaches explicit manual_scope
-        # dependency edges and is accepted only on ``pl.submit(...)``.
-        # ``device=`` selects the physical device for an Orchestration
-        # dispatch. Other kwargs are rejected.
-        allowed_kwargs = {"attrs"}
-        if as_submit:
-            allowed_kwargs.add("deps")
-            allowed_kwargs.add("dumps")
-        if as_spmd:
-            allowed_kwargs.update({"core_num", "sync_start"})
-        if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
-            allowed_kwargs.add("device")
-        for kw in keywords:
-            if kw.arg not in allowed_kwargs:
-                hint = f"Allowed keyword arguments: {sorted(allowed_kwargs)}"
-                if kw.arg == "deps" and not as_submit:
-                    hint = (
-                        "Plain self.kernel(...) is fire-and-forget. To attach "
-                        "dependency edges, submit it: "
-                        "`out, tid = pl.submit(self.kernel, ..., deps=[...])`."
-                    )
-                elif kw.arg in ("core_num", "sync_start") and not as_spmd:
-                    hint = (
-                        f"'{kw.arg}' is an SPMD launch parameter. Launch the kernel "
-                        "across multiple blocks with "
-                        "`out, tid = pl.spmd_submit(self.kernel, ..., core_num=N)`."
-                    )
-                elif kw.arg == "dumps" and not as_submit:
-                    hint = (
-                        "dumps= is only valid on pl.submit(...). For a plain kernel "
-                        "call, wrap the arg: `self.kernel(pl.dump(x), ...)`."
-                    )
-                raise ParserTypeError(
-                    f"Function '{method_name}' does not accept keyword argument '{kw.arg}'",
-                    span=span,
-                    hint=hint,
-                )
+        # Reject unknown kwargs (``attrs`` always; ``deps`` / ``dumps`` only on
+        # submit; ``core_num`` / ``sync_start`` only on spmd_submit; ``device``
+        # only for an Orchestrator callee).
+        self._validate_kernel_call_kwargs(method_name, func_obj, keywords, as_submit, as_spmd, span)
 
         # Validate argument count before parsing args to fail fast.
         if func_obj is not None:
@@ -5335,18 +5354,15 @@ class ASTParser:
             val = self.parse_expression(elt)
             if not isinstance(val, ir.Var) or not isinstance(val.type, ir.TensorType):
                 raise ParserTypeError(
-                    f"'{method_name}' dumps= entries must be tensor variables — "
-                    f"got '{ast.unparse(elt)}'",
+                    f"'{method_name}' dumps= entries must be tensor variables — got '{ast.unparse(elt)}'",
                     span=elt_span,
                     hint="List tensors passed to this submit, e.g. dumps=[x].",
                 )
             if not any(val is a for a in args):
                 raise ParserTypeError(
-                    f"'{method_name}' dumps= entry '{ast.unparse(elt)}' is not an "
-                    f"argument of this submit",
+                    f"'{method_name}' dumps= entry '{ast.unparse(elt)}' is not an argument of this submit",
                     span=elt_span,
-                    hint="dumps= may only name tensors passed positionally to the "
-                    "submitted kernel.",
+                    hint="dumps= may only name tensors passed positionally to the submitted kernel.",
                 )
             if not any(val is e for e in result):  # dedup by identity
                 result.append(val)
