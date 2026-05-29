@@ -428,13 +428,20 @@ iter_arg carry，或未写入的数组槽——invalid id 绝不能进入
 | `pl.submit` 的 producer TaskId（增广 Call 的 TaskId tuple 元素） | `PTO2TaskId <tid_name> = task_<n>_outs.task_id();`，其中 `task_<n>_outs` 是 submit 捕获的 `TaskOutputTensors` |
 | `None` 种子（`deps=[None]` 条目中的字面量，或 TaskId iter_arg init） | `PTO2TaskId::invalid()` |
 | 循环 carry iter_arg（穿行循环的 TaskId 配套） | for 循环中穿行的命名变量——标量或数组，见下 |
+| 数组槽读取（`prev = tids[k]`——对 `Array[TASK_ID]` 的 `array.get_element`） | `PTO2TaskId <name> = <arr>[k];`——一个标量快照局部变量；dep 引用该局部变量而非重新读取槽位，因此之后的 `tids[k] = ...` 覆写不会改变它 |
 
 `pl.submit` call 的 kernel-result tuple 元素与普通多输出 kernel call 一样，
 直接 alias kernel 的 `Out`/`InOut` 参数。
 
-dep 数组填充条目在 source 是 iter_arg / 数组槽 carry 时会被
-`if (<task_id>.is_valid())` 包裹（首轮迭代种子可能仍是 invalid 哨兵）；
-对直接 `pl.submit` producer TaskId 绑定则无条件追加。
+dep 数组填充条目在 source 是 iter_arg / 数组槽 carry 或数组槽读取时会被
+`if (<task_id>.is_valid())` 包裹（首轮迭代种子或未写入的槽位可能仍是 invalid
+哨兵）；对直接 `pl.submit` producer TaskId 绑定则无条件追加。
+
+**词法作用域生命周期。** TaskId 绑定命名的是在其产生所在的 `PTO2_SCOPE { ... }`
+块内声明的 C++ 局部变量（`PTO2TaskId tid = ...`）。每个 `PTO2_SCOPE`（AUTO 或
+MANUAL）在进入时快照 `manual_task_id_map_`、退出时恢复，因此在某作用域内产生的
+绑定不会泄漏到外层作用域（否则其标识符会超出 C++ 作用域）。循环 / 分支的 carry
+在其 body 的 `PTO2_SCOPE` *之前*声明，因此能正确地在块结束后存活。
 
 ### `pl.parallel` TaskId iter_arg 的 array carry
 

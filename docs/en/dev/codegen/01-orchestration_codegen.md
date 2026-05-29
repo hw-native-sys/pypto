@@ -435,14 +435,23 @@ variables. Each entry resolves at codegen time through
 | `pl.submit` producer TaskId (the augmented Call's TaskId tuple element) | `PTO2TaskId <tid_name> = task_<n>_outs.task_id();` where `task_<n>_outs` is the `TaskOutputTensors` captured from the submit |
 | `None` seed (the literal in a `deps=[None]` entry or a TaskId iter_arg init) | `PTO2TaskId::invalid()` |
 | Loop-carry iter_arg (TaskId companion threaded through a loop) | A named variable threaded through the for-loop, either scalar or array — see below |
+| Array-slot read (`prev = tids[k]` — `array.get_element` on an `Array[TASK_ID]`) | `PTO2TaskId <name> = <arr>[k];` — a scalar snapshot local; the dep references this local, not a re-read of the slot, so a later `tids[k] = ...` overwrite does not change it |
 
 The kernel-result tuple elements of a `pl.submit` call alias the kernel's
 `Out`/`InOut` args exactly like an ordinary multi-output kernel call.
 
 A dep array-fill entry is wrapped in `if (<task_id>.is_valid())` when the
-source is an iter_arg / array-slot carry (first-iteration seed may still be
-the invalid sentinel) and appended unconditionally for direct
-`pl.submit`-producer TaskId bindings.
+source is an iter_arg / array-slot carry or an array-slot read (first-iteration
+seed or unwritten slot may still be the invalid sentinel) and appended
+unconditionally for direct `pl.submit`-producer TaskId bindings.
+
+**Lexical-scope lifetime.** TaskId bindings name C++ locals (`PTO2TaskId tid
+= ...`) declared inside the generated `PTO2_SCOPE { ... }` block they are
+produced in. Each `PTO2_SCOPE` (AUTO or MANUAL) snapshots `manual_task_id_map_`
+on entry and restores it on exit, so a binding produced inside a scope does not
+leak to an enclosing scope where its identifier would be out of C++ scope. Loop
+/ branch carries are declared *before* their body's `PTO2_SCOPE`, so they
+correctly survive the block.
 
 ### Array carry for `pl.parallel` TaskId iter_args
 

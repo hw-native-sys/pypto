@@ -790,25 +790,28 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << Indent() << "PTO2_SCOPE(" << (scope->manual_ ? "PTO2ScopeMode::MANUAL" : "") << ") {\n";
     indent_ += 4;
     PushCppScope();
-    decltype(manual_task_id_map_) saved_map;
-    decltype(array_carry_vars_) saved_array_carry;
+    // Snapshot the TaskId / array-carry bindings on entry to EVERY generated
+    // PTO2_SCOPE (AUTO or MANUAL); restore on exit. A binding added inside the
+    // block names a C++ local (e.g. ``PTO2TaskId tid = ...``, ``PTO2TaskId prev
+    // = arr[k]``) declared inside the generated ``{ }`` — it dies at the closing
+    // brace, so it must not leak to the enclosing scope where a later
+    // ``set_dependencies`` / array-yield would reference a now-out-of-scope
+    // identifier (issue #1577). The snapshot is by COPY so outer entries stay
+    // visible inside the block: a task in the scope can still fence on TaskIds
+    // produced by tasks emitted in the enclosing (auto or outer) scope. Loop /
+    // branch carries are registered *before* their body's PTO2_SCOPE (outside
+    // this frame), so they correctly survive the block.
+    auto saved_map = manual_task_id_map_;
+    auto saved_array_carry = array_carry_vars_;
     if (scope->manual_) {
       ++in_manual_scope_depth_;
-      // Snapshot the outer maps by COPY (not move) so the live map keeps
-      // the outer entries visible inside the manual scope — a kernel inside
-      // a manual scope must be able to fence on TaskIds produced by tasks
-      // emitted in the enclosing (auto or outer-manual) scope. On exit we
-      // restore the outer-only snapshot, discarding the inner-scope adds
-      // (those reference C++ identifiers that die with the inner block).
-      saved_map = manual_task_id_map_;
-      saved_array_carry = array_carry_vars_;
     }
     VisitStmt(scope->body_);
     if (scope->manual_) {
       --in_manual_scope_depth_;
-      manual_task_id_map_ = std::move(saved_map);
-      array_carry_vars_ = std::move(saved_array_carry);
     }
+    manual_task_id_map_ = std::move(saved_map);
+    array_carry_vars_ = std::move(saved_array_carry);
     PopCppScope();
     indent_ -= 4;
     code_ << Indent() << "}\n";
@@ -971,6 +974,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
         } else if (op_name == "array.get_element") {
           auto scalar_ty = As<ScalarType>(assign->var_->GetType());
           if (scalar_ty && scalar_ty->dtype_ == DataType::TASK_ID) {
+            manual_task_id_map_[assign->var_.get()] = var_name;
+          }
+        }
+        // ``prev = tids[k]`` reads one slot of a TaskId array into a scalar
+        // C++ local (``PTO2TaskId prev = arr[k];``). Register the LHS so a
+        // downstream ``deps=[prev]`` resolves to this snapshot local (string
+        // variant) — mirroring the producer-TaskId registration in
+        // ``GenerateSubmitReturnAliases``. Binding to the local (not the
+        // ``arr[k]`` slot) preserves snapshot semantics: a later
+        // ``arr[k] = ...`` overwrite must not retroactively change ``prev``.
+        // Non-TaskId ``get_element`` results are not dependency sources, so
+        // they are intentionally left unregistered.
+        if (op_name == "array.get_element") {
+          if (auto st = As<ScalarType>(assign->var_->GetType()); st && st->dtype_ == DataType::TASK_ID) {
             manual_task_id_map_[assign->var_.get()] = var_name;
           }
         }

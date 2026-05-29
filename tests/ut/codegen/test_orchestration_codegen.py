@@ -4770,5 +4770,123 @@ class TestScalarCarryPhiCodegen:
                 raise AssertionError(f"Wrong phi: out_b assigned from out_c value (scrambled):\n  {stripped}")
 
 
+def _generate_orch_full_pipeline(program_cls) -> str:
+    """Run the Default pass pipeline + orchestration codegen on the orch func.
+
+    The issue #1577 witnesses use ``pl.submit`` against ``@pl.function(InCore)``
+    kernels, which only reach orchestration form after the full Default pipeline
+    (inline / outline / SSA / materialize scopes). Mirrors
+    ``test_array_codegen._generate_pto`` but targets the Orchestration function.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    # Scope to BASIC (property) verification, overriding conftest's default
+    # roundtrip instrument. ``pl.submit(..., deps=[...])`` in an auto
+    # orchestration does not survive a print->parse roundtrip after
+    # DeriveCallDirections (a separate printer/parser bug, unrelated to the
+    # orchestration codegen behaviour under test here). Property verification
+    # still runs so real IR invariant violations are caught.
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        optimized = pm.run_passes(program_cls)
+    for func in optimized.functions.values():
+        if func.func_type == ir.FunctionType.Orchestration:
+            return codegen.generate_orchestration(optimized, func).code
+    raise AssertionError("no Orchestration function found in program")
+
+
+def test_array_slot_task_id_usable_as_submit_dep():
+    """Regression for issue #1577.
+
+    ``prev = tids[k]`` reads one slot of a ``pl.array.create(N, pl.TASK_ID)``
+    into a ``Scalar[TASK_ID]``. Using ``prev`` as a ``pl.submit(..., deps=[prev])``
+    source must wire the consumer's ``set_dependencies`` array from that snapshot
+    local. Before the fix, orchestration codegen aborted with "manual_dep_edge
+    var '...' has no producer task in current manual scope".
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k3(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            tids = pl.array.create(1, pl.TASK_ID)
+            seed, seed_tid = pl.submit(self.k1, x)
+            a, tid = pl.submit(self.k2, x)
+            tids[0] = tid
+            prev = tids[0]
+            b, _ = pl.submit(self.k3, x, deps=[seed_tid, prev])
+            return b
+
+    code = _generate_orch_full_pipeline(P)
+
+    # ``prev = tids[0]`` lowers to a scalar PTO2TaskId snapshot local read from
+    # the array slot (the dep site references the snapshot, not a slot re-read).
+    assert re.search(r"PTO2TaskId\s+prev\w*\s*=\s*tids\w*\[0\];", code), code
+    # The consumer gets exactly one dependency array, filled from BOTH the direct
+    # producer tid (seed_tid) and the array-slot snapshot (prev), each guarded.
+    assert code.count("set_dependencies(") == 1, code
+    assert re.search(r"if \(seed_tid\w*\.is_valid\(\)\)", code), code
+    assert re.search(r"if \(prev\w*\.is_valid\(\)\)", code), code
+
+
+def test_task_id_binding_does_not_leak_past_pl_scope():
+    """Regression for the issue #1577 lifetime hazard.
+
+    A producer TaskId declared inside a nested AUTO ``pl.scope()`` names a
+    ``PTO2TaskId`` C++ local that dies at the block's closing brace. Codegen must
+    not reference it after the block — before the fix it emitted a
+    ``set_dependencies`` fill from the out-of-scope local (uncompilable C++).
+    The TaskId binding is now scoped to the ``PTO2_SCOPE`` it is produced in, so
+    its identifier appears exactly once (its declaration) in the generated code.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            return x
+
+        @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
+        def main(
+            self,
+            x: pl.Tensor[[64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64], pl.FP32]],
+        ) -> pl.Tensor[[64], pl.FP32]:
+            with pl.scope():
+                a, scoped_tid = pl.submit(self.k1, x)
+            b, _ = pl.submit(self.k2, x, deps=[scoped_tid])
+            return b
+
+    code = _generate_orch_full_pipeline(P)
+
+    # The producer tid is declared inside the inner PTO2_SCOPE block.
+    m = re.search(r"PTO2TaskId\s+(\w+)\s*=\s*task_0_outs\.task_id\(\);", code)
+    assert m, code
+    tid_name = m.group(1)
+    # It must NOT be referenced after its block closes — the binding is scoped
+    # out, so the only occurrence is its declaration (no dangling dep fill).
+    assert code.count(tid_name) == 1, f"TaskId local '{tid_name}' leaked past its pl.scope():\n{code}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
