@@ -96,11 +96,19 @@ void VerifySingleInitializePipeCall(const CallPtr& call, const std::string& func
                                "Function '" + func_name + "': '" + op_name +
                                    "' 'local_slot_num' attribute must be positive when set",
                                call->span_);
-    } else if (call->HasKwarg("slot_num") && local_slot_num > call->GetKwarg<int>("slot_num", 0)) {
-      diagnostics.emplace_back(
-          DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
-          "Function '" + func_name + "': '" + op_name + "' 'local_slot_num' must be <= 'slot_num'",
-          call->span_);
+    } else {
+      // When slot_num is omitted PTOAS derives it from dir_mask (8 unidirectional,
+      // 4 bidirectional); validate local_slot_num against that effective value.
+      const int effective_slot_num = call->HasKwarg("slot_num")
+                                         ? call->GetKwarg<int>("slot_num", 0)
+                                         : cross_core_pipe::GetSlotNumForDirMask(dir_mask);
+      if (local_slot_num > effective_slot_num) {
+        diagnostics.emplace_back(DiagnosticSeverity::Error, "MixedKernelExpanded", 0,
+                                 "Function '" + func_name + "': '" + op_name + "' 'local_slot_num' (" +
+                                     std::to_string(local_slot_num) + ") must be <= effective slot_num (" +
+                                     std::to_string(effective_slot_num) + ")",
+                                 call->span_);
+      }
     }
   }
   if (dir_mask < 0 || (dir_mask & ~valid_dir_mask) != 0 || (dir_mask & valid_dir_mask) == 0 ||

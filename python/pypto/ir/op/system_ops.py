@@ -170,17 +170,16 @@ def _build_pipe_init_kwargs(
     local_slot_num: int | None,
     id: int | None,
 ) -> dict[str, int]:
-    """Build and validate the attribute kwargs shared by aic/aiv_initialize_pipe."""
+    """Build the attribute kwargs shared by aic/aiv_initialize_pipe.
+
+    Value constraints (slot_num > 0, local_slot_num > 0, local_slot_num <=
+    slot_num) are enforced downstream by the IR verifier and PTOAS, matching how
+    dir_mask / slot_size are handled, so they are not re-checked here.
+    """
     kwargs: dict[str, int] = {"dir_mask": dir_mask, "slot_size": slot_size}
     if slot_num is not None:
-        if slot_num <= 0:
-            raise ValueError(f"slot_num must be positive, got {slot_num}")
         kwargs["slot_num"] = slot_num
     if local_slot_num is not None:
-        if local_slot_num <= 0:
-            raise ValueError(f"local_slot_num must be positive, got {local_slot_num}")
-        if slot_num is not None and local_slot_num > slot_num:
-            raise ValueError(f"local_slot_num ({local_slot_num}) must be <= slot_num ({slot_num})")
         kwargs["local_slot_num"] = local_slot_num
     if id is not None:
         kwargs["id"] = id
