@@ -795,6 +795,27 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
   // Print kwargs as keyword arguments
   bool need_comma = !op->args_.empty();
+  if (op->op_->name_ == "system.task_dummy") {
+    const std::vector<VarPtr>* deps_to_print = nullptr;
+    for (const auto& [k, v] : op->attrs_) {
+      if (k != kAttrManualDepEdges) continue;
+      deps_to_print = std::any_cast<std::vector<VarPtr>>(&v);
+      break;
+    }
+    stream_ << (need_comma ? ", " : "") << "deps=[";
+    if (deps_to_print) {
+      bool printed_dep = false;
+      for (size_t i = 0; i < deps_to_print->size(); ++i) {
+        // Invalid/null dependency slots do not contribute user-visible edges.
+        if (!(*deps_to_print)[i]) continue;
+        if (printed_dep) stream_ << ", ";
+        stream_ << GetVarName((*deps_to_print)[i].get());
+        printed_dep = true;
+      }
+    }
+    stream_ << "]";
+    need_comma = true;
+  }
   for (const auto& [key, value] : op->kwargs_) {
     // ``pld.tensor.alloc_window_buffer`` injects its ``name`` kwarg from the LHS
     // at parse time and explicitly rejects a user-written ``name=`` kwarg. Skip

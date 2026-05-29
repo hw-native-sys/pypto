@@ -3561,6 +3561,109 @@ class TestManualScopeCodegen:
         assert "params_t2_deps[params_t2_deps_count++] = b_tid;" in code
         assert "params_t2.set_dependencies(params_t2_deps, params_t2_deps_count);" in code
 
+    def test_user_written_task_dummy_lowers_to_dummy_submit(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        N_BRANCHES = 4
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    tids = pl.array.create(N_BRANCHES, pl.TASK_ID)
+                    for j in pl.parallel(N_BRANCHES):
+                        _branch_out, tid = pl.submit(self.k1, x)
+                        tids[j] = tid
+                    barrier = pl.system.task_dummy(deps=[tids])
+                    b, _consumer_tid = pl.submit(self.k2, x, deps=[barrier])
+                return b
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
+        assert f"PTO2TaskId params_phase_fence_barrier_0_deps[{N_BRANCHES}];" in code, code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+        assert re.search(
+            r"if \(barrier.*\.is_valid\(\)\) (params_t\d+)_deps\[\1_deps_count\+\+\] = barrier",
+            code,
+        ), code
+
+    def test_user_written_task_dummy_accepts_scalar_dep_codegen(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, tid = pl.submit(self.k1, x)
+                    barrier = pl.system.task_dummy(deps=[tid])
+                    b, _consumer_tid = pl.submit(self.k2, a, deps=[barrier])
+                return b
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "rt_submit_dummy_task(params_phase_fence_barrier_0)" in code, code
+        assert "PTO2TaskId params_phase_fence_barrier_0_deps[1];" in code, code
+        assert re.search(
+            r"if \(tid.*\.is_valid\(\)\) params_phase_fence_barrier_0_deps"
+            r"\[params_phase_fence_barrier_0_deps_count\+\+\] = tid",
+            code,
+        ), code
+        assert re.search(r"PTO2TaskId params_t\d+_deps\[1\];", code), code
+
+    def test_user_written_empty_task_dummy_keeps_invalid_task_id(self):
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    barrier = pl.system.task_dummy(deps=[])
+                    y, _tid = pl.submit(self.k1, x, deps=[barrier])
+                return y
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "uint32_t params_phase_fence_barrier_0_deps_count = 0;" in code, code
+        assert "PTO2TaskId barrier = PTO2TaskId::invalid();" in code, code
+        assert "if (params_phase_fence_barrier_0_deps_count > 0)" in code, code
+        assert re.search(
+            r"if \(barrier.*\.is_valid\(\)\) (params_t\d+)_deps\[\1_deps_count\+\+\] = barrier",
+            code,
+        ), code
+
     def test_auto_scope_does_not_emit_task_id_capture(self):
         """Sanity: plain ``self.kernel(...)`` in auto scope stays fire-and-forget."""
         backend.reset_for_testing()

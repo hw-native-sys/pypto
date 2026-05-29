@@ -95,9 +95,66 @@ def build_chained_snapshot_phase_fence(*, branches: int = DEFAULT_BRANCHES):
     return ChainedSnapshotPhaseFence
 
 
+def build_chained_snapshot_manual_dummy_phase_fence(*, branches: int = DEFAULT_BRANCHES):
+    """Build a chained phase-fence program with explicit dummy-task barriers.
+
+    Args:
+        branches: Number of parallel branches in each flattened stage.
+
+    Returns:
+        A ``@pl.program`` class that can be compiled or run by PyPTO tooling.
+    """
+    big_m, big_n = chained_snapshot_shape(branches=branches)
+    tile_m = TILE_M
+
+    @pl.program
+    class ChainedSnapshotManualDummyPhaseFence:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel_stripe(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            bias: pl.Scalar[pl.FP32],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row_offset, 0], [tile_m, big_n])
+            result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, bias)
+            ret: pl.Tensor[[big_m, big_n], pl.FP32] = pl.store(result, [row_offset, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            with pl.manual_scope():
+                tids = pl.array.create(branches, pl.TASK_ID)
+                for a_phase, (tids_a,) in pl.range(2, init_values=(tids,)):
+                    tids_next = pl.array.create(branches, pl.TASK_ID)
+                    deps = pl.system.task_dummy(deps=[tids_a])
+                    for branch in pl.parallel(branches):
+                        row: pl.Scalar[pl.INDEX] = (a_phase * branches + branch) * tile_m
+                        out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[deps])
+                        tids_next[branch] = tid
+                    tids = pl.yield_(tids_next)
+                for b_phase, (tids_b,) in pl.range(2, init_values=(tids,)):
+                    tids_next = pl.array.create(branches, pl.TASK_ID)
+                    deps = pl.system.task_dummy(deps=[tids_b])
+                    for branch in pl.parallel(branches):
+                        row: pl.Scalar[pl.INDEX] = ((2 + b_phase) * branches + branch) * tile_m
+                        out, tid = pl.submit(self.kernel_stripe, data, row, 1.0, out, deps=[deps])
+                        tids_next[branch] = tid
+                    tids = pl.yield_(tids_next)
+            return out
+
+    return ChainedSnapshotManualDummyPhaseFence
+
+
 if __name__ == "__main__":
-    program = build_chained_snapshot_phase_fence()
     rows, cols = chained_snapshot_shape()
-    print(f"ChainedSnapshotPhaseFence: shape=({rows}, {cols}), branches={DEFAULT_BRANCHES}")
-    for fn in program.functions.values():
-        print(f"  {fn.name}: {fn.func_type}")
+    for builder in (build_chained_snapshot_phase_fence, build_chained_snapshot_manual_dummy_phase_fence):
+        program = builder()
+        print(f"{program.name}: shape=({rows}, {cols}), branches={DEFAULT_BRANCHES}")
+        for fn in program.functions.values():
+            print(f"  {fn.name}: {fn.func_type}")

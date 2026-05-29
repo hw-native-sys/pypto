@@ -13,6 +13,7 @@
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.parser.diagnostics import ParserTypeError
 from pypto.pypto_core import DataType
 
 
@@ -107,6 +108,93 @@ class TestSubmitParsing:
         assert len(ret.types) == 2
         assert isinstance(ret.types[1], ir.ScalarType)
         assert ret.types[1].dtype == DataType.TASK_ID
+
+
+class TestTaskDummyParsing:
+    def test_task_dummy_accepts_task_id_array_dep(self):
+        """``pl.system.task_dummy(deps=[tids])`` builds a marked dummy TaskId call."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self) -> pl.Scalar[pl.TASK_ID]:
+                with pl.manual_scope():
+                    tids = pl.array.create(4, pl.TASK_ID)
+                    barrier = pl.system.task_dummy(deps=[tids])
+                return barrier
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        scope = _first_runtime_scope(fn.body)
+        assert scope is not None
+        dummy_call = next(c for c in _calls_in(scope.body) if c.op.name == "system.task_dummy")
+        attrs = dict(dummy_call.attrs)
+        assert attrs["dummy_task"] is True
+        edges = attrs["manual_dep_edges"]
+        assert len(edges) == 1
+        assert isinstance(edges[0].type, ir.ArrayType)
+        assert edges[0].type.dtype == DataType.TASK_ID
+
+    def test_task_dummy_return_can_feed_downstream_deps(self):
+        """The dummy TaskId can be used as a later ``pl.submit(..., deps=[...])`` edge."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, tid = pl.submit(self.k1, x)
+                    barrier = pl.system.task_dummy(deps=[tid])
+                    b, _ = pl.submit(self.k2, a, deps=[barrier])
+                return b
+
+        fn = Prog.get_function("main")
+        assert fn is not None
+        scope = _first_runtime_scope(fn.body)
+        assert scope is not None
+        dummy_call = next(c for c in _calls_in(scope.body) if c.op.name == "system.task_dummy")
+        dummy_edges = dict(dummy_call.attrs)["manual_dep_edges"]
+        assert len(dummy_edges) == 1
+        assert isinstance(dummy_edges[0].type, ir.ScalarType)
+        assert dummy_edges[0].type.dtype == DataType.TASK_ID
+
+        k2_call = next(c for c in _calls_in(scope.body) if isinstance(c, ir.Submit) and c.op.name == "k2")
+        edges = list(k2_call.deps)
+        assert len(edges) == 1
+        assert isinstance(edges[0].type, ir.ScalarType)
+        assert edges[0].type.dtype == DataType.TASK_ID
+
+    def test_task_dummy_rejects_non_task_id_dep(self):
+        """``pl.system.task_dummy`` reuses the normal TaskId deps validation."""
+        with pytest.raises(ParserTypeError, match="TaskId"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Scalar[pl.TASK_ID]:
+                    with pl.manual_scope():
+                        barrier = pl.system.task_dummy(deps=[x])  # type: ignore[arg-type]
+                    return barrier
+
+    def test_task_dummy_requires_explicit_deps_kwarg(self):
+        """Empty fan-in is explicit: write ``deps=[]`` rather than omitting it."""
+        with pytest.raises(ParserTypeError, match="requires keyword argument 'deps'"):
+
+            @pl.program
+            class _Prog:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(self) -> pl.Scalar[pl.TASK_ID]:
+                    with pl.manual_scope():
+                        barrier = pl.system.task_dummy()
+                    return barrier
 
 
 class TestDepsKwargAcceptsTaskId:

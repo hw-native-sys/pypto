@@ -9,6 +9,7 @@
 
 """Tests for printing and structural identity of the new Submit IR node."""
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 
@@ -105,6 +106,41 @@ def test_submit_zero_arg_with_deps():
     program = ir.Program([kernel_func, caller_func], "test_submit_zero_arg", span)
     text = program.as_python()
     assert "pl.submit(self.seed, deps=[t])" in text, text
+
+
+def test_task_dummy_prints_deps_kwarg_and_roundtrips():
+    """A user-written dummy barrier preserves its explicit deps in Python dumps."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self) -> pl.Scalar[pl.TASK_ID]:
+            with pl.manual_scope():
+                tids = pl.array.create(4, pl.TASK_ID)
+                barrier = pl.system.task_dummy(deps=[tids])
+            return barrier
+
+    text = Prog.as_python()
+    assert "pl.system.task_dummy(deps=[tids])" in text, text
+    reparsed = pl.parse_program(text)
+    ir.assert_structural_equal(Prog, reparsed)
+
+
+def test_task_dummy_prints_empty_deps_kwarg():
+    """An empty dummy barrier still prints the public ``deps=[]`` surface."""
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self) -> pl.Scalar[pl.TASK_ID]:
+            with pl.manual_scope():
+                barrier = pl.system.task_dummy(deps=[])
+            return barrier
+
+    text = Prog.as_python()
+    assert "pl.system.task_dummy(deps=[])" in text, text
+    reparsed = pl.parse_program(text)
+    ir.assert_structural_equal(Prog, reparsed)
 
 
 def test_submit_structural_equal_self():

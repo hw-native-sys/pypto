@@ -379,31 +379,29 @@ unit that fits your use case; combine if needed.
 
 #### Mechanism B — declare explicit task→task edges (`deps=`)
 
-Two surfaces both produce the same `set_dependencies` codegen. The
-choice depends on whether the producer is a single kernel call
-(`pl.submit`) or a multi-statement region (`pl.at`-block).
+These surfaces all produce `set_dependencies` codegen; choose by producer
+shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 
 | Surface | Producer shape | Notes |
 | ------- | -------------- | ----- |
 | `result, tid = pl.submit(kernel, *args, deps=[...])` | single kernel call | The trailing `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. |
 | `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + Call; `tid` captures the synthesized call's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. |
+| `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | Submits no kernel. The returned TaskId is a compact fan-in point for later `deps=[barrier]`. |
 | `None` (Python literal) | seed / dep entry | The "no producer yet" sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` in `deps=[None]` is dropped (contributes no edge). Lowers to `system.task_invalid` → `PTO2TaskId::invalid()`. |
 
-**Both surfaces work regardless of Mechanism A state.** You can use
-`pl.submit(..., deps=[tid])` in plain auto-tracked orchestration, or
-inside `pl.manual_scope()`, or against a `manual_dep=True` tensor, and the
-explicit edge is always added on top of whatever auto-tracking decided.
-The earlier restriction that "`deps=` is accepted only inside
-`pl.manual_scope`" no longer applies.
+**These surfaces work regardless of Mechanism A state.** Use explicit deps in
+plain auto-tracked orchestration, inside `pl.manual_scope()`, or with a
+`manual_dep=True` tensor; explicit edges are added on top of auto-tracking.
+The earlier "`deps=` only inside `pl.manual_scope`" restriction no longer applies.
 
 Plain `out = self.kernel(...)` is **fire-and-forget**: it returns no task
 id, and `deps=` is rejected on it (the parser raises, hinting "use
 `pl.submit`"). Each `deps=[...]` entry must be a TaskId value: a `tid`
-bound by a prior `pl.submit(...)` / `pl.at(..., deps=) as tid`, a TaskId
-loop iter_arg carry, a `Scalar[TASK_ID]` read from a TaskId array slot
-(`prev = tids[k]`), an `Array[N, TASK_ID]` from
-`pl.array.create(N, pl.TASK_ID)`, or the literal `None`. Tensors are
-**not** accepted in `deps=[...]`.
+bound by a prior `pl.submit(...)` / `pl.at(..., deps=) as tid`, the result of
+`pl.system.task_dummy(deps=[...])`, a TaskId loop iter_arg carry, a
+`Scalar[TASK_ID]` read from a TaskId array slot (`prev = tids[k]`), an
+`Array[N, TASK_ID]` from `pl.array.create(N, pl.TASK_ID)`, or the literal
+`None`. Tensors are **not** accepted in `deps=[...]`.
 
 ```python
 # Example 1 — both mechanisms together: scope-wide opt-out + explicit edge.
@@ -464,6 +462,11 @@ synthesized Call. Codegen fills a fixed-size stack array sized to the
 exact dep count and emits one `params.set_dependencies(arr, count);`
 call per task. The runtime's `Arg::set_dependencies(ptr, count)` accepts a
 caller-owned array of arbitrary size, so there is no per-call edge cap.
+For explicit fan-in, write `barrier = pl.system.task_dummy(deps=[tids])` and
+then `pl.submit(..., deps=[barrier])`; it uses the same dependency parser,
+lowers to `rt_submit_dummy_task(...)`, returns invalid without submitting when
+all deps are invalid, and coexists with automatic `ExpandManualPhaseFence`
+barriers for profitable full-array phase fences.
 
 `pl.no_dep(arg)` is an auto-scope primitive; inside `pl.manual_scope` it
 has no effect (the whole region already skips auto-tracking).

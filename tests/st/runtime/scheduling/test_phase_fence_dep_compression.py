@@ -27,6 +27,7 @@ from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.ir.pass_manager import OptimizationStrategy
 
 from examples.utils.phase_fence_dep_compression import (
+    build_chained_snapshot_manual_dummy_phase_fence,
     build_chained_snapshot_phase_fence,
     chained_snapshot_shape,
 )
@@ -324,6 +325,59 @@ def _build_sibling_loops_program():
             return out
 
     return SiblingLoopPhaseFence
+
+
+def _build_manual_dummy_auto_mix_program():
+    branches = _BRANCHES
+    tile_m = _TILE_M
+    big_n = _BIG_N
+    big_m = 3 * branches * tile_m
+
+    @pl.program
+    class ManualDummyAutoMixPhaseFence:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel_stripe(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            row_offset: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row_offset, 0], [tile_m, big_n])
+            result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, 1.0)
+            ret: pl.Tensor[[big_m, big_n], pl.FP32] = pl.store(result, [row_offset, 0], out)
+            return ret
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            data: pl.Tensor[[big_m, big_n], pl.FP32],
+            out: pl.Out[pl.Tensor[[big_m, big_n], pl.FP32]],
+        ) -> pl.Tensor[[big_m, big_n], pl.FP32]:
+            with pl.manual_scope():
+                tids = pl.array.create(branches, pl.TASK_ID)
+                for branch in pl.parallel(branches):
+                    row: pl.Scalar[pl.INDEX] = branch * tile_m
+                    out, tid = pl.submit(self.kernel_stripe, data, row, out)
+                    tids[branch] = tid
+
+                # User-written dummy barrier. The second consumer below still
+                # uses the same TaskId array directly, so the auto phase-fence
+                # pass should insert its own separate barrier for that path.
+                user_barrier = pl.system.task_dummy(deps=[tids])
+                for branch in pl.parallel(branches):
+                    row: pl.Scalar[pl.INDEX] = (branches + branch) * tile_m
+                    out, _ = pl.submit(self.kernel_stripe, data, row, out, deps=[user_barrier])
+
+                for branch, (out_branch,) in pl.parallel(branches, init_values=(out,)):
+                    row = (2 * branches + branch) * tile_m
+                    with pl.at(level=pl.Level.CORE_GROUP, name_hint="auto_mix_tile", deps=[tids]):
+                        tile: pl.Tile[[tile_m, big_n], pl.FP32] = pl.load(data, [row, 0], [tile_m, big_n])
+                        result: pl.Tile[[tile_m, big_n], pl.FP32] = pl.add(tile, 1.0)
+                        out_next = pl.store(result, [row, 0], out_branch)
+                    out = pl.yield_(out_next)
+            return out
+
+    return ManualDummyAutoMixPhaseFence
 
 
 def _build_if_consumer_program():
@@ -754,6 +808,16 @@ def _sibling_loops_case(*, platform: str | None = None):
     )
 
 
+def _manual_dummy_auto_mix_case(*, platform: str | None = None):
+    rows = 3 * _BRANCHES * _TILE_M
+    return _PhaseFenceCase(
+        "phase_fence_manual_dummy_auto_mix",
+        _build_manual_dummy_auto_mix_program,
+        rows=rows,
+        platform=platform,
+    )
+
+
 def _if_consumer_case(*, platform: str | None = None):
     rows = 2 * _BRANCHES * _TILE_M
     return _PhaseFenceCase(
@@ -816,6 +880,17 @@ def _chained_snapshot_case(*, branches: int = _BRANCHES, name: str, platform: st
     )
 
 
+def _chained_snapshot_manual_dummy_case(*, branches: int = _BRANCHES, platform: str | None = None):
+    rows, cols = chained_snapshot_shape(branches=branches)
+    return _PhaseFenceCase(
+        "phase_fence_chained_snapshot_manual_dummy",
+        lambda: build_chained_snapshot_manual_dummy_phase_fence(branches=branches),
+        rows=rows,
+        cols=cols,
+        platform=platform,
+    )
+
+
 class TestPhaseFenceDepCompressionCorrectness:
     @pytest.fixture(autouse=True)
     def _skip_when_collecting_l2_swimlane(self, test_runner):
@@ -847,6 +922,11 @@ class TestPhaseFenceDepCompressionCorrectness:
     def test_sibling_loops_correctness(self, test_runner, platform):
         result = test_runner.run(_sibling_loops_case(platform=platform))
         assert result.passed, f"sibling-loop phase-fence failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_manual_dummy_auto_mix_correctness(self, test_runner, platform):
+        result = test_runner.run(_manual_dummy_auto_mix_case(platform=platform))
+        assert result.passed, f"manual-dummy/auto phase-fence mix failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_if_consumer_correctness(self, test_runner, platform):
@@ -883,6 +963,18 @@ class TestPhaseFenceDepCompressionCorrectness:
             )
         )
         assert result.passed, f"chained snapshot phase-fence failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_chained_snapshot_manual_dummy_correctness(self, test_runner, platform):
+        # Unlike test_chained_snapshot_correctness, this case uses user-written
+        # pl.system.task_dummy barriers instead of auto phase-fence compression.
+        result = test_runner.run(
+            _chained_snapshot_manual_dummy_case(
+                branches=_BRANCHES,
+                platform=platform,
+            )
+        )
+        assert result.passed, f"manual-dummy chained snapshot phase-fence failed: {result.error}"
 
 
 class TestPhaseFenceDepCompressionSwimlane:

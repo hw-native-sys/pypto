@@ -888,6 +888,45 @@ def test_three_by_three_min_profitable_inserts_dummy():
     _assert_expands(Before, Expected)
 
 
+def test_user_dummy_and_auto_phase_fence_can_mix_on_same_array():
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(self) -> pl.Scalar[pl.TASK_ID]:
+            return pl.system.task_invalid()
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self) -> pl.Scalar[pl.TASK_ID]:
+            with pl.manual_scope():
+                tids = pl.array.create(4, pl.TASK_ID)
+                user_barrier = pl.system.task_dummy(deps=[tids])
+                for p in pl.parallel(4):
+                    a = self.kernel(attrs={"arg_directions": [], "manual_dep_edges": [user_barrier]})
+                    b = self.kernel(attrs={"arg_directions": [], "manual_dep_edges": [tids]})
+            return pl.system.task_invalid()
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def kernel(self) -> pl.Scalar[pl.TASK_ID]:
+            return pl.system.task_invalid()
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self) -> pl.Scalar[pl.TASK_ID]:
+            with pl.manual_scope():
+                tids = pl.array.create(4, pl.TASK_ID)
+                user_barrier = pl.system.task_dummy(deps=[tids])
+                phase_fence_barrier_0_tid = pl.system.task_dummy(deps=[tids])
+                for p in pl.parallel(4):
+                    a = self.kernel(attrs={"arg_directions": [], "manual_dep_edges": [user_barrier]})
+                    b = self.kernel(
+                        attrs={"arg_directions": [], "manual_dep_edges": [phase_fence_barrier_0_tid]}
+                    )
+            return pl.system.task_invalid()
+
+    _assert_expands(Before, Expected)
+
+
 def test_sequential_stable_outer_dep_hoists_barrier_once():
     @pl.program
     class Before:

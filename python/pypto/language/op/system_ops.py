@@ -14,6 +14,8 @@ tpush ops wrap the IR-level functions, unwrapping Tile to Expr.
 tpop ops accept optional shape/dtype kwargs to create typed results.
 """
 
+from collections.abc import Sequence
+
 from pypto.ir.op import system_ops as _ir_ops
 from pypto.ir.op.system_ops import (
     AUTO,
@@ -28,7 +30,7 @@ from pypto.ir.op.system_ops import (
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Call, Span
 
-from ..typing import Scalar, Tile
+from ..typing import Array, Scalar, Tile
 
 __all__ = [
     "AUTO",
@@ -48,6 +50,7 @@ __all__ = [
     "tfree_to_aic",
     "tfree_to_aiv",
     "task_invalid",
+    "task_dummy",
 ]
 
 
@@ -162,3 +165,17 @@ def task_invalid(*, span: Span | None = None) -> Scalar:
     """
     call = _ir_ops.task_invalid(span=span)
     return Scalar(DataType.TASK_ID, call)
+
+
+def task_dummy(*, deps: Sequence[Scalar | Array | None]) -> Scalar:
+    """Dependency-only dummy TaskId barrier.
+
+    This is a parser construct: ``pl.system.task_dummy(deps=[...])`` is
+    intercepted syntactically and lowered to ``system.task_dummy`` with manual
+    dep edges. The body exists so the public DSL name resolves for static
+    checkers and imports.
+    """
+    raise RuntimeError(
+        "pl.system.task_dummy is a DSL parser construct and cannot be called directly; "
+        "use it as `barrier = pl.system.task_dummy(deps=[task_id])` inside a @pl.function body."
+    )

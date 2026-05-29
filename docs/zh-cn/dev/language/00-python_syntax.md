@@ -374,29 +374,28 @@ DSL 暴露**两套正交的机制**，用户可任意组合：
 
 #### 机制 B——显式声明 task 间的边（`deps=`）
 
-两种表面都下沉为相同的 `set_dependencies` codegen。选哪个取决于
-producer 是一个 kernel 调用 (`pl.submit`) 还是一段多语句的 outlined 区域
-(`pl.at`-块)。
+这些表面都会下沉为 `set_dependencies` codegen；按 producer 形态选择：
+单个 kernel 调用、outlined `pl.at` 区域，或 dependency-only fan-in。
 
 | 表层语法 | producer 形态 | 备注 |
 | -------- | ------------- | ---- |
 | `result, tid = pl.submit(kernel, *args, deps=[...])` | 单个 kernel 调用 | 尾部 `tid` 是 producer `pl.Scalar[pl.TASK_ID]`。它是 parser construct（类似 `pl.range`），不是 runtime 函数。 |
 | `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-块 | 整块被 outline 成 InCore kernel + Call；`tid` 捕获被合成的 Call 的 TaskId，可作为后续 `pl.submit` / `pl.at` 的 dep。 |
+| `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | 不提交 kernel。返回的 TaskId 是一个紧凑的 fan-in 点，可供后续 `deps=[barrier]` 使用。 |
 | `None`（Python 字面量） | 种子 / dep 条目 | "暂无 producer" 的哨兵。`prev_tid = None` 用作 TaskId 循环 iter_arg 的种子；`deps=[None]` 中的 `None` 被丢弃（不贡献任何边）。下沉为 `system.task_invalid` → `PTO2TaskId::invalid()`。 |
 
-**两个表面都不依赖机制 A 的状态。** 你可以在普通自动跟踪的 orchestration 里
-使用 `pl.submit(..., deps=[tid])`、也可以在 `pl.manual_scope()` 内使用、
-还可以在 `manual_dep=True` 的 tensor 上使用——显式边总是在自动跟踪的结果
-**之上**追加。早期"`deps=` 只在 `pl.manual_scope` 内有效"的限制已经
-解除。
+**这些表面都不依赖机制 A 的状态。** 显式 deps 可用于普通自动跟踪、
+`pl.manual_scope()` 内或 `manual_dep=True` tensor 上，并总是在自动跟踪结果
+**之上**追加；早期"`deps=` 只在 `pl.manual_scope` 内有效"的限制已经解除。
 
 普通的 `out = self.kernel(...)` 是 **fire-and-forget**：它不返回 task id，
 并且在它上面写 `deps=` 会被拒绝（parser 报错，提示 "use `pl.submit`"）。
 每个 `deps=[...]` 条目必须是 TaskId 值：先前 `pl.submit(...)` /
-`pl.at(..., deps=) as tid` 绑定的 `tid`、TaskId 循环 iter_arg carry、
-从 TaskId 数组槽读出的 `Scalar[TASK_ID]`（`prev = tids[k]`）、
-来自 `pl.array.create(N, pl.TASK_ID)` 的 `Array[N, TASK_ID]`，或字面量
-`None`。`deps=[...]` 不接受 tensor。
+`pl.at(..., deps=) as tid` 绑定的 `tid`、`pl.system.task_dummy(deps=[...])`
+的返回值、TaskId 循环 iter_arg carry、从 TaskId 数组槽读出的
+`Scalar[TASK_ID]`（`prev = tids[k]`）、来自
+`pl.array.create(N, pl.TASK_ID)` 的 `Array[N, TASK_ID]`，或字面量 `None`。
+`deps=[...]` 不接受 tensor。
 
 ```python
 # 示例 1——两套机制同用：scope-wide 退出 + 显式边。
@@ -453,7 +452,11 @@ out, _ = pl.submit(self.consume, scratch, out, deps=[prod_tid])
 把它们一起搬到合成的 Call 上。codegen 填充一个按精确依赖数定长的栈数组，
 并对每个 task 发出一次 `params.set_dependencies(arr, count);` 调用。
 runtime 的 `Arg::set_dependencies(ptr, count)` 直接接收调用者持有的任意
-长度数组，所以单 call 的依赖边数没有硬上限。
+长度数组，所以单 call 的依赖边数没有硬上限。显式 fan-in 可写成
+`barrier = pl.system.task_dummy(deps=[tids])`，再让 consumer `deps=[barrier]`；
+它复用同一套 dependency parser，lowering 成 `rt_submit_dummy_task(...)`，
+在 dep 全 invalid 时返回 invalid 且跳过 dummy submit，并可与自动
+`ExpandManualPhaseFence` barrier 共存。
 
 `pl.no_dep(arg)` 是 auto scope 原语；在 `pl.manual_scope` 内不起作用
 （整个 scope 已经退出自动跟踪了）。

@@ -5671,15 +5671,15 @@ class ASTParser:
     def _parse_system_op(self, op_name: str, call: ast.Call) -> ir.Expr:
         """Parse system operation."""
         if op_name == "task_dummy":
-            return self._parse_printed_task_dummy(call)
+            return self._parse_task_dummy(call)
         return self._dispatch_op(_dsl_system, "pl.system", op_name, call)
 
-    def _parse_printed_task_dummy(self, call: ast.Call) -> ir.Expr:
-        """Parse pass-internal ``pl.system.task_dummy`` from printed/expected IR."""
+    def _parse_task_dummy(self, call: ast.Call) -> ir.Expr:
+        """Parse user-written ``pl.system.task_dummy(deps=[...])``."""
         span = self.span_tracker.get_span(call)
         if call.args:
             raise InvalidOperationError(
-                "pl.system.task_dummy in printed IR must not use positional arguments",
+                "pl.system.task_dummy must not use positional arguments",
                 span=span,
             )
         allowed_kwargs = {"deps"}
@@ -5688,8 +5688,14 @@ class ASTParser:
                 raise ParserTypeError(
                     f"pl.system.task_dummy does not accept keyword argument '{kw.arg}'",
                     span=span,
-                    hint="Use pl.system.task_dummy(deps=[task_id_array]) in expected IR",
+                    hint="Use pl.system.task_dummy(deps=[task_id]) where each dep is a TaskId value",
                 )
+        if not any(kw.arg == "deps" for kw in call.keywords):
+            raise ParserTypeError(
+                "pl.system.task_dummy requires keyword argument 'deps'",
+                span=span,
+                hint="Use pl.system.task_dummy(deps=[]) for an empty dummy barrier",
+            )
         deps = self._parse_submit_deps_kwarg("pl.system.task_dummy", call.keywords, span)
         base = ir.create_op_call("system.task_dummy", [], {}, span)
         attrs: list[tuple[str, Any]] = [("dummy_task", True)]
