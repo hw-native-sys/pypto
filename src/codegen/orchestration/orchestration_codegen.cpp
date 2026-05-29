@@ -2057,7 +2057,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   const std::vector<std::optional<size_t>>& GetReturnedParamIndices(const FunctionPtr& callee) {
     auto it = returned_param_indices_cache_.find(callee.get());
     if (it != returned_param_indices_cache_.end()) return it->second;
-    auto inserted = returned_param_indices_cache_.emplace(callee.get(), FindReturnedParamIndices(callee, program_));
+    auto inserted =
+        returned_param_indices_cache_.emplace(callee.get(), FindReturnedParamIndices(callee, program_));
     return inserted.first->second;
   }
 
@@ -2071,7 +2072,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (ret_map.empty()) return false;
     auto tuple_ty = As<TupleType>(call->GetType());
     if (!tuple_ty) return false;
-    for (size_t j = 0; j < ret_map.size() && j < tuple_ty->types_.size(); ++j) {
+    // Kernel-result positions to validate. For a submit call the trailing tuple
+    // element is the producer TASK_ID, not a kernel result, so it has no
+    // ret_map entry — exclude it from the expected count.
+    size_t expected = tuple_ty->types_.size();
+    if (IsSubmitCall(call) && expected > 0) --expected;
+    // A short map leaves trailing tensor outputs unchecked: treat as imprecise
+    // so the caller falls back to the heuristic instead of silently skipping an
+    // unmapped tensor alias.
+    if (ret_map.size() < expected) return false;
+    for (size_t j = 0; j < expected; ++j) {
       if (AsTensorTypeLike(tuple_ty->types_[j]) && !ret_map[j].has_value()) {
         return false;
       }
@@ -2300,12 +2310,23 @@ class OrchestrationStmtCodegen : public CodegenBase {
         size_t out_pos = elem_pos - tuple_out_base;
         if (out_pos < out_indices.size()) param_idx_opt = out_indices[out_pos];
       }
-      // Leading aux scalars / untraced positions carry no runtime output and
-      // are left undeclared (a referenced one would be a codegen bug surfaced
-      // elsewhere, same as the non-submit path).
-      if (!param_idx_opt) continue;
+      if (!param_idx_opt) {
+        // Leading aux scalar / untraced position: no runtime output. If it is
+        // referenced later, materialize a safe scalar default so the generated
+        // code stays compilable (mirrors GenerateTupleReturnAliases).
+        if (effective_uses_.count(elem.var)) {
+          std::string elem_name = ReserveVarEmitName(elem.var);
+          if (auto st = As<ScalarType>(elem.var->GetType())) {
+            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
+          }
+        }
+        continue;
+      }
       if (!effective_uses_.count(elem.var)) continue;
       size_t param_idx = *param_idx_opt;
+      INTERNAL_CHECK_SPAN(param_idx < callee->params_.size(), call->span_)
+          << "Internal error: resolved param_idx " << param_idx << " out of range for " << call->op_->name_
+          << " (has " << callee->params_.size() << " params)";
       std::string elem_name = ReserveVarEmitName(elem.var);
       if (param_idx < call->args_.size()) {
         // Caller-allocated: the param was passed positionally as an arg.
@@ -2604,8 +2625,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// share a callee; caching the per-callee return→param map keeps the codegen
   /// from re-walking the same callee body and stays within the O(N log N) pass
   /// budget.
-  std::unordered_map<const Function*, std::vector<std::optional<size_t>>>
-      returned_param_indices_cache_;
+  std::unordered_map<const Function*, std::vector<std::optional<size_t>>> returned_param_indices_cache_;
 };
 
 OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const ir::FunctionPtr& func) {
