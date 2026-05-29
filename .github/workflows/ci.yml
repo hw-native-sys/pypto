@@ -76,7 +76,7 @@ jobs:
       run: pytest tests/ut -n auto --maxprocesses 8 -v
 
   system-tests:
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, arm64, npu-3-device]
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
@@ -190,7 +190,7 @@ jobs:
     # Checkout / install happen under ./dist-checkout so they don't collide
     # with system-tests' workspace (which is owned by container root and
     # would EACCES our ci-runner cleanup).
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, arm64, npu-2-device]
     defaults:
       run:
         working-directory: dist-checkout
@@ -283,7 +283,7 @@ jobs:
           python -m pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=6909e5c4 --ignore=tests/st/distributed/test_l2_multi_orch.py
 
   pypto-lib-model:
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, arm64, npu-1-device]
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin

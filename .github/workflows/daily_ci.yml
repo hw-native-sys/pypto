@@ -7,7 +7,7 @@ on:
 
 jobs:
   qwen3-pypto-lib:
-    runs-on: [self-hosted, linux, arm64, npu]
+    runs-on: [self-hosted, linux, arm64, npu-1-device]
     env:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
