@@ -394,6 +394,7 @@ producer 是一个 kernel 调用 (`pl.submit`) 还是一段多语句的 outlined
 并且在它上面写 `deps=` 会被拒绝（parser 报错，提示 "use `pl.submit`"）。
 每个 `deps=[...]` 条目必须是 TaskId 值：先前 `pl.submit(...)` /
 `pl.at(..., deps=) as tid` 绑定的 `tid`、TaskId 循环 iter_arg carry、
+从 TaskId 数组槽读出的 `Scalar[TASK_ID]`（`prev = tids[k]`）、
 来自 `pl.array.create(N, pl.TASK_ID)` 的 `Array[N, TASK_ID]`，或字面量
 `None`。`deps=[...]` 不接受 tensor。
 

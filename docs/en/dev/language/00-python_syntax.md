@@ -400,7 +400,8 @@ Plain `out = self.kernel(...)` is **fire-and-forget**: it returns no task
 id, and `deps=` is rejected on it (the parser raises, hinting "use
 `pl.submit`"). Each `deps=[...]` entry must be a TaskId value: a `tid`
 bound by a prior `pl.submit(...)` / `pl.at(..., deps=) as tid`, a TaskId
-loop iter_arg carry, an `Array[N, TASK_ID]` from
+loop iter_arg carry, a `Scalar[TASK_ID]` read from a TaskId array slot
+(`prev = tids[k]`), an `Array[N, TASK_ID]` from
 `pl.array.create(N, pl.TASK_ID)`, or the literal `None`. Tensors are
 **not** accepted in `deps=[...]`.
 
