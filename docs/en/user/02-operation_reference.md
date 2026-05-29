@@ -24,9 +24,9 @@ Auto-selects between tensor and tile implementation based on input type.
 | `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | Matrix multiply with accumulation: `acc += lhs @ rhs` |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
-| `col_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise sum (tile-only). Passing `tmp_tile` activates binary-tree reduction; omitting it uses sequential reduction. |
-| `col_max` | `(input: Tile) -> Tile` | Column-wise max (tile-only) |
-| `col_min` | `(input: Tile) -> Tile` | Column-wise min (tile-only) |
+| `col_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Column-wise sum. On Tile, passing `tmp_tile` activates binary-tree reduction; omitting it uses sequential reduction. Tensor input lowers to the sequential path. |
+| `col_max` | `(input: T) -> T` | Column-wise max |
+| `col_min` | `(input: T) -> T` | Column-wise min |
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | Reciprocal square root; `high_precision=True` selects the high-precision path (tensor input only — tile callers must use `pl.tile.rsqrt(src, tmp=...)`) |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | Tile-only (promoted from `pl.tile.create`): create tile at specific memory space |
 | `read` | `(src: T, offset: IntLike \| Sequence[IntLike]) -> Scalar` | Read scalar at indices (dispatched by source type). Sugar: `A[i, j]` |
@@ -58,6 +58,9 @@ Operate on `Tensor` objects (DDR memory).
 | `maximum` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | Element-wise maximum |
 | `row_max` | `(input: Tensor) -> Tensor` | Row-wise max reduction |
 | `row_sum` | `(input: Tensor) -> Tensor` | Row-wise sum reduction |
+| `col_sum` | `(input: Tensor) -> Tensor` | Column-wise sum reduction (reduces along axis=-2) |
+| `col_max` | `(input: Tensor) -> Tensor` | Column-wise max reduction (reduces along axis=-2) |
+| `col_min` | `(input: Tensor) -> Tensor` | Column-wise min reduction (reduces along axis=-2) |
 | `rsqrt` | `(input: Tensor, high_precision: bool = False) -> Tensor` | Element-wise reciprocal square root; `high_precision=True` allocates a scratch tile during lowering for the higher-precision PTO path (requires static tile shape, same constraint as `row_max`/`row_sum`) |
 | `exp` | `(input: Tensor) -> Tensor` | Element-wise exponential |
 | `cast` | `(input: Tensor, target_type: DataType, mode="round") -> Tensor` | Type cast |

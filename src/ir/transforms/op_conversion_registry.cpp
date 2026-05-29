@@ -918,8 +918,11 @@ void OpConversionRegistry::RegisterReductionOps() {
   RegisterCustom("tensor.row_min", MakeReductionConv("tile.row_min"));
 
   // tile.col_sum's 1-arg form is the sequential reduction path — no tmp_tile workspace
-  // needed, so a plain 1:1 name rewrite is enough.
+  // needed, so a plain 1:1 name rewrite is enough. tile.col_max / tile.col_min are
+  // likewise 1-arg, so the same simple rewrite applies.
   RegisterSimple("tensor.col_sum", "tile.col_sum");
+  RegisterSimple("tensor.col_max", "tile.col_max");
+  RegisterSimple("tensor.col_min", "tile.col_min");
 }
 
 // ============================================================================

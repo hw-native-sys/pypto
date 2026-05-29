@@ -637,14 +637,24 @@ def col_sum(input: T, tmp_tile: Tile | None = None) -> T:
 
 
 def col_max(input: T) -> T:
-    """Column-wise max reduction, dispatched by input type."""
+    """Column-wise max reduction, dispatched by input type.
+
+    For Tensor inputs, the tensor-to-tile conversion lowers to ``tile.col_max``.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.col_max(input)
     if isinstance(input, Tile):
         return _tile.col_max(input)
     _raise_type_dispatch_error("col_max", input)
 
 
 def col_min(input: T) -> T:
-    """Column-wise min reduction, dispatched by input type."""
+    """Column-wise min reduction, dispatched by input type.
+
+    For Tensor inputs, the tensor-to-tile conversion lowers to ``tile.col_min``.
+    """
+    if isinstance(input, Tensor):
+        return _tensor.col_min(input)
     if isinstance(input, Tile):
         return _tile.col_min(input)
     _raise_type_dispatch_error("col_min", input)

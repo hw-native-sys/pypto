@@ -677,6 +677,38 @@ def col_sum(input: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tensor.col_sum", [input], {}, actual_span)
 
 
+def col_max(input: Expr, span: Span | None = None) -> Call:
+    """Column-wise max reduction (reduces along axis=-2, keeps dim).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise max reduction
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_max", [input], {}, actual_span)
+
+
+def col_min(input: Expr, span: Span | None = None) -> Call:
+    """Column-wise min reduction (reduces along axis=-2, keeps dim).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise min reduction
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_min", [input], {}, actual_span)
+
+
 def row_expand(target: Expr, row_vec: Expr, span: Span | None = None) -> Call:
     """Row-wise expansion: expand row_vec [M, 1] to target shape [M, N].
 

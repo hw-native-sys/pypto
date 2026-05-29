@@ -269,6 +269,32 @@ class TestUnifiedTensorDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_col_max(self):
+        @pl.function
+        def unified(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[1, 128], pl.FP32]:
+            c: pl.Tensor[[1, 128], pl.FP32] = pl.col_max(a)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[1, 128], pl.FP32]:
+            c: pl.Tensor[[1, 128], pl.FP32] = pl.tensor.col_max(a)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_col_min(self):
+        @pl.function
+        def unified(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[1, 128], pl.FP32]:
+            c: pl.Tensor[[1, 128], pl.FP32] = pl.col_min(a)
+            return c
+
+        @pl.function
+        def explicit(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[1, 128], pl.FP32]:
+            c: pl.Tensor[[1, 128], pl.FP32] = pl.tensor.col_min(a)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
     def test_row_expand(self):
         @pl.function
         def unified(

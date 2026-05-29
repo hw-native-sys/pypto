@@ -277,6 +277,50 @@ def test_tensor_col_sum():
     assert len(result_type.shape) == 2
 
 
+def test_tensor_col_max():
+    """tensor.col_max reduces axis=-2 (the M dim of [..., M, N]) with keepdim=True."""
+    span = ir.Span.unknown()
+
+    # Create a tensor [64, 128]
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.col_max(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_max"
+
+    # Output shape should be [1, 128] — the second-to-last dim collapses to 1.
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_col_min():
+    """tensor.col_min reduces axis=-2 (the M dim of [..., M, N]) with keepdim=True."""
+    span = ir.Span.unknown()
+
+    # Create a tensor [64, 128]
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+
+    call = ir.op.tensor.col_min(tensor_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_min"
+
+    # Output shape should be [1, 128] — the second-to-last dim collapses to 1.
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
 def test_tensor_exp():
     """Test tensor.exp operation."""
     span = ir.Span.unknown()
@@ -1108,6 +1152,8 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.matmul")
     assert ir.is_op_registered("tensor.row_max")
     assert ir.is_op_registered("tensor.row_sum")
+    assert ir.is_op_registered("tensor.col_max")
+    assert ir.is_op_registered("tensor.col_min")
     assert ir.is_op_registered("tensor.exp")
     assert ir.is_op_registered("tensor.sqrt")
     assert ir.is_op_registered("tensor.rsqrt")

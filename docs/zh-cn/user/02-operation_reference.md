@@ -24,9 +24,9 @@
 | `matmul_acc` | `(acc: T, lhs: T, rhs: T, a_trans=False, b_trans=False) -> T` | 带累加的矩阵乘法：`acc += lhs @ rhs` |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
-| `col_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列求和（仅 tile）；传入 `tmp_tile` 启用二叉树归约，省略时使用顺序归约 |
-| `col_max` | `(input: Tile) -> Tile` | 列最大值（仅 tile） |
-| `col_min` | `(input: Tile) -> Tile` | 列最小值（仅 tile） |
+| `col_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 列求和；Tile 上传入 `tmp_tile` 启用二叉树归约，省略时使用顺序归约；Tensor 输入下沉为顺序归约路径 |
+| `col_max` | `(input: T) -> T` | 列最大值 |
+| `col_min` | `(input: T) -> T` | 列最小值 |
 | `rsqrt` | `(input: T, high_precision: bool = False) -> T` | 倒数平方根；`high_precision=True` 选择高精度路径（仅对 Tensor 输入生效，Tile 路径需要改用 `pl.tile.rsqrt(src, tmp=...)`） |
 | `create` / `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: Mem) -> Tile` | 在指定内存空间创建 tile（tile-only，对应 `pl.tile.create`） |
 
@@ -55,6 +55,9 @@
 | `maximum` | `(lhs: Tensor, rhs: Tensor) -> Tensor` | 逐元素最大值 |
 | `row_max` | `(input: Tensor) -> Tensor` | 行最大值归约 |
 | `row_sum` | `(input: Tensor) -> Tensor` | 行求和归约 |
+| `col_sum` | `(input: Tensor) -> Tensor` | 列求和归约（沿 axis=-2） |
+| `col_max` | `(input: Tensor) -> Tensor` | 列最大值归约（沿 axis=-2） |
+| `col_min` | `(input: Tensor) -> Tensor` | 列最小值归约（沿 axis=-2） |
 | `rsqrt` | `(input: Tensor, high_precision: bool = False) -> Tensor` | 逐元素倒数平方根；`high_precision=True` 时编译器在下沉阶段分配临时 tile，启用高精度 PTO 路径（要求 tile 形状是编译期常量，与 `row_max`/`row_sum` 限制一致） |
 | `exp` | `(input: Tensor) -> Tensor` | 逐元素指数 |
 | `cast` | `(input: Tensor, target_type: DataType, mode="round") -> Tensor` | 类型转换 |

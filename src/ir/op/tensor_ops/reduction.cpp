@@ -11,7 +11,7 @@
 
 /**
  * @file reduction.cpp
- * @brief Reduction tensor operations (row_max, row_sum, row_min, col_sum)
+ * @brief Reduction tensor operations (row_max, row_sum, row_min, col_sum, col_max, col_min)
  *
  * This file implements reduction operations for tensors that reduce along
  * specified axes.
@@ -190,6 +190,28 @@ REGISTER_OP("tensor.col_sum")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceTensorColReductionType(args, kwargs, "tensor.col_sum");
+    });
+
+REGISTER_OP("tensor.col_max")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise max reduction (reduces along axis=-2 by default)")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColReductionType(args, kwargs, "tensor.col_max");
+    });
+
+REGISTER_OP("tensor.col_min")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise min reduction (reduces along axis=-2 by default)")
+    .add_argument("input", "Input tensor (TensorType)")
+    .set_attr<int>("axis")
+    .set_attr<bool>("keep_dim")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColReductionType(args, kwargs, "tensor.col_min");
     });
 
 }  // namespace ir

@@ -46,6 +46,8 @@ __all__ = [
     "row_sum",
     "row_min",
     "col_sum",
+    "col_max",
+    "col_min",
     "row_expand",
     "row_expand_mul",
     "row_expand_div",
@@ -674,6 +676,38 @@ def col_sum(input: Tensor) -> Tensor:
     """
     input_expr = input.unwrap()
     call_expr = _ir_ops.col_sum(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_max(input: Tensor) -> Tensor:
+    """Column-wise max reduction (reduces along axis=-2, keeps dim).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the col_max operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.col_max(input_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_min(input: Tensor) -> Tensor:
+    """Column-wise min reduction (reduces along axis=-2, keeps dim).
+
+    Output shape is ``[..., 1, N]`` for an input of shape ``[..., M, N]``.
+
+    Args:
+        input: Input tensor
+
+    Returns:
+        Tensor wrapping the col_min operation
+    """
+    input_expr = input.unwrap()
+    call_expr = _ir_ops.col_min(input_expr)
     return Tensor(expr=call_expr)
 
 
