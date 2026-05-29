@@ -14,8 +14,10 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
+#include "pypto/ir/expr.h"
 #include "pypto/ir/stmt.h"
 
 namespace pypto {
@@ -56,6 +58,18 @@ std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts);
 /// Like `EliminateDeadCode`, iterates to a fixed point so chains of scalar
 /// bindings (`a = 5; b = a + 1; c = b + 1` with `c` unused) collapse fully.
 std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts);
+
+/// Same as `EliminateDeadScalarAssignments`, but treats every Var in
+/// `protected_vars` (and, transitively, the Vars its defining RHS uses) as
+/// live so its defining `AssignStmt` is never pruned.
+///
+/// This is needed for values referenced *outside* the statement list being
+/// pruned — e.g. a scalar computed in an Orchestration function whose only
+/// consumer is the `core_num` attribute of an outlined Spmd function it
+/// dispatches. A per-function pass cannot see that cross-function use, so the
+/// caller passes those Vars in explicitly.
+std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts,
+                                                    const std::unordered_set<const Var*>& protected_vars);
 
 }  // namespace dce
 }  // namespace ir

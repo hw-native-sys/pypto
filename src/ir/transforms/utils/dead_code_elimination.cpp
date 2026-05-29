@@ -300,9 +300,14 @@ std::vector<StmtPtr> FilterDeadCodeImpl(const std::vector<StmtPtr>& stmts,
 }
 
 std::vector<StmtPtr> EliminateDeadCodeCore(const std::vector<StmtPtr>& stmts,
-                                           const RemovablePredicate& is_removable) {
+                                           const RemovablePredicate& is_removable,
+                                           const std::unordered_set<const Var*>& extra_live = {}) {
   std::unordered_set<const Var*> live;
   FindLiveRootsRecursiveImpl(stmts, is_removable, live);
+  // Seed externally-referenced live roots (e.g. a scalar whose only consumer
+  // is the ``core_num`` attr of a function dispatched elsewhere). The
+  // fixed-point loop below then keeps each one's transitive RHS uses alive too.
+  live.insert(extra_live.begin(), extra_live.end());
 
   std::vector<std::shared_ptr<const AssignStmt>> all_assigns;
   CollectAllAssignStmts(stmts, all_assigns);
@@ -389,6 +394,11 @@ std::vector<StmtPtr> EliminateDeadCode(const std::vector<StmtPtr>& stmts) {
 
 std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts) {
   return EliminateDeadCodeCore(stmts, IsRemovableScalarAssign);
+}
+
+std::vector<StmtPtr> EliminateDeadScalarAssignments(const std::vector<StmtPtr>& stmts,
+                                                    const std::unordered_set<const Var*>& protected_vars) {
+  return EliminateDeadCodeCore(stmts, IsRemovableScalarAssign, protected_vars);
 }
 
 }  // namespace dce

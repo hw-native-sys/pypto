@@ -1503,19 +1503,26 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   // Render the launched function's core_num attribute as a C++ scalar expression.
-  // Accepts a ConstInt literal or a Var resolving to an orchestration-scope scalar
-  // variable (routed through TryGetVarName so SSA/emit-name mapping is respected).
+  // Handles a ConstInt literal, a Var resolving to an orchestration-scope scalar
+  // variable, or a composite scalar expression (e.g. ``b_dim * 64``,
+  // ``b_dim // 8``). ``GenerateExprString`` resolves leaf Vars via TryGetVarName
+  // (so SSA/emit-name mapping is respected) and recurses through arithmetic
+  // operators — the same path used to render ForStmt bounds.
   [[nodiscard]] std::string RenderLaunchCoreNum(const ExprPtr& expr) const {
     if (auto ci = As<ConstInt>(expr)) {
       return std::to_string(ci->value_);
     }
-    if (As<Var>(expr) != nullptr) {
-      return TryGetVarName(expr);
-    }
-    INTERNAL_CHECK_SPAN(false, expr->span_)
+    // Var/IterArg or composite index arithmetic (BinaryExpr/UnaryExpr). Keep a
+    // core_num-specific diagnostic here rather than falling through to
+    // ``GenerateExprString``'s generic NotImplementedError.
+    const bool renderable = AsVarLike(expr) != nullptr ||
+                            std::dynamic_pointer_cast<const BinaryExpr>(expr) != nullptr ||
+                            std::dynamic_pointer_cast<const UnaryExpr>(expr) != nullptr;
+    INTERNAL_CHECK_SPAN(renderable, expr->span_)
         << "Unsupported core_num expression kind for orchestration codegen: "
-        << "expected ConstInt or Var, got kind=" << static_cast<int>(expr->GetKind());
-    return "";
+        << "expected ConstInt, Var, or composite index arithmetic, got kind="
+        << static_cast<int>(expr->GetKind());
+    return GenerateExprString(expr);
   }
 
   void EmitLaunchSpec(const std::string& ind, const std::string& task_var, const FunctionPtr& launch_func) {

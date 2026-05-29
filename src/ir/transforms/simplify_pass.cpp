@@ -30,6 +30,7 @@
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
+#include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
 #include "pypto/ir/stmt.h"
@@ -40,6 +41,7 @@
 #include "pypto/ir/transforms/utils/deep_clone_utils.h"
 #include "pypto/ir/transforms/utils/loop_state_repair.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/scope_outline_utils.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
 
@@ -785,7 +787,8 @@ class SimplifyMutator : public arith::IRMutatorWithAnalyzer {
   int scope_depth_ = 0;
 };
 
-FunctionPtr TransformSimplify(const FunctionPtr& func) {
+FunctionPtr TransformSimplify(const FunctionPtr& func,
+                              const std::unordered_set<const Var*>& protected_vars = {}) {
   MultiAssignCollector collector;
   collector.VisitStmt(func->body_);
 
@@ -796,9 +799,11 @@ FunctionPtr TransformSimplify(const FunctionPtr& func) {
   // Final step: conservative scalar DCE prunes scalar bindings whose only
   // uses were folded out by the mutator above. Call-backed assignments are
   // preserved because the IR has no purity annotations yet — a Call may
-  // have observable side effects we cannot reason about.
+  // have observable side effects we cannot reason about. ``protected_vars``
+  // additionally shields scalars whose only consumer lives outside this
+  // function (e.g. the ``core_num`` attr of a dispatched Spmd function).
   auto flat = transform_utils::FlattenToStmts(new_body);
-  auto pruned = dce::EliminateDeadScalarAssignments(flat);
+  auto pruned = dce::EliminateDeadScalarAssignments(flat, protected_vars);
   bool dce_changed = pruned.size() != flat.size() ||
                      !std::equal(pruned.begin(), pruned.end(), flat.begin(),
                                  [](const StmtPtr& a, const StmtPtr& b) { return a.get() == b.get(); });
@@ -810,11 +815,54 @@ FunctionPtr TransformSimplify(const FunctionPtr& func) {
   return result;
 }
 
+/// Collect every Var referenced by any function's ``core_num`` attribute.
+///
+/// After scope outlining, an outlined Spmd function carries its dispatch
+/// ``core_num`` as a function attr (an ``ExprPtr``) whose Vars are defined in
+/// the *dispatching* (Orchestration) function, not in the Spmd function
+/// itself. Orchestration codegen evaluates that expression at the call site,
+/// so the defining scalars must survive in the caller. A per-function scalar
+/// DCE cannot see this cross-function use; collecting these Vars program-wide
+/// lets us protect them. Mirrors the ``SpmdScopeStmt::core_num_`` handling in
+/// ``dead_code_elimination.cpp`` for the pre-outline form.
+std::unordered_set<const Var*> CollectCoreNumReferencedVars(const ProgramPtr& program) {
+  std::unordered_set<const Var*> protected_vars;
+  for (const auto& [gvar, func] : program->functions_) {
+    if (!func) continue;
+    auto core_num = func->GetAttr<ExprPtr>("core_num", nullptr);
+    if (!core_num) continue;
+    outline_utils::VarDefUseCollector collector;
+    collector.VisitExpr(core_num);
+    protected_vars.insert(collector.var_uses.begin(), collector.var_uses.end());
+  }
+  return protected_vars;
+}
+
+ProgramPtr TransformSimplifyProgram(const ProgramPtr& program) {
+  if (!program) return program;
+
+  const auto protected_vars = CollectCoreNumReferencedVars(program);
+
+  auto new_functions = program->functions_;
+  bool changed = false;
+  for (auto& [gvar, func] : new_functions) {
+    if (!func) continue;
+    auto transformed = TransformSimplify(func, protected_vars);
+    if (transformed.get() != func.get()) {
+      func = transformed;
+      changed = true;
+    }
+  }
+  if (!changed) return program;
+  return std::make_shared<const Program>(std::move(new_functions), program->comm_groups_, program->name_,
+                                         program->span_);
+}
+
 }  // namespace
 
 namespace pass {
 
-Pass Simplify() { return CreateFunctionPass(TransformSimplify, "Simplify", kSimplifyProperties); }
+Pass Simplify() { return CreateProgramPass(TransformSimplifyProgram, "Simplify", kSimplifyProperties); }
 
 }  // namespace pass
 

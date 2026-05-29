@@ -883,7 +883,7 @@ class SpmdContext:
 
 
 def spmd(
-    core_num: int | _ir.Expr,
+    core_num: RangeArg,
     *,
     sync_start: bool = False,
     name_hint: str = "",
