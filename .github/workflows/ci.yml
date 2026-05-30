@@ -114,6 +114,11 @@ jobs:
         run: |
           npu-smi info
 
+      - name: Print device env
+        run: |
+          echo "DEVICE_ID=$DEVICE_ID"
+          echo "DEVICE_RANGE=$DEVICE_RANGE"
+
       - name: Show ccache stats (before)
         run: ccache -s || true
 
@@ -215,6 +220,12 @@ jobs:
       - name: Check NPU
         working-directory: .
         run: npu-smi info
+
+      - name: Print device env
+        working-directory: .
+        run: |
+          echo "DEVICE_ID=$DEVICE_ID"
+          echo "DEVICE_RANGE=$DEVICE_RANGE"
 
       - name: Install ptoas (local cache)
         env:
@@ -319,6 +330,11 @@ jobs:
 
       - name: Check NPU
         run: npu-smi info
+
+      - name: Print device env
+        run: |
+          echo "DEVICE_ID=$DEVICE_ID"
+          echo "DEVICE_RANGE=$DEVICE_RANGE"
 
       - name: Install project and dependencies
         run: |
