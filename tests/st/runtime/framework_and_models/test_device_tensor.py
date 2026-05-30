@@ -29,7 +29,7 @@ call is the supported way to mix host + device tensor inputs.
 import pytest
 import torch
 from examples.kernels.elementwise import tile_add_128
-from pypto.runtime import RunConfig, Worker
+from pypto.runtime import ChipWorker, RunConfig
 
 
 def _worker_config(test_config: RunConfig) -> RunConfig:
@@ -80,7 +80,7 @@ class TestDeviceTensorEndToEnd:
         out1 = torch.zeros((128, 128), dtype=torch.float32)
         out2 = torch.zeros((128, 128), dtype=torch.float32)
 
-        with Worker(config=_worker_config(test_config)) as w:
+        with ChipWorker(config=_worker_config(test_config)) as w:
             weight = w.alloc_tensor((128, 128), torch.float32, init=host_b)
             try:
                 compiled(host_a1, weight, out1, config=test_config)
@@ -109,7 +109,7 @@ class TestDeviceTensorEndToEnd:
         host_in = torch.arange(256, dtype=torch.float32).view(16, 16)
         host_out = torch.zeros_like(host_in)
 
-        with Worker(config=_worker_config(test_config)) as w:
+        with ChipWorker(config=_worker_config(test_config)) as w:
             t = w.alloc_tensor((16, 16), torch.float32, init=host_in)
             try:
                 w.copy_from(host_out.data_ptr(), t.data_ptr, t.nbytes)

@@ -14,6 +14,7 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import sys
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,11 +22,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np  # pyright: ignore[reportMissingImports]
 import torch
 
-from .device_memory import DeviceMemoryHandle
 from .device_tensor import DeviceTensor
+from .runtime_base import Worker
 
 if TYPE_CHECKING:
     from pypto.ir.distributed_compiled_program import DistributedCompiledProgram, DistributedConfig
+
+    from .worker import RegistrationHandle
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +105,7 @@ def _load_generated_module(path: Path) -> Any:
 
 # ---------------------------------------------------------------------------
 # Setup steps shared by the one-shot ``execute_distributed`` path and the
-# reusable ``DistributedRuntime`` handle. Keeping them as free functions lets
+# reusable ``DistributedWorker`` handle. Keeping them as free functions lets
 # both paths run identical, expensive setup (compile_and_assemble, module load,
 # Worker construction + registration) without duplicating it.
 # ---------------------------------------------------------------------------
@@ -298,7 +301,7 @@ def execute_distributed(
     One-shot path: runs the full setup, dispatches once, then tears the Worker
     down. Supports host ``torch.Tensor`` inputs (placed in shared memory before
     the fork). For repeated dispatch with device-resident inputs, prefer
-    :meth:`DistributedCompiledProgram.prepare` → :class:`DistributedRuntime`.
+    :meth:`DistributedCompiledProgram.prepare` → :class:`DistributedWorker`.
 
     Args:
         compiled: The DistributedCompiledProgram instance.
@@ -347,19 +350,20 @@ def execute_distributed(
             w.close()
 
 
-class DistributedRuntime(DeviceMemoryHandle):
-    """Reusable L3 execution handle: prepare once, dispatch many.
+class DistributedWorker(Worker):
+    """L3 distributed execution handle: prepare once, dispatch many.
 
     Holds an initialized simpler ``Worker(level=3)`` plus all setup artifacts
     (chip callables, host_orch entry, sub-worker fns, comm bootstrap) so the
     expensive setup — ``compile_and_assemble``, generated-module loading, Worker
     construction + registration + ``init()`` (fork) — happens exactly once.
 
-    Mirrors the L2 ``with Worker(...)`` reuse block: it exposes device-memory
+    Mirrors the L2 ``with ChipWorker(...)`` reuse block: it exposes device-memory
     helpers (:meth:`malloc`, :meth:`copy_to`, :meth:`copy_from`, :meth:`free`,
     :meth:`alloc_tensor`) so callers can build worker-resident
     :class:`~pypto.runtime.DeviceTensor` buffers that survive across dispatches,
-    then call ``rt(*device_args)`` repeatedly.
+    then call ``rt(*device_args)`` or ``rt.run(compiled, *device_args)``
+    repeatedly.
 
     Per-call IO buffers (inputs **and** outputs) are shared-memory host
     ``torch.Tensor`` objects allocated **before** :meth:`prepare` and reused in
@@ -399,8 +403,10 @@ class DistributedRuntime(DeviceMemoryHandle):
         *,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
     ) -> None:
+        super().__init__()  # initialize Worker ABC state (_owned_tensors)
         del config  # reserved for future per-runtime overrides
         self.dc = compiled._distributed_config
+        self._compiled = compiled  # held for run/register
 
         # Wrap setup so a failure at any step still releases the worker and the
         # comm rootinfo temp file. ``self.close()`` can't be used here — it reads
@@ -450,6 +456,9 @@ class DistributedRuntime(DeviceMemoryHandle):
         # many", so re-extracting it on every __call__ would be wasted work.
         self._param_infos, _, _ = compiled._get_metadata()
         self._closed = False
+        # Live RegistrationHandles so close() can mark them closed. WeakSet
+        # so handles that drop out of scope first don't pin DistributedWorker.
+        self._handles: weakref.WeakSet[Any] = weakref.WeakSet()
 
     # ------------------------------------------------------------------
     # Device memory primitives
@@ -467,7 +476,7 @@ class DistributedRuntime(DeviceMemoryHandle):
         orch = getattr(self._w, "_orch", None)
         if orch is None:
             raise RuntimeError(
-                "DistributedRuntime worker has no active orchestrator; the chip hierarchy was not started."
+                "DistributedWorker worker has no active orchestrator; the chip hierarchy was not started."
             )
         return orch
 
@@ -491,7 +500,7 @@ class DistributedRuntime(DeviceMemoryHandle):
         self._require_open("copy_from")
         self._orch().copy_from(worker_id, dst_host_ptr, src_dev_ptr, nbytes)
 
-    # ``alloc_tensor`` / ``free_tensor`` are inherited from DeviceMemoryHandle.
+    # ``alloc_tensor`` / ``free_tensor`` are inherited from Worker ABC.
     # Only the two behaviours that genuinely differ from L2 are overridden below:
     # the readiness guard (open vs. closed) and the host-init upload policy (the
     # upload runs in a forked chip worker, so no defensive copy is possible).
@@ -499,11 +508,11 @@ class DistributedRuntime(DeviceMemoryHandle):
     _WORKER_KIND = "chip worker"
 
     def _require_ready(self, op: str) -> None:
-        # DeviceMemoryHandle hook: device-memory ops are valid until close().
+        # Worker ABC hook: device-memory ops are valid until close().
         self._require_open(op)
 
     def _prepare_init(self, init: torch.Tensor) -> torch.Tensor:
-        # DeviceMemoryHandle hook: the upload (``copy_to``) runs **inside the
+        # Worker ABC hook: the upload (``copy_to``) runs **inside the
         # forked chip worker**, so ``init`` must be a CPU, contiguous,
         # shared-memory tensor allocated **before**
         # :meth:`DistributedCompiledProgram.prepare` (call ``.share_memory_()``).
@@ -511,7 +520,7 @@ class DistributedRuntime(DeviceMemoryHandle):
         # copy would live only in the parent and be invisible to the child.
         if not (init.is_shared() and init.is_contiguous() and init.device.type == "cpu"):
             raise ValueError(
-                "DistributedRuntime.alloc_tensor(init=...) requires a CPU, contiguous, "
+                "DistributedWorker.alloc_tensor(init=...) requires a CPU, contiguous, "
                 "shared-memory tensor allocated BEFORE prepare() (call .share_memory_()). "
                 "The upload runs in the forked chip worker, which can only read host "
                 "memory it inherited at fork."
@@ -547,7 +556,7 @@ class DistributedRuntime(DeviceMemoryHandle):
         n_params = len(param_infos)
         if len(args) != n_params:
             raise TypeError(
-                f"DistributedRuntime expects {n_params} arguments (in-place, one per parameter), "
+                f"DistributedWorker expects {n_params} arguments (in-place, one per parameter), "
                 f"got {len(args)}. Parameters: {[p.name for p in param_infos]}"
             )
 
@@ -558,14 +567,14 @@ class DistributedRuntime(DeviceMemoryHandle):
             elif isinstance(arg, torch.Tensor):
                 if not arg.is_shared():
                     raise TypeError(
-                        f"Parameter {info.name!r}: a host torch.Tensor passed to a DistributedRuntime "
+                        f"Parameter {info.name!r}: a host torch.Tensor passed to a DistributedWorker "
                         f"must be shared memory allocated BEFORE prepare() (call .share_memory_() and "
                         f"reuse the same buffer across dispatches), so the forked chip worker can see "
                         f"it. Got a non-shared tensor."
                     )
             elif not _is_continuous_tensor(arg):
                 raise TypeError(
-                    f"DistributedRuntime parameter {info.name!r} got {type(arg).__name__}; expected a "
+                    f"DistributedWorker parameter {info.name!r} got {type(arg).__name__}; expected a "
                     f"shared-memory torch.Tensor, a worker-resident DeviceTensor, or a ContinuousTensor."
                 )
             tensors[info.name] = arg
@@ -586,17 +595,81 @@ class DistributedRuntime(DeviceMemoryHandle):
 
     def _require_open(self, op: str) -> None:
         if self._closed:
-            raise RuntimeError(f"DistributedRuntime.{op}() called after close()")
+            raise RuntimeError(f"DistributedWorker.{op}() called after close()")
 
     def close(self) -> None:
         """Release the Worker and comm rootinfo file. Idempotent."""
         if self._closed:
             return
         self._closed = True
+        # Auto-free any DeviceTensors the caller forgot. Run BEFORE we tear
+        # down the underlying worker so the free path is still live.
+        self._close_owned_tensors()
+        # Mark every still-alive RegistrationHandle as closed so subsequent
+        # handle(...) calls raise instead of dispatching to a torn-down runtime.
+        for handle in list(self._handles):
+            handle._mark_closed()
+        self._handles.clear()
         self._w.close()
 
-    def __enter__(self) -> DistributedRuntime:
+    def __enter__(self) -> DistributedWorker:
         return self
 
     def __exit__(self, *_exc: Any) -> None:
         self.close()
+
+    # ------------------------------------------------------------------
+    # Explicit dispatch — mirror ChipWorker's run / register surface so
+    # library code can use one method name across L2 / L3.
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        compiled: DistributedCompiledProgram,
+        *args: Any,
+        config: Any = None,
+    ) -> None:
+        """Dispatch *compiled* on this DistributedWorker.
+
+        Equivalent to the legacy ``self(*args, config=config)`` call. Provided
+        for symmetry with :meth:`ChipWorker.run`, so library code can write
+        ``rt.run(compiled, *args)`` and accept either runtime kind.
+
+        *compiled* must be the same :class:`DistributedCompiledProgram` this
+        runtime was prepared from; passing a different one raises
+        ``ValueError``.
+        """
+        if compiled is not self._compiled:
+            raise ValueError(
+                "DistributedWorker.run(compiled, ...) requires the same "
+                "DistributedCompiledProgram this runtime was prepared from. "
+                "Construct a new DistributedWorker via the other compiled.prepare()."
+            )
+        return self(*args, config=config)
+
+    def register(self, compiled: DistributedCompiledProgram) -> RegistrationHandle:
+        """Pre-register *compiled* on this DistributedWorker.
+
+        Returns a :class:`~pypto.runtime.RegistrationHandle` whose
+        ``__call__`` delegates to :meth:`run`. The cid alias-safety rules
+        described on :class:`RegistrationHandle` apply.
+
+        Unlike L2, the underlying simpler registration already happened
+        during :meth:`__init__` (it must, for COW propagation to forked
+        chip children). This method just packages the existing setup as a
+        callable handle, exposing ``cid=0`` as a placeholder.
+        """
+        if compiled is not self._compiled:
+            raise ValueError(
+                "DistributedWorker.register(compiled) requires the same "
+                "DistributedCompiledProgram this runtime was prepared from."
+            )
+        # Avoid a hard cycle: distributed_runner imports from worker only
+        # for RegistrationHandle; worker never imports from distributed_runner.
+        from .worker import RegistrationHandle  # noqa: PLC0415
+
+        # L3 doesn't have a per-callable cid; expose 0 as a placeholder.
+        # __call__ delegates to self.run() which is the existing dispatch path.
+        handle = RegistrationHandle(self, compiled, cid=0)
+        self._handles.add(handle)
+        return handle

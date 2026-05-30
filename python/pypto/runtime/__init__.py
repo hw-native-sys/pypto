@@ -24,14 +24,14 @@ Example::
     compiled = run(MyProgram, a, b, c, config=RunConfig(platform="a2a3sim"))
 """
 
-from .device_memory import DeviceMemoryHandle
 from .device_tensor import DeviceTensor
 from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
 from .log_config import current_level as log_level
 from .runner import RunConfig, RunResult, compile_program, execute_compiled, run
+from .runtime_base import Worker
 from .tensor_spec import ScalarSpec, TensorSpec
-from .worker import Worker
+from .worker import ChipWorker, RegistrationHandle
 
 # Honour ``PYPTO_RUNTIME_LOG`` before any runtime entry point runs.
 _ensure_log_configured()
@@ -42,8 +42,9 @@ __all__ = [
     "execute_compiled",
     "configure_log",
     "log_level",
-    "DeviceMemoryHandle",
+    "ChipWorker",
     "DeviceTensor",
+    "RegistrationHandle",
     "RunConfig",
     "RunResult",
     "ScalarSpec",

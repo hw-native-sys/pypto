@@ -510,12 +510,12 @@ def execute_on_device(  # noqa: PLR0913
 ) -> None:
     """Execute *chip_callable* on device via Simpler's unified ``Worker``.
 
-    If a :class:`pypto.runtime.Worker` is currently active (the call site is
-    inside a ``with Worker(...):`` block) and matches the
-    ``(level, platform, device_id, runtime_name)`` binding, that Worker is
+    If a :class:`pypto.runtime.ChipWorker` is currently active (the call site is
+    inside a ``with ChipWorker(...):`` block) and matches the
+    ``(level, platform, device_id, runtime_name)`` binding, that ChipWorker is
     reused — its already-initialized device context dispatches the run
     without re-running ``init`` / ``close``. Otherwise a fresh one-shot
-    Worker is constructed exactly as before.
+    simpler Worker is constructed exactly as before.
 
     Args:
         chip_callable: Assembled callable (orchestration + kernels).
@@ -560,10 +560,10 @@ def execute_on_device(  # noqa: PLR0913
             Mirrors ``--enable-dep-gen``.
         runtime_env: Optional per-example environment variable overrides.
             Applied around the device ``run`` call. When an active
-            :class:`pypto.runtime.Worker` is reused, ``init()`` has already
+            :class:`pypto.runtime.ChipWorker` is reused, ``init()`` has already
             executed before this call, so env vars that influence device
             initialization will not take effect on the reuse path — pass
-            those at ``Worker(...)`` construction instead.
+            those at ``ChipWorker(...)`` construction instead.
 
     Raises:
         ValueError: If ``level != 2`` (L3 not yet exposed), or any DFX flag
@@ -583,7 +583,7 @@ def execute_on_device(  # noqa: PLR0913
             "is enabled — runtime CallConfig::validate() would otherwise reject the call."
         )
 
-    from .worker import Worker as _PyptoWorker  # noqa: PLC0415
+    from .worker import ChipWorker as _PyptoWorker  # noqa: PLC0415
 
     cfg = CallConfig()
     if block_dim is not None:

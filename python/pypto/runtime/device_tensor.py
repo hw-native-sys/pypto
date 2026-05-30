@@ -97,8 +97,8 @@ def alloc_device_tensor(
 ) -> DeviceTensor:
     """Allocate a device buffer and (optionally) upload host data.
 
-    Shared by :meth:`pypto.runtime.Worker.alloc_tensor` (L2) and
-    :meth:`pypto.runtime.distributed_runner.DistributedRuntime.alloc_tensor`
+    Shared by :meth:`pypto.runtime.ChipWorker.alloc_tensor` (L2) and
+    :meth:`pypto.runtime.distributed_runner.DistributedWorker.alloc_tensor`
     (L3). The ``malloc`` / ``copy_to`` / ``free`` callables are injected with
     any ``worker_id`` already bound, so this helper stays free of worker scope.
 

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for the shared ``DeviceMemoryHandle`` ABC.
+"""Unit tests for the shared :class:`Worker` ABC (formerly ``DeviceMemoryHandle``).
 
 These exercise the convenience surface (``alloc_tensor`` / ``free_tensor``) and
 the two subclass hooks (``_require_ready`` / ``_prepare_init``) with an in-test
@@ -16,15 +16,20 @@ dict-backed subclass — no ``simpler`` package or device required.
 
 import pytest
 import torch
-from pypto.runtime import DeviceMemoryHandle, DeviceTensor, Worker
+from pypto.runtime import ChipWorker, DeviceTensor, Worker
 
 
-class FakeHandle(DeviceMemoryHandle):
-    """Dict-backed handle that records every primitive call."""
+class FakeHandle(Worker):
+    """Dict-backed Worker that records every primitive call.
+
+    Used to exercise the ABC's concrete methods (alloc_tensor / free_tensor /
+    _close_owned_tensors) without instantiating a real ``ChipWorker``.
+    """
 
     _WORKER_KIND = "fake worker"
 
     def __init__(self) -> None:
+        super().__init__()
         self.ready = True
         self._next_ptr = 0x1000
         self.live: dict[int, int] = {}  # ptr -> nbytes
@@ -49,6 +54,13 @@ class FakeHandle(DeviceMemoryHandle):
 
     def copy_from(self, dst_host_ptr: int, src_dev_ptr: int, nbytes: int, *, worker_id: int = 0) -> None:
         pass
+
+    # Abstract dispatch methods — stubbed; not exercised by these tests.
+    def run(self, compiled, *args, config=None):
+        raise NotImplementedError("FakeHandle does not implement dispatch")
+
+    def register(self, compiled):
+        raise NotImplementedError("FakeHandle does not implement dispatch")
 
     def _require_ready(self, op: str) -> None:
         if not self.ready:
@@ -81,6 +93,44 @@ def test_alloc_tensor_rollback_on_copy_failure():
     # The buffer malloc'd before the failed copy must be freed (no leak).
     assert h.freed == [0x1000]
     assert h.live == {}
+
+
+def test_alloc_tensor_tracks_in_owned_set():
+    h = FakeHandle()
+    t = h.alloc_tensor((4,), torch.float32)
+    assert t.data_ptr in h._owned_tensors
+
+
+def test_free_tensor_untracks_and_frees():
+    h = FakeHandle()
+    t = h.alloc_tensor((4,), torch.float32)
+    h.free_tensor(t)
+    assert t.data_ptr not in h._owned_tensors
+    assert h.freed == [t.data_ptr]
+
+
+def test_close_owned_tensors_frees_leaked():
+    h = FakeHandle()
+    a = h.alloc_tensor((4,), torch.float32)
+    b = h.alloc_tensor((8,), torch.float32)
+    h.free_tensor(a)  # released early
+    # Only b is leaked; _close_owned_tensors should free it.
+    h._close_owned_tensors()
+    assert b.data_ptr in h.freed
+    assert h._owned_tensors == set()
+
+
+def test_close_owned_tensors_swallows_free_errors():
+    h = FakeHandle()
+    h.alloc_tensor((4,), torch.float32)
+
+    def failing_free(_ptr, *, worker_id=0):
+        raise RuntimeError("backend torn down")
+
+    h.free = failing_free  # type: ignore[method-assign]
+    # Must NOT raise; the failure is logged-and-swallowed so close() can complete.
+    h._close_owned_tensors()
+    assert h._owned_tensors == set()
 
 
 def test_default_prepare_init_makes_contiguous_cpu_copy():
@@ -127,13 +177,13 @@ def test_require_ready_consulted_by_alloc_tensor():
         h.alloc_tensor((4,), torch.float32)
 
 
-def test_worker_subclasses_handle():
-    assert issubclass(Worker, DeviceMemoryHandle)
+def test_chip_worker_subclasses_worker_abc():
+    assert issubclass(ChipWorker, Worker)
 
 
-def test_distributed_runtime_subclasses_handle():
+def test_distributed_worker_subclasses_worker_abc():
     drm = pytest.importorskip("pypto.runtime.distributed_runner")
-    assert issubclass(drm.DistributedRuntime, DeviceMemoryHandle)
+    assert issubclass(drm.DistributedWorker, Worker)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for ``DistributedRuntime`` (the ``prepare()`` reuse handle).
+"""Unit tests for ``DistributedWorker`` (the ``prepare()`` reuse handle).
 
 Runs without a device or the ``simpler`` package by patching the module-level
 setup helpers in :mod:`pypto.runtime.distributed_runner`, so construction does
@@ -24,7 +24,7 @@ from pypto.ir.distributed_compiled_program import DistributedConfig
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ParamDirection
 from pypto.runtime import DeviceTensor
-from pypto.runtime.distributed_runner import DistributedRuntime
+from pypto.runtime.distributed_runner import DistributedWorker
 
 
 def _param(name: str, shape: list[int], direction: ParamDirection = ParamDirection.In) -> _ParamInfo:
@@ -32,7 +32,7 @@ def _param(name: str, shape: list[int], direction: ParamDirection = ParamDirecti
 
 
 def _fake_compiled(param_infos, output_indices):
-    """A minimal stand-in for DistributedCompiledProgram used by DistributedRuntime."""
+    """A minimal stand-in for DistributedCompiledProgram used by DistributedWorker."""
     compiled = MagicMock(name="DistributedCompiledProgram")
     compiled._get_metadata.return_value = (param_infos, output_indices, [])
     compiled._distributed_config = DistributedConfig()
@@ -42,7 +42,7 @@ def _fake_compiled(param_infos, output_indices):
 
 @pytest.fixture
 def patched_setup():
-    """Patch every setup helper so DistributedRuntime() does no real work.
+    """Patch every setup helper so DistributedWorker() does no real work.
 
     Yields a dict of the mocks so individual tests can assert call counts.
     The worker mock records malloc/copy_to/free for alloc_tensor checks.
@@ -79,7 +79,7 @@ class TestSetupOnce:
         m = patched_setup
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
 
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         # All expensive setup happened exactly once at construction.
         m["assemble"].assert_called_once()
         m["construct"].assert_called_once()
@@ -106,7 +106,7 @@ class TestSetupOnce:
 class TestPerCallValidation:
     def test_accepts_device_tensor(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         rt(DeviceTensor(0x1000, (128, 128), torch.float32), DeviceTensor(0x2000, (128, 128), torch.float32))
         patched_setup["dispatch"].assert_called_once()
         # The merged tensors dict (5th positional arg of _dispatch) carries the inputs by name.
@@ -116,7 +116,7 @@ class TestPerCallValidation:
 
     def test_accepts_shared_host_torch_tensor(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         host_a = torch.zeros(128, 128, dtype=torch.float32).share_memory_()
         rt(host_a, DeviceTensor(0x2000, (128, 128), torch.float32))
         patched_setup["dispatch"].assert_called_once()
@@ -124,21 +124,21 @@ class TestPerCallValidation:
 
     def test_rejects_non_shared_host_torch_tensor(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         with pytest.raises(TypeError, match="shared memory"):
             rt(torch.zeros(128, 128), DeviceTensor(0x2000, (128, 128), torch.float32))
         rt.close()
 
     def test_rejects_wrong_arg_count(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         with pytest.raises(TypeError, match="expects 2 arguments"):
             rt(DeviceTensor(0x1000, (128, 128), torch.float32))
         rt.close()
 
     def test_validates_device_tensor_shape(self, patched_setup):
         compiled = _fake_compiled([_param("a", [128, 128]), _param("b", [128, 128])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         with pytest.raises(TypeError, match="shape"):
             rt(
                 DeviceTensor(0x1000, (64, 64), torch.float32),  # wrong shape
@@ -150,7 +150,7 @@ class TestPerCallValidation:
 class TestDeviceMemoryApi:
     def test_alloc_tensor_forwards_malloc_and_copy(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         # init must be a CPU, contiguous, shared-memory tensor (read by the
         # forked chip worker via the inherited mapping).
         host = torch.arange(256, dtype=torch.float32).view(16, 16).share_memory_()
@@ -170,7 +170,7 @@ class TestDeviceMemoryApi:
 
     def test_alloc_tensor_rejects_non_shared_init(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         with pytest.raises(ValueError, match="shared-memory"):
             rt.alloc_tensor((16, 16), torch.float32, init=torch.zeros(16, 16, dtype=torch.float32))
         # rolled back the malloc'd pointer.
@@ -179,7 +179,7 @@ class TestDeviceMemoryApi:
 
     def test_alloc_tensor_rolls_back_on_copy_failure(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         patched_setup["worker"]._orch.copy_to.side_effect = RuntimeError("boom")
         host = torch.zeros(16, 16, dtype=torch.float32).share_memory_()
 
@@ -192,7 +192,7 @@ class TestDeviceMemoryApi:
 
     def test_alloc_tensor_rejects_nonzero_worker_id(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         with pytest.raises(ValueError, match="worker_id=0"):
             rt.alloc_tensor((16, 16), torch.float32, worker_id=1)
         rt.close()
@@ -201,20 +201,20 @@ class TestDeviceMemoryApi:
 class TestLifecycle:
     def test_close_idempotent_and_closes_worker(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         rt.close()
         rt.close()  # second close is a no-op
         assert patched_setup["worker"].close.call_count == 1
 
     def test_context_manager_closes(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        with DistributedRuntime(compiled) as rt:
+        with DistributedWorker(compiled) as rt:
             assert rt is not None
         assert patched_setup["worker"].close.call_count == 1
 
     def test_call_after_close_raises(self, patched_setup):
         compiled = _fake_compiled([_param("a", [16, 16])], [])
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
         rt.close()
         with pytest.raises(RuntimeError, match="after close"):
             rt(DeviceTensor(0x1000, (16, 16), torch.float32))
@@ -227,7 +227,7 @@ class TestSubWorkerOverrides:
         m["load_subs"].return_value = {"sample_and_prepare": placeholder}
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
-        rt = DistributedRuntime(compiled, sub_worker_overrides={"sample_and_prepare": real})
+        rt = DistributedWorker(compiled, sub_worker_overrides={"sample_and_prepare": real})
 
         # _register_callables(w, sub_worker_fns, chip_callables): arg[1] is the merged set.
         passed = m["register"].call_args.args[1]
@@ -240,7 +240,7 @@ class TestSubWorkerOverrides:
         m["load_subs"].return_value = loaded
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
-        rt = DistributedRuntime(compiled)
+        rt = DistributedWorker(compiled)
 
         assert m["register"].call_args.args[1] == loaded
         rt.close()
@@ -251,7 +251,7 @@ class TestSubWorkerOverrides:
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
         with pytest.raises(ValueError, match="not sub-workers"):
-            DistributedRuntime(compiled, sub_worker_overrides={"typo": MagicMock()})
+            DistributedWorker(compiled, sub_worker_overrides={"typo": MagicMock()})
 
 
 class TestMergeSubWorkerOverrides:
@@ -294,6 +294,88 @@ class TestOneShotRegression:
         patched_setup["worker"].init.assert_called_once()
         patched_setup["dispatch"].assert_called_once()
         patched_setup["worker"].close.assert_called_once()
+
+
+class TestExplicitDispatchAPI:
+    """The new ``run`` / ``register`` surface that mirrors ChipWorker.
+
+    DistributedWorker.run() is an alias for ``__call__`` (existing dispatch
+    path). register() returns a :class:`RegistrationHandle` whose call
+    delegates to run().
+    """
+
+    def test_run_delegates_to_call(self, patched_setup):
+        from pypto.runtime import RegistrationHandle  # noqa: PLC0415
+
+        compiled = _fake_compiled([_param("a", [4]), _param("b", [4])], [])
+        rt = DistributedWorker(compiled)
+
+        a = torch.zeros(4).share_memory_()
+        b = torch.zeros(4).share_memory_()
+        rt.run(compiled, a, b)
+        patched_setup["dispatch"].assert_called_once()
+
+        # register() returns a usable handle.
+        rt2 = DistributedWorker(compiled)
+        h = rt2.register(compiled)
+        assert isinstance(h, RegistrationHandle)
+        assert h.compiled is compiled
+        rt.close()
+        rt2.close()
+
+    def test_run_rejects_other_compiled(self, patched_setup):
+        compiled_a = _fake_compiled([_param("a", [4])], [])
+        compiled_b = _fake_compiled([_param("a", [4])], [])
+        rt = DistributedWorker(compiled_a)
+        a = torch.zeros(4).share_memory_()
+        with pytest.raises(ValueError, match="prepared from"):
+            rt.run(compiled_b, a)
+        rt.close()
+
+    def test_register_rejects_other_compiled(self, patched_setup):
+        compiled_a = _fake_compiled([_param("a", [4])], [])
+        compiled_b = _fake_compiled([_param("a", [4])], [])
+        rt = DistributedWorker(compiled_a)
+        with pytest.raises(ValueError, match="prepared from"):
+            rt.register(compiled_b)
+        rt.close()
+
+    def test_handle_call_dispatches(self, patched_setup):
+        compiled = _fake_compiled([_param("a", [4]), _param("b", [4])], [])
+        rt = DistributedWorker(compiled)
+        a = torch.zeros(4).share_memory_()
+        b = torch.zeros(4).share_memory_()
+
+        h = rt.register(compiled)
+        patched_setup["dispatch"].reset_mock()
+        h(a, b)
+        patched_setup["dispatch"].assert_called_once()
+        rt.close()
+
+    def test_close_marks_handle_closed(self, patched_setup):
+        compiled = _fake_compiled([_param("a", [4])], [])
+        rt = DistributedWorker(compiled)
+        h = rt.register(compiled)
+        assert h.closed is False
+        rt.close()
+        assert h.closed is True
+
+    def test_close_auto_frees_owned_device_tensors(self, patched_setup):
+        """alloc_tensor on DistributedWorker is also tracked through the ABC."""
+        compiled = _fake_compiled([_param("a", [4])], [])
+        rt = DistributedWorker(compiled)
+
+        # alloc_tensor goes through Worker ABC -> records in _owned_tensors.
+        host = torch.zeros(4, dtype=torch.float32).share_memory_()
+        t = rt.alloc_tensor((4,), torch.float32, init=host)
+        assert t.data_ptr in rt._owned_tensors
+
+        # Spy on the orchestrator's free so we can assert close drove the
+        # auto-free path (L3 routes free through the orchestrator facade).
+        orch = patched_setup["worker"]._orch
+        orch.free.reset_mock()
+        rt.close()
+        assert orch.free.called
 
 
 if __name__ == "__main__":

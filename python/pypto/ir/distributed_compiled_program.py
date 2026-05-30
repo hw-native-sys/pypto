@@ -38,7 +38,7 @@ from .compiled_program import (
 )
 
 if TYPE_CHECKING:
-    from pypto.runtime.distributed_runner import DistributedRuntime
+    from pypto.runtime.distributed_runner import DistributedWorker
 
 
 def _extract_param_infos_from_func(func):
@@ -251,16 +251,16 @@ class DistributedCompiledProgram:
         config: Any = None,
         *,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
-    ) -> "DistributedRuntime":
+    ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
 
         Runs the expensive setup (``compile_and_assemble``, generated-module
-        loading, ``Worker(level=3)`` construction + registration + ``init()``)
-        exactly once and returns a :class:`DistributedRuntime` that dispatches
-        many times on the held Worker. The handle also exposes device-memory
-        helpers (``alloc_tensor`` / ``malloc`` / ``copy_to`` / ``copy_from`` /
-        ``free``) for building worker-resident :class:`DeviceTensor` buffers
-        that survive across dispatches.
+        loading, simpler ``Worker(level=3)`` construction + registration +
+        ``init()``) exactly once and returns a :class:`DistributedWorker` that
+        dispatches many times on the held worker. The handle also exposes
+        device-memory helpers (``alloc_tensor`` / ``malloc`` / ``copy_to`` /
+        ``copy_from`` / ``free``) for building worker-resident
+        :class:`DeviceTensor` buffers that survive across dispatches.
 
         Per-call inputs and outputs are reused-in-place **shared-memory** host
         ``torch.Tensor`` buffers (allocated before ``prepare()``) and/or
@@ -279,12 +279,12 @@ class DistributedCompiledProgram:
                 ``ValueError``.
 
         Returns:
-            A :class:`DistributedRuntime`; use it as a context manager or call
+            A :class:`DistributedWorker`; use it as a context manager or call
             ``close()`` when done.
         """
-        from pypto.runtime.distributed_runner import DistributedRuntime  # noqa: PLC0415
+        from pypto.runtime.distributed_runner import DistributedWorker  # noqa: PLC0415
 
-        return DistributedRuntime(self, config, sub_worker_overrides=sub_worker_overrides)
+        return DistributedWorker(self, config, sub_worker_overrides=sub_worker_overrides)
 
     @staticmethod
     def _build_full_args(input_args, param_infos, output_indices):

@@ -7,10 +7,10 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for ``Worker`` device-memory primitives and ``alloc_tensor``.
+"""Unit tests for ``ChipWorker`` device-memory primitives and ``alloc_tensor``.
 
 Patches ``_SimplerWorker`` so tests run without a device.  Each test asserts
-that the call is forwarded to the underlying chip worker with the expected
+that the call is forwarded to the underlying simpler worker with the expected
 arguments (positional + ``worker_id`` trailing arg).
 """
 
@@ -18,12 +18,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from pypto.runtime import DeviceTensor, RunConfig, Worker
+from pypto.runtime import ChipWorker, DeviceTensor, RunConfig
 
 
 @pytest.fixture
 def fake_simpler_worker():
-    """Patch ``simpler.worker.Worker`` so Worker construction does not touch a device."""
+    """Patch ``simpler.worker.Worker`` so ChipWorker construction does not touch a device."""
     with patch("pypto.runtime.worker._SimplerWorker") as cls:
         instance = MagicMock()
         cls.return_value = instance
@@ -32,7 +32,7 @@ def fake_simpler_worker():
 
 @pytest.fixture
 def worker(fake_simpler_worker):
-    w = Worker(config=RunConfig(platform="a2a3sim"))
+    w = ChipWorker(config=RunConfig(platform="a2a3sim"))
     yield w
     if w.initialized:
         w.close()
@@ -60,7 +60,7 @@ class TestMallocFree:
 
     def test_malloc_after_close_raises(self, fake_simpler_worker, worker):
         worker.close()
-        with pytest.raises(RuntimeError, match="initialized Worker"):
+        with pytest.raises(RuntimeError, match="initialized ChipWorker"):
             worker.malloc(1024)
         fake_simpler_worker.malloc.assert_not_called()
 
@@ -70,7 +70,7 @@ class TestMallocFree:
 
     def test_free_after_close_raises(self, worker):
         worker.close()
-        with pytest.raises(RuntimeError, match="initialized Worker"):
+        with pytest.raises(RuntimeError, match="initialized ChipWorker"):
             worker.free(0x4000)
 
 
@@ -85,12 +85,12 @@ class TestCopy:
 
     def test_copy_to_after_close_raises(self, worker):
         worker.close()
-        with pytest.raises(RuntimeError, match="initialized Worker"):
+        with pytest.raises(RuntimeError, match="initialized ChipWorker"):
             worker.copy_to(0x100, 0x200, 64)
 
     def test_copy_from_after_close_raises(self, worker):
         worker.close()
-        with pytest.raises(RuntimeError, match="initialized Worker"):
+        with pytest.raises(RuntimeError, match="initialized ChipWorker"):
             worker.copy_from(0x100, 0x200, 64)
 
 

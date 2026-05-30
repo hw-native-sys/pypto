@@ -215,18 +215,18 @@ print(vector_add.as_python(concise=True))
 ## 在 worker 上复用权重（DeviceTensor）
 
 当同一个大张量被多次内核调用复用 —— 例如前向计算每个 batch 都要用到的权重矩阵 ——
-每次都重新上传会浪费带宽。`Worker.alloc_tensor` 在 device 上分配一块常驻内存，并返回
+每次都重新上传会浪费带宽。`ChipWorker.alloc_tensor` 在 device 上分配一块常驻内存，并返回
 一个 `DeviceTensor` 句柄；`CompiledProgram` 接受它替代 `torch.Tensor` 入参。runtime
 把这块 buffer 视为已经驻留在 device 上，对该入参跳过 H2D 与 D2H 拷贝。
 
 ```python
 import torch
 from pypto import ir
-from pypto.runtime import Worker, RunConfig
+from pypto.runtime import ChipWorker, RunConfig
 
 compiled = ir.compile(MyKernel)
 
-with Worker(config=RunConfig(platform="a2a3sim")) as w:
+with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
     weight = w.alloc_tensor((1024, 4096), torch.float16, init=host_weight)
     for batch in batches:
         out = torch.empty(batch.shape[0], 4096, dtype=torch.float16)
@@ -237,10 +237,10 @@ with Worker(config=RunConfig(platform="a2a3sim")) as w:
 ### 注意事项
 
 - `DeviceTensor` 永远不会被拷回 host。如果内核写入了它，需要显式调用
-  `Worker.copy_from(host_ptr, t.data_ptr, t.nbytes)` 读回结果。
-- 必须在 Worker 关闭之前用 `Worker.free_tensor` 释放句柄，否则该内存会泄漏到
-  Worker 生命周期结束。
-- 只有分配它的那个 Worker 可以使用该 buffer。
+  `ChipWorker.copy_from(host_ptr, t.data_ptr, t.nbytes)` 读回结果。
+- 必须在 ChipWorker 关闭之前用 `ChipWorker.free_tensor` 释放句柄，否则该内存会泄漏到
+  ChipWorker 生命周期结束。
+- 只有分配它的那个 ChipWorker 可以使用该 buffer。
 
 ### 分布式（L3+）程序
 
@@ -259,9 +259,9 @@ compiled(x, weight, out)                       # weight：无 H2D/D2H 拷贝
 
 #### 跨多次 dispatch 复用 setup（`prepare()`）
 
-`compiled(*args)` 每次调用都会跑完整的分布式 setup（逐 chip 装配、构造 Worker 并 fork）。
+`compiled(*args)` 每次调用都会跑完整的分布式 setup（逐 chip 装配、构造 simpler Worker 并 fork）。
 对反复 dispatch 同一程序的常驻服务（如 generate 循环），可调用一次 `compiled.prepare()` 得到
-一个 `DistributedRuntime` 句柄：setup 只做一次，多次 dispatch 复用同一个 Worker。
+一个 `DistributedWorker` 句柄：setup 只做一次，多次 dispatch 复用同一个 worker。
 
 per-call 的 IO buffer（输入**和**输出）是**在 `prepare()` 之前分配的共享内存 host 张量**，
 原地复用 —— fork 出的 chip worker 通过继承的映射读写它们，所以输出直接从该张量读回。大块静态
