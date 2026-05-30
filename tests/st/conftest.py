@@ -22,6 +22,7 @@ import shutil
 import sys
 import tempfile
 from collections import Counter
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -305,11 +306,10 @@ def _report_device(request) -> None:
         return
     line = f"[DEVICE] {request.node.nodeid} -> device {device_id}"
     capmanager = request.config.pluginmanager.getplugin("capturemanager")
-    if capmanager is not None:
-        with capmanager.global_and_fixture_disabled():
-            sys.stdout.write(f"\n{line}\n")
-            sys.stdout.flush()
-    else:
+    # Suspend capture (when a capturemanager is present) so the line reaches the
+    # real terminal regardless of test outcome; otherwise write it directly.
+    disabled = capmanager.global_and_fixture_disabled() if capmanager is not None else nullcontext()
+    with disabled:
         sys.stdout.write(f"\n{line}\n")
         sys.stdout.flush()
     _device_counter[device_id] += 1

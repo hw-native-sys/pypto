@@ -93,14 +93,18 @@ def test_no_mat_to_mat_tmov():
     except Exception as e:  # noqa: BLE001 - see comment above
         compile_error = e
 
-    pto = DUMP_DIR / "ptoas" / "repro_mm.pto"
-    assert pto.exists(), (
-        f"codegen did not emit {pto}; compile raised before .pto materialized: {compile_error!r}"
+    # The generated .pto lands in different subdirs depending on whether ptoas
+    # is available: ``ptoas/<name>.pto`` (the ptoas input) when it runs, or the
+    # raw MLIR ``kernels/<core>/<name>.pto`` under ``--codegen-only`` / no ptoas.
+    # Both carry the same pre-ptoas ``pto.tmov`` ops, so scan every emitted .pto.
+    ptos = sorted(DUMP_DIR.rglob("*.pto"))
+    assert ptos, (
+        f"codegen did not emit any .pto under {DUMP_DIR}; "
+        f"compile raised before .pto materialized: {compile_error!r}"
     )
-    text = pto.read_text()
-    mat_to_mat = _MAT_TO_MAT_TMOV.findall(text)
+    mat_to_mat = [m for p in ptos for m in _MAT_TO_MAT_TMOV.findall(p.read_text())]
     assert not mat_to_mat, (
-        f"{len(mat_to_mat)} unsupported loc=mat -> loc=mat pto.tmov in {pto}; "
+        f"{len(mat_to_mat)} unsupported loc=mat -> loc=mat pto.tmov in {[str(p) for p in ptos]}; "
         f"the Mat tile.slice was not canonicalized into tile.extract"
     )
 

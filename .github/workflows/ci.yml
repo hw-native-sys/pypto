@@ -113,7 +113,13 @@ jobs:
         run: ccache -s || true
 
       - name: Test codegen (codegen-only, no device)
-        run: pytest tests/st/codegen -v --codegen-only
+        # test_torch_codegen_paged_attention does a numeric golden compare whose
+        # bf16/fp16 accumulation is sensitive to the host torch/BLAS build; it
+        # drifts past tolerance on this CPU container, so it runs in the npu
+        # system-tests job instead (it needs no device, only that environment).
+        run: >-
+          pytest tests/st/codegen -v --codegen-only
+          --ignore=tests/st/codegen/torch/test_torch_codegen_paged_attention.py
 
   system-tests:
     runs-on: [self-hosted, linux, arm64, npu-1-device]
@@ -209,7 +215,11 @@ jobs:
         # tests/st/codegen is device-free and runs in the separate CPU
         # codegen-tests job (--codegen-only). On-board execution tests
         # (incl. the paged-attention pipelines) live under tests/st/runtime.
-        run: pytest tests/st -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed --ignore=tests/st/codegen
+        # test_torch_codegen_paged_attention is passed explicitly so it still
+        # runs here despite the tests/st/codegen ignore: its numeric golden
+        # compare is unstable on the CPU container's torch/BLAS build (see the
+        # codegen-tests job), so it needs this environment.
+        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed --ignore=tests/st/codegen
 
       - name: Test multi-orch L2 (isolated pytest invocation)
         # A ``Worker(level=2)`` device session currently leaves runtime
