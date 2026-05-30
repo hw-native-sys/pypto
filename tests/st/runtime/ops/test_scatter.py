@@ -162,6 +162,25 @@ def _scatter_mask_specs(b: int, c: int, stride: int, dt: DataType, torch_dt: tor
     ]
 
 
+def _scatter_mask_chain_specs(b: int, c: int, dt: DataType, torch_dt: torch.dtype) -> list[TensorSpec]:
+    """Build the (even, odd, dst, output) TensorSpecs for the chained mask-scatter case.
+
+    Two compact ``[B, C]`` inputs are interleaved into one ``[B, 2C]`` dst by
+    chaining two mask scatters: ``even`` into the even columns (P0101) and
+    ``odd`` into the odd columns (P1010). ``even`` and ``odd`` hold disjoint
+    positive ranges so a swapped pattern or a clobbered column is caught. ``dst``
+    starts zeroed; a correct chain leaves ``dst[:, 0::2] = even`` and
+    ``dst[:, 1::2] = odd`` (the second scatter must preserve the first's writes).
+    """
+    dst_cols = 2 * c
+    return [
+        TensorSpec("even", [b, c], dt, init_value=lambda: _make_values(b, c, torch_dt)),
+        TensorSpec("odd", [b, c], dt, init_value=lambda: _make_values(b, c, torch_dt) + b * c),
+        TensorSpec("dst", [b, dst_cols], dt, init_value=lambda: torch.zeros(b, dst_cols, dtype=torch_dt)),
+        TensorSpec("output", [b, dst_cols], dt, is_output=True),
+    ]
+
+
 # --- Programs (one per element type; shapes satisfy the 32-byte row alignment) ---
 
 
@@ -325,6 +344,32 @@ class ScatterMaskP1010Program:
         return output
 
 
+@pl.program
+class ScatterMaskChainProgram:
+    """Chained mask-form scatter (P0101 then P1010, A2/A3): RoPE even/odd reassembly.
+
+    Writes ``even`` into the even columns (P0101) and ``odd`` into the odd columns
+    (P1010) of a single ``dst``, chaining two mask scatters into one buffer — the
+    inverse of splitting a RoPE head into even/odd halves. Validates that the
+    second scatter preserves the first's writes, so ``dst[:, 0::2] = even`` and
+    ``dst[:, 1::2] = odd``.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        even: pl.Tensor[[16, 32], pl.FP32],
+        odd: pl.Tensor[[16, 32], pl.FP32],
+        dst: pl.Tensor[[16, 64], pl.FP32],
+        output: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+    ) -> pl.Tensor[[16, 64], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.tensor.scatter(even, mask_pattern=pl.tile.MaskPattern.P0101, dst=dst)
+            out = pl.tensor.scatter(odd, mask_pattern=pl.tile.MaskPattern.P1010, dst=out)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
 # --- Test cases ---
 
 
@@ -479,6 +524,31 @@ class ScatterMaskP1010TestCase(_ScatterMaskBaseTestCase):
         return ScatterMaskP1010Program
 
 
+class ScatterMaskChainTestCase(_ScatterMaskBaseTestCase):
+    """Chain P0101 then P1010 into one dst (RoPE even/odd reassembly).
+
+    Unlike the single-pattern cases, this writes two compact inputs into one
+    interleaved ``dst`` via two chained scatters, pinning that the second
+    pattern's scatter preserves the first's writes.
+    """
+
+    def get_name(self) -> str:
+        return "scatter_mask_chain"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_mask_chain_specs(16, 32, DataType.FP32, torch.float32)
+
+    def get_program(self) -> Any:
+        return ScatterMaskChainProgram
+
+    def compute_expected(self, tensors, params=None):
+        b, dst_cols = tensors["output"].shape
+        out = torch.zeros(b, dst_cols, dtype=tensors["even"].dtype)
+        out[:, 0::2] = tensors["even"]  # P0101 → even columns
+        out[:, 1::2] = tensors["odd"]  # P1010 → odd columns
+        tensors["output"][:] = out
+
+
 # --- Tests ---
 
 
@@ -526,7 +596,9 @@ class TestScatterMaskForm:
 
     Each compact ``inp`` row is written into the mask-selected columns of the
     wider ``dst`` (``dst.cols == inp.cols * stride``); column selection mirrors
-    the mask gather (P0101 → even, P1010 → odd).
+    the mask gather (P0101 → even, P1010 → odd). The chain case writes two inputs
+    into one ``dst`` (P0101 then P1010) to pin that the second scatter preserves
+    the first's writes — the RoPE even/odd reassembly tail.
     """
 
     @pytest.mark.parametrize("platform", PLATFORMS)
@@ -537,6 +609,11 @@ class TestScatterMaskForm:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_scatter_mask_p1010(self, test_runner, platform):
         result = test_runner.run(ScatterMaskP1010TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_mask_chain(self, test_runner, platform):
+        result = test_runner.run(ScatterMaskChainTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
