@@ -467,12 +467,47 @@ std::vector<std::optional<size_t>> FindReturnedParamIndices(const FunctionPtr& c
   // back to a direction-based heuristic. Each entry maps a return-tuple
   // position to its source ``callee->params_`` index, or nullopt when that
   // position is not a writeback to a param (e.g. an auxiliary scalar).
-  if (!callee || !callee->body_) return {};
+  //
+  // Cycle guard + memoization, mirroring FindReturnedParamIndex: TraceReturnedToParam
+  // recurses through user-function returns, so a callee whose body calls back into
+  // this (or itself) would otherwise re-walk full bodies repeatedly. The result
+  // depends only on the callee body, so a thread_local Function* -> result cache
+  // collapses repeat visits (distinct call sites sharing a callee, repeated
+  // layers/blocks). The cache is cleared when the outermost call unwinds so it
+  // never crosses unrelated compilations on the same thread.
+  thread_local std::vector<const Function*> call_stack;
+  thread_local std::unordered_map<const Function*, std::vector<std::optional<size_t>>> memo;
+
+  if (!callee) return {};
+  if (std::find(call_stack.begin(), call_stack.end(), callee.get()) != call_stack.end()) {
+    return {};
+  }
+  if (auto it = memo.find(callee.get()); it != memo.end()) {
+    return it->second;
+  }
+  call_stack.push_back(callee.get());
+  bool is_top_level = call_stack.size() == 1;
+  struct RecursionGuard {
+    std::vector<const Function*>& stack;
+    std::unordered_map<const Function*, std::vector<std::optional<size_t>>>& memo_ref;
+    bool top_level;
+    ~RecursionGuard() {
+      stack.pop_back();
+      if (top_level) memo_ref.clear();
+    }
+  } guard{call_stack, memo, is_top_level};
+
+  auto record = [&](std::vector<std::optional<size_t>> result) -> std::vector<std::optional<size_t>> {
+    memo.emplace(callee.get(), result);
+    return result;
+  };
+
+  if (!callee->body_) return record({});
 
   ReturnAndDefCollector collector;
   collector.VisitStmt(callee->body_);
   if (!collector.first_return || collector.first_return->value_.empty()) {
-    return {};
+    return record({});
   }
 
   VarLineageCollector lineage(program);
@@ -495,7 +530,7 @@ std::vector<std::optional<size_t>> FindReturnedParamIndices(const FunctionPtr& c
     }
     result.push_back(idx);
   }
-  return result;
+  return record(result);
 }
 
 // ---------------------------------------------------------------------------
