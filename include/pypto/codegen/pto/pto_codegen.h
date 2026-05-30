@@ -145,7 +145,8 @@ class PTOCodegen : public CodegenBase {
    * Like GetOrCreateTensorView but returns an empty string when no view is
    * registered (and none is reachable via an IterArg init chain), instead of
    * raising. Callers that have a valid fallback (e.g. yielding a tensor that
-   * has no make_tensor_view) use this to avoid a hard failure.
+   * has no make_tensor_view, or propagating a plain tensor alias) use this to
+   * avoid a hard failure.
    *
    * @param tensor Tensor variable
    * @return Tensor view SSA name, or "" if none is registered

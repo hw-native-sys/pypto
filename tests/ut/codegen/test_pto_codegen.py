@@ -624,6 +624,94 @@ def test_pto_codegen_tile_store_lowering():
     assert "outs(" in mlir_code
 
 
+def test_pto_codegen_plain_tensor_alias_resolves_store_view():
+    """Regression: a plain ``lhs_tensor = rhs_var`` alias feeding a tile.store
+    must resolve its tensor view at codegen (plain-Var RHS leg).
+
+    A folded loop-result alias ``t__rv = t__base`` whose RHS already has a
+    registered view (here a function param) must propagate that view to the LHS
+    so a later ``tile.store`` into the alias resolves. The AssignStmt visitor now
+    propagates view / SSA name / base ptr across plain tensor aliases, mirroring
+    the ForStmt loop-result path. Before the fix this tripped
+    ``Tensor view not found for parameter: out_alias`` /
+    ``Check failed: !view.empty()``. The IterArg-RHS leg (the actual
+    constant-trip-``pl.pipeline`` fold shape ``t__rv = t__iter``) is guarded by
+    :func:`test_pto_codegen_iter_arg_alias_resolves_store_view`.
+
+    Codegen runs directly (no default passes) so the alias is preserved —
+    Simplify would copy-propagate it away in the full pipeline, but the device
+    codegen gap it exposes is what this test guards.
+    """
+    ty = ir.TensorType([16, 64], DataType.FP32)
+
+    ib = IRBuilder()
+    with ib.function("alias_store_func", type=ir.FunctionType.InCore) as f:
+        a = f.param("a", ty)
+        out = f.param("out", ty)
+        t = ib.let("t", tile.load(a, [0, 0], [16, 64]))
+        # Plain tensor Var alias (no Call on the RHS) — the post-fold shape.
+        out_alias = ib.let("out_alias", out)
+        ret = ib.let("ret", tile.store(t, [0, 0], out_alias))
+        f.return_type(ty)
+        ib.return_stmt(ret)
+    func = f.get_result()
+
+    program = ir.Program([func], "alias_store_prog", ir.Span.unknown())
+    mlir_code = _generate_mlir(program)
+
+    lines = _get_mlir_lines(mlir_code)
+    # The store lowers to a tstore — proving the alias resolved to `out`'s view.
+    _single_line(lines, "pto.tstore", startswith=True)
+    # load + store each emit a partition_view off a resolved tensor view.
+    partition_lines = _find_lines(lines, "pto.partition_view")
+    assert len(partition_lines) >= 2, f"Expected load + store partition_view, got: {partition_lines}"
+
+
+def test_pto_codegen_iter_arg_alias_resolves_store_view():
+    """Regression: a plain alias whose RHS is a loop IterArg — the exact shape a
+    constant-trip stage-2 ``pl.pipeline``'s empty-main-loop fold produces
+    (``t__rv_vN_main = t__iter_vM``) — feeding a tile.store must resolve its view.
+
+    Distinct from :func:`test_pto_codegen_plain_tensor_alias_resolves_store_view`
+    (plain-Var RHS): here the alias RHS is a tensor ``IterArg`` carried by an
+    enclosing loop. The enclosing ForStmt registers the iter-arg's view; the
+    AssignStmt visitor must propagate it across the plain alias so the in-body
+    ``tile.store(..., out_alias)`` resolves. Before the fix this tripped
+    ``Tensor view not found for parameter: out_alias`` (the IterArg-RHS path that
+    the param-Var test never reaches).
+
+    Codegen runs directly (no default passes) so the alias survives.
+    """
+    ty = ir.TensorType([128, 64], DataType.FP32)
+
+    ib = IRBuilder()
+    with ib.function("iter_alias_store_func", type=ir.FunctionType.InCore) as f:
+        a = f.param("a", ty)
+        out = f.param("out", ty)
+        f.return_type(ty)
+
+        k = ib.var("k", ir.ScalarType(DataType.INDEX))
+        with ib.for_loop(k, 0, 2, 1) as loop:
+            out_iter = loop.iter_arg("out_iter", out)  # tensor IterArg, init = param `out`
+            out_final = loop.return_var("out_final")
+            t = ib.let("t", tile.load(a, [0, 0], [64, 64]))
+            # Plain alias whose RHS is the IterArg — the post-fold `__rv = __iter`.
+            out_alias = ib.let("out_alias", out_iter)
+            ib.let("ret", tile.store(t, [0, 0], out_alias))
+            ib.emit(ir.YieldStmt([out_alias], ir.Span.unknown()))
+        ib.return_stmt(out_final)
+    func = f.get_result()
+
+    program = ir.Program([func], "iter_alias_store_prog", ir.Span.unknown())
+    mlir_code = _generate_mlir(program)
+
+    lines = _get_mlir_lines(mlir_code)
+    # The store lowers to a tstore — proving the IterArg alias resolved its view.
+    _single_line(lines, "pto.tstore", startswith=True)
+    partition_lines = _find_lines(lines, "pto.partition_view")
+    assert len(partition_lines) >= 2, f"Expected load + store partition_view, got: {partition_lines}"
+
+
 def test_pto_codegen_mixed_slice_assign_and_write_keeps_ptr():
     """Mixing slice-assign (view) with pl.write (ptr) on one tensor must not clash.
 

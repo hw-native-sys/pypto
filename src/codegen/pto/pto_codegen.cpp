@@ -1385,6 +1385,28 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
     }
   }
 
+  // Plain tensor alias: `lhs_tensor = rhs_var` with no Call on the RHS. This
+  // arises when Simplify folds an empty loop-result ForStmt into a plain
+  // AssignStmt — e.g. a constant-trip `pl.pipeline`'s statically-empty main
+  // loop becomes `t__rv_vN_main = t__iter_vM`. The deleted ForStmt would have
+  // registered the loop-result tensor view / SSA name / base ptr (see
+  // VisitStmt_(ForStmtPtr) in pto_control_flow_codegen.cpp). Mirror that here
+  // so a later tile.store into the alias can resolve its view, instead of
+  // GetOrCreateTensorView tripping its INTERNAL_CHECK on the synthetic var.
+  // Non-fatal: if the RHS has no registered view, fall through to the generic
+  // handling rather than throwing eagerly on a view that may never be consumed.
+  if (auto rhs_var = AsVarLike(op->value_)) {
+    if (ir::AsTensorTypeLike(op->var_->GetType())) {
+      const std::string view = TryGetTensorView(rhs_var);
+      if (!view.empty()) {
+        BindTensorView(op->var_, view);
+        BindVarToMlir(op->var_, view);  // view name == SSA name, as in ForStmt
+        RegisterBasePtr(op->var_, GetTensorBasePtr(rhs_var));
+        return;
+      }
+    }
+  }
+
   fs_.current_expr_value = "";
   VisitExpr(op->value_);
   // Register scalar/index/CommCtx result so subsequent expressions can look up
