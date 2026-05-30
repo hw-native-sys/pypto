@@ -290,6 +290,11 @@ def _report_device(request) -> None:
     read it after ``yield`` so the line shows the device the test actually
     ran on.  Tests that don't go through ``TestRunner.run`` see ``None``
     and are skipped from the per-device counter.
+
+    The write runs in the fixture's teardown phase, which pytest captures
+    per-test and discards for passing tests.  We suspend capture so the line
+    reaches the real terminal regardless of test outcome (otherwise it only
+    surfaced on failures or under ``-s``).
     """
     yield
     from harness.core.test_runner import _last_device  # noqa: PLC0415
@@ -298,8 +303,15 @@ def _report_device(request) -> None:
     _last_device["value"] = None
     if device_id is None:
         return
-    sys.stdout.write(f"\n[DEVICE] {request.node.nodeid} -> device {device_id}\n")
-    sys.stdout.flush()
+    line = f"[DEVICE] {request.node.nodeid} -> device {device_id}"
+    capmanager = request.config.pluginmanager.getplugin("capturemanager")
+    if capmanager is not None:
+        with capmanager.global_and_fixture_disabled():
+            sys.stdout.write(f"\n{line}\n")
+            sys.stdout.flush()
+    else:
+        sys.stdout.write(f"\n{line}\n")
+        sys.stdout.flush()
     _device_counter[device_id] += 1
 
 

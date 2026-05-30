@@ -29,7 +29,7 @@ The user provides a **test case specification**, which is a pytest node ID. Exam
 ```text
 tests/st/runtime/ops/test_matmul.py::TestMatmulOperations::test_matmul_shapes
 tests/st/runtime/control_flow/test_dyn_orch_shape.py -k "test_dyn_orch_paged_attention"
-tests/st/codegen/dsl/test_paged_attention_multi_config.py::TestPagedAttention::test_basic
+tests/st/runtime/framework_and_models/test_paged_attention_multi_config.py -k "test_paged_attention_multi_config_ptoas"
 ```
 
 If the user only gives a short name (e.g., "paged attention"), search under
