@@ -14,7 +14,6 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -27,6 +26,7 @@
 #include "pypto/ir/stmt.h"
 #include "pypto/ir/transforms/base/visitor.h"
 #include "pypto/ir/transforms/printer.h"
+#include "pypto/ir/transforms/utils/var_collectors.h"
 #include "pypto/ir/verifier/verification_error.h"
 #include "pypto/ir/verifier/verifier.h"
 
@@ -46,23 +46,30 @@ std::string ErrorTypeToString(ErrorType type) {
 
 namespace {
 
-/// Operations that create new tensors, disconnecting from any Out parameter.
-/// Defined in src/ir/op/tensor_ops/memory.cpp (REGISTER_OP entries).
-const std::unordered_set<std::string>& GetTensorCreatingOps() {
-  static const std::unordered_set<std::string> ops{"tensor.create", "tensor.full"};
-  return ops;
+/// True when `call` references `param` anywhere in its argument subtree — i.e.
+/// the reassignment threads the Out/InOut parameter through the call, keeping
+/// the external buffer connected (e.g. `out = tensor.assemble(out, tile, off)`,
+/// `out = tile.store(value, idx, out)`).
+bool CallThreadsParam(const CallPtr& call, const Var* param) {
+  var_collectors::VarDefUseCollector uses;
+  uses.VisitExpr(call);
+  return uses.var_uses.count(param) > 0;
 }
 
 /**
- * @brief Visitor that detects Out/InOut parameter shadowing by tensor-creating ops
+ * @brief Visitor that detects Out/InOut parameters reassigned to a detached value
  *
  * For each function, collects Out/InOut parameter Var pointers. Then during
- * traversal, checks if any AssignStmt reassigns one of those Var pointers
- * with a tensor-creating call (tensor.create, tensor.full) that disconnects
- * from the external output tensor.
+ * traversal, flags any AssignStmt that reassigns one of those Var pointers with
+ * a call whose arguments do NOT reference the parameter. Such a reassignment
+ * rebinds the name to a fresh value disconnected from the external output
+ * buffer (`out = pl.matmul(...)`, `out = tensor.create(...)`), so the buffer is
+ * never written and the kernel silently produces its init value (all-zero). See
+ * issue #1525.
  *
- * Legitimate reassignments like `out = tensor.assemble(out, tile, offsets)` are
- * allowed because they flow through the Out parameter.
+ * Legitimate reassignments like `out = tensor.assemble(out, tile, offsets)` or
+ * `out = tile.store(value, idx, out)` are allowed because they thread the Out
+ * parameter through the call and keep the external buffer connected.
  */
 class OutParamShadowVerifier : public IRVisitor {
  public:
@@ -86,7 +93,7 @@ class OutParamShadowVerifier : public IRVisitor {
     auto it = out_params_.find(op->var_.get());
     if (it != out_params_.end()) {
       if (auto call = As<Call>(op->value_)) {
-        if (call->op_ && GetTensorCreatingOps().count(call->op_->name_)) {
+        if (call->op_ && !CallThreadsParam(call, op->var_.get())) {
           RecordError(op->var_->name_hint_, it->second, call->op_->name_, op->span_);
         }
       }
@@ -106,8 +113,13 @@ class OutParamShadowVerifier : public IRVisitor {
                    const Span& span) {
     std::ostringstream msg;
     msg << "'" << var_name << "' is an " << ParamDirectionToString(direction)
-        << " parameter and cannot be reassigned via " << op_name
-        << ". Use the parameter directly as the output target instead."
+        << " parameter but is reassigned to the result of '" << op_name
+        << "', which does not write into it. This rebinds the name to a detached value, "
+        << "so the external output buffer is never written (the kernel silently produces "
+        << "its init value, e.g. all-zero — see issue #1525). Write into the parameter "
+        << "instead — e.g. `" << var_name << " = pl.assemble(" << var_name << ", value, offset)`, "
+        << "`pl.store(value, offset, " << var_name << ")`, or an indexed write `" << var_name
+        << "[...] = value`."
         << "\n  In function '" << func_name_ << "'";
     if (func_) {
       if (cached_func_str_.empty()) {

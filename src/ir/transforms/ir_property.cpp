@@ -120,14 +120,15 @@ std::string IRPropertySet::ToString() const {
 }
 
 const IRPropertySet& GetVerifiedProperties() {
-  static const IRPropertySet props{IRProperty::SSAForm,
-                                   IRProperty::TypeChecked,
-                                   IRProperty::MixedKernelExpanded,
-                                   IRProperty::AllocatedMemoryAddr,
-                                   IRProperty::BreakContinueValid,
-                                   IRProperty::NoRedundantBlocks,
-                                   IRProperty::InOutUseValid,
-                                   IRProperty::CallDirectionsResolved};
+  static const IRPropertySet props{IRProperty::SSAForm, IRProperty::TypeChecked,
+                                   IRProperty::MixedKernelExpanded, IRProperty::AllocatedMemoryAddr,
+                                   IRProperty::BreakContinueValid, IRProperty::NoRedundantBlocks,
+                                   IRProperty::InOutUseValid, IRProperty::CallDirectionsResolved,
+                                   // Verified once at pipeline input (pre-SSA, where a bare
+                                   // reassignment's AssignStmt still targets the param Var) so an
+                                   // unwritten Out/InOut buffer fails fast instead of silently
+                                   // producing its init value (issue #1525).
+                                   IRProperty::OutParamNotShadowed};
   return props;
 }
 

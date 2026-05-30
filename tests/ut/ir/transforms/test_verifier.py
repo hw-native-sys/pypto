@@ -506,5 +506,75 @@ def test_out_param_non_creating_reassignment_ok():
     assert len(diagnostics) == 0
 
 
+def test_out_param_reassigned_by_compute_op_detected():
+    """OutParamNotShadowed detects Out param reassigned to a compute result that
+    does not thread the param (the issue #1525 footgun: ``out = matmul(a, b)``).
+
+    The result is a detached value, so the external output buffer is never
+    written and the kernel silently produces all-zero on device.
+    """
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+
+    a = ir.Var("a", tensor_type, span)
+    b = ir.Var("b", tensor_type, span)
+    out = ir.Var("out", tensor_type, span)
+
+    # out = tensor.add(a, b) — out does NOT appear in the call args -> detached
+    add_call = ir.create_op_call("tensor.add", [a, b], span)
+    assign_out = ir.AssignStmt(out, add_call, span)
+    return_stmt = ir.ReturnStmt([out], span)
+    body = ir.SeqStmts([assign_out, return_stmt], span)
+
+    func = ir.Function(
+        "test_compute_shadow",
+        [a, b, (out, ir.ParamDirection.Out)],
+        [tensor_type],
+        body,
+        span,
+    )
+    program = ir.Program([func], "test_program", span)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.OutParamNotShadowed)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+
+    assert len(diagnostics) > 0
+    assert all(d.severity == passes.DiagnosticSeverity.Error for d in diagnostics)
+    assert any(d.rule_name == "OutParamNotShadowed" for d in diagnostics)
+    assert any("'out'" in d.message and "Out" in d.message for d in diagnostics)
+
+
+def test_out_param_inout_reassigned_by_compute_op_detected():
+    """OutParamNotShadowed also covers InOut params reassigned to a detached value."""
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+
+    a = ir.Var("a", tensor_type, span)
+    acc = ir.Var("acc", tensor_type, span)
+
+    # acc = tensor.add(a, a) — acc (InOut) not referenced -> detached
+    add_call = ir.create_op_call("tensor.add", [a, a], span)
+    assign_acc = ir.AssignStmt(acc, add_call, span)
+    return_stmt = ir.ReturnStmt([acc], span)
+    body = ir.SeqStmts([assign_acc, return_stmt], span)
+
+    func = ir.Function(
+        "test_inout_shadow",
+        [a, (acc, ir.ParamDirection.InOut)],
+        [tensor_type],
+        body,
+        span,
+    )
+    program = ir.Program([func], "test_program", span)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.OutParamNotShadowed)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+
+    assert len(diagnostics) > 0
+    assert any("InOut" in d.message for d in diagnostics)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

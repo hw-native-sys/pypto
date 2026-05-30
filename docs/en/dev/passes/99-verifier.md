@@ -72,7 +72,7 @@ The `run_verifier()` utility creates a standalone `Pass` for ad-hoc use in custo
 | **IncoreTileOps** | IncoreTileOps | InCore functions use tile ops (no tensor-level ops remain) |
 | **HasMemRefs** | HasMemRefs | All TileType variables have MemRef initialized |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | All MemRefs have valid addresses within buffer limits |
-| **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut params not reassigned with tensor-creating ops |
+| **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut params not reassigned to a detached value — a call that does not thread the param (e.g. `out = pl.matmul(...)`, `out = tensor.create(...)`) silently leaves the external buffer unwritten (issue #1525). Threading reassignments like `out = pl.assemble(out, ...)` are allowed |
 | **NoNestedInCore** | NoNestedInCore | No nested InCore scopes (`InCoreScopeStmt` inside `InCoreScopeStmt`) |
 | **InOutUseValid** | InOutUseValid | Variables passed as InOut/Out to user-function calls are not read after the call (RFC #1026). Group-typed function bodies are skipped pending follow-up. |
 | **PipelineLoopValid** | PipelineLoopValid | Bidirectional invariant on every `ForStmt`: `kind_ == ForKind::Pipeline` ⇔ `pipeline_stages` attr present. Either direction failing means the pipeline loop is malformed. |

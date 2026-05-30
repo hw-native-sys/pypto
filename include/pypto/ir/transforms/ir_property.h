@@ -48,14 +48,15 @@ enum class IRProperty : uint64_t {
   HierarchyOutlined,        ///< Hierarchy scopes outlined into level/role functions
   StructuredCtrlFlow,       ///< No BreakStmt/ContinueStmt — only structured control flow
   VectorKernelSplit,        ///< AIV functions with split mode have tpop shapes and store offsets adjusted
-  OutParamNotShadowed,      ///< Out/InOut params are not reassigned with tensor-creating ops
-  NoNestedInCore,           ///< No nested InCore scopes (ScopeStmt inside ScopeStmt)
-  InOutUseValid,            ///< No reads of InOut/Out-passed variables after the call (RFC #1026)
-  PipelineLoopValid,        ///< Bidirectional invariant: ForStmt.kind_ == Pipeline ⇔ has pipeline_stages attr
-  PipelineResolved,         ///< No ForKind::Pipeline survives; produced by CanonicalizeIOOrder
-  CallDirectionsResolved,   ///< Every non-builtin Call has explicit attrs['arg_directions']
-  TileTypeCoherence,        ///< Every TileType has canonical tile_view (implicit views stored as nullopt)
-  InlineFunctionsEliminated,        ///< No FunctionType::Inline functions or Calls to them remain
+  OutParamNotShadowed,  ///< Out/InOut params are not reassigned to a detached value (call not threading the
+                        ///< param)
+  NoNestedInCore,       ///< No nested InCore scopes (ScopeStmt inside ScopeStmt)
+  InOutUseValid,        ///< No reads of InOut/Out-passed variables after the call (RFC #1026)
+  PipelineLoopValid,    ///< Bidirectional invariant: ForStmt.kind_ == Pipeline ⇔ has pipeline_stages attr
+  PipelineResolved,     ///< No ForKind::Pipeline survives; produced by CanonicalizeIOOrder
+  CallDirectionsResolved,     ///< Every non-builtin Call has explicit attrs['arg_directions']
+  TileTypeCoherence,          ///< Every TileType has canonical tile_view (implicit views stored as nullopt)
+  InlineFunctionsEliminated,  ///< No FunctionType::Inline functions or Calls to them remain
   OrchestrationReferencesResolved,  ///< Every non-builtin Call in an Orchestration function targets a
                                     ///< Function that exists in the Program
   TensorViewCanonical,              ///< TensorView canonicality verified (weak: stride.empty() ok; strict:
