@@ -235,8 +235,7 @@ void VarLineageCollector::VisitStmt_(const ForStmtPtr& for_stmt) {
       // to a Scalar return_var makes FindReturnedParamIndices incorrectly map
       // a Scalar return element to a param index, causing EmitTensorAlias to
       // emit ``const Tensor&`` for an int64_t variable (issue #1580).
-      if (i < for_stmt->return_vars_.size() &&
-          AsTensorTypeLike(for_stmt->return_vars_[i]->GetType())) {
+      if (i < for_stmt->return_vars_.size() && AsTensorTypeLike(for_stmt->return_vars_[i]->GetType())) {
         var_to_param[for_stmt->return_vars_[i].get()] = param;
       }
     }
@@ -251,8 +250,7 @@ void VarLineageCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
     if (param) {
       var_to_param[iter_arg.get()] = param;
       // Same guard as ForStmt: only propagate to Tensor return_vars.
-      if (i < while_stmt->return_vars_.size() &&
-          AsTensorTypeLike(while_stmt->return_vars_[i]->GetType())) {
+      if (i < while_stmt->return_vars_.size() && AsTensorTypeLike(while_stmt->return_vars_[i]->GetType())) {
         var_to_param[while_stmt->return_vars_[i].get()] = param;
       }
     }
