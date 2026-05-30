@@ -4764,14 +4764,10 @@ class TestScalarCarryPhiCodegen:
             lhs, _, rhs = stripped.partition("=")
             # out_c phi must not be initialized from out_b's carry value
             if "out_c" in lhs and "out_b" in rhs and "out_c" not in rhs:
-                raise AssertionError(
-                    f"Wrong phi: out_c assigned from out_b value (scrambled):\n  {stripped}"
-                )
+                raise AssertionError(f"Wrong phi: out_c assigned from out_b value (scrambled):\n  {stripped}")
             # out_b phi must not be initialized from out_c's carry value
             if "out_b" in lhs and "out_c" in rhs and "out_b" not in rhs:
-                raise AssertionError(
-                    f"Wrong phi: out_b assigned from out_c value (scrambled):\n  {stripped}"
-                )
+                raise AssertionError(f"Wrong phi: out_b assigned from out_c value (scrambled):\n  {stripped}")
 
 
 if __name__ == "__main__":
