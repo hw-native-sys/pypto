@@ -1,6 +1,6 @@
 # CanonicalizeIOOrder Pass
 
-Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, lifts scalar compute and `tile.load` / `tile.read` to the top and sinks `tile.store` / `tile.write` to the bottom — subject to the SSA dependency graph. Within replicated regions produced by `LowerPipelineLoops`, this enables symmetric ping-pong buffering. Loops that are not pipelined are left untouched.
+Scoped to `SeqStmts` **inside a `ForKind::Pipeline` body**, reorders statements along a **hardware-unit stage ladder** — subject to the SSA dependency graph — so that each stage clusters across the replicated clones produced by `LowerPipelineLoops`. Clustering keeps sibling-iteration tiles co-live, which is what enables ping-pong (double-buffering). The ladder covers the intra-core MTE/compute stages (scalar → load → compute → store) **and** the cross-core AIC↔AIV round-trip (cross-core push → pop → consumer compute), so fused cube/vector pipelines software-pipeline across the `tpush`/`tpop` boundary (issue #1610). Loops that are not pipelined are left untouched.
 
 ## Overview
 
@@ -16,6 +16,24 @@ This pass reorders `SeqStmts` **inside a `ForKind::Pipeline` body** (including n
 The result is `[scalars…, loads…, tile compute…, stores…]` whenever the dataflow allows. Within replicated regions, sibling clones' input tiles become co-live near the top and output tiles become co-live near the bottom — `MemoryReuse` cannot coalesce them, so each clone keeps its own MemRef and ping-pong buffering becomes possible.
 
 Lifting scalar compute is what unlocks the load cluster: without it, each clone's address-arithmetic assign would be classified as ordinary compute and rank by original position — interleaving between sibling loads and pinning them in their original groups. With scalar compute as the highest-priority category, all sibling clones' address arithmetic emits first, all dependent loads become ready together, and the loads naturally cluster.
+
+### Cross-core pipelining (AIC↔AIV)
+
+The same clustering generalizes to a fused cube/vector kernel, whose `pl.pipeline` loop `ExpandMixedKernel` has split into a per-engine AIC/AIV body with cross-core `tpush`/`tpop` moves. A flash-attention AIC clone is `QK matmul → tpush_to_aiv → tpop_from_aiv → SV matmul`. Giving the cross-core push/pop their own stages and separating producer (`QK`) from consumer (`SV`) compute regroups the `F`-clone body from the per-clone-serial
+
+```text
+QK0, tpush0, tpop0, SV0,   QK1, tpush1, tpop1, SV1
+```
+
+into stage-clustered
+
+```text
+QK0, QK1,   tpush0, tpush1,   tpop0, tpop1,   SV0, SV1
+```
+
+so `raw_scores0`/`raw_scores1` (between QK and tpush) stay co-live ⇒ two score buffers, and the two popped results (between tpop and SV) stay co-live ⇒ two result buffers — ping-pong on both.
+
+**Why ordering, not instruction overlap, is the lever.** Ascend executes event/dependency-driven, not in instruction order: emitting `QK0 QK1 tpush0 tpush1` issues all four tasks, and `tpush0` runs as soon as `QK0` finishes — clustering does *not* delay the consumer. The reorder's purpose is to **bypass `MemoryReuse`**. Interleaving a stage's producer and consumer (`QK0, tpush0, QK1, tpush1`) makes `raw_scores0` die at `tpush0` before `raw_scores1` is born at `QK1`; the disjoint live ranges let `MemoryReuse` coalesce them into one buffer, which injects a *false* WAR dependency (`QK1` must wait for `tpush0`) that serializes the pipeline. Clustering keeps the live ranges overlapping, forcing distinct MemRefs.
 
 **Requires**: SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, TileMemoryInferred, NormalizedStmtStructure.
 
@@ -36,16 +54,23 @@ result = passes.canonicalize_io_order()(program)
 
 A priority-aware stable topological sort applied to every `SeqStmts` of two or more statements **inside a `ForKind::Pipeline` body**. The mutator maintains a pipeline-depth counter: it increments on entry to a `ForKind::Pipeline` loop, decrements on exit, and reorders `SeqStmts` only when the counter is non-zero. Each top-level statement is categorized:
 
-| Category | Priority | Examples |
-| -------- | -------- | -------- |
-| `ScalarCompute` | 0 (emit first) | `AssignStmt` whose LHS is a `ScalarType` (e.g. `off = i * 64`) |
-| `Load` | 1 | `AssignStmt(_, Call("tile.load", …))` or `AssignStmt(_, Call("tile.read", …))` |
-| `TileCompute` | 2 | Anything else inside the region (tile.move, tile.matmul, yield_, …) |
-| `Store` | 3 (emit last) | `AssignStmt(_, Call("tile.store", …))` / `EvalStmt(Call("tile.store", …))` / `tile.write` variants |
+| Category | Priority | Hardware unit | Examples |
+| -------- | -------- | ------------- | -------- |
+| `ScalarCompute` | 0 (emit first) | scalar | `AssignStmt` whose LHS is a `ScalarType` (e.g. `off = i * 64`) |
+| `Load` | 1 | MTE ingress (GM→L1/L0) | `AssignStmt(_, Call("tile.load", …))` / `tile.read` / L1→L0 `tile.extract` |
+| `TileCompute` | 2 | CUBE/Vec (producer) | Compute *before* a cross-core round-trip (e.g. the QK matmul loop, tile.move) |
+| `CrossCorePush` | 3 | cross-core egress | `EvalStmt(Call("tile.tpush_to_aiv" / "tile.tpush_to_aic", …))` |
+| `CrossCorePop` | 4 | cross-core ingress | `AssignStmt(_, Call("tile.tpop_from_aiv" / "tile.tpop_from_aic", …))` |
+| `ConsumerCompute` | 5 | CUBE/Vec (consumer) | Compute *downstream of* a cross-core pop (e.g. the SV matmul loop, `tfree`, `set_validshape`) |
+| `Store` | 6 (emit last) | MTE egress (L1/L0→GM) | `tile.store` / `tile.write` (AssignStmt or EvalStmt) |
 
 `tile.read` is classified as `Load` even though it produces a scalar — it's I/O against a tile and belongs in the load tier alongside `tile.load`. The LHS-type check only applies once the RHS is determined not to be a recognized I/O op.
 
-At each step, among statements whose predecessors are all already emitted (`ready`), the pass emits the one with the smallest `(category, original_index)`. Stores naturally sort last because `Store = 3` is the largest category — they are only emitted once nothing else is ready.
+**Producer vs consumer compute.** `tpop` has no SSA argument (it pops the GM ring buffer keyed by `id`/`split`), so the dependency graph alone cannot tell that the compute consuming its result belongs to the post-round-trip stage. The pass propagates a "downstream of a cross-core pop" bit forward over the SSA edges and demotes such `TileCompute` to `ConsumerCompute`. A `tile.create` whose uses are *all* consumer-stage (e.g. the SV-accumulator init that sits between a `tpush` and its `tpop`) is likewise treated as `ConsumerCompute`, so it stays next to its consumer instead of being hoisted into the producer cluster (which would stretch its Acc buffer live-range and inflate L0C pressure).
+
+**Why `tpush` is not sunk like `Store`.** Both are egress, but `tpush` must fire as early as its producer allows so the peer core can start; it ranks *after* producer `TileCompute` (so sibling producers cluster first) but *before* the pops — it is not deferred to the bottom like a GM store.
+
+At each step, among statements whose predecessors are all already emitted (`ready`), the pass emits the one with the smallest `(category, original_index)`. Stores naturally sort last because `Store` is the largest category — they are only emitted once nothing else is ready. (The worked example below has no cross-core ops, so only the scalar/load/compute/store tiers participate; see *Cross-core pipelining* above for a tpush/tpop example.)
 
 Worked example — input `[scalar_0, load_0, compute_0, store_0, scalar_1, load_1, compute_1, store_1]` with each clone's load reading its scalar, each compute reading its load, each store reading both its scalar and compute:
 
@@ -55,7 +80,7 @@ ready={load_0, scalar_1}                emit scalar_1    (cat 0 < cat 1)
 ready={load_0, load_1}                  emit load_0      (cat 1, idx 1 < 5)
 ready={load_1, compute_0}               emit load_1      (cat 1 < cat 2)
 ready={compute_0, compute_1}            emit compute_0
-ready={compute_1, store_0}              emit compute_1   (cat 2 < cat 3)
+ready={compute_1, store_0}              emit compute_1   (cat 2 < cat 6)
 ready={store_0, store_1}                emit store_0
 ready={store_1}                         emit store_1
 ```

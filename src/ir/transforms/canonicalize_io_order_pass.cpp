@@ -32,6 +32,7 @@
 #include "pypto/ir/transforms/passes.h"
 #include "pypto/ir/transforms/utils/attrs.h"
 #include "pypto/ir/transforms/utils/mutable_copy.h"
+#include "pypto/ir/transforms/utils/op_predicates.h"
 #include "pypto/ir/transforms/utils/stmt_dependency_analysis.h"
 #include "pypto/ir/type.h"
 
@@ -41,13 +42,40 @@ namespace {
 
 /// IO category used for priority during the topological sort. Lower is emitted first.
 ///
+/// This is a **hardware-unit stage ladder**: statements are ordered by the unit
+/// they cross along the dataflow, scalar → MTE-load → CUBE/Vec compute →
+/// cross-core egress → cross-core ingress → CUBE/Vec compute → MTE-store.
+/// Clustering same-stage statements across the replicated clones of a pipeline
+/// body keeps sibling-iteration tiles *co-live*, which is exactly what prevents
+/// ``MemoryReuse`` from coalescing them into a single buffer — preserving the
+/// ping-pong (double-buffering) the event-based scheduler needs to run iteration
+/// ``i+1``'s stage-k concurrently with iteration ``i``'s stage-(k+1).
+///
 /// ``ScalarCompute`` sits above ``Load`` so that address-arithmetic assigns
 /// (e.g. ``k = i * 512``) — the typical predecessors of a tile.load offset —
 /// are emitted first, allowing all sibling clones' loads to become ready and
-/// cluster at the top of the region. Without this split, a per-clone scalar
-/// gate would interleave between clones and prevent the load-cluster layout
-/// that ping-pong buffering depends on.
-enum class IOCategory : int { ScalarCompute = 0, Load = 1, TileCompute = 2, Store = 3 };
+/// cluster at the top of the region.
+///
+/// The middle three tiers generalize the ladder across the AIC↔AIV cross-core
+/// boundary (issue #1610). A cross-core round-trip splits a core's work into a
+/// **producer** half (compute → ``tpush`` egress) and a **consumer** half
+/// (``tpop`` ingress → compute). Giving the egress ``tpush`` and the ingress
+/// ``tpop`` their own tiers — and separating producer ``TileCompute`` from
+/// post-pop ``ConsumerCompute`` — clusters every cross-core stage across clones,
+/// so sibling ``raw_scores`` (between QK and tpush) and sibling popped results
+/// (between tpop and the consumer matmul) stay co-live and ping-pong. Note
+/// ``tpush`` is *not* sunk like ``Store``: it must fire as early as its producer
+/// allows so the peer core can start, but it ranks after producer ``TileCompute``
+/// so all sibling producers cluster before the sends.
+enum class IOCategory : int {
+  ScalarCompute = 0,
+  Load = 1,
+  TileCompute = 2,
+  CrossCorePush = 3,
+  CrossCorePop = 4,
+  ConsumerCompute = 5,
+  Store = 6,
+};
 
 /// Singletons for the ops the pass cares about — resolved once from the registry
 /// and compared by identity in ``CategorizeStmt``. Using pointer identity instead
@@ -59,17 +87,19 @@ struct IOCategoryOps {
   OpPtr tile_store;    ///< Write: tile → tensor data movement
   OpPtr tile_write;    ///< Write: put scalar into a tile
   OpPtr tile_extract;  ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
+  OpPtr tile_create;   ///< Tile allocation — used by the consumer-side create refinement
 
   static IOCategoryOps Build() {
     const auto& registry = OpRegistry::GetInstance();
     return {
         registry.GetOp("tile.load"),  registry.GetOp("tile.read"),    registry.GetOp("tile.store"),
-        registry.GetOp("tile.write"), registry.GetOp("tile.extract"),
+        registry.GetOp("tile.write"), registry.GetOp("tile.extract"), registry.GetOp("tile.create"),
     };
   }
 
   [[nodiscard]] bool IsLoadLike(const OpPtr& op) const { return op == tile_load || op == tile_read; }
   [[nodiscard]] bool IsStoreLike(const OpPtr& op) const { return op == tile_store || op == tile_write; }
+  [[nodiscard]] bool IsCreate(const OpPtr& op) const { return op == tile_create; }
 
   /// True when @p call is a `tile.extract` whose source lives in L1 (Mat) and
   /// whose destination lives in L0a/L0b (Left/Right) — i.e. the ISA TEXTRACT
@@ -98,11 +128,6 @@ struct IOCategoryOps {
   }
 };
 
-OpPtr CalledOp(const ExprPtr& expr) {
-  auto call = std::dynamic_pointer_cast<const Call>(expr);
-  return call ? call->op_ : OpPtr{};
-}
-
 IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops) {
   if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
     if (auto call = std::dynamic_pointer_cast<const Call>(assign->value_)) {
@@ -110,6 +135,11 @@ IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops) {
       // a tile and belongs in the load tier alongside tile.load.
       if (ops.IsLoadLike(call->op_)) return IOCategory::Load;
       if (ops.IsStoreLike(call->op_)) return IOCategory::Store;
+      // Cross-core ingress: a tpop has no SSA argument (it pops the GM ring
+      // buffer) and binds its result; it is the per-iteration "wait for the
+      // peer unit" boundary. Ranked after on-core compute/egress so sibling
+      // tpops cluster and their popped results stay co-live (issue #1610).
+      if (op_predicates::IsTPop(call)) return IOCategory::CrossCorePop;
       // tile.extract is load-like only when it represents an L1→L0 transfer
       // (Mat source, Left/Right target). Other extract shapes stay in
       // TileCompute — see IsL1ToL0ExtractCall doc for rationale.
@@ -124,8 +154,14 @@ IOCategory CategorizeStmt(const StmtPtr& stmt, const IOCategoryOps& ops) {
     return IOCategory::TileCompute;
   }
   if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-    auto op = CalledOp(eval->expr_);
-    if (op && ops.IsStoreLike(op)) return IOCategory::Store;
+    if (auto call = std::dynamic_pointer_cast<const Call>(eval->expr_)) {
+      if (ops.IsStoreLike(call->op_)) return IOCategory::Store;
+      // Cross-core egress: tpush hands a tile to the pipe. Unlike a store it is
+      // not sunk — it must fire as early as its producer allows so the peer core
+      // can start — but it ranks after producer TileCompute so all sibling
+      // producers cluster before the sends (issue #1610).
+      if (op_predicates::IsTPush(call)) return IOCategory::CrossCorePush;
+    }
   }
   return IOCategory::TileCompute;
 }
@@ -144,10 +180,13 @@ bool IsTerminator(const StmtPtr& stmt) {
 /**
  * @brief Mutator that reorders every multi-stmt ``SeqStmts`` in the program.
  *
- * Layered priority (top → bottom): scalar compute, loads, tile compute, stores —
- * all subject to the dependency graph. Lifting scalar compute (typically address
- * arithmetic) above loads ensures sibling clones' loads become ready together
- * and cluster at the top, the layout ``MemoryReuse`` needs for ping-pong.
+ * Layered priority (top → bottom) is a hardware-unit stage ladder: scalar
+ * compute, loads, (producer) tile compute, cross-core push, cross-core pop,
+ * (consumer) tile compute, stores — all subject to the dependency graph.
+ * Lifting scalar compute (typically address arithmetic) above loads ensures
+ * sibling clones' loads become ready together and cluster at the top; the same
+ * clustering across the cross-core stages keeps sibling cross-core tiles
+ * co-live — the layout ``MemoryReuse`` needs for ping-pong (issue #1610).
  *
  * Soundness precondition (InOut-use discipline) is validated once per function
  * by the driver before the mutator runs, so per-region checks are unnecessary
@@ -254,11 +293,63 @@ class CanonicalizeIOOrderMutator : public IRMutator {
       }
     }
 
-    // Ready-set as a min-heap keyed by (category, original_index). Emitting
-    // the smallest category first gives the desired top-to-bottom layout —
-    // ``ScalarCompute`` (0) first, then ``Load`` (1), ``TileCompute`` (2), and
-    // finally ``Store`` (3). Using the original index as the tiebreaker keeps
-    // the sort stable within each tier.
+    // Generalize the stage ladder across the cross-core boundary (issue #1610).
+    // A `tpop` has no SSA argument, so the dependency graph alone won't reveal
+    // that the compute consuming its popped result belongs to the *post*-round-
+    // trip stage. Propagate "downstream of a cross-core pop" forward over the
+    // SSA edges — predecessors always have a smaller index in valid SSA, so a
+    // single index-order sweep suffices — and demote such producer `TileCompute`
+    // to `ConsumerCompute` so it clusters after the pops instead of with the
+    // producers.
+    std::vector<bool> after_pop(sort_count, false);
+    for (size_t i = 0; i < sort_count; ++i) {
+      bool ap = (cats[i] == IOCategory::CrossCorePop);
+      if (!ap) {
+        auto it = graph.predecessors.find(stmts[i].get());
+        if (it != graph.predecessors.end()) {
+          for (const Stmt* pred : it->second) {
+            auto pit = idx_of.find(pred);
+            if (pit != idx_of.end() && after_pop[pit->second]) {
+              ap = true;
+              break;
+            }
+          }
+        }
+      }
+      after_pop[i] = ap;
+      if (ap && cats[i] == IOCategory::TileCompute) cats[i] = IOCategory::ConsumerCompute;
+    }
+
+    // A `tile.create` that only feeds consumer-stage statements is itself
+    // consumer setup (e.g. the SV-accumulator init that sits between a `tpush`
+    // and its `tpop`). Left as producer `TileCompute` it would be hoisted into
+    // the producer cluster, stretching its accumulator buffer's live range
+    // across the whole round-trip and inflating L0C/Acc pressure. Sweep in
+    // reverse index order so chained setup-creates settle in one pass (a
+    // create's successors have a larger index and are finalized first).
+    for (size_t r = sort_count; r-- > 0;) {
+      if (cats[r] != IOCategory::TileCompute) continue;
+      auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmts[r]);
+      if (!assign) continue;
+      auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
+      if (!call || !io_ops_.IsCreate(call->op_)) continue;
+      if (successors[r].empty()) continue;  // dead create — leave it where it is
+      bool all_consumer = true;
+      for (size_t s : successors[r]) {
+        if (cats[s] != IOCategory::ConsumerCompute) {
+          all_consumer = false;
+          break;
+        }
+      }
+      if (all_consumer) cats[r] = IOCategory::ConsumerCompute;
+    }
+
+    // Ready-set as a min-heap keyed by (category, original_index). Emitting the
+    // smallest category first gives the hardware-unit stage layout top-to-bottom:
+    // ``ScalarCompute`` (0), ``Load`` (1), ``TileCompute`` (2), ``CrossCorePush``
+    // (3), ``CrossCorePop`` (4), ``ConsumerCompute`` (5), ``Store`` (6). Using
+    // the original index as the tiebreaker keeps the sort stable within each tier
+    // (which preserves per-pipe FIFO order among sibling tpush/tpop).
     using HeapKey = std::pair<int, size_t>;
     std::priority_queue<HeapKey, std::vector<HeapKey>, std::greater<>> ready;
     auto key_for = [&](size_t i) -> HeapKey { return {static_cast<int>(cats[i]), i}; };

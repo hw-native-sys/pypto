@@ -10,9 +10,10 @@
 """DSL-style Before/Expected tests for the CanonicalizeIOOrder pass.
 
 The pass walks every ``SeqStmts`` **inside a ``ForKind.Pipeline`` body** and
-reorders its top-level statements into four priority tiers — scalar compute
-first, then tile.load, then tile compute, and finally tile.store — all subject
-to the SSA dependency graph. Loops that are not pipelined are left untouched.
+reorders its top-level statements along a hardware-unit stage ladder — scalar
+compute, tile.load, (producer) tile compute, cross-core push, cross-core pop,
+(consumer) tile compute, tile.store — all subject to the SSA dependency graph.
+Loops that are not pipelined are left untouched.
 
 Tests that want reorder wrap the outer in ``pl.pipeline(..., stage=1)`` to opt
 in. The pass demotes ``ForKind.Pipeline`` → ``ForKind.Sequential`` and strips
@@ -665,6 +666,361 @@ class TestCanonicalizeIOOrder:
         # b_tid (ScalarCompute) lifts above b.
         assert is_scalar_assign(stmts[4])
         assert is_proj(stmts[5]) and not is_scalar_assign(stmts[5])
+
+
+def _run_lower_then_canon(program: ir.Program) -> ir.Program:
+    """Replicate (LowerPipelineLoops) then reorder (CanonicalizeIOOrder) — the
+    real pipeline order — with structural verification disabled."""
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        lowered = passes.lower_pipeline_loops()(program)
+        return passes.canonicalize_io_order()(lowered)
+
+
+def _positions(text: str, marker: str) -> list[int]:
+    """Character offsets of every occurrence of ``marker`` in ``text``."""
+    out: list[int] = []
+    start = 0
+    while (i := text.find(marker, start)) != -1:
+        out.append(i)
+        start = i + 1
+    return out
+
+
+def _pos(text: str, marker: str) -> int:
+    """Offset of the single/first occurrence of ``marker`` (asserts presence)."""
+    p = _positions(text, marker)
+    assert p, f"marker {marker!r} not found in:\n{text}"
+    return p[0]
+
+
+class TestCrossCorePipeline:
+    """Cross-core (AIC↔AIV) stage clustering for fused cube/vector pipelines (#1610).
+
+    The pass generalizes its hardware-unit stage ladder across the cross-core
+    boundary: producer compute (tier 2) < cross-core push (3) < cross-core pop
+    (4) < consumer compute (5). Clustering each stage across the replicated
+    clones keeps sibling tiles co-live so MemoryReuse can ping-pong them.
+    """
+
+    def test_aic_stages_cluster_for_pingpong(self):
+        """AIC body ``QK -> tpush -> tpop -> SV`` (2 clones) regroups into
+        ``loads | QK0,QK1 | tpush0,tpush1 | tpop0,tpop1 | SV0,SV1 | stores``."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[32, 64], pl.FP32], out: pl.Tensor[[32, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    pl.tile.store(oi0, [0, 0], out)
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [16, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
+                    pl.tile.store(oi1, [16, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[32, 64], pl.FP32], out: pl.Tensor[[32, 64], pl.FP32]):
+                for i in pl.range(0, 2, 1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [16, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
+                    pl.tile.store(oi0, [0, 0], out)
+                    pl.tile.store(oi1, [16, 0], out)
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_aiv_consumer_side_clusters(self):
+        """AIV body ``tpop_from_aic -> softmax -> tpush_to_aic`` (2 clones):
+        both receives cluster ahead of the first consumer compute."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    scores0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aic(split=0)
+                    sm0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(scores0, scores0)
+                    pl.tile.tpush_to_aic(sm0, split=0)
+                    scores1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aic(split=0)
+                    sm1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(scores1, scores1)
+                    pl.tile.tpush_to_aic(sm1, split=0)
+
+        text = ir.python_print(_run_pass(Before))
+        # Both tpop receives precede the first consumer compute -> received-score
+        # buffers stay co-live (ping-pong on the consumer side too).
+        assert _pos(text, "scores0") < _pos(text, "sm0")
+        assert _pos(text, "scores1") < _pos(text, "sm0")
+
+    def test_three_clone_cross_core_clusters(self):
+        """Clustering generalizes past 2 clones: all QKs, then all tpushes, then
+        all tpops, then all SVs."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[48, 64], pl.FP32], out: pl.Tensor[[48, 64], pl.FP32]):
+                for i in pl.pipeline(0, 3, 1, stage=1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    pl.tile.store(oi0, [0, 0], out)
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [16, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
+                    pl.tile.store(oi1, [16, 0], out)
+                    qa2: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [32, 0], [16, 64])
+                    rs2: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa2, qa2)
+                    pl.tile.tpush_to_aiv(rs2, split=0)
+                    e2: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi2: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e2, e2)
+                    pl.tile.store(oi2, [32, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        push = _positions(text, "tpush_to_aiv")
+        pop = _positions(text, "tpop_from_aiv")
+        assert len(push) == 3 and len(pop) == 3
+        # All three producers (rs*) precede all three pushes; all pushes precede
+        # all pops; the last push precedes the first pop (full stage grouping).
+        assert max(_pos(text, n) for n in ("rs0", "rs1", "rs2")) < min(push)
+        assert max(push) < min(pop)
+        # All three pops precede the first consumer compute (oi0).
+        assert max(pop) < _pos(text, "oi0")
+
+    def test_sv_init_create_stays_with_consumer(self):
+        """A tile.create that only feeds consumer-stage compute is NOT hoisted
+        into the producer cluster — it stays after the pushes/pops with its SV."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[32, 64], pl.FP32], out: pl.Tensor[[32, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    sv_init0: pl.Tile[[16, 64], pl.FP32] = pl.tile.create([16, 64], dtype=pl.FP32)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, sv_init0)
+                    pl.tile.store(oi0, [0, 0], out)
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [16, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    sv_init1: pl.Tile[[16, 64], pl.FP32] = pl.tile.create([16, 64], dtype=pl.FP32)
+                    e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, sv_init1)
+                    pl.tile.store(oi1, [16, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        # Each SV-init create lands after the last tpush (consumer side), not in
+        # the producer cluster ahead of the sends.
+        last_push = max(_positions(text, "tpush_to_aiv"))
+        assert _pos(text, "sv_init0") > last_push
+        assert _pos(text, "sv_init1") > last_push
+
+    def test_tpush_is_not_sunk_like_store(self):
+        """tpush is egress but must NOT sink like tile.store: it stays before the
+        pop, while the store sinks to the very bottom."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[16, 64], pl.FP32], out: pl.Tensor[[16, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    pl.tile.store(oi0, [0, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        assert _pos(text, "tpush_to_aiv") < _pos(text, "tpop_from_aiv")
+        assert _pos(text, "tpop_from_aiv") < _pos(text, "tile.store")
+
+    def test_loads_and_stores_unaffected_by_cross_core(self):
+        """Load stays at the top tier and store at the bottom even with the
+        cross-core stages present in between."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[32, 64], pl.FP32], out: pl.Tensor[[32, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    pl.tile.store(oi0, [0, 0], out)
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [16, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
+                    pl.tile.store(oi1, [16, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        loads = _positions(text, "pl.tile.load")
+        stores = _positions(text, "pl.tile.store")
+        push = _positions(text, "tpush_to_aiv")
+        pop = _positions(text, "tpop_from_aiv")
+        # Every load precedes every cross-core op; every cross-core op precedes
+        # every store.
+        assert max(loads) < min(push + pop)
+        assert max(push + pop) < min(stores)
+
+    def test_consumer_chain_through_intermediate(self):
+        """``after_pop`` is transitive: an intermediate compute between the pop
+        and the final consumer is also placed in the consumer cluster."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[32, 64], pl.FP32], out: pl.Tensor[[32, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    mid0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(mid0, mid0)
+                    pl.tile.store(oi0, [0, 0], out)
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [16, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    mid1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
+                    oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(mid1, mid1)
+                    pl.tile.store(oi1, [16, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        # The intermediate (mid*) and final (oi*) consumer computes all follow
+        # the producer cluster (rs*) and the pushes.
+        last_push = max(_positions(text, "tpush_to_aiv"))
+        for name in ("mid0", "oi0", "mid1", "oi1"):
+            assert _pos(text, name) > last_push
+
+    def test_tfree_follows_its_consumer(self):
+        """tfree (consumer-tier) is emitted after the SV compute that last-uses
+        the popped tile."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[16, 64], pl.FP32], out: pl.Tensor[[16, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    pl.system.tfree_to_aiv(e0)
+                    pl.tile.store(oi0, [0, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        assert _pos(text, "oi0") < _pos(text, "tfree_to_aiv")
+
+    def test_fifo_and_causal_order_preserved(self):
+        """Per-pipe FIFO (push0<push1, pop0<pop1) and causality (every push
+        before every pop) hold after the reorder."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[32, 64], pl.FP32], out: pl.Tensor[[32, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    qa0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa0, qa0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    e0: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e0, e0)
+                    pl.tile.store(oi0, [0, 0], out)
+                    qa1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [16, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa1, qa1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    e1: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e1, e1)
+                    pl.tile.store(oi1, [16, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        push = _positions(text, "tpush_to_aiv")
+        pop = _positions(text, "tpop_from_aiv")
+        assert push == sorted(push) and pop == sorted(pop)  # stable per-pipe order
+        assert max(push) < min(pop)  # every push before every pop
+
+    def test_no_cross_core_pipeline_unchanged(self):
+        """A pure load/compute/store pipeline (no cross-core ops) reorders
+        exactly as before — guards the Store-tier renumber."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    ta0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                    tc0: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta0, ta0)
+                    pl.tile.store(tc0, [0, 0], out)
+                    ta1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])
+                    tc1: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta1, ta1)
+                    pl.tile.store(tc1, [64, 0], out)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[128, 64], pl.FP32], out: pl.Tensor[[128, 64], pl.FP32]):
+                for i in pl.range(0, 2, 1):
+                    ta0: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                    ta1: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [64, 0], [64, 64])
+                    tc0: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta0, ta0)
+                    tc1: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(ta1, ta1)
+                    pl.tile.store(tc0, [0, 0], out)
+                    pl.tile.store(tc1, [64, 0], out)
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_pipeline_stage2_replicate_then_reorder(self):
+        """End-to-end IR flow: a single cross-core body under ``stage=2`` is
+        replicated by LowerPipelineLoops then stage-grouped by CanonicalizeIOOrder."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, q: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=2):
+                    off: pl.Scalar[pl.INDEX] = i * 16
+                    qa: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [off, 0], [16, 64])
+                    rs: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(qa, qa)
+                    pl.tile.tpush_to_aiv(rs, split=0)
+                    e: pl.Tile[[16, 64], pl.FP32] = pl.tile.tpop_from_aiv(split=0)
+                    oi: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(e, e)
+                    pl.tile.store(oi, [off, 0], out)
+
+        text = ir.python_print(_run_lower_then_canon(Before))
+        push = _positions(text, "tpush_to_aiv")
+        pop = _positions(text, "tpop_from_aiv")
+        # stage=2 replicates the body; the two pushes cluster before the two pops.
+        assert len(push) == 2 and len(pop) == 2
+        assert max(push) < min(pop)
 
 
 if __name__ == "__main__":
