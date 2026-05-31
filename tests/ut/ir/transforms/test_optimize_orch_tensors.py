@@ -2421,6 +2421,62 @@ class TestOutWindowSubmitCall:
         assert "pl.tensor.slice(out" in printed_main
         assert "kernel_stripe__windowed" in printed_main
 
+    def test_submit_windowable_suppressed_by_later_full_submit_read(self):
+        """The later-full-parent-read safety guard must see Submit readers.
+
+        A windowed submit writes a 64x64 window of ``out``; a *later* submit
+        reads the full ``out``. ``HasLaterFullParentReadOfRewrittenOutput`` is
+        fed by ``AddFullRootReadsFromStmt``, whose reverse scan must treat the
+        later Submit reader like a Call (via ``SubmitToCallView``) — otherwise
+        the first submit gets externalized even though the equivalent plain-call
+        safety check would keep it baseline (regression for the Submit-blind
+        reverse scan, #1616 review)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_stripe(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                ret: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile, [row_offset, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                src: pl.Tensor[[256, 64], pl.FP32],
+                sink: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t: pl.Tile[[64, 64], pl.FP32] = pl.load(src, [0, 0], [64, 64])
+                r: pl.Tensor[[64, 64], pl.FP32] = pl.store(t, [0, 0], sink)
+                return r
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                with pl.manual_scope():
+                    row: pl.Scalar[pl.INDEX] = 64
+                    out_next, tid = pl.submit(self.kernel_stripe, data, row, out)
+                    sink: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
+                    # Later submit reads the FULL `out` (In direction).
+                    _consumed, _tid2 = pl.submit(self.consume, out, sink, deps=[tid])
+                return out_next
+
+        After = passes.optimize_orch_tensors()(Before)
+        printed_main = ir.python_print(_get_function(After, "main"))
+        # Externalizing the windowed first submit would be unsafe — the guard
+        # keeps it baseline: no windowed-clone call and no Out-param slice at the
+        # call site.
+        assert "kernel_stripe__windowed" not in printed_main
+        assert "pl.tensor.slice(out" not in printed_main
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

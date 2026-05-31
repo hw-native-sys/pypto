@@ -2355,12 +2355,25 @@ class OutWindowExternalizer {
       }
     }
 
+    // A later reader can be a Call OR a Submit (pl.submit in a manual_scope).
+    // Route the Submit through its augmented-Call view so its In/InOut full-root
+    // reads are counted by the later-read safety guard — otherwise a windowed
+    // submit could be externalized even though a subsequent submit reads the
+    // full output (.claude/rules/pass-submit-awareness.md).
+    void AddFullRootReadsFromCallLike(const ExprPtr& value, RootSet& reads) const {
+      if (auto call = As<Call>(value)) {
+        AddFullRootReadsFromCall(call, reads);
+      } else if (auto submit = As<Submit>(value)) {
+        AddFullRootReadsFromCall(SubmitToCallView(submit), reads);
+      }
+    }
+
     void AddFullRootReadsFromStmt(const StmtPtr& stmt, RootSet& reads) const {
       if (!stmt) return;
       if (auto assign = As<AssignStmt>(stmt)) {
-        AddFullRootReadsFromCall(As<Call>(assign->value_), reads);
+        AddFullRootReadsFromCallLike(assign->value_, reads);
       } else if (auto eval = As<EvalStmt>(stmt)) {
-        AddFullRootReadsFromCall(As<Call>(eval->expr_), reads);
+        AddFullRootReadsFromCallLike(eval->expr_, reads);
       } else if (auto seq = As<SeqStmts>(stmt)) {
         for (auto it = seq->stmts_.rbegin(); it != seq->stmts_.rend(); ++it) {
           AddFullRootReadsFromStmt(*it, reads);
@@ -2376,6 +2389,8 @@ class OutWindowExternalizer {
         }
       } else if (auto scope = As<ScopeStmt>(stmt)) {
         AddFullRootReadsFromStmt(scope->body_, reads);
+      } else if (auto rscope = As<RuntimeScopeStmt>(stmt)) {
+        AddFullRootReadsFromStmt(rscope->body_, reads);
       }
     }
 
