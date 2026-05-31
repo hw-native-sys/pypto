@@ -73,7 +73,9 @@ result = passes.canonicalize_io_order()(program)
 - `tile.create`（如夹在 `tpush` 与其 `tpop` 之间的 SV 累加器初始化）——上拉会加剧 L0C/Acc 压力。
 - 落入 L0（Left/Right）的 `tile.move`（如 SV matmul 的 V 操作数搬运）——上拉会把狭小的 L0 切分成每克隆独立的缓冲。下沉则让相邻克隆**共用一块 L0 缓冲**，以放弃一点消费侧 ping-pong（仅在 L0 尚有余量时才可实现）换取更小的 L0 占用——这是更合理的默认，因为通常是 L0 容量而非跨迭代重叠才是瓶颈。生产侧的 scores/result ping-pong（`raw_scores` 的 Acc tile 与 pop 出的 tile）不受影响——它们不是 setup 算子。
 
-**为何 `tpush` 不像 `Store` 那样下沉。** 二者都是出口，但 `tpush` 必须在其生产者允许的最早时刻发射、好让对端核尽快开工；它排在生产者 `TileCompute` *之后*（使兄弟生产者先聚集）、却在 pop *之前* —— 不像 GM store 那样被推到最底部。
+**为何生产侧 `tpush` 不像 `Store` 那样下沉。** 二者都是出口，但*生产侧* `tpush`（C2V 的 scores 发送）必须在其生产者允许的最早时刻发射、好让对端核尽快开工；它排在生产者 `TileCompute` *之后*（使兄弟生产者先聚集）、却在 pop *之前* —— 不像 GM store 那样被推到最底部。
+
+**消费侧 `tpush`。** 若某 `tpush` 本身位于跨核 pop 下游（AIV 在 softmax 之后回送结果的 V2C 发送），则*不*上拉到 `CrossCorePush`，而是降为 `ConsumerCompute`、留在其所属阶段。把这种发送上拉到兄弟消费侧计算（如尾随的 `row_sum`）之前，会缩短被发送 tile 的生命周期，使后续分配在异步跨核传输仍在读取该缓冲时就复用它——这一隐患会在更严格的运行时上卡住 AICPU stream sync（#1610）。
 
 每一步在 `ready`（所有前驱已发射）的语句中，发射 `(category, original_index)` 最小者。Store 因 `Store` 是最大类别而自然排在最后 —— 只有当没有其他可发射时才会被选中。（下方示例不含跨核 op，故只有 scalar/load/compute/store 阶段参与；跨核 tpush/tpop 示例见上文「跨核流水」。）
 

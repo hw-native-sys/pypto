@@ -306,6 +306,16 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     // single index-order sweep suffices — and demote such producer `TileCompute`
     // to `ConsumerCompute` so it clusters after the pops instead of with the
     // producers.
+    //
+    // A `tpush` that is itself downstream of a pop is a *consumer-phase* egress
+    // (e.g. the AIV's V2C send of the softmax result). It must NOT be hoisted
+    // into the early `CrossCorePush` tier ahead of sibling consumer compute:
+    // doing so shortens the pushed tile's live-range and lets a later allocation
+    // reuse its buffer while the asynchronous cross-core transfer is still
+    // reading it — a hazard that stalls the AICPU sync on stricter runtimes
+    // (issue #1610). Only a *producer-phase* `tpush` (the C2V scores send, not
+    // after a pop) keeps the early tier, which is what the scores ping-pong
+    // needs. So an after-pop `CrossCorePush` is demoted to `ConsumerCompute` too.
     std::vector<bool> after_pop(sort_count, false);
     for (size_t i = 0; i < sort_count; ++i) {
       bool ap = (cats[i] == IOCategory::CrossCorePop);
@@ -322,7 +332,9 @@ class CanonicalizeIOOrderMutator : public IRMutator {
         }
       }
       after_pop[i] = ap;
-      if (ap && cats[i] == IOCategory::TileCompute) cats[i] = IOCategory::ConsumerCompute;
+      if (ap && (cats[i] == IOCategory::TileCompute || cats[i] == IOCategory::CrossCorePush)) {
+        cats[i] = IOCategory::ConsumerCompute;
+      }
     }
 
     // Consumer-only "setup" ops are demoted to ConsumerCompute when every use is

@@ -1075,6 +1075,38 @@ class TestCrossCorePipeline:
         # Producer compute (the QK stand-ins) still clusters ahead of the pushes.
         assert max(_pos(text, "rs0"), _pos(text, "rs1")) < last_push
 
+    def test_consumer_phase_tpush_not_hoisted_over_trailing_compute(self):
+        """A consumer-phase ``tpush_to_aic`` (V2C send, downstream of a ``tpop``)
+        must NOT be hoisted ahead of sibling consumer compute — the AIV softmax
+        case. Hoisting it (early CrossCorePush tier) shortens the pushed tile's
+        live-range and races the async transfer against buffer reuse, stalling the
+        AICPU sync on stricter runtimes (#1610). It stays in the consumer tier."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, out: pl.Tensor[[32, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    sc0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                    sent0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.exp(sc0)
+                    tail0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(sc0, sc0)
+                    pl.tile.tpush_to_aic(sent0, split=0)
+                    pl.tile.store(tail0, [0, 0], out)
+                    sc1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                    sent1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.exp(sc1)
+                    tail1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(sc1, sc1)
+                    pl.tile.tpush_to_aic(sent1, split=0)
+                    pl.tile.store(tail1, [16, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        push = _positions(text, "tpush_to_aic")
+        # Each clone's trailing consumer compute (tailN, which precedes its tpush
+        # in program order) is NOT jumped over by the consumer-phase tpush.
+        assert _pos(text, "tail0") < push[0]
+        assert _pos(text, "tail1") < push[1]
+        # The receives still cluster (CrossCorePop) ahead of all the sends.
+        assert max(_positions(text, "tpop_from_aic")) < min(push)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
