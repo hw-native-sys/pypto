@@ -16,6 +16,35 @@ import pypto
 import pypto.language as pl
 import pytest
 from pypto import ir
+from pypto.language.parser.diagnostics import ParserError
+from pypto.language.parser.diagnostics.renderer import ErrorRenderer
+
+
+def _span_begin(err: ParserError) -> tuple[int, int]:
+    """Return (begin_line, begin_column) from a ParserError span.
+
+    ``ParserError.span`` is stored as a dict of extracted coordinates (see
+    ``diagnostics/exceptions.py``).
+    """
+    sp = err.span
+    assert sp is not None, "expected a span on the parser error"
+    return sp["begin_line"], sp["begin_column"]
+
+
+def _assert_caret_on_line(err: ParserError, expected_substring: str) -> None:
+    """Assert the rendered caret (^) sits under a line containing ``expected_substring``.
+
+    The renderer prints each source line immediately before its caret row, so
+    the line above the caret is the one the caret points at.
+    """
+    rendered = ErrorRenderer(use_color=False).render(err)
+    rows = rendered.split("\n")
+    caret_idx = next(i for i, r in enumerate(rows) if "^" in r)
+    source_row = rows[caret_idx - 1]
+    assert expected_substring in source_row, (
+        f"caret points at {source_row!r}, expected a line containing "
+        f"{expected_substring!r}\n--- full render ---\n{rendered}"
+    )
 
 
 class TestParse:
@@ -705,6 +734,76 @@ def complex_range(
         func = pl.parse(code)
         assert isinstance(func, ir.Function)
         assert func.name == "complex_range"
+
+
+class TestErrorCaretAlignment:
+    """Diagnostic caret must align with the span when parsing ``<string>`` sources.
+
+    ``pl.parse`` (and therefore ``@pl.jit``, which renders specialized DSL source
+    and parses it as a ``<string>``) yields spans in module/file coordinates.
+    ``error.source_lines`` must be indexed the same way or the rendered caret
+    drifts by the entity's ``line_offset`` — pointing several lines past the real
+    error. Regression for issue #1558.
+    """
+
+    def test_parse_error_caret_aligns_with_span_deps_shape(self):
+        """A rejected ``pl.at(deps=...)`` shape points the caret at the ``deps=``
+        argument on the ``with pl.at(...)`` line, not lines past it (issue #1558).
+
+        The ``with pl.at(...)`` is written on a single collapsed line the way
+        ``@pl.jit``'s ``ast.unparse`` emits it.
+        """
+        code = """
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[128], pl.FP16]) -> pl.Tensor[[128], pl.FP32]:
+        out = pl.create_tensor([128], dtype=pl.FP32)
+        with pl.manual_scope():
+            silu_tids = pl.array.create(8, pl.TASK_ID)
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint='seed') as seed_tid:
+                tmp = pl.create_tensor([128], dtype=pl.FP32)
+            with pl.at(level=pl.Level.CORE_GROUP, name_hint='proj', deps=[seed_tid] + [silu_tids[i] for i in range(4)]) as down_tid:
+                a0 = pl.create_tensor([128], dtype=pl.FP32)
+        return out
+"""
+        with pytest.raises(ParserError) as exc_info:
+            pl.parse(code)
+        err = exc_info.value
+        begin_line, begin_column = _span_begin(err)
+
+        # Module indexing: the span's line must resolve to the with pl.at line.
+        error_line = err.source_lines[begin_line - 1]
+        assert "deps=" in error_line
+        # The column must point exactly at the rejected `[seed_tid] + ...` value.
+        assert error_line[begin_column:].startswith("[seed_tid]")
+
+        # The rendered caret must sit under that same line.
+        _assert_caret_on_line(err, expected_substring="deps=")
+
+    def test_parse_error_caret_aligns_with_span_generic(self):
+        """A generic parse error in a ``<string>`` program points the caret at the
+        real offending line (guards the general renderer alignment bug)."""
+        code = """
+@pl.program
+class Prog:
+    @pl.function(type=pl.FunctionType.Orchestration)
+    def main(self, x: pl.Tensor[[128], pl.FP16]) -> pl.Tensor[[128], pl.FP32]:
+        a = pl.create_tensor([128], dtype=pl.FP32)
+        b = pl.create_tensor([128], dtype=pl.FP32)
+        c = pl.this_op_does_not_exist(a, b)
+        return c
+"""
+        with pytest.raises(ParserError) as exc_info:
+            pl.parse(code)
+        err = exc_info.value
+        begin_line, begin_column = _span_begin(err)
+
+        error_line = err.source_lines[begin_line - 1]
+        assert "this_op_does_not_exist" in error_line
+        assert error_line[begin_column:].startswith("pl.this_op_does_not_exist")
+
+        _assert_caret_on_line(err, expected_substring="this_op_does_not_exist")
 
 
 if __name__ == "__main__":

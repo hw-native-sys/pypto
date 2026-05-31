@@ -89,6 +89,9 @@ fixable = ["ALL"]
 "tests/ut/ir/transforms/test_legalize_pto_buffer_reuse.py" = ["E501", "F841"]
 "tests/ut/ir/transforms/test_ctrl_flow_transform.py" = ["F841"]
 "tests/ut/ir/transforms/test_split_vector_kernel.py" = ["F841"]
+# Embedded DSL repro deliberately collapses `with pl.at(...)` onto one line to
+# mimic @pl.jit's ast.unparse output — load-bearing, cannot be wrapped.
+"tests/ut/language/parser/test_text_parser.py" = ["E501"]
 # IR dumps are formatted at 200-col for readability — suppress line-length lint
 "build_output/**" = ["E501"]
 

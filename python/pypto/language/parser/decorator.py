@@ -171,27 +171,63 @@ def _find_ast_node(tree: ast.AST, node_type: type[TypeASTNode], name: str, entit
     )
 
 
-def _attach_source_lines_to_error(error: ParserError, source_file: str, source_lines_raw: list[str]) -> None:
-    """Attach source lines to a ParserError if not already present.
+def _attach_source_lines_to_error(
+    error: ParserError,
+    source_file: str,
+    source_lines_raw: list[str],
+    line_offset: int = 0,
+) -> None:
+    """Attach module-indexed source lines to a ParserError if not already present.
+
+    Span line numbers are module/file coordinates: each entity's local AST line
+    is shifted by its ``line_offset`` in ``SpanTracker.get_span``. So
+    ``error.source_lines`` must be indexed in the same coordinates, or the
+    renderer's caret drifts ``line_offset`` lines past the real span.
+
+    Resolution order:
+
+    1. Real files — read the whole file so line N maps to ``source_lines[N-1]``.
+    2. ``<string>`` sources (``pl.parse`` / ``@pl.jit``) — ``open`` fails, but the
+       full module text lives in ``linecache`` (``text_parser.parse`` populates
+       it before ``exec``); it is already module-indexed.
+    3. Last resort — ``source_lines_raw`` is only the entity's block (it starts at
+       the decorator/``def`` line), so it is offset from module coordinates by
+       ``line_offset``. Pad with blank leading lines to restore module indexing;
+       the bare block would push the caret ``line_offset`` lines past the span.
 
     Args:
         error: ParserError to attach source lines to
         source_file: Path to the source file
-        source_lines_raw: Raw source lines as fallback
+        source_lines_raw: Raw source lines for the entity's def/class block
+        line_offset: ``starting_line - 1`` for the entity; used to pad
+            ``source_lines_raw`` back into module coordinates as a last resort
     """
-    if error.source_lines is None:
-        # Use the span's filename if it differs (e.g., error in an inline function)
-        target_file = source_file
-        if error.span and isinstance(error.span, dict):
-            span_file = error.span.get("filename")
-            if span_file and span_file != source_file:
-                target_file = span_file
-        try:
-            with open(target_file, encoding="utf-8") as f:
-                error.source_lines = f.read().split("\n")
-        except Exception:
-            # Fallback to the raw source lines if we can't read the file
-            error.source_lines = source_lines_raw
+    if error.source_lines is not None:
+        return
+
+    # Use the span's filename if it differs (e.g., error in an inline function)
+    target_file = source_file
+    if error.span and isinstance(error.span, dict):
+        span_file = error.span.get("filename")
+        if span_file and span_file != source_file:
+            target_file = span_file
+
+    try:
+        with open(target_file, encoding="utf-8") as f:
+            error.source_lines = f.read().split("\n")
+            return
+    except (OSError, UnicodeError):
+        pass
+
+    cached = linecache.getlines(target_file)
+    if cached:
+        error.source_lines = [line.rstrip("\n") for line in cached]
+        return
+
+    if target_file == source_file:
+        error.source_lines = [""] * line_offset + list(source_lines_raw)
+    else:
+        error.source_lines = source_lines_raw
 
 
 def _has_pl_function_decorator(node: ast.FunctionDef) -> bool:
@@ -746,7 +782,7 @@ def function(
 
         except ParserError as e:
             # Attach source lines if not already present
-            _attach_source_lines_to_error(e, source_file, source_lines_raw)
+            _attach_source_lines_to_error(e, source_file, source_lines_raw, line_offset)
             # Always raise the exception - let the excepthook handle uncaught cases
             raise
 
@@ -1043,7 +1079,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
 
         except ParserError as e:
             # Attach source lines if not already present
-            _attach_source_lines_to_error(e, source_file, source_lines_raw)
+            _attach_source_lines_to_error(e, source_file, source_lines_raw, line_offset)
             raise
 
     # Support both @pl.program and @pl.program(strict_ssa=...)
