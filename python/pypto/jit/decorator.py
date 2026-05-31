@@ -1003,6 +1003,18 @@ class JITFunction:
         self.__doc__ = func.__doc__
         self.__module__ = func.__module__
 
+    @property
+    def _diagnostic_filename(self) -> str:
+        """Synthetic filename for the generated, specialized source.
+
+        Statements that survive specialization are remapped to the user's real
+        ``.py`` via the source map (see :meth:`Specializer.source_map`); this
+        ``<jit:name>`` marker is only the fallback identity for synthesized
+        statements that have no original location. Naming the kernel here is far
+        more navigable than an anonymous ``<string>``. See issue #1612.
+        """
+        return f"<jit:{self.__name__}>"
+
     # ------------------------------------------------------------------
     # Lazy dep discovery
     # ------------------------------------------------------------------
@@ -1285,7 +1297,7 @@ class JITFunction:
         source = specializer.specialize()
         rename_map = specializer.rename_map
         try:
-            parsed = pl.parse(source)
+            parsed = pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
             skip_ptoas = not _ptoas_available()
             return ir_compile(parsed, skip_ptoas=skip_ptoas, platform=platform, **ir_compile_kwargs)
         except Exception as exc:
@@ -1314,7 +1326,7 @@ class JITFunction:
         source = specializer.specialize()
         rename_map = specializer.rename_map
         try:
-            return pl.parse(source)
+            return pl.parse(source, filename=self._diagnostic_filename, source_map=specializer.source_map)
         except Exception as exc:
             rewritten = _rewrite_jit_error(exc, rename_map)
             if rewritten is exc:

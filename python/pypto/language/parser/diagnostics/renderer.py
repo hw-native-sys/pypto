@@ -9,6 +9,7 @@
 
 """Error rendering and formatting for pretty error messages."""
 
+import linecache
 import os
 import re
 import sys
@@ -186,7 +187,7 @@ class ErrorRenderer:
             List of formatted lines
         """
         lines = []
-        _, prev_line, prev_col = self._extract_span_info(error.previous_span)
+        prev_file, prev_line, prev_col = self._extract_span_info(error.previous_span)
 
         if prev_line <= 0:
             return lines
@@ -200,8 +201,9 @@ class ErrorRenderer:
             lines.append(self._cyan(f"     --> {location}"))
 
         # Show previous definition code context
-        if error.source_lines and prev_line <= len(error.source_lines):
-            lines.extend(self._render_previous_context(error.source_lines, prev_line, prev_col))
+        prev_source = self._source_lines_for(prev_file, error.source_lines)
+        if prev_source and prev_line <= len(prev_source):
+            lines.extend(self._render_previous_context(prev_source, prev_line, prev_col))
 
         return lines
 
@@ -306,6 +308,23 @@ class ErrorRenderer:
 
         return token_chars if token_chars > 0 else 1
 
+    def _source_lines_for(self, filename: str | None, source_lines: list[str] | None) -> list[str] | None:
+        """Resolve the source lines to render for a span.
+
+        Prefers the real file's contents (via ``linecache``) when the span names
+        an on-disk file, so spans remapped to the user's source — e.g. a
+        ``@pl.jit`` kernel (#1612) — show that file's text. Falls back to the
+        exception's captured ``source_lines`` for synthetic sources
+        (``<string>`` / ``<jit:...>``), where ``linecache`` has nothing. This is
+        a no-op for normal file-backed parse errors, which already carried the
+        whole file indexed by absolute line.
+        """
+        if filename:
+            file_lines = linecache.getlines(filename)
+            if file_lines:
+                return file_lines
+        return source_lines
+
     def _render_code_context(self, error: ParserError) -> list[str]:
         """Render code context with line numbers and caret highlighting.
 
@@ -316,12 +335,12 @@ class ErrorRenderer:
             List of formatted lines
         """
         lines = []
-        _, error_line, error_col = self._extract_span_info(error.span)
+        filename, error_line, error_col = self._extract_span_info(error.span)
 
-        if error_line <= 0 or not error.source_lines:
+        source_lines = self._source_lines_for(filename, error.source_lines)
+        if error_line <= 0 or not source_lines:
             return lines
 
-        source_lines = error.source_lines
         context_before = 2
         context_after = 2
 

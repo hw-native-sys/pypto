@@ -105,5 +105,54 @@ class TestSpanTracker:
         assert span.filename == source_file
 
 
+class TestSpanTrackerSourceMap:
+    """Source-map remapping of spans to original source (issue #1612)."""
+
+    def test_mapped_line_is_remapped(self):
+        """A node whose emitted line is in the map gets the original location."""
+        # line_offset shifts node.lineno (1) -> emitted line 11.
+        tracker = SpanTracker(
+            "<jit:kernel>", ["code"], line_offset=10, source_map={11: ("/real/kernel.py", 5, 8)}
+        )
+        node = ast.parse("x = 1").body[0]
+
+        span = tracker.get_span(node)
+
+        assert span.filename == "/real/kernel.py"
+        assert span.begin_line == 5
+        assert span.begin_column == 8
+
+    def test_unmapped_line_keeps_generated_coords(self):
+        """A node whose emitted line is absent from the map keeps generated coords."""
+        tracker = SpanTracker(
+            "<jit:kernel>", ["code"], line_offset=10, source_map={999: ("/real/kernel.py", 5, 8)}
+        )
+        node = ast.parse("x = 1").body[0]
+
+        span = tracker.get_span(node)
+
+        assert span.filename == "<jit:kernel>"
+        assert span.begin_line == 11
+
+    def test_no_source_map_is_noop(self):
+        """Without a source map, spans are unchanged (default behavior)."""
+        tracker = SpanTracker("<jit:kernel>", ["code"], line_offset=10)
+        node = ast.parse("x = 1").body[0]
+
+        assert tracker.get_span(node).filename == "<jit:kernel>"
+
+    def test_multiline_span_is_remapped(self):
+        """get_multiline_span remaps on its start line too."""
+        tracker = SpanTracker(
+            "<jit:kernel>", ["code"], line_offset=10, source_map={11: ("/real/kernel.py", 5, 8)}
+        )
+        node = ast.parse("x = 1").body[0]
+
+        span = tracker.get_multiline_span(node, node)
+
+        assert span.filename == "/real/kernel.py"
+        assert span.begin_line == 5
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

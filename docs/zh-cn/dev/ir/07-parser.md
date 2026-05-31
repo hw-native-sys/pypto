@@ -130,6 +130,16 @@ return result  # OK
 - 每个 IR 节点包含带有文件名、行/列范围的 `Span`
 - 支持调试、错误报告和源码到 IR 的映射
 
+**源码映射溯源 (source-map provenance)**（`pl.parse(code, source_map=...)`）：当 `code`
+是从其他源码*生成*的 —— 例如 `@pl.jit` 通过 `ast.unparse` 将 kernel 重新生成为
+`@pl.program` 字符串 —— 一个 `generated_line → (orig_file, orig_line, orig_col)`
+映射会把每个 Span 重映射回用户真实的 `.py`。借助它，解析错误与编译/Pass 错误都会指向
+原始文件（例如 `--> kernel.py:8:13`），而非匿名的 `<string>`；错误渲染器也会通过
+`linecache` 从该真实文件读取代码片段。映射为**语句粒度**：跨多行的用户语句解析到其起始行，
+而*合成语句*（循环桥接赋值、展开的 `M, N = a.shape`、被剥离的 `bind_dynamic`）没有原始行，
+保留生成坐标。`@pl.jit` 在 `Specializer.source_map` 中构建该映射；默认值（`None`）对普通解析
+是无操作。参见 issue #1612。
+
 **支持的操作**：
 
 | 分类 | 示例 |

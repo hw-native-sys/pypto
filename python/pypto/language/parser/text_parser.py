@@ -18,6 +18,7 @@ from pypto.pypto_core import ir
 
 from .diagnostics.exceptions import ParserError, ParserSyntaxError
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP
+from .span_tracker import active_source_map
 
 
 def _extract_exec_error_line(tb, filename: str) -> int | None:
@@ -141,7 +142,11 @@ def _validate_enum_kwarg(
         )
 
 
-def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
+def parse(
+    code: str,
+    filename: str = "<string>",
+    source_map: dict[int, tuple[str, int, int]] | None = None,
+) -> ir.Function | ir.Program:
     """Parse a DSL function or program from a string.
 
     This function takes Python source code containing a @pl.function decorated
@@ -152,6 +157,12 @@ def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
     Args:
         code: Python source code containing @pl.function or @pl.program
         filename: Optional filename for error reporting (default: "<string>")
+        source_map: Optional ``generated_line → (orig_file, orig_line, orig_col)``
+            map. When provided, spans whose emitted line is present are remapped
+            to the original source location, so diagnostics point at the user's
+            real file rather than this (possibly generated) ``code``. Used by
+            ``@pl.jit`` to recover provenance through its specialize→reparse
+            round-trip (issue #1612).
 
     Returns:
         Parsed ir.Function or ir.Program object (auto-detected)
@@ -223,8 +234,11 @@ def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
     sys.modules[module_name] = temp_module
 
     # Execute the code in the module's namespace, using _AutoDynVar to handle
-    # dynamic shape variable references that may not be in scope during re-parse
+    # dynamic shape variable references that may not be in scope during re-parse.
+    # Publish the source map for the duration of the exec so each SpanTracker
+    # built by the decorators (which run during exec) can remap spans (#1612).
     exec_ns = _AutoDynVar(temp_module.__dict__)
+    map_token = active_source_map.set(source_map)
     try:
         _prevalidate_decorator_args(code, filename)
         exec(compiled_code, exec_ns)
@@ -243,6 +257,7 @@ def parse(code: str, filename: str = "<string>") -> ir.Function | ir.Program:
             ) from e
         raise RuntimeError(f"Error executing code from {filename}: {e}") from e
     finally:
+        active_source_map.reset(map_token)
         # Clean up linecache entry
         if filename in linecache.cache:
             del linecache.cache[filename]

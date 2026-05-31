@@ -10,6 +10,7 @@
 """Tests for @pl.jit decorator: decoration, cache hit/miss, and bind_dynamic."""
 
 import importlib
+import inspect
 import warnings
 
 import pypto.language as pl
@@ -1600,6 +1601,91 @@ class TestCompileKwargForwarding:
         )
         assert set(captured) == {"skip_ptoas", "platform"}
         assert captured["platform"] is None
+
+
+# ---------------------------------------------------------------------------
+# Source provenance: diagnostics map back to the user's real .py (Issue #1612)
+# ---------------------------------------------------------------------------
+
+
+@jit
+def _provenance_kernel(x: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.at(level=pl.Level.CORE_GROUP):
+        t = pl.load(x, [0, 0], [128, 128])
+        t = pl.mul(t, t)
+        pl.store(t, [0, 0], out)
+    return out
+
+
+def _walk_spans(stmts):
+    """Collect spans of all statements (recursing into nested bodies)."""
+    out = []
+    for s in stmts:
+        span = getattr(s, "span", None)
+        if span is not None:
+            out.append(span)
+        body = getattr(s, "body", None)
+        if body is not None:
+            try:
+                out.extend(_walk_spans(list(body)))
+            except TypeError:
+                pass
+    return out
+
+
+class TestJitSourceProvenance:
+    """JIT parse/compile diagnostics point at the user's real source (#1612).
+
+    @pl.jit re-derives the kernel into a generated @pl.program string and
+    reparses it, so spans used to land on a synthesized ``<string>`` source.
+    A source map now remaps them back to the user's .py at statement
+    granularity.
+    """
+
+    def test_diagnostic_filename_names_kernel(self):
+        """The fallback synthetic filename names the kernel, not ``<string>``."""
+        assert _provenance_kernel._diagnostic_filename == "<jit:_provenance_kernel>"
+
+    def test_body_spans_point_at_real_file(self):
+        """Every (user-written) body statement's span resolves to this file."""
+        prog = _provenance_kernel._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((128, 128), DataType.FP32),
+                "out": TensorMeta((128, 128), DataType.FP32),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(_provenance_kernel._func): {}},
+            pl=pl,
+        )
+        func = prog.get_function("_provenance_kernel")
+        assert func is not None
+
+        spans = _walk_spans(list(func.body))
+        assert spans, "expected body statement spans"
+        # The kernel body is entirely user-written (no synthesized statements),
+        # so every body span must resolve to this real source file.
+        assert all(s.filename == __file__ for s in spans), [s.filename for s in spans]
+
+    def test_span_line_matches_the_real_source_line(self):
+        """The remapped span line equals the statement's actual line in this file."""
+        src_lines, start = inspect.getsourcelines(_provenance_kernel._func)
+        with_offset = next(i for i, ln in enumerate(src_lines) if "with pl.at" in ln)
+        expected_with_line = start + with_offset
+
+        prog = _provenance_kernel._compile_to_program(
+            tensor_meta={
+                "x": TensorMeta((128, 128), DataType.FP32),
+                "out": TensorMeta((128, 128), DataType.FP32),
+            },
+            scalar_values={},
+            scalar_dtypes={},
+            per_func_dyn={id(_provenance_kernel._func): {}},
+            pl=pl,
+        )
+        incore = list(prog.get_function("_provenance_kernel").body)[0]
+        assert incore.span.filename == __file__
+        assert incore.span.begin_line == expected_with_line
 
 
 if __name__ == "__main__":

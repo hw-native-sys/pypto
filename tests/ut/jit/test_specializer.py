@@ -1147,5 +1147,62 @@ class TestSpecializerInlineDeprecation:
         assert "pl.Out[pl.Tensor[[32, 32], pl.FP32]]" in out
 
 
+class TestSpecializerSourceMap:
+    """specialize() builds a generated→original line map (issue #1612)."""
+
+    def _meta(self) -> TensorMeta:
+        return TensorMeta(shape=(32, 32), dtype=DataType.FP32)
+
+    def test_maps_statements_to_original_file_lines(self):
+        # Source as inspect.getsourcelines would return it: first line is the
+        # decorator, so body statements sit at dedented lines 3, 4, 5.
+        src = textwrap.dedent(
+            """
+            @pl.jit
+            def kernel(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+                t = pl.load(a, [0, 0], [32, 32])
+                pl.store(t, [0, 0], out)
+                return out
+            """
+        ).strip("\n")
+        ctx = _make_ctx(
+            func_name="kernel",
+            source=src,
+            param_names=["a", "out"],
+            tensor_meta={"a": self._meta(), "out": self._meta()},
+        )
+        # Pretend the kernel's first source line lives at line 100 of a real file.
+        ctx.orig_file = "/real/kernel.py"
+        ctx.orig_start_line = 100
+
+        spec = Specializer("Gen", [ctx])
+        spec.specialize()
+        source_map = spec.source_map
+
+        assert source_map, "expected a non-empty source map"
+        assert all(f == "/real/kernel.py" for f, _, _ in source_map.values())
+        # Dedented body lines 3,4,5 + (orig_start_line - 1) = 102,103,104.
+        assert sorted(line for _, line, _ in source_map.values()) == [102, 103, 104]
+
+    def test_no_real_file_yields_empty_map(self):
+        """Without on-disk source (orig_file=None), no mapping is produced."""
+        src = textwrap.dedent(
+            """
+            def kernel(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+                return out
+            """
+        ).strip("\n")
+        ctx = _make_ctx(
+            func_name="kernel",
+            source=src,
+            param_names=["a", "out"],
+            tensor_meta={"a": self._meta(), "out": self._meta()},
+        )
+        # orig_file defaults to None.
+        spec = Specializer("Gen", [ctx])
+        spec.specialize()
+        assert spec.source_map == {}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

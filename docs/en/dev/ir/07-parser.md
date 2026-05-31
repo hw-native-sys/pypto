@@ -130,6 +130,19 @@ return result  # OK
 - Each IR node includes `Span` with filename, line/column ranges
 - Enables debugging, error reporting, and source-to-IR mapping
 
+**Source-map provenance** (`pl.parse(code, source_map=...)`): When `code` is
+*generated* from another source — as `@pl.jit` does, re-deriving a kernel into a
+`@pl.program` string via `ast.unparse` — a `generated_line → (orig_file,
+orig_line, orig_col)` map remaps each span back to the user's real `.py`. With
+it, both parse and compile/pass errors point at the original file (e.g.
+`--> kernel.py:8:13`) instead of an anonymous `<string>`, and the error renderer
+reads the snippet from that real file via `linecache`. Mapping is
+**statement-granular**: a multi-line user statement resolves to its start line,
+and *synthesized* statements (loop-bridge assignments, expanded `M, N = a.shape`,
+stripped `bind_dynamic`) have no original line and keep the generated
+coordinates. `@pl.jit` builds this map in `Specializer.source_map`; the
+default (`None`) is a no-op for ordinary parsing. See issue #1612.
+
 **Supported Operations**:
 
 | Category | Examples |
