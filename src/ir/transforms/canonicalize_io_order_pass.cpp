@@ -66,7 +66,9 @@ namespace {
 /// (between tpop and the consumer matmul) stay co-live and ping-pong. Note
 /// ``tpush`` is *not* sunk like ``Store``: it must fire as early as its producer
 /// allows so the peer core can start, but it ranks after producer ``TileCompute``
-/// so all sibling producers cluster before the sends.
+/// so all sibling producers cluster before the sends. ``ConsumerCompute`` also
+/// receives consumer-only *setup* ops (a ``tile.create``, or a ``tile.move`` into
+/// L0) demoted from ``TileCompute`` — see the refinement in ``ReorderRegion``.
 enum class IOCategory : int {
   ScalarCompute = 0,
   Load = 1,
@@ -87,19 +89,22 @@ struct IOCategoryOps {
   OpPtr tile_store;    ///< Write: tile → tensor data movement
   OpPtr tile_write;    ///< Write: put scalar into a tile
   OpPtr tile_extract;  ///< Sub-tile extract — load-like only when L1→L0 (see IsL1ToL0ExtractCall)
-  OpPtr tile_create;   ///< Tile allocation — used by the consumer-side create refinement
+  OpPtr tile_create;   ///< Tile allocation — used by the consumer-side setup refinement
+  OpPtr tile_move;     ///< Tile relocation — consumer-only L0 moves defer to the consumer tier
 
   static IOCategoryOps Build() {
     const auto& registry = OpRegistry::GetInstance();
     return {
         registry.GetOp("tile.load"),  registry.GetOp("tile.read"),    registry.GetOp("tile.store"),
         registry.GetOp("tile.write"), registry.GetOp("tile.extract"), registry.GetOp("tile.create"),
+        registry.GetOp("tile.move"),
     };
   }
 
   [[nodiscard]] bool IsLoadLike(const OpPtr& op) const { return op == tile_load || op == tile_read; }
   [[nodiscard]] bool IsStoreLike(const OpPtr& op) const { return op == tile_store || op == tile_write; }
   [[nodiscard]] bool IsCreate(const OpPtr& op) const { return op == tile_create; }
+  [[nodiscard]] bool IsMove(const OpPtr& op) const { return op == tile_move; }
 
   /// True when @p call is a `tile.extract` whose source lives in L1 (Mat) and
   /// whose destination lives in L0a/L0b (Left/Right) — i.e. the ISA TEXTRACT
@@ -320,20 +325,38 @@ class CanonicalizeIOOrderMutator : public IRMutator {
       if (ap && cats[i] == IOCategory::TileCompute) cats[i] = IOCategory::ConsumerCompute;
     }
 
-    // A `tile.create` that only feeds consumer-stage statements is itself
-    // consumer setup (e.g. the SV-accumulator init that sits between a `tpush`
-    // and its `tpop`). Left as producer `TileCompute` it would be hoisted into
-    // the producer cluster, stretching its accumulator buffer's live range
-    // across the whole round-trip and inflating L0C/Acc pressure. Sweep in
-    // reverse index order so chained setup-creates settle in one pass (a
-    // create's successors have a larger index and are finalized first).
+    // Consumer-only "setup" ops are demoted to ConsumerCompute when every use is
+    // consumer-stage, so they sit next to their consumer instead of being hoisted
+    // into the producer cluster. Two kinds qualify:
+    //   * `tile.create` — e.g. the SV-accumulator init between a `tpush` and its
+    //     `tpop`. Hoisting stretches its Acc buffer's live range and inflates L0C.
+    //   * `tile.move` into L0 (Left/Right) — e.g. the V operand prep for the SV
+    //     matmul. Hoisting stretches its L0 buffer's live range across the whole
+    //     cross-core round-trip, which forces MemoryReuse to give each clone its
+    //     own L0 buffer — partitioning a scarce resource. Deferring shrinks the
+    //     live range so sibling clones share one L0 buffer. This trades a marginal
+    //     consumer-side ping-pong (only realizable when L0 has spare capacity for
+    //     a per-clone buffer) for a smaller L0 footprint — the right default since
+    //     L0, not cross-iteration overlap, is usually the binding constraint
+    //     (issue #1610 follow-up). The producer-side scores/result ping-pong
+    //     (raw_scores / tpop tiles) is unaffected — those are not setup ops.
+    // Sweep in reverse index order so chained setup ops settle in one pass (a
+    // setup op's successors have a larger index and are finalized first).
     for (size_t r = sort_count; r-- > 0;) {
       if (cats[r] != IOCategory::TileCompute) continue;
       auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmts[r]);
       if (!assign) continue;
       auto call = std::dynamic_pointer_cast<const Call>(assign->value_);
-      if (!call || !io_ops_.IsCreate(call->op_)) continue;
-      if (successors[r].empty()) continue;  // dead create — leave it where it is
+      if (!call) continue;
+      bool consumer_setup = io_ops_.IsCreate(call->op_);
+      if (!consumer_setup && io_ops_.IsMove(call->op_)) {
+        if (auto dst = std::dynamic_pointer_cast<const TileType>(assign->var_->GetType())) {
+          auto ms = dst->GetMemorySpace();
+          consumer_setup = ms.has_value() && (*ms == MemorySpace::Left || *ms == MemorySpace::Right);
+        }
+      }
+      if (!consumer_setup) continue;
+      if (successors[r].empty()) continue;  // dead setup op — leave it where it is
       bool all_consumer = true;
       for (size_t s : successors[r]) {
         if (cats[s] != IOCategory::ConsumerCompute) {

@@ -1022,6 +1022,59 @@ class TestCrossCorePipeline:
         assert len(push) == 2 and len(pop) == 2
         assert max(push) < min(pop)
 
+    def test_consumer_only_l0_move_defers_to_consumer(self):
+        """A `tile.move` into L0 (Right) that feeds only the post-pop SV matmul is
+        NOT hoisted into the producer cluster — it is demoted to ConsumerCompute and
+        sits with its consumer, so MemoryReuse can share one L0 buffer per clone
+        instead of partitioning L0 across clones (#1610 follow-up)."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                q: pl.Tensor[[32, 64], pl.FP32],
+                vt: pl.Tensor[[128, 64], pl.FP32],
+                out: pl.Tensor[[32, 64], pl.FP32],
+            ):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    q0: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [0, 0], [16, 64])
+                    rs0: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(q0, q0)
+                    pl.tile.tpush_to_aiv(rs0, split=0)
+                    v0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                        vt, [0, 0], [64, 64], target_memory=pl.Mem.Mat
+                    )
+                    e0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Left] = pl.tile.tpop_from_aiv(split=0)
+                    v_right0: pl.Tile[[64, 64], pl.FP32, pl.Mem.Right] = pl.tile.move(
+                        v0, target_memory=pl.Mem.Right
+                    )
+                    oi0: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(e0, v_right0)
+                    pl.tile.store(oi0, [0, 0], out)
+                    q1: pl.Tile[[16, 64], pl.FP32] = pl.tile.load(q, [16, 0], [16, 64])
+                    rs1: pl.Tile[[16, 64], pl.FP32] = pl.tile.add(q1, q1)
+                    pl.tile.tpush_to_aiv(rs1, split=0)
+                    v1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                        vt, [0, 0], [64, 64], target_memory=pl.Mem.Mat
+                    )
+                    e1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Left] = pl.tile.tpop_from_aiv(split=0)
+                    v_right1: pl.Tile[[64, 64], pl.FP32, pl.Mem.Right] = pl.tile.move(
+                        v1, target_memory=pl.Mem.Right
+                    )
+                    oi1: pl.Tile[[16, 64], pl.FP32] = pl.tile.matmul(e1, v_right1)
+                    pl.tile.store(oi1, [16, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        last_push = max(_positions(text, "tpush_to_aiv"))
+        last_pop = max(_positions(text, "tpop_from_aiv"))
+        # Both V→Right moves are deferred past the pushes AND the pops (consumer
+        # tier), i.e. not hoisted into the producer cluster.
+        assert _pos(text, "v_right0") > last_push
+        assert _pos(text, "v_right1") > last_push
+        assert _pos(text, "v_right0") > last_pop
+        assert _pos(text, "v_right1") > last_pop
+        # Producer compute (the QK stand-ins) still clusters ahead of the pushes.
+        assert max(_pos(text, "rs0"), _pos(text, "rs1")) < last_push
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

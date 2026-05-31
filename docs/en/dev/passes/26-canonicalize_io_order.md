@@ -66,7 +66,12 @@ A priority-aware stable topological sort applied to every `SeqStmts` of two or m
 
 `tile.read` is classified as `Load` even though it produces a scalar — it's I/O against a tile and belongs in the load tier alongside `tile.load`. The LHS-type check only applies once the RHS is determined not to be a recognized I/O op.
 
-**Producer vs consumer compute.** `tpop` has no SSA argument (it pops the GM ring buffer keyed by `id`/`split`), so the dependency graph alone cannot tell that the compute consuming its result belongs to the post-round-trip stage. The pass propagates a "downstream of a cross-core pop" bit forward over the SSA edges and demotes such `TileCompute` to `ConsumerCompute`. A `tile.create` whose uses are *all* consumer-stage (e.g. the SV-accumulator init that sits between a `tpush` and its `tpop`) is likewise treated as `ConsumerCompute`, so it stays next to its consumer instead of being hoisted into the producer cluster (which would stretch its Acc buffer live-range and inflate L0C pressure).
+**Producer vs consumer compute.** `tpop` has no SSA argument (it pops the GM ring buffer keyed by `id`/`split`), so the dependency graph alone cannot tell that the compute consuming its result belongs to the post-round-trip stage. The pass propagates a "downstream of a cross-core pop" bit forward over the SSA edges and demotes such `TileCompute` to `ConsumerCompute`.
+
+**Consumer-only setup ops.** A *setup* op whose uses are **all** consumer-stage is also demoted to `ConsumerCompute` so it sits next to its consumer rather than being hoisted into the producer cluster — hoisting would stretch its buffer's live-range across the whole cross-core round-trip, forcing `MemoryReuse` to give each clone its own buffer:
+
+- A `tile.create` (e.g. the SV-accumulator init between a `tpush` and its `tpop`) — hoisting inflates L0C/Acc pressure.
+- A `tile.move` into L0 (Left/Right) (e.g. the V operand prep for the SV matmul) — hoisting partitions the tiny L0 space into a distinct per-clone buffer. Deferring lets sibling clones **share one L0 buffer**, trading a marginal consumer-side ping-pong (only realizable when L0 has spare capacity) for a smaller L0 footprint — the right default since L0 capacity, not cross-iteration overlap, is usually the binding constraint. The producer-side scores/result ping-pong (the `raw_scores` Acc tiles and the popped tiles) is unaffected — those are not setup ops.
 
 **Why `tpush` is not sunk like `Store`.** Both are egress, but `tpush` must fire as early as its producer allows so the peer core can start; it ranks *after* producer `TileCompute` (so sibling producers cluster first) but *before* the pops — it is not deferred to the bottom like a GM store.
 

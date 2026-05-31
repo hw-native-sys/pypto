@@ -66,7 +66,12 @@ result = passes.canonicalize_io_order()(program)
 
 `tile.read` 虽然产出标量，但仍归为 `Load` —— 它是针对 tile 的 I/O，与 `tile.load` 同属 load 层。LHS 类型检查仅在 RHS 不是已识别的 I/O op 时生效。
 
-**生产者计算 vs 消费者计算。** `tpop` 没有 SSA 参数（它按 `id`/`split` 从 GM 环形缓冲弹出），故依赖图本身无法判断消费其结果的计算属于往返之后的阶段。本 Pass 沿 SSA 边正向传播“位于跨核 pop 下游”这一标记，并把此类 `TileCompute` 降为 `ConsumerCompute`。若某 `tile.create` 的使用者*全部*属于消费侧（如夹在 `tpush` 与其 `tpop` 之间的 SV 累加器初始化），同样归为 `ConsumerCompute`，使其紧挨消费者、而非被上拉进生产者簇（否则会拉长其 Acc 缓冲生命周期、加剧 L0C 压力）。
+**生产者计算 vs 消费者计算。** `tpop` 没有 SSA 参数（它按 `id`/`split` 从 GM 环形缓冲弹出），故依赖图本身无法判断消费其结果的计算属于往返之后的阶段。本 Pass 沿 SSA 边正向传播“位于跨核 pop 下游”这一标记，并把此类 `TileCompute` 降为 `ConsumerCompute`。
+
+**仅供消费侧的 setup 算子。** 若某 *setup* 算子的使用者**全部**属于消费侧，同样降为 `ConsumerCompute`，使其紧挨消费者、而非被上拉进生产者簇——上拉会把其缓冲生命周期拉长到整个跨核往返，迫使 `MemoryReuse` 为每个克隆分配各自的缓冲：
+
+- `tile.create`（如夹在 `tpush` 与其 `tpop` 之间的 SV 累加器初始化）——上拉会加剧 L0C/Acc 压力。
+- 落入 L0（Left/Right）的 `tile.move`（如 SV matmul 的 V 操作数搬运）——上拉会把狭小的 L0 切分成每克隆独立的缓冲。下沉则让相邻克隆**共用一块 L0 缓冲**，以放弃一点消费侧 ping-pong（仅在 L0 尚有余量时才可实现）换取更小的 L0 占用——这是更合理的默认，因为通常是 L0 容量而非跨迭代重叠才是瓶颈。生产侧的 scores/result ping-pong（`raw_scores` 的 Acc tile 与 pop 出的 tile）不受影响——它们不是 setup 算子。
 
 **为何 `tpush` 不像 `Store` 那样下沉。** 二者都是出口，但 `tpush` 必须在其生产者允许的最早时刻发射、好让对端核尽快开工；它排在生产者 `TileCompute` *之后*（使兄弟生产者先聚集）、却在 pop *之前* —— 不像 GM store 那样被推到最底部。
 
