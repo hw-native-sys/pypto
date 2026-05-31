@@ -1389,10 +1389,14 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   // arises when Simplify folds an empty loop-result ForStmt into a plain
   // AssignStmt — e.g. a constant-trip `pl.pipeline`'s statically-empty main
   // loop becomes `t__rv_vN_main = t__iter_vM`. The deleted ForStmt would have
-  // registered the loop-result tensor view / SSA name / base ptr (see
-  // VisitStmt_(ForStmtPtr) in pto_control_flow_codegen.cpp). Mirror that here
-  // so a later tile.store into the alias can resolve its view, instead of
+  // registered the loop-result tensor view / SSA name for its return var (see
+  // VisitStmt_(ForStmtPtr) in pto_control_flow_codegen.cpp), so a later
+  // tile.store into the alias can resolve its view instead of
   // GetOrCreateTensorView tripping its INTERNAL_CHECK on the synthetic var.
+  // We additionally propagate the base-ptr mapping so element-wise alias
+  // consumers (pl.read / pl.write / store_scalar) resolve to the backing
+  // pointer rather than the view SSA — as the IfStmt in-place-return path
+  // (VisitStmt_(IfStmtPtr)) does for merged tensors.
   // Non-fatal: if the RHS has no registered view, fall through to the generic
   // handling rather than throwing eagerly on a view that may never be consumed.
   if (auto rhs_var = AsVarLike(op->value_)) {
