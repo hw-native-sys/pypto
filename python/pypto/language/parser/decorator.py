@@ -212,22 +212,25 @@ def _attach_source_lines_to_error(
         if span_file and span_file != source_file:
             target_file = span_file
 
+    # All three paths strip line endings (``splitlines`` / ``rstrip("\r\n")``)
+    # so source_lines is uniformly newline-free and CRLF-safe.
     try:
         with open(target_file, encoding="utf-8") as f:
-            error.source_lines = f.read().split("\n")
+            error.source_lines = f.read().splitlines()
             return
     except (OSError, UnicodeError):
         pass
 
     cached = linecache.getlines(target_file)
     if cached:
-        error.source_lines = [line.rstrip("\n") for line in cached]
+        error.source_lines = [line.rstrip("\r\n") for line in cached]
         return
 
+    raw = [line.rstrip("\r\n") for line in source_lines_raw]
     if target_file == source_file:
-        error.source_lines = [""] * line_offset + list(source_lines_raw)
+        error.source_lines = [""] * line_offset + raw
     else:
-        error.source_lines = source_lines_raw
+        error.source_lines = raw
 
 
 def _has_pl_function_decorator(node: ast.FunctionDef) -> bool:
