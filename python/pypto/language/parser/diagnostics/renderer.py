@@ -122,8 +122,12 @@ class ErrorRenderer:
             if location:
                 lines.append(self._cyan(f"  --> {location}"))
 
-        # Code context with line numbers and caret highlighting
-        if error.span and error.source_lines:
+        # Code context with line numbers and caret highlighting. Gate only on
+        # the span: _render_code_context resolves the snippet from the real file
+        # (via linecache) when the span names one, so remapped spans that carry
+        # no source_lines — e.g. @pl.jit compile errors (#1612) — still render a
+        # snippet. It self-guards and returns nothing when no lines are available.
+        if error.span:
             lines.extend(self._render_code_context(error))
 
         # Previous definition location (for SSA violations)

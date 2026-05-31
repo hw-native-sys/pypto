@@ -1297,9 +1297,11 @@ class Specializer:
         # generated-program absolute line → (orig_file, orig_line, orig_col),
         # built by specialize() so diagnostics map back to the user's .py (#1612).
         self._source_map: dict[int, tuple[str, int, int]] = {}
-        # (ctx, transformed FunctionDef) per function — retained during
-        # specialize() so _build_source_map can zip statements after assembly.
-        self._fn_origin: list[tuple[SpecializeContext, ast.FunctionDef]] = []
+        # (ctx, original (lineno, col_offset) per transformed statement in DFS
+        # order) per function — captured BEFORE ast.fix_missing_locations so
+        # synthesized statements read as (0, 0), and zipped against the reparsed
+        # generated statements in _build_source_map after assembly.
+        self._fn_origin: list[tuple[SpecializeContext, list[tuple[int, int]]]] = []
 
     @property
     def rename_map(self) -> dict[str, str]:
@@ -1365,10 +1367,10 @@ class Specializer:
 
         Reparses the assembled program to recover absolute line numbers (which
         equal the spans ``SpanTracker`` will emit), then zips each function's
-        reparsed statements against the retained transformed AST — whose nodes
-        carry the original (dedented) linenos. Per-statement granularity: a
-        multi-line user statement collapses to its start line; synthesized
-        statements (lineno 0) are left unmapped so their spans keep the
+        reparsed statements against the original (dedented) positions captured
+        per statement in :meth:`_specialize_function`. Per-statement granularity:
+        a multi-line user statement collapses to its start line; synthesized
+        statements (captured lineno 0) are left unmapped so their spans keep the
         generated coordinates. See issue #1612.
         """
         out: dict[int, tuple[str, int, int]] = {}
@@ -1382,25 +1384,23 @@ class Specializer:
         if classdef is None:
             return out
         gen_funcs = {n.name: n for n in classdef.body if isinstance(n, ast.FunctionDef)}
-        for ctx, new_func in self._fn_origin:
+        for ctx, orig_positions in self._fn_origin:
             gen_func = gen_funcs.get(ctx.func_name)
             if ctx.orig_file is None or gen_func is None:
                 continue
             gen_stmts = _dfs_stmts(gen_func)
-            orig_stmts = _dfs_stmts(new_func)
             # Reparsing the unparsed transform must preserve statement count and
             # DFS order; if it somehow diverges, skip this function rather than
             # emit a wrong mapping (its spans then fall back to generated coords).
-            if len(gen_stmts) != len(orig_stmts):
+            if len(gen_stmts) != len(orig_positions):
                 continue
-            for gen_stmt, orig_stmt in zip(gen_stmts, orig_stmts):
-                orig_line = getattr(orig_stmt, "lineno", 0)
+            for gen_stmt, (orig_line, orig_col) in zip(gen_stmts, orig_positions, strict=True):
                 if orig_line <= 0:
                     continue  # synthesized statement — no original location
                 out[gen_stmt.lineno] = (
                     ctx.orig_file,
                     orig_line + ctx.orig_start_line - 1,
-                    getattr(orig_stmt, "col_offset", 0) + ctx.orig_col_offset,
+                    orig_col + ctx.orig_col_offset,
                 )
         return out
 
@@ -1504,12 +1504,18 @@ class Specializer:
             lineno=1,
             col_offset=0,
         )
+        # Capture each statement's original (dedented) position in DFS order
+        # BEFORE fix_missing_locations runs (#1612). Surviving/expanded statements
+        # carry their original linenos; synthesized statements (loop bridges, the
+        # empty-body `pass`, transformer-built nodes) have no lineno yet and read
+        # as (0, 0) — fix_missing_locations would otherwise backfill them with the
+        # function's lineno=1, which would mis-map them to the decorator line.
+        # specialize() zips this against the reassembled program's statements.
+        orig_positions = [
+            (getattr(s, "lineno", 0), getattr(s, "col_offset", 0)) for s in _dfs_stmts(new_func)
+        ]
+        self._fn_origin.append((ctx, orig_positions))
         ast.fix_missing_locations(new_func)
-        # Retain (ctx, transformed AST) so specialize() can map each generated
-        # statement back to the user's source line after the program is
-        # assembled (#1612). Surviving/expanded statements carry their original
-        # (dedented) linenos; synthesized ones carry lineno 0.
-        self._fn_origin.append((ctx, new_func))
 
         body_src = ast.unparse(new_func)
         # ast.unparse gives us "def func_name(self, ...):\n    ..."

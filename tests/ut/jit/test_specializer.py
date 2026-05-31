@@ -1203,6 +1203,37 @@ class TestSpecializerSourceMap:
         spec.specialize()
         assert spec.source_map == {}
 
+    def test_synthesized_statements_are_not_mapped(self):
+        """Synthesized statements must be skipped, not mis-mapped to the def line.
+
+        ``ast.fix_missing_locations`` backfills a synthesized statement's missing
+        lineno with the function's ``lineno=1``, which (without the pre-fix
+        capture) would map it to the kernel's decorator line. Here the whole body
+        deletes (``K = a.shape[1]`` is inlined), collapsing to a synthesized
+        ``pass`` that must produce no mapping at all. See issue #1612.
+        """
+        src = textwrap.dedent(
+            """
+            @pl.jit
+            def kernel(a: pl.Tensor, out: pl.Out[pl.Tensor]):
+                K = a.shape[1]
+            """
+        ).strip("\n")
+        ctx = _make_ctx(
+            func_name="kernel",
+            source=src,
+            param_names=["a", "out"],
+            tensor_meta={"a": self._meta(), "out": self._meta()},
+        )
+        ctx.orig_file = "/real/kernel.py"
+        ctx.orig_start_line = 100
+
+        spec = Specializer("Gen", [ctx])
+        spec.specialize()
+        # The body collapses to a synthesized `pass`; it must not be mapped, and
+        # in particular must not point at the decorator line (100).
+        assert spec.source_map == {}
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

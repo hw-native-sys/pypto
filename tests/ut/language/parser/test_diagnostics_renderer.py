@@ -136,6 +136,31 @@ class TestRealFileSnippet:
 
         assert "t_v1 = pl.mul(t_v1, t_v1)" in rendered
 
+    def test_real_file_snippet_when_source_lines_missing(self, renderer: ErrorRenderer, tmp_path):
+        """A remapped span with no source_lines still renders the real snippet.
+
+        render() must not gate the code context on error.source_lines, else
+        compile/pass errors that carry only a remapped span (the case #1612
+        targets) would show the header but no snippet.
+        """
+        real = tmp_path / "kernel.py"
+        real.write_text("line one\nt = pl.mul(t, t)  # the real source\nline three\n")
+
+        err = ParserSyntaxError("type mismatch")
+        err.span = {
+            "filename": str(real),
+            "begin_line": 2,
+            "begin_column": 0,
+            "line": 2,
+            "column": 0,
+        }
+        err.source_lines = None  # no captured source — only the remapped span
+
+        rendered = renderer.render(err)
+
+        assert str(real) in rendered  # header points at the real file
+        assert "the real source" in rendered  # snippet still rendered via linecache
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
