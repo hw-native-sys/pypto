@@ -338,6 +338,57 @@ class TestFlattenCallInIfCondition:
         ir.assert_structural_equal(After, NormalizeIR(Expected))
 
 
+class TestFlattenCallInWhileCondition:
+    """Tests for flattening calls in WhileStmt conditions.
+
+    The WhileStmt visitor (flatten_call_expr_pass.cpp:302-326) visits the
+    condition, then saves any extracted temporaries as ``condition_pending``
+    and restores them for the parent ``SeqStmts`` so they land *before* the
+    while loop. A nested call in the condition therefore hoists to a sibling
+    statement preceding the ``for ... in pl.while_(...)`` node, leaving the
+    iter-arg / yield machinery untouched (the visitor only rewrites
+    ``condition_`` and ``body_`` via MutableCopy).
+    """
+
+    def test_nested_call_in_while_condition(self):
+        """`pl.cond(get_block_idx() < 10)` hoists the call before the while loop.
+
+        The condition is a ``Lt`` whose left operand is the ``get_block_idx()``
+        Call. ProcessBinaryExpr extracts that operand into ``t__tmp_v0``; the
+        WhileStmt visitor surfaces it to the enclosing SeqStmts so it sits as a
+        sibling before the loop, and the condition becomes ``t__tmp_v0 < 10``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                n: pl.Scalar[pl.INT64] = 0
+                for cnt, x_iter in pl.while_(init_values=(n, x_0)):
+                    pl.cond(pl.tile.get_block_idx() < 10)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    c2: pl.Scalar[pl.INT64] = cnt + 1
+                    cnt, x_iter = pl.yield_(c2, y)
+                return x_iter
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, strict_ssa=True)
+            def main(self, x_0: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                n: pl.Scalar[pl.INT64] = 0
+                # get_block_idx() hoisted to a sibling before the while loop.
+                t__tmp_v0: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
+                for cnt, x_iter in pl.while_(init_values=(n, x_0)):
+                    pl.cond(t__tmp_v0 < 10)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x_iter, x_iter)
+                    c2: pl.Scalar[pl.INT64] = cnt + 1
+                    cnt, x_iter = pl.yield_(c2, y)
+                return x_iter
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+
 class TestFlattenCallInForRange:
     """Tests for flattening calls in for loop bodies.
 
@@ -394,6 +445,44 @@ class TestFlattenCallInForRange:
             ) -> pl.Tensor[[64, 64], pl.FP32]:
                 t__tmp_v0: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
                 for _i in pl.range(t__tmp_v0):
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
+                    pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
+                return output
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+    def test_for_with_calls_in_start_and_step(self):
+        """Calls in for-range start and step are both hoisted before the loop.
+
+        The ForStmt visitor (flatten_call_expr_pass.cpp:266-300) visits
+        ``start``, ``stop``, ``step`` in that order and extracts any Call into a
+        temp. Here ``start = get_block_idx()`` and ``step = get_block_num()``
+        are calls (``stop = 10`` is a constant), so two temps are emitted in
+        start-then-step order before the loop: ``t__tmp_v0`` for start,
+        ``t__tmp_v1`` for step.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                for _i in pl.range(pl.tile.get_block_idx(), 10, pl.tile.get_block_num()):
+                    tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
+                    pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
+                return output
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self, a: pl.Tensor[[64, 64], pl.FP32], output: pl.Tensor[[64, 64], pl.FP32]
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t__tmp_v0: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
+                t__tmp_v1: pl.Scalar[pl.INDEX] = pl.tile.get_block_num()
+                for _i in pl.range(t__tmp_v0, 10, t__tmp_v1):
                     tile: pl.Tile[[32, 32], pl.FP32] = pl.tile.load(a, offsets=[0, 0], shapes=[32, 32])
                     pl.tile.store(tile, offsets=[0, 0], output_tensor=output)
                 return output
@@ -630,6 +719,72 @@ class TestFlattenPreservesAttrs:
             f"Submit.deps dropped after FlattenCallExpr; got {list(k2_submit.deps)!r}"
         )
 
+    @pytest.mark.xfail(
+        reason="suspected bug: FlattenCallExpr does not hoist a nested Call arg of a Submit "
+        "(no VisitExpr_(SubmitPtr) override extracts top-level Call args), so the three-address "
+        "constraint 'Call arguments cannot be calls' is violated for pl.submit args",
+        strict=False,
+    )
+    def test_nested_call_arg_in_submit_is_flattened(self):
+        """A nested Call passed as a Submit arg should be hoisted to a temp.
+
+        The pass doc rule #1 states "Call arguments cannot be calls", and
+        ``.claude/rules/pass-submit-awareness.md`` rule #1 requires Submit to be
+        walked like Call. The semantically-correct output therefore hoists the
+        ``pl.slice(out, [32], [0])`` arg of the ``k2`` submit into ``t__tmp_v0``
+        before the submit, exactly as a plain ``Call`` arg would be flattened.
+
+        FlattenCallExpr only overrides ``VisitExpr_(CallPtr)`` and never
+        ``VisitExpr_(SubmitPtr)``, so the base mutator's Submit visitor leaves
+        the nested ``slice`` Call inline. This Expected encodes the intended
+        semantics; the pass currently fails to produce it (suspected bug).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    _b, _ = pl.submit(self.k2, x, pl.slice(out, [32], [0]))
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[32], pl.FP32]],
+            ) -> pl.Tensor[[32], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    # Nested slice() Call hoisted to a temp before the submit.
+                    t__tmp_v0: pl.Tensor[[32], pl.FP32] = pl.slice(out, [32], [0])
+                    _b, _ = pl.submit(self.k2, x, t__tmp_v0)
+                return out
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
 
 class TestFlattenCallInScopeStmt:
     """Tests for flattening nested calls inside ScopeStmt (pl.incore / pl.at) blocks.
@@ -769,6 +924,48 @@ class TestFlattenCallInScopeStmt:
                     t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.exp(x)
                     t__tmp_v1: pl.Tensor[[64], pl.FP32] = pl.add(t__tmp_v0, 1.0)
                     result: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v1, 2.0)
+                return result
+
+        After = passes.flatten_call_expr()(Before)
+        ir.assert_structural_equal(After, NormalizeIR(Expected))
+
+
+class TestFlattenCallInClusterScope:
+    """Tests for flattening nested calls inside a Cluster scope body.
+
+    ``with pl.cluster():`` lowers to a ``ClusterScopeStmt``. The scope visitor
+    (flatten_call_expr_pass.cpp:399-404) delegates to the shared
+    ``FlattenScopeBody`` helper (lines 364-382), which keeps extracted
+    temporaries *inside* the scope body (mirroring the ``pl.at()`` behaviour)
+    so execution-context boundaries are preserved. The sibling Spmd scope
+    visitor (lines 414-420) reuses the same helper; see the
+    spmd-2-statement-body note in the deferred report for why it is not
+    exercised here.
+    """
+
+    def test_nested_call_inside_cluster_scope(self):
+        """Nested call directly in a ``pl.cluster()`` body keeps its temp inside.
+
+        ``mul(add(x, 1.0), 2.0)`` flattens to ``t__tmp_v0 = add(x, 1.0)`` then
+        ``result = mul(t__tmp_v0, 2.0)``, both staying inside the cluster scope
+        (FlattenScopeBody, lines 364-382 + 399-404).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster():
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(pl.add(x, 1.0), 2.0)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster():
+                    t__tmp_v0: pl.Tensor[[64], pl.FP32] = pl.add(x, 1.0)
+                    result: pl.Tensor[[64], pl.FP32] = pl.mul(t__tmp_v0, 2.0)
                 return result
 
         After = passes.flatten_call_expr()(Before)

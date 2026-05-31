@@ -23,6 +23,20 @@ def _run_normalize(program):
         return pipeline.run(program)
 
 
+def _run_normalize_direct(program):
+    """Run normalize_return_order via a direct pass invocation.
+
+    ``manual_scope``/``submit`` programs trip the pipeline's PostPipeline
+    perf-hint diagnostic (it needs a configured backend handler), so the
+    Submit-bearing cases call the pass object directly inside a
+    ``VerificationLevel.NONE`` context — the same convention used by
+    ``test_expand_manual_phase_fence.py``. The single-pass behaviour is
+    identical; only the pipeline's post-run diagnostic checks are skipped.
+    """
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        return passes.normalize_return_order()(program)
+
+
 class TestNormalizeReturnOrder:
     """Tests for the NormalizeReturnOrder pass."""
 
@@ -366,6 +380,145 @@ class TestNormalizeReturnOrder:
 
         After = _run_normalize(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+class TestNormalizeReturnOrderSubmit:
+    """Step B must remap ``TupleGetItemExpr`` indices on a ``pl.submit`` result
+    just as it does for a plain ``self.kernel(...)`` Call.
+
+    A ``pl.submit(self.kernel, ...)`` inside ``pl.manual_scope()`` desugars to
+    a ``Submit`` node whose flat return type is
+    ``Tuple[<kernel return>..., Scalar[TASK_ID]]``; the unpack
+    ``(a, b), tid = pl.submit(...)`` becomes ``_submit_tmp[0]`` / ``[1]`` /
+    ``[2]``. When Step A reorders the InCore kernel's returns, those
+    projection indices must be permuted in lockstep so the same physical
+    output buffer still flows into the same name (doc
+    ``24-normalize_return_order.md`` §"Step B"; pass principle in
+    ``.claude/rules/pass-submit-awareness.md``).
+    """
+
+    @pytest.mark.xfail(
+        reason="suspected bug: TupleIndexPermutationMutator matches As<Call> only "
+        "(normalize_return_order_pass.cpp:241), so Submit results are never tracked "
+        "and their TupleGetItemExpr indices are not remapped after Step A reorders "
+        "the kernel returns.",
+        strict=False,
+    )
+    def test_submit_swapped_returns_remapped(self):
+        """InCore kernel returns swapped + result consumed via ``pl.submit`` →
+        kernel returns reordered AND the submit-result projection indices
+        permuted so ``a``/``b`` keep binding the same buffers.
+
+        Derivation: original kernel ``return (out_b_store, out_a_store)`` maps
+        return[0]→out_b (param 2), return[1]→out_a (param 1). With
+        out_indices ``[1, 2]`` that yields permutation ``[1, 0]`` — kernel
+        becomes ``return (out_a_store, out_b_store)``. Step B then rewrites the
+        caller's projections by ``permutation[old_index]``: ``a`` was
+        ``_submit_tmp[0]`` → ``_submit_tmp[1]``; ``b`` was ``_submit_tmp[1]`` →
+        ``_submit_tmp[0]``; ``tid`` at index 2 (>= perm size) is untouched.
+        The ``(b, a), tid`` unpack in Expected encodes exactly that:
+        ``b = _submit_tmp[0]`` and ``a = _submit_tmp[1]``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
+                a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)
+                return (out_b_store, out_a_store)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                with pl.manual_scope():
+                    (a, b), tid = pl.submit(self.kernel, x, out_a, out_b)  # noqa: F841
+                return (a, b)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
+                a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)
+                return (out_a_store, out_b_store)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                with pl.manual_scope():
+                    # permutation[0]=1, permutation[1]=0 → a reads index 1, b reads
+                    # index 0. Encoded here via the (b, a) unpack order, which the
+                    # parser desugars to b=_submit_tmp[0], a=_submit_tmp[1].
+                    (b, a), tid = pl.submit(self.kernel, x, out_a, out_b)  # noqa: F841
+                return (a, b)
+
+        After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_submit_already_ordered_noop(self):
+        """A ``pl.submit`` of a kernel whose returns already match Out-param
+        order needs no permutation → Step A produces no permutation, Step B
+        never fires, and the Submit-bearing caller is left untouched.
+
+        This is the positive companion to the xfail above: it confirms the
+        manual_scope/submit machinery does not spuriously change IR when no
+        reorder is required (the bug only surfaces when a permutation exists).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                x_tile: pl.Tile[[16], pl.FP32] = pl.load(x, [0], [16])
+                a_tile: pl.Tile[[16], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                b_tile: pl.Tile[[16], pl.FP32] = pl.tile.mul(x_tile, x_tile)
+                out_a_store: pl.Tensor[[16], pl.FP32] = pl.store(a_tile, [0], out_a)
+                out_b_store: pl.Tensor[[16], pl.FP32] = pl.store(b_tile, [0], out_b)
+                return (out_a_store, out_b_store)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[16], pl.FP32],
+                out_a: pl.Out[pl.Tensor[[16], pl.FP32]],
+                out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
+                with pl.manual_scope():
+                    (a, b), tid = pl.submit(self.kernel, x, out_a, out_b)  # noqa: F841
+                return (a, b)
+
+        After = _run_normalize_direct(Before)
+        ir.assert_structural_equal(After, Before)
 
 
 class TestNormalizeReturnOrderProperties:

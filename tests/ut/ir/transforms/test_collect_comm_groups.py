@@ -20,26 +20,39 @@ chains, and:
 * clusters allocs with the same device descriptor into a single
   :class:`ir.CommGroup` and writes them to ``Program.comm_groups``.
 
-Most tests below run the pass directly on a parsed program (via
-``passes.collect_comm_groups()(program)``) and assert on the produced IR by
-node inspection rather than the Before/Expected ``assert_structural_equal``
-pattern. The pass's two output products have no print/parse surface syntax:
+The tests below run the pass directly on a parsed program (via
+``passes.collect_comm_groups()(program)``). The pass's two output products have
+no *print/parse* surface syntax — so a whole-``@pl.program`` ``Expected`` built
+by parsing Python source would always carry an empty ``comm_groups`` and
+``window_buffer``-less view types, mismatching the pass output:
 
 * ``Program.comm_groups`` — a ``UsualField`` compared by ``structural_equal``,
   but the printer emits no ``comm_groups`` syntax and the parser parses none.
 * ``DistributedTensorType.window_buffer_`` — a ``UsualField`` back-reference
   on each view Var, also compared by ``structural_equal`` but not printed.
 
-An ``Expected`` ``@pl.program`` is built by parsing Python source, so it would
-always carry an empty ``comm_groups`` and ``window_buffer``-less view types,
-mismatching the pass output. ``test_no_alloc_window_buffer_no_op`` is the one
-exception: it produces no such fields and uses ``assert_structural_equal``.
+The Before/Expected ``assert_structural_equal`` pattern is therefore applied at
+the granularity of the pass's structurally-comparable output product — the
+produced :class:`ir.CommGroup` — rather than the whole program. Each
+``Expected`` ``CommGroup`` is **hand-built from the pass's documented
+semantics** (device-descriptor table + slot/alloc-order rules in
+``docs/en/dev/passes/36-collect_comm_groups.md``) and compared with
+``enable_auto_mapping=True`` so freshly-constructed ``WindowBuffer`` slot Vars
+match the pass-produced ones by structural isomorphism rather than identity
+(see ``tests/ut/ir/core/test_comm_group_schema.py`` for that contract). The
+comparison is load-bearing: a wrong ``devices`` list or slot ``size`` makes
+``structural_equal`` return ``False``.
+
+``test_no_alloc_window_buffer_no_op`` is the whole-program exception: it
+produces neither ``comm_groups`` nor rewritten view types, so it uses
+``assert_structural_equal`` on the entire program. Error-branch tests assert via
+``pytest.raises`` — the malformed-input "after" is a ``pypto::ValueError``.
 """
 
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto.pypto_core import ir, passes
+from pypto.pypto_core import DataType, ir, passes
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +108,31 @@ def _apply(program: ir.Program) -> ir.Program:
     return passes.collect_comm_groups()(program)
 
 
+def _expected_slot(name: str, size_bytes: int) -> ir.WindowBuffer:
+    """Hand-build the WindowBuffer the pass should mint for one alloc.
+
+    Per the pass's Phase-5 rule (``docs/.../36-collect_comm_groups.md`` step 5),
+    each ``pld.alloc_window_buffer(size, *, name)`` materialises
+    ``WindowBuffer(base=Var(name, PtrType), size=size, load_from_host=False,
+    store_to_host=False)`` with ``name_hint`` inherited from the base Ptr Var.
+    The literal ``size`` is the alloc's first arg passed through unchanged —
+    the DSL emits it as a ``ConstInt`` of dtype ``index``.
+    """
+    base = ir.Var(name, ir.PtrType(), ir.Span.unknown())
+    size = ir.ConstInt(size_bytes, DataType.INDEX, ir.Span.unknown())
+    return ir.WindowBuffer(base, size)
+
+
+def _assert_group_equal(actual: ir.CommGroup, expected: ir.CommGroup) -> None:
+    """Compare a produced CommGroup against a hand-derived Expected.
+
+    ``enable_auto_mapping=True`` lets the freshly-built slot Vars in
+    ``expected`` match the pass-produced ones by structural isomorphism
+    (name_hint + size + flags) rather than by ``shared_ptr`` identity.
+    """
+    ir.assert_structural_equal(actual, expected, enable_auto_mapping=True)
+
+
 # ---------------------------------------------------------------------------
 # Single alloc / ALL devices
 # ---------------------------------------------------------------------------
@@ -118,17 +156,18 @@ def test_single_alloc_all_devices_world_size_loop():
             return 0
 
     result = _apply(P)
+
+    # The world_size loop bound resolves the device descriptor to kAll, encoded
+    # on the wire as an empty ``devices`` list, with a single slot for ``buf``.
     assert len(result.comm_groups) == 1
-    g = result.comm_groups[0]
-    # devices == [] is the on-the-wire encoding for "all devices" (kAll).
-    assert list(g.devices) == []
-    assert len(g.slots) == 1
-    wb = g.slots[0]
-    assert isinstance(wb, ir.WindowBuffer)
-    assert wb.name_hint == "buf"
-    assert isinstance(wb.size, ir.ConstInt)
-    assert wb.size.value == 1024
-    # The view's window_buffer back-reference now points to the same wb.
+    expected = ir.CommGroup([], [_expected_slot("buf", 1024)])
+    _assert_group_equal(result.comm_groups[0], expected)
+
+    # The view's window_buffer back-reference now points to the (same) slot.
+    # Pointer-identity between the group's slot and the view type's
+    # window_buffer is a load-bearing invariant (doc "Output invariants") that
+    # structural comparison alone cannot express.
+    wb = result.comm_groups[0].slots[0]
     host = _get_func(result, "host_orch")
     view_types = _view_var_types(host)
     assert len(view_types) == 1
@@ -158,11 +197,11 @@ def test_single_alloc_subset_const_int_devices():
             return 0
 
     result = _apply(P)
+    # Two ConstInt dispatches contribute {0} and {1}; merged into subset {0,1}
+    # over a single ``buf`` slot.
     assert len(result.comm_groups) == 1
-    g = result.comm_groups[0]
-    assert list(g.devices) == [0, 1]
-    assert len(g.slots) == 1
-    assert g.slots[0].name_hint == "buf"
+    expected = ir.CommGroup([0, 1], [_expected_slot("buf", 1024)])
+    _assert_group_equal(result.comm_groups[0], expected)
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +227,10 @@ def test_single_alloc_bounded_loop_devices():
             return 0
 
     result = _apply(P)
+    # ``pl.range(2)`` expands the induction-var descriptor to subset {0, 1}.
     assert len(result.comm_groups) == 1
-    assert list(result.comm_groups[0].devices) == [0, 1]
+    expected = ir.CommGroup([0, 1], [_expected_slot("buf", 1024)])
+    _assert_group_equal(result.comm_groups[0], expected)
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +260,15 @@ def test_two_allocs_same_descriptor_one_group():
             return 0
 
     result = _apply(P)
+    # Both allocs are dispatched over the same world_size loop ⇒ identical kAll
+    # descriptor ⇒ a single group whose slots follow source/alloc order
+    # (buf_data, then buf_signal) per Phase-7 clustering.
     assert len(result.comm_groups) == 1
-    g = result.comm_groups[0]
-    assert list(g.devices) == []  # kAll
-    assert [s.name_hint for s in g.slots] == ["buf_data", "buf_signal"]
+    expected = ir.CommGroup(
+        [],  # kAll
+        [_expected_slot("buf_data", 1024), _expected_slot("buf_signal", 32)],
+    )
+    _assert_group_equal(result.comm_groups[0], expected)
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +300,12 @@ def test_two_allocs_different_descriptors_two_groups():
             return 0
 
     result = _apply(P)
+    # buf_a is dispatched to {0,1}; buf_b to {2,3}. Distinct descriptors ⇒ two
+    # groups. Phase-7 walks allocs in source order and opens a group on first
+    # descriptor mismatch, so group order follows alloc order: buf_a then buf_b.
     assert len(result.comm_groups) == 2
-    devices = sorted([tuple(g.devices) for g in result.comm_groups])
-    assert devices == [(0, 1), (2, 3)]
+    _assert_group_equal(result.comm_groups[0], ir.CommGroup([0, 1], [_expected_slot("buf_a", 1024)]))
+    _assert_group_equal(result.comm_groups[1], ir.CommGroup([2, 3], [_expected_slot("buf_b", 1024)]))
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +379,32 @@ def test_chip_orch_param_types_keep_window_buffer_nullopt():
 
 
 # ---------------------------------------------------------------------------
+# Dead alloc — alloc with no pld.tensor.window materialisation
+# ---------------------------------------------------------------------------
+
+
+def test_dead_alloc_no_window_materialisation_raises():
+    """An alloc with no ``pld.tensor.window`` view is a dead allocation.
+
+    Phase-3 sanity check (source ``CHECK(!allocs_with_windows[...].empty())``,
+    doc "Sanity checks" bullet 1): downstream codegen would have nothing to
+    point a CommDomain buffer slot at, so the pass rejects it. This is a
+    distinct branch from ``test_dead_alloc_no_dispatch_raises`` (which has a
+    view but no consuming dispatch).
+    """
+
+    @pl.program
+    class P:
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(1024)  # noqa: F841  # never windowed
+            return 0
+
+    with pytest.raises(Exception, match="no pld.tensor.window materialisation"):
+        _apply(P)
+
+
+# ---------------------------------------------------------------------------
 # Dead alloc — alloc + window but no dispatch consumer
 # ---------------------------------------------------------------------------
 
@@ -344,6 +419,38 @@ def test_dead_alloc_no_dispatch_raises():
             return 0
 
     with pytest.raises(Exception, match="not consumed by any chip_orch dispatch"):
+        _apply(P)
+
+
+# ---------------------------------------------------------------------------
+# Unsupported device= — induction var over a non-unit-step loop
+# ---------------------------------------------------------------------------
+
+
+def test_non_unit_step_device_loop_raises():
+    """``device=r`` over ``pl.range(0, 4, 2)`` is rejected.
+
+    The device resolver only supports unit-step ``pl.range`` induction vars
+    (source ``CHECK(step == 1)``, doc device-descriptor table "other ⇒
+    ValueError"). A stride-2 loop has no well-defined contiguous coverage, so
+    the pass raises rather than guessing.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf = pld.alloc_window_buffer(1024)
+            data = pld.window(buf, [256], dtype=pl.FP32)
+            for r in pl.range(0, 4, 2):
+                self.chip_orch(data, device=r)
+            return 0
+
+    with pytest.raises(Exception, match="non-unit-step loop is not supported"):
         _apply(P)
 
 

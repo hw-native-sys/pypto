@@ -10,6 +10,7 @@
 """Unit tests for FuseCreateAssembleToSlice pass."""
 
 import pypto.language as pl
+import pytest
 from pypto import ir, passes
 from pypto.pypto_core import ir as ir_core
 
@@ -600,3 +601,238 @@ class TestFuseCreateAssembleToSlice:
         after = _run_prereqs_and_fuse(Before)
         expected = _run_prereqs_only(Expected)
         ir.assert_structural_equal(after, expected)
+
+    def test_while_loop_create_assemble_fused_to_slice(self):
+        """create + single assemble inside a ``while`` loop → slice; pass-through while iter arg stripped.
+
+        Mirrors the basic for-loop case but exercises the WhileStmt path
+        (``BufferRootCollector::VisitStmt_(WhileStmtPtr)`` threads roots through
+        while iter args, and ``StripPassThroughWhileIterArgs`` drops the iter arg
+        once the assemble that produced its yielded value is eliminated). The
+        loop also carries a real scalar counter ``i`` that must survive.
+
+        ConvertToSSA turns the natural ``while`` into an SSA while whose iter
+        args are ``i`` (counter, real loop-carried state) and ``out`` (assembled
+        buffer). After fusion the ``out`` create→assemble pattern is replaced by
+        a ``tensor.slice(out, ...)`` of the function param ``out``, the assemble
+        is dropped, and the now pass-through ``out`` iter arg is stripped, while
+        ``i`` survives.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                i: pl.Scalar[pl.INDEX] = 0
+                while i < 4:
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    row = self.fill_row(x, i, row)
+                    out = pl.assemble(out, row, [i, 0])
+                    i = i + 1
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                i: pl.Scalar[pl.INDEX] = 0
+                while i < 4:
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.slice(out, [1, 8], [i, 0])
+                    row = self.fill_row(x, i, row)
+                    i = i + 1
+                return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Expected)
+        ir.assert_structural_equal(after, expected)
+
+    def test_tuple_return_callee_root_tracked_and_fused(self):
+        """create + tuple-returning callee + single assemble → slice (tuple-root tracking).
+
+        Exercises the tuple-output-root path of ``BufferRootCollector``: the
+        callee returns ``Tuple[<stats>, <row>]`` where the 2nd element aliases
+        its ``Out`` param (the created ``row`` buffer). The collector records the
+        per-element roots in ``tuple_output_roots_`` for the call result, then
+        resolves ``row = call_result[1]`` (a ``TupleGetItemExpr``) back to the
+        create root. The subsequent single ``pl.assemble(out, row, ...)`` is thus
+        recognised as fusible: the create becomes a ``tensor.slice(out, ...)`` and
+        the assemble is dropped (pass doc, algorithm phase 1: "tracks tuple roots
+        for tuple-returning calls via ``tuple_output_roots_`` and resolves
+        ``TupleGetItemExpr`` from those call results").
+
+        ``stats`` is a separately-created scratch (different shape) that is NOT
+        assembled, so it stays a plain ``tensor.create``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                stats: pl.Out[pl.Tensor[[1], pl.FP32]],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> tuple[pl.Tensor[[1], pl.FP32], pl.Tensor[[1, 8], pl.FP32]]:
+                s_tile: pl.Tile[[1], pl.FP32] = pl.load(stats, [0], [1])
+                stats_1: pl.Tensor[[1], pl.FP32] = pl.store(s_tile, [0], stats)
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return stats_1, out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                for r in pl.range(4):
+                    stats: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                    stats, row = self.fill_row(x, r, stats, row)
+                    out = pl.assemble(out, row, [r, 0])
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                stats: pl.Out[pl.Tensor[[1], pl.FP32]],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> tuple[pl.Tensor[[1], pl.FP32], pl.Tensor[[1, 8], pl.FP32]]:
+                s_tile: pl.Tile[[1], pl.FP32] = pl.load(stats, [0], [1])
+                stats_1: pl.Tensor[[1], pl.FP32] = pl.store(s_tile, [0], stats)
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return stats_1, out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                for r in pl.range(4):
+                    stats: pl.Tensor[[1], pl.FP32] = pl.create_tensor([1], dtype=pl.FP32)
+                    row: pl.Tensor[[1, 8], pl.FP32] = pl.slice(out, [1, 8], [r, 0])
+                    stats, row = self.fill_row(x, r, stats, row)
+                return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Expected)
+        ir.assert_structural_equal(after, expected)
+
+    @pytest.mark.xfail(
+        reason="suspected bug: BufferRootCollector uses As<Call> (exact kind), so a "
+        "pl.submit (ir.Submit) callee never propagates its Out-param buffer root; the "
+        "create+assemble around a submit is left unfused (violates pass-submit-awareness).",
+        strict=False,
+    )
+    def test_submit_create_assemble_fused_to_slice(self):
+        """create + pl.submit callee + single assemble inside manual_scope → slice.
+
+        Semantically identical to ``test_basic_create_assemble_fused_to_slice``
+        except the InCore call is launched with ``pl.submit`` inside
+        ``pl.manual_scope``. ``pl.submit(self.fill_row, x, r, row)`` carries the
+        created ``row`` as an Out-direction prefix arg, so its result aliases the
+        ``row`` create root exactly as a plain call would.
+
+        Per the pass's documented buffer-root analysis ("propagates roots through
+        call output parameters whose direction is Out/InOut") and the project
+        ``pass-submit-awareness`` rule (Submit is a sibling call-like kind that
+        must be handled wherever Call is), the create should fuse to
+        ``tensor.slice(out, ...)`` and the assemble should be dropped — exactly as
+        in the plain-call case. The Expected below is the correct fused result.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                with pl.manual_scope():
+                    for r in pl.range(4):
+                        row: pl.Tensor[[1, 8], pl.FP32] = pl.create_tensor([1, 8], dtype=pl.FP32)
+                        row, _tid = pl.submit(self.fill_row, x, r, row)
+                        out = pl.assemble(out, row, [r, 0])
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill_row(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                r: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 8], pl.FP32]],
+            ) -> pl.Tensor[[1, 8], pl.FP32]:
+                row_tile: pl.Tile[[1, 8], pl.FP32] = pl.load(x, [r, 0], [1, 8])
+                out_1: pl.Tensor[[1, 8], pl.FP32] = pl.store(row_tile, [0, 0], out)
+                return out_1
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch(
+                self,
+                x: pl.Tensor[[4, 8], pl.FP32],
+                out: pl.Out[pl.Tensor[[4, 8], pl.FP32]],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
+                with pl.manual_scope():
+                    for r in pl.range(4):
+                        row: pl.Tensor[[1, 8], pl.FP32] = pl.slice(out, [1, 8], [r, 0])
+                        row, _tid = pl.submit(self.fill_row, x, r, row)
+                return out
+
+        after = _run_prereqs_and_fuse(Before)
+        expected = _run_prereqs_only(Expected)
+        ir.assert_structural_equal(after, expected)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

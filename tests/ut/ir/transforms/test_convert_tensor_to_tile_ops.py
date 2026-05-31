@@ -397,7 +397,13 @@ class TestConvertTensorToTileOps:
         _assert_convert_equal(before, expected)
 
     def test_put_emits_tile_create_plus_tile_put(self):
-        """pld.tensor.put lowers to tile.create(stage) + pld.tile.put(dst, peer, src, stage)."""
+        """pld.tensor.put lowers to tile.create(stage) + pld.tile.put(dst, peer, src, stage).
+
+        The staging tile is a Vec-space ``[rows, cols]`` flattening of the dst window
+        (here [16, 64] flattens to itself) with the dst's FP16 dtype, threaded as the
+        4th positional arg of ``pld.tile.put``; the ``atomic`` kwarg is forwarded
+        unchanged. The InCore is void (no return), so no Out param is appended.
+        """
 
         @pl.program
         class Before:
@@ -410,38 +416,30 @@ class TestConvertTensorToTileOps:
             ):
                 pld.tensor.put(dst, peer=peer, src=src, atomic=pld.AtomicType.None_)
 
+        # pld.tensor.put becomes a tile.create staging buffer (shape [16, 64] = flattened
+        # [rows, cols] of the dst window, FP16, Vec space so InitMemRef/AllocateMemoryAddr
+        # assign a real UB address) plus pld.tile.put(dst, peer, src, tput_stage, atomic=...).
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                dst: pld.DistributedTensor[[16, 64], pl.FP16],
+                src: pld.DistributedTensor[[16, 64], pl.FP16],
+                peer: pl.Scalar[pl.INT32],
+            ):
+                tput_stage: pl.Tile[[16, 64], pl.FP16, pl.Mem.Vec] = pl.tile.create(
+                    [16, 64], dtype=pl.FP16, target_memory=pl.Mem.Vec
+                )
+                pld.tile.put(dst, peer, src, tput_stage, atomic=pld.AtomicType.None_)
+                # Void InCore body ends in an explicit return terminator: the pass
+                # preserves the (parser-inserted) return from Before, so Expected must
+                # carry it too. Relying on the parser's implicit-return here is
+                # non-deterministic across runs and makes the test flaky.
+                return  # noqa: PLR1711  (DSL return terminator, not a Python no-op)
+
         After = passes.convert_tensor_to_tile_ops()(Before)
-        kernel = After.get_function("kernel")
-        assert kernel is not None, "kernel function missing after conversion"
-
-        # pld.tensor.put has been replaced.
-        assert _find_first_call_to(kernel, "pld.tensor.put") is None, (
-            "pld.tensor.put must be lowered to pld.tile.put by ConvertTensorToTileOps"
-        )
-
-        # tile.create + pld.tile.put are now present.
-        assert _find_first_call_to(kernel, "tile.create") is not None
-        put_call = _find_first_call_to(kernel, "pld.tile.put")
-        assert put_call is not None, "expected pld.tile.put after conversion"
-
-        # pld.tile.put threads the staging tile as the 4th positional arg.
-        assert len(put_call.args) == 4
-        stage_arg = put_call.args[3]
-        assert isinstance(stage_arg, ir.Var)
-        assert stage_arg.name_hint == "tput_stage"
-
-        # Stage tile carries the right shape ([rows, cols] flattening of [16, 64] = [16, 64]),
-        # FP16 dtype and the VEC memory space — InitMemRef and AllocateMemoryAddr need these
-        # to assign a real UB address.
-        stage_type = stage_arg.type
-        assert isinstance(stage_type, ir.TileType)
-        shape_vals: list[int] = []
-        for d in stage_type.shape:
-            assert isinstance(d, ir.ConstInt)
-            shape_vals.append(d.value)
-        assert shape_vals == [16, 64]
-        assert stage_type.dtype == pl.FP16
-        assert stage_type.memory_space == MemorySpace.Vec
+        ir.assert_structural_equal(After, Expected)
 
     def test_rsqrt_high_precision_conversion(self):
         """tensor.rsqrt(high_precision=True) allocates a tmp tile and lowers to 2-arg tile.rsqrt."""
@@ -2719,6 +2717,76 @@ class TestWrapperForwardPropagation:
         # The declared return type is structurally what the wrapper declared,
         # not the inner callee's post-transform store-call type.
         assert ir.structural_equal(after_return_types[0], before_return_types[0])
+
+
+class TestSubmitCallSiteUpdate:
+    """Phase 2b must update ``pl.submit`` call sites, not just plain ``Call`` ones.
+
+    ``CallSiteUpdateMutator`` (and the wrapper-forward path) resolve the call on
+    an AssignStmt RHS via ``As<Call>(...)``. ``Submit`` is a sibling ``ObjectKind``
+    (not a ``Call`` subclass — see .claude/rules/pass-submit-awareness.md /
+    ir-kind-traits.md), so a ``pl.submit(self.kernel, ...)`` inside
+    ``pl.manual_scope`` is silently skipped. When the InCore callee gains an
+    appended ``Out`` param in Phase 1, the submit call site must — exactly like
+    the plain-call case (``test_call_inside_for_loop``) — insert a
+    ``tensor.create`` and forward it as the new arg, while preserving Submit-ness
+    and the trailing ``TASK_ID`` return element.
+    """
+
+    @pytest.mark.xfail(
+        reason="suspected bug: CallSiteUpdateMutator walks As<Call> only, so a "
+        "pl.submit call site to a transformed InCore is not updated (no tensor.create, "
+        "Out arg not forwarded) — Submit is a sibling ObjectKind, not a Call subclass.",
+        strict=False,
+    )
+    def test_submit_call_site_gets_tensor_create(self):
+        """pl.submit to a transformed InCore must allocate + forward the appended Out.
+
+        Mirrors ``test_call_inside_for_loop`` but launches the InCore via
+        ``pl.submit`` inside ``pl.manual_scope``. The InCore ``kernel`` is lowered
+        and gains ``ret0__out`` (Phase 1, unaffected by the call kind). The
+        orchestration ``main`` must allocate ``ret0__out = pl.create_tensor(...)``
+        before the submit and forward it as the second arg; the Submit's
+        ``TASK_ID``-augmented tuple return is preserved (callee return type
+        unchanged), so ``a``/``a_tid`` projections stay valid.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, a_tid = pl.submit(self.kernel, x)
+                return a
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                ret0__out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x__tile = pl.load(x, [0], [64], [64], target_memory=pl.Mem.Vec, transpose=False)
+                y__tile = pl.tile.add(x__tile, x__tile)
+                ret0__store = pl.store(y__tile, [0], ret0__out)
+                return ret0__store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    ret0__out = pl.create_tensor([64], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                    a, a_tid = pl.submit(self.kernel, x, ret0__out)
+                return a
+
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestSpmdBlockIdentityConversion:

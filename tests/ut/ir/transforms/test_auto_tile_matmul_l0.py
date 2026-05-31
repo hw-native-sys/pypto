@@ -243,6 +243,185 @@ class TestAutoTileMatmulL0KOnly:
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_matmul_acc_vec_lhs_staged_and_tiled(self):
+        """``tile.matmul_acc`` whose left (A) operand is Vec-resident
+        (fused-attention PV / ``score·V`` with a running caller accumulator).
+
+        Per the pass (``auto_tile_matmul_l0_pass.cpp`` lines 540-541): the
+        Vec left operand sets ``stage_lhs_to_mat=true`` so a single
+        ``tile.move(lhs_vec, target=Mat)`` is emitted before the K-loop and the
+        per-iter Left extract slices from the staged Mat tile; ``acc_init`` is
+        the caller's accumulator threaded into the iter-arg directly.  Because
+        ``is_acc`` is true the body is the *uniform* ``matmul_acc`` shape with
+        **no** if-else and **no** ``tile.create`` placeholder (``BuildKLoopRewrite``
+        lines 325-327, ``BuildMatmulAccBody``).  16×64 @ 2048 BF16 with
+        ``c_read=true`` picks (m=16, n=64, k=256) — the same tile the Mat-lhs
+        ``test_matmul_acc_pipelined`` case pins."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                acc_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                # Default tile.load lands in Vec — the PV / score·V operand.
+                lhs_vec: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Vec] = pl.tile.load(lhs, [0, 0], [16, 2048])
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(acc_init, lhs_vec, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                acc_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_vec: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Vec] = pl.tile.load(lhs, [0, 0], [16, 2048])
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                # No tile.create placeholder: the iter-arg init is the caller's
+                # acc_init.  Vec lhs staged into Mat once, before the K-loop.
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.move(
+                    lhs_vec, target_memory=pl.Mem.Mat
+                )
+                for ko, (c_iter,) in pl.pipeline(0, 2048, 256, init_values=(acc_init,), stage=2):
+                    # lhs sub-tile extracted from the staged Mat tile, not Vec.
+                    sa: pl.Tile[[16, 256], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        lhs_mat, 0, ko, shape=[16, 256], target_memory=pl.Mem.Left
+                    )
+                    sb: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        rhs_mat, ko, 0, shape=[256, 64], target_memory=pl.Mem.Right
+                    )
+                    # Uniform matmul_acc body — no if-else branch.
+                    c_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c_iter, sa, sb)
+                    c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c_acc)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_two_independent_matmuls_each_remapped(self):
+        """Two independent Mat-resident ``tile.matmul`` calls in one function
+        body are each rewritten into their own K-loop, and each downstream
+        ``pl.store`` is redirected to the matching ForStmt's ``return_var``.
+
+        This exercises the per-SeqStmts ``remap`` in
+        ``AutoTileMutator::VisitStmt_(SeqStmtsPtr)`` (pass lines 561-585): the
+        first rewrite records ``c0 -> for0.return_var`` and the second records
+        ``c1 -> for1.return_var``; the running ``Substitute`` then rewrites the
+        two ``pl.store`` uses to the new return_vars.  Each matmul is 16×64 @
+        2048 BF16 (plain ``tile.matmul``, ``c_read=false``) → (m=16, n=64,
+        k=256), so each loop is the standard if-else K-loop of
+        ``test_skinny_gemm_pipelined``."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs0: pl.Tensor[[16, 2048], pl.BF16],
+                rhs0: pl.Tensor[[2048, 64], pl.BF16],
+                lhs1: pl.Tensor[[16, 2048], pl.BF16],
+                rhs1: pl.Tensor[[2048, 64], pl.BF16],
+                out0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 64], pl.FP32], pl.Tensor[[16, 64], pl.FP32]]:
+                a0: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs0, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                b0: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs0, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a0, b0)
+                out0 = pl.store(c0, [0, 0], out0)
+                a1: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs1, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                b1: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs1, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(a1, b1)
+                out1 = pl.store(c1, [0, 0], out1)
+                return out0, out1
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs0: pl.Tensor[[16, 2048], pl.BF16],
+                rhs0: pl.Tensor[[2048, 64], pl.BF16],
+                lhs1: pl.Tensor[[16, 2048], pl.BF16],
+                rhs1: pl.Tensor[[2048, 64], pl.BF16],
+                out0: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 64], pl.FP32], pl.Tensor[[16, 64], pl.FP32]]:
+                a0: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs0, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                b0: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs0, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c0_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko0, (c0_iter,) in pl.pipeline(0, 2048, 256, init_values=(c0_init,), stage=2):
+                    sa0: pl.Tile[[16, 256], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a0, 0, ko0, shape=[16, 256], target_memory=pl.Mem.Left
+                    )
+                    sb0: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b0, ko0, 0, shape=[256, 64], target_memory=pl.Mem.Right
+                    )
+                    if ko0 == 0:
+                        c0_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa0, sb0)
+                        c0_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_first)
+                    else:
+                        c0_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c0_iter, sa0, sb0)
+                        c0_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_acc)
+                    c0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c0_phi)
+                out0 = pl.store(c0, [0, 0], out0)
+                a1: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs1, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                b1: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs1, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c1_init: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.create(
+                    [16, 64], dtype=pl.FP32, target_memory=pl.Mem.Acc
+                )
+                for ko1, (c1_iter,) in pl.pipeline(0, 2048, 256, init_values=(c1_init,), stage=2):
+                    sa1: pl.Tile[[16, 256], pl.BF16, pl.Mem.Left] = pl.tile.extract(
+                        a1, 0, ko1, shape=[16, 256], target_memory=pl.Mem.Left
+                    )
+                    sb1: pl.Tile[[256, 64], pl.BF16, pl.Mem.Right] = pl.tile.extract(
+                        b1, ko1, 0, shape=[256, 64], target_memory=pl.Mem.Right
+                    )
+                    if ko1 == 0:
+                        c1_first: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(sa1, sb1)
+                        c1_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_first)
+                    else:
+                        c1_acc: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul_acc(c1_iter, sa1, sb1)
+                        c1_phi: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_acc)
+                    c1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.yield_(c1_phi)
+                out1 = pl.store(c1, [0, 0], out1)
+                return out0, out1
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_vec_right_operand_left_untouched(self):
         """The right (B) operand must be Mat — it feeds L0B from L1.  A Vec
         right operand (even with a Mat left) is out of scope: the asymmetry is
@@ -413,6 +592,149 @@ class TestAutoTileMatmulL0Skips:
 
         After = passes.auto_tile_matmul_l0()(Before)
         ir.assert_structural_equal(After, Before)
+
+    def test_sub_byte_dtype_skipped(self):
+        """An INT4 (sub-byte) operand makes ``DTypeBytes`` return 0, so the
+        pass emits ``PH-AT-003`` and leaves the matmul untouched (pass lines
+        448-453).  INT4 @ INT4 deduces an INT32 accumulator, so the matmul is
+        well-typed and Mat-resident — the skip is purely the sub-byte guard,
+        not a residency/shape filter.  The shape (16×64 @ 2048) would otherwise
+        be K-tiled, proving the sub-byte branch is what blocks the rewrite."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.INT4],
+                rhs: pl.Tensor[[2048, 64], pl.INT4],
+                out: pl.Out[pl.Tensor[[16, 64], pl.INT32]],
+            ) -> pl.Tensor[[16, 64], pl.INT32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.INT4, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.INT4, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.INT32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_chooser_rejected_config_skipped(self):
+        """A K dimension below the cube minimum (K=8 < min_k=16) makes
+        ``ChooseL0Tile`` throw ``pypto::ValueError`` (chooser line 192,
+        ``allow_padding=false``).  The pass catches it, emits ``PH-AT-005``,
+        and leaves the matmul untouched (pass lines 492-500)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 8], pl.BF16],
+                rhs: pl.Tensor[[8, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 8], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 8], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[8, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [8, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_mn_tiling_unsupported_skipped(self):
+        """A 4096×4096 @ 4096 BF16 matmul forces the chooser to tile M and N
+        (it picks m=256, n=256 ≠ M=N=4096).  M/N tiling needs a Mat-resident
+        output scratch + per-iter assemble that is not yet implemented, so the
+        pass emits ``PH-AT-006`` and leaves the matmul untouched (pass lines
+        507-514)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[4096, 4096], pl.BF16],
+                rhs: pl.Tensor[[4096, 4096], pl.BF16],
+                out: pl.Out[pl.Tensor[[4096, 4096], pl.FP32]],
+            ) -> pl.Tensor[[4096, 4096], pl.FP32]:
+                lhs_mat: pl.Tile[[4096, 4096], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [4096, 4096], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[4096, 4096], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [4096, 4096], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[4096, 4096], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        After = passes.auto_tile_matmul_l0()(Before)
+        ir.assert_structural_equal(After, Before)
+
+    def test_non_incore_function_untouched(self):
+        """The pass only walks InCore-typed functions
+        (``TransformFunction`` guard, pass line 593 — ``IsInCoreType``).  An
+        ``Opaque`` function carrying the *exact same* tile-able Mat matmul as
+        the rewritten K-only cases is left untouched, while the InCore twin
+        rewrites — isolating the function-type guard as the deciding factor."""
+
+        @pl.program
+        class OpaqueProg:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        # The Opaque function is left structurally identical.
+        After = passes.auto_tile_matmul_l0()(OpaqueProg)
+        ir.assert_structural_equal(After, OpaqueProg)
+
+        # Twin: same body in an InCore function DOES rewrite — proves the
+        # untouched-ness above is the function-type guard, not a different
+        # filter.
+        @pl.program
+        class InCoreProg:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                lhs: pl.Tensor[[16, 2048], pl.BF16],
+                rhs: pl.Tensor[[2048, 64], pl.BF16],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                lhs_mat: pl.Tile[[16, 2048], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    lhs, [0, 0], [16, 2048], target_memory=pl.Mem.Mat
+                )
+                rhs_mat: pl.Tile[[2048, 64], pl.BF16, pl.Mem.Mat] = pl.tile.load(
+                    rhs, [0, 0], [2048, 64], target_memory=pl.Mem.Mat
+                )
+                c: pl.Tile[[16, 64], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(lhs_mat, rhs_mat)
+                out = pl.store(c, [0, 0], out)
+                return out
+
+        incore_after = passes.auto_tile_matmul_l0()(InCoreProg)
+        with pytest.raises(ValueError, match="Structural equality"):
+            ir.assert_structural_equal(incore_after, InCoreProg)
 
 
 if __name__ == "__main__":

@@ -26,8 +26,10 @@ Tests follow the Before/Expected ``@pl.program`` pattern: the pass runs on
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import DataType, ir
 from pypto.pypto_core import passes as _passes
+
+_SPAN = ir.Span.unknown()
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -41,6 +43,20 @@ def _materialize(program):
 def _verify_strict(program):
     """Run TensorViewCanonical in strict mode — empty stride is rejected."""
     return _passes.verify_tensor_view_canonical(program, require_materialized=True)
+
+
+def _dims(shape):
+    return [ir.ConstInt(s, DataType.INDEX, _SPAN) for s in shape]
+
+
+def _dn_tensor(shape, stride):
+    """Build a TensorType with an explicit DN-stride TensorView.
+
+    ``stride=[]`` yields the implicit (empty-stride) form that the pass must
+    materialize.
+    """
+    view = ir.TensorView(_dims(stride), ir.TensorLayout.DN)
+    return ir.TensorType(_dims(shape), DataType.FP32, None, view)
 
 
 # ============================================================================
@@ -301,6 +317,121 @@ def test_strict_verifier_passes_after_materialization():
     After = _materialize(Before)
     ir.assert_structural_equal(After, Expected)
     assert _verify_strict(After) == []
+
+
+# ============================================================================
+# TupleType recursion: MaterializeType recurses into every element of a
+# TupleType return signature (pass source: MaterializeType TupleType branch,
+# materialize_tensor_strides_pass.cpp:90-101 — "recursively into TupleType").
+# ============================================================================
+
+
+def test_tuple_return_type_materialized():
+    # A function whose single return is a Tuple of two empty-stride DN tensors.
+    # Both elements must be materialized to their packed DN canonical stride:
+    #   [4, 8]    -> [1, 4]
+    #   [2, 4, 8] -> [32, 1, 4]
+    # (DN formula, doc 27-materialize_tensor_strides.md "Stride Formulas".)
+    def build(stride_2d, stride_3d):
+        x = ir.Var("x", _dn_tensor([4, 8], stride_2d), _SPAN)
+        ret_tuple = ir.TupleType([_dn_tensor([4, 8], stride_2d), _dn_tensor([2, 4, 8], stride_3d)])
+        body = ir.ReturnStmt([x, x], _SPAN)
+        func = ir.Function("f", [x], [ret_tuple], body, _SPAN)
+        return ir.Program([func], "p", _SPAN)
+
+    Before = build([], [])
+    Expected = build([1, 4], [32, 1, 4])
+
+    After = _materialize(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+# ============================================================================
+# IterArg recursion: VisitExpr_(IterArgPtr) materializes the IterArg's own
+# carried type, and recurses into its init_value (pass source:
+# materialize_tensor_strides_pass.cpp:133-149). A loop-carried DN tensor with
+# empty stride must come out packed, and its init (a reference to the
+# already-materialized param) must follow.
+# ============================================================================
+
+
+def test_iter_arg_type_and_init_materialized():
+    def build(stride):
+        init = ir.Var("init", _dn_tensor([4, 8], stride), _SPAN)
+        acc = ir.IterArg("acc", _dn_tensor([4, 8], stride), init, _SPAN)
+        i = ir.Var("i", ir.ScalarType(DataType.INDEX), _SPAN)
+        ret = ir.Var("r", _dn_tensor([4, 8], stride), _SPAN)
+        # A ForStmt carrying iter_args must end its body with a YieldStmt that
+        # yields the loop-carried values (SSA invariant enforced by SSAVerify).
+        # A single-child body is the YieldStmt directly (NormalizedStmtStructure
+        # rejects a SeqStmts wrapping a single child).
+        loop_body = ir.YieldStmt([acc], _SPAN)
+        for_stmt = ir.ForStmt(
+            i,
+            ir.ConstInt(0, DataType.INDEX, _SPAN),
+            ir.ConstInt(4, DataType.INDEX, _SPAN),
+            ir.ConstInt(1, DataType.INDEX, _SPAN),
+            [acc],
+            loop_body,
+            [ret],
+            _SPAN,
+        )
+        body = ir.SeqStmts([for_stmt, ir.ReturnStmt([ret], _SPAN)], _SPAN)
+        func = ir.Function("f", [init], [_dn_tensor([4, 8], stride)], body, _SPAN)
+        return ir.Program([func], "p", _SPAN)
+
+    Before = build([])
+    Expected = build([1, 4])
+
+    After = _materialize(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+# ============================================================================
+# Submit return-type materialization (FOCUS — suspected bug).
+#
+# The pass overrides VisitExpr_(CallPtr) to route Call return types through
+# MaterializeType, but provides NO VisitExpr_(SubmitPtr) override. Submit
+# therefore falls to the base IRMutator::VisitExpr_(SubmitPtr), which only
+# runs RemapTypeViaVisitor (remaps embedded *expressions*, NOT empty-stride
+# views) on the return type. Per the pass docstring ("Walks every TensorType
+# reachable from a Program ... recursively into TupleType ... after this pass
+# runs, every TensorType that carries a TensorView has explicit stride") and
+# .claude/rules/pass-submit-awareness.md rule 4 (Submit return types must be
+# accounted for), the Submit node's own return TupleType element MUST be
+# materialized to [1, 4] just like the equivalent Call/param/return-type slots
+# (which this same program DOES materialize). The Submit node's type_ slot is
+# left with empty stride instead.
+# ============================================================================
+
+
+@pytest.mark.xfail(
+    reason="suspected bug: pass has no VisitExpr_(SubmitPtr); Submit node's "
+    "own return type keeps empty stride while every other reachable "
+    "TensorType is materialized",
+    strict=False,
+)
+def test_submit_return_type_materialized():
+    def build(stride):
+        kx = ir.Var("x", _dn_tensor([4, 8], stride), _SPAN)
+        kernel = ir.Function("kernel", [kx], [_dn_tensor([4, 8], stride)], ir.ReturnStmt([kx], _SPAN), _SPAN)
+        kgv = ir.GlobalVar("kernel")
+
+        a = ir.Var("a", _dn_tensor([4, 8], stride), _SPAN)
+        submit_ret = ir.TupleType([_dn_tensor([4, 8], stride), ir.ScalarType(DataType.TASK_ID)])
+        res = ir.Var("res", submit_ret, _SPAN)
+        submit = ir.Submit(kgv, [a], [], submit_ret, _SPAN)
+        body = ir.SeqStmts([ir.AssignStmt(res, submit, _SPAN), ir.ReturnStmt([res], _SPAN)], _SPAN)
+        caller = ir.Function("caller", [a], [submit_ret], body, _SPAN)
+        return ir.Program([kernel, caller], "p", _SPAN)
+
+    Before = build([])
+    # Every reachable TensorType — kernel params/return, caller param/return,
+    # AND the Submit node's own tuple-return element — should be DN-packed [1, 4].
+    Expected = build([1, 4])
+
+    After = _materialize(Before)
+    ir.assert_structural_equal(After, Expected)
 
 
 if __name__ == "__main__":

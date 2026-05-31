@@ -667,5 +667,233 @@ class TestPartialLoadPromotion:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestAlreadyDNParamSkipped:
+    """A param whose signature already carries a DN tag (no explicit stride) is
+    skipped: ``DeduceTileLoadType`` already handles the (source_is_dn XOR
+    transpose) tile-view logic, so prepending an ``as_layout`` bridge and
+    dropping ``transpose=True`` would shift the XOR result and produce the wrong
+    TileType. The pass leaves the function — and therefore the whole program —
+    untouched (pass source lines 207-214; doc §Scope row 'already DN')."""
+
+    def test_dn_tagged_param_left_unchanged(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def matmul_incore(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                # Param already DN-tagged at the boundary (empty stride): the
+                # load-side transpose=True is the user-intended row-major flip.
+                b: pl.Tensor[[32, 128], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+                c: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                tile_a = pl.load(a, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat)
+                tile_b = pl.load(b, [0, 0], [32, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
+                tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                b: pl.Tensor[[32, 128], pl.FP32, pl.TensorView(stride=[], layout=pl.TensorLayout.DN)],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                c: pl.Tensor[[64, 32], pl.FP32] = pl.create_tensor([64, 32], dtype=pl.FP32)
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
+
+        # The only promoted param is already DN, so the prepend list stays empty
+        # and LowerInCoreFunction returns the original function unchanged
+        # (pass source lines 214, 228-230). The program is a structural no-op.
+        After = passes.lower_transpose_load_param_layout()(Before)
+        ir.assert_structural_equal(After, Before)
+
+
+class TestDoubleTransposeRejected:
+    """A param whose source TensorView carries BOTH ``layout=DN`` and an explicit
+    non-empty stride is the signature of a ``tensor.transpose`` result. Loading
+    it with ``transpose=True`` would compose the two encodings into a double
+    transpose at codegen, so the pass rejects it with a ``CHECK`` failure
+    (``pypto::ValueError``) — pass source lines 200-206; doc §'Interaction with
+    tensor.transpose at Orchestration'."""
+
+    def test_dn_plus_explicit_stride_raises(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def matmul_incore(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                # DN tag + explicit physical stride == a tensor.transpose result.
+                b: pl.Tensor[[32, 128], pl.FP32, pl.TensorView(stride=[1, 32], layout=pl.TensorLayout.DN)],
+                c: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                tile_a = pl.load(a, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat)
+                tile_b = pl.load(b, [0, 0], [32, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
+                tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                b: pl.Tensor[[32, 128], pl.FP32, pl.TensorView(stride=[1, 32], layout=pl.TensorLayout.DN)],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                c: pl.Tensor[[64, 32], pl.FP32] = pl.create_tensor([64, 32], dtype=pl.FP32)
+                c_result = self.matmul_incore(a, b, c)
+                return c_result
+
+        with pytest.raises(ValueError, match="double transpose"):
+            passes.lower_transpose_load_param_layout()(Before)
+
+
+class TestMultipleInCoreFunctions:
+    """Each InCore function is promoted independently in a single pass run: the
+    program loop (pass source lines 264-272) applies ``LowerInCoreFunction`` to
+    every InCore function. Here ``matmul_b`` promotes its B param (mirrors
+    ``TestBTransposePromotesParam.test_btranspose_basic``) and ``matmul_a``
+    promotes its A param (mirrors ``TestATransposePromotesParam``), proving the
+    two rewrites are isolated and both fire in one run."""
+
+    def test_two_incore_functions_promote_independently(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def matmul_b(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                b: pl.Tensor[[32, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                tile_a = pl.load(a, [0, 0], [64, 128], target_memory=pl.MemorySpace.Mat)
+                tile_b = pl.load(b, [0, 0], [32, 128], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
+                tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def matmul_a(
+                self,
+                a: pl.Tensor[[128, 64], pl.FP32],
+                b: pl.Tensor[[128, 32], pl.FP32],
+                c: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                tile_a = pl.load(a, [0, 0], [128, 64], target_memory=pl.MemorySpace.Mat, transpose=True)
+                tile_b = pl.load(b, [0, 0], [128, 32], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b, target_memory=pl.MemorySpace.Right)
+                tile_c = pl.matmul(tile_a_l0a, tile_b_l0b)
+                c_store = pl.store(tile_c, [0, 0], c)
+                return c_store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                b: pl.Tensor[[32, 128], pl.FP32],
+                a2: pl.Tensor[[128, 64], pl.FP32],
+                b2: pl.Tensor[[128, 32], pl.FP32],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                c: pl.Tensor[[64, 32], pl.FP32] = pl.create_tensor([64, 32], dtype=pl.FP32)
+                c1 = self.matmul_b(a, b, c)  # noqa: F841
+                c2t: pl.Tensor[[64, 32], pl.FP32] = pl.create_tensor([64, 32], dtype=pl.FP32)
+                c2 = self.matmul_a(a2, b2, c2t)
+                return c2
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def matmul_b(
+                a: pl.Tensor[[64, 128], pl.FP32],
+                b: pl.Tensor[[32, 128], pl.FP32],
+                c: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                # B-transpose promotion (same shape as test_btranspose_basic).
+                b_dn_view: pl.Tensor[
+                    [128, 32], pl.FP32, pl.TensorView(stride=[1, 128], layout=pl.TensorLayout.DN)
+                ] = pl.tensor.as_layout(b, layout=pl.TensorLayout.DN)
+                tile_a: pl.Tile[[64, 128], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    a, [0, 0], [64, 128], [64, 128], target_memory=pl.Mem.Mat, transpose=False
+                )
+                tile_b: pl.Tile[
+                    [128, 32],
+                    pl.FP32,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.tile.load(
+                    b_dn_view, [0, 0], [128, 32], [128, 32], target_memory=pl.Mem.Mat, transpose=False
+                )
+                tile_a_l0a: pl.Tile[[64, 128], pl.FP32, pl.Mem.Left] = pl.tile.move(
+                    tile_a, target_memory=pl.Mem.Left
+                )
+                tile_b_l0b: pl.Tile[[128, 32], pl.FP32, pl.Mem.Right] = pl.tile.move(
+                    tile_b, target_memory=pl.Mem.Right
+                )
+                tile_c: pl.Tile[[64, 32], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(tile_a_l0a, tile_b_l0b)
+                c_store: pl.Tensor[[64, 32], pl.FP32] = pl.tile.store(tile_c, [0, 0], c)
+                return c_store
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def matmul_a(
+                a: pl.Tensor[[128, 64], pl.FP32],
+                b: pl.Tensor[[128, 32], pl.FP32],
+                c: pl.Out[pl.Tensor[[64, 32], pl.FP32]],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                # A-transpose promotion (same shape as test_atranspose_basic).
+                a_dn_view: pl.Tensor[
+                    [64, 128], pl.FP32, pl.TensorView(stride=[1, 64], layout=pl.TensorLayout.DN)
+                ] = pl.tensor.as_layout(a, layout=pl.TensorLayout.DN)
+                tile_a: pl.Tile[
+                    [64, 128],
+                    pl.FP32,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.tile.load(
+                    a_dn_view, [0, 0], [64, 128], [64, 128], target_memory=pl.Mem.Mat, transpose=False
+                )
+                tile_b: pl.Tile[[128, 32], pl.FP32, pl.Mem.Mat] = pl.tile.load(
+                    b, [0, 0], [128, 32], [128, 32], target_memory=pl.Mem.Mat, transpose=False
+                )
+                tile_a_l0a: pl.Tile[[64, 128], pl.FP32, pl.Mem.Left] = pl.tile.move(
+                    tile_a, target_memory=pl.Mem.Left
+                )
+                tile_b_l0b: pl.Tile[[128, 32], pl.FP32, pl.Mem.Right] = pl.tile.move(
+                    tile_b, target_memory=pl.Mem.Right
+                )
+                tile_c: pl.Tile[[64, 32], pl.FP32, pl.Mem.Acc] = pl.tile.matmul(tile_a_l0a, tile_b_l0b)
+                c_store: pl.Tensor[[64, 32], pl.FP32] = pl.tile.store(tile_c, [0, 0], c)
+                return c_store
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[64, 128], pl.FP32],
+                b: pl.Tensor[[32, 128], pl.FP32],
+                a2: pl.Tensor[[128, 64], pl.FP32],
+                b2: pl.Tensor[[128, 32], pl.FP32],
+            ) -> pl.Tensor[[64, 32], pl.FP32]:
+                # Orch is untouched — both call sites pass their ND args through.
+                c: pl.Tensor[[64, 32], pl.FP32] = pl.tensor.create(
+                    [64, 32], dtype=pl.FP32, layout=pl.TensorLayout.ND
+                )
+                c1: pl.Tensor[[64, 32], pl.FP32] = self.matmul_b(a, b, c)  # noqa: F841
+                c2t: pl.Tensor[[64, 32], pl.FP32] = pl.tensor.create(
+                    [64, 32], dtype=pl.FP32, layout=pl.TensorLayout.ND
+                )
+                c2: pl.Tensor[[64, 32], pl.FP32] = self.matmul_a(a2, b2, c2t)
+                return c2
+
+        After = passes.lower_transpose_load_param_layout()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

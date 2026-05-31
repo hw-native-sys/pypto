@@ -36,6 +36,181 @@ def _run_inject(program: ir.Program) -> ir.Program:
         return passes.inject_gm_pipe_buffer()(passes.convert_to_ssa()(program))
 
 
+def test_inject_gm_pipe_buffer_is_no_op_on_non_gm_backend():
+    """The pass is gated on BackendHandler::RequiresGMPipeBuffer().
+
+    Ascend950 has a direct cross-core fabric (RequiresGMPipeBuffer() == false),
+    so InjectGMPipeBuffer must leave the IR untouched: no __gm_pipe_buffer
+    parameter on the pipe functions, no tensor.create in the orchestration.
+    Source: inject_gm_pipe_buffer_pass.cpp:435-438 returns `program` unchanged
+    when the backend does not require a GM pipe buffer; doc 22 lines 19, 24.
+
+    The "after" must be structurally identical to the SSA-converted "before"
+    (the pass did nothing), which is the precise semantic of a gated no-op.
+    """
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube_kernel(self):
+            c2v_peer = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="vector_kernel")
+            v2c_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=32768, base=0x1000)
+            pl.aic_initialize_pipe(c2v_peer, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192, id=0)
+            pl.aic_initialize_pipe(pl.const(0, pl.INT32), v2c_buf, dir_mask=2, slot_size=4096, id=1)
+
+        @pl.function(type=pl.FunctionType.AIV)
+        def vector_kernel(self):
+            c2v_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=65536, base=0x2000)
+            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_kernel")
+            pl.aiv_initialize_pipe(c2v_buf, pl.const(0, pl.INT32), dir_mask=1, slot_size=8192, id=0)
+            pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=4096, id=1)
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group_func(self):
+            self.cube_kernel()
+            self.vector_kernel()
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self):
+            self.group_func()
+
+    # The expected post-pass IR is exactly the SSA-converted input, unchanged.
+    with passes.PassContext([], ir.VerificationLevel.NONE):
+        ssa = passes.convert_to_ssa()(Before)
+        after = passes.inject_gm_pipe_buffer()(ssa)
+    ir.assert_structural_equal(after, ssa)
+
+
+@pytest.mark.xfail(
+    reason="suspected bug: GetCallFromStmt uses As<Call> (exact-kind), so a Group "
+    "launched via pl.submit is invisible to the call graph; the orchestration "
+    "gets no tensor.create and the Submit's args are not forwarded the buffer",
+    strict=False,
+)
+def test_gm_pipe_injection_handles_submit_launched_group():
+    """A Group launched via pl.submit from a manual_scope must be wired too.
+
+    Submit is a first-class call-like IR kind (pass-submit-awareness.md). On
+    910B, an Orchestration that launches a pipe-using Group via
+    `result, tid = pl.submit(self.group_func, ...)` must, per doc 22 lines
+    11-12 and Phase 3 (lines 61-65), receive a per-call-site placeholder
+    `tensor.create` and forward that workspace as an extra Submit argument —
+    exactly as it would for a plain `self.group_func(...)` Call.
+
+    The pass walks call sites through transform_utils::GetCallFromStmt
+    (inject_gm_pipe_buffer_pass.cpp:75,106,159,167,262,272), which is
+    As<Call> exact-kind matching and therefore skips Submit nodes. The
+    Expected below encodes the CORRECT behavior; if the pass diverges, this
+    test confirms the dispatch bug (xfail).
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        def vector_producer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ):
+            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
+            pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=v2c_peer)
+            tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+            pl.tpush_to_aic(tile_a, split=0)
+
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        def cube_consumer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+            pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=pipe_buf)
+            received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+            pl.tfree_to_aiv(received)
+            updated: pl.Tensor[[16, 16], pl.FP16] = pl.store(received, [0, 0], out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group_func(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            updated = self.cube_consumer(a, out)
+            self.vector_producer(a, out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            with pl.manual_scope():
+                updated, tid = pl.submit(self.group_func, a, out)
+            return updated
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
+        def cube_consumer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            pipe_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+            pl.aic_initialize_pipe(pl.const(0, pl.INT32), pipe_buf, dir_mask=2, slot_size=512)
+            received: pl.Tile[[16, 16], pl.FP16, pl.MemorySpace.Mat] = pl.tpop_from_aiv(split=0)
+            pl.tfree_to_aiv(received)
+            updated: pl.Tensor[[16, 16], pl.FP16] = pl.store(received, [0, 0], out)
+            return updated
+
+        @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
+        def vector_producer(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
+        ):
+            v2c_peer = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="cube_consumer")
+            pl.aiv_initialize_pipe(pl.const(0, pl.INT32), v2c_peer, dir_mask=2, slot_size=512)
+            tile_a: pl.Tile[[16, 16], pl.FP16] = pl.load(a, [0, 0], [16, 16])
+            pl.tpush_to_aic(tile_a, split=0)
+
+        @pl.function(type=pl.FunctionType.Group)
+        def group_func(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+            gm_pipe_buffer: pl.Out[pl.Tensor[[1], pl.FP32]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            updated = self.cube_consumer(a, out, gm_pipe_buffer)
+            self.vector_producer(a, out, gm_pipe_buffer)
+            return updated
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[16, 16], pl.FP16],
+            out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
+        ) -> pl.Tensor[[16, 16], pl.FP16]:
+            with pl.manual_scope():
+                gm_pipe_buffer_0: pl.Tensor[[1], pl.FP32] = pl.tensor.create(
+                    [1],
+                    dtype=pl.FP32,
+                    layout=pl.TensorLayout.ND,
+                    manual_dep=True,
+                )
+                updated, tid = pl.submit(self.group_func, a, out, gm_pipe_buffer_0)
+            return updated
+
+    After = _run_inject(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
 def test_gm_pipe_injection_preserves_split_mode_for_a2a3_cross_core_functions():
     @pl.program
     class Before:

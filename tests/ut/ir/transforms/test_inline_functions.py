@@ -87,6 +87,92 @@ class TestInlineFunctionsBasic:
         ir.assert_structural_equal(After, Before)
 
 
+class TestInlineFunctionsCallSiteForms:
+    """The three top-level call-site forms: AssignStmt, EvalStmt, self-aliasing.
+
+    The AssignStmt form is exercised throughout the file; these pin the two
+    less-common forms handled by ``HandleTopLevelInlineCall``."""
+
+    def test_eval_stmt_call_site_drops_return(self):
+        """A bare ``self.writeout(...)`` (EvalStmt, no LHS) splices only the
+        pre-return body and drops the trailing return value.
+
+        ``SpliceInlineCallAsEval`` (src lines 293-296) calls ``CloneInlineBody``
+        and returns ``body.stmts`` only — the trailing ``return out`` value is
+        discarded since there is no LHS to bind it to. The in-place rebinding
+        ``out = pl.assemble(out, x, ...)`` collapses to ``ext = pl.assemble(ext,
+        a, ...)`` under the ``x→a``, ``out→ext`` param substitution. The caller
+        deliberately does not read ``ext`` back (that would trip the
+        InOutUseDiscipline structural verifier); it returns an independent
+        value, so the dropped return is genuinely unused."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def writeout(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                out = pl.tensor.assemble(out, x, [0])
+                return out
+
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                self.writeout(a, ext)  # EvalStmt call site — no LHS
+                b: pl.Tensor[[4], pl.FP32] = pl.tensor.assemble(a, a, [0])
+                return b
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                ext = pl.tensor.assemble(ext, a, [0])  # spliced; trailing return dropped
+                b: pl.Tensor[[4], pl.FP32] = pl.tensor.assemble(a, a, [0])
+                return b
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_self_aliasing_assign_skips_redundant_copy(self):
+        """``a = self.passthrough(a)`` where the inline returns its param
+        verbatim emits NO assignment — the ``lhs = lhs`` no-op is elided.
+
+        ``SpliceInlineCallAsAssign`` (src lines 313-318): the substituted return
+        value is the Var ``a`` and the call-site LHS is also ``a``, so
+        ``var_expr.get() == lhs.get()`` holds and the body's stmts (empty here)
+        are returned without appending ``a = a``. ``main`` collapses to a bare
+        ``return a``."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def passthrough(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                return x
+
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                a = self.passthrough(a)  # arg == LHS Var → redundant copy elided
+                return a
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                return a
+
+        After = passes.inline_functions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 class TestInlineFunctionsMultiCallSite:
     """Multiple call sites of the same Inline function: each gets a fresh expansion."""
 
@@ -262,33 +348,65 @@ class TestInlineFunctionsBodyShapes:
         ir.assert_structural_equal(After, Expected)
 
     def test_inline_body_with_pl_range(self):
-        """An Inline body containing ``for i in pl.range(...)`` splices the loop intact."""
+        """An Inline body containing ``for i in pl.range(...)`` splices the loop
+        intact, with the loop body alpha-renamed and params substituted.
+
+        Uses an in-place ``pl.Out`` rebinding inside the loop (no loop-carried
+        return var) so the spliced shape is hand-derivable: ``CloneInlineBody``
+        deep-clones the For body with ``x→a``, ``out→ext`` (param substitution
+        carried into both use- and def-sites, src lines 224-242), the base
+        IRMutator mints a fresh loop var, and the trailing ``return out`` aliases
+        to the call-site LHS (``r = ext``)."""
 
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.Inline)
-            def helper(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                acc: pl.Tensor[[1], pl.INT32] = x
+            def helper(
+                self,
+                x: pl.Tensor[[4], pl.FP32],
+                out: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
                 for i in pl.range(4):
-                    acc = pl.add(acc, x)
-                return acc
+                    out = pl.tensor.assemble(out, x, [0])
+                return out
 
             @pl.function
-            def main(self, a: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
-                r: pl.Tensor[[1], pl.INT32] = self.helper(a)
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                r: pl.Tensor[[4], pl.FP32] = self.helper(a, ext)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                a: pl.Tensor[[4], pl.FP32],
+                ext: pl.Out[pl.Tensor[[4], pl.FP32]],
+            ) -> pl.Tensor[[4], pl.FP32]:
+                for i in pl.range(4):
+                    ext = pl.tensor.assemble(ext, a, [0])
+                r: pl.Tensor[[4], pl.FP32] = ext  # trailing return aliased to LHS
                 return r
 
         After = passes.inline_functions()(Before)
-        # helper is gone; main contains the spliced loop.
-        names = [f.name for f in After.functions.values()]
-        assert names == ["main"]
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestInlineFunctionsDeadCode:
     """Inline functions with no callers."""
 
     def test_no_callers_silently_dropped(self):
-        """An Inline function with no call sites is removed from the program."""
+        """An Inline function with no call sites is removed from the program and
+        the surviving caller body is left byte-for-byte unchanged.
+
+        ``unused`` has no Call site, so the fixpoint loop never splices it (no
+        ``any_changed``); the cleanup phase (src lines 596-603) drops it purely
+        because ``func_type_ == Inline``. ``main`` carries no inline call, so it
+        passes through verbatim — hence Expected is just ``main`` alone."""
 
         @pl.program
         class Before:
@@ -302,9 +420,15 @@ class TestInlineFunctionsDeadCode:
                 y: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
                 return y
 
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, x: pl.Tensor[[1], pl.INT32]) -> pl.Tensor[[1], pl.INT32]:
+                y: pl.Tensor[[1], pl.INT32] = pl.mul(x, x)
+                return y
+
         After = passes.inline_functions()(Before)
-        names = [f.name for f in After.functions.values()]
-        assert names == ["main"]
+        ir.assert_structural_equal(After, Expected)
 
 
 class TestInlineFunctionsInDefaultPipeline:
@@ -678,6 +802,64 @@ class TestInlineReturnAndMultiReturn:
                 return y0, y1
 
         ir.assert_structural_equal(After, Expected)
+
+
+class TestInlineFunctionsSubmitCallSite:
+    """Inline callee launched via ``pl.submit`` inside a ``pl.manual_scope``.
+
+    ``CalledInlineCollector`` and ``InlineCallsMutator`` dispatch on ``CallPtr``
+    only (src lines 53, 449-468, 486-491) — a ``Submit`` of an Inline function
+    is never recognised as a call site. The cleanup phase still drops the Inline
+    function unconditionally (``func_type_ == Inline``), so the ``pl.submit(
+    self.helper, ...)`` is left dangling, referencing a deleted function. Per
+    ``.claude/rules/pass-submit-awareness.md`` (rule 1: "When walking calls,
+    walk Submit too"), this is a silent-skip bug surfacing inside
+    ``manual_scope`` bodies.
+    """
+
+    @pytest.mark.xfail(
+        reason="suspected bug: pl.submit of an Inline fn is not inlined; "
+        "the fn is dropped but the dangling Submit survives and the "
+        "InlineFunctionsEliminated verifier does not flag it",
+        strict=False,
+    )
+    def test_submit_of_inline_eliminates_reference(self):
+        """After the pass, no reference (Call OR Submit) to a dropped Inline
+        function may survive — the documented ``InlineFunctionsEliminated``
+        contract (doc §Verification: "No Call whose callee resolves to one
+        survives"), extended to Submit per the submit-awareness rule.
+
+        The semantically-correct outcome is that the verifier reports an error
+        for the surviving ``pl.submit(self.helper, ...)`` (or, better, the pass
+        splices it away). The current pass produces neither: 0 verifier errors
+        and a live dangling submit."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Inline)
+            def helper(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, a_tid = pl.submit(self.helper, x)
+                return a
+
+        After = passes.inline_functions()(Before)
+
+        # The Inline function `helper` is dropped, so any surviving reference to
+        # it (here a Submit) is a dangling reference and must be reported by the
+        # InlineFunctionsEliminated verifier.
+        ps = core_passes.IRPropertySet()
+        ps.insert(core_passes.IRProperty.InlineFunctionsEliminated)
+        diagnostics = core_passes.PropertyVerifierRegistry.verify(ps, After)
+        errors = [d for d in diagnostics if d.severity == core_passes.DiagnosticSeverity.Error]
+        assert errors, (
+            "Expected the verifier to flag the surviving pl.submit(self.helper, ...) "
+            "after `helper` was dropped, but it reported no errors."
+        )
 
 
 if __name__ == "__main__":

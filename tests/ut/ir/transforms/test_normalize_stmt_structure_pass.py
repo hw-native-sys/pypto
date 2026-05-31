@@ -155,6 +155,198 @@ def test_flattens_nested_seqstmts():
     ir.assert_structural_equal(After, Expected)
 
 
+def test_for_body_flattens_nested_seqstmts():
+    """A ForStmt whose body is a nested ``SeqStmts`` gets its body flattened
+    while the ``ForStmt`` node (loop var, range, iter_args, return_vars) is
+    preserved.
+
+    ``VisitStmt_(ForStmtPtr)`` (normalize_stmt_structure.cpp:127) normalizes
+    the body via ``NormalizeBody`` → ``VisitStmt`` → ``VisitStmt_(SeqStmtsPtr)``,
+    which absorbs a nested ``SeqStmts`` child (lines 78-82). The loop scaffolding
+    is rebuilt via ``MutableCopy`` (lines 138-143), keeping it structurally
+    identical. Built via raw ``ir.*`` — the DSL parser never nests SeqStmts.
+    """
+    span = ir.Span.unknown()
+    int_ty = ir.ScalarType(DataType.INT64)
+    index_ty = ir.ScalarType(DataType.INDEX)
+
+    a = ir.Var("a", int_ty, span)
+    loop_var = ir.Var("i", index_ty, span)
+    iter_arg = ir.IterArg("acc", int_ty, a, span)
+    rv = ir.Var("result", int_ty, span)
+
+    def make_program(body: ir.Stmt) -> ir.Program:
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(10, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            [iter_arg],
+            body,
+            [rv],
+            span,
+        )
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("main", [a], [int_ty], func_body, span)
+        return ir.Program([func], "test_program", span)
+
+    assign = ir.AssignStmt(
+        ir.Var("tmp", int_ty, span),
+        ir.Add(iter_arg, loop_var, DataType.INT64, span),
+        span,
+    )
+    yield_stmt = ir.YieldStmt([iter_arg], span)
+
+    # Before: loop body's first child is itself a SeqStmts (one nesting level).
+    Before = make_program(ir.SeqStmts([ir.SeqStmts([assign], span), yield_stmt], span))
+    # Expected: nested SeqStmts absorbed into a single flat loop body.
+    Expected = make_program(ir.SeqStmts([assign, yield_stmt], span))
+
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.normalize_stmt_structure()(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_if_then_and_else_bodies_normalized():
+    """An IfStmt with a nested-SeqStmts then-branch and a single-child-SeqStmts
+    else-branch gets both branches normalized; the ``IfStmt`` node is preserved.
+
+    ``VisitStmt_(IfStmtPtr)`` (normalize_stmt_structure.cpp:99) normalizes
+    ``then_body_`` and ``else_body_`` via ``NormalizeBody``. The then-branch's
+    nested ``SeqStmts`` is flattened; the else-branch's single-child ``SeqStmts``
+    is unwrapped to the bare child (lines 89-91). Built via raw ``ir.*``.
+    """
+    span = ir.Span.unknown()
+    int_ty = ir.ScalarType(DataType.INT64)
+
+    a = ir.Var("a", int_ty, span)
+    rv = ir.Var("result", int_ty, span)
+    condition = ir.Gt(a, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+
+    assign = ir.AssignStmt(ir.Var("tmp", int_ty, span), a, span)
+    then_yield = ir.YieldStmt([a], span)
+    else_yield = ir.YieldStmt([ir.ConstInt(0, DataType.INT64, span)], span)
+
+    def make_program(then_body: ir.Stmt, else_body: ir.Stmt) -> ir.Program:
+        if_stmt = ir.IfStmt(condition, then_body, else_body, [rv], span)
+        func_body = ir.SeqStmts([if_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("main", [a], [int_ty], func_body, span)
+        return ir.Program([func], "test_program", span)
+
+    # Before: then-branch is a nested SeqStmts; else-branch is a single-child SeqStmts.
+    Before = make_program(
+        ir.SeqStmts([ir.SeqStmts([assign], span), then_yield], span),
+        ir.SeqStmts([else_yield], span),
+    )
+    # Expected: then-branch flattened; else-branch unwrapped to the bare YieldStmt.
+    Expected = make_program(
+        ir.SeqStmts([assign, then_yield], span),
+        else_yield,
+    )
+
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.normalize_stmt_structure()(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_while_body_flattens_nested_seqstmts():
+    """A WhileStmt whose body is a nested ``SeqStmts`` gets its body flattened
+    while the ``WhileStmt`` node (condition, iter_args, return_vars) is preserved.
+
+    ``VisitStmt_(WhileStmtPtr)`` (normalize_stmt_structure.cpp:148) normalizes
+    the body via ``NormalizeBody`` and rebuilds the loop via ``MutableCopy``
+    (lines 157-160). Built via raw ``ir.*``.
+    """
+    span = ir.Span.unknown()
+    int_ty = ir.ScalarType(DataType.INT64)
+
+    a = ir.Var("a", int_ty, span)
+    iter_arg = ir.IterArg("acc", int_ty, a, span)
+    rv = ir.Var("result", int_ty, span)
+    condition = ir.Gt(iter_arg, ir.ConstInt(0, DataType.INT64, span), DataType.BOOL, span)
+
+    assign = ir.AssignStmt(
+        ir.Var("tmp", int_ty, span),
+        ir.Add(iter_arg, ir.ConstInt(1, DataType.INT64, span), DataType.INT64, span),
+        span,
+    )
+    yield_stmt = ir.YieldStmt([iter_arg], span)
+
+    def make_program(body: ir.Stmt) -> ir.Program:
+        while_stmt = ir.WhileStmt(condition, [iter_arg], body, [rv], span)
+        func_body = ir.SeqStmts([while_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("main", [a], [int_ty], func_body, span)
+        return ir.Program([func], "test_program", span)
+
+    # Before: loop body's first child is itself a SeqStmts (one nesting level).
+    Before = make_program(ir.SeqStmts([ir.SeqStmts([assign], span), yield_stmt], span))
+    # Expected: nested SeqStmts absorbed into a single flat loop body.
+    Expected = make_program(ir.SeqStmts([assign, yield_stmt], span))
+
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.normalize_stmt_structure()(Before)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_idempotence_on_malformed_loop_body():
+    """Real idempotency: the pass rewrites a malformed (nested-SeqStmts) loop
+    body once, then the second application is a no-op.
+
+    Unlike ``test_idempotence`` (which starts from an already-normal body where
+    ``Before == Expected``), this case has ``Before != Expected``: the first
+    application flattens the nested loop body, and a second application of the
+    pass leaves the now-normalized program unchanged.
+    """
+    span = ir.Span.unknown()
+    int_ty = ir.ScalarType(DataType.INT64)
+    index_ty = ir.ScalarType(DataType.INDEX)
+
+    a = ir.Var("a", int_ty, span)
+    loop_var = ir.Var("i", index_ty, span)
+    iter_arg = ir.IterArg("acc", int_ty, a, span)
+    rv = ir.Var("result", int_ty, span)
+
+    def make_program(body: ir.Stmt) -> ir.Program:
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, DataType.INDEX, span),
+            ir.ConstInt(10, DataType.INDEX, span),
+            ir.ConstInt(1, DataType.INDEX, span),
+            [iter_arg],
+            body,
+            [rv],
+            span,
+        )
+        func_body = ir.SeqStmts([for_stmt, ir.ReturnStmt([rv], span)], span)
+        func = ir.Function("main", [a], [int_ty], func_body, span)
+        return ir.Program([func], "test_program", span)
+
+    assign_a = ir.AssignStmt(
+        ir.Var("t0", int_ty, span),
+        ir.Add(iter_arg, loop_var, DataType.INT64, span),
+        span,
+    )
+    assign_b = ir.AssignStmt(
+        ir.Var("t1", int_ty, span),
+        ir.Add(iter_arg, iter_arg, DataType.INT64, span),
+        span,
+    )
+    yield_stmt = ir.YieldStmt([iter_arg], span)
+
+    # Before != Expected: loop body has a nested SeqStmts that must be flattened.
+    Before = make_program(ir.SeqStmts([ir.SeqStmts([assign_a, assign_b], span), yield_stmt], span))
+    Expected = make_program(ir.SeqStmts([assign_a, assign_b, yield_stmt], span))
+
+    with passes.PassContext([], passes.VerificationLevel.NONE):
+        After = passes.normalize_stmt_structure()(Before)
+        # First application performs the rewrite.
+        ir.assert_structural_equal(After, Expected)
+
+        # Second application is a no-op on the now-normalized program.
+        After2 = passes.normalize_stmt_structure()(After)
+    ir.assert_structural_equal(After2, Expected)
+
+
 def test_no_redundant_blocks_rejects_mid_body_yield():
     """NoRedundantBlocks rejects a YieldStmt at a non-trailing position of a
     SeqStmts. Function body has no iter_args context, so SSAVerify's

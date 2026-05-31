@@ -1617,5 +1617,327 @@ class TestInferTileMemorySpaceSSAAlias:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestInferTileMemorySpaceLoopCarried:
+    """ForStmt accumulator back-propagation (analyzer VisitStmt_(ForStmt)).
+
+    When a loop body writes a non-Vec space (e.g. Acc from matmul_acc) into a
+    yielded tile, the analyzer copies that space onto the matching return_var,
+    the iter_arg, AND the TileType init carrier underneath the iter_arg
+    (cpp lines 213-247). This is what fixes the accumulator pattern where a
+    conservative `tile.create -> Vec` init would otherwise leave the final
+    `tile.store` reading a Vec tile and mislead ExpandMixedKernel.
+    """
+
+    def test_forstmt_accumulator_backprops_acc_to_create_init(self):
+        """`acc0 = tile.create` (Vec default) carried into a matmul_acc loop is
+        back-propagated to Acc.
+
+        Derivation (no snapshot):
+        - `matmul_acc` resolves its output to Acc via `set_output_memory(Acc)`,
+          so the yielded `acc_next` is Acc.
+        - ForStmt back-prop sets `return_vars_[0]` (r), `iter_args_[0]` (acc),
+          and the init carrier `acc0` all to Acc (cpp 230, 238, 244-246).
+        - `acc0 = tile.create` is a retargetable producer, so Phase 3 rewrites
+          its absent/Vec `target_memory` kwarg to Acc and refreshes its type
+          (cpp 508-547, doc step 4).
+        - `matmul_acc` input 0 now reads an Acc `acc`, inputs 1/2 already
+          Left/Right -> no moves inserted. `tile.store` accepts {Vec, Acc}, so
+          the Acc `r` needs no move.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 16], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                acc0: pl.Tile[[16, 16], pl.FP32] = pl.tile.create([16, 16], dtype=pl.FP32)
+                lhs_m: pl.Tile[[16, 32], pl.BF16] = pl.load(
+                    lhs, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_m: pl.Tile[[32, 16], pl.BF16] = pl.load(
+                    rhs, [0, 0], [32, 16], target_memory=pl.MemorySpace.Mat
+                )
+                lhs_l: pl.Tile[[16, 32], pl.BF16] = pl.move(lhs_m, target_memory=pl.MemorySpace.Left)
+                rhs_r: pl.Tile[[32, 16], pl.BF16] = pl.move(rhs_m, target_memory=pl.MemorySpace.Right)
+                for i, (acc,) in pl.range(0, 4, 1, init_values=(acc0,)):
+                    acc_next: pl.Tile[[16, 16], pl.FP32] = pl.matmul_acc(acc, lhs_l, rhs_r)
+                    r = pl.yield_(acc_next)
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(r, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 16], pl.BF16],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                return self.main_incore_0(lhs, rhs, out_0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                lhs: pl.Tensor[[16, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 16], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # acc0 promoted Vec -> Acc; target_memory kwarg rewritten to Acc.
+                acc0: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.tile.create(
+                    [16, 16], dtype=pl.FP32, target_memory=pl.MemorySpace.Acc
+                )
+                lhs_m: pl.Tile[[16, 32], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    lhs, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_m: pl.Tile[[32, 16], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    rhs, [0, 0], [32, 16], target_memory=pl.MemorySpace.Mat
+                )
+                lhs_l: pl.Tile[[16, 32], pl.BF16, pl.MemorySpace.Left] = pl.move(
+                    lhs_m, target_memory=pl.MemorySpace.Left
+                )
+                rhs_r: pl.Tile[[32, 16], pl.BF16, pl.MemorySpace.Right] = pl.move(
+                    rhs_m, target_memory=pl.MemorySpace.Right
+                )
+                # iter_arg acc and return_var r both back-propagated to Acc.
+                for i, (acc,) in pl.range(0, 4, 1, init_values=(acc0,)):
+                    acc_next: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.matmul_acc(
+                        acc, lhs_l, rhs_r
+                    )
+                    r = pl.yield_(acc_next)
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(r, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                lhs: pl.Tensor[[16, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 16], pl.BF16],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                return self.main_incore_0(lhs, rhs, out_0)
+
+        After = passes.infer_tile_memory_space()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_ifstmt_return_var_init_backprops_acc(self):
+        """An IfStmt return_var used as a loop init is back-propagated to Acc.
+
+        This targets the IfStmt-return_var fallback in ForStmt analysis: the
+        analyzer never visits an IfStmt return_var as an AssignStmt, so it would
+        otherwise keep its annotation (Mat here). When that var is the loop init
+        whose iter_arg yields Acc, cpp lines 243-246 force `var_memory_[init_var]
+        = Acc`, and the fallback at cpp 222-227 reads the yielded IfStmt-result's
+        TileType annotation when resolving the loop return.
+
+        Derivation (no snapshot):
+        - Both branches yield a Mat tile, so `sel` (IfStmt return_var) is Mat.
+        - The loop body's `matmul_acc(acc, lhs_l, rhs_r)` resolves to Acc, so
+          `acc_next` (yield) is Acc.
+        - Back-prop: r -> Acc, iter_arg acc -> Acc, and `sel` (the init carrier)
+          -> Acc (cpp 244-246). Phase 3 rewrites `sel`'s Var type to Acc.
+        - The inner branch loads stay Mat (unchanged). The pass does not insert
+          a legalization move inside the if-branches for `sel` (IfStmt yields are
+          invisible to MoveCollector); this fallback only forces the annotation.
+        - `tile.store` reads the Acc `r` -> no move.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                lhs: pl.Tensor[[16, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 16], pl.BF16],
+                flag: pl.Scalar[pl.INT32],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs_m: pl.Tile[[16, 32], pl.BF16] = pl.load(
+                    lhs, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_m: pl.Tile[[32, 16], pl.BF16] = pl.load(
+                    rhs, [0, 0], [32, 16], target_memory=pl.MemorySpace.Mat
+                )
+                lhs_l: pl.Tile[[16, 32], pl.BF16] = pl.move(lhs_m, target_memory=pl.MemorySpace.Left)
+                rhs_r: pl.Tile[[32, 16], pl.BF16] = pl.move(rhs_m, target_memory=pl.MemorySpace.Right)
+                if flag > 0:
+                    a: pl.Tile[[16, 16], pl.FP32] = pl.load(
+                        x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+                    )
+                    sel = pl.yield_(a)
+                else:
+                    b: pl.Tile[[16, 16], pl.FP32] = pl.load(
+                        x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+                    )
+                    sel = pl.yield_(b)
+                for i, (acc,) in pl.range(0, 4, 1, init_values=(sel,)):
+                    acc_next: pl.Tile[[16, 16], pl.FP32] = pl.matmul_acc(acc, lhs_l, rhs_r)
+                    r = pl.yield_(acc_next)
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(r, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                lhs: pl.Tensor[[16, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 16], pl.BF16],
+                flag: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                return self.main_incore_0(x, lhs, rhs, flag, out_0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                lhs: pl.Tensor[[16, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 16], pl.BF16],
+                flag: pl.Scalar[pl.INT32],
+                out_0: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                lhs_m: pl.Tile[[16, 32], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    lhs, [0, 0], [16, 32], target_memory=pl.MemorySpace.Mat
+                )
+                rhs_m: pl.Tile[[32, 16], pl.BF16, pl.MemorySpace.Mat] = pl.load(
+                    rhs, [0, 0], [32, 16], target_memory=pl.MemorySpace.Mat
+                )
+                lhs_l: pl.Tile[[16, 32], pl.BF16, pl.MemorySpace.Left] = pl.move(
+                    lhs_m, target_memory=pl.MemorySpace.Left
+                )
+                rhs_r: pl.Tile[[32, 16], pl.BF16, pl.MemorySpace.Right] = pl.move(
+                    rhs_m, target_memory=pl.MemorySpace.Right
+                )
+                if flag > 0:
+                    a: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Mat] = pl.load(
+                        x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+                    )
+                    # sel (IfStmt return_var) forced to Acc by ForStmt back-prop.
+                    sel: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.yield_(a)
+                else:
+                    b: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Mat] = pl.load(
+                        x, [0, 0], [16, 16], target_memory=pl.MemorySpace.Mat
+                    )
+                    sel: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.yield_(b)
+                for i, (acc,) in pl.range(0, 4, 1, init_values=(sel,)):
+                    acc_next: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Acc] = pl.matmul_acc(
+                        acc, lhs_l, rhs_r
+                    )
+                    r = pl.yield_(acc_next)
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.store(r, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 16], pl.FP32],
+                lhs: pl.Tensor[[16, 32], pl.BF16],
+                rhs: pl.Tensor[[32, 16], pl.BF16],
+                flag: pl.Scalar[pl.INT32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                out_0: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
+                return self.main_incore_0(x, lhs, rhs, flag, out_0)
+
+        After = passes.infer_tile_memory_space()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+class TestInferTileMemorySpaceDemandBackprop:
+    """Backward demand propagation through inherit-input view chains (Phase 0).
+
+    A `tile.load` with no `target_memory` kwarg feeding a `tile.slice`
+    (`OutputMemoryInheritsInput`) into a `tile.matmul` (input 0 demands Left).
+    Phase 0 records the Left demand on the slice output and propagates it back
+    through the slice->load inherit-input edge onto the load.
+    """
+
+    def test_load_slice_matmul_demand_clamps_to_vec_then_moves(self):
+        """Left demand back-propagated to a retargetable `tile.load` is clamped
+        to Vec, with the Left/Right moves inserted at the matmul.
+
+        Derivation (no snapshot):
+        - Phase 0 records matmul input-0 demand Left on `x_sl`, then propagates
+          it back through the slice->load inherit-input edge onto `x_tile`
+          (cpp 106-157, doc 41-50).
+        - Phase 1: `x_tile = tile.load` is retargetable with demand Left. The
+          clamp keeps retargetable DDR producers in {Vec, Mat} (cpp 293-303,
+          doc 76-79); Left is neither, so it falls through to Vec.
+        - `x_sl = tile.slice` inherits Vec from `x_tile`; `y_tile = tile.load`
+          (no demand) resolves to Vec.
+        - matmul demands Left/Right but the operands are Vec, so Phase 2/3
+          insert `x_sl_Left` and `y_tile_Right` moves before the matmul, which
+          itself resolves to Acc. `tile.store` accepts Acc -> no move.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 256], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                x_tile: pl.Tile[[16, 256], pl.BF16] = pl.load(x, [0, 0], [16, 256])
+                x_sl: pl.Tile[[16, 128], pl.BF16] = pl.tile.slice(x_tile, [16, 128], [0, 0])
+                y_tile: pl.Tile[[128, 128], pl.BF16] = pl.load(y, [0, 0], [128, 128])
+                z_tile: pl.Tile[[16, 128], pl.FP32] = pl.matmul(x_sl, y_tile)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 256], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                return self.main_incore_0(x, y, out_0)
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[16, 256], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                # Left demand clamped to Vec on the retargetable load.
+                x_tile: pl.Tile[[16, 256], pl.BF16, pl.MemorySpace.Vec] = pl.load(x, [0, 0], [16, 256])
+                x_sl: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Vec] = pl.tile.slice(
+                    x_tile, [16, 128], [0, 0]
+                )
+                y_tile: pl.Tile[[128, 128], pl.BF16, pl.MemorySpace.Vec] = pl.load(y, [0, 0], [128, 128])
+                x_sl_L: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Left] = pl.move(
+                    x_sl, target_memory=pl.MemorySpace.Left
+                )
+                y_tile_R: pl.Tile[[128, 128], pl.BF16, pl.MemorySpace.Right] = pl.move(
+                    y_tile, target_memory=pl.MemorySpace.Right
+                )
+                z_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Acc] = pl.matmul(x_sl_L, y_tile_R)
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[16, 256], pl.BF16],
+                y: pl.Tensor[[128, 128], pl.BF16],
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                out_0: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                return self.main_incore_0(x, y, out_0)
+
+        After = passes.infer_tile_memory_space()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

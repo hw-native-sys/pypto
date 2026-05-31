@@ -1011,6 +1011,38 @@ class TestConstantIfCollapse:
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
 
+    def test_always_false_no_else_drops_if_entirely(self):
+        """`if i == -1` with no else and i ∈ [0, 8): the whole IfStmt vanishes.
+
+        Fold A's always-false / no-else / empty-return_vars edge case
+        (simplify_pass.cpp:462-469): when the condition is provably false and
+        there is no else branch, the kept branch is an empty body
+        (``loop_repair::MakeBody({})``) — the IfStmt is dropped entirely rather
+        than collapsed to a branch. The surrounding loop keeps only its other
+        statement (here the trailing unconditional write), since an empty
+        for-body is not representable in the DSL.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(0, 8, 2):
+                    if i == -1:
+                        y: pl.Scalar[pl.INDEX] = 99
+                        pl.tensor.write(out, [i], y)
+                    pl.tensor.write(out, [i], i)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self, out: pl.Tensor[[8], pl.INDEX]):
+                for i in pl.range(0, 8, 2):
+                    pl.tensor.write(out, [i], i)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
     def test_always_false_via_loop_affine_scalar(self):
         """A dead `if` guarded by a scalar bound to a loop-affine expression folds.
 
@@ -1130,6 +1162,36 @@ class TestSingleTripLoopCollapse:
             @pl.function
             def main(self):
                 _t: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_zero_trip_loop_drops_body_no_return_vars(self):
+        """`for _i in pl.range(0, 0)`: trip 0 with no return vars collapses to
+        an empty body.
+
+        Fold B's zero-trip branch (simplify_pass.cpp:272-281) proves
+        ``stop <= start`` for ``pl.range(0, 0)`` (step 1, so ``CanProveGreaterEqual
+        (step, 1)`` holds), then emits one ``AssignStmt(return_vars[i], init)``
+        per return var and drops the body. With an empty ``return_vars_`` the
+        emitted vector is empty, so ``loop_repair::MakeBody({})`` yields an
+        empty body and the whole loop vanishes — leaving the function body
+        empty (the Call-backed ``tensor.create`` inside the dead loop is
+        discarded with the body, since the body never executes).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self):
+                for _i in pl.range(0, 0):
+                    _t: pl.Tensor[[16], pl.FP32] = pl.tensor.create([16], dtype=pl.FP32)
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(self):
+                pass
 
         after = passes.simplify()(Before)
         ir.assert_structural_equal(after, Expected)
@@ -1317,6 +1379,158 @@ class TestAsLayoutFolding:
 
         after = passes.simplify()(Before)
         # Substantive flip is not a layout-tag identity, so it is preserved.
+        ir.assert_structural_equal(after, Before)
+
+
+# ============================================================================
+# SpmdScope core_num folding
+# ============================================================================
+
+
+class TestSpmdScopeCoreNum:
+    """Simplify folds the ``core_num_`` expression of a pre-outline
+    ``SpmdScopeStmt`` (simplify_pass.cpp:383-395, doc §Algorithm step 2 last
+    bullet). Closure arithmetic such as ``MAX // TILE`` arrives as an un-folded
+    ``FloorDiv`` after parsing; one Simplify pass reduces it to a literal so
+    later outlining records a concrete ``core_num`` attr.
+
+    ``pl.spmd(pl.const(8, ...) // pl.const(2, ...))`` reaches the parser as an
+    un-folded ``FloorDiv`` (two distinct ``ConstInt`` nodes — Python never sees
+    two bare literals to pre-fold), so this stays a style-A ``@pl.program``
+    test. The with-form body is a single InCore kernel call, the historical
+    ``SpmdScopeStmt(<call>)`` shape the parser preserves when no optimizations
+    are passed.
+    """
+
+    def test_spmd_core_num_floordiv_folds(self):
+        """`with pl.spmd(8 // 2)` → `with pl.spmd(4)`: only core_num_ changes."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                out: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.spmd(pl.const(8, pl.INDEX) // pl.const(2, pl.INDEX)):
+                    out = self.kernel(x, out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                out: pl.Tensor[[64], pl.FP32] = pl.store(x_tile, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.spmd(pl.const(4, pl.INDEX)):
+                    out = self.kernel(x, out)
+                return out
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+
+# ============================================================================
+# Submit-awareness: Simplify walks Submit args and deps (see
+# .claude/rules/pass-submit-awareness.md). A pl.submit inside pl.manual_scope
+# is a first-class Submit; folding must reach its args/types and its dep edges
+# must keep TaskId scalars live.
+# ============================================================================
+
+
+class TestManualScopeSubmit:
+    def test_folds_shape_into_submit_arg_preserving_submit(self):
+        """A top-level constant folds into a tensor shape that feeds a
+        pl.submit inside pl.manual_scope.
+
+        ``N = 4`` propagates into ``pl.tensor.create([N, 8], ...)`` and into the
+        ``Submit``'s positional-arg type (the base IRMutator walks Submit args,
+        mutator.cpp:407-415, so the leaf folds reach the rebuilt arg type). The
+        dead ``N`` scalar binding is then dropped by scalar DCE, while the
+        Submit-backed assignment is preserved — Submit is call-like, so DCE
+        never prunes it. The single-LHS ``res = pl.submit(...)`` form keeps the
+        body to one statement (no trailing unused TaskId projection to DCE).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                return t
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                N: pl.Scalar[pl.INDEX] = 4
+                t: pl.Tensor[[N, 8], pl.FP32] = pl.tensor.create([N, 8], dtype=pl.FP32)
+                with pl.manual_scope():
+                    res = pl.submit(self.kernel, t)  # noqa: F841
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                return t
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                t: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
+                with pl.manual_scope():
+                    res = pl.submit(self.kernel, t)  # noqa: F841
+
+        after = passes.simplify()(Before)
+        ir.assert_structural_equal(after, Expected)
+
+    def test_submit_dep_keeps_taskid_scalar_alive(self):
+        """A TaskId scalar referenced by a later Submit's ``deps_`` is NOT
+        dropped by scalar DCE — Simplify walks ``Submit.deps_`` as part of the
+        use-def chain (pass-submit-awareness.md rule 2; mutator.cpp:417-429).
+
+        ``a_tid`` is bound from ``_submit_tmp[1]`` (a scalar TASK_ID, non-Call
+        RHS — normally a DCE candidate) but is consumed by the second submit's
+        ``deps=[a_tid]``. Because the dep edge is a real SSA use that the
+        traversal sees, ``a_tid`` survives and the program is unchanged. If
+        Simplify ignored ``deps_``, ``a_tid`` would look dead and be pruned.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(self, t: pl.Tensor[[4, 8], pl.FP32]) -> pl.Tensor[[4, 8], pl.FP32]:
+                return t
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self):
+                t: pl.Tensor[[4, 8], pl.FP32] = pl.tensor.create([4, 8], dtype=pl.FP32)
+                with pl.manual_scope():
+                    a, a_tid = pl.submit(self.kernel, t)
+                    res2 = pl.submit(self.kernel, a, deps=[a_tid])  # noqa: F841
+
+        after = passes.simplify()(Before)
+        # No foldable exprs; a_tid is kept alive solely by the second Submit's
+        # deps_ edge, so the program is structurally unchanged.
         ir.assert_structural_equal(after, Before)
 
 

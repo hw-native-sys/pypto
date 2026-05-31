@@ -424,6 +424,248 @@ class TestCanonicalizeIOOrder:
         After = _run_pass(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_yield_terminator_stays_last_after_store_sinks(self):
+        """A trailing ``YieldStmt`` is peeled off the region, the remaining
+        non-terminator stmts are priority-sorted, then the terminator is
+        re-appended last — so a sunk ``tile.store`` can never end up after the
+        yield (which would make the store unreachable).
+
+        Body in source order is ``[load t, store(t), nxt = acc + i, yield(nxt)]``.
+        Categories of the 3 non-terminators: ``t``=Load(1), ``store``=Store(3),
+        ``nxt``=ScalarCompute(0). Dependency edges within the region:
+        ``store`` ← ``t``; ``nxt`` reads loop-level ``acc``/``i`` only, so it has
+        no intra-region predecessor. Priority-aware topo sort emits
+        ``nxt`` (cat 0) → ``t`` (cat 1) → ``store`` (cat 3); the peeled
+        ``yield`` is re-appended last. (pass source: IsTerminator + ReorderRegion
+        terminator peeling, lines 137-142, 227-282.)
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                in_a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Tensor[[64, 64], pl.FP32],
+                s0: pl.Scalar[pl.INDEX],
+            ) -> pl.Scalar[pl.INDEX]:
+                for i, (acc,) in pl.pipeline(0, 2, 1, stage=1, init_values=(s0,)):
+                    t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                    pl.tile.store(t, [0, 0], out)
+                    nxt: pl.Scalar[pl.INDEX] = acc + i
+                    r = pl.yield_(nxt)
+                return r
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(
+                self,
+                in_a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Tensor[[64, 64], pl.FP32],
+                s0: pl.Scalar[pl.INDEX],
+            ) -> pl.Scalar[pl.INDEX]:
+                for i, (acc,) in pl.range(0, 2, 1, init_values=(s0,)):
+                    # ScalarCompute lifts to the top.
+                    nxt: pl.Scalar[pl.INDEX] = acc + i
+                    # Load follows.
+                    t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                    # Store sinks — but only among non-terminators.
+                    pl.tile.store(t, [0, 0], out)
+                    # The terminator stays absolutely last.
+                    r = pl.yield_(nxt)
+                return r
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_nested_pipeline_reorders_inner_and_demotes_both(self):
+        """A pipeline loop nested inside another pipeline loop: the inner body
+        (pipeline-depth 2) is reordered, and BOTH loops are demoted to
+        ``ForKind::Sequential`` on exit.
+
+        The pass keeps an ``inside_pipeline_depth_`` counter that increments per
+        nested pipeline and reorders any SeqStmts while it is non-zero (pass
+        source lines 171-203). The demotion runs once per ``ForKind::Pipeline``
+        loop, so both the outer and inner loops become ``pl.range``.
+
+        Inner body ``[load t, store(t), load t2, add(t2)]`` reorders to
+        loads-clustered-then-compute-then-store:
+        ``t`` (Load) and ``t2`` (Load) lift; ``_c`` (TileCompute) settles in the
+        middle; ``store(t)`` (Store) sinks. ``t``/``t2`` are independent, so
+        their original relative order is preserved.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    for j in pl.pipeline(0, 2, 1, stage=1):
+                        t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                        pl.tile.store(t, [0, 0], out)
+                        t2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                        _c: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(t2, t2)
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, in_a: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]):
+                # Both loops demoted Pipeline → Sequential.
+                for i in pl.range(0, 2, 1):
+                    for j in pl.range(0, 2, 1):
+                        t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                        t2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                        _c: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(t2, t2)
+                        pl.tile.store(t, [0, 0], out)
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_inout_discipline_violation_skips_whole_function(self):
+        """A function that violates the InOut-use discipline is skipped entirely —
+        the pass neither reorders its pipeline body nor demotes the pipeline loop.
+
+        The driver runs ``CollectInOutUseDisciplineDiagnostics`` once per function
+        and, when non-empty, re-emits the original function unchanged (pass source
+        lines 316-319). Here ``main`` passes ``x`` as ``InOut`` to ``mutate`` and
+        then reads the pre-call ``x`` again (``y = pl.add(x, x)``) — a violation.
+        Even though the pipeline body below WOULD be reordered (interleaved
+        load/store), the whole function is left untouched, so the program is
+        returned by identity.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def mutate(self, T: pl.InOut[pl.Tensor[[64, 64], pl.FP32]]) -> pl.Tensor[[64, 64], pl.FP32]:
+                r: pl.Tensor[[64, 64], pl.FP32] = pl.add(T, T)
+                return r
+
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64, 64], pl.FP32],
+                in_a: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Tensor[[64, 64], pl.FP32],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                _t_new: pl.Tensor[[64, 64], pl.FP32] = self.mutate(x)
+                y: pl.Tensor[[64, 64], pl.FP32] = pl.add(x, x)  # VIOLATION: reads x after InOut pass
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    t: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                    pl.tile.store(t, [0, 0], out)
+                    t2: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(in_a, [0, 0], [64, 64])
+                    _c: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(t2, t2)
+                return y
+
+        After = _run_pass(Before)
+        # Violation → whole-program identity (no reorder, no Pipeline→Sequential demotion).
+        assert After is Before
+
+    def test_submit_inside_pipeline_is_tile_compute_not_io(self):
+        """``pl.submit`` inside a ``pl.manual_scope`` within a pipeline body: the
+        Submit-valued ``AssignStmt`` must be categorized as ``TileCompute`` (not
+        misclassified as Load/Store), while its ``TASK_ID`` tuple projection is a
+        ``ScalarType`` assign and so lifts as ``ScalarCompute``. The Submit's
+        ``deps_`` edge must be honored by the topo sort.
+
+        ``CategorizeStmt`` only recognizes Load/Store on ``AssignStmt`` whose value
+        is a ``Call`` (pass source lines 106-117). A ``Submit`` is a sibling kind,
+        not a ``Call``, so it falls through to the LHS-type check: the tuple-typed
+        ``_submit_tmp`` LHS is not scalar → ``TileCompute``.
+
+        Body in source order (after DSL lowering) is::
+
+            _submit_tmp = Submit(k1, x)   # TileCompute (Submit, not Call)
+            a   = _submit_tmp[0]          # TileCompute (Tensor)
+            a_tid = _submit_tmp[1]        # ScalarCompute (TASK_ID scalar)
+            _submit_tmp = Submit(k1, x, deps=[a_tid])  # TileCompute
+            b   = _submit_tmp[0]          # TileCompute
+            b_tid = _submit_tmp[1]        # ScalarCompute
+
+        Hand-derived priority-aware topo sort (deps: a/a_tid ← first submit;
+        second submit ← a_tid; b/b_tid ← second submit) emits::
+
+            [submit_0, a_tid, a, submit_1, b_tid, b]
+
+        i.e. each ``*_tid`` (ScalarCompute) lifts above its sibling tensor
+        projection, the second submit stays after ``a_tid`` (deps honored), and
+        the outer pipeline loop is demoted to Sequential.
+
+        The reorder swaps tuple projections, which the DSL emission order cannot
+        express directly, so this asserts the demotion + the by-hand-derived
+        statement order via structural inspection (not a snapshot).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    for i in pl.pipeline(0, 2, 1, stage=1):
+                        _a, a_tid = pl.submit(self.k1, x)
+                        _b, _b_tid = pl.submit(self.k1, x, deps=[a_tid])
+                return out
+
+        After = _run_pass(Before)
+        assert After is not Before  # the reorder + demotion changed the IR
+
+        # Locate the (now-Sequential) loop's body within the RuntimeScopeStmt.
+        fn = After.get_function("main")
+        assert fn is not None
+
+        loop = None
+
+        def find_loop(stmt):
+            nonlocal loop
+            if isinstance(stmt, ir.ForStmt):
+                loop = stmt
+                return
+            if isinstance(stmt, ir.SeqStmts):
+                for s in stmt.stmts:
+                    find_loop(s)
+            elif isinstance(stmt, ir.RuntimeScopeStmt):
+                find_loop(stmt.body)
+
+        find_loop(fn.body)
+        assert loop is not None, "expected the pipeline loop in main"
+        # The transient Pipeline marker must be demoted to Sequential.
+        assert loop.kind == ir.ForKind.Sequential
+
+        body = loop.body
+        assert isinstance(body, ir.SeqStmts)
+        stmts = list(body.stmts)
+        assert len(stmts) == 6
+
+        # Hand-derived order: [submit_0, a_tid, a, submit_1, b_tid, b].
+        def is_submit(s):
+            return isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.Submit)
+
+        def is_proj(s):
+            return isinstance(s, ir.AssignStmt) and isinstance(s.value, ir.TupleGetItemExpr)
+
+        def is_scalar_assign(s):
+            return is_proj(s) and isinstance(s.var.type, ir.ScalarType)
+
+        # submit_0 stays first (it has no intra-region predecessor).
+        assert is_submit(stmts[0])
+        # a_tid (ScalarCompute) lifts above a (TileCompute tensor projection).
+        assert is_scalar_assign(stmts[1])
+        assert is_proj(stmts[2]) and not is_scalar_assign(stmts[2])
+        # submit_1 follows a_tid (deps=[a_tid] edge honored).
+        assert is_submit(stmts[3])
+        # b_tid (ScalarCompute) lifts above b.
+        assert is_scalar_assign(stmts[4])
+        assert is_proj(stmts[5]) and not is_scalar_assign(stmts[5])
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

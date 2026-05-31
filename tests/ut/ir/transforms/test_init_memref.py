@@ -311,6 +311,80 @@ class TestMemRefSharing:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestSliceView:
+    """tile.slice is a view op: output shares the input's base Ptr with an
+    accumulated byte offset and a smaller view size."""
+
+    def test_slice_nonzero_byte_offset_and_alloc_dedup(self):
+        """tile.slice views share the source's base Ptr; only one alloc per base.
+
+        ``tile.slice`` is registered with ``set_output_memory_inherit_input()``
+        (src/ir/op/tile_ops/transform.cpp:380), so InitMemRef routes it through
+        ``ShareMemRefFrom`` (init_memref.cpp:291-303). That helper:
+          * computes the slice byte offset via ``ComputeViewByteOffset`` /
+            ``ComputeSliceByteOffset`` (memref_utils.h:292-343):
+            byte_offset = (o0 * cols + o1) * elem_bytes;
+          * sizes the view from the slice OUTPUT shape (init_memref.cpp:241-255).
+
+        For an FP32 [8, 16] parent (512 bytes, base ``mem_vec_2``):
+          * ``s0 = slice([1,16], [0,0])`` -> offset 0, view size 1*16*4 = 64.
+            Size differs from the parent (512) so it is NOT a pure alias
+            (init_memref.cpp:260-267): a fresh MemRef over the SAME base, off 0.
+          * ``s1 = slice([1,16], [1,0])`` -> offset (1*16 + 0)*4 = 64, size 64.
+
+        Alloc dedup is by base Ptr (init_memref.cpp:543-550); all three tiles
+        share base ``mem_vec_2``, so exactly one ``tile.alloc`` is emitted, sized
+        from the first MemRef seen for that base in traversal order — the root
+        ``tile_a`` (512 bytes).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[8, 16], pl.FP32],
+                out0: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+                out1: pl.Out[pl.Tensor[[1, 16], pl.FP32]],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(input_a, [0, 0], [8, 16])
+                s0: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(tile_a, [1, 16], [0, 0])
+                s1: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.slice(tile_a, [1, 16], [1, 0])
+                r0: pl.Tensor[[1, 16], pl.FP32] = pl.store(s0, [0, 0], out0)
+                _r1: pl.Tensor[[1, 16], pl.FP32] = pl.store(s1, [0, 0], out1)
+                return r0
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_a: pl.Tensor[[8, 16], pl.FP32, pl.MemRef("mem_ddr_0", 0, 512)],
+                out0: pl.Out[pl.Tensor[[1, 16], pl.FP32, pl.MemRef("mem_ddr_1", 0, 64)]],
+                out1: pl.Out[pl.Tensor[[1, 16], pl.FP32, pl.MemRef("mem_ddr_2", 0, 64)]],
+            ) -> pl.Tensor[[1, 16], pl.FP32]:
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512)
+                tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 512), pl.Mem.Vec] = pl.tile.load(
+                    input_a, [0, 0], [8, 16], [8, 16], target_memory=pl.Mem.Vec, transpose=False
+                )
+                s0: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 64), pl.Mem.Vec] = pl.tile.slice(
+                    tile_a, [1, 16], [0, 0]
+                )
+                s1: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, 64, 64), pl.Mem.Vec] = pl.tile.slice(
+                    tile_a, [1, 16], [1, 0]
+                )
+                r0: pl.Tensor[[1, 16], pl.FP32, pl.MemRef("mem_ddr_1", 0, 64)] = pl.tile.store(
+                    s0, [0, 0], out0
+                )
+                _r1: pl.Tensor[[1, 16], pl.FP32, pl.MemRef("mem_ddr_2", 0, 64)] = pl.tile.store(
+                    s1, [0, 0], out1
+                )
+                return r0
+
+        After = passes.init_mem_ref()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
 class TestYieldMemRef:
     """MemRef propagation through yield in ForStmt and IfStmt."""
 
@@ -377,6 +451,157 @@ class TestYieldMemRef:
 
         After = passes.init_mem_ref()(Before)
         ir.assert_structural_equal(After, Expected)
+
+    def test_for_multi_iter_arg_each_carry_independent_memref(self):
+        """ForStmt with two iter_args: each carry group resolves independently.
+
+        ``VisitStmt_(ForStmt)`` processes ``iter_args_`` and ``return_vars_`` as
+        parallel vectors (init_memref.cpp:350-359, 377-385) and
+        ``PatchReturnVarsFromYield`` pairs return_var[i] with yield value[i]
+        (init_memref.cpp:452-475). So with init_values=(init_a, init_b):
+          * Group A0: init_a / iter_arg ``a`` share ``mem_vec_2`` (initValue).
+          * Group A1: init_b / iter_arg ``b`` share ``mem_vec_3`` (initValue).
+          * yield ``a_next`` (mem_vec_4) -> return_var ``a_out`` shares mem_vec_4.
+          * yield ``b_next`` (mem_vec_5) -> return_var ``b_out`` shares mem_vec_5.
+
+        The two carry chains never cross — each return_var inherits ONLY its own
+        positional yield's MemRef.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                init_a: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64]
+                )
+                init_b: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
+                    input_tensor, [0, 0], [64, 64]
+                )
+                for _i, (a, b) in pl.range(0, 4, init_values=(init_a, init_b)):
+                    a_next: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(a, b)
+                    b_next: pl.Tile[[64, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(b, a)
+                    a_out, b_out = pl.yield_(a_next, b_next)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.store(a_out, [0, 0], output)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function
+            def main(
+                self,
+                input_tensor: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+                output: pl.Out[pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_4: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                mem_vec_5: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+                init_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                init_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 0, 16384), pl.Mem.Vec] = pl.tile.load(
+                    input_tensor, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                for _i, (a, b) in pl.range(0, 4, init_values=(init_a, init_b)):
+                    a_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_4, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.add(a, b)
+                    )
+                    b_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_5, 0, 16384), pl.Mem.Vec] = (
+                        pl.tile.add(b, a)
+                    )
+                    a_out, b_out = pl.yield_(a_next, b_next)
+                result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                    a_out, [0, 0], output
+                )
+                return result
+
+        After = passes.init_mem_ref()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_for_chunk_config_preserved(self):
+        """ForStmt chunk_config survives InitMemRef with carry relationships intact.
+
+        ``VisitStmt_(ForStmt)`` re-builds chunk_config by visiting only its size
+        expr and copying the policy (init_memref.cpp:388-391): for a constant
+        chunk size the visit is identity, so size and policy must round-trip
+        unchanged. The same handler also applies loop-carry sharing — iter_arg
+        ``acc`` inherits initValue ``seed``'s MemRef, and the patched return_var
+        inherits the yield value's MemRef (init_memref.cpp:403-421).
+
+        Built as raw IR because the DSL rejects ``chunk=`` loops outside an
+        ``auto_chunk`` scope (ast_parser ``_validate_chunk_args``); the scope
+        wrapper changes the IR shape such that a full declarative Expected for
+        InitMemRef's output cannot be hand-derived without snapshotting. This
+        focused assertion pins exactly the chunk_config-preservation behavior
+        plus the iter_arg carry-group invariant.
+        """
+        span = ir.Span.unknown()
+        idx = ir.DataType.INDEX
+
+        tile_type = ir.TileType([64, 64], ir.DataType.FP32, memory_space=MemorySpace.Vec)
+
+        # seed: produced before the loop; iter_arg acc inherits its MemRef.
+        seed = ir.Var("seed", tile_type, span)
+        tpop = ir.Call(ir.Op("tile.tpop_from_aic"), [], {"split": 0}, tile_type, span)
+
+        acc = ir.IterArg("acc", tile_type, seed, span)
+        acc_next = ir.Var("acc_next", tile_type, span)
+        muls = ir.Call(ir.Op("tile.muls"), [acc], {"scalar": 1.0}, tile_type, span)
+        acc_out = ir.Var("acc_out", tile_type, span)
+
+        loop_var = ir.Var("i", ir.ScalarType(idx), span)
+        loop_body = ir.SeqStmts([ir.AssignStmt(acc_next, muls, span), ir.YieldStmt([acc_next], span)], span)
+        for_stmt = ir.ForStmt(
+            loop_var,
+            ir.ConstInt(0, idx, span),
+            ir.ConstInt(8, idx, span),
+            ir.ConstInt(1, idx, span),
+            [acc],
+            loop_body,
+            [acc_out],
+            span,
+            chunk_size=ir.ConstInt(4, idx, span),
+            chunk_policy=ir.ChunkPolicy.LeadingFull,
+        )
+
+        body = ir.SeqStmts([ir.AssignStmt(seed, tpop, span), for_stmt, ir.ReturnStmt([acc_out], span)], span)
+        func = ir.Function("main", [], [tile_type], body, span, type=ir.FunctionType.AIV)
+        program = ir.Program([func], "chunk_prog", span)
+
+        # Override the conftest roundtrip instrument: a bare chunked loop is not
+        # reparseable (it needs an auto_chunk scope wrapper), so print->parse
+        # roundtrip would fail on otherwise-correct output. Keep verification on.
+        with passes.PassContext(
+            [passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)],
+        ):
+            after = passes.init_mem_ref()(program)
+
+        func_after = next(iter(after.functions.values()))
+        for_after = next(
+            stmt for stmt in cast(ir.SeqStmts, func_after.body).stmts if isinstance(stmt, ir.ForStmt)
+        )
+
+        # chunk_config preserved: size 4 (constant, visited as identity) + policy.
+        assert for_after.chunk_config is not None, "chunk_config must survive InitMemRef"
+        cs = for_after.chunk_size
+        assert isinstance(cs, ir.ConstInt) and cs.value == 4, f"chunk size must stay 4, got {cs}"
+        assert for_after.chunk_policy == ir.ChunkPolicy.LeadingFull
+
+        # Loop-carry invariant: iter_arg acc shares initValue seed's base Ptr.
+        iter_arg_after = for_after.iter_args[0]
+        seed_after = iter_arg_after.initValue
+        assert isinstance(iter_arg_after.type, ir.TileType)
+        assert iter_arg_after.type.memref is not None
+        assert isinstance(seed_after.type, ir.TileType)
+        assert seed_after.type.memref is not None
+        assert ir.MemRef.same_allocation(iter_arg_after.type.memref, seed_after.type.memref), (
+            "iter_arg must share its initValue's base Ptr (Group A sharing)"
+        )
 
     def test_if_yield_return_var_shares_memref(self):
         """IfStmt: return_var shares MemRef with the then-branch yield value."""

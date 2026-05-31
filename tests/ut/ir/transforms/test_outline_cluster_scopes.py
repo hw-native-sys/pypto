@@ -508,6 +508,247 @@ class TestOutlineClusterScopes:
         After = passes.outline_cluster_scopes()(After)
         ir.assert_structural_equal(After, Expected)
 
+    def test_nested_spmd_in_cluster_propagates_sync_start(self):
+        """`with pl.cluster(): with pl.spmd(N, sync_start=True): ...` keeps a
+        single Group function and moves ``core_num``/``sync_start`` onto the
+        Group's attrs.
+
+        Semantics (outline_cluster_scopes_pass.cpp:41-70, UnwrapNestedSpmd):
+        the Cluster scope is outlined into a Group function whose body still
+        contains the nested ``SpmdScopeStmt``. The post-outline UnwrapNestedSpmd
+        sweep then (a) copies ``core_num`` and ``sync_start`` from the Spmd
+        scope onto the Group function's attrs and (b) replaces the
+        ``ScopeStmt(Spmd)`` with its body (the single kernel call). No separate
+        Spmd wrapper is emitted — the doc's "Unwrap Nested Spmd in Group" step.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
+                out: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster():
+                    with pl.spmd(4, sync_start=True):
+                        out = self.kernel(x, out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
+                out: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out)
+                return out
+
+            # Single Group function (NOT a Spmd wrapper): the nested Spmd scope
+            # was unwrapped, so core_num/sync_start ride on the Group's attrs.
+            @pl.function(type=pl.FunctionType.Group, attrs={"core_num": 4, "sync_start": True})
+            def main_cluster_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.kernel(x, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.main_cluster_0(x, out)
+                return out
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_cluster_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_nested_spmd_in_cluster_omits_sync_start_when_false(self):
+        """Without ``sync_start=True`` the unwrapped Group carries only
+        ``core_num`` — the ``sync_start`` attr is not added.
+
+        Pins the conditional in UnwrapNestedSpmd
+        (outline_cluster_scopes_pass.cpp:66-68): ``sync_start`` is appended to
+        the Group attrs only when present AND true. With the default
+        ``sync_start=False`` the attr must be absent, not ``False``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
+                out: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster():
+                    with pl.spmd(8):
+                        out = self.kernel(x, out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                x_tile: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                y_tile: pl.Tile[[64], pl.FP32] = pl.add(x_tile, x_tile)
+                out: pl.Tensor[[64], pl.FP32] = pl.store(y_tile, [0], out)
+                return out
+
+            # core_num only — no sync_start attr (default False is dropped).
+            @pl.function(type=pl.FunctionType.Group, attrs={"core_num": 8})
+            def main_cluster_0(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.kernel(x, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                out = self.main_cluster_0(x, out)
+                return out
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_cluster_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_cluster_store_target_becomes_inout(self):
+        """A Cluster scope that writes an external tensor via ``pl.store`` marks
+        that tensor as an ``InOut`` parameter on the outlined Group function.
+
+        Semantics: ScopeOutliner treats tile.store targets as side-effect
+        outputs (scope_outline_utils.h:560-571) and InferParamDirections Step 1
+        upgrades the corresponding param to ``InOut``
+        (scope_outline_utils.h:1118-1123). The store result is captured into a
+        fresh ``_store`` SSA var and returned, and the call site re-binds the
+        external tensor to that return value (``buf`` -> ``buf2``). Mirrors the
+        InCore-pass store-only case, but the parent here is NOT promoted — the
+        cluster pass leaves the caller's function type unchanged.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
+                buf: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                with pl.cluster():
+                    tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
+                    pl.store(tile, [0, 0], buf)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf, x)
+                return result
+
+        @pl.program
+        class Expected:
+            # buf is a tile.store target, so it becomes InOut on the Group; the
+            # store result is returned as a fresh buf_store var.
+            @pl.function(type=pl.FunctionType.Group)
+            def main_cluster_0(
+                self, buf: pl.InOut[pl.Tensor[[16, 128], pl.FP32]]
+            ) -> pl.Tensor[[16, 128], pl.FP32]:
+                tile = pl.tile.full([16, 128], dtype=pl.FP32, value=0.0)
+                buf_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(tile, [0, 0], buf)
+                return buf_store
+
+            @pl.function
+            def main(self, x: pl.Tensor[[16, 128], pl.FP32]) -> pl.Tensor[[16, 128], pl.FP32]:
+                buf: pl.Tensor[[16, 128], pl.FP32] = pl.create_tensor([16, 128], dtype=pl.FP32)
+                buf2: pl.Tensor[[16, 128], pl.FP32] = self.main_cluster_0(buf)
+                result: pl.Tensor[[16, 128], pl.FP32] = pl.add(buf2, x)
+                return result
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_cluster_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_cluster_duplicate_name_hint_dedups(self):
+        """Two Cluster scopes sharing a ``name_hint`` deduplicate the second
+        outlined function name with a numeric suffix.
+
+        Semantics (scope_outline_utils.h:464-472): the first scope takes the
+        verbatim hint ``grp`` and inserts it into ``known_names_``; the second
+        scope's identical hint collides, so the outliner appends ``_0`` ->
+        ``grp_0``. This keeps program function names unique even when the user
+        reuses a hint across sibling scopes.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster(name_hint="grp"):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.cluster(name_hint="grp"):
+                    z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Group)
+            def grp(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            # Second "grp" collides -> deduplicated to "grp_0".
+            @pl.function(type=pl.FunctionType.Group)
+            def grp_0(self, y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.grp(x)
+                z: pl.Tensor[[64], pl.FP32] = self.grp_0(y)
+                return z
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_cluster_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_cluster_outlined_verifier_rejects_cluster_in_incore(self):
         """Test that ClusterOutlined verifier flags Cluster scopes in InCore functions."""
 

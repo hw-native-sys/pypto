@@ -659,6 +659,261 @@ class TestOutlineIncoreScopes:
         After = passes.outline_incore_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_outline_assemble_dest_upgraded_to_inout(self):
+        """``tensor.assemble`` destination captured by a scope becomes an InOut param.
+
+        ``tensor.assemble`` is SSA-pure (returns a fresh Tensor), but its first
+        argument is a destination the result aliases. When the destination is a
+        captured outer variable, the outlined function effectively reads and
+        writes the same backing buffer, so ``InferParamDirections`` Step 2
+        (``AssembleDestUpgrader``, scope_outline_utils.h:1129-1153) upgrades that
+        parameter from ``In`` to ``InOut``. The ``src`` argument is only read, so
+        it stays ``In`` — pinning both directions makes the InOut upgrade the
+        load-bearing assertion (``assert_structural_equal`` is direction-aware).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, dst: pl.Tensor[[64], pl.FP32], src: pl.Tensor[[32], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP):
+                    updated: pl.Tensor[[64], pl.FP32] = pl.assemble(dst, src, [0])
+                return updated
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, dst: pl.InOut[pl.Tensor[[64], pl.FP32]], src: pl.Tensor[[32], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                updated: pl.Tensor[[64], pl.FP32] = pl.assemble(dst, src, [0])
+                return updated
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, dst: pl.Tensor[[64], pl.FP32], src: pl.Tensor[[32], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                updated: pl.Tensor[[64], pl.FP32] = self.main_incore_0(dst, src)
+                return updated
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_outline_scope_inside_while_captures_iter_arg(self):
+        """Scope inside a WhileStmt body captures the loop-carried IterArg, not its init.
+
+        WhileStmt iter-args are SSA values bound by the loop, so a scope that
+        reads ``acc`` (the while iter-arg) must take ``acc`` as a parameter while
+        the loop's init value (``x``) stays out of the callee signature. This is
+        the while-loop counterpart of ``test_outline_scope_with_loop_carried_init_values``
+        and exercises ``VarCollector::VisitStmt_(WhileStmtPtr)``
+        (scope_outline_utils.h:200-212), which seeds the symbol table with the
+        while's iter-args / return-vars so they resolve as captured inputs.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for acc, c in pl.while_(init_values=(x, 0)):
+                    pl.cond(c < n)
+                    with pl.at(level=pl.Level.CORE_GROUP):
+                        updated: pl.Tensor[[64], pl.FP32] = pl.add(acc, y)
+                    c_new: pl.Scalar[pl.INDEX] = c + 1
+                    acc_rv, c_rv = pl.yield_(updated, c_new)
+                return acc_rv
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self, acc: pl.Tensor[[64], pl.FP32], y: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                updated: pl.Tensor[[64], pl.FP32] = pl.add(acc, y)
+                return updated
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Tensor[[64], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                for acc, c in pl.while_(init_values=(x, 0)):
+                    pl.cond(c < n)
+                    updated: pl.Tensor[[64], pl.FP32] = self.main_incore_0(acc, y)
+                    c_new: pl.Scalar[pl.INDEX] = c + 1
+                    acc_rv, c_rv = pl.yield_(updated, c_new)
+                return acc_rv
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+class TestOutlineSubmitTaskId:
+    """``with pl.at(...) as tid:`` emits an ``ir.Submit`` (not a plain Call).
+
+    When a scope captures a producer TaskId via the ``as tid`` binding (or
+    carries ``deps=[...]``), the outliner emits an ``ir.Submit`` whose return
+    type is augmented with a trailing ``Scalar[TASK_ID]`` and whose call site
+    unpacks the flat tuple: ``out = ret[0]`` ... ``tid = ret[last]``. This
+    matches the explicit ``out, tid = pl.submit(self.kernel, ...)`` DSL surface,
+    so the Expected programs author the equivalent ``pl.submit`` form directly.
+    See scope_outline_utils.h:836-931 (Submit emission) and 961-978 (TaskId
+    tuple-unpack call site).
+    """
+
+    def test_outline_scope_with_task_id_emits_submit(self):
+        """A lone ``as tid`` scope outlines to a deps-free ``ir.Submit``."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP) as tid:
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                # ``y, tid = pl.submit(...)`` desugars to AssignStmt(_submit_tmp,
+                # Submit) + TupleGetItem unpack — exactly the outliner's Submit
+                # emission. ``tid`` is the trailing TaskId tuple element.
+                y, tid = pl.submit(self.main_incore_0, x)
+                return y
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_outline_chained_task_id_deps_fold_into_submit_deps(self):
+        """``deps=[tid0]`` on a second scope folds into the second ``Submit``'s deps_.
+
+        Two ordered scopes: the first binds ``tid0``; the second declares
+        ``deps=[tid0]``. The outliner emits two ``ir.Submit`` nodes — the second
+        carries ``tid0`` in its first-class ``deps_`` field (folded from the
+        scope's ``manual_dep_edges`` attr because ``task_id_var`` is set;
+        scope_outline_utils.h:896-901). The Expected expresses this as
+        ``pl.submit(self.main_incore_1, y, deps=[tid0])``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP) as tid0:
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.at(level=pl.Level.CORE_GROUP, deps=[tid0]) as tid1:
+                    z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_1(self, y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y, tid0 = pl.submit(self.main_incore_0, x)
+                z, tid1 = pl.submit(self.main_incore_1, y, deps=[tid0])
+                return z
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+class TestOutlineSpmdScope:
+    """InCore scopes nested inside a ``SpmdScopeStmt`` are outlined, wrapper kept.
+
+    ``for i in pl.spmd(n):`` desugars to ``SpmdScopeStmt(InCoreScopeStmt(...))``
+    in an Orchestration function. ``OutlineIncoreScopes`` processes Orchestration
+    functions (outline_incore_scopes_pass.cpp:42-44): it descends into the
+    SpmdScopeStmt with ``inside_nested_scope_body_`` set, outlines the inner
+    InCore body into a separate function, and replaces it with a Call while
+    leaving the ``with pl.spmd(...)`` wrapper in place around the Call.
+    """
+
+    def test_outline_inner_incore_keeps_spmd_wrapper(self):
+        """The inner InCore body is outlined; the SpmdScope wrapper survives.
+
+        The scope body writes ``out`` via ``tile.store``, so ``out`` is a store
+        target: it becomes an ``InOut`` callee param and a returned (renamed)
+        value (``out_v1`` -> ``out_store``), mirroring
+        ``test_outline_scope_with_store_only_outputs``.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4):
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(t, [offset, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.InOut[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                i: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
+                offset = i * 128
+                t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                out_v1: pl.Tensor[[512, 128], pl.FP32] = pl.store(t, [offset, 0], out)
+                out_store: pl.Tensor[[512, 128], pl.FP32] = out_v1
+                return out_store
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4):
+                    out_v2: pl.Tensor[[512, 128], pl.FP32] = self.main_incore_0(a, out)
+                return out_v2
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_incore_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 class TestSplitIncoreOrchVerifier:
     """Regression tests for the SplitIncoreOrch property verifier."""

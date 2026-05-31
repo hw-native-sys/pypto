@@ -2242,5 +2242,192 @@ class TestEdgeCases:
         ir.assert_structural_equal(After, Before)
 
 
+class TestPattern3WhileLoop:
+    """Pattern 3 (AssembleLoopRewriter) is ForStmt-only.
+
+    The rewriter (LoopRewriteMutator) only overrides VisitStmt_(ForStmtPtr)
+    (src ~line 1328); there is no WhileStmt branch. So a while-carried
+    tile.assemble accumulation must stay baseline: the tile.create buffer is
+    kept, the iter-arg init stays the buffer (not the Out param), and the
+    tile.assemble is NOT rewritten to tile.store. This is the dual of the
+    passing ForStmt case in TestAssembleLoopRewrite.test_assemble_loop_to_store_loop.
+    """
+
+    def test_while_assemble_loop_not_rewritten(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[1, 32], pl.FP32],
+                n: pl.Scalar[pl.INDEX],
+                ret0__out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                buf__tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.create(
+                    [1, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                i0: pl.Scalar[pl.INDEX] = 0
+                for acc, ii in pl.while_(init_values=(buf__tile, i0)):
+                    pl.cond(ii < n)
+                    off: pl.Scalar[pl.INDEX] = ii * 32
+                    chunk__tile: pl.Tile[[1, 32], pl.FP32] = pl.load(x, [0, 0], [1, 32])
+                    acc_next__tile: pl.Tile[[1, 64], pl.FP32] = pl.tile.assemble(acc, chunk__tile, [0, off])
+                    ii_next: pl.Scalar[pl.INDEX] = ii + 1
+                    acc_rv, ii_rv = pl.yield_(acc_next__tile, ii_next)
+                ret0__store: pl.Tensor[[1, 64], pl.FP32] = pl.store(acc_rv, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[1, 32], pl.FP32], n: pl.Scalar[pl.INDEX]
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                ret0__out: pl.Tensor[[1, 64], pl.FP32] = pl.create_tensor([1, 64], dtype=pl.FP32)
+                y: pl.Tensor[[1, 64], pl.FP32] = self.main_incore_0(x, n, ret0__out)
+                return y
+
+        After = passes.optimize_orch_tensors()(Before)
+        # Pattern 3 only matches ForStmt; the WhileStmt assemble loop is left
+        # untouched. (Patterns 1/4 also do not fire: the In param x is sliced
+        # nowhere, and there is no iter-arg-fed In/Out merge.)
+        ir.assert_structural_equal(After, Before)
+
+
+class TestOutWindowMultiOutAllOrNothing:
+    """Pattern 5 multi-Out policy is all-or-nothing (doc line 95, src ~line 1815).
+
+    AnalyzeFinalStore rejects an Out whose only store covers the full tensor at
+    zero offset (src ~line 3115). When the FinalStore analysis encounters such
+    an Out among several, `all_final` is cleared and the whole callee falls back
+    to baseline — no per-Out partial windowing.
+    """
+
+    def test_one_full_shape_out_blocks_whole_callee(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kv_stripe(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                k_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+                v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
+                # k_out: local 64x64 window at [row_offset, 0] -> windowable.
+                ktile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                k_next: pl.Tensor[[256, 64], pl.FP32] = pl.store(ktile, [row_offset, 0], k_out)
+                # v_out: full 256x64 write at [0, 0] -> NOT a window (full-shape,
+                # zero-offset). This blocks the all-or-nothing multi-Out rewrite.
+                vtile: pl.Tile[[256, 64], pl.FP32] = pl.load(data, [0, 0], [256, 64])
+                v_next: pl.Tensor[[256, 64], pl.FP32] = pl.store(vtile, [0, 0], v_out)
+                return k_next, v_next
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                k_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+                v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
+                row: pl.Scalar[pl.INDEX] = 64
+                result: tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]] = self.kv_stripe(
+                    data, row, k_out, v_out
+                )
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kv_stripe(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                k_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+                v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
+                ktile: pl.Tile[[64, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    data, [row_offset, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                k_next = pl.tile.store(ktile, [row_offset, 0], k_out)
+                vtile: pl.Tile[[256, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    data, [0, 0], [256, 64], [256, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                v_next = pl.tile.store(vtile, [0, 0], v_out)
+                return k_next, v_next
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                k_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+                v_out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> tuple[pl.Tensor[[256, 64], pl.FP32], pl.Tensor[[256, 64], pl.FP32]]:
+                row: pl.Scalar[pl.INDEX] = 64
+                result = self.kv_stripe(data, row, k_out, v_out)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        # all-or-nothing: v_out is a full-shape store, so neither Out is
+        # externalized and no __windowed clone is emitted.
+        assert After.get_function("kv_stripe__windowed") is None
+        ir.assert_structural_equal(After, Expected)
+
+
+class TestOutWindowSubmitCall:
+    """Pattern 5 IsSubmitCall branch (TASK_ID return augmentation).
+
+    TryRewriteCall has an IsSubmitCall branch (src ~line 2464) that, for a
+    task-launch call whose return type is augmented with a trailing
+    Scalar[TASK_ID], must keep the TASK_ID in the windowed call's return type
+    and route through the tuple-projection tail (the single-output FinalStore
+    shortcut is gated by `!is_submit_call`). Per pass-submit-awareness rule 1
+    ("when walking calls, walk Submit too"), a windowable kernel launched via
+    pl.submit inside pl.manual_scope SHOULD be externalized just like the
+    plain-call form in
+    TestOutWindowExternalizer.test_direct_out_call_rewrites_to_windowed_clone.
+    """
+
+    @pytest.mark.xfail(
+        reason="suspected bug: OrchRewriter dispatches via As<Call>, which is "
+        "exact-kind and never matches a Submit node; the IsSubmitCall branch is "
+        "unreachable from the pl.submit DSL form, so the windowable submit stays "
+        "baseline instead of being externalized",
+        strict=False,
+    )
+    def test_submit_windowable_kernel_is_externalized(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel_stripe(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                tile: pl.Tile[[64, 64], pl.FP32] = pl.load(data, [row_offset, 0], [64, 64])
+                ret: pl.Tensor[[256, 64], pl.FP32] = pl.store(tile, [row_offset, 0], out)
+                return ret
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[256, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[256, 64], pl.FP32]],
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                with pl.manual_scope():
+                    row: pl.Scalar[pl.INDEX] = 64
+                    out_next, tid = pl.submit(self.kernel_stripe, data, row, out)
+                return out_next
+
+        After = passes.optimize_orch_tensors()(Before)
+        # A statically provable 64x64 window write at [64, 0] must be
+        # externalized: the windowed clone exists and the orchestration call
+        # site slices the Out param before the (still task-launching) call.
+        windowed = After.get_function("kernel_stripe__windowed")
+        assert windowed is not None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "pl.tensor.slice(out" in printed_main
+        assert "kernel_stripe__windowed" in printed_main
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

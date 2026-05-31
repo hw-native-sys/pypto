@@ -25,6 +25,18 @@ def _run_pass(program):
         backend.reset_for_testing()
 
 
+def _run_pass_without_backend(program):
+    """Run ResolveBackendOpLayouts with no backend configured.
+
+    `RewriteFunction` bails out (returns the function unchanged) when
+    `BackendConfig::IsConfigured()` is false, so the pass must be a no-op
+    even for IR that would otherwise be repaired.
+    """
+    backend.reset_for_testing()
+    assert not backend.is_backend_configured()
+    return passes.resolve_backend_op_layouts()(program)
+
+
 class TestResolveBackendOpLayouts:
     """Test backend-driven layout repair for constrained tile ops.
 
@@ -300,6 +312,135 @@ class TestResolveBackendOpLayouts:
                 return stored
 
         After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_repairs_eval_stmt_mscatter_inputs_through_row_major_reshape(self):
+        """`tile.mscatter` as a bare statement repairs its col-major tile inputs.
+
+        Covers the `EvalStmt` branch (`VisitStmt_(const EvalStmtPtr&)`): a
+        discarded `tile.mscatter(src, idx, out)` call has no result var, so
+        only input repair runs (no output restoration). `tile.mscatter`
+        constrains arg0 (`src`) and arg1 (`idx`) to `row_major` (see
+        `pto_ops_common.cpp`), and both are `[16, 1]` col-major vectors, so
+        each is reshaped to `[1, 16] row_major` before the call. The `out`
+        tensor argument is non-tile and left untouched.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[256], pl.FP32]],
+            ) -> pl.Tensor[[256], pl.FP32]:
+                src: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                idx: pl.Tile[[16, 1], pl.INT32] = pl.tile.create(
+                    [16, 1], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                )
+                pl.tile.mscatter(src, idx, out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[256], pl.FP32]],
+            ) -> pl.Tensor[[256], pl.FP32]:
+                src: pl.Tile[[16, 1], pl.FP32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                idx: pl.Tile[[16, 1], pl.INT32, pl.MemorySpace.Vec] = pl.tile.create(
+                    [16, 1], dtype=pl.INT32, target_memory=pl.MemorySpace.Vec
+                )
+                src_rm: pl.Tile[[1, 16], pl.FP32, pl.MemorySpace.Vec] = pl.tile.reshape(src, [1, 16])
+                idx_rm: pl.Tile[[1, 16], pl.INT32, pl.MemorySpace.Vec] = pl.tile.reshape(idx, [1, 16])
+                pl.tile.mscatter(src_rm, idx_rm, out)
+                return out
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_non_incore_function_is_left_unchanged(self):
+        """Non-`InCore` functions are skipped entirely (`RewriteFunction` guard).
+
+        Layout constraints apply only to per-core elementwise execution, so
+        `RewriteFunction` returns Group / Orchestration functions verbatim.
+        The same `tile.abs` on a `[16, 1]` col-major vector that gets repaired
+        in an `InCore` function must be a no-op here.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Group)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                src: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 1], pl.FP32] = pl.tile.abs(src)
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+                return stored
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.Group)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                src: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 1], pl.FP32] = pl.tile.abs(src)
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+                return stored
+
+        After = _run_pass(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_unconfigured_backend_is_left_unchanged(self):
+        """With no backend configured the pass is a no-op (`RewriteFunction` guard).
+
+        `RewriteFunction` returns early when `BackendConfig::IsConfigured()`
+        is false. The same `tile.abs` on a `[16, 1]` col-major vector that
+        gets repaired under Ascend910B must pass through unchanged when no
+        backend is selected.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                src: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 1], pl.FP32] = pl.tile.abs(src)
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+                return stored
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def repro(
+                self,
+                out: pl.Out[pl.Tensor[[16, 1], pl.FP32]],
+            ) -> pl.Tensor[[16, 1], pl.FP32]:
+                src: pl.Tile[[16, 1], pl.FP32] = pl.tile.create(
+                    [16, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
+                )
+                result: pl.Tile[[16, 1], pl.FP32] = pl.tile.abs(src)
+                stored: pl.Tensor[[16, 1], pl.FP32] = pl.store(result, [0, 0], out)
+                return stored
+
+        After = _run_pass_without_backend(Before)
         ir.assert_structural_equal(After, Expected)
 
 

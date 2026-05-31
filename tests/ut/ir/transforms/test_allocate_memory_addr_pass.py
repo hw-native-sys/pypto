@@ -536,16 +536,20 @@ def test_allocate_memory_addr_uses_default_policy_without_backend():
 def test_allocate_memory_addr_preserves_sibling_slice_offsets():
     """Sibling slice/reshape views keep distinct per-view addresses (base + slice offset).
 
-    Regression for issue #1510: AllocateMemoryAddr used to collapse every member
-    of a base_ group onto the bare base address, dropping the per-view offset that
-    InitMemRef had already computed. A reshape-of-slice chain does not go through
-    ``pto.subview`` at codegen, so it relied on the MemRef offset being correct —
-    siblings at different rows silently aliased row 0. Each view must instead land
-    at ``base + row*cols*elem_bytes``.
+    Regression for issue #1510. All views share one ``base_`` Ptr (the root
+    ``mem_vec_3`` alloc), so they form a single base_ group co-located in one slot
+    (pass src lines 300-307). The slot base is ``current_addr = 0`` (no reserve),
+    and each member keeps its own relative offset: ``new_addr = slot_base + member
+    offset`` (pass src lines 339-365, doc line 58-60). InitMemRef already recorded
+    each view's relative offset (root/row-0 at 0, row-1 at 1*16*4 = 64 bytes), so:
 
-    Kept as a value-assertion (rather than a declarative before/after) to match the
-    sibling precondition test above and to pin the exact byte offsets the codegen
-    reads.
+      tile_a, s0, c0 -> 0   (root and row-0 views sit at the slot base)
+      s1, c1         -> 64  (row-1 views carry the slice offset; must NOT collapse
+                             onto base 0 — the #1510 bug a reshape-of-slice chain
+                             would otherwise alias to row 0)
+
+    Because slot_base is 0, the post-pass offsets equal the pre-pass relative
+    offsets: the pass is a no-op on offsets here, which is exactly the invariant.
     """
 
     @pl.program
@@ -567,31 +571,181 @@ def test_allocate_memory_addr_preserves_sibling_slice_offsets():
             _r1: pl.Tensor[[16, 1], pl.FP32] = pl.store(c1, [0, 0], out1)
             return r0
 
+    @pl.program
+    class Expected:
+        @pl.function
+        def main(
+            self,
+            input_a: pl.Tensor[[8, 16], pl.FP32, pl.MemRef("mem_ddr_0", 0, 512)],
+            out0: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.MemRef("mem_ddr_1", 0, 64)]],
+            out1: pl.Out[pl.Tensor[[16, 1], pl.FP32, pl.MemRef("mem_ddr_2", 0, 64)]],
+        ) -> pl.Tensor[[16, 1], pl.FP32]:
+            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 512)
+            # Root sits at the slot base 0, sized to the full 512-byte alloc.
+            tile_a: pl.Tile[[8, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 512), pl.Mem.Vec] = pl.tile.load(
+                input_a, [0, 0], [8, 16], [8, 16], target_memory=pl.Mem.Vec, transpose=False
+            )
+            # Row-0 slice + its reshape land on the slot base (offset 0).
+            s0: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, 0, 64), pl.Mem.Vec] = pl.tile.slice(
+                tile_a, [1, 16], [0, 0]
+            )
+            # Row-1 slice + its reshape carry the +64 byte slice offset.
+            s1: pl.Tile[[1, 16], pl.FP32, pl.MemRef(mem_vec_3, 64, 64), pl.Mem.Vec] = pl.tile.slice(
+                tile_a, [1, 16], [1, 0]
+            )
+            c0: pl.Tile[[16, 1], pl.FP32, pl.MemRef(mem_vec_3, 0, 64), pl.Mem.Vec] = pl.tile.reshape(
+                s0, [16, 1]
+            )
+            c1: pl.Tile[[16, 1], pl.FP32, pl.MemRef(mem_vec_3, 64, 64), pl.Mem.Vec] = pl.tile.reshape(
+                s1, [16, 1]
+            )
+            r0: pl.Tensor[[16, 1], pl.FP32, pl.MemRef("mem_ddr_1", 0, 64)] = pl.tile.store(c0, [0, 0], out0)
+            _r1: pl.Tensor[[16, 1], pl.FP32, pl.MemRef("mem_ddr_2", 0, 64)] = pl.tile.store(c1, [0, 0], out1)
+            return r0
+
     After = passes.init_mem_ref()(Before)
     After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected)
 
-    func = next(iter(After.functions.values()))
-    assert isinstance(func.body, ir.SeqStmts)
-    addrs: dict[str, int] = {}
-    for stmt in func.body.stmts:
-        if isinstance(stmt, ir.AssignStmt):
-            var_type = stmt.var.type
-            if isinstance(var_type, ir.TileType) and var_type.memref is not None:
-                off = var_type.memref.byte_offset_
-                if isinstance(off, ir.ConstInt):
-                    addrs[stmt.var.name_hint] = off.value
 
-    # The root tile and its row-0 views share the slot base.
-    base = addrs["tile_a"]
-    assert addrs["s0"] == base, f"row-0 slice should sit at base {base}, got {addrs['s0']}"
-    assert addrs["c0"] == base, f"reshape of row-0 slice should sit at base {base}, got {addrs['c0']}"
+def test_allocate_memory_addr_resolves_aic_reserve_buffer_in_mat_space():
+    """AIC reserve_buffer reserves the Mat space (not Vec) before Mat tile allocation.
 
-    # Row-1 views must carry the slice offset: 1 row * 16 cols * 4 bytes = 64.
-    assert addrs["s1"] == base + 64, f"row-1 slice should sit at base+64, got {addrs['s1']}"
-    assert addrs["c1"] == base + 64, (
-        f"reshape of row-1 slice should inherit base+64, got {addrs['c1']} "
-        f"(issue #1510: offset must not collapse onto base {base})"
-    )
+    GetReserveBufferMemorySpace maps AIC -> MemorySpace::Mat (pass src lines 62-64),
+    whereas AIV/InCore map to Vec. So an AUTO reserve_buffer of 4096 bytes consumes
+    the low Mat window: reserved_end[Mat] = align32(0 + 4096) = 4096 (pass src
+    lines 133-155). The Mat tile then starts at current_addr = reserved_end = 4096
+    (pass src lines 309-313), and the buffer's base kwarg is rewritten 0 (lines
+    230-247). This is the Mat-space dual of the AIV/Vec reserve test above.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.BF16],
+            out_0: pl.Out[pl.Tensor[[64, 64], pl.BF16]],
+        ) -> pl.Tensor[[64, 64], pl.BF16]:
+            _ = pl.reserve_buffer(name="aic_slot_buffer", size=4096)
+            tile_a: pl.Tile[[64, 64], pl.BF16] = pl.load(
+                input_a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat
+            )
+            result: pl.Tensor[[64, 64], pl.BF16] = pl.store(tile_a, [0, 0], out_0)
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIC)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_0", 0, 8192)],
+            out_0: pl.Out[pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)]],
+        ) -> pl.Tensor[[64, 64], pl.BF16]:
+            mem_mat_2: pl.Ptr = pl.tile.alloc(pl.Mem.Mat, 8192)
+            _: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(name="aic_slot_buffer", size=4096, base=0)
+            # Mat tile is pushed past the 4096-byte reserved Mat window.
+            tile_a: pl.Tile[[64, 64], pl.BF16, pl.MemRef(mem_mat_2, 4096, 8192), pl.Mem.Mat] = pl.tile.load(
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Mat, transpose=False
+            )
+            result: pl.Tensor[[64, 64], pl.BF16, pl.MemRef("mem_ddr_1", 0, 8192)] = pl.tile.store(
+                tile_a, [0, 0], out_0
+            )
+            return result
+
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_allocate_memory_addr_honors_explicit_reserve_buffer_base():
+    """An explicit reserve_buffer base= is honored verbatim and bounds tile placement.
+
+    With base provided (>= 0), resolved_base = base (pass src lines 122-123) — the
+    pass does NOT fill the [0, base) gap below it. The reserved end is
+    align32(base + size); tiles start there (pass src lines 309-313). Here
+    base=8192, size=4096 -> reserved_end[Vec] = align32(12288) = 12288, so:
+
+      tile_a -> 12288, tile_b -> align32(12288 + 16384) = 28672
+
+    The base kwarg is left as the supplied 8192 (pass src lines 234-242).
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            _ = pl.reserve_buffer(name="explicit_slot_buffer", size=4096, base=8192)
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
+            return result
+
+    @pl.program
+    class Expected:
+        @pl.function(type=pl.FunctionType.AIV)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_0", 0, 16384)],
+            output: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            mem_vec_2: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            mem_vec_3: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 16384)
+            _: pl.Scalar[pl.INT32] = pl.system.reserve_buffer(
+                name="explicit_slot_buffer", size=4096, base=8192
+            )
+            # Reserved window is [8192, 12288); the [0, 8192) gap below base stays unused.
+            tile_a: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_2, 12288, 16384), pl.Mem.Vec] = pl.tile.load(
+                input_a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+            )
+            tile_b: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_3, 28672, 16384), pl.Mem.Vec] = pl.tile.add(
+                tile_a, tile_a
+            )
+            result: pl.Tensor[[64, 64], pl.FP32, pl.MemRef("mem_ddr_1", 0, 16384)] = pl.tile.store(
+                tile_b, [0, 0], output
+            )
+            return result
+
+    After = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(After)
+    ir.assert_structural_equal(After, Expected)
+
+
+def test_allocate_memory_addr_skips_non_incore_function():
+    """Non-InCore functions (Spmd/Group/Orchestration/Opaque) are returned unchanged.
+
+    TransformAllocateMemoryAddr early-returns for any function where
+    !IsInCoreType(func_type_) (pass src lines 396-398) — only InCore/AIC/AIV use
+    on-chip tile buffers. An Opaque function whose tile allocs still sit at the
+    InitMemRef placeholder offset (0, unallocated) must therefore come out
+    byte-for-byte identical: the pass does NOT bump them to 0 / 16384 the way it
+    would for an InCore function (cf. test_allocate_memory_addr_simple).
+
+    Expected is the InitMemRef output itself: asserting the pass is a no-op
+    directly encodes the skip semantics without hand-snapshotting InitMemRef.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function(type=pl.FunctionType.Opaque)
+        def main(
+            self,
+            input_a: pl.Tensor[[64, 64], pl.FP32],
+            output: pl.Tensor[[64, 64], pl.FP32],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(input_a, [0, 0], [64, 64])
+            tile_b: pl.Tile[[64, 64], pl.FP32] = pl.add(tile_a, tile_a)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.store(tile_b, [0, 0], output)
+            return result
+
+    Initialized = passes.init_mem_ref()(Before)
+    After = passes.allocate_memory_addr()(Initialized)
+    # Pass is a no-op for the Opaque (non-InCore) function: addresses untouched.
+    ir.assert_structural_equal(After, Initialized)
 
 
 if __name__ == "__main__":

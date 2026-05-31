@@ -1098,6 +1098,72 @@ class TestFlattenTileNdTo2DControlFlow:
         After = passes.flatten_tile_nd_to_2d()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_while_stmt_tile_iter_arg_structural(self):
+        """``WhileStmt`` with a 3D tile iter_arg -> structural equality with explicit 2D Expected.
+
+        Mirrors ``test_for_stmt_tile_iter_arg_structural`` for the ``WhileStmt``
+        branch of ``TransformBody`` (flatten_tile_nd_to_2d_pass.cpp:1501-1543).
+        The pass substitutes the iter_arg's ``initValue`` (now the flattened
+        ``[6, 4]`` load), rebuilds the ``IterArg`` with the new 2D type, walks
+        the body in that context, and rewrites the loop ``return_vars`` to the
+        flattened type via positional matching against the new iter_args. The
+        scalar ``cond`` carrier is untouched. ``tile.store`` to the rank>2 ``out``
+        tensor still gets the original tensor-rank ``shapes=[2, 3, 4]`` injected.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 4], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                t: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.load(x, [0, 0, 0], [2, 3, 4])
+                count: pl.Scalar[pl.INDEX] = 0
+                for acc, count_iter in pl.while_(init_values=(t, count)):
+                    pl.cond(count_iter < 4)
+                    r: pl.Tile[[2, 3, 4], pl.FP32] = pl.tile.add(acc, acc)
+                    next_count: pl.Scalar[pl.INDEX] = count_iter + 1
+                    acc_out, count_out = pl.yield_(r, next_count)
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.tile.store(acc_out, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                out_0: pl.Tensor[[2, 3, 4], pl.FP32] = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                y: pl.Tensor[[2, 3, 4], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[2, 3, 4], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[2, 3, 4], pl.FP32]],
+            ) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                t: pl.Tile[[6, 4], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0, 0], [2, 3, 4], [2, 3, 4], target_memory=pl.Mem.Vec, transpose=False
+                )
+                count: pl.Scalar[pl.INDEX] = 0
+                for acc, count_iter in pl.while_(init_values=(t, count)):
+                    pl.cond(count_iter < 4)
+                    r = pl.tile.add(acc, acc)
+                    next_count: pl.Scalar[pl.INDEX] = count_iter + 1
+                    acc_out, count_out = pl.yield_(r, next_count)
+                out_0_1 = pl.tile.store(acc_out, [0, 0, 0], out_0, [2, 3, 4])
+                return out_0_1
+
+            @pl.function
+            def main(self, x: pl.Tensor[[2, 3, 4], pl.FP32]) -> pl.Tensor[[2, 3, 4], pl.FP32]:
+                out_0 = pl.create_tensor([2, 3, 4], dtype=pl.FP32)
+                y = self.main_incore_0(x, out_0)
+                return y
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_if_stmt_tile_return_var(self):
         """``IfStmt`` with 3D tile return_vars -> flattened to 2D via yield-type matching."""
 
@@ -1723,6 +1789,89 @@ class TestFlattenTileNdTo2DBatchMatmul:
         assert eff.slayout == ir.TileLayout.col_major, (
             f"flattened rhs Mat tile lost NZ slayout (#1540): blayout={eff.blayout}, slayout={eff.slayout}"
         )
+
+    def test_rank3_mat_load_fallback_preserves_explicit_tile_view_2d(self):
+        """#1540 fallback path: a rank>2 Mat ``tile.load`` carrying an explicit
+        ``TileView`` whose consumer is *not* ``tile.batch_matmul`` (here a
+        ``tile.move``) must keep that view, with the trailing matrix layout
+        intact, on the flattened 2D load.
+
+        This complements ``test_rank3_mat_load_under_if_preserves_explicit_tile_view``
+        (which routes through the batch_matmul-under-if path) by exercising the
+        plain fallback rewrite branch in ``TransformBody`` at
+        ``flatten_tile_nd_to_2d_pass.cpp:1616-1648``. Because the load is consumed
+        by ``tile.move`` (not ``tile.batch_matmul``) it stays out of
+        ``batch_matmul_only_vars``, so the ``result_tile->tile_view_.has_value()``
+        branch (lines 1632-1635) fires: the pass rebuilds the result ``TileType``
+        as 2D but copies ``blayout``/``slayout``/``fractal``/``pad`` from the
+        source view, only replacing ``valid_shape`` with the merged 2D shape.
+
+        The Expected ``TileType`` is derived by hand from that branch, NOT by
+        snapshotting pass output:
+          * shape: ``[1, 128, 64]`` merges all-but-last -> ``[1*128, 64] = [128, 64]``
+          * dtype/memory_space: unchanged (``BF16`` / ``Mat``)
+          * tile_view: ``valid_shape=[128, 64]`` with the source's
+            ``blayout=row_major, slayout=col_major`` (and default ``fractal=512``,
+            ``pad=null``, empty stride / no start_offset).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                w: pl.Tensor[[1, 64, 128], pl.BF16],
+                out_0: pl.Out[pl.Tensor[[1, 128, 64], pl.BF16]],
+            ) -> pl.Tensor[[1, 128, 64], pl.BF16]:
+                # Explicit NZ-layout annotation, as LowerCompositeOps emits for a
+                # transposed-load Mat operand. transpose=True swaps the last two
+                # source dims: slice [1, 64, 128] becomes tile [1, 128, 64].
+                rhs: pl.Tile[
+                    [1, 128, 64],
+                    pl.BF16,
+                    pl.Mem.Mat,
+                    pl.TileView(blayout=pl.TileLayout.row_major, slayout=pl.TileLayout.col_major),
+                ] = pl.tile.load(w, [0, 0, 0], [1, 64, 128], target_memory=pl.Mem.Mat, transpose=True)
+                # tile.move (not batch_matmul) keeps `rhs` on the fallback path.
+                moved = pl.tile.move(rhs, target_memory=pl.Mem.Left)
+                out_0 = pl.tile.store(moved, [0, 0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, w: pl.Tensor[[1, 64, 128], pl.BF16]) -> pl.Tensor[[1, 128, 64], pl.BF16]:
+                out_0 = pl.create_tensor([1, 128, 64], dtype=pl.BF16)
+                return self.main_incore_0(w, out_0)
+
+        After = passes.flatten_tile_nd_to_2d()(Before)
+        after_func = After.get_function("main_incore_0")
+        assert after_func is not None
+
+        body = cast(ir.SeqStmts, after_func.body)
+        flat_load = next(
+            stmt
+            for stmt in body.stmts
+            if isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == "tile.load"
+        )
+        actual_type = cast(ir.TileType, flat_load.value.type)
+
+        span = ir.Span.unknown()
+        expected_view = ir.TileView(
+            valid_shape=[128, 64],
+            blayout=ir.TileLayout.row_major,
+            slayout=ir.TileLayout.col_major,
+        )
+        expected_type = ir.TileType(
+            [ir.ConstInt(128, DataType.INDEX, span), ir.ConstInt(64, DataType.INDEX, span)],
+            DataType.BF16,
+            None,
+            expected_view,
+            ir.MemorySpace.Mat,
+        )
+        # Both the Var binding and the Call result must carry the canonical 2D type.
+        ir.assert_structural_equal(actual_type, expected_type)
+        ir.assert_structural_equal(cast(ir.TileType, flat_load.var.type), expected_type)
 
 
 # ----------------------------------------------------------------------------

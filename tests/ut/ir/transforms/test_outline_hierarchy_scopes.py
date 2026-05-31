@@ -7,99 +7,65 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Unit tests for OutlineHierarchyScopes pass."""
+"""Unit tests for OutlineHierarchyScopes pass.
+
+The inline ``with pl.at(level>=HOST, role=pl.Role.SubWorker)`` form was removed
+(SubWorkers are now declared via ``@pl.function(level=..., role=...)``), so the
+cases here exercise Hierarchy scopes through the still-supported inline forms:
+``with pl.at(level=..., role=pl.Role.Orchestrator)`` and the level-only
+``with pl.at(level=...)`` (for any non-CORE_GROUP level — CORE_GROUP is special
+cased to InCore by the parser).
+
+Every transform case follows the canonical Before/After/Expected style: the
+Expected IR is the post-outline program written by hand from the pass's
+documented semantics (``docs/en/dev/passes/09-outline_hierarchy_scopes.md`` and
+``src/ir/transforms/outline_hierarchy_scopes_pass.cpp``), then run through
+``convert_to_ssa`` so SSA naming/phi insertion matches the pass output.
+"""
 
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
 
-# All cases below construct SubWorker scopes via the inline ``with pl.at(...)``
-# form, which has been removed. The pass itself is exercised end-to-end by the
-# distributed integration tests in tests/st/distributed; this file is kept as a
-# parking place pending migration to @pl.function-declared SubWorkers.
-pytestmark = pytest.mark.skip(reason="inline 'with pl.at(role=SubWorker)' form removed")
-
 
 class TestOutlineHierarchyScopes:
     """Test OutlineHierarchyScopes pass."""
 
-    def test_outline_simple_hierarchy_scope(self):
-        """Test outlining a SubWorker scope with annotated output variable."""
+    def test_outline_single_orchestrator_scope(self):
+        """A single Hierarchy(Orchestrator) scope is lifted into an Opaque
+        function carrying level/role; the scope is replaced by a Call. Parent
+        stays Opaque (doc Example, lines 113-139; source: outlined_func_type_ =
+        FunctionType::Opaque, MutableCopy preserves parent type)."""
 
         @pl.program
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    y: pl.Tensor[[64], pl.FP32] = x + 1
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def main_host_orch_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = self.main_host_orch_0(x)
                 return y
 
         Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_hierarchy_scopes()(Before)
-
-        funcs = {f.name: f for f in After.functions.values()}
-        worker = funcs["main_host_sub_worker_0"]
-        assert worker.level == ir.Level.HOST
-        assert worker.role == ir.Role.SubWorker
-        assert len(worker.params) == 1
-        assert worker.params[0].name_hint == "x__ssa_v0"
-        assert len(worker.return_types) == 1
-
-    def test_outline_sub_worker_multiple_outputs(self):
-        """Test SubWorker scope with multiple annotated output variables."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self, x: pl.Tensor[[64], pl.FP32], w: pl.Tensor[[64], pl.FP32]
-            ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    a: pl.Tensor[[64], pl.FP32] = x + 1
-                    b: pl.Tensor[[64], pl.FP32] = w * 2  # noqa: F841
-                return a
-
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.outline_hierarchy_scopes()(Before)
-
-        funcs = {f.name: f for f in After.functions.values()}
-        worker = funcs["main_host_sub_worker_0"]
-        assert worker.level == ir.Level.HOST
-        assert worker.role == ir.Role.SubWorker
-        # Two inputs (x, w) and two outputs (a, b) — but only a is used after
-        param_names = [p.name_hint for p in worker.params]
-        assert "x__ssa_v0" in param_names
-        assert "w__ssa_v0" in param_names
-        # Only 'a' is used after the scope (return a), so only 1 return type
-        assert len(worker.return_types) == 1
-
-    def test_outline_sub_worker_all_outputs_used(self):
-        """Test SubWorker scope where multiple outputs defined, all used after."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(
-                self,
-                x: pl.Tensor[[64], pl.FP32],
-                w: pl.Tensor[[64], pl.FP32],
-            ) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    a: pl.Tensor[[64], pl.FP32] = x + 1
-                    b: pl.Tensor[[64], pl.FP32] = w + 2
-                y: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
-                return y
-
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.outline_hierarchy_scopes()(Before)
-
-        funcs = {f.name: f for f in After.functions.values()}
-        worker = funcs["main_host_sub_worker_0"]
-        assert len(worker.params) == 2  # x, w
-        assert len(worker.return_types) == 2  # a, b both used after scope
+        ir.assert_structural_equal(After, Expected)
 
     def test_outline_hierarchy_level_only(self):
-        """Test outlining a Hierarchy scope with only level (no role)."""
+        """Outlining a Hierarchy scope with only level (no role) — the role
+        suffix is omitted from the name (doc Naming table; source
+        GenerateHierarchySuffix appends role only when present)."""
 
         @pl.program
         class Before:
@@ -126,34 +92,38 @@ class TestOutlineHierarchyScopes:
         After = passes.outline_hierarchy_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_outline_multiple_hierarchy_scopes(self):
-        """Test outlining multiple Hierarchy scopes in one function."""
+    def test_outline_multiple_sequential_scopes_independent_counter(self):
+        """Two sibling Hierarchy scopes are outlined into two functions with a
+        per-function counter (``_0`` then ``_1``). The first is level-only
+        (no role suffix), the second is Orchestrator (source: scope_counter_
+        increments per outlined scope; naming via GenerateHierarchySuffix)."""
 
         @pl.program
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
+                with pl.at(level=pl.Level.CHIP):
+                    a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 with pl.at(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator):
-                    z: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+                    z: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
                 return z
 
         @pl.program
         class Expected:
-            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
-            def main_host_sub_worker_0(self, x: pl.Tensor[[64], pl.FP32]):
-                x
+            @pl.function(level=pl.Level.CHIP)
+            def main_chip_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return a
 
             @pl.function(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator)
-            def main_global_orch_1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                z: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
+            def main_global_orch_1(self, a: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
                 return z
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                self.main_host_sub_worker_0(x)
-                z: pl.Tensor[[64], pl.FP32] = self.main_global_orch_1(x)
+                a: pl.Tensor[[64], pl.FP32] = self.main_chip_0(x)
+                z: pl.Tensor[[64], pl.FP32] = self.main_global_orch_1(a)
                 return z
 
         Before = passes.convert_to_ssa()(Before)
@@ -161,8 +131,12 @@ class TestOutlineHierarchyScopes:
         After = passes.outline_hierarchy_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_outline_nested_hierarchy_scopes(self):
-        """Test outlining nested Hierarchy scopes."""
+    def test_outline_nested_orchestrator_scopes_chained_name(self):
+        """Nested Hierarchy scopes are outlined recursively: the inner scope is
+        extracted first and replaced with a Call inside the outer outlined
+        function, producing chained names like
+        ``main_global_orch_0_host_orch_0`` (doc Nested Hierarchy Example,
+        lines 153-189)."""
 
         @pl.program
         class Before:
@@ -170,61 +144,37 @@ class TestOutlineHierarchyScopes:
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 with pl.at(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator):
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                    with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                        _ = y
-                return y
+                    with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                        z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
 
         @pl.program
         class Expected:
-            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
-            def main_host_sub_worker_0(self, y: pl.Tensor[[64], pl.FP32]):
-                y
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def main_global_orch_0_host_orch_0(self, y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
 
             @pl.function(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator)
             def main_global_orch_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                self.main_host_sub_worker_0(y)
-                return y
+                z: pl.Tensor[[64], pl.FP32] = self.main_global_orch_0_host_orch_0(y)
+                return z
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                y: pl.Tensor[[64], pl.FP32] = self.main_global_orch_0(x)
-                return y
+                z: pl.Tensor[[64], pl.FP32] = self.main_global_orch_0(x)
+                return z
 
         Before = passes.convert_to_ssa()(Before)
         Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_hierarchy_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_outline_hierarchy_with_incore_preserved(self):
-        """Test that InCore scope inside SubWorker body is captured as pure Python (not parsed as DSL)."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
-
-        @pl.program
-        class Expected:
-            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
-            def main_host_sub_worker_0(self, x: pl.Tensor[[64], pl.FP32]):
-                x
-
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                self.main_host_sub_worker_0(x)
-                return x
-
-        Before = passes.convert_to_ssa()(Before)
-        Expected = passes.convert_to_ssa()(Expected)
-        After = passes.outline_hierarchy_scopes()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_outline_hierarchy_multiple_inputs(self):
-        """Test outlining scope that uses multiple outer variables."""
+    def test_outline_multiple_inputs(self):
+        """A scope that reads two outer variables produces a 2-param outlined
+        function; the captured Vars are the call args in first-use order
+        (source: input_vars built from body_collector.var_uses_ordered)."""
 
         @pl.program
         class Before:
@@ -234,16 +184,18 @@ class TestOutlineHierarchyScopes:
             ) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
                 b: pl.Tensor[[64], pl.FP32] = pl.mul(x, y)
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = a, b
-                return a
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    c: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                return c
 
         @pl.program
         class Expected:
-            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
-            def main_host_sub_worker_0(self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]):
-                a
-                b
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def main_host_orch_0(
+                self, a: pl.Tensor[[64], pl.FP32], b: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                return c
 
             @pl.function
             def main(
@@ -251,87 +203,196 @@ class TestOutlineHierarchyScopes:
             ) -> pl.Tensor[[64], pl.FP32]:
                 a: pl.Tensor[[64], pl.FP32] = pl.add(x, y)
                 b: pl.Tensor[[64], pl.FP32] = pl.mul(x, y)
-                self.main_host_sub_worker_0(a, b)
-                return a
+                c: pl.Tensor[[64], pl.FP32] = self.main_host_orch_0(a, b)
+                return c
 
         Before = passes.convert_to_ssa()(Before)
         Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_hierarchy_scopes()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_outline_hierarchy_multiple_variable_references(self):
-        """Test outlining scope that references multiple outer variables."""
+    def test_outline_multi_output_tuple_get_item(self):
+        """A scope that defines two values used after it returns a 2-tuple; the
+        call site binds a temp ``ret`` var, then projects each output with a
+        ``TupleGetItem`` (source OutlineScope output_vars.size() > 1 path,
+        lines 984-996)."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], w: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator):
+                    a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    b: pl.Tensor[[64], pl.FP32] = pl.mul(w, w)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator)
+            def main_global_orch_0(
+                self, x: pl.Tensor[[64], pl.FP32], w: pl.Tensor[[64], pl.FP32]
+            ) -> tuple[pl.Tensor[[64], pl.FP32], pl.Tensor[[64], pl.FP32]]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(w, w)
+                return a, b
+
+            @pl.function
+            def main(
+                self, x: pl.Tensor[[64], pl.FP32], w: pl.Tensor[[64], pl.FP32]
+            ) -> pl.Tensor[[64], pl.FP32]:
+                a, b = self.main_global_orch_0(x, w)
+                y: pl.Tensor[[64], pl.FP32] = pl.add(a, b)
+                return y
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_hierarchy_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_outline_with_intermediate_computation(self):
+        """Computation before and after the scope is left in the parent; the
+        scope itself is replaced by a single Call (single-output AssignStmt
+        path, source line 981-983)."""
 
         @pl.program
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    c: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
+                e: pl.Tensor[[64], pl.FP32] = pl.add(c, c)
+                return e
+
+        @pl.program
+        class Expected:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def main_host_orch_0(self, b: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                c: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
+                return c
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
+                c: pl.Tensor[[64], pl.FP32] = self.main_host_orch_0(b)
+                e: pl.Tensor[[64], pl.FP32] = pl.add(c, c)
+                return e
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_hierarchy_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_outline_in_control_flow(self):
+        """A Hierarchy scope nested inside an ``if`` branch is outlined in place
+        (source: SeqStmts visitor recurses into control-flow bodies via
+        required_outputs_ propagation). SSA phi insertion for the joined ``y``
+        is produced identically on both sides by convert_to_ssa."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+                if cond:
+                    with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                        y0: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(y0, x)  # type: ignore[no-redef]
+                else:
+                    y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)  # type: ignore[no-redef,unreachable]
+                return y
+
+        @pl.program
+        class Expected:
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def main_host_orch_0(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y0: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
+                if cond:
+                    y0: pl.Tensor[[64], pl.FP32] = self.main_host_orch_0(x)
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(y0, x)  # type: ignore[no-redef]
+                else:
+                    y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)  # type: ignore[no-redef,unreachable]
+                return y
+
+        Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
+        After = passes.outline_hierarchy_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_outline_submit_emission_with_deps(self):
+        """``with pl.at(...) as tid:`` makes the scope carry a ``task_id_var``
+        attr, so the call site becomes an ``ir.Submit`` (not a plain Call) whose
+        return type is the augmented ``Tuple{<scope output>, Scalar[TASK_ID]}``;
+        a trailing ``TupleGetItem`` binds the producer TaskId. ``deps=[t1]`` is
+        folded into ``Submit.deps_``. The parser's transient
+        ``system.task_invalid()`` placeholder before each scope is dropped
+        (source lines 317-345, 836, 871-909, 961-978)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator, name_hint="s1") as t1:
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator, name_hint="s2", deps=[t1]) as _t2:
+                    z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator)
+            def s1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                z: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = y, z
-                result: pl.Tensor[[64], pl.FP32] = pl.add(y, z)
-                return result
+                return y
 
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.outline_hierarchy_scopes()(Before)
+            @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+            def s2(self, y: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                z: pl.Tensor[[64], pl.FP32] = pl.mul(y, y)
+                return z
 
-        # Verify outlined function has level/role and correct number of params
-        hierarchy_func = After.get_function("main_host_sub_worker_0")
-        assert hierarchy_func is not None
-        assert hierarchy_func.level == ir.Level.HOST
-        assert hierarchy_func.role == ir.Role.SubWorker
-        # SubWorker has no return types (pure Python body, no DSL outputs)
-        assert len(hierarchy_func.return_types) == 0
-
-    def test_outline_hierarchy_no_outputs(self):
-        """Test outlining a Hierarchy scope with no variables used after."""
-
-        @pl.program
-        class Before:
-            @pl.function
+            @pl.function(type=pl.FunctionType.Opaque)
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
+                y, t1 = pl.submit(self.s1, x)
+                z, _t2 = pl.submit(self.s2, y, deps=[t1])
+                return z
 
         Before = passes.convert_to_ssa()(Before)
+        Expected = passes.convert_to_ssa()(Expected)
         After = passes.outline_hierarchy_scopes()(Before)
+        ir.assert_structural_equal(After, Expected)
 
-        hierarchy_func = After.get_function("main_host_sub_worker_0")
-        assert hierarchy_func is not None
-        assert hierarchy_func.level == ir.Level.HOST
-        assert hierarchy_func.role == ir.Role.SubWorker
-        assert len(hierarchy_func.return_types) == 0
-
-    def test_outline_hierarchy_in_control_flow(self):
-        """Test outlining Hierarchy scope inside conditional statement."""
+    def test_outline_submit_single_output(self):
+        """Even with a single scope output, the ``as tid:`` path always uses the
+        temp+unpack form: the TaskId is an extra trailing tuple element needing
+        its own ``TupleGetItem`` (source lines 961-978 — "always goes through
+        the temp+unpack path even for <=1 output")."""
 
         @pl.program
         class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
-                if cond:
-                    with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                        _ = x
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # type: ignore[no-redef]
-                else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)  # type: ignore[no-redef,unreachable]
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator, name_hint="s1") as t1:  # noqa: F841
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
         @pl.program
         class Expected:
-            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
-            def main_host_sub_worker_0(self, x: pl.Tensor[[64], pl.FP32]):
-                x
+            @pl.function(level=pl.Level.GLOBAL, role=pl.Role.Orchestrator)
+            def s1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
 
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32], cond: pl.Scalar[pl.BOOL]) -> pl.Tensor[[64], pl.FP32]:
-                if cond:
-                    self.main_host_sub_worker_0(x)
-                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)  # type: ignore[no-redef]
-                else:
-                    y: pl.Tensor[[64], pl.FP32] = pl.mul(x, x)  # type: ignore[no-redef,unreachable]
+            @pl.function(type=pl.FunctionType.Opaque)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y, t1 = pl.submit(self.s1, x)  # noqa: F841
                 return y
 
         Before = passes.convert_to_ssa()(Before)
@@ -340,7 +401,8 @@ class TestOutlineHierarchyScopes:
         ir.assert_structural_equal(After, Expected)
 
     def test_hierarchy_does_not_affect_incore_scopes(self):
-        """Test that OutlineHierarchyScopes does not outline InCore scopes."""
+        """OutlineHierarchyScopes only targets ScopeKind::Hierarchy; InCore
+        scopes are left untouched (source: target_scope_kind_ == Hierarchy)."""
 
         @pl.program
         class Before:
@@ -352,11 +414,10 @@ class TestOutlineHierarchyScopes:
 
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_hierarchy_scopes()(Before)
-        # InCore scopes should remain untouched by the hierarchy pass
         ir.assert_structural_equal(After, Before)
 
     def test_hierarchy_does_not_affect_cluster_scopes(self):
-        """Test that OutlineHierarchyScopes does not outline Cluster scopes."""
+        """Cluster scopes are likewise untouched by the hierarchy pass."""
 
         @pl.program
         class Before:
@@ -368,11 +429,10 @@ class TestOutlineHierarchyScopes:
 
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_hierarchy_scopes()(Before)
-        # Cluster scopes should remain untouched by the hierarchy pass
         ir.assert_structural_equal(After, Before)
 
     def test_no_hierarchy_scopes_passthrough(self):
-        """Test that functions without Hierarchy scopes are passed through unchanged."""
+        """Functions without any Hierarchy scope are passed through unchanged."""
 
         @pl.program
         class Before:
@@ -386,53 +446,28 @@ class TestOutlineHierarchyScopes:
         ir.assert_structural_equal(After, Before)
 
     def test_outline_preserves_parent_function_type(self):
-        """Test that parent function keeps its original type after outlining."""
+        """Parent stays Opaque after outlining — hierarchy is orthogonal to
+        FunctionType (doc lines 31-34; source: MutableCopy preserves
+        func_type_, no Orchestration promotion)."""
 
         @pl.program
         class Before:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
 
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_hierarchy_scopes()(Before)
 
         main_func = After.get_function("main")
         assert main_func is not None
-        # Parent remains Opaque (not promoted to Orchestration)
         assert main_func.func_type == ir.FunctionType.Opaque
 
-    def test_outline_hierarchy_different_levels(self):
-        """Test various level/role combinations."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.CHIP, role=pl.Role.Orchestrator):
-                    a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                with pl.at(level=pl.Level.CLUSTER_0, role=pl.Role.SubWorker):
-                    _ = a
-                return a
-
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.outline_hierarchy_scopes()(Before)
-
-        # Verify levels are correctly propagated
-        func_0 = After.get_function("main_chip_orch_0")
-        assert func_0 is not None
-        assert func_0.level == ir.Level.CHIP
-        assert func_0.role == ir.Role.Orchestrator
-
-        func_1 = After.get_function("main_cluster0_sub_worker_0")
-        assert func_1 is not None
-        assert func_1.level == ir.Level.CLUSTER_0
-        assert func_1.role == ir.Role.SubWorker
-
     def test_outline_skips_non_opaque_functions(self):
-        """Test that non-Opaque functions (InCore, Orchestration) are skipped."""
+        """Non-Opaque functions are emitted unchanged; only the Opaque ``main``
+        is processed (source: ``if func_type_ != Opaque: continue``)."""
 
         @pl.program
         class Before:
@@ -443,66 +478,35 @@ class TestOutlineHierarchyScopes:
 
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
 
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_hierarchy_scopes()(Before)
 
-        # InCore function preserved unchanged
+        # InCore function preserved unchanged.
         compute = After.get_function("compute")
         assert compute is not None
         assert compute.func_type == ir.FunctionType.InCore
 
-        # Hierarchy scope in main was outlined
-        hierarchy_func = After.get_function("main_host_sub_worker_0")
+        # Hierarchy scope in main was outlined.
+        hierarchy_func = After.get_function("main_host_orch_0")
         assert hierarchy_func is not None
         assert hierarchy_func.level == ir.Level.HOST
+        assert hierarchy_func.role == ir.Role.Orchestrator
 
-    def test_outline_hierarchy_with_intermediate_computation(self):
-        """Test outlining with computation before and after the scope."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = b
-                e: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
-                return e
-
-        @pl.program
-        class Expected:
-            @pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
-            def main_host_sub_worker_0(self, b: pl.Tensor[[64], pl.FP32]):
-                b
-
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                a: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
-                b: pl.Tensor[[64], pl.FP32] = pl.mul(a, a)
-                self.main_host_sub_worker_0(b)
-                e: pl.Tensor[[64], pl.FP32] = pl.add(b, b)
-                return e
-
-        Before = passes.convert_to_ssa()(Before)
-        Expected = passes.convert_to_ssa()(Expected)
-        After = passes.outline_hierarchy_scopes()(Before)
-        ir.assert_structural_equal(After, Expected)
-
-    def test_outline_multiple_functions_with_hierarchy(self):
-        """Test outlining in multiple functions (independent counter per function)."""
+    def test_outline_independent_counter_across_functions(self):
+        """Each Opaque function starts its own scope counter at 0 (source:
+        scope_counter_ is constructed per-function in the pass loop)."""
 
         @pl.program
         class Before:
             @pl.function
             def func1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
 
             @pl.function
             def func2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
@@ -513,70 +517,21 @@ class TestOutlineHierarchyScopes:
         Before = passes.convert_to_ssa()(Before)
         After = passes.outline_hierarchy_scopes()(Before)
 
-        # Each function gets its own counter
-        func1_outlined = After.get_function("func1_host_sub_worker_0")
+        func1_outlined = After.get_function("func1_host_orch_0")
         assert func1_outlined is not None
         assert func1_outlined.level == ir.Level.HOST
-        assert func1_outlined.role == ir.Role.SubWorker
+        assert func1_outlined.role == ir.Role.Orchestrator
 
         func2_outlined = After.get_function("func2_global_orch_0")
         assert func2_outlined is not None
         assert func2_outlined.level == ir.Level.GLOBAL
         assert func2_outlined.role == ir.Role.Orchestrator
 
-    def test_outline_hierarchy_round_trip(self):
-        """Test that outlined hierarchy program survives print-parse round-trip."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
-
-        Before = passes.convert_to_ssa()(Before)
-        After = passes.outline_hierarchy_scopes()(Before)
-
-        # Print and re-parse
-        printed = After.as_python()
-        Reparsed = pl.parse_program(printed)
-        ir.assert_structural_equal(After, Reparsed)
-
-    def test_outline_then_incore(self):
-        """Test hierarchy outlined first; SubWorker body is pure Python so nested InCore is not in IR."""
-
-        @pl.program
-        class Before:
-            @pl.function
-            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
-
-        Before = passes.convert_to_ssa()(Before)
-
-        # Step 1: Outline hierarchy scopes
-        After1 = passes.outline_hierarchy_scopes()(Before)
-
-        # The outlined hierarchy function should exist with level/role
-        hierarchy_func = After1.get_function("main_host_sub_worker_0")
-        assert hierarchy_func is not None
-        assert hierarchy_func.level == ir.Level.HOST
-
-        # SubWorker body is pure Python — no InCore scope in the IR
-        printed1 = After1.as_python()
-        assert "pl.at(level=pl.Level.CORE_GROUP)" not in printed1
-
-        # Step 2: Outline incore scopes — nothing to outline in SubWorker function
-        After2 = passes.outline_incore_scopes()(After1)
-
-        # No InCore function should be created since SubWorker body has no InCore scopes in IR
-        incore_func = After2.get_function("main_host_sub_worker_0_incore_0")
-        assert incore_func is None
-
     def test_outline_hierarchy_with_alias_level(self):
-        """Test that level aliases (POD = CLUSTER_0) resolve to canonical name."""
+        """Level aliases (``POD = CLUSTER_0``) resolve to the canonical name in
+        both the function suffix (``cluster0``) and the stored ``level``
+        (doc Level aliases, lines 107-109; the binding returns the canonical
+        enum member)."""
 
         @pl.program
         class Before:
@@ -591,9 +546,25 @@ class TestOutlineHierarchyScopes:
 
         func = After.get_function("main_cluster0_0")
         assert func is not None
-        # POD is an alias for CLUSTER_0 — both have underlying value 6.
-        # The binding returns the canonical enum member (CLUSTER_0).
         assert func.level == ir.Level.CLUSTER_0
+
+    def test_outline_hierarchy_round_trip(self):
+        """Outlined hierarchy program survives a print → parse round-trip."""
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+        Before = passes.convert_to_ssa()(Before)
+        After = passes.outline_hierarchy_scopes()(Before)
+
+        printed = After.as_python()
+        Reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(After, Reparsed)
 
 
 class TestHierarchyOutlinedVerifier:
@@ -612,16 +583,16 @@ class TestHierarchyOutlinedVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
 
         ctx = passes.PassContext([], passes.VerificationLevel.NONE)
         with ctx:
             program = passes.convert_to_ssa()(Input)
             program = passes.outline_hierarchy_scopes()(program)
 
-        # Should not throw — no Hierarchy scopes remain
+        # Should not throw — no Hierarchy scopes remain.
         passes.verify_properties(self._hierarchy_outlined_props(), program, "test")
 
     def test_remaining_hierarchy_scope_fails_verification(self):
@@ -631,16 +602,16 @@ class TestHierarchyOutlinedVerifier:
         class Input:
             @pl.function
             def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-                with pl.at(level=pl.Level.HOST, role=pl.Role.SubWorker):
-                    _ = x
-                return x
+                with pl.at(level=pl.Level.HOST, role=pl.Role.Orchestrator):
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
 
-        # Don't outline — just convert to SSA, leaving Hierarchy scope intact
+        # Don't outline — just convert to SSA, leaving Hierarchy scope intact.
         ctx = passes.PassContext([], passes.VerificationLevel.NONE)
         with ctx:
             program = passes.convert_to_ssa()(Input)
 
-        # verify_properties should throw because Hierarchy scope remains
+        # verify_properties should throw because Hierarchy scope remains.
         with pytest.raises(Exception, match="Hierarchy ScopeStmt"):
             passes.verify_properties(self._hierarchy_outlined_props(), program, "test")
 
@@ -654,7 +625,7 @@ class TestHierarchyOutlinedVerifier:
                 y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-        # No hierarchy scopes at all — verification should pass
+        # No hierarchy scopes at all — verification should pass.
         passes.verify_properties(self._hierarchy_outlined_props(), Input, "test")
 
 

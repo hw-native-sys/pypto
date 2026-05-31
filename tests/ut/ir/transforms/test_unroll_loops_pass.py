@@ -118,6 +118,37 @@ class TestBasicUnroll:
         After = _unroll_and_ssa(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_negative_step_unroll(self):
+        """Negative step unroll(6, 0, -2) iterates i = 6, 4, 2 (3 iterations).
+
+        Exercises both the ``step < 0`` trip-count / emit branches
+        (unroll_loops_pass.cpp:99-101, 124-126) and the ``Neg(ConstInt)``
+        negative-literal extraction in GetConstIntValue (lines 58-64): the
+        parser represents the ``-2`` step as ``neg(ConstInt(2))``. The loop
+        variable is substituted with each descending constant value, so the
+        added literals must be 6, 4, 2 in that order.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.unroll(6, 0, -2):
+                    x = pl.add(x, i)
+                return x
+
+        @pl.program
+        class Expected:
+            @pl.function(strict_ssa=True)
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                x_0: pl.Tensor[[64], pl.FP32] = pl.add(x, 6)
+                x_1: pl.Tensor[[64], pl.FP32] = pl.add(x_0, 4)
+                x_2: pl.Tensor[[64], pl.FP32] = pl.add(x_1, 2)
+                return x_2
+
+        After = _unroll_and_ssa(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 class TestNestedLoops:
     """Tests for unrolling with nested loops."""
@@ -161,6 +192,29 @@ class TestNestedLoops:
         After = passes.unroll_loops()(Before)
         ir.assert_structural_equal(After, Before)
 
+    def test_chunked_unroll_not_expanded(self):
+        """Chunked unroll loops are left intact for SplitChunkedLoops to handle.
+
+        VisitStmt_ skips expansion when ``op->chunk_config_.has_value()``
+        (unroll_loops_pass.cpp:164), so a ``pl.unroll(..., chunk=...)`` loop
+        survives this pass unchanged — the chunk is later lowered by
+        SplitChunkedLoops. The pass returns the original function unmodified,
+        so the result is structurally identical to the input (no SSA conversion
+        needed since nothing is transformed).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk]):
+                    for i in pl.unroll(0, 8, 1, chunk=4, chunk_policy="leading_full"):
+                        x = pl.add(x, 1.0)
+                return x
+
+        After = passes.unroll_loops()(Before)
+        ir.assert_structural_equal(After, Before)
+
 
 class TestZeroTripLoop:
     """Tests for zero-trip unrolled loops."""
@@ -184,6 +238,29 @@ class TestZeroTripLoop:
 
         After = _unroll_and_ssa(Before)
         ir.assert_structural_equal(After, Expected)
+
+
+class TestUnrollLimits:
+    """Tests for the compile-time unroll trip-count limit."""
+
+    def test_trip_count_exceeds_max_raises(self):
+        """Trip count above kMaxUnrollIterations (1024) raises ValueError.
+
+        unroll_loops_pass.cpp:102-106 rejects any loop whose computed trip
+        count exceeds 1024. ``pl.unroll(2000)`` has trip count 2000 > 1024,
+        so running the pass must raise rather than expand 2000 body copies.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function
+            def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                for i in pl.unroll(2000):
+                    x = pl.add(x, 1.0)
+                return x
+
+        with pytest.raises(Exception, match="exceeds maximum allowed"):
+            passes.unroll_loops()(Before)
 
 
 class TestParserValidation:
