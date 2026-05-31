@@ -143,7 +143,7 @@ def test_gm_pipe_injection_handles_submit_launched_group():
             out: pl.Out[pl.Tensor[[16, 16], pl.FP16]],
         ) -> pl.Tensor[[16, 16], pl.FP16]:
             with pl.manual_scope():
-                updated, tid = pl.submit(self.group_func, a, out)
+                updated, _tid = pl.submit(self.group_func, a, out)
             return updated
 
     @pl.program
@@ -198,7 +198,7 @@ def test_gm_pipe_injection_handles_submit_launched_group():
                     layout=pl.TensorLayout.ND,
                     manual_dep=True,
                 )
-                updated, tid = pl.submit(self.group_func, a, out, gm_pipe_buffer_0)
+                updated, _tid = pl.submit(self.group_func, a, out, gm_pipe_buffer_0)
             return updated
 
     After = _run_inject(Before)

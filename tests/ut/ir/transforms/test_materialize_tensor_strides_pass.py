@@ -334,9 +334,10 @@ def test_tuple_return_type_materialized():
     # (DN formula, doc 27-materialize_tensor_strides.md "Stride Formulas".)
     def build(stride_2d, stride_3d):
         x = ir.Var("x", _dn_tensor([4, 8], stride_2d), _SPAN)
+        y = ir.Var("y", _dn_tensor([2, 4, 8], stride_3d), _SPAN)
         ret_tuple = ir.TupleType([_dn_tensor([4, 8], stride_2d), _dn_tensor([2, 4, 8], stride_3d)])
-        body = ir.ReturnStmt([x, x], _SPAN)
-        func = ir.Function("f", [x], [ret_tuple], body, _SPAN)
+        body = ir.ReturnStmt([x, y], _SPAN)
+        func = ir.Function("f", [x, y], [ret_tuple], body, _SPAN)
         return ir.Program([func], "p", _SPAN)
 
     Before = build([], [])

@@ -165,22 +165,24 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
     // a Submit's deps_); only args_ grows, with gm_param last to match the
     // __gm_pipe_buffer param appended at the callee's tail.
     auto try_rewrite = [&](const ExprPtr& value) -> ExprPtr {
+      auto call = As<Call>(value);
+      auto submit = As<Submit>(value);
       OpPtr callee_op;
-      if (auto call = As<Call>(value)) {
+      if (call) {
         callee_op = call->op_;
-      } else if (auto submit = As<Submit>(value)) {
+      } else if (submit) {
         callee_op = submit->op_;
       } else {
         return nullptr;
       }
       auto gv = std::dynamic_pointer_cast<const GlobalVar>(callee_op);
       if (!gv || !modified_funcs.count(gv->name_)) return nullptr;
-      if (auto call = As<Call>(value)) {
+      if (call) {
         auto new_call = MutableCopy(call);
         new_call->args_.push_back(gm_param);
         return new_call;
       }
-      auto new_submit = MutableCopy(As<Submit>(value));
+      auto new_submit = MutableCopy(submit);
       new_submit->args_.push_back(gm_param);
       return new_submit;
     };
@@ -286,10 +288,12 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
   // workspace is appended last, matching the __gm_pipe_buffer param appended at
   // the callee's tail.
   auto try_rewrite = [&](const ExprPtr& value) -> std::pair<StmtPtr, ExprPtr> {
+    auto call = As<Call>(value);
+    auto submit = As<Submit>(value);
     OpPtr callee_op;
-    if (auto call = As<Call>(value)) {
+    if (call) {
       callee_op = call->op_;
-    } else if (auto submit = As<Submit>(value)) {
+    } else if (submit) {
       callee_op = submit->op_;
     } else {
       return std::make_pair(StmtPtr{}, ExprPtr{});
@@ -303,12 +307,12 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
     auto create_stmt = std::make_shared<AssignStmt>(gm_var, create_call, span);
     StmtPtr create_stmt_ptr = create_stmt;
 
-    if (auto call = As<Call>(value)) {
+    if (call) {
       auto new_call = MutableCopy(call);
       new_call->args_.push_back(gm_var);
       return std::make_pair(create_stmt_ptr, ExprPtr(new_call));
     }
-    auto new_submit = MutableCopy(As<Submit>(value));
+    auto new_submit = MutableCopy(submit);
     new_submit->args_.push_back(gm_var);
     return std::make_pair(create_stmt_ptr, ExprPtr(new_submit));
   };

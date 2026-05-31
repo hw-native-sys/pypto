@@ -400,7 +400,7 @@ def test_dead_alloc_no_window_materialisation_raises():
             buf = pld.alloc_window_buffer(1024)  # noqa: F841  # never windowed
             return 0
 
-    with pytest.raises(Exception, match="no pld.tensor.window materialisation"):
+    with pytest.raises(Exception, match=r"no pld\.tensor\.window materialisation"):
         _apply(P)
 
 
