@@ -238,22 +238,32 @@ class TupleIndexPermutationMutator : public IRMutator {
     auto new_value = VisitExpr(op->value_);
 
     if (op->var_) {
+      // Both Call and Submit (pl.submit inside pl.manual_scope) launch a callee
+      // whose Out-param return order may have been reordered in Step A; the
+      // result tuple's TupleGetItem indices must be remapped the same way.
+      // Submit is a sibling ObjectKind of Call, so As<Call> alone misses it
+      // (see .claude/rules/pass-submit-awareness.md).
+      OpPtr callee_op;
       if (auto call = As<Call>(new_value)) {
-        // Track call results to reordered functions so we can remap
-        // TupleGetItemExpr indices on those results later.
-        if (auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_)) {
-          auto perm_it = permutations_.find(global_var->name_);
-          if (perm_it != permutations_.end() && !perm_it->second.empty()) {
-            reordered_tuple_vars_[op->var_.get()] = &perm_it->second;
-          } else {
-            // Variable reassigned to a non-reordered call: remove stale entry.
-            reordered_tuple_vars_.erase(op->var_.get());
-          }
+        callee_op = call->op_;
+      } else if (auto submit = As<Submit>(new_value)) {
+        callee_op = submit->op_;
+      }
+      // Track call/submit results to reordered functions so we can remap
+      // TupleGetItemExpr indices on those results later. A Submit's trailing
+      // Scalar[TASK_ID] tuple element is never permuted: the permutation only
+      // covers the callee's return values, and the index_ < perm.size() bound
+      // in VisitExpr_(TupleGetItemExpr) skips it.
+      if (auto global_var = std::dynamic_pointer_cast<const GlobalVar>(callee_op)) {
+        auto perm_it = permutations_.find(global_var->name_);
+        if (perm_it != permutations_.end() && !perm_it->second.empty()) {
+          reordered_tuple_vars_[op->var_.get()] = &perm_it->second;
         } else {
+          // Reassigned to a non-reordered call: remove stale entry.
           reordered_tuple_vars_.erase(op->var_.get());
         }
       } else {
-        // Non-call assignment: any previous tuple mapping for this var is stale.
+        // Non-call/submit assignment (or non-GlobalVar callee): stale mapping.
         reordered_tuple_vars_.erase(op->var_.get());
       }
     }

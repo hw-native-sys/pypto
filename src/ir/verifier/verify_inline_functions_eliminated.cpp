@@ -66,6 +66,32 @@ class InlineCallVisitor : public IRVisitor {
     IRVisitor::VisitExpr_(op);
   }
 
+  void VisitExpr_(const SubmitPtr& op) override {
+    // Submit (pl.submit inside pl.manual_scope) is a sibling call-like kind of
+    // Call; a pl.submit whose callee resolves to a surviving/dropped Inline
+    // function is just as much a dangling reference as a Call. Inlining a
+    // submit is not meaningful (the task launch / TASK_ID result would vanish),
+    // so the correct contract is to flag it here rather than splice it
+    // (.claude/rules/pass-submit-awareness.md, rule 1: "walk Submit too").
+    if (op) {
+      if (auto gv = As<GlobalVar>(op->op_)) {
+        if (inline_names_.count(gv->name_) > 0) {
+          diagnostics_.emplace_back(
+              DiagnosticSeverity::Error, "InlineFunctionsEliminated", 1,
+              "Submit to FunctionType::Inline function '" + gv->name_ + "' survived the InlineFunctions pass",
+              op->span_);
+        } else if (known_names_.count(gv->name_) == 0) {
+          diagnostics_.emplace_back(
+              DiagnosticSeverity::Error, "InlineFunctionsEliminated", 2,
+              "Dangling Submit to function '" + gv->name_ +
+                  "' (no such function in program — likely a former Inline callee that wasn't spliced)",
+              op->span_);
+        }
+      }
+    }
+    IRVisitor::VisitExpr_(op);
+  }
+
  private:
   const std::unordered_set<std::string>& inline_names_;
   const std::unordered_set<std::string>& known_names_;

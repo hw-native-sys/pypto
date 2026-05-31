@@ -2733,12 +2733,6 @@ class TestSubmitCallSiteUpdate:
     and the trailing ``TASK_ID`` return element.
     """
 
-    @pytest.mark.xfail(
-        reason="suspected bug: CallSiteUpdateMutator walks As<Call> only, so a "
-        "pl.submit call site to a transformed InCore is not updated (no tensor.create, "
-        "Out arg not forwarded) — Submit is a sibling ObjectKind, not a Call subclass.",
-        strict=False,
-    )
     def test_submit_call_site_gets_tensor_create(self):
         """pl.submit to a transformed InCore must allocate + forward the appended Out.
 

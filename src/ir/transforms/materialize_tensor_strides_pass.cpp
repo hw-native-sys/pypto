@@ -216,9 +216,35 @@ class MaterializeTensorStridesMutator : public IRMutator {
     // silently undoing the 2D flattening. Forwarding ``op->attrs_`` likewise
     // preserves call metadata that earlier passes wrote (e.g. arg directions,
     // manual-dep edges) — re-deduction would drop those.
-    auto attrs_to_use = attrs_changed ? std::move(new_attrs) : op->attrs_;
+    std::vector<std::pair<std::string, std::any>> attrs_to_use;
+    if (attrs_changed) {
+      attrs_to_use = std::move(new_attrs);
+    } else {
+      attrs_to_use = op->attrs_;
+    }
     return std::make_shared<Call>(op->op_, std::move(new_args), op->kwargs_, std::move(attrs_to_use),
                                   std::move(new_return_type), op->span_);
+  }
+
+  // Submit (pl.submit inside pl.manual_scope) is a sibling ObjectKind of Call,
+  // so VisitExpr_(CallPtr) never sees it. Without this override the Submit
+  // node's own ``Tuple[<returns>..., Scalar[TASK_ID]]`` return type keeps an
+  // unmaterialized (empty-stride) TensorView while every other reachable
+  // TensorType is materialized, silently violating the pass's contract
+  // (see .claude/rules/pass-submit-awareness.md). The base IRMutator override
+  // already recurses args_/deps_/Var-typed attrs; we only patch the return
+  // type and rebuild, preserving Submit-ness (and deps_/attrs_/kwargs_).
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    auto base = IRMutator::VisitExpr_(op);
+    auto submit = As<Submit>(base);
+    if (!submit) return base;
+    auto new_return_type = MaterializeType(submit->GetType());
+    if (new_return_type.get() == submit->GetType().get()) return submit;
+    // MaterializeType recurses the TupleType, materializing each leading
+    // return TensorType and leaving the trailing Scalar[TASK_ID] untouched.
+    // Note the 7-arg Submit ctor order is (op, args, deps, kwargs, attrs, ...).
+    return std::make_shared<Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                    submit->attrs_, std::move(new_return_type), submit->span_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {

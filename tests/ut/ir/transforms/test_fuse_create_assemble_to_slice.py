@@ -755,12 +755,6 @@ class TestFuseCreateAssembleToSlice:
         expected = _run_prereqs_only(Expected)
         ir.assert_structural_equal(after, expected)
 
-    @pytest.mark.xfail(
-        reason="suspected bug: BufferRootCollector uses As<Call> (exact kind), so a "
-        "pl.submit (ir.Submit) callee never propagates its Out-param buffer root; the "
-        "create+assemble around a submit is left unfused (violates pass-submit-awareness).",
-        strict=False,
-    )
     def test_submit_create_assemble_fused_to_slice(self):
         """create + pl.submit callee + single assemble inside manual_scope → slice.
 

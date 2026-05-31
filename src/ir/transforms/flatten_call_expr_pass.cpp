@@ -68,6 +68,7 @@ class FlattenCallExprMutator : public IRMutator {
 
   // Expression visitors
   ExprPtr VisitExpr_(const CallPtr& op) override;
+  ExprPtr VisitExpr_(const SubmitPtr& op) override;
   ExprPtr VisitExpr_(const AddPtr& op) override;
   ExprPtr VisitExpr_(const SubPtr& op) override;
   ExprPtr VisitExpr_(const MulPtr& op) override;
@@ -138,7 +139,9 @@ class FlattenCallExprMutator : public IRMutator {
    * @return Var expression referring to the temporary variable
    */
   ExprPtr ExtractCallToTemp(const ExprPtr& expr) {
-    if (!As<Call>(expr)) {
+    // Submit is a sibling ObjectKind of Call (pl.submit); a nested Submit
+    // argument must be hoisted to a temporary too (pass-submit-awareness.md).
+    if (!As<Call>(expr) && !As<Submit>(expr)) {
       return expr;
     }
 
@@ -450,6 +453,37 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const CallPtr& op) {
 
   if (changed) {
     return std::make_shared<Call>(op->op_, new_args, op->kwargs_, op->attrs_, op->GetType(), op->span_);
+  }
+  return op;
+}
+
+// Submit (pl.submit inside pl.manual_scope) is a sibling ObjectKind of Call;
+// VisitExpr_(CallPtr) never sees it, so a nested Call/Submit argument of a
+// Submit is left inline, violating the three-address "Call arguments cannot be
+// calls" invariant. Mirror the Call handler but rebuild a Submit, preserving
+// deps_ / kwargs_ / attrs_ and the TASK_ID-augmented return type.
+ExprPtr FlattenCallExprMutator::VisitExpr_(const SubmitPtr& op) {
+  std::vector<ExprPtr> new_args;
+  bool changed = false;
+
+  for (const auto& arg : op->args_) {
+    auto visited_arg = VisitExpr(arg);
+    if (As<Call>(visited_arg) || As<Submit>(visited_arg)) {
+      auto temp_var = ExtractCallToTemp(visited_arg);
+      new_args.push_back(temp_var);
+      changed = true;
+    } else {
+      new_args.push_back(visited_arg);
+      if (visited_arg.get() != arg.get()) {
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    // deps_ are TaskId Vars/Arrays, never nested calls — pass through unchanged.
+    return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_, op->GetType(),
+                                    op->span_);
   }
   return op;
 }

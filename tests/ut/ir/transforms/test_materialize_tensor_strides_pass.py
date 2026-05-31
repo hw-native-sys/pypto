@@ -405,12 +405,6 @@ def test_iter_arg_type_and_init_materialized():
 # ============================================================================
 
 
-@pytest.mark.xfail(
-    reason="suspected bug: pass has no VisitExpr_(SubmitPtr); Submit node's "
-    "own return type keeps empty stride while every other reachable "
-    "TensorType is materialized",
-    strict=False,
-)
 def test_submit_return_type_materialized():
     def build(stride):
         kx = ir.Var("x", _dn_tensor([4, 8], stride), _SPAN)

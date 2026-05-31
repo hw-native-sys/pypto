@@ -1586,8 +1586,15 @@ class CallSiteUpdateMutator : public TypePropagatingMutator {
     auto new_value = VisitExpr(op->value_);
     auto call = As<Call>(new_value);
 
-    // Non-call or non-GlobalVar: propagate type change
-    if (!call) return HandlePassThroughAssign(op, new_value);
+    // Submit (pl.submit inside pl.manual_scope) is a sibling call-like kind;
+    // route it through the same appended-Out allocation as Call, preserving
+    // Submit-ness and its TASK_ID-augmented return type
+    // (.claude/rules/pass-submit-awareness.md).
+    if (!call) {
+      if (auto submit = As<Submit>(new_value)) return HandleSubmitCallSite(op, submit);
+      // Non-call or non-GlobalVar: propagate type change
+      return HandlePassThroughAssign(op, new_value);
+    }
     auto global_var = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
     if (!global_var) return HandlePassThroughAssign(op, new_value);
 
@@ -1651,6 +1658,57 @@ class CallSiteUpdateMutator : public TypePropagatingMutator {
     stmts.push_back(std::move(new_assign));
     var_remap_[op->var_.get()] = new_assign_var;
 
+    return SeqStmts::Flatten(std::move(stmts), op->span_);
+  }
+
+  // Submit variant of the call-site update. The appended runtime-allocated
+  // outputs are Out *params* (inputs the callee writes), not additional
+  // returns, so the Submit's own result tuple — Tuple[<callee returns>...,
+  // TASK_ID] — is unchanged; only args_ grows and Submit-ness / deps_ / kwargs_
+  // / attrs_ are preserved. The result var keeps its type, so no var remap.
+  StmtPtr HandleSubmitCallSite(const AssignStmtPtr& op, const SubmitPtr& submit) {
+    auto global_var = std::dynamic_pointer_cast<const GlobalVar>(submit->op_);
+    if (!global_var) return HandlePassThroughAssign(op, submit);
+
+    auto it = incore_added_outputs_.find(global_var->name_);
+    if (it == incore_added_outputs_.end() || it->second == 0) {
+      return HandlePassThroughAssign(op, submit);
+    }
+
+    size_t num_outputs = it->second;
+    auto incore_func_it = transformed_incore_funcs_.find(global_var->name_);
+    INTERNAL_CHECK_SPAN(incore_func_it != transformed_incore_funcs_.end(), submit->span_)
+        << "Internal error: transformed InCore function not found: " << global_var->name_;
+    const auto& incore_func = incore_func_it->second;
+
+    std::vector<StmtPtr> stmts;
+    std::vector<ExprPtr> extra_args;
+    size_t orig_param_count = incore_func->params_.size() - num_outputs;
+    for (size_t i = 0; i < num_outputs; ++i) {
+      const auto& out_param = incore_func->params_[orig_param_count + i];
+      auto out_tensor_type = As<TensorType>(out_param->GetType());
+      INTERNAL_CHECK_SPAN(out_tensor_type, submit->span_) << "Internal error: output param is not TensorType";
+      auto shape_tuple = MakeShapeTuple(out_tensor_type->shape_, submit->span_);
+      TensorLayout layout = out_tensor_type->tensor_view_.has_value() ? out_tensor_type->tensor_view_->layout
+                                                                      : TensorLayout::ND;
+      std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", out_tensor_type->dtype_},
+                                                                     {"layout", layout}};
+      auto create_call = op_registry_.Create("tensor.create", {shape_tuple}, create_kwargs, submit->span_);
+      auto out_var = std::make_shared<Var>(MakeOutParamName(i), create_call->GetType(), submit->span_);
+      stmts.push_back(std::make_shared<AssignStmt>(out_var, create_call, op->span_));
+      extra_args.push_back(out_var);
+    }
+
+    std::vector<ExprPtr> new_args = submit->args_;
+    new_args.insert(new_args.end(), extra_args.begin(), extra_args.end());
+
+    // Note: 7-arg Submit ctor order is (op, args, deps, kwargs, attrs, type, span).
+    auto new_submit =
+        std::make_shared<Submit>(submit->op_, std::move(new_args), submit->deps_, submit->kwargs_,
+                                 submit->attrs_, submit->GetType(), submit->span_);
+    auto new_assign = MutableCopy(op);
+    new_assign->value_ = new_submit;
+    stmts.push_back(std::move(new_assign));
     return SeqStmts::Flatten(std::move(stmts), op->span_);
   }
 

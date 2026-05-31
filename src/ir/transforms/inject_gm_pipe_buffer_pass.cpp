@@ -46,6 +46,7 @@
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
+#include "pypto/ir/kind_traits.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
@@ -103,9 +104,19 @@ void BuildCallGraphFromFunctions(const std::vector<FunctionPtr>& functions,
   for (const auto& func : functions) {
     std::function<void(const std::vector<StmtPtr>&)> walk = [&](const std::vector<StmtPtr>& stmts) {
       for (const auto& stmt : stmts) {
+        // Record both Call and Submit call edges. GetCallFromStmt only matches
+        // Call; a pl.submit (sibling ObjectKind) launching a Group from a
+        // manual_scope is just as much a call edge (pass-submit-awareness.md).
+        OpPtr callee_op;
         if (auto call = transform_utils::GetCallFromStmt(stmt)) {
-          auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-          if (gv && func_names.count(gv->name_)) {
+          callee_op = call->op_;
+        } else if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
+          if (auto submit = As<Submit>(assign->value_)) callee_op = submit->op_;
+        } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
+          if (auto submit = As<Submit>(eval->expr_)) callee_op = submit->op_;
+        }
+        if (auto gv = std::dynamic_pointer_cast<const GlobalVar>(callee_op)) {
+          if (func_names.count(gv->name_)) {
             callees[func->name_].insert(gv->name_);
             callers[gv->name_].insert(func->name_);
           }
@@ -118,6 +129,9 @@ void BuildCallGraphFromFunctions(const std::vector<FunctionPtr>& functions,
           if (else_body.has_value()) walk(FlattenBody(*else_body));
         } else if (auto while_stmt = std::dynamic_pointer_cast<const WhileStmt>(stmt)) {
           walk(FlattenBody(while_stmt->body_));
+        } else if (auto scope = std::dynamic_pointer_cast<const RuntimeScopeStmt>(stmt)) {
+          // pl.manual_scope body holds the submit/call to the Group.
+          walk(FlattenBody(scope->body_));
         }
       }
     };
@@ -145,18 +159,33 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
   std::vector<StmtPtr> new_stmts;
   bool any_changed = false;
   for (const auto& stmt : stmts) {
-    auto try_rewrite = [&](const CallPtr& call) -> CallPtr {
-      if (!call) return nullptr;
-      auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
+    // Append gm_param to a Call OR Submit (pl.submit inside pl.manual_scope is
+    // a sibling call-like kind — pass-submit-awareness.md) launching a modified
+    // function. MutableCopy preserves the node kind and its kwargs_/attrs_ (and
+    // a Submit's deps_); only args_ grows, with gm_param last to match the
+    // __gm_pipe_buffer param appended at the callee's tail.
+    auto try_rewrite = [&](const ExprPtr& value) -> ExprPtr {
+      OpPtr callee_op;
+      if (auto call = As<Call>(value)) {
+        callee_op = call->op_;
+      } else if (auto submit = As<Submit>(value)) {
+        callee_op = submit->op_;
+      } else {
+        return nullptr;
+      }
+      auto gv = std::dynamic_pointer_cast<const GlobalVar>(callee_op);
       if (!gv || !modified_funcs.count(gv->name_)) return nullptr;
-      // Copy the original Call so kwargs_ / attrs_ (e.g. Call::arg_directions_)
-      // survive the rewrite — only args_ needs to grow.
-      auto new_call = MutableCopy(call);
-      new_call->args_.push_back(gm_param);
-      return new_call;
+      if (auto call = As<Call>(value)) {
+        auto new_call = MutableCopy(call);
+        new_call->args_.push_back(gm_param);
+        return new_call;
+      }
+      auto new_submit = MutableCopy(As<Submit>(value));
+      new_submit->args_.push_back(gm_param);
+      return new_submit;
     };
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_))) {
+      if (auto rw = try_rewrite(assign->value_)) {
         auto new_assign = MutableCopy(assign);
         new_assign->value_ = rw;
         new_stmts.push_back(std::move(new_assign));
@@ -164,7 +193,7 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
         continue;
       }
     } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-      if (auto rw = try_rewrite(std::dynamic_pointer_cast<const Call>(eval->expr_))) {
+      if (auto rw = try_rewrite(eval->expr_)) {
         auto new_eval = MutableCopy(eval);
         new_eval->expr_ = rw;
         new_stmts.push_back(std::move(new_eval));
@@ -212,6 +241,18 @@ StmtPtr RewriteCallsForGMBuffer(const StmtPtr& body, const std::unordered_set<st
       } else {
         new_stmts.push_back(stmt);
       }
+    } else if (auto scope = std::dynamic_pointer_cast<const RuntimeScopeStmt>(stmt)) {
+      // pl.manual_scope is a RuntimeScopeStmt at this stage; a Group launched
+      // via pl.submit/Call lives inside its body, so recurse into it too.
+      auto nb = RewriteCallsForGMBuffer(scope->body_, modified_funcs, gm_param);
+      if (nb != scope->body_) {
+        auto new_scope = MutableCopy(scope);
+        new_scope->body_ = nb;
+        new_stmts.push_back(std::move(new_scope));
+        any_changed = true;
+      } else {
+        new_stmts.push_back(stmt);
+      }
     } else {
       new_stmts.push_back(stmt);
     }
@@ -239,27 +280,42 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
   std::vector<StmtPtr> new_stmts;
   bool any_changed = false;
 
-  auto try_rewrite = [&](const CallPtr& call) -> std::pair<StmtPtr, CallPtr> {
-    if (!call) return std::make_pair(StmtPtr{}, CallPtr{});
-    auto gv = std::dynamic_pointer_cast<const GlobalVar>(call->op_);
-    if (!gv || !modified_funcs.count(gv->name_)) return std::make_pair(StmtPtr{}, CallPtr{});
+  // Handle a Call OR Submit (pl.submit inside pl.manual_scope is a sibling
+  // call-like kind — pass-submit-awareness.md). MutableCopy preserves the node
+  // kind and its kwargs_/attrs_ (and a Submit's deps_); the per-call-site
+  // workspace is appended last, matching the __gm_pipe_buffer param appended at
+  // the callee's tail.
+  auto try_rewrite = [&](const ExprPtr& value) -> std::pair<StmtPtr, ExprPtr> {
+    OpPtr callee_op;
+    if (auto call = As<Call>(value)) {
+      callee_op = call->op_;
+    } else if (auto submit = As<Submit>(value)) {
+      callee_op = submit->op_;
+    } else {
+      return std::make_pair(StmtPtr{}, ExprPtr{});
+    }
+    auto gv = std::dynamic_pointer_cast<const GlobalVar>(callee_op);
+    if (!gv || !modified_funcs.count(gv->name_)) return std::make_pair(StmtPtr{}, ExprPtr{});
 
     std::string var_name = std::string("gm_pipe_buffer_") + std::to_string(counter++);
     auto gm_var = std::make_shared<Var>(var_name, gm_type, span);
     auto create_call = CreateGMPipeBufferTensorCreate(span);
     auto create_stmt = std::make_shared<AssignStmt>(gm_var, create_call, span);
-
-    // Preserve the original Call's kwargs_ / attrs_ (compiler metadata such as
-    // Call::arg_directions_) by copying rather than reconstructing.
-    auto new_call = MutableCopy(call);
-    new_call->args_.push_back(gm_var);
     StmtPtr create_stmt_ptr = create_stmt;
-    return std::make_pair(create_stmt_ptr, CallPtr(new_call));
+
+    if (auto call = As<Call>(value)) {
+      auto new_call = MutableCopy(call);
+      new_call->args_.push_back(gm_var);
+      return std::make_pair(create_stmt_ptr, ExprPtr(new_call));
+    }
+    auto new_submit = MutableCopy(As<Submit>(value));
+    new_submit->args_.push_back(gm_var);
+    return std::make_pair(create_stmt_ptr, ExprPtr(new_submit));
   };
 
   for (const auto& stmt : stmts) {
     if (auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt)) {
-      auto [create, rw] = try_rewrite(std::dynamic_pointer_cast<const Call>(assign->value_));
+      auto [create, rw] = try_rewrite(assign->value_);
       if (rw) {
         new_stmts.push_back(create);
         auto new_assign = MutableCopy(assign);
@@ -269,7 +325,7 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         continue;
       }
     } else if (auto eval = std::dynamic_pointer_cast<const EvalStmt>(stmt)) {
-      auto [create, rw] = try_rewrite(std::dynamic_pointer_cast<const Call>(eval->expr_));
+      auto [create, rw] = try_rewrite(eval->expr_);
       if (rw) {
         new_stmts.push_back(create);
         auto new_eval = MutableCopy(eval);
@@ -318,6 +374,19 @@ StmtPtr RewriteCallsWithPerCallGMBuffer(const StmtPtr& body,
         auto new_while = MutableCopy(while_stmt);
         new_while->body_ = nb;
         new_stmts.push_back(std::move(new_while));
+        any_changed = true;
+      } else {
+        new_stmts.push_back(stmt);
+      }
+    } else if (auto scope = std::dynamic_pointer_cast<const RuntimeScopeStmt>(stmt)) {
+      // pl.manual_scope is a RuntimeScopeStmt at this stage; an Orchestration
+      // that launches a pipe-using Group via pl.submit/Call does so inside the
+      // manual_scope body, so recurse into it to emit the per-call placeholder.
+      auto nb = RewriteCallsWithPerCallGMBuffer(scope->body_, modified_funcs, gm_buffer_elems, span, counter);
+      if (nb != scope->body_) {
+        auto new_scope = MutableCopy(scope);
+        new_scope->body_ = nb;
+        new_stmts.push_back(std::move(new_scope));
         any_changed = true;
       } else {
         new_stmts.push_back(stmt);

@@ -2386,13 +2386,6 @@ class TestOutWindowSubmitCall:
     TestOutWindowExternalizer.test_direct_out_call_rewrites_to_windowed_clone.
     """
 
-    @pytest.mark.xfail(
-        reason="suspected bug: OrchRewriter dispatches via As<Call>, which is "
-        "exact-kind and never matches a Submit node; the IsSubmitCall branch is "
-        "unreachable from the pl.submit DSL form, so the windowable submit stays "
-        "baseline instead of being externalized",
-        strict=False,
-    )
     def test_submit_windowable_kernel_is_externalized(self):
         @pl.program
         class Before:

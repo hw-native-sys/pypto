@@ -719,12 +719,6 @@ class TestFlattenPreservesAttrs:
             f"Submit.deps dropped after FlattenCallExpr; got {list(k2_submit.deps)!r}"
         )
 
-    @pytest.mark.xfail(
-        reason="suspected bug: FlattenCallExpr does not hoist a nested Call arg of a Submit "
-        "(no VisitExpr_(SubmitPtr) override extracts top-level Call args), so the three-address "
-        "constraint 'Call arguments cannot be calls' is violated for pl.submit args",
-        strict=False,
-    )
     def test_nested_call_arg_in_submit_is_flattened(self):
         """A nested Call passed as a Submit arg should be hoisted to a temp.
 
@@ -734,10 +728,9 @@ class TestFlattenPreservesAttrs:
         ``pl.slice(out, [32], [0])`` arg of the ``k2`` submit into ``t__tmp_v0``
         before the submit, exactly as a plain ``Call`` arg would be flattened.
 
-        FlattenCallExpr only overrides ``VisitExpr_(CallPtr)`` and never
-        ``VisitExpr_(SubmitPtr)``, so the base mutator's Submit visitor leaves
-        the nested ``slice`` Call inline. This Expected encodes the intended
-        semantics; the pass currently fails to produce it (suspected bug).
+        Regression test for #1615: FlattenCallExpr's ``VisitExpr_(SubmitPtr)``
+        hoists nested Call/Submit args of a Submit to temps (preserving
+        ``deps_``), just as ``VisitExpr_(CallPtr)`` does for a Call.
         """
 
         @pl.program

@@ -83,12 +83,6 @@ def test_inject_gm_pipe_buffer_is_no_op_on_non_gm_backend():
     ir.assert_structural_equal(after, ssa)
 
 
-@pytest.mark.xfail(
-    reason="suspected bug: GetCallFromStmt uses As<Call> (exact-kind), so a Group "
-    "launched via pl.submit is invisible to the call graph; the orchestration "
-    "gets no tensor.create and the Submit's args are not forwarded the buffer",
-    strict=False,
-)
 def test_gm_pipe_injection_handles_submit_launched_group():
     """A Group launched via pl.submit from a manual_scope must be wired too.
 

@@ -397,13 +397,6 @@ class TestNormalizeReturnOrderSubmit:
     ``.claude/rules/pass-submit-awareness.md``).
     """
 
-    @pytest.mark.xfail(
-        reason="suspected bug: TupleIndexPermutationMutator matches As<Call> only "
-        "(normalize_return_order_pass.cpp:241), so Submit results are never tracked "
-        "and their TupleGetItemExpr indices are not remapped after Step A reorders "
-        "the kernel returns.",
-        strict=False,
-    )
     def test_submit_swapped_returns_remapped(self):
         """InCore kernel returns swapped + result consumed via ``pl.submit`` →
         kernel returns reordered AND the submit-result projection indices
@@ -471,10 +464,19 @@ class TestNormalizeReturnOrderSubmit:
                 out_b: pl.Out[pl.Tensor[[16], pl.FP32]],
             ) -> tuple[pl.Tensor[[16], pl.FP32], pl.Tensor[[16], pl.FP32]]:
                 with pl.manual_scope():
-                    # permutation[0]=1, permutation[1]=0 → a reads index 1, b reads
-                    # index 0. Encoded here via the (b, a) unpack order, which the
-                    # parser desugars to b=_submit_tmp[0], a=_submit_tmp[1].
-                    (b, a), tid = pl.submit(self.kernel, x, out_a, out_b)  # noqa: F841
+                    # The pass remaps the submit-result projection indices IN
+                    # PLACE (statement order preserved), exactly like the Call
+                    # path in test_swapped_returns_reordered: with permutation
+                    # [1, 0], `a` now reads _submit_tmp[1] (out_b, moved to slot
+                    # 1) and `b` reads _submit_tmp[0] (out_a, moved to slot 0);
+                    # `tid` at index 2 is past the permutation and untouched.
+                    # This is the explicit-subscript form the pass emits — a
+                    # (b, a) tuple-unpack would instead reorder the statements
+                    # (b before a), which the in-place remap does not do.
+                    _submit_tmp = pl.submit(self.kernel, x, out_a, out_b)
+                    a: pl.Tensor[[16], pl.FP32] = _submit_tmp[1]
+                    b: pl.Tensor[[16], pl.FP32] = _submit_tmp[0]
+                    tid: pl.Scalar[pl.TASK_ID] = _submit_tmp[2]  # noqa: F841
                 return (a, b)
 
         After = _run_normalize_direct(Before)

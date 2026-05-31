@@ -97,7 +97,17 @@ class BufferRootCollector : public IRVisitor {
   }
 
   void VisitStmt_(const AssignStmtPtr& assign) override {
-    if (auto call = As<Call>(assign->value_)) {
+    // Submit (pl.submit in pl.manual_scope) is a sibling call-like kind; route
+    // it through the same Out/InOut buffer-root analysis as Call via the
+    // augmented-Call view. The view preserves args_ and the TASK_ID-augmented
+    // return type, so the tuple path below maps the submit-result projections
+    // to the callee's Out roots and leaves the trailing TASK_ID element
+    // unmapped (see .claude/rules/pass-submit-awareness.md).
+    CallPtr call = As<Call>(assign->value_);
+    if (!call) {
+      if (auto submit = As<Submit>(assign->value_)) call = SubmitToCallView(submit);
+    }
+    if (call) {
       const std::string& op_name = call->op_->name_;
       if (op_name == "tensor.create" || op_name == "tensor.slice") {
         buffer_roots_[assign->var_.get()] = assign->var_.get();

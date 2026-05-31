@@ -807,32 +807,25 @@ class TestInlineReturnAndMultiReturn:
 class TestInlineFunctionsSubmitCallSite:
     """Inline callee launched via ``pl.submit`` inside a ``pl.manual_scope``.
 
-    ``CalledInlineCollector`` and ``InlineCallsMutator`` dispatch on ``CallPtr``
-    only (src lines 53, 449-468, 486-491) — a ``Submit`` of an Inline function
-    is never recognised as a call site. The cleanup phase still drops the Inline
-    function unconditionally (``func_type_ == Inline``), so the ``pl.submit(
-    self.helper, ...)`` is left dangling, referencing a deleted function. Per
+    InlineFunctions drops Inline functions unconditionally (``func_type_ ==
+    Inline``). A ``pl.submit(self.helper, ...)`` of a dropped Inline function
+    would therefore be left dangling. Per
     ``.claude/rules/pass-submit-awareness.md`` (rule 1: "When walking calls,
-    walk Submit too"), this is a silent-skip bug surfacing inside
-    ``manual_scope`` bodies.
+    walk Submit too"), the InlineFunctionsEliminated verifier is Submit-aware
+    and flags such a dangling submit (fixed in #1615).
     """
 
-    @pytest.mark.xfail(
-        reason="suspected bug: pl.submit of an Inline fn is not inlined; "
-        "the fn is dropped but the dangling Submit survives and the "
-        "InlineFunctionsEliminated verifier does not flag it",
-        strict=False,
-    )
     def test_submit_of_inline_eliminates_reference(self):
         """After the pass, no reference (Call OR Submit) to a dropped Inline
         function may survive — the documented ``InlineFunctionsEliminated``
         contract (doc §Verification: "No Call whose callee resolves to one
         survives"), extended to Submit per the submit-awareness rule.
 
-        The semantically-correct outcome is that the verifier reports an error
-        for the surviving ``pl.submit(self.helper, ...)`` (or, better, the pass
-        splices it away). The current pass produces neither: 0 verifier errors
-        and a live dangling submit."""
+        Regression test for #1615: the InlineFunctionsEliminated verifier is
+        Submit-aware and reports an error for the surviving
+        ``pl.submit(self.helper, ...)`` after ``helper`` is dropped. (Inlining a
+        submit is not meaningful — the task launch / TASK_ID result would
+        vanish — so flagging it loudly is the correct contract.)"""
 
         @pl.program
         class Before:
@@ -847,7 +840,13 @@ class TestInlineFunctionsSubmitCallSite:
                     a, a_tid = pl.submit(self.helper, x)
                 return a
 
-        After = passes.inline_functions()(Before)
+        # inline_functions PRODUCES the InlineFunctionsEliminated property, so
+        # with the now-Submit-aware verifier its own post-pass verification
+        # throws on the dangling pl.submit. Run under VerificationLevel.NONE to
+        # obtain `After` and inspect the diagnostics explicitly below (the throw
+        # path is itself the correct loud-failure behavior).
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.inline_functions()(Before)
 
         # The Inline function `helper` is dropped, so any surviving reference to
         # it (here a Submit) is a dangling reference and must be reported by the
