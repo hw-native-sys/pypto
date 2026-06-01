@@ -65,6 +65,18 @@ def _make_kv_final() -> torch.Tensor:
     return rows.expand(B, H).contiguous()
 
 
+def _make_block_table() -> torch.Tensor:
+    """``[B]`` INT32 block table: ``block_table[b] = b`` (block id for row ``b``).
+
+    The kernel reads this block id at runtime and computes the scatter row as
+    ``block_id * CACHE`` (the paged ``block_id * block_size`` idiom), so the
+    store lowers to a *dynamic-address* ``pto.tstore``. The ``* CACHE`` keeps the
+    offset ``index``-typed, so codegen is clean — matching the issue (compiles
+    clean, deadlocks at runtime). The golden output is identical to the
+    static-address variants; only the addressing mode (and codegen path) differ."""
+    return torch.arange(B, dtype=torch.int32).contiguous()
+
+
 @pl.program
 class FusedMatmulScatterProgram:
     """matmul -> store kv_final -> per-row cast + scatter, all in one CORE_GROUP scope."""
@@ -132,6 +144,64 @@ class ScatterOnlyProgram:
         with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.NONE)]):
             for b in pl.range(B):  # per-row scatter to distinct cache rows
                 cache[b * CACHE : b * CACHE + 1, :] = pl.cast(
+                    kv_final[b : b + 1, :], target_type=pl.BF16, mode="rint"
+                )
+        return cache
+
+
+@pl.program
+class FusedMatmulDynScatterProgram:
+    """Issue #1592: like ``FusedMatmulScatterProgram`` but the scatter row index
+    is **read from a GM block table** (``cache_row = pl.read(block_table, [b])``)
+    instead of the affine ``b * CACHE``.
+
+    This makes the per-row store a **dynamic-address** ``pto.tstore`` on the vec
+    side of the cube+vec mix scope. Per the #1592 isolation matrix this is the
+    variant that compiles clean but deadlocks at runtime (``507018``); the
+    static-address variants above run. ``SplitMode.UP_DOWN`` is the mode named in
+    the issue report; it exercises the ``ProcessFunction`` split path."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def fused(
+        self,
+        x: pl.Tensor[[B, H], pl.BF16],
+        w: pl.Tensor[[H, H], pl.BF16],
+        block_table: pl.Tensor[[B], pl.INT32],
+        cache: pl.Out[pl.Tensor[[B * CACHE, H], pl.BF16]],
+    ) -> pl.Tensor[[B * CACHE, H], pl.BF16]:
+        kv_final = pl.create_tensor([B, H], dtype=pl.FP32)
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
+            kv_final[:, :] = pl.matmul(x, w, out_dtype=pl.FP32)  # cube matmul, whole-tile store
+            for b in pl.range(B):  # per-row scatter to a data-dependent cache row
+                block_id: pl.Scalar[pl.INT32] = pl.read(block_table, [b])
+                cache_row = block_id * CACHE  # block id -> row; keeps offset index-typed
+                cache[cache_row : cache_row + 1, :] = pl.cast(
+                    kv_final[b : b + 1, :], target_type=pl.BF16, mode="rint"
+                )
+        return cache
+
+
+@pl.program
+class FusedMatmulDynScatterNoSplitProgram:
+    """Issue #1592 under ``SplitMode.NONE`` — the no-split dual-AIV dispatch path
+    (``ProcessNoSplitDualAivFunction``). Same dynamic-address scatter and golden
+    as ``FusedMatmulDynScatterProgram``; only the requested split mode differs."""
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def fused(
+        self,
+        x: pl.Tensor[[B, H], pl.BF16],
+        w: pl.Tensor[[H, H], pl.BF16],
+        block_table: pl.Tensor[[B], pl.INT32],
+        cache: pl.Out[pl.Tensor[[B * CACHE, H], pl.BF16]],
+    ) -> pl.Tensor[[B * CACHE, H], pl.BF16]:
+        kv_final = pl.create_tensor([B, H], dtype=pl.FP32)
+        with pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.split(pl.SplitMode.NONE)]):
+            kv_final[:, :] = pl.matmul(x, w, out_dtype=pl.FP32)  # cube matmul, whole-tile store
+            for b in pl.range(B):  # per-row scatter to a data-dependent cache row
+                block_id: pl.Scalar[pl.INT32] = pl.read(block_table, [b])
+                cache_row = block_id * CACHE  # block id -> row; keeps offset index-typed
+                cache[cache_row : cache_row + 1, :] = pl.cast(
                     kv_final[b : b + 1, :], target_type=pl.BF16, mode="rint"
                 )
         return cache
@@ -209,6 +279,50 @@ class ScatterOnlyTestCase(PTOTestCase):
             cache[b * CACHE] = kv[b]
 
 
+class FusedMatmulDynScatterTestCase(PTOTestCase):
+    """Issue #1592: matmul -> per-row scatter to a **block-table-indirected** GM
+    row (dynamic address) under ``SplitMode.UP_DOWN``."""
+
+    def get_name(self) -> str:
+        return "fused_matmul_dyn_scatter_1592"
+
+    def get_strategy(self) -> OptimizationStrategy:
+        return OptimizationStrategy.Default
+
+    def get_backend_type(self) -> BackendType:
+        return BackendType.Ascend910B
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [B, H], DataType.BF16, init_value=_make_x),
+            TensorSpec("w", [H, H], DataType.BF16, init_value=lambda: torch.ones(H, H, dtype=torch.bfloat16)),
+            TensorSpec("block_table", [B], DataType.INT32, init_value=_make_block_table),
+            TensorSpec("cache", [B * CACHE, H], DataType.BF16, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        return FusedMatmulDynScatterProgram
+
+    def compute_expected(self, tensors, params=None):
+        out = (tensors["x"].float() @ tensors["w"].float()).to(tensors["cache"].dtype)
+        block_table = tensors["block_table"]
+        cache = tensors["cache"]
+        cache.zero_()  # unwritten rows stay zero (matches device output init)
+        for b in range(B):
+            cache[int(block_table[b]) * CACHE] = out[b]
+
+
+class FusedMatmulDynScatterNoSplitTestCase(FusedMatmulDynScatterTestCase):
+    """Issue #1592 under ``SplitMode.NONE`` (no-split dual-AIV path). Same tensors
+    and golden as ``FusedMatmulDynScatterTestCase``; only the program differs."""
+
+    def get_name(self) -> str:
+        return "fused_matmul_dyn_scatter_1592_nosplit"
+
+    def get_program(self) -> Any:
+        return FusedMatmulDynScatterNoSplitProgram
+
+
 class TestFusedMatmulScatterCoreGroup:
     """matmul -> per-row scatter to distinct GM rows fused in one CORE_GROUP scope."""
 
@@ -233,6 +347,25 @@ class TestScatterOnlyDiagnostic:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_scatter_only(self, test_runner, platform):
         result = test_runner.run(ScatterOnlyTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+class TestFusedMatmulDynScatter:
+    """Issue #1592: matmul -> per-row scatter to a block-table-indirected
+    (dynamic-address) GM row, fused in one CORE_GROUP scope."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fused_matmul_dyn_scatter(self, test_runner, platform):
+        result = test_runner.run(FusedMatmulDynScatterTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+
+class TestFusedMatmulDynScatterNoSplit:
+    """Issue #1592 under SplitMode.NONE (no-split dual-AIV dispatch path)."""
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_fused_matmul_dyn_scatter_nosplit(self, test_runner, platform):
+        result = test_runner.run(FusedMatmulDynScatterNoSplitTestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
