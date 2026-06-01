@@ -61,6 +61,13 @@ the wider ``dst`` (``dst.cols == input.cols * stride``). The form runs on the
 A2/A3 backend (``BackendType.Ascend910B``); A5 (``Ascend950``) rejects it, so
 those cases are pinned to A2/A3 only. Column selection mirrors gather: P0101
 hits even columns (``0::2``), P1010 hits odd columns (``1::2``).
+
+The raw ``pto.tscatter`` mask instruction zero-fills the entire ``dst`` before
+writing the selected columns, so the lowering reconstructs DPS preserve with the
+same zeroed-scatter + mask + select blend as the index form. These cases pin
+that with a **non-zero sentinel** ``dst`` (unselected columns must survive), and
+the chain case writes two patterns into one ``dst`` (P0101 then P1010) so the
+second scatter must preserve the first's writes — the RoPE even/odd reassembly.
 """
 
 from typing import Any
@@ -150,14 +157,15 @@ def _scatter_mask_specs(b: int, c: int, stride: int, dt: DataType, torch_dt: tor
     """Build the (inp, dst, output) TensorSpecs for a mask-form scatter case.
 
     ``inp`` is ``[B, C]`` of distinct positive values; ``dst`` is ``[B, C*stride]``
-    initialised to zeros so the expected unselected columns are zero regardless
-    of whether pto.tscatter zeros or preserves them (its index form zeros
-    unwritten slots; a zero base makes the test robust either way).
+    pre-filled with a **negative sentinel** (disjoint from ``inp``) rather than
+    zeros, so the case actually distinguishes preserve from zero-fill: the
+    mask-selected columns must become ``inp`` and the unselected columns must
+    keep the sentinel. A zero ``dst`` could not tell the two apart.
     """
     dst_cols = c * stride
     return [
         TensorSpec("inp", [b, c], dt, init_value=lambda: _make_values(b, c, torch_dt)),
-        TensorSpec("dst", [b, dst_cols], dt, init_value=lambda: torch.zeros(b, dst_cols, dtype=torch_dt)),
+        TensorSpec("dst", [b, dst_cols], dt, init_value=lambda: _make_base(b, dst_cols, torch_dt)),
         TensorSpec("output", [b, dst_cols], dt, is_output=True),
     ]
 
@@ -476,8 +484,9 @@ class _ScatterMaskBaseTestCase(PTOTestCase):
     """Base for mask-form scatter cases. Pinned to A2/A3 (Ascend910B).
 
     Subclasses set ``_start`` (0 for P0101, 1 for P1010) and ``_stride`` (2);
-    ``compute_expected`` writes ``inp`` into the ``[start::stride]`` columns of a
-    zero ``[B, C*stride]`` tensor (the unselected columns stay zero).
+    ``compute_expected`` writes ``inp`` into the ``[start::stride]`` columns of
+    ``dst`` while **preserving** ``dst``'s other (sentinel) columns — so the case
+    fails if the lowering zero-fills the unselected columns instead.
     """
 
     __test__ = False
@@ -492,8 +501,9 @@ class _ScatterMaskBaseTestCase(PTOTestCase):
         return BackendType.Ascend910B
 
     def compute_expected(self, tensors, params=None):
-        b, dst_cols = tensors["output"].shape
-        out = torch.zeros(b, dst_cols, dtype=tensors["inp"].dtype)
+        # Preserve dst's unselected (sentinel) columns; write inp into the
+        # mask-selected columns. Discriminates preserve from zero-fill.
+        out = tensors["dst"].clone()
         out[:, self._start :: self._stride] = tensors["inp"]
         tensors["output"][:] = out
 
@@ -614,7 +624,6 @@ class TestScatterMaskForm:
         result = test_runner.run(ScatterMaskP1010TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.skip(reason="chained mask scatter (P0101→P1010 into one dst) under investigation")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_scatter_mask_chain(self, test_runner, platform):
         result = test_runner.run(ScatterMaskChainTestCase(platform=platform))
