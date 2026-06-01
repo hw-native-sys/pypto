@@ -7,16 +7,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Device regression for issue #1525.
+"""Device test: chained matmul -> cast(bf16) -> matmul fused in one CORE_GROUP scope.
 
-Chained matmul -> cast -> matmul in one CORE_GROUP scope (SplitMode.NONE).
-
-The chained fusion runs correctly on a2a3 as long as the output is committed
-idiomatically (writing into the ``pl.Out`` buffer via ``pl.assemble``), rather
-than via a bare reassignment ``y = pl.matmul(...)`` that rebinds the name to a
-detached value. The bare form is now rejected at compile time by the
-OutParamNotShadowed verifier (issue #1525), so this device test exercises the
-supported idiom.
+The chained fusion (``SplitMode.NONE``) runs correctly on a2a3 as long as the
+output is committed idiomatically (writing into the ``pl.Out`` buffer via
+``pl.assemble``), rather than via a bare reassignment ``y = pl.matmul(...)`` that
+rebinds the name to a detached value. The bare form is now rejected at compile
+time by the OutParamNotShadowed verifier (see issue #1525), so this device test
+exercises the supported idiom end to end.
 """
 
 from typing import Any
@@ -30,7 +28,7 @@ from pypto.runtime.runner import RunConfig
 M = K = N = 64
 
 
-class TestIssue1525ChainedMatmul(PTOTestCase):
+class ChainedMatmulCastMatmulTest(PTOTestCase):
     """matmul -> cast(bf16) -> matmul(b_trans) chained in one CORE_GROUP."""
 
     __test__ = False
@@ -39,7 +37,7 @@ class TestIssue1525ChainedMatmul(PTOTestCase):
         super().__init__(config, platform=platform)
 
     def get_name(self) -> str:
-        return "issue1525_chained_matmul"
+        return "chained_matmul_cast_matmul"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
@@ -80,11 +78,11 @@ class TestIssue1525ChainedMatmul(PTOTestCase):
         tensors["y"][:] = t1b @ w2.t()
 
 
-class TestIssue1525:
+class TestChainedMatmulCastMatmul:
     @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_chained_matmul(self, test_runner, platform):
+    def test_chained_matmul_cast_matmul(self, test_runner, platform):
         cfg = RunConfig(platform=platform, rtol=1e-2, atol=1e-2)
-        result = test_runner.run(TestIssue1525ChainedMatmul(platform=platform, config=cfg))
+        result = test_runner.run(ChainedMatmulCastMatmulTest(platform=platform, config=cfg))
         assert result.passed, f"Test failed: {result.error}"
 
 
