@@ -123,7 +123,8 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
       "tensor.rsqrt",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 1) << "tensor.rsqrt conversion expects 1 arg, got " << args.size();
+        INTERNAL_CHECK_SPAN(args.size() == 1, span)
+            << "tensor.rsqrt conversion expects 1 arg, got " << args.size();
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
 
@@ -133,8 +134,9 @@ void OpConversionRegistry::RegisterScalarAndUnaryOps() {
         }
 
         auto tile_type = As<TileType>(input->GetType());
-        CHECK(tile_type) << "tensor.rsqrt conversion: input must be TileType after memory promotion, got "
-                         << input->GetType()->TypeName();
+        INTERNAL_CHECK_SPAN(tile_type, span)
+            << "tensor.rsqrt conversion: input must be TileType after memory promotion, got "
+            << input->GetType()->TypeName();
 
         auto shape_tuple = std::make_shared<MakeTuple>(tile_type->shape_, span);
         std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", tile_type->dtype_},
@@ -176,14 +178,14 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
         // The optional 4th tensor-level arg is valid_shape; it has no tile-level equivalent.
-        CHECK(args.size() == 3 || args.size() == 4)
+        INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, span)
             << "tensor.transpose conversion expects 3 or 4 args (input, axis1, axis2[, valid_shape]), got "
             << args.size();
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
 
         auto input_tile_type = As<TileType>(input->GetType());
-        CHECK(input_tile_type)
+        INTERNAL_CHECK_SPAN(input_tile_type, span)
             << "tensor.transpose conversion: input must be TileType after memory promotion, got "
             << input->GetType()->TypeName();
 
@@ -247,7 +249,7 @@ void OpConversionRegistry::RegisterElementwiseBinaryOps() {
     return [tile_op, tile_scalar_op](const std::vector<ExprPtr>& args,
                                      const std::vector<std::pair<std::string, std::any>>& kwargs,
                                      const Span& span) -> ConversionResult {
-      INTERNAL_CHECK(args.size() == 2)
+      INTERNAL_CHECK_SPAN(args.size() == 2, span)
           << "tensor.maximum/minimum conversion expects 2 args, got " << args.size();
       auto& op_reg = OpRegistry::GetInstance();
       const std::string& chosen = As<ScalarType>(args[1]->GetType()) ? tile_scalar_op : tile_op;
@@ -271,7 +273,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
       "tensor.slice",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3 || args.size() == 4)
+        INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 4, span)
             << "tensor.slice conversion expects 3 or 4 args (tensor, shape, offset[, valid_shape])";
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
@@ -312,7 +314,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
           return ConversionResult{slice_call};
         }
 
-        CHECK(false) << "tensor.slice conversion: unexpected input type: " << input->GetType()->TypeName();
+        INTERNAL_UNREACHABLE_SPAN(span)
+            << "tensor.slice conversion: unexpected input type: " << input->GetType()->TypeName();
         return ConversionResult{nullptr};  // unreachable
       });
 
@@ -321,7 +324,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
       "tensor.assemble",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3) << "tensor.assemble conversion expects 3 args (target, source, offset)";
+        INTERNAL_CHECK_SPAN(args.size() == 3, span)
+            << "tensor.assemble conversion expects 3 args (target, source, offset)";
         auto& op_reg = OpRegistry::GetInstance();
 
         const auto& target = args[0];
@@ -350,16 +354,17 @@ void OpConversionRegistry::RegisterMemoryOps() {
         }
 
         if (source_tile_type && target_tile_type) {
-          CHECK(!atomic_add) << kAtomicTileToTileMsg;
+          INTERNAL_CHECK_SPAN(!atomic_add, span) << kAtomicTileToTileMsg;
           auto assemble_call = op_reg.Create("tile.assemble", {target, source, offset}, span);
           return ConversionResult{assemble_call};
         }
 
         if (target_tile_type && !source_tile_type) {
-          CHECK(!atomic_add) << kAtomicTileToTileMsg;
+          INTERNAL_CHECK_SPAN(!atomic_add, span) << kAtomicTileToTileMsg;
           auto source_tensor_type = As<TensorType>(source->GetType());
-          CHECK(source_tensor_type) << "tensor.assemble: source must be TensorType or TileType, but got "
-                                    << source->GetType()->TypeName();
+          INTERNAL_CHECK_SPAN(source_tensor_type, span)
+              << "tensor.assemble: source must be TensorType or TileType, but got "
+              << source->GetType()->TypeName();
           std::vector<StmtPtr> prologue;
           auto offsets_load = MakeZeroOffsets(source_tensor_type->shape_.size(), span);
           auto shapes = MakeShapeTuple(source_tensor_type->shape_, span);
@@ -403,7 +408,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
         << "tensor.scatter_update conversion: input/index/src must be Vec tiles after bridge";
     // 4D input/src is accepted by the op's type deduction but not yet lowered, so a 4D call
     // type-checks and would otherwise hit an internal error here — surface it as a user error.
-    CHECK(input_tile->shape_.size() == 2 && src_tile->shape_.size() == 2)
+    CHECK_SPAN(input_tile->shape_.size() == 2 && src_tile->shape_.size() == 2, span)
         << "scatter_update: only 2D input/src is currently supported in lowering, got input rank "
         << input_tile->shape_.size() << " and src rank " << src_tile->shape_.size();
     auto src_rows = As<ConstInt>(src_tile->shape_[0]);
@@ -428,9 +433,9 @@ void OpConversionRegistry::RegisterMemoryOps() {
     // For 2-byte dst the tscatter index is i16, so the largest flat destination index
     // (m*d - 1) must fit in i16; otherwise it silently overflows and scatters to wrong rows.
     if (idx_dtype == DataType(DataType::INT16)) {
-      CHECK(m * d <= 32767) << "scatter_update: " << dt.ToString() << " dst has m*d = " << m * d
-                            << " elements, exceeding the i16 flat-index limit (32767); "
-                            << "reduce dst rows*cols or use a 4-byte dtype";
+      CHECK_SPAN(m * d <= 32767, span) << "scatter_update: " << dt.ToString() << " dst has m*d = " << m * d
+                                       << " elements, exceeding the i16 flat-index limit (32767); "
+                                       << "reduce dst rows*cols or use a 4-byte dtype";
     }
     // Build the flat-index math entirely in i32, then narrow only the finished [n, d] flat_idx
     // to idx_dtype. Every intermediate tile stays in the canonical i32 layout — identical to
@@ -508,7 +513,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
       "tensor.create",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 1) << "tensor.create conversion expects 1 arg (shape)";
+        INTERNAL_CHECK_SPAN(args.size() == 1, span) << "tensor.create conversion expects 1 arg (shape)";
         auto& op_reg = OpRegistry::GetInstance();
 
         MemorySpace target_mem = MemorySpace::Vec;
@@ -538,7 +543,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
             const auto* be = backend::GetBackend();
             if (be) {
               uint64_t mem_size = be->GetMemSize(target_mem);
-              CHECK(mem_size == 0 || tile_bytes <= mem_size)
+              INTERNAL_CHECK_SPAN(mem_size == 0 || tile_bytes <= mem_size, span)
                   << "tensor.create: tile size (" << tile_bytes << " bytes) exceeds buffer capacity ("
                   << mem_size << " bytes) for memory space " << static_cast<int>(target_mem) << " at "
                   << span.to_string();
@@ -555,7 +560,7 @@ void OpConversionRegistry::RegisterMemoryOps() {
       "tensor.fillpad",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 1) << "tensor.fillpad conversion expects 1 arg (input)";
+        INTERNAL_CHECK_SPAN(args.size() == 1, span) << "tensor.fillpad conversion expects 1 arg (input)";
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
 
@@ -567,8 +572,9 @@ void OpConversionRegistry::RegisterMemoryOps() {
         }
 
         auto tensor_type = As<TensorType>(input->GetType());
-        CHECK(tensor_type) << "tensor.fillpad conversion: input must be TensorType or TileType, got "
-                           << input->GetType()->TypeName();
+        INTERNAL_CHECK_SPAN(tensor_type, span)
+            << "tensor.fillpad conversion: input must be TensorType or TileType, got "
+            << input->GetType()->TypeName();
 
         auto offsets = MakeZeroOffsets(tensor_type->shape_.size(), span);
         auto shapes = MakeShapeTuple(tensor_type->shape_, span);
@@ -606,7 +612,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
       "tensor.read",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 2) << "tensor.read conversion expects 2 args (tensor, indices)";
+        INTERNAL_CHECK_SPAN(args.size() == 2, span)
+            << "tensor.read conversion expects 2 args (tensor, indices)";
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
 
@@ -624,7 +631,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
           return ConversionResult{op_reg.Create("tile.read", args, kwargs, span)};
         }
 
-        CHECK(false) << "tensor.read conversion: unexpected input type: " << input->GetType()->TypeName();
+        INTERNAL_UNREACHABLE_SPAN(span)
+            << "tensor.read conversion: unexpected input type: " << input->GetType()->TypeName();
         return ConversionResult{nullptr};  // unreachable
       });
 
@@ -634,7 +642,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
       "tensor.write",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3) << "tensor.write conversion expects 3 args (tensor, indices, value)";
+        INTERNAL_CHECK_SPAN(args.size() == 3, span)
+            << "tensor.write conversion expects 3 args (tensor, indices, value)";
         auto& op_reg = OpRegistry::GetInstance();
         const auto& dest = args[0];
 
@@ -652,7 +661,8 @@ void OpConversionRegistry::RegisterMemoryOps() {
           return ConversionResult{op_reg.Create("tile.write", args, kwargs, span)};
         }
 
-        CHECK(false) << "tensor.write conversion: unexpected input type: " << dest->GetType()->TypeName();
+        INTERNAL_UNREACHABLE_SPAN(span)
+            << "tensor.write conversion: unexpected input type: " << dest->GetType()->TypeName();
         return ConversionResult{nullptr};  // unreachable
       });
 
@@ -665,26 +675,29 @@ void OpConversionRegistry::RegisterMemoryOps() {
       "tensor.expand_clone",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 2) << "tensor.expand_clone conversion expects 2 args (input, target)";
+        INTERNAL_CHECK_SPAN(args.size() == 2, span)
+            << "tensor.expand_clone conversion expects 2 args (input, target)";
 
         auto& op_reg = OpRegistry::GetInstance();
         const auto& input = args[0];
         const auto& target = args[1];
 
         auto input_tensor_type = As<TensorType>(input->GetType());
-        CHECK(input_tensor_type) << "tensor.expand_clone conversion: input must be TensorType, but got "
-                                 << input->GetType()->TypeName();
+        INTERNAL_CHECK_SPAN(input_tensor_type, span)
+            << "tensor.expand_clone conversion: input must be TensorType, but got "
+            << input->GetType()->TypeName();
 
         auto target_tensor_type = As<TensorType>(target->GetType());
-        CHECK(target_tensor_type) << "tensor.expand_clone conversion: target must be TensorType, but got "
-                                  << target->GetType()->TypeName();
+        INTERNAL_CHECK_SPAN(target_tensor_type, span)
+            << "tensor.expand_clone conversion: target must be TensorType, but got "
+            << target->GetType()->TypeName();
 
         const auto& input_shape = input_tensor_type->shape_;
         const auto& target_shape = target_tensor_type->shape_;
 
-        CHECK(input_shape.size() == 3)
+        INTERNAL_CHECK_SPAN(input_shape.size() == 3, span)
             << "tensor.expand_clone conversion: input rank must be 3, but got " << input_shape.size();
-        CHECK(target_shape.size() == input_shape.size())
+        INTERNAL_CHECK_SPAN(target_shape.size() == input_shape.size(), span)
             << "tensor.expand_clone conversion: input rank (" << input_shape.size()
             << ") must match target rank (" << target_shape.size() << ")";
 
@@ -694,10 +707,10 @@ void OpConversionRegistry::RegisterMemoryOps() {
             continue;
           }
           auto input_const = GetConstantDimension(input_shape[i]);
-          CHECK(input_const && *input_const == 1)
+          INTERNAL_CHECK_SPAN(input_const && *input_const == 1, span)
               << "tensor.expand_clone conversion requires input dim " << i
               << " to be 1 for broadcasting, but got " << PythonPrint(input_shape[i]);
-          CHECK(broadcast_dim < 0)
+          INTERNAL_CHECK_SPAN(broadcast_dim < 0, span)
               << "tensor.expand_clone conversion allows broadcasting in at most one dimension";
           broadcast_dim = static_cast<int>(i);
         }
@@ -853,7 +866,7 @@ void OpConversionRegistry::RegisterMatmulOps() {
       [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
                 const Span& span) -> ConversionResult {
         (void)kwargs;
-        CHECK(args.size() == 2) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
+        INTERNAL_CHECK_SPAN(args.size() == 2, span) << "tensor.matmul conversion expects 2 args (lhs, rhs)";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2;
         const std::string out_op = nd ? "tile.batch_matmul" : "tile.matmul";
         return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1]}, span)};
@@ -867,7 +880,8 @@ void OpConversionRegistry::RegisterMatmulOps() {
       [rank_of](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
                 const Span& span) -> ConversionResult {
         (void)kwargs;
-        CHECK(args.size() == 3) << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs)";
+        INTERNAL_CHECK_SPAN(args.size() == 3, span)
+            << "tensor.matmul_acc conversion expects 3 args (acc, lhs, rhs)";
         const bool nd = rank_of(args[0]) > 2 || rank_of(args[1]) > 2 || rank_of(args[2]) > 2;
         const std::string out_op = nd ? "tile.batch_matmul_acc" : "tile.matmul_acc";
         return ConversionResult{OpRegistry::GetInstance().Create(out_op, {args[0], args[1], args[2]}, span)};
@@ -884,13 +898,13 @@ void OpConversionRegistry::RegisterReductionOps() {
     return [tile_op](const std::vector<ExprPtr>& args,
                      const std::vector<std::pair<std::string, std::any>>& kwargs,
                      const Span& span) -> ConversionResult {
-      CHECK(args.size() == 1) << tile_op << " conversion expects 1 arg (input tile)";
+      INTERNAL_CHECK_SPAN(args.size() == 1, span) << tile_op << " conversion expects 1 arg (input tile)";
       auto& op_reg = OpRegistry::GetInstance();
 
       const auto& input = args[0];
       auto tile_type = As<TileType>(input->GetType());
-      CHECK(tile_type) << tile_op << " conversion: input must be TileType, got "
-                       << input->GetType()->TypeName();
+      INTERNAL_CHECK_SPAN(tile_type, span)
+          << tile_op << " conversion: input must be TileType, got " << input->GetType()->TypeName();
 
       std::vector<ExprPtr> tmp_shape = tile_type->shape_;
       if (tmp_shape.size() >= 2) {
@@ -953,7 +967,7 @@ void OpConversionRegistry::RegisterSortOps() {
       "tensor.mrgsort_format2",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() >= 2 && args.size() <= 4)
+        INTERNAL_CHECK_SPAN(args.size() >= 2 && args.size() <= 4, span)
             << "tensor.mrgsort_format2 conversion expects 2-4 src args, got " << args.size();
         auto& op_reg = OpRegistry::GetInstance();
 
@@ -962,7 +976,8 @@ void OpConversionRegistry::RegisterSortOps() {
         src_tile_types.reserve(args.size());
         for (size_t i = 0; i < args.size(); ++i) {
           auto tt = As<TileType>(args[i]->GetType());
-          CHECK(tt) << "tensor.mrgsort_format2 conversion expects bridged Vec tile at arg " << i;
+          INTERNAL_CHECK_SPAN(tt, span)
+              << "tensor.mrgsort_format2 conversion expects bridged Vec tile at arg " << i;
           src_tile_types.push_back(tt);
         }
         const auto& src0_tile = src_tile_types.front();
@@ -1070,8 +1085,8 @@ void OpConversionRegistry::RegisterGatherOps() {
       "tensor.gather",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 2) << "tensor.gather conversion expects 2 args (input, index), got "
-                                << args.size();
+        INTERNAL_CHECK_SPAN(args.size() == 2, span)
+            << "tensor.gather conversion expects 2 args (input, index), got " << args.size();
         auto& op_reg = OpRegistry::GetInstance();
 
         const auto& input = args[0];
@@ -1081,9 +1096,10 @@ void OpConversionRegistry::RegisterGatherOps() {
                                    const char* role) -> std::pair<std::vector<ExprPtr>, DataType> {
           if (auto t = As<TensorType>(e->GetType())) return {t->shape_, t->dtype_};
           if (auto t = As<TileType>(e->GetType())) return {t->shape_, t->dtype_};
-          CHECK(false) << "tensor.gather conversion: " << role << " must be TensorType or TileType, got "
-                       << e->GetType()->TypeName();
-          return {};
+          INTERNAL_UNREACHABLE_SPAN(span)
+              << "tensor.gather conversion: " << role << " must be TensorType or TileType, got "
+              << e->GetType()->TypeName();
+          return {};  // unreachable
         };
         auto input_info = get_shape_dtype(input, "input");
         auto index_info = get_shape_dtype(index, "index");
@@ -1091,11 +1107,11 @@ void OpConversionRegistry::RegisterGatherOps() {
         const DataType input_dtype = input_info.second;
         const auto& index_shape = index_info.first;
         const int64_t rank = static_cast<int64_t>(input_shape.size());
-        CHECK(rank >= 2) << "tensor.gather conversion: rank must be >= 2, got " << rank;
+        INTERNAL_CHECK_SPAN(rank >= 2, span) << "tensor.gather conversion: rank must be >= 2, got " << rank;
 
         int dim_val = GetKwargOr<int>(kwargs, "dim", -1);
         int norm_dim = dim_val < 0 ? dim_val + static_cast<int>(rank) : dim_val;
-        CHECK(norm_dim >= 0 && norm_dim < static_cast<int>(rank))
+        INTERNAL_CHECK_SPAN(norm_dim >= 0 && norm_dim < static_cast<int>(rank), span)
             << "tensor.gather conversion: dim out of range, got " << dim_val;
 
         auto make_idx = [&](int64_t value) -> ExprPtr {
@@ -1187,7 +1203,8 @@ void OpConversionRegistry::RegisterGatherOps() {
         // Get ConstInt value from a shape expression.
         auto get_const = [&](const ExprPtr& expr, const char* what) -> int64_t {
           auto c = As<ConstInt>(expr);
-          CHECK(c) << "tensor.gather: " << what << " must be ConstInt for rank>2 lowering";
+          INTERNAL_CHECK_SPAN(c, span)
+              << "tensor.gather: " << what << " must be ConstInt for rank>2 lowering";
           return c->value_;
         };
 
@@ -1326,8 +1343,8 @@ void OpConversionRegistry::RegisterGatherOps() {
         //   flat_idx = idx_row * S2 + [0..I2-1] → [1, I2]
         //   out_row  = gather(inp_flat, flat_idx) → [1, I2]
         // ================================================================
-        CHECK(rank == 3 && norm_dim == 1) << "tensor.gather: unsupported (rank, dim) combination, "
-                                          << "got rank=" << rank << " norm_dim=" << norm_dim;
+        CHECK_SPAN(rank == 3 && norm_dim == 1, span) << "tensor.gather: unsupported (rank, dim) combination, "
+                                                     << "got rank=" << rank << " norm_dim=" << norm_dim;
 
         {
           int64_t I0 = get_const(index_shape[0], "index.shape[0]");
@@ -1391,14 +1408,15 @@ void OpConversionRegistry::RegisterGatherOps() {
       "tensor.gather_compare",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 2) << "tensor.gather_compare conversion expects 2 args (input, kvalue), got "
-                                << args.size();
+        INTERNAL_CHECK_SPAN(args.size() == 2, span)
+            << "tensor.gather_compare conversion expects 2 args (input, kvalue), got " << args.size();
         auto& op_reg = OpRegistry::GetInstance();
 
         auto src_tile = As<TileType>(args[0]->GetType());
-        CHECK(src_tile) << "tensor.gather_compare conversion: input must be Vec tile after bridge, got "
-                        << args[0]->GetType()->TypeName();
-        CHECK(src_tile->shape_.size() == 2)
+        INTERNAL_CHECK_SPAN(src_tile, span)
+            << "tensor.gather_compare conversion: input must be Vec tile after bridge, got "
+            << args[0]->GetType()->TypeName();
+        INTERNAL_CHECK_SPAN(src_tile->shape_.size() == 2, span)
             << "tensor.gather_compare conversion: input must be 2D, got rank " << src_tile->shape_.size();
 
         std::vector<StmtPtr> prologue;
@@ -1455,19 +1473,19 @@ void OpConversionRegistry::RegisterScatterOps() {
       "tensor.scatter",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3) << "tensor.scatter conversion expects 3 args (input, index, src), got "
-                                << args.size();
+        INTERNAL_CHECK_SPAN(args.size() == 3, span)
+            << "tensor.scatter conversion expects 3 args (input, index, src), got " << args.size();
 
         // Validate dim — MVP supports dim=-1 only (column scatter).
         int dim_val = GetKwargOr<int>(kwargs, "dim", -1);
         auto input_tile = As<TileType>(args[0]->GetType());
         auto idx_tile = As<TileType>(args[1]->GetType());
         auto src_tile = As<TileType>(args[2]->GetType());
-        CHECK(input_tile && idx_tile && src_tile)
+        INTERNAL_CHECK_SPAN(input_tile && idx_tile && src_tile, span)
             << "tensor.scatter conversion: input/index/src must be Vec tiles after bridge";
         const int rank = static_cast<int>(input_tile->shape_.size());
         const int norm_dim = dim_val < 0 ? dim_val + rank : dim_val;
-        CHECK(rank == 2 && norm_dim == rank - 1)
+        INTERNAL_CHECK_SPAN(rank == 2 && norm_dim == rank - 1, span)
             << "tensor.scatter conversion currently supports rank-2 input with dim=-1 only, got "
             << "rank=" << rank << " dim=" << dim_val;
 
@@ -1491,7 +1509,7 @@ void OpConversionRegistry::RegisterScatterOps() {
         // so reading it off `input` is equivalent to the dst column count used
         // in the `i * dst_cols` flat-index formula above.
         auto dst_cols_c = As<ConstInt>(input_tile->shape_[1]);
-        CHECK(src_rows && dst_cols_c)
+        INTERNAL_CHECK_SPAN(src_rows && dst_cols_c, span)
             << "tensor.scatter conversion requires static src rows and dst cols for index expansion";
         const int64_t n = src_rows->value_;
         const int64_t cols = dst_cols_c->value_;
@@ -1513,11 +1531,11 @@ void OpConversionRegistry::RegisterScatterOps() {
           // 2-byte tile has at least one column), but guard against 0 anyway.
           const int64_t kMaxFlat = 32768;
           const int64_t max_rows = cols == 0 ? kMaxFlat : kMaxFlat / cols;
-          CHECK(n <= max_rows) << "tensor.scatter with element dtype " << input_tile->dtype_.ToString()
-                               << " uses INT16 flattened indices, but the destination is too large: rows("
-                               << n << ") * cols(" << cols
-                               << ") exceeds the INT16 index range (max flat index 32767, rows <= "
-                               << max_rows << "). Use a smaller tile or split the scatter into chunks.";
+          CHECK_SPAN(n <= max_rows, span)
+              << "tensor.scatter with element dtype " << input_tile->dtype_.ToString()
+              << " uses INT16 flattened indices, but the destination is too large: rows(" << n << ") * cols("
+              << cols << ") exceeds the INT16 index range (max flat index 32767, rows <= " << max_rows
+              << "). Use a smaller tile or split the scatter into chunks.";
         }
 
         auto make_idx = [&](int64_t v) -> ExprPtr {
@@ -1587,7 +1605,7 @@ void OpConversionRegistry::RegisterScatterOps() {
         const DataType dt = input_tile->dtype_;
         auto dst_rows_c = As<ConstInt>(input_tile->shape_[0]);
         auto src_cols_c = As<ConstInt>(src_tile->shape_[1]);
-        CHECK(dst_rows_c && src_cols_c)
+        INTERNAL_CHECK_SPAN(dst_rows_c && src_cols_c, span)
             << "tensor.scatter conversion requires static dst rows and src cols for the preserve blend";
         const int64_t m = dst_rows_c->value_;
         const int64_t k = src_cols_c->value_;
@@ -1642,12 +1660,12 @@ void OpConversionRegistry::RegisterScatterOps() {
       "tensor.scatter_mask",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 2) << "tensor.scatter_mask conversion expects 2 args (input, dst), got "
-                                << args.size();
+        INTERNAL_CHECK_SPAN(args.size() == 2, span)
+            << "tensor.scatter_mask conversion expects 2 args (input, dst), got " << args.size();
         auto& op_reg = OpRegistry::GetInstance();
         auto input_tile = As<TileType>(args[0]->GetType());
         auto dst_tile = As<TileType>(args[1]->GetType());
-        CHECK(input_tile && dst_tile)
+        INTERNAL_CHECK_SPAN(input_tile && dst_tile, span)
             << "tensor.scatter_mask conversion: input/dst must be Vec tiles after bridge";
 
         // pto.tscatter (mask form) zero-fills the entire dst tile before writing
@@ -1664,7 +1682,7 @@ void OpConversionRegistry::RegisterScatterOps() {
         auto in_rows = As<ConstInt>(input_tile->shape_[0]);
         auto in_cols = As<ConstInt>(input_tile->shape_[1]);
         auto dst_cols_c = As<ConstInt>(dst_tile->shape_[1]);
-        CHECK(in_rows && in_cols && dst_cols_c)
+        INTERNAL_CHECK_SPAN(in_rows && in_cols && dst_cols_c, span)
             << "tensor.scatter_mask conversion requires static shapes for the preserve blend";
         const int64_t b = in_rows->value_;
         const int64_t c = in_cols->value_;
@@ -1734,8 +1752,9 @@ void OpConversionRegistry::RegisterCmpOps() {
                     const Span& span) -> ConversionResult {
     auto& op_reg = OpRegistry::GetInstance();
     auto lhs_tile = As<TileType>(args[0]->GetType());
-    CHECK(lhs_tile) << "tensor.cmp conversion: lhs must be TileType after memory promotion, got "
-                    << args[0]->GetType()->TypeName();
+    INTERNAL_CHECK_SPAN(lhs_tile, span)
+        << "tensor.cmp conversion: lhs must be TileType after memory promotion, got "
+        << args[0]->GetType()->TypeName();
 
     std::string tile_cmp_op;
     std::vector<ExprPtr> result_shape;
@@ -1743,24 +1762,26 @@ void OpConversionRegistry::RegisterCmpOps() {
     if (auto rhs_tile = As<TileType>(args[1]->GetType())) {
       tile_cmp_op = "tile.cmp";
       auto broadcast_result = BroadcastShapes(lhs_tile->shape_, rhs_tile->shape_);
-      CHECK(broadcast_result.success)
+      INTERNAL_CHECK_SPAN(broadcast_result.success, span)
           << "tensor.cmp conversion: incompatible shapes " << FormatShape(lhs_tile->shape_) << " and "
           << FormatShape(rhs_tile->shape_);
       result_shape = broadcast_result.shape;
       auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_tile->dtype_);
-      CHECK(promoted) << "tensor.cmp conversion: incompatible dtypes " << lhs_tile->dtype_.ToString()
-                      << " and " << rhs_tile->dtype_.ToString();
+      INTERNAL_CHECK_SPAN(promoted, span)
+          << "tensor.cmp conversion: incompatible dtypes " << lhs_tile->dtype_.ToString() << " and "
+          << rhs_tile->dtype_.ToString();
       result_dtype = *promoted;
     } else if (auto rhs_scalar = As<ScalarType>(args[1]->GetType())) {
       tile_cmp_op = "tile.cmps";
       result_shape = lhs_tile->shape_;
       auto promoted = PromoteDataTypes(lhs_tile->dtype_, rhs_scalar->dtype_);
-      CHECK(promoted) << "tensor.cmp conversion: incompatible dtypes " << lhs_tile->dtype_.ToString()
-                      << " and " << rhs_scalar->dtype_.ToString();
+      INTERNAL_CHECK_SPAN(promoted, span)
+          << "tensor.cmp conversion: incompatible dtypes " << lhs_tile->dtype_.ToString() << " and "
+          << rhs_scalar->dtype_.ToString();
       result_dtype = *promoted;
     } else {
-      CHECK(false) << "tensor.cmp conversion: rhs must be TileType or ScalarType, got "
-                   << args[1]->GetType()->TypeName();
+      INTERNAL_UNREACHABLE_SPAN(span) << "tensor.cmp conversion: rhs must be TileType or ScalarType, got "
+                                      << args[1]->GetType()->TypeName();
     }
 
     std::vector<StmtPtr> prologue;
@@ -1815,34 +1836,38 @@ void OpConversionRegistry::RegisterDistributedOps() {
       "pld.tensor.put",
       [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
          const Span& span) -> ConversionResult {
-        CHECK(args.size() == 3 || args.size() == 6)
+        INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 6, span)
             << "pld.tensor.put conversion expects 3 args (dst, peer, src) or 6 "
                "(dst, peer, src, dst_offsets, src_offsets, shape), got "
             << args.size();
         auto& op_reg = OpRegistry::GetInstance();
 
         auto dst_type = As<DistributedTensorType>(args[0]->GetType());
-        CHECK(dst_type) << "pld.tensor.put conversion: dst must be DistributedTensorType, got "
-                        << args[0]->GetType()->TypeName();
+        INTERNAL_CHECK_SPAN(dst_type, span)
+            << "pld.tensor.put conversion: dst must be DistributedTensorType, got "
+            << args[0]->GetType()->TypeName();
         std::vector<ExprPtr> transfer_shape = dst_type->shape_;
         if (args.size() == 6) {
           auto shape_tuple_arg = As<MakeTuple>(args[5]);
-          CHECK(shape_tuple_arg) << "pld.tensor.put conversion: shape must be MakeTuple";
+          INTERNAL_CHECK_SPAN(shape_tuple_arg, span) << "pld.tensor.put conversion: shape must be MakeTuple";
           transfer_shape = shape_tuple_arg->elements_;
         }
-        CHECK(!transfer_shape.empty()) << "pld.tensor.put conversion: transfer shape requires rank >= 1";
+        INTERNAL_CHECK_SPAN(!transfer_shape.empty(), span)
+            << "pld.tensor.put conversion: transfer shape requires rank >= 1";
 
         // Flatten N-D to [rows, cols]: rows = ∏ leading dims, cols = innermost.
         int64_t cols_val = 0;
         {
           auto last = As<ConstInt>(transfer_shape.back());
-          CHECK(last) << "pld.tensor.put conversion: transfer innermost dimension must be ConstInt";
+          INTERNAL_CHECK_SPAN(last, span)
+              << "pld.tensor.put conversion: transfer innermost dimension must be ConstInt";
           cols_val = last->value_;
         }
         int64_t rows_val = 1;
         for (size_t i = 0; i + 1 < transfer_shape.size(); ++i) {
           auto d = As<ConstInt>(transfer_shape[i]);
-          CHECK(d) << "pld.tensor.put conversion: transfer dimension " << i << " must be ConstInt";
+          INTERNAL_CHECK_SPAN(d, span)
+              << "pld.tensor.put conversion: transfer dimension " << i << " must be ConstInt";
           rows_val *= d->value_;
         }
         auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);

@@ -175,7 +175,8 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
                                          const Span& dispatch_span) {
   DeviceDescriptor desc;
   if (auto ci = As<ConstInt>(device)) {
-    CHECK(ci->value_ >= 0) << "CollectCommGroups: device= ConstInt must be non-negative, got " << ci->value_;
+    INTERNAL_CHECK_SPAN(ci->value_ >= 0, dispatch_span)
+        << "CollectCommGroups: device= ConstInt must be non-negative, got " << ci->value_;
     desc.subset.insert(ci->value_);
     return desc;
   }
@@ -195,15 +196,17 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
         }
         if (auto stop_ci = As<ConstInt>(stop)) {
           auto start_ci = As<ConstInt>(UnwrapStopExpr(fs->start_, var_defs));
-          CHECK(start_ci) << "CollectCommGroups: device=r loop start must unwrap to ConstInt";
+          INTERNAL_CHECK_SPAN(start_ci, dispatch_span)
+              << "CollectCommGroups: device=r loop start must unwrap to ConstInt";
           int64_t start = start_ci->value_;
           auto step_ci = As<ConstInt>(UnwrapStopExpr(fs->step_, var_defs));
-          CHECK(step_ci) << "CollectCommGroups: device=r loop step must unwrap to ConstInt";
+          INTERNAL_CHECK_SPAN(step_ci, dispatch_span)
+              << "CollectCommGroups: device=r loop step must unwrap to ConstInt";
           int64_t step = step_ci->value_;
-          CHECK(step == 1) << "CollectCommGroups: device=r over a non-unit-step loop is not supported "
-                              "(step="
-                           << step << ")";
-          CHECK(start >= 0 && stop_ci->value_ >= start)
+          INTERNAL_CHECK_SPAN(step == 1, dispatch_span)
+              << "CollectCommGroups: device=r over a non-unit-step loop is not supported (step=" << step
+              << ")";
+          INTERNAL_CHECK_SPAN(start >= 0 && stop_ci->value_ >= start, dispatch_span)
               << "CollectCommGroups: device=r loop range must be [0, N) with N>=0";
           for (int64_t i = start; i < stop_ci->value_; ++i) desc.subset.insert(i);
           return desc;
@@ -327,11 +330,12 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
     allocs_with_windows[w.alloc->ptr_var.get()].push_back(&w);
   }
   for (const auto& rec : collector.allocs) {
-    CHECK(!allocs_with_windows[rec->ptr_var.get()].empty())
+    INTERNAL_CHECK(!allocs_with_windows[rec->ptr_var.get()].empty())
         << "CollectCommGroups: pld.tensor.alloc_window_buffer '" << rec->name
         << "' has no pld.tensor.window materialisation (dead allocation) at " << rec->span.to_string();
-    CHECK(!rec->seen.empty()) << "CollectCommGroups: pld.tensor.alloc_window_buffer '" << rec->name
-                              << "' is not consumed by any chip_orch dispatch at " << rec->span.to_string();
+    INTERNAL_CHECK(!rec->seen.empty())
+        << "CollectCommGroups: pld.tensor.alloc_window_buffer '" << rec->name
+        << "' is not consumed by any chip_orch dispatch at " << rec->span.to_string();
   }
 
   // Phase 4: construct WindowBuffer for each alloc. Final descriptor merging

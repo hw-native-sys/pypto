@@ -1172,41 +1172,39 @@ class JITFunction:
     # Call
     # ------------------------------------------------------------------
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Specialize, compile (or serve from cache), and execute on device.
+    def _resolve_compiled(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[Any, list[Any], Any | None]:
+        """Bind args, look up or build the CompiledProgram, return it with the
+        ordered positional arg list and the consumed RunConfig.
 
-        On the first call for a given shape/dtype combination the function is
-        specialized into ``@pl.program`` source, parsed, and compiled via
-        ``ir.compile()`` (passes + codegen).  The resulting ``CompiledProgram``
-        is stored in the L1 in-memory cache so subsequent calls with the same
-        specialization key skip compilation entirely.
+        Shared by :meth:`__call__` (which then dispatches) and :meth:`compile`
+        (which then returns the CompiledProgram). Centralises:
 
-        The compiled kernel is then executed on the NPU device with the given
-        torch tensor arguments (Triton-like API).
-
-        A ``config=RunConfig(...)`` keyword argument is consumed here rather
-        than passed to the decorated function: its compile-side fields
-        (``strategy``, ``dump_passes``, diagnostics, ...) are forwarded to
-        ``ir.compile()`` via :func:`_run_config_compile_kwargs`, and its
-        runtime fields drive on-device execution.  ``strategy`` also takes
-        part in the cache key so two strategies never share a cache entry.
-
-        Args:
-            *args: Positional arguments matching the decorated function's params.
-            **kwargs: Keyword arguments.  A ``config`` keyword, if present, is
-                a :class:`~pypto.runtime.runner.RunConfig` and is consumed by
-                the JIT machinery (not forwarded to the decorated function).
+        - ``config=`` keyword extraction (so it never leaks into the decorated
+          function's signature)
+        - ``_bind_args`` shape/dtype classification
+        - cache-key construction (platform + strategy participate so artefacts
+          for different targets never collide)
+        - on-miss ``_compile()`` invocation
 
         Returns:
-            ``None`` for in-place calls (output tensors modified on device),
-            or ``torch.Tensor`` / ``tuple[torch.Tensor, ...]`` for return-style
-            calls.
+            ``(compiled, ordered_args, run_config)`` where ``ordered_args``
+            is the positional list in declared parameter order — keyword
+            callers like ``kernel(a=x, b=y)`` are normalised here so
+            downstream dispatch is order-agnostic.
         """
         import pypto.language as pl  # noqa: PLC0415
 
-        # Extract RunConfig before binding — it is not a JIT function parameter
-        # but is forwarded directly to CompiledProgram.__call__().
-        run_config = kwargs.pop("config", None)
+        # Extract RunConfig without mutating *kwargs* — although the caller's
+        # ``**kwargs`` dict is normally owned by Python at this scope, building
+        # a fresh dict is the same cost and removes the ambiguity for readers
+        # who don't track the calling convention.
+        run_config = kwargs.get("config")
+        if "config" in kwargs:
+            kwargs = {k: v for k, v in kwargs.items() if k != "config"}
 
         param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = self._bind_args(
             args, kwargs
@@ -1249,15 +1247,99 @@ class JITFunction:
                 **compile_kwargs,
             )
 
-        # Execute the compiled kernel on device.
         # Use bound.arguments (in signature order) so keyword-style calls
         # like kernel(a=x, b=y) are routed correctly regardless of how the
         # caller passed them.
         compiled = self._cache[key]
         ordered_args = [arguments[n] for n in param_names if n in arguments]
+        return compiled, ordered_args, run_config
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Specialize, compile (or serve from cache), and execute on device.
+
+        On the first call for a given shape/dtype combination the function is
+        specialized into ``@pl.program`` source, parsed, and compiled via
+        ``ir.compile()`` (passes + codegen).  The resulting ``CompiledProgram``
+        is stored in the L1 in-memory cache so subsequent calls with the same
+        specialization key skip compilation entirely.
+
+        The compiled kernel is then executed on the NPU device with the given
+        torch tensor arguments (Triton-like API).
+
+        A ``config=RunConfig(...)`` keyword argument is consumed here rather
+        than passed to the decorated function: its compile-side fields
+        (``strategy``, ``dump_passes``, diagnostics, ...) are forwarded to
+        ``ir.compile()`` via :func:`_run_config_compile_kwargs`, and its
+        runtime fields drive on-device execution.  ``strategy`` also takes
+        part in the cache key so two strategies never share a cache entry.
+
+        Args:
+            *args: Positional arguments matching the decorated function's params.
+            **kwargs: Keyword arguments.  A ``config`` keyword, if present, is
+                a :class:`~pypto.runtime.runner.RunConfig` and is consumed by
+                the JIT machinery (not forwarded to the decorated function).
+
+        Returns:
+            ``None`` for in-place calls (output tensors modified on device),
+            or ``torch.Tensor`` / ``tuple[torch.Tensor, ...]`` for return-style
+            calls.
+        """
+        compiled, ordered_args, run_config = self._resolve_compiled(args, kwargs)
         if run_config is not None:
             return compiled(*ordered_args, config=run_config)
         return compiled(*ordered_args)
+
+    def compile(self, *args: Any, **kwargs: Any) -> Any:
+        """Specialize + compile for the shape/dtype combination implied by *args*,
+        and return the underlying :class:`~pypto.ir.compiled_program.CompiledProgram`.
+
+        Same specialization / cache pipeline as :meth:`__call__`, minus the
+        on-device dispatch. Use this when you want to drive execution through
+        the runtime worker API directly:
+
+        - :meth:`pypto.runtime.ChipWorker.run` / :meth:`~pypto.runtime.ChipWorker.register`
+          for explicit L2 dispatch.
+        - :attr:`CompiledProgram.chip_callable` / ``runtime_name`` / ``runtime_config``
+          to drive a hand-constructed ``simpler.worker.Worker``.
+        - :attr:`CompiledProgram.build_orch_args` / ``build_call_config`` to
+          assemble the simpler dispatch tuple yourself.
+
+        ``config=RunConfig(...)`` is still consumed (and its compile-side
+        knobs forwarded to ``ir.compile()``) so the returned
+        ``CompiledProgram`` honours the same options as a direct
+        ``kernel(*args, config=...)`` call. Runtime-side fields on the
+        ``RunConfig`` (``device_id``, DFX flags, ...) do not apply here —
+        they affect dispatch, not the compiled artefact.
+
+        Subsequent calls (either :meth:`__call__` or :meth:`compile`) with the
+        same specialization key hit the L1 cache and return the same
+        ``CompiledProgram`` instance.
+
+        Example::
+
+            @pl.jit
+            def my_kernel(x, w, out):
+                ...
+
+            worker = ChipWorker(config=RunConfig(platform="a2a3"))
+            compiled = my_kernel.compile(sample_x, sample_w, sample_out)
+            w_dev = worker.alloc_tensor(real_w.shape, real_w.dtype, init=real_w)
+            h = worker.register(compiled)
+            for batch in stream:
+                h(batch.x, w_dev, batch.out)
+
+        Args:
+            *args: Positional arguments matching the decorated function's
+                params. Tensor values are inspected for shape/dtype only;
+                their contents are not read.
+            **kwargs: Keyword arguments. A ``config`` keyword, if present, is
+                a :class:`~pypto.runtime.runner.RunConfig`.
+
+        Returns:
+            The cached :class:`CompiledProgram` for this specialization.
+        """
+        compiled, _ordered_args, _run_config = self._resolve_compiled(args, kwargs)
+        return compiled
 
     # ------------------------------------------------------------------
     # Compilation

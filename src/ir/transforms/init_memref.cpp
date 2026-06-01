@@ -96,12 +96,13 @@ class InitMemRefMutator : public IRMutator {
       uint64_t num_elements = 1;
       for (size_t i = 0; i < type->shape_.size(); ++i) {
         auto const_dim = As<ConstInt>(type->shape_[i]);
-        CHECK(const_dim) << "InitMemRef requires static shape for variable '" << var_name
-                         << "', but shape element " << i
-                         << " is dynamic. Fix the upstream op to keep TileType.shape static and put runtime "
-                            "extent in TileView.valid_shape instead.";
-        CHECK(const_dim->value_ > 0) << "InitMemRef requires positive shape for variable '" << var_name
-                                     << "', but shape element " << i << " is " << const_dim->value_;
+        INTERNAL_CHECK_SPAN(const_dim, var ? var->span_ : Span::unknown())
+            << "InitMemRef requires static shape for variable '" << var_name << "', but shape element " << i
+            << " is dynamic. Fix the upstream op to keep TileType.shape static and put runtime "
+               "extent in TileView.valid_shape instead.";
+        INTERNAL_CHECK_SPAN(const_dim->value_ > 0, var ? var->span_ : Span::unknown())
+            << "InitMemRef requires positive shape for variable '" << var_name << "', but shape element " << i
+            << " is " << const_dim->value_;
         num_elements *= static_cast<uint64_t>(const_dim->value_);
       }
 

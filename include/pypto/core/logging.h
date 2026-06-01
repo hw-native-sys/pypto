@@ -597,6 +597,21 @@ class FatalLogger {
   if (!(expr)) pypto::FatalLogger<pypto::ValueError>(#expr, __FILE__, __LINE__)
 
 /**
+ * @brief Check a user-facing condition with IR source location and throw ValueError if it fails
+ *
+ * The `span` argument is evaluated only on failure, but it is evaluated
+ * unconditionally there. The span expression must therefore be safe to
+ * evaluate exactly when the check fails — see error-handling docs.
+ *
+ * Usage: CHECK_SPAN(condition, node->span_) << "error message";
+ */
+#define CHECK_SPAN(expr, span) \
+  if (!!(expr))                \
+    ;                          \
+  else                         \
+    pypto::FatalLogger<pypto::ValueError>(#expr, __FILE__, __LINE__, span)
+
+/**
  * @brief Check an internal invariant and throw InternalError if it fails
  *
  * When an IR Span is available, prefer INTERNAL_CHECK_SPAN(expr, span) to
@@ -613,6 +628,13 @@ class FatalLogger {
  * Usage: UNREACHABLE << "optional message";
  */
 #define UNREACHABLE pypto::FatalLogger<pypto::ValueError>("unreachable", __FILE__, __LINE__)
+
+/**
+ * @brief Mark a code path as unreachable with IR source location and throw ValueError if reached
+ *
+ * Usage: UNREACHABLE_SPAN(node->span_) << "optional message";
+ */
+#define UNREACHABLE_SPAN(span) pypto::FatalLogger<pypto::ValueError>("unreachable", __FILE__, __LINE__, span)
 
 /**
  * @brief Mark a code path as internally unreachable and throw InternalError if reached

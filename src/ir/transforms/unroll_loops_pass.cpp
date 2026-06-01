@@ -82,7 +82,8 @@ class LoopUnrollMutator : public IRMutator {
   /// Unroll a single ForStmt with ForKind::Unroll.
   StmtPtr UnrollForStmt(const ForStmtPtr& op) {
     // Validate: no iter_args for unroll loops
-    CHECK(op->iter_args_.empty()) << "Unroll loops cannot have iter_args (init_values)";
+    INTERNAL_CHECK_SPAN(op->iter_args_.empty(), op->span_)
+        << "Unroll loops cannot have iter_args (init_values)";
 
     // Extract compile-time constants for start/stop/step
     int64_t start = GetConstIntValue(op->start_, "start");
