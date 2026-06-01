@@ -543,13 +543,13 @@ def execute_on_device(  # noqa: PLR0913
         aicpu_thread_num: Number of AICPU threads. ``None`` leaves the
             field unset and uses the simpler runtime default.
         output_prefix: Directory under which the runtime writes diagnostic
-            artifacts (``l2_perf_records.json`` / ``tensor_dump/`` /
+            artifacts (``l2_swimlane_records.json`` / ``tensor_dump/`` /
             ``pmu.csv`` / ``deps.json``). Required whenever any
             ``enable_*`` DFX flag is set — Simpler's
             ``CallConfig::validate()`` would otherwise reject the call.
             Passing it with all flags off creates no artefacts.
         enable_l2_swimlane: Capture per-task L2 perf records
-            (``l2_perf_records.json``). Mirrors runtime's
+            (``l2_swimlane_records.json``). Mirrors runtime's
             ``--enable-l2-swimlane`` pytest flag.
         enable_dump_tensor: Dump per-task tensor I/O into
             ``<output_prefix>/tensor_dump/``. Mirrors ``--dump-tensor``.

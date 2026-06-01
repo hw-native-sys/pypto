@@ -178,17 +178,17 @@ def pl_at_deps_swimlane_file(test_runner) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip("pass --enable-l2-swimlane to validate the pl.at-deps swimlane")
 
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(_PlAtDepsPipelinePTO())
     assert result.passed, f"pl.at-deps pipeline failed: {result.error}"
 
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     candidates = list(after - before)
     if not candidates:
         # Fallback for runners that overwrite an existing path rather than
         # creating a new one. Pick the freshest available file.
         candidates = sorted(after, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-    assert candidates, "No l2_perf_records.json was found for the pl.at-deps run"
+    assert candidates, "No l2_swimlane_records.json was found for the pl.at-deps run"
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
@@ -396,14 +396,14 @@ class TestPhaseFencePlAtDeps:
 def phase_fence_pl_at_swimlane_file(test_runner) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip("pass --enable-l2-swimlane to validate the phase-fence pl.at swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(_PhaseFencePlAtDepsPTO())
     assert result.passed, f"phase-fence pl.at-deps failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     candidates = list(after - before)
     if not candidates:
         candidates = sorted(after, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-    assert candidates, "No l2_perf_records.json found for the phase-fence pl.at run"
+    assert candidates, "No l2_swimlane_records.json found for the phase-fence pl.at run"
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
@@ -585,14 +585,14 @@ class TestBranchChainPlAtDeps:
 def branch_chain_pl_at_swimlane_file(test_runner) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip("pass --enable-l2-swimlane to validate the branch-chain pl.at swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(_BranchChainPlAtDepsPTO())
     assert result.passed, f"branch-chain pl.at-deps failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     candidates = list(after - before)
     if not candidates:
         candidates = sorted(after, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-    assert candidates, "No l2_perf_records.json found for the branch-chain pl.at run"
+    assert candidates, "No l2_swimlane_records.json found for the branch-chain pl.at run"
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 

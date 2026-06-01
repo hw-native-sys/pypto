@@ -10,7 +10,7 @@
 """Runtime witnesses for manual_scope phase-fence dependency compression.
 
 These tests intentionally avoid depending on a stable dummy-task marker in
-``l2_perf_records.json``. The externally required contract is phase strictness:
+``l2_swimlane_records.json``. The externally required contract is phase strictness:
 all tasks in flattened stage k+1 must start after all tasks in flattened stage k
 finish.
 """
@@ -126,14 +126,14 @@ def _snapshot_swimlane_branches_from_env() -> int:
 def _new_swimlane_file(test_runner, case: PTOTestCase, *, label: str) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip(f"pass --enable-l2-swimlane to validate {label}")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(case)
     assert result.passed, f"{label} failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     candidates = list(after - before)
     if not candidates:
         candidates = sorted(after, key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-    assert candidates, f"No l2_perf_records.json generated for {label}"
+    assert candidates, f"No l2_swimlane_records.json generated for {label}"
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
