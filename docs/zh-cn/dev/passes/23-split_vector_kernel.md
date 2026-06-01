@@ -203,6 +203,24 @@ Ascend910B（或任意
    保留 —— 后续 lowering 会读它）。
 ```
 
+### Codegen 传输：整列 box、保留行
+
+lane 1 的 replay 会把 tile `valid_shape` 清零，从而不产生任何可见写；但它
+保留的 AIC↔AIV `tpush` 仍会通过共享 GM FIFO slot 搬运数据，而单个 cube
+消费者会按完整 slot pop。因此在 codegen 侧
+（`EmitSplitTpushTransportValidShape`，`pto_ops_common.cpp`），一个用
+`set_validshape` 收窄了 `valid_shape` 的 no-split 双 AIV 生产者，必须传输
+**整列 box**，否则消费者会读到 `valid_col` 之后未初始化（stale）的 slot
+列。与真正的 `UpDown` / `LeftRight` 拆分（两个轴都扩展）不同，no-split 路
+径**只扩展列、保留行 `valid_shape`**：subblock 0 的真实 push 携带整列
+box，而 subblock 1 的 `valid_shape=[0, 0]` replay **完全不发 transport**（静态
+0 行的 push 本就不搬数据，给它发 col-widening `set_validshape` 反而会扰动共享
+slot 的双 AIV 归并 —— 曾使 `cross_core_v2c_nosplit` golden 回归），因此它保持为
+真正的 0 行 no-op，不会把垃圾行竞争写进 subblock 0 的 slot。（不带
+`dual_aiv_dispatch` 的普通 `split=0` 同样完全不发 transport。）检测开关是
+`PTOCodegen::IsDualAivDispatchFunction()`，它读取本 Pass 写入的
+`dual_aiv_dispatch` 属性。
+
 ## 约束
 
 | 约束 | 原因 |

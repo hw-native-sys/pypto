@@ -1651,7 +1651,18 @@ static std::shared_ptr<const ir::TileType> GetTpushTileType(const ExprPtr& tile_
 static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCodegen& codegen,
                                               const std::string& tile_buf, const std::string& tile_type,
                                               int split) {
-  if (split == 0 || tile_buf.empty() || tile_type.empty()) {
+  // split == 0 normally means no cross-core split: the single consumer reads
+  // exactly the producer's (possibly narrowed) valid_shape, so no full-box
+  // transport is needed. BUT the 910B no-split dual-AIV dispatch path
+  // (function attr `dual_aiv_dispatch`) runs the producer on TWO AIV subblocks
+  // that share one FIFO slot while the single cube consumer pops the FULL
+  // slot. If the producer narrowed its valid_shape (e.g. set_validshape on a
+  // partial attention block), the un-narrowed rows/cols of the slot stay stale
+  // and feed garbage into the consumer's matmul. So for that mode we must
+  // still transport the full box, exactly as for split==1/2 — this extends
+  // PR #1454's fix to the split==0 dual-dispatch case.
+  const bool dual_aiv_no_split = (split == 0) && codegen.IsDualAivDispatchFunction();
+  if ((split == 0 && !dual_aiv_no_split) || tile_buf.empty() || tile_type.empty()) {
     return false;
   }
 
@@ -1675,6 +1686,28 @@ static bool EmitSplitTpushTransportValidShape(const CallPtr& op, codegen::PTOCod
   const auto& valid_shape = tile_view.valid_shape;
   ExprPtr transport_row = shape[0];
   ExprPtr transport_col = shape[1];
+
+  // For the 910B no-split dual-AIV path there is NO genuine cross-core row
+  // split: subblock 0 runs the full computation while subblock 1 is a
+  // pipe-balancing replay whose tile carries valid_shape (0, 0). So here we
+  // widen the COLUMNS only -- carrying the producer's fillpad'd cols >=
+  // valid_col, which fixes the stale-col feed into the consumer matmul --
+  // while PRESERVING the producer's row valid_shape. Widening the rows to the
+  // full box would push subblock-1's garbage rows into the shared FIFO slot
+  // and race/overwrite subblock-0's real data. Genuine split==1/2 paths keep
+  // widening both axes because the row split is real there.
+  if (dual_aiv_no_split) {
+    transport_row = valid_shape[0];
+    // A statically-zero-row producer IS the subblock-1 pipe-balancing replay:
+    // it moves no data regardless of the column box, so a col-widening
+    // transport is pure overhead AND (on 910B) perturbs the shared-slot
+    // dual-AIV merge -- emitting it regressed the cross_core_v2c_nosplit
+    // golden. Only the real subblock-0 push (non-zero rows, possibly narrowed
+    // by set_validshape) needs the full-column transport.
+    if (auto row_const = As<ir::ConstInt>(transport_row); row_const && row_const->value_ == 0) {
+      return false;
+    }
+  }
 
   if (IsSameDimExpr(transport_row, valid_shape[0]) && IsSameDimExpr(transport_col, valid_shape[1])) {
     return false;

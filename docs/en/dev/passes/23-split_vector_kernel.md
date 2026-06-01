@@ -214,6 +214,26 @@ both paths).
    stays — downstream lowering reads it).
 ```
 
+### Codegen transport: full-column box, preserved rows
+
+The lane-1 replay zeroes its tile `valid_shape` so it produces no visible
+writes, but the AIC↔AIV `tpush` it keeps still moves data through the shared
+GM FIFO slot the single cube consumer pops in full. On the codegen side
+(`EmitSplitTpushTransportValidShape`, `pto_ops_common.cpp`) a no-split
+dual-AIV producer that narrowed its `valid_shape` with `set_validshape` must
+therefore transport the **full column box**, or the consumer reads stale slot
+columns past `valid_col`. Unlike the genuine `UpDown` / `LeftRight` splits —
+which widen *both* axes — the no-split path widens **columns only and
+preserves the row `valid_shape`**: subblock 0's real push carries the full
+column box, while subblock 1's `valid_shape=[0, 0]` replay gets **no transport
+at all** (a statically 0-row push moves no data, and emitting a col-widening
+`set_validshape` for it perturbs the shared-slot dual-AIV merge — it regressed
+the `cross_core_v2c_nosplit` golden), so it stays a true 0-row no-op rather than
+racing garbage rows into subblock 0's slot. (Plain `split=0` without
+`dual_aiv_dispatch` emits no transport at all either.) The detection lever is
+`PTOCodegen::IsDualAivDispatchFunction()`, which reads this pass's
+`dual_aiv_dispatch` attribute.
+
 ## Constraints
 
 | Constraint | Why |

@@ -518,6 +518,18 @@ class PTOCodegen : public CodegenBase {
    */
   [[nodiscard]] bool IsAIVFunction() const;
 
+  /**
+   * @brief Check if the current function carries the `dual_aiv_dispatch`
+   * attribute (910B no-split dual-AIV dispatch). In that mode the single cube
+   * consumer reads the FULL slot while two AIV subblocks share it, so the
+   * cross-core tpush transport widens only the COLUMN axis to the producer's
+   * box (carrying its fillpad'd columns) while PRESERVING the row
+   * `valid_shape[0]`: subblock 0's real push stays full and subblock 1's
+   * 0-row replay stays a no-op. Genuine `split==1/2` paths widen both axes --
+   * see `EmitSplitTpushTransportValidShape`.
+   */
+  [[nodiscard]] bool IsDualAivDispatchFunction() const;
+
  protected:
   // Override visitor methods for code generation - Statements
   void VisitStmt_(const ir::AssignStmtPtr& op) override;

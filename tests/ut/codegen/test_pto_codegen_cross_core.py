@@ -815,6 +815,249 @@ class TestCrossCoreTpushTpopCodegen:
             f"Expected tpush to use the aliased source tile, got:\n{tpush_line}"
         )
 
+    def test_no_split_dual_aiv_tpush_widens_cols_preserves_rows(self):
+        """No-split dual-AIV tpush widens COLUMNS to the box but PRESERVES rows.
+
+        On 910B the no-split dual-AIV dispatch runs a mixed root's producer on
+        two AIV subblocks that share one FIFO slot while the single cube
+        consumer pops the full slot. A producer that narrowed its valid_shape
+        (e.g. set_validshape on a partial attention block) would otherwise leave
+        the slot columns >= valid_col stale and feed garbage into the consumer
+        matmul. So for split==0 functions carrying ``dual_aiv_dispatch`` the
+        transport set_validshape widens the COLUMN axis to the box while
+        PRESERVING the producer's row valid_shape -- so subblock 0's real push
+        carries the full column box and subblock 1's valid_shape=(0, 0) replay
+        stays a true 0-row no-op instead of racing garbage rows into subblock
+        0's slot. Genuine split==1/2 paths widen both axes; plain split==0
+        without ``dual_aiv_dispatch`` emits no transport at all. See
+        src/backend/common/pto_ops_common.cpp::EmitSplitTpushTransportValidShape.
+        """
+        span = ir.Span.unknown()
+        memory_space = ir.MemorySpace.Vec
+
+        src = ir.Var("src", ir.TensorType([16, 16], pl.FP32), span)
+        valid_row = ir.Var("valid_row", ir.ScalarType(pl.INDEX), span)
+        valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
+
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        shape_16 = ir.ConstInt(16, pl.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shapes = ir.MakeTuple([shape_16, shape_16], span)
+
+        src_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 16 * 16 * 4, 0)
+        src_view = ir.TileView(
+            valid_shape=[shape_16, shape_16],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
+        src_type = ir.TileType([16, 16], pl.FP32, src_memref, src_view, memory_space)
+        src_tile = ir.Var("src_tile", src_type, span)
+
+        narrowed_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 16 * 16 * 4, 0)
+        narrowed_view = ir.TileView(
+            valid_shape=[valid_row, valid_col],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
+        narrowed_type = ir.TileType([16, 16], pl.FP32, narrowed_memref, narrowed_view, memory_space)
+        narrowed_tile = ir.Var("narrowed_tile", narrowed_type, span)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    src_tile,
+                    ir.Call(
+                        ir.Op("tile.load"),
+                        [src, offsets, shapes, shapes],
+                        {"target_memory": memory_space},
+                        src_type,
+                        span,
+                    ),
+                    span,
+                ),
+                ir.AssignStmt(
+                    narrowed_tile,
+                    ir.Call(
+                        ir.Op("tile.set_validshape"),
+                        [src_tile, valid_row, valid_col],
+                        {},
+                        narrowed_type,
+                        span,
+                    ),
+                    span,
+                ),
+                ir.EvalStmt(
+                    ir.Call(
+                        ir.Op("tile.tpush_to_aic"),
+                        [narrowed_tile],
+                        {"split": 0},
+                        ir.UnknownType(),
+                        span,
+                    ),
+                    span,
+                ),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "dual_aiv_narrow_then_push",
+            [
+                (src, ir.ParamDirection.In),
+                (valid_row, ir.ParamDirection.In),
+                (valid_col, ir.ParamDirection.In),
+            ],
+            [],
+            body,
+            span,
+            ir.FunctionType.AIV,
+            attrs={"dual_aiv_dispatch": True},
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(
+            ir.Program([func], "dual_aiv_narrow_then_push_program", span)
+        )
+
+        set_validshape_lines = [
+            line.strip() for line in mlir_code.splitlines() if "pto.set_validshape" in line
+        ]
+        tpush_line = next(line.strip() for line in mlir_code.splitlines() if "pto.tpush_to_aic" in line)
+
+        assert len(set_validshape_lines) == 3, (
+            "Expected logical set_validshape, transport normalization, and logical restore, got:\n"
+            + "\n".join(set_validshape_lines)
+        )
+        assert ", %arg1, %arg2 :" in set_validshape_lines[0], (
+            f"Expected the initial logical validShape update, got:\n{set_validshape_lines[0]}"
+        )
+        # Column widened to the box (%c16_index); ROW preserved at the
+        # producer's valid_row (%arg1) so the subblock-1 replay stays a 0-row
+        # no-op rather than racing garbage rows into subblock 0's slot.
+        assert ", %arg1, %c16_index :" in set_validshape_lines[1], (
+            "Expected no-split dual-AIV transport to widen cols but preserve rows, got:\n"
+            f"{set_validshape_lines[1]}"
+        )
+        assert ", %arg1, %arg2 :" in set_validshape_lines[2], (
+            f"Expected the logical validShape restore after tpush, got:\n{set_validshape_lines[2]}"
+        )
+        assert "%src_tile" in tpush_line and "%narrowed_tile" not in tpush_line, (
+            f"Expected tpush to use the aliased source tile, got:\n{tpush_line}"
+        )
+
+    def test_no_split_dual_aiv_zero_row_replay_emits_no_transport(self):
+        """The subblock-1 replay (statically 0 rows) emits NO transport.
+
+        BuildNoSplitLane1ReplayStmts zeroes the replay tile's valid_shape to
+        (0, 0). A col-widening transport for a 0-row push moves no data yet
+        (on 910B) perturbs the shared-slot dual-AIV merge -- emitting one
+        regressed the cross_core_v2c_nosplit golden. So when the producer's
+        transport rows are statically 0, EmitSplitTpushTransportValidShape
+        skips the transport entirely; only the real, non-zero-row subblock-0
+        push gets it. See
+        src/backend/common/pto_ops_common.cpp::EmitSplitTpushTransportValidShape.
+        """
+        span = ir.Span.unknown()
+        memory_space = ir.MemorySpace.Vec
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        shape_16 = ir.ConstInt(16, pl.INDEX, span)
+
+        src = ir.Var("src", ir.TensorType([16, 16], pl.FP32), span)
+        valid_col = ir.Var("valid_col", ir.ScalarType(pl.INDEX), span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shapes = ir.MakeTuple([shape_16, shape_16], span)
+
+        src_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 16 * 16 * 4, 0)
+        src_view = ir.TileView(
+            valid_shape=[shape_16, shape_16],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
+        src_type = ir.TileType([16, 16], pl.FP32, src_memref, src_view, memory_space)
+        src_tile = ir.Var("src_tile", src_type, span)
+
+        # Replay tile: statically 0 rows (as BuildNoSplitLane1ReplayStmts zeroes it).
+        zeroed_memref = ir.MemRef(memory_space, ir.ConstInt(0, pl.INT64, span), 16 * 16 * 4, 0)
+        zeroed_view = ir.TileView(
+            valid_shape=[zero, valid_col],
+            blayout=ir.TileLayout.col_major,
+            slayout=ir.TileLayout.row_major,
+            fractal=1024,
+        )
+        zeroed_type = ir.TileType([16, 16], pl.FP32, zeroed_memref, zeroed_view, memory_space)
+        zeroed_tile = ir.Var("zeroed_tile", zeroed_type, span)
+
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(
+                    src_tile,
+                    ir.Call(
+                        ir.Op("tile.load"),
+                        [src, offsets, shapes, shapes],
+                        {"target_memory": memory_space},
+                        src_type,
+                        span,
+                    ),
+                    span,
+                ),
+                ir.AssignStmt(
+                    zeroed_tile,
+                    ir.Call(
+                        ir.Op("tile.set_validshape"),
+                        [src_tile, zero, valid_col],
+                        {},
+                        zeroed_type,
+                        span,
+                    ),
+                    span,
+                ),
+                ir.EvalStmt(
+                    ir.Call(
+                        ir.Op("tile.tpush_to_aic"),
+                        [zeroed_tile],
+                        {"split": 0},
+                        ir.UnknownType(),
+                        span,
+                    ),
+                    span,
+                ),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "dual_aiv_zero_row_replay",
+            [(src, ir.ParamDirection.In), (valid_col, ir.ParamDirection.In)],
+            [],
+            body,
+            span,
+            ir.FunctionType.AIV,
+            attrs={"dual_aiv_dispatch": True},
+        )
+
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        mlir_code = codegen.PTOCodegen().generate(
+            ir.Program([func], "dual_aiv_zero_row_replay_program", span)
+        )
+
+        set_validshape_lines = [
+            line.strip() for line in mlir_code.splitlines() if "pto.set_validshape" in line
+        ]
+        # No transport normalization / restore -- the 0-row replay push is
+        # skipped, so the only set_validshape is the user's logical update and
+        # none widen a column to the box constant (%c16_index).
+        assert all("%c16_index" not in line for line in set_validshape_lines), (
+            "Expected NO col-widening transport for the 0-row replay, got:\n"
+            + "\n".join(set_validshape_lines)
+        )
+        assert len(set_validshape_lines) <= 1, (
+            "Expected at most the logical set_validshape (no transport+restore pair), got:\n"
+            + "\n".join(set_validshape_lines)
+        )
+
     def test_tfree_stays_after_nested_control_flow_use(self):
         """Nested control-flow users of a tpop result must stay before tfree."""
 

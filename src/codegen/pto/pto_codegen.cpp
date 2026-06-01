@@ -1289,6 +1289,11 @@ bool PTOCodegen::IsAIVFunction() const {
   return fs_.current_function && fs_.current_function->func_type_ == ir::FunctionType::AIV;
 }
 
+bool PTOCodegen::IsDualAivDispatchFunction() const {
+  return fs_.current_function && fs_.current_function->HasAttr("dual_aiv_dispatch") &&
+         fs_.current_function->GetAttr<bool>("dual_aiv_dispatch", false);
+}
+
 void PTOCodegen::EmitExtraAllocTiles() {
   for (const auto& alloc : fs_.extra_alloc_tiles) {
     stream_ << GetIndent() << alloc.name << " = pto.alloc_tile";
