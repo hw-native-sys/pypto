@@ -80,7 +80,9 @@ Register(DiagnosticCheck::MyCheck,
 
 ### 第一项检查：`TileInnermostDimGranularity` (PH001)
 
-检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时，对每个 op 发一条 diagnostic，指向用户源代码 span。上下文中存在 `ReportInstrument` 时全部写入 `perf_hints.log`，stderr 仅见摘要行；否则每条 hint 输出到 stderr。
+检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时发出 diagnostic，指向源代码 span。该检查**感知内存空间**：阈值建模的是 L2 cache-line 关注点，因此 `target_memory` 为 cube 私有 L0/L1（`Mat`/`Left`/`Right`/`Acc`）的 tile 不会经过 L2，会被跳过，以避免在已调优的 cube kernel 上误报。命中按 `(file, line, col, op)` 站点**去重**——循环展开 / 分片展开在同一源 span 产生的多个 tile op 会折叠为一条带出现次数的 hint。消息会回显其评估的 `(dtype[innermost], target_memory)` 元组，便于将字节数与 IR 对照。上下文中存在 `ReportInstrument` 时全部写入 `perf_hints.log`，stderr 仅见摘要行；否则每条 hint 输出到 stderr。
+
+> **源 span 限制：** span 为流水线后 IR 文本位置（`<string>:line:col`），并非原始 DSL `pl.at` / 切片表达式，也未命名控制内层维度的 chunk 常量。回溯到用户源代码并命名内层维度常量需要将 DSL 源 span 通过 parser/IR 传递到 tile op 上——目前 `TileType`、`Call` op、`Span` 都未携带该元数据（issue #1305 第 2/3 项）。
 
 示例：stderr 摘要 + `perf_hints.log` 内容（`examples/kernels/08_assemble.py`，Ascend950）：
 
@@ -89,8 +91,8 @@ Register(DiagnosticCheck::MyCheck,
 [perf_hint] 2 hints across 2 sites; see /tmp/build/perf_hints.log
 
 # /tmp/build/perf_hints.log：
-[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B; recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
-[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B; recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
 ```
 
 ## 用户面 API

@@ -80,7 +80,9 @@ Adding a new backend implements these alongside the existing virtuals; perf-hint
 
 ### First check: `TileInnermostDimGranularity` (PH001)
 
-Inspects every `tile.load` and `tile.store` op. When the innermost-dimension byte size (`shape[-1] * sizeof(dtype)`) is below `GetRecommendedInnermostDimBytes()`, emits one diagnostic per op pointing at the user-source span. With a `ReportInstrument` in the context the full set goes to `perf_hints.log` and the console only sees the summary line; without one, each hint prints to stderr.
+Inspects every `tile.load` and `tile.store` op. When the innermost-dimension byte size (`shape[-1] * sizeof(dtype)`) is below `GetRecommendedInnermostDimBytes()`, emits a diagnostic pointing at the source span. The check is **memory-space aware**: the recommendation models an L2 cache-line concern, so tiles whose `target_memory` is cube-private L0/L1 (`Mat`/`Left`/`Right`/`Acc`) never traverse L2 and are skipped to avoid false positives on tuned cube kernels. Hits are **deduplicated** by `(file, line, col, op)` site — loop-unroll / per-fragment expansion that produces many tile ops at the same source span collapses to one hint carrying an occurrence count. The message echoes the `(dtype[innermost], target_memory)` tuple it evaluated so the byte figure can be reconciled against the IR. With a `ReportInstrument` in the context the full set goes to `perf_hints.log` and the console only sees the summary line; without one, each hint prints to stderr.
+
+> **Source-span limitation:** the span is the post-pipeline IR-text location (`<string>:line:col`), not the originating DSL `pl.at` / slicing expression, and the controlling chunk constant is not named. Mapping back to user source and naming the inner-dim constant requires DSL source spans to be threaded through the parser/IR onto the tile op — that metadata is not yet carried on `TileType`, the `Call` op, or `Span` (issue #1305 asks 2/3).
 
 Example: console summary plus `perf_hints.log` content (from `examples/kernels/08_assemble.py` on Ascend950):
 
@@ -89,8 +91,8 @@ Example: console summary plus `perf_hints.log` content (from `examples/kernels/0
 [perf_hint] 2 hints across 2 sites; see /tmp/build/perf_hints.log
 
 # /tmp/build/perf_hints.log:
-[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B; recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
-[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B; recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.load has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
+[perf_hint PH001] TileInnermostDimGranularity: tile.store has innermost dim = 64B (tile fp32[16], target_memory=Vec); recommended >= 128B for backend a5 (L2 cache line = 512B). Consider increasing tile shape on the innermost axis. at examples/kernels/08_assemble.py:60:4
 ```
 
 ## User-facing API

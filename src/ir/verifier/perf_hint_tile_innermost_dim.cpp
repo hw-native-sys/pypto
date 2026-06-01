@@ -11,16 +11,20 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/error.h"
 #include "pypto/ir/expr.h"
+#include "pypto/ir/memory_space.h"
+#include "pypto/ir/pipe.h"
 #include "pypto/ir/program.h"
 #include "pypto/ir/scalar_expr.h"
 #include "pypto/ir/span.h"
@@ -37,13 +41,23 @@ namespace {
 
 constexpr int kTileInnermostDimGranularityCode = 1;  // PH001 — issue #1180
 
-/// Compute the innermost-dim size in bytes for a TileType result. Returns
+/// Evaluated facts about a flagged tile transfer, carried from inspection to
+/// message construction so the hint can echo the exact (shape, dtype,
+/// target_memory) tuple it reasoned about — see issue #1305 ask (5).
+struct TileTransferInfo {
+  uint64_t innermost_bytes;           ///< Innermost-dim size in bytes.
+  int64_t innermost_elems;            ///< Innermost-dim element count.
+  std::string dtype_name;             ///< Element dtype, e.g. "int8".
+  std::optional<MemorySpace> memory;  ///< target_memory of the tile, if known.
+};
+
+/// Inspect a TileType and compute the innermost-dim transfer facts. Returns
 /// nullopt if the shape is symbolic, the dtype has unknown bit width, or the
 /// type is not a tile.
 ///
 /// We use the result type for tile.load (which produces a tile) and the first
-/// argument's type for tile.store (which consumes a tile) — see CheckCall.
-std::optional<uint64_t> InnermostBytesOfTile(const TypePtr& type) {
+/// argument's type for tile.store (which consumes a tile) — see VisitExpr_.
+std::optional<TileTransferInfo> InspectTile(const TypePtr& type) {
   auto tile = std::dynamic_pointer_cast<const TileType>(type);
   if (!tile) return std::nullopt;
   if (tile->shape_.empty()) return std::nullopt;
@@ -56,11 +70,16 @@ std::optional<uint64_t> InnermostBytesOfTile(const TypePtr& type) {
   size_t bits = tile->dtype_.GetBit();
   if (bits == 0) return std::nullopt;
 
+  TileTransferInfo info;
   // Multiply by element count first, then round up to bytes — for sub-byte
   // dtypes (int4, bool, ...) per-element rounding overestimates the row size
   // and would mask hints that should fire. Innermost-dim granularity is a
   // bus / cache concern measured in bytes.
-  return (static_cast<uint64_t>(last->value_) * static_cast<uint64_t>(bits) + 7u) / 8u;
+  info.innermost_bytes = (static_cast<uint64_t>(last->value_) * static_cast<uint64_t>(bits) + 7u) / 8u;
+  info.innermost_elems = last->value_;
+  info.dtype_name = tile->dtype_.ToString();
+  info.memory = tile->GetMemorySpace();
+  return info;
 }
 
 class TileInnermostDimVisitor : public IRVisitor {
@@ -72,6 +91,16 @@ class TileInnermostDimVisitor : public IRVisitor {
         l2_cache_line_bytes_(l2_cache_line_bytes),
         arch_(std::move(arch)) {}
 
+  /// Flush deduplicated sites into `diagnostics_`. Call once after the walk.
+  void Flush() {
+    for (auto& [key, site] : sites_) {
+      (void)key;
+      diagnostics_.emplace_back(DiagnosticSeverity::PerfHint, "TileInnermostDimGranularity",
+                                kTileInnermostDimGranularityCode, /*hint_code=*/"PH001", BuildMessage(site),
+                                site.span);
+    }
+  }
+
  protected:
   void VisitExpr_(const CallPtr& op) override {
     IRVisitor::VisitExpr_(op);  // recurse into children first
@@ -80,36 +109,85 @@ class TileInnermostDimVisitor : public IRVisitor {
     const std::string& name = op->op_->name_;
     if (name == "tile.load") {
       // tile.load returns a TileType — innermost dim is on the result.
-      EmitIfBelowThreshold(name, op->GetType(), op->span_);
+      RecordIfBelowThreshold(name, op->GetType(), op->span_);
     } else if (name == "tile.store") {
       // tile.store's first arg is the source tile; innermost dim lives there.
       if (op->args_.empty() || !op->args_[0]) return;
-      EmitIfBelowThreshold(name, op->args_[0]->GetType(), op->span_);
+      RecordIfBelowThreshold(name, op->args_[0]->GetType(), op->span_);
     }
   }
 
  private:
-  void EmitIfBelowThreshold(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
-    auto bytes_opt = InnermostBytesOfTile(tile_type);
-    if (!bytes_opt.has_value()) return;
-    uint64_t bytes = *bytes_opt;
-    if (bytes >= recommended_bytes_) return;
+  /// One deduplicated diagnostic site, keyed by (file, line, col, op_name).
+  /// `Span` has const members (no default ctor / copy-assign), so Site is
+  /// constructed once via try_emplace and never reassigned; `count` is the
+  /// only field that mutates after insertion.
+  struct Site {
+    Site(TileTransferInfo i, Span s, std::string op)
+        : info(std::move(i)), span(std::move(s)), op_name(std::move(op)) {}
+    TileTransferInfo info;
+    Span span;
+    std::string op_name;
+    uint32_t count = 0;
+  };
+
+  // Dedup key per issue #1305 ask (4): (file, line, col, op_name). Loop-unroll
+  // and per-fragment expansion produce many tile ops at the same source span;
+  // collapsing them to one hint with a count keeps the signal readable.
+  using SiteKey = std::tuple<std::string, int, int, std::string>;
+
+  void RecordIfBelowThreshold(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
+    auto info_opt = InspectTile(tile_type);
+    if (!info_opt.has_value()) return;
+    const TileTransferInfo& info = *info_opt;
+
+    // Memory-space awareness (ask 1): the recommended-bytes threshold is an L2
+    // cache-line concern, which only applies to transfers that traverse L2
+    // (GM <-> Vec). Cube-private L0/L1 buffers (Left/Right/Acc/Mat) never touch
+    // L2, so the L2 threshold is meaningless for them — skip to avoid
+    // false-positive noise on fully-tuned cube kernels.
+    if (info.memory.has_value() && IsCubeMemorySpace(*info.memory)) return;
+
+    if (info.innermost_bytes >= recommended_bytes_) return;
+
+    SiteKey key{span.filename_, span.begin_line_, span.begin_column_, op_name};
+    auto [it, inserted] = sites_.try_emplace(key, info, span, op_name);
+    (void)inserted;
+    ++it->second.count;
+  }
+
+  std::string BuildMessage(const Site& site) const {
+    const TileTransferInfo& info = site.info;
+    const std::string mem_str =
+        info.memory.has_value() ? MemorySpaceToString(*info.memory) : std::string("unknown");
 
     std::ostringstream msg;
-    msg << op_name << " has innermost dim = " << bytes << "B; recommended >= " << recommended_bytes_
-        << "B for backend " << arch_ << " (L2 cache line = " << l2_cache_line_bytes_
+    msg << site.op_name << " has innermost dim = " << info.innermost_bytes << "B"
+        << " (tile " << info.dtype_name << "[" << info.innermost_elems << "], target_memory=" << mem_str
+        << ")"
+        << "; recommended >= " << recommended_bytes_ << "B for backend " << arch_
+        << " (L2 cache line = " << l2_cache_line_bytes_
         << "B). Consider increasing tile shape on the innermost axis.";
-
-    // The registry stamps severity / hint_code; we still set them for
-    // self-documenting verifier behaviour and for direct-invocation tests.
-    diagnostics_.emplace_back(DiagnosticSeverity::PerfHint, "TileInnermostDimGranularity",
-                              kTileInnermostDimGranularityCode, /*hint_code=*/"PH001", msg.str(), span);
+    if (site.count > 1) {
+      msg << " (" << site.count << " occurrences at this source location)";
+    }
+    // Ask (2)/(3): the span below is the post-pipeline IR-text location
+    // ("<string>:line:col"), not the originating DSL pl.at / slicing
+    // expression, and the inner-dim chunk constant is not recoverable here.
+    // Mapping back to the user's source requires DSL source spans to be
+    // threaded through the parser/IR onto the tile op (none of TileType, the
+    // Call op, or Span currently carry the originating DSL file:line for the
+    // slicing expression), so we cannot name the controlling constant from
+    // inside this verifier today. The (dtype, innermost, target_memory) tuple
+    // above lets users reconcile the hint against the IR they are inspecting.
+    return msg.str();
   }
 
   std::vector<Diagnostic>& diagnostics_;
   uint32_t recommended_bytes_;
   uint32_t l2_cache_line_bytes_;
   std::string arch_;
+  std::map<SiteKey, Site> sites_;
 };
 
 class TileInnermostDimVerifier : public PropertyVerifier {
@@ -135,6 +213,9 @@ class TileInnermostDimVerifier : public PropertyVerifier {
       if (!func || !func->body_) continue;
       visitor.VisitStmt(func->body_);
     }
+    // Deduplicated sites are accumulated during the walk; emit one diagnostic
+    // per (file, line, col, op) site now (issue #1305 ask 4).
+    visitor.Flush();
   }
 
   [[nodiscard]] std::string GetName() const override { return "TileInnermostDimGranularity"; }
