@@ -360,20 +360,21 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
   // not yet derived"; any other msgpack type indicates a malformed payload.
   auto arg_dirs_opt = GetOptionalFieldObj(fields_obj, "arg_directions", ctx);
   if (arg_dirs_opt.has_value() && arg_dirs_opt->type != msgpack::type::NIL) {
-    CHECK(arg_dirs_opt->type == msgpack::type::ARRAY)
+    CHECK_SPAN(arg_dirs_opt->type == msgpack::type::ARRAY, span)
         << "Invalid arg_directions field for Call: expected ARRAY, got msgpack type "
         << static_cast<int>(arg_dirs_opt->type);
     std::vector<ArgDirection> arg_directions;
     arg_directions.reserve(arg_dirs_opt->via.array.size);
     for (uint32_t i = 0; i < arg_dirs_opt->via.array.size; ++i) {
       uint8_t code = arg_dirs_opt->via.array.ptr[i].as<uint8_t>();
-      CHECK(code <= static_cast<uint8_t>(ArgDirection::Scalar))
+      CHECK_SPAN(code <= static_cast<uint8_t>(ArgDirection::Scalar), span)
           << "Invalid ArgDirection value: " << static_cast<int>(code);
       arg_directions.push_back(static_cast<ArgDirection>(code));
     }
     if (!arg_directions.empty()) {
-      CHECK(arg_directions.size() == args.size()) << "Call arg_directions size (" << arg_directions.size()
-                                                  << ") must match args size (" << args.size() << ")";
+      CHECK_SPAN(arg_directions.size() == args.size(), span)
+          << "Call arg_directions size (" << arg_directions.size() << ") must match args size ("
+          << args.size() << ")";
       attrs = WithArgDirectionsAttr(std::move(attrs), std::move(arg_directions));
     }
   }
@@ -683,7 +684,7 @@ static IRNodePtr DeserializeHierarchyScopeStmt(const msgpack::object& fields_obj
 
   // level is required
   auto level_obj = GET_FIELD_OBJ("level");
-  CHECK(level_obj.type != msgpack::type::NIL) << "HierarchyScopeStmt requires a level";
+  CHECK_SPAN(level_obj.type != msgpack::type::NIL, span) << "HierarchyScopeStmt requires a level";
   Level level = static_cast<Level>(level_obj.via.u64);
 
   // role is optional
@@ -711,7 +712,7 @@ static IRNodePtr DeserializeSpmdScopeStmt(const msgpack::object& fields_obj, msg
   bool sync_start = false;
   auto sync_start_obj = GetOptionalFieldObj(fields_obj, "sync_start", ctx);
   if (sync_start_obj.has_value() && sync_start_obj->type != msgpack::type::NIL) {
-    CHECK(sync_start_obj->type == msgpack::type::BOOLEAN)
+    CHECK_SPAN(sync_start_obj->type == msgpack::type::BOOLEAN, span)
         << "SpmdScopeStmt sync_start must be a bool, got msgpack type "
         << static_cast<int>(sync_start_obj->type);
     sync_start = sync_start_obj->as<bool>();
@@ -801,14 +802,14 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
   std::vector<ParamDirection> param_directions(params.size(), ParamDirection::In);
   auto dirs_opt = GetOptionalFieldObj(fields_obj, "param_directions", ctx);
   if (dirs_opt.has_value()) {
-    CHECK(dirs_opt->type == msgpack::type::ARRAY)
+    CHECK_SPAN(dirs_opt->type == msgpack::type::ARRAY, span)
         << "Invalid param_directions type for Function: expected ARRAY";
-    CHECK(dirs_opt->via.array.size == params.size())
+    CHECK_SPAN(dirs_opt->via.array.size == params.size(), span)
         << "Invalid param_directions size for Function: expected " << params.size() << ", got "
         << dirs_opt->via.array.size;
     for (uint32_t i = 0; i < dirs_opt->via.array.size; ++i) {
       uint8_t code = dirs_opt->via.array.ptr[i].as<uint8_t>();
-      CHECK(code <= static_cast<uint8_t>(ParamDirection::InOut))
+      CHECK_SPAN(code <= static_cast<uint8_t>(ParamDirection::InOut), span)
           << "Invalid ParamDirection value: " << static_cast<int>(code);
       param_directions[i] = static_cast<ParamDirection>(code);
     }

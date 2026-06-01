@@ -209,7 +209,7 @@ PassPipeline::PassPipeline() = default;
 void PassPipeline::AddPass(Pass pass) { passes_.push_back(std::move(pass)); }
 
 ProgramPtr PassPipeline::Run(const ProgramPtr& program) const {
-  CHECK(program) << "PassPipeline cannot run on null program";
+  INTERNAL_CHECK(program) << "PassPipeline cannot run on null program";
 
   ProgramPtr current = program;
 

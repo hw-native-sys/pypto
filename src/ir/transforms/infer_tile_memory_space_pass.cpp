@@ -166,8 +166,9 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
   TileMemorySpaceAnalyzer(const std::vector<VarPtr>& params, const std::map<VarPtr, MemorySpace>& demands)
       : demands_(demands) {
     for (const auto& var : params) {
-      CHECK(!As<TileType>(var->GetType())) << "InCore function parameter '" << var->name_hint_
-                                           << "' has TileType, but InCore parameters must be TensorType";
+      INTERNAL_CHECK(!As<TileType>(var->GetType()))
+          << "InCore function parameter '" << var->name_hint_
+          << "' has TileType, but InCore parameters must be TensorType";
     }
   }
 

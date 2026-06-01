@@ -281,9 +281,10 @@ SplicedInlineBody CloneInlineBody(const FunctionPtr& callee, const std::vector<E
   //     where there's no LHS-driven `has_return` guard downstream.
   NestedReturnCounter post_extract;
   for (const auto& s : spliced) post_extract.VisitStmt(s);
-  CHECK(post_extract.count == 0) << "Inline function '" << callee->name_
-                                 << "' contains a non-trailing ReturnStmt; only a single trailing return is "
-                                    "supported (early-return inside an If/For/While branch is rejected)";
+  INTERNAL_CHECK_SPAN(post_extract.count == 0, callee->span_)
+      << "Inline function '" << callee->name_
+      << "' contains a non-trailing ReturnStmt; only a single trailing return is "
+         "supported (early-return inside an If/For/While branch is rejected)";
 
   return SplicedInlineBody{std::move(spliced), std::move(return_values), has_return};
 }
@@ -543,7 +544,7 @@ Pass InlineFunctions() {
     std::unordered_map<std::string, FunctionPtr> inline_fns;
     for (const auto& [gvar, fn] : program->functions_) {
       if (fn->func_type_ == FunctionType::Inline) {
-        CHECK(inline_fns.count(fn->name_) == 0)
+        INTERNAL_CHECK_SPAN(inline_fns.count(fn->name_) == 0, fn->span_)
             << "Duplicate FunctionType::Inline function name '" << fn->name_ << "' in program";
         inline_fns[fn->name_] = fn;
       }

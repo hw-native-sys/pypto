@@ -84,19 +84,21 @@ CallPtr CreateReshapeCall(const ExprPtr& input, const std::vector<ExprPtr>& shap
   auto expr =
       OpRegistry::GetInstance().Create("tile.reshape", {input, MakeShapeTuple(shape, span)}, {}, span);
   auto call = As<Call>(expr);
-  CHECK(call) << "ResolveBackendOpLayouts: tile.reshape must produce a Call";
+  INTERNAL_CHECK(call) << "ResolveBackendOpLayouts: tile.reshape must produce a Call";
   return call;
 }
 
 std::vector<ExprPtr> MakeRowVectorShape(const TileTypePtr& tile_type) {
-  CHECK(IsColumnVector(tile_type)) << "ResolveBackendOpLayouts expects a [N,1] tile for vector repair";
+  INTERNAL_CHECK(IsColumnVector(tile_type))
+      << "ResolveBackendOpLayouts expects a [N,1] tile for vector repair";
   return {std::make_shared<ConstInt>(1, DataType::INDEX, Span::unknown()), tile_type->shape_[0]};
 }
 
 MemorySpace GetRepairTargetMemory(const TileTypePtr& tile_type) {
-  CHECK(tile_type) << "ResolveBackendOpLayouts expects synthesized tile.move repairs to use tile inputs";
+  INTERNAL_CHECK(tile_type)
+      << "ResolveBackendOpLayouts expects synthesized tile.move repairs to use tile inputs";
   const auto& memory_space = tile_type->memory_space_;
-  CHECK(memory_space.has_value())
+  INTERNAL_CHECK(memory_space.has_value())
       << "ResolveBackendOpLayouts expects synthesized tile.move repairs to preserve memory space";
   return *memory_space;
 }
@@ -115,7 +117,7 @@ CallPtr CreateLayoutMoveCall(const ExprPtr& input, MemorySpace target_memory, Ti
   auto expr = OpRegistry::GetInstance().Create("tile.move", {input},
                                                MakeLayoutMoveKwargs(target_memory, blayout, slayout), span);
   auto call = As<Call>(expr);
-  CHECK(call) << "ResolveBackendOpLayouts: tile.move must produce a Call";
+  INTERNAL_CHECK(call) << "ResolveBackendOpLayouts: tile.move must produce a Call";
   return call;
 }
 
@@ -164,7 +166,7 @@ class BackendLayoutRepairMutator : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
 
-    CHECK(result_tile_type)
+    INTERNAL_CHECK_SPAN(result_tile_type, op->span_)
         << "ResolveBackendOpLayouts expects constrained op assignment targets to be TileType";
 
     std::vector<StmtPtr> rewritten;
@@ -201,7 +203,8 @@ class BackendLayoutRepairMutator : public IRMutator {
     auto repaired_expr =
         OpRegistry::GetInstance().Create(call->op_->name_, new_args, call->kwargs_, call->span_);
     auto repaired_call = As<Call>(repaired_expr);
-    CHECK(repaired_call) << "ResolveBackendOpLayouts: repaired consumer must remain a Call";
+    INTERNAL_CHECK_SPAN(repaired_call, call->span_)
+        << "ResolveBackendOpLayouts: repaired consumer must remain a Call";
 
     if (NeedsOutputRepair(result_tile_type, *layout_spec)) {
       auto row_major_var = std::make_shared<Var>(NextTempName(op->var_->name_hint_, {"row_major"}),

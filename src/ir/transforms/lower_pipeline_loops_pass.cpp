@@ -167,7 +167,8 @@ class LowerPipelineMutator : public IRMutator {
       return IRMutator::VisitStmt_(op);
     }
     int64_t factor = static_cast<int64_t>(op->GetAttr<int>(kPipelineStagesAttr, 0));
-    CHECK(factor >= 1) << "LowerPipelineLoops: pipeline_stages must be >= 1, got " << factor;
+    INTERNAL_CHECK_SPAN(factor >= 1, op->span_)
+        << "LowerPipelineLoops: pipeline_stages must be >= 1, got " << factor;
 
     // factor == 1 is either a user-written `pl.pipeline(stage=1)` or the
     // post-lowering marker emitted by a previous run. Either way nothing needs
@@ -184,7 +185,7 @@ class LowerPipelineMutator : public IRMutator {
     // Step must always be static — the main loop's stride and per-clone offsets
     // both depend on `factor * step` being a compile-time integer.
     int64_t step = GetConstIntValue(op->step_, "step");
-    CHECK(step != 0) << "LowerPipelineLoops: step cannot be zero";
+    INTERNAL_CHECK_SPAN(step != 0, op->span_) << "LowerPipelineLoops: step cannot be zero";
 
     auto start_const = TryGetConstInt(op->start_);
     auto stop_const = TryGetConstInt(op->stop_);
@@ -421,8 +422,8 @@ class LowerPipelineMutator : public IRMutator {
    */
   StmtPtr LowerDynamic(const ForStmtPtr& op, const StmtPtr& body, int64_t factor, int64_t step) {
     Span sp = op->span_;
-    CHECK(step > 0) << "LowerPipelineLoops: dynamic bounds require a positive step, got " << step
-                    << ". Use static bounds for negative-step loops.";
+    INTERNAL_CHECK_SPAN(step > 0, sp) << "LowerPipelineLoops: dynamic bounds require a positive step, got "
+                                      << step << ". Use static bounds for negative-step loops.";
 
     // trip_iters = ceil_div(stop - start, step). For step == 1 the ceil_div
     // collapses to (stop - start), so skip the `+ (step-1)` / `// step` wrapping

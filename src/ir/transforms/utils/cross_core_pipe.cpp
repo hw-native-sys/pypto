@@ -57,15 +57,15 @@ std::optional<int64_t> TryGetTileSlotSizeBytes(const TypePtr& type) {
   for (const auto& dim : tile_type->shape_) {
     auto dim_value = TryGetConstIntValue(dim);
     if (!dim_value.has_value()) return std::nullopt;
-    CHECK(*dim_value == 0 || element_count <= std::numeric_limits<int64_t>::max() / *dim_value)
+    INTERNAL_CHECK(*dim_value == 0 || element_count <= std::numeric_limits<int64_t>::max() / *dim_value)
         << "Tile element count overflow while inferring cross-core slot size";
     element_count *= *dim_value;
   }
 
   const int64_t bit_width = static_cast<int64_t>(tile_type->dtype_.GetBit());
-  CHECK(bit_width > 0) << "Unsupported dtype for cross-core slot size inference: "
-                       << tile_type->dtype_.ToString();
-  CHECK(element_count <= (std::numeric_limits<int64_t>::max() - 7) / bit_width)
+  INTERNAL_CHECK(bit_width > 0) << "Unsupported dtype for cross-core slot size inference: "
+                                << tile_type->dtype_.ToString();
+  INTERNAL_CHECK(element_count <= (std::numeric_limits<int64_t>::max() - 7) / bit_width)
       << "Tile byte size overflow while inferring cross-core slot size";
   return (element_count * bit_width + 7) / 8;
 }
@@ -159,7 +159,7 @@ CallPtr CreateSystemOpCall(const std::string& op_name, const std::vector<ExprPtr
 }
 
 CallPtr CreateReserveBuffer(const std::string& buffer_name, int64_t size_bytes, const Span& span) {
-  CHECK(size_bytes >= 0 && size_bytes <= std::numeric_limits<int>::max())
+  INTERNAL_CHECK(size_bytes >= 0 && size_bytes <= std::numeric_limits<int>::max())
       << "Cross-core reserve_buffer size out of range: " << size_bytes;
   return CreateSystemOpCall("system.reserve_buffer",
                             {{"name", std::any(buffer_name)},
@@ -177,7 +177,7 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
                              const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
                              const Span& span) {
-  CHECK(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max())
+  INTERNAL_CHECK(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max())
       << "Cross-core slot_size out of range: " << slot_size_bytes;
   const std::string op_name = core_side_ops::InitializePipeOp(side);
   return CreateSystemOpCall(op_name, {c2v_consumer_buf, v2c_consumer_buf},
@@ -284,7 +284,7 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   }
 
   const int64_t buffer_size = common_slot_size.value() * GetSlotNumForDirMask(dir_mask);
-  CHECK(common_slot_size.value() <= std::numeric_limits<int>::max())
+  INTERNAL_CHECK(common_slot_size.value() <= std::numeric_limits<int>::max())
       << "Cross-core slot_size out of range: " << common_slot_size.value();
   const int slot_size_bytes = static_cast<int>(common_slot_size.value());
   AutomaticPipeSetup setup;

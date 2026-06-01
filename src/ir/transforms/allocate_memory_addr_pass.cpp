@@ -58,7 +58,7 @@ using ReserveBufferBaseMap = std::unordered_map<const Call*, int64_t>;
 using ReservedEndBySpace = std::unordered_map<MemorySpace, uint64_t>;
 
 MemorySpace GetReserveBufferMemorySpace(const FunctionPtr& func) {
-  CHECK(func) << "AllocateMemoryAddr requires a valid function when resolving reserve_buffer space";
+  INTERNAL_CHECK(func) << "AllocateMemoryAddr requires a valid function when resolving reserve_buffer space";
   switch (func->func_type_) {
     case FunctionType::AIC:
       return MemorySpace::Mat;
@@ -66,8 +66,8 @@ MemorySpace GetReserveBufferMemorySpace(const FunctionPtr& func) {
     case FunctionType::InCore:
       return MemorySpace::Vec;
     default:
-      CHECK(false) << "AllocateMemoryAddr cannot resolve reserve_buffer memory space for function '"
-                   << func->name_ << "' with type " << FunctionTypeToString(func->func_type_);
+      INTERNAL_CHECK(false) << "AllocateMemoryAddr cannot resolve reserve_buffer memory space for function '"
+                            << func->name_ << "' with type " << FunctionTypeToString(func->func_type_);
   }
   return MemorySpace::DDR;
 }
@@ -87,7 +87,8 @@ class ReserveBufferCollector : public IRVisitor {
     if (ir_op && ir_op->name_ == "system.reserve_buffer") {
       const int size = op->GetKwarg<int>("size", -1);
       const int base = op->GetKwarg<int>("base", -1);
-      CHECK(size > 0) << "AllocateMemoryAddr requires reserve_buffer size > 0, got " << size;
+      INTERNAL_CHECK_SPAN(size > 0, op->span_)
+          << "AllocateMemoryAddr requires reserve_buffer size > 0, got " << size;
       reserve_buffers_.push_back(
           ReserveBufferInfo{op.get(), static_cast<int64_t>(size), static_cast<int64_t>(base)});
     }
@@ -125,7 +126,7 @@ ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func,
       resolved_base = next_base;
     }
 
-    CHECK(resolved_base <= static_cast<uint64_t>(std::numeric_limits<int>::max()))
+    INTERNAL_CHECK(resolved_base <= static_cast<uint64_t>(std::numeric_limits<int>::max()))
         << "AllocateMemoryAddr resolved reserve_buffer base out of int range in function '" << func->name_
         << "': " << resolved_base;
     resolution.resolved_bases[reserve.call] = static_cast<int64_t>(resolved_base);
@@ -137,15 +138,16 @@ ReserveBufferResolution ResolveReserveBufferBases(const FunctionPtr& func,
     auto overlaps = [&](const std::pair<const uint64_t, uint64_t>& range) {
       return resolved_base < range.second && range.first < buffer_end;
     };
-    CHECK(next_it == reserved_ranges.end() || !overlaps(*next_it))
+    INTERNAL_CHECK(next_it == reserved_ranges.end() || !overlaps(*next_it))
         << "AllocateMemoryAddr found overlapping reserve_buffer ranges in function '" << func->name_ << "': ["
         << resolved_base << ", " << buffer_end << ") overlaps with [" << next_it->first << ", "
         << next_it->second << ")";
     if (next_it != reserved_ranges.begin()) {
       auto prev_it = std::prev(next_it);
-      CHECK(!overlaps(*prev_it)) << "AllocateMemoryAddr found overlapping reserve_buffer ranges in function '"
-                                 << func->name_ << "': [" << resolved_base << ", " << buffer_end
-                                 << ") overlaps with [" << prev_it->first << ", " << prev_it->second << ")";
+      INTERNAL_CHECK(!overlaps(*prev_it))
+          << "AllocateMemoryAddr found overlapping reserve_buffer ranges in function '" << func->name_
+          << "': [" << resolved_base << ", " << buffer_end << ") overlaps with [" << prev_it->first << ", "
+          << prev_it->second << ")";
     }
     reserved_ranges.emplace(resolved_base, buffer_end);
 
@@ -318,7 +320,7 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       // sized to the full alloc; views are sub-regions and never exceed it.
       uint64_t slot_size = 0;
       for (const auto& ref : group) {
-        CHECK(ref->size_ > 0)
+        INTERNAL_CHECK(ref->size_ > 0)
             << "AllocateMemoryAddr encountered zero-sized MemRef '" << ref->name_hint_
             << "'. InitMemRef should reject dynamic or invalid allocation shapes before address assignment.";
         slot_size = std::max(slot_size, static_cast<uint64_t>(ref->size_));
@@ -400,7 +402,7 @@ FunctionPtr TransformAllocateMemoryAddr(const FunctionPtr& func) {
   // Obtain the allocation policy from the backend (or fall back to the default).
   auto policy = backend::BackendConfig::IsConfigured() ? backend::GetBackend()->CreateMemoryAllocatorPolicy()
                                                        : std::make_unique<DefaultMemoryAllocatorPolicy>();
-  CHECK(policy) << "Backend::CreateMemoryAllocatorPolicy() returned null";
+  INTERNAL_CHECK(policy) << "Backend::CreateMemoryAllocatorPolicy() returned null";
 
   // Step 1: Resolve reserve_buffer bases before assigning tile addresses.
   auto reserve_resolution = ResolveReserveBufferBases(func, *policy);
@@ -465,7 +467,7 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
     auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
       auto memory_space = tile_type->GetMemorySpace();
-      CHECK(memory_space.has_value())
+      INTERNAL_CHECK_SPAN(memory_space.has_value(), op->span_)
           << "TileType with MemRef must have memory_space for address verification";
       CheckMemRefAddr(tile_type->memref_.value(), *memory_space, op->name_hint_, op->span_);
     }

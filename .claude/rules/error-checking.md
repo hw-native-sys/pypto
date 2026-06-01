@@ -2,9 +2,11 @@
 
 ## Overview
 
-PyPTO uses two distinct macros: `CHECK` for user errors, `INTERNAL_CHECK` for internal bugs. When operating on IR and a `Span` is in scope, prefer the `_SPAN` variants — they auto-emit IR source location on failure and dramatically improve debuggability.
+PyPTO uses two distinct macros: `CHECK` for user errors, `INTERNAL_CHECK` for internal bugs. When operating on IR and a `Span` is in scope, prefer the `_SPAN` variants (`CHECK_SPAN`, `INTERNAL_CHECK_SPAN`, `UNREACHABLE_SPAN`, `INTERNAL_UNREACHABLE_SPAN`) — they auto-emit IR source location on failure and dramatically improve debuggability for both users and developers.
 
-## CHECK - User Input Validation
+**Inside passes**: passes operate on IR that earlier passes have already verified. A failed invariant inside a pass therefore almost always indicates a **compiler bug** — use `INTERNAL_CHECK_SPAN`, not `CHECK`. Reserve `CHECK` / `CHECK_SPAN` for documented user-facing limitations (e.g. "feature X not yet supported — use Y").
+
+## CHECK / CHECK_SPAN - User Input Validation
 
 **Use for validating user-provided input or external conditions.**
 
@@ -12,11 +14,11 @@ PyPTO uses two distinct macros: `CHECK` for user errors, `INTERNAL_CHECK` for in
 
 - Function arguments passed by users
 - User-provided data (tensor dimensions, indices)
-- External configuration or file input
+- External configuration or file input (`.pto` deserialization)
 - API contract enforcement
-- Conditions that may fail due to user mistakes
+- Documented user-facing limitations inside passes (e.g. "feature X not yet lowered — use Y")
 
-**Behavior:** Raises `pypto::ValueError` with helpful error message
+**Behavior:** Raises `pypto::ValueError` with helpful error message. `CHECK_SPAN` additionally embeds the IR source location.
 
 **Example:**
 
@@ -28,7 +30,14 @@ void SetTensorShape(const std::vector<int>& shape) {
                         << " must be positive, got " << shape[i];
   }
 }
+
+// Inside an op-conversion lambda where `span` is a parameter:
+CHECK_SPAN(input_tile->shape_.size() == 2, span)
+    << "scatter_update: only 2D input is currently supported, got rank "
+    << input_tile->shape_.size();
 ```
+
+`CHECK_SPAN` follows the same span-safety rule as `INTERNAL_CHECK_SPAN` (see below): the span expression must be safe to evaluate when the check fails.
 
 **Error messages should:**
 
@@ -133,10 +142,12 @@ if (complex_validation_fails) {
 
 ```text
 Could this fail due to user error?
-├─ YES → Use CHECK (raises pypto::ValueError)
+├─ YES → Use CHECK / CHECK_SPAN (raises pypto::ValueError)
+│        ↳ Inside a pass? Almost always NO — earlier passes verified the IR.
+│          Only YES when surfacing a documented limitation as a user error.
 │
 └─ NO → Could this fail due to PyPTO bug?
-    └─ YES → Use INTERNAL_CHECK
+    └─ YES → Use INTERNAL_CHECK / INTERNAL_CHECK_SPAN
 ```
 
 ## Common Patterns
@@ -187,10 +198,11 @@ INTERNAL_CHECK(ref_count_ > 0) << "Internal error: ref count is " << ref_count_;
 
 ## Summary
 
-| - | CHECK | INTERNAL_CHECK |
-| - | ----- | -------------- |
-| **For** | User errors | Internal bugs |
-| **Raises** | `pypto::ValueError` | Internal error |
-| **Message** | User-friendly | Technical |
+| - | CHECK / CHECK_SPAN | INTERNAL_CHECK / INTERNAL_CHECK_SPAN |
+| - | ------------------ | ------------------------------------ |
+| **For** | User errors / documented user-facing limitations | Internal bugs (pass invariants, postconditions) |
+| **Raises** | `pypto::ValueError` | `pypto::InternalError` |
+| **Message** | User-friendly | Technical, mark as "Internal error" |
+| **Inside passes** | Rare — only for surfaced limitations | Default |
 
-**Remember:** `CHECK` = user error, `INTERNAL_CHECK` = PyPTO bug. Always use PyPTO exceptions!
+**Remember:** `CHECK` = user error, `INTERNAL_CHECK` = PyPTO bug. Prefer the `_SPAN` variants whenever an IR `Span` is reachable. Always use PyPTO exceptions!
