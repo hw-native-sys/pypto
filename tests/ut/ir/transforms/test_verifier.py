@@ -576,5 +576,43 @@ def test_out_param_inout_reassigned_by_compute_op_detected():
     assert any("InOut" in d.message for d in diagnostics)
 
 
+def test_out_param_inplace_read_op_detected():
+    """OutParamNotShadowed flags `out = op(out, ...)` when `op` only READS the
+    param (a non-output-side builtin like tensor.add) — the result is still a
+    fresh, detached value even though the param appears in the args.
+
+    Only output-side ops that thread the param to their result
+    (tensor.assemble / tile.store / tensor.set_validshape, target arg) keep the
+    external buffer connected.
+    """
+    span = ir.Span.unknown()
+    tensor_type = ir.TensorType([ir.ConstInt(64, DataType.INT64, span)], DataType.FP32)
+
+    b = ir.Var("b", tensor_type, span)
+    out = ir.Var("out", tensor_type, span)
+
+    # out = tensor.add(out, b) — out is read but the result is a fresh tensor.
+    add_call = ir.create_op_call("tensor.add", [out, b], span)
+    assign_out = ir.AssignStmt(out, add_call, span)
+    return_stmt = ir.ReturnStmt([out], span)
+    body = ir.SeqStmts([assign_out, return_stmt], span)
+
+    func = ir.Function(
+        "test_inplace_read_shadow",
+        [b, (out, ir.ParamDirection.Out)],
+        [tensor_type],
+        body,
+        span,
+    )
+    program = ir.Program([func], "test_program", span)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.OutParamNotShadowed)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+
+    assert len(diagnostics) > 0
+    assert any(d.rule_name == "OutParamNotShadowed" for d in diagnostics)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

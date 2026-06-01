@@ -72,7 +72,7 @@
 | **IncoreTileOps** | IncoreTileOps | InCore 函数使用 tile 操作（无张量级操作残留） |
 | **HasMemRefs** | HasMemRefs | 所有 TileType 变量已初始化 MemRef |
 | **AllocatedMemoryAddr** | AllocatedMemoryAddr | 所有 MemRef 在缓冲区限制内具有有效地址 |
-| **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut 参数未被重新赋值为脱钩值——若调用未将该参数穿透其参数列表（例如 `out = pl.matmul(...)`、`out = tensor.create(...)`），外部缓冲区将静默地不被写入（issue #1525）。穿透型重新赋值如 `out = pl.assemble(out, ...)` 是允许的 |
+| **OutParamNotShadowed** | OutParamNotShadowed | Out/InOut 参数未被重新赋值为脱钩值——若调用的结果是一个新张量（`out = pl.matmul(...)`、`out = tensor.create(...)`，甚至 `out = pl.add(out, x)` 这种仅读取参数的形式），外部缓冲区将静默地不被写入（issue #1525）。允许：输出侧算子经目标参数穿透（`out = pl.assemble(out, ...)`、`out = pl.store(v, idx, out)`）以及用户函数经 Out/InOut 实参写入（`out = self.kernel(a, out)`） |
 | **NoNestedInCore** | NoNestedInCore | 无嵌套 InCore 作用域（`InCoreScopeStmt` 内含 `InCoreScopeStmt`） |
 | **InOutUseValid** | InOutUseValid | 作为 InOut/Out 传入用户函数调用的变量，在调用之后不得再被读取（RFC #1026）。Group 类型函数体目前跳过，待后续完善。 |
 | **PipelineLoopValid** | PipelineLoopValid | 每个 `ForStmt` 上的双向不变量：`kind_ == ForKind::Pipeline` ⇔ 含有 `pipeline_stages` 属性。任一方向失败即表示 pipeline 循环格式错误。 |

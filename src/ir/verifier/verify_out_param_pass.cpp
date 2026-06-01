@@ -46,11 +46,45 @@ std::string ErrorTypeToString(ErrorType type) {
 
 namespace {
 
-/// True when `call` references `param` anywhere in its argument subtree — i.e.
-/// the reassignment threads the Out/InOut parameter through the call, keeping
-/// the external buffer connected (e.g. `out = tensor.assemble(out, tile, off)`,
-/// `out = tile.store(value, idx, out)`).
+/// Local builtin-op classifier (string-prefix). Verifiers live in the IR layer
+/// and must not depend on `pypto::codegen::IsBuiltinOp`; this mirrors the copy in
+/// verify_orchestration_references.cpp. If a fourth reader appears, promote it to
+/// a shared IR utility.
+bool IsBuiltinOpName(const std::string& name) {
+  return name.rfind("tile.", 0) == 0 || name.rfind("tensor.", 0) == 0 || name.rfind("system.", 0) == 0 ||
+         name.rfind("array.", 0) == 0;
+}
+
+/// True when `param` appears anywhere in the subtree of argument `idx`.
+bool ArgSubtreeReferences(const CallPtr& call, size_t idx, const Var* param) {
+  if (idx >= call->args_.size() || !call->args_[idx]) return false;
+  var_collectors::VarDefUseCollector uses;
+  uses.VisitExpr(call->args_[idx]);
+  return uses.var_uses.count(param) > 0;
+}
+
+/// True when the reassignment `param = call(...)` keeps `param` aliased to its
+/// external buffer — i.e. the call's *result* is `param`, not a fresh value.
+///
+/// This mirrors `TraceReturnedToParam` in the orchestration codegen so the
+/// verifier flags exactly the reassignments codegen would fail to bind back to
+/// the Out buffer (and allows exactly those it binds):
+///   - Builtin output-side ops alias their **target** argument only:
+///       tensor.assemble(target, tile, off)      -> args[0]
+///       tile.store(value, indices, target)      -> args[2]
+///       tensor.set_validshape(target, rows, col)-> args[0]
+///   - Any other builtin op (tensor.add, tensor.matmul, ...) produces a fresh
+///     value: the param is never written even when it appears as an input
+///     operand (e.g. `out = pl.add(out, x)` — issue #1525, second form).
+///   - A user-function call may write the param through an Out/InOut argument,
+///     so the param appearing anywhere in the args counts as threading
+///     (keeps `out = self.kernel(a, out)` valid).
 bool CallThreadsParam(const CallPtr& call, const Var* param) {
+  const std::string& op = call->op_->name_;
+  if (op == "tensor.assemble" || op == "tensor.set_validshape") return ArgSubtreeReferences(call, 0, param);
+  if (op == "tile.store") return ArgSubtreeReferences(call, 2, param);
+  if (IsBuiltinOpName(op)) return false;
+
   var_collectors::VarDefUseCollector uses;
   uses.VisitExpr(call);
   return uses.var_uses.count(param) > 0;
@@ -61,15 +95,17 @@ bool CallThreadsParam(const CallPtr& call, const Var* param) {
  *
  * For each function, collects Out/InOut parameter Var pointers. Then during
  * traversal, flags any AssignStmt that reassigns one of those Var pointers with
- * a call whose arguments do NOT reference the parameter. Such a reassignment
- * rebinds the name to a fresh value disconnected from the external output
- * buffer (`out = pl.matmul(...)`, `out = tensor.create(...)`), so the buffer is
- * never written and the kernel silently produces its init value (all-zero). See
- * issue #1525.
+ * a call whose *result* is a fresh value rather than the parameter itself (see
+ * CallThreadsParam). Such a reassignment rebinds the name to a value
+ * disconnected from the external output buffer — `out = pl.matmul(...)`,
+ * `out = tensor.create(...)`, or even `out = pl.add(out, x)` (which reads the
+ * param but returns a new tensor) — so the buffer is never written and the
+ * kernel silently produces its init value (all-zero). See issue #1525.
  *
- * Legitimate reassignments like `out = tensor.assemble(out, tile, offsets)` or
- * `out = tile.store(value, idx, out)` are allowed because they thread the Out
- * parameter through the call and keep the external buffer connected.
+ * Legitimate reassignments are allowed: builtin output-side ops threading the
+ * param through their target arg (`out = tensor.assemble(out, tile, offsets)`,
+ * `out = tile.store(value, idx, out)`) and user-function calls that may write the
+ * param through an Out/InOut argument (`out = self.kernel(a, out)`).
  */
 class OutParamShadowVerifier : public IRVisitor {
  public:

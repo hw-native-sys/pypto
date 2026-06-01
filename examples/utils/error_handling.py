@@ -40,9 +40,12 @@ if __name__ == "__main__":
         test_ssa_violation(x, result, config=RunConfig())
         print("ERROR: expected the invalid kernel to be rejected")
         sys.exit(1)
-    except Exception as e:  # noqa: BLE001 -- demo: any compile-time rejection is the success path
+    except Exception as e:  # noqa: BLE001 -- inspect the message to confirm it is the expected diagnostic
         msg = str(e)
         if "OutParamNotShadowed" in msg or "issue #1525" in msg:
             print("OK -- rejected at compile time by the OutParamNotShadowed verifier")
         else:
-            print(f"OK -- rejected at compile time: {type(e).__name__}")
+            # An unrelated failure (import error, env issue, ...) must not be
+            # mistaken for the expected rejection.
+            print(f"ERROR: rejected for an unexpected reason: {type(e).__name__}: {msg}")
+            raise
