@@ -16,6 +16,7 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "pypto/codegen/codegen_base.h"
 #include "pypto/codegen/orchestration_op_registry.h"
@@ -205,10 +206,11 @@ REGISTER_ORCHESTRATION_OP(tensor_write, ("tensor.write")) {
 }
 
 REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
-  // tensor.slice(input, shape_tuple, offset_tuple[, valid_shape_tuple]) -> Generate array variables and call
-  // .view()
-  CHECK(op->args_.size() == 3 || op->args_.size() == 4)
-      << "tensor.slice requires 3 or 4 arguments (input, shape, offset[, valid_shape])";
+  // tensor.slice(input, shape_tuple, offset_tuple[, valid_shape_tuple[, drop_dims_tuple]])
+  // -> Generate array variables and call .view(), then drop rank-reduced axes
+  //    (numpy-style ``C[i]`` / ``C[i, j]``) via a follow-up .reshape().
+  CHECK(op->args_.size() >= 3 && op->args_.size() <= 5)
+      << "tensor.slice requires 3-5 arguments (input, shape, offset[, valid_shape[, drop_dims]])";
 
   std::string input_name = codegen.TryGetVarName(op->args_[0]);
   CHECK(!input_name.empty()) << "tensor.slice input must be a variable";
@@ -256,16 +258,80 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
   }
   oss << "};\n";
 
-  if (op->args_.size() == 4) {
+  if (op->args_.size() >= 4) {
+    // valid_shape (4th arg) may be an empty MakeTuple — the "no valid_shape"
+    // sentinel that lets callers pass drop_dims (5th arg) without a custom
+    // valid_shape (see DeduceTensorSliceType / tile.slice). Only enforce the
+    // rank match when it carries elements.
     auto valid_shape_tuple = As<MakeTuple>(op->args_[3]);
     CHECK(valid_shape_tuple) << "tensor.slice valid_shape must be MakeTuple";
-    CHECK(valid_shape_tuple->elements_.size() == ndim)
+    CHECK(valid_shape_tuple->elements_.empty() || valid_shape_tuple->elements_.size() == ndim)
         << "tensor.slice valid_shape must have same rank as shape";
   }
 
   // Runtime tensor views use shape+offset; valid_shape only affects IR metadata.
+  // The view is always full-rank: Tensor::view loops over the parent's ndims and
+  // requires shape/offset arrays at the parent rank.
   oss << "Tensor " << result_var << " = " << ext_input_name << ".view(" << result_var << "_shapes, "
       << result_var << "_offsets);";
+
+  // drop_dims (5th arg): numpy-style rank reduction (``C[i]`` drops axis 0,
+  // ``C[i, j]`` drops axes 0 and 1). Each dropped axis is a unit dim of the
+  // slice shape, so the addressed data is unchanged — only the result Tensor's
+  // rank shrinks. The full-rank ``.view`` above already folded every offset
+  // (including the dropped axes) into ``start_offset``; we then reinterpret the
+  // unit-extent view at the reduced rank declared by the result Tensor type.
+  // We emit the reduced shape from the result type (already rank-reduced and, for
+  // sub-2D tensor results, never clamped — tiles clamp, tensors do not) rather
+  // than recomputing ApplyDropDims here.
+  if (op->args_.size() == 5) {
+    auto drop_dims_tuple = As<MakeTuple>(op->args_[4]);
+    CHECK(drop_dims_tuple) << "tensor.slice drop_dims must be MakeTuple";
+    if (!drop_dims_tuple->elements_.empty()) {
+      auto result_type = As<TensorType>(op->GetType());
+      CHECK(result_type) << "tensor.slice with drop_dims must return TensorType";
+      const size_t reduced_ndim = result_type->shape_.size();
+      CHECK(reduced_ndim + drop_dims_tuple->elements_.size() == ndim)
+          << "tensor.slice result rank " << reduced_ndim << " plus drop_dims count "
+          << drop_dims_tuple->elements_.size() << " must equal slice rank " << ndim;
+      // The view().reshape() lowering only stays contiguous when the dropped axes
+      // are a leading prefix {0, 1, ..., k-1}: slicing leading unit axes of a
+      // row-major DDR tensor leaves a contiguous trailing block, so reshape's
+      // runtime is_contiguous assert holds. Dropping a non-leading axis (e.g.
+      // ``C[:, i, :]`` -> drop_dims=[1]) yields a strided view that reshape would
+      // reject at runtime, so reject it here with an actionable message instead of
+      // emitting wrong-rank/asserting code. The per-axis index lowering needed to
+      // support arbitrary dropped axes lives in the distributed tensor.slice
+      // handler (src/codegen/distributed/distributed_ops_codegen.cpp) and is a
+      // follow-up for orchestration.
+      std::vector<int64_t> dropped;
+      dropped.reserve(drop_dims_tuple->elements_.size());
+      for (const auto& e : drop_dims_tuple->elements_) {
+        auto e_const = As<ConstInt>(e);
+        CHECK(e_const) << "tensor.slice drop_dims elements must be ConstInt";
+        dropped.push_back(e_const->value_);
+      }
+      std::sort(dropped.begin(), dropped.end());
+      for (size_t i = 0; i < dropped.size(); ++i) {
+        CHECK(dropped[i] == static_cast<int64_t>(i))
+            << "Orchestration tensor.slice only supports dropping a leading prefix "
+               "of axes (drop_dims must be {0, 1, ..., k-1}); got a non-leading "
+               "dropped axis "
+            << dropped[i] << " at position " << i
+            << ". Dropping non-leading axes (e.g. C[:, i, :]) needs per-axis index "
+               "lowering not yet wired for orchestration (see #1349 / the "
+               "distributed tensor.slice handler).";
+      }
+      oss << "\nuint32_t " << result_var << "_reduced_shapes[" << reduced_ndim << "] = {";
+      for (size_t i = 0; i < reduced_ndim; ++i) {
+        if (i > 0) oss << ", ";
+        oss << EmitAsUint32(result_type->shape_[i], codegen);
+      }
+      oss << "};\n";
+      oss << result_var << " = " << result_var << ".reshape(" << result_var << "_reduced_shapes, "
+          << reduced_ndim << ");";
+    }
+  }
   return oss.str();
 }
 

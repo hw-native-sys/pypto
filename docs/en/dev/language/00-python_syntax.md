@@ -146,6 +146,8 @@ Restrictions (v1): no slice `step`, tile slice lower bounds must be static-folda
 
 Mechanism: a non-trivial subscript lowers to `tensor.slice` / `tile.slice` with full-rank `shape`/`offset` plus a `drop_dims` list of the scalar-indexed axes (see the IR operator docs). The same rules apply on the assignment LHS — `C[i, j] = rhs` reshapes `rhs` back to the full-rank window before `tensor.assemble` (chained writes `C[i][j] = rhs` are not yet supported).
 
+Codegen: an orchestration `tensor.slice` with `drop_dims` emits a full-rank `Tensor::view(shapes, offsets)` (the runtime view loops over the parent rank) followed by a rank-reduced `Tensor::reshape(reduced_shapes, reduced_ndim)` that reinterprets the unit-extent view at the result rank. This is correct only when the dropped axes form a **leading prefix** `{0, 1, ..., k-1}` (numpy subscript sugar like `C[i]` / `C[i, j, :, :]`), where slicing leading axes of a row-major DDR tensor leaves a contiguous trailing block that `reshape` requires; dropping a **non-leading** axis (e.g. `C[:, i, :]` → `drop_dims=[1]`) produces a strided view and is rejected with an actionable error (supporting it needs the per-axis index lowering the distributed `tensor.slice` handler uses — a follow-up for orchestration). A rank-reducing `tile.slice` on a **>2D** tile (e.g. subscripting a literal `>2D pl.Tile`) is not yet lowered — `FlattenTileNdTo2D` rejects it with an actionable error — because it would require merging the sliced source window to 2D before re-deriving `drop_dims`; slice into a 2D tile instead.
+
 ### Binary Operations
 
 | Python Operator | PyPTO IR | Category |

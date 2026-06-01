@@ -1143,6 +1143,90 @@ class TestOrchestration:
         assert "uint32_t r_shapes[2] = {16, 16};" in code
         assert "Tensor r = chunk.reshape(r_shapes, 2);" in code
 
+    def test_tensor_slice_drop_dims_leading(self):
+        """tensor.slice with drop_dims (numpy ``C[i, j, :, :]``) emits a full-rank
+        .view() followed by a rank-reduced .reshape() to the result Tensor rank.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DropDimsSliceProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice(
+                self,
+                data: pl.Tensor[[4, 8, 16, 16], pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+                j: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # C[i, j, :, :] -> drop axes 0 and 1, result is 2D [16, 16].
+                chunk: pl.Tensor[[16, 16], pl.FP32] = pl.slice(
+                    data, [1, 1, 16, 16], [i, j, 0, 0], drop_dims=[0, 1]
+                )
+                return chunk
+
+        code = _generate_orch_code(DropDimsSliceProgram)
+
+        # The view is emitted at the full (parent) rank — Tensor::view loops over
+        # the parent ndims and needs full-rank shape/offset arrays.
+        assert "uint32_t chunk_offsets[4] = {" in code
+        assert "uint32_t chunk_shapes[4] = {" in code
+        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        # drop_dims then reinterprets the unit-extent view at the reduced result rank.
+        assert "uint32_t chunk_reduced_shapes[2] = {16, 16};" in code
+        assert "chunk = chunk.reshape(chunk_reduced_shapes, 2);" in code
+
+    def test_tensor_slice_drop_dims_single(self):
+        """tensor.slice with a single drop_dims axis (numpy ``C[i]``) reduces a 3D
+        source to a 2D result Tensor.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DropDimSingleProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice(
+                self,
+                data: pl.Tensor[[4, 16, 16], pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                # C[i] -> drop axis 0, result is 2D [16, 16].
+                chunk: pl.Tensor[[16, 16], pl.FP32] = pl.slice(data, [1, 16, 16], [i, 0, 0], drop_dims=[0])
+                return chunk
+
+        code = _generate_orch_code(DropDimSingleProgram)
+
+        assert "uint32_t chunk_offsets[3] = {" in code
+        assert "uint32_t chunk_shapes[3] = {" in code
+        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "uint32_t chunk_reduced_shapes[2] = {16, 16};" in code
+        assert "chunk = chunk.reshape(chunk_reduced_shapes, 2);" in code
+
+    def test_tensor_slice_drop_dims_non_leading_rejected(self):
+        """tensor.slice dropping a non-leading axis (numpy ``C[:, i, :]``) is rejected:
+        the view().reshape() lowering only stays contiguous for a leading prefix of
+        dropped axes, so a non-leading dropped axis must error rather than emit a
+        strided view that reshape would assert on at runtime.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DropMiddleProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice(
+                self,
+                data: pl.Tensor[[4, 8, 16], pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                # C[:, i, :] -> drop axis 1 (non-leading), result is 2D [4, 16].
+                chunk: pl.Tensor[[4, 16], pl.FP32] = pl.slice(data, [4, 1, 16], [0, i, 0], drop_dims=[1])
+                return chunk
+
+        with pytest.raises(Exception, match="leading prefix"):
+            _generate_orch_code(DropMiddleProgram)
+
     def test_tensor_transpose_external_input(self):
         """tensor.transpose on an external orchestration input emits Tensor::transpose on ext_<name>."""
         backend.reset_for_testing()

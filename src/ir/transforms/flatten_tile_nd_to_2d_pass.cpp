@@ -276,7 +276,19 @@ class PreconditionChecker : public IRVisitor {
     if (name == "tile.read" || name == "tile.write" || name == "tile.slice") {
       if (!call->args_.empty()) {
         auto input_tile = As<TileType>(call->args_[0]->GetType());
-        CHECK(!IsNdTile(input_tile)) << "FlattenTileNdTo2D: " << name << " is not supported on >2D tiles";
+        // A rank-reducing tile.slice (5-arg drop_dims form, e.g. ``t4d[i]``)
+        // on a >2D tile would need this pass to merge the sliced source window
+        // into a 2D shape AND re-derive drop_dims against that 2D shape — neither
+        // the >2D-window merge nor a runtime kernel-binding for the reduced tile
+        // exists yet (RFC #1338 follow-up, #1349). Reject with an actionable hint
+        // rather than silently flattening to a tile whose drop_dims no longer
+        // match its 2D shape.
+        const bool is_drop_dims_slice = name == "tile.slice" && call->args_.size() == 5;
+        CHECK(!IsNdTile(input_tile))
+            << "FlattenTileNdTo2D: " << name << " is not supported on >2D tiles"
+            << (is_drop_dims_slice ? " (rank-reducing slice of a >2D tile is a pending RFC #1338 follow-up;"
+                                     " slice into a 2D tile instead)"
+                                   : "");
       }
     }
 
