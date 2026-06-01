@@ -796,19 +796,21 @@ FunctionPtr TransformSimplify(const FunctionPtr& func,
   SimplifyMutator mutator(analyzer.get(), std::move(collector.multi_assigned));
   auto new_body = mutator.VisitStmt(func->body_);
 
-  // Final step: drop dead IfStmt phi return_vars + matching yield slots,
-  // then run conservative scalar DCE that prunes scalar bindings whose only
-  // uses were folded out by the mutator above (or orphaned by the phi-prune
-  // step). Call-backed assignments are preserved because the IR has no
-  // purity annotations yet — a Call may have observable side effects we
-  // cannot reason about. ``protected_vars`` additionally shields scalars
-  // whose only consumer lives outside this function (e.g. the ``core_num``
-  // attr of a dispatched Spmd function). Phi-prune runs first so the now-
-  // orphan branch-body scalar assigns become visible to the scalar DCE
-  // in the same Simplify invocation (fixes #1603 — outlining was
-  // capturing dead phi as a spurious Scalar[INDEX] return).
+  // Final step: drop dead IfStmt phi return_vars + matching yield slots, with
+  // conservative scalar DCE on either side so both cascade directions resolve
+  // in one Simplify invocation. The pre-prune scalar DCE removes dead scalar
+  // bindings that were the phi's only consumer (so the now-dead phi becomes
+  // visible to the phi-prune step); the post-prune scalar DCE removes the
+  // branch-body scalar assigns orphaned by phi pruning (fixes #1603 —
+  // outlining was capturing dead phi as a spurious Scalar[INDEX] return).
+  // Call-backed assignments are preserved because the IR has no purity
+  // annotations yet — a Call may have observable side effects we cannot reason
+  // about. ``protected_vars`` additionally shields scalars whose only consumer
+  // lives outside this function (e.g. the ``core_num`` attr of a dispatched
+  // Spmd function).
   auto flat = transform_utils::FlattenToStmts(new_body);
-  auto phi_pruned = dce::EliminateDeadIfReturnVars(flat);
+  auto pre_pruned = dce::EliminateDeadScalarAssignments(flat, protected_vars);
+  auto phi_pruned = dce::EliminateDeadIfReturnVars(pre_pruned);
   auto pruned = dce::EliminateDeadScalarAssignments(phi_pruned, protected_vars);
   bool dce_changed = pruned.size() != flat.size() ||
                      !std::equal(pruned.begin(), pruned.end(), flat.begin(),

@@ -444,7 +444,7 @@ StmtPtr RebuildScopeWithBody(const std::shared_ptr<const ScopeStmt>& scope_stmt,
     copy->body_ = new_body;
     return copy;
   }
-  INTERNAL_CHECK(false) << "Unhandled ScopeStmt subtype: " << scope_stmt->TypeName();
+  INTERNAL_CHECK_SPAN(false, scope_stmt->span_) << "Unhandled ScopeStmt subtype: " << scope_stmt->TypeName();
   return scope_stmt;
 }
 
@@ -464,10 +464,11 @@ std::vector<StmtPtr> RewriteDeadIfPhisOnce(const std::vector<StmtPtr>& stmts,
       // convergence; the inner recursion just shortens the iteration count.
       auto then_stmts = FlattenBody(if_stmt->then_body_);
       auto new_then = RewriteDeadIfPhisOnce(then_stmts, live_uses, changed);
+      std::optional<std::vector<StmtPtr>> else_stmts;
       std::optional<std::vector<StmtPtr>> new_else;
       if (if_stmt->else_body_.has_value()) {
-        auto else_stmts = FlattenBody(if_stmt->else_body_.value());
-        new_else = RewriteDeadIfPhisOnce(else_stmts, live_uses, changed);
+        else_stmts = FlattenBody(if_stmt->else_body_.value());
+        new_else = RewriteDeadIfPhisOnce(*else_stmts, live_uses, changed);
       }
 
       // Identify which return_vars are dead at this level.
@@ -484,8 +485,7 @@ std::vector<StmtPtr> RewriteDeadIfPhisOnce(const std::vector<StmtPtr>& stmts,
       const bool dropped_any = kept_indices.size() < if_stmt->return_vars_.size();
 
       const bool then_unchanged = SameFlattenedBody(new_then, then_stmts);
-      const bool else_unchanged =
-          !new_else.has_value() || SameFlattenedBody(*new_else, FlattenBody(if_stmt->else_body_.value()));
+      const bool else_unchanged = !new_else.has_value() || SameFlattenedBody(*new_else, *else_stmts);
 
       if (!dropped_any && then_unchanged && else_unchanged) {
         result.push_back(stmt);
