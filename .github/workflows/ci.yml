@@ -199,7 +199,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 2c607938
+          git checkout 8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
 
       - name: Install simpler
         run: |
@@ -219,7 +219,7 @@ jobs:
         # runs here despite the tests/st/codegen ignore: its numeric golden
         # compare is unstable on the CPU container's torch/BLAS build (see the
         # codegen-tests job), so it needs this environment.
-        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=2c607938 --ignore=tests/st/distributed --ignore=tests/st/codegen
+        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143 --ignore=tests/st/distributed --ignore=tests/st/codegen
 
       - name: Test multi-orch L2 (isolated pytest invocation)
         # A ``Worker(level=2)`` device session currently leaves runtime
@@ -228,12 +228,12 @@ jobs:
         # isolation bug). Running this file in its own pytest process
         # keeps the L2 leak from poisoning ``test_l3_distributed``.
         timeout-minutes: 3
-        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=2c607938
+        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
 
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=2c607938
+            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
 
   dist-system-tests:
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
@@ -409,7 +409,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 2c607938
+          git checkout 8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
 
       - name: Install simpler
         run: |
@@ -490,10 +490,10 @@ jobs:
         # against the runtime's bundled pto-isa, which still clones from the
         # stale PTO-ISA/pto-isa mirror (lacks pto::Coalesce) until the runtime
         # submodule is bumped past simpler #806. Re-enable once that lands.
-        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=2c607938 -k "not TestMscatter"
+        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143 -k "not TestMscatter"
 
       - name: Test A5 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=2c607938
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
 
       - name: Test A2A3 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=2c607938
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
