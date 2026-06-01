@@ -69,7 +69,7 @@ _LEAK_LOGGER = "pypto.runtime.runtime_base"
 # flat across many calls; a few dozen iterations exercise the scenario without
 # a long device hold. Overridable via env so the host simulator (seconds per
 # dispatch) can validate the flow with an even smaller count.
-LOOP_ITERS = int(os.environ.get("PYPTO_DISPATCH_LOOP_ITERS", "100"))
+LOOP_ITERS = int(os.environ.get("PYPTO_DISPATCH_LOOP_ITERS") or "100")
 
 
 @pl.program
