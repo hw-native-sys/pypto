@@ -134,7 +134,13 @@ class TestAllocTensor:
         fake_simpler_worker.free.assert_called_once_with(0x9000, 0)
 
     def test_free_tensor_uses_data_ptr(self, fake_simpler_worker, worker):
-        t = DeviceTensor(0x9000, (4, 8), torch.float32)
+        # ``free_tensor`` is the dual of ``alloc_tensor``; only tensors the
+        # Worker actually allocated are tracked (and therefore freed). Going
+        # through alloc_tensor puts the ptr in ``_owned_tensors`` so the
+        # subsequent free_tensor forwards through to the underlying ``free``.
+        fake_simpler_worker.malloc.return_value = 0x9000
+        t = worker.alloc_tensor((4, 8), torch.float32)
+        fake_simpler_worker.free.reset_mock()
         worker.free_tensor(t)
         fake_simpler_worker.free.assert_called_once_with(0x9000, 0)
 
