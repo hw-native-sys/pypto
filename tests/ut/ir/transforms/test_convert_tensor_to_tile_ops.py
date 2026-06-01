@@ -2413,6 +2413,79 @@ class TestConvertGatherOp:
         After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_gather_conversion_with_tile_input(self):
+        """tensor.gather whose input was already demoted to a tile by an upstream conversion.
+
+        Regression test for the case the converter previously crashed with
+        CHECK(input_tensor_type): a local tensor.create + tensor.assemble feeds
+        tensor.gather, so by the time gather is visited its `input` arg is a
+        TileType. The converter now emits tile.slice per row for the tile input
+        and keeps tile.load for the tensor index in the same call.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[4, 16], pl.FP32],
+                idx: pl.Tensor[[4, 3], pl.INT32],
+            ) -> pl.Tensor[[4, 3], pl.FP32]:
+                tmp: pl.Tensor[[4, 16], pl.FP32] = pl.create_tensor([4, 16], dtype=pl.FP32)
+                tmp_1: pl.Tensor[[4, 16], pl.FP32] = pl.assemble(tmp, src, [0, 0])
+                out: pl.Tensor[[4, 3], pl.FP32] = pl.tensor.gather(tmp_1, dim=-1, index=idx)
+                return out
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[4, 16], pl.FP32],
+                idx: pl.Tensor[[4, 3], pl.INT32],
+            ) -> pl.Tensor[[4, 3], pl.FP32]:
+                out: pl.Tensor[[4, 3], pl.FP32] = self.main_incore_0(src, idx)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                src: pl.Tensor[[4, 16], pl.FP32],
+                idx: pl.Tensor[[4, 3], pl.INT32],
+                ret0__out: pl.Out[pl.Tensor[[4, 3], pl.FP32]],
+            ) -> pl.Tensor[[4, 3], pl.FP32]:
+                tmp__tile = pl.tile.create([4, 16], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                assemble_src = pl.load(
+                    src, [0, 0], [4, 16], [4, 16], target_memory=pl.Mem.Vec, transpose=False
+                )
+                tmp_1__tile = pl.tile.assemble(tmp__tile, assemble_src, [0, 0])
+                gather_acc_init = pl.tile.create([4, 3], dtype=pl.FP32, target_memory=pl.Mem.Vec)
+                for gather_lv, (gather_ia,) in pl.range(4, init_values=(gather_acc_init,)):
+                    gather_inp_row = pl.tile.slice(tmp_1__tile, [1, 16], [gather_lv, 0], [1, 16])
+                    gather_idx_row = pl.load(
+                        idx, [gather_lv, 0], [1, 3], [1, 3], target_memory=pl.Mem.Vec, transpose=False
+                    )
+                    gather_row_tmp = pl.tile.create([1, 3], dtype=pl.INT32, target_memory=pl.Mem.Vec)
+                    gather_row = pl.tile.gather(gather_inp_row, gather_idx_row, gather_row_tmp)
+                    gather_asmbl = pl.tile.assemble(gather_ia, gather_row, [gather_lv, 0])
+                    gather_rv = pl.yield_(gather_asmbl)
+                out__tile: pl.Tile[[4, 3], pl.FP32, pl.Mem.Vec] = gather_rv
+                ret0__store = pl.store(out__tile, [0, 0], ret0__out)
+                return ret0__store
+
+            @pl.function
+            def main(
+                self,
+                src: pl.Tensor[[4, 16], pl.FP32],
+                idx: pl.Tensor[[4, 3], pl.INT32],
+            ) -> pl.Tensor[[4, 3], pl.FP32]:
+                ret0__out = pl.create_tensor([4, 3], dtype=pl.FP32, layout=pl.TensorLayout.ND)
+                out = self.main_incore_0(src, idx, ret0__out)
+                return out
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_gather_mask_conversion(self):
         """tensor.gather(mask_pattern=...) -> tile.load + tile.gather_mask + tile.store."""
         before, expected = _make_pair(
