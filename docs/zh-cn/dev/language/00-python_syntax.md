@@ -525,7 +525,7 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 | ---- | ---- | ------ |
 | `pl.static_print(*args)` | 将变量类型/值打印到 stdout | 需要 ≥1 个参数 |
 | `pl.static_assert(cond, msg="")` | 断言编译期条件 | 抛出 `ParserError` |
-| `pl.dump_tag(tensor)` | 把某个张量标记为运行期选择性 dump 的目标 —— 是逐调用 `pl.dump(arg)` 之上的逐张量语法糖（在 Orchestration 作用域，或被 orch 内联的 Inline helper 中均可使用 —— 见 [运行期 DFX](../03-runtime-dfx.md#选择性张量-dump)） | 在非 Orchestration / Inline 函数中使用、或参数不是裸变量名时抛出 `ParserSyntaxError` |
+| `pl.dump_tag(tensor)` | 把某个张量标记为运行期选择性 dump 的目标 —— 声明式逐张量标记（在 Orchestration 作用域，或被 orch 内联的 Inline helper 中均可使用 —— 见 [运行期 DFX](../03-runtime-dfx.md#选择性张量-dump)） | 在非 Orchestration / Inline 函数中使用、或参数不是裸变量名时抛出 `ParserSyntaxError` |
 
 **要点：**
 
@@ -533,7 +533,7 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 - `static_print` 接受变量、常量、字符串标签（原样打印）和 f-string 的简单 `{expr}` 占位符（格式化为 IR）。不支持转换标志（`!r`、`!s`、`!a`）和格式说明符（`:...`）。
 - `static_assert` 支持闭包变量表达式（如 `N > 32`）和 IR 常量
 - `static_assert` 的消息参数必须是字符串字面量
-- `dump_tag` 接受单个绑定在外层 Orchestration（或 Inline）作用域内的张量变量名，在解析期被消耗，并自始至终以 Var 身份（而非名字）跟踪到 codegen。在显式 `self.kernel(...)` 调用点，它 desugar 成对每个后续消费该值的 call 加 `pl.dump(arg)`；在 `@pl.jit` / `with pl.incore()` 风格（派发由 outline pass 合成）下，它改为写入所在 scope 的 `dump_vars`，再由 outliner 映射到合成派发的实参上（见 [运行期 DFX](../03-runtime-dfx.md#选择性张量-dump)）。若需要逐调用精确控制，直接在调用点写 `pl.dump(arg)`（类似 `pl.no_dep(arg)`）
+- `dump_tag` 接受单个绑定在外层 Orchestration（或 Inline）作用域内的张量变量名，在解析期被消耗，并自始至终以 Var 身份（而非名字）跟踪到 codegen。在显式 `self.kernel(...)` 调用点，它把该张量记录到每个后续消费它的 Call 的 `dump_vars` 上；在 `@pl.jit` / `with pl.at(level=...)` 风格（派发由 outline pass 合成）下，它改为写入所在 scope 的 `dump_vars`，再由 outliner 映射到合成派发的实参上（见 [运行期 DFX](../03-runtime-dfx.md#选择性张量-dump)）。若需要在单次 task 启动处显式列出 dump 目标，请用 `pl.submit(...)` / `pl.at(...)` 上的 `dumps=[...]` kwarg（与 `deps=` 对称）
 - 即使后续解析失败，输出仍会显示——适用于调试解析错误
 
 ### 语句序列

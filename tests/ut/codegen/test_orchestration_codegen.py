@@ -2177,55 +2177,6 @@ class TestOrchestration:
             if ".dump(" in line:
                 assert "ext_b" not in line, f"Untagged ext_b should not be dumped: {line!r}"
 
-    def test_dump_per_call_emits_toggle_and_dump(self):
-        """``pl.dump(arg)`` (Layer 1, per-call) marks one arg slot of one task.
-
-        Demonstrates per-call granularity the per-tensor ``pl.dump_tag`` cannot
-        express: ``a`` is dumped on the first call only, never on the second,
-        and ``b`` is never dumped. Matched by Var identity, not name.
-        """
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-
-        @pl.program
-        class DumpPerCallProgram:
-            @pl.function(type=pl.FunctionType.AIV)
-            def kernel_add(
-                self,
-                a: pl.Tensor[[16, 16], pl.FP32],
-                b: pl.Tensor[[16, 16], pl.FP32],
-                output: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                a_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
-                b_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(b, [0, 0], [16, 16])
-                result: pl.Tile[[16, 16], pl.FP32] = pl.add(a_tile, b_tile)
-                out: pl.Tensor[[16, 16], pl.FP32] = pl.store(result, [0, 0], output)
-                return out
-
-            @pl.function(type=pl.FunctionType.Orchestration)
-            def orch_per_call(
-                self,
-                a: pl.Tensor[[16, 16], pl.FP32],
-                b: pl.Tensor[[16, 16], pl.FP32],
-                d: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
-            ) -> pl.Tensor[[16, 16], pl.FP32]:
-                c: pl.Tensor[[16, 16], pl.FP32] = pl.create_tensor([16, 16], dtype=pl.FP32)
-                c = self.kernel_add(pl.dump(a), b, c)  # dump a on task 0 only
-                d = self.kernel_add(a, b, d)  # task 1 dumps nothing
-                return d
-
-        code = _generate_orch_code(DumpPerCallProgram)
-
-        # Toggle emitted exactly once at orch entry.
-        assert code.count("enable_dump_tensor_selective();") == 1
-
-        # Only task 0 dumps, and only ext_a.
-        assert code.count("params_t0.dump(ext_a);") == 1
-        assert "params_t1.dump(" not in code
-        for line in code.split("\n"):
-            if ".dump(" in line:
-                assert "ext_b" not in line, f"Untagged ext_b should not be dumped: {line!r}"
-
     def test_no_dump_tag_emits_no_toggle_or_dump(self):
         """Without any ``pl.dump_tag`` the legacy full-dump path is preserved:
         no selective-mode toggle, no ``.dump(...)`` calls. The runtime's
@@ -3986,6 +3937,45 @@ class TestManualScopeCodegen:
         with _core_passes.PassContext(instruments):
             yield
 
+    def test_submit_dumps_emits_toggle_and_per_task_dump(self):
+        """``pl.submit(..., dumps=[x])`` (explicit kwarg) marks one arg slot of
+        one task launch.
+
+        Demonstrates per-launch granularity the forward-sticky ``pl.dump_tag``
+        cannot express: ``x`` is dumped on the first submit only, never on the
+        second. Matched by Var identity, not name.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class DumpPerSubmitProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k1(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def k2(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_per_submit(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, a_tid = pl.submit(self.k1, x, dumps=[x])  # dump x on task 0 only
+                    b, _ = pl.submit(self.k2, x, deps=[a_tid])  # task 1 dumps nothing
+                return b
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(DumpPerSubmitProgram)
+        code = _generate_orch_code(transformed)
+
+        # Toggle emitted exactly once at orch entry.
+        assert code.count("enable_dump_tensor_selective();") == 1
+
+        # Only task 0 dumps ext_x; task 1 dumps nothing.
+        assert code.count("params_t0.dump(ext_x);") == 1
+        assert "params_t1.dump(" not in code
+
     def test_manual_scope_emits_manual_pto2_scope_and_task_id_capture(self):
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
@@ -5023,10 +5013,10 @@ class TestManualScopeCodegen:
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
     def test_submit_dumps_emits_per_task_dump(self):
-        """``pl.submit(..., dumps=[x])`` feeds the same dump_vars path as the
-        Call-side ``pl.dump`` wrapper: codegen emits the selective-dump toggle
+        """``pl.submit(..., dumps=[x])`` feeds the same dump_vars path as a
+        ``pl.dump_tag`` declaration: codegen emits the selective-dump toggle
         and a per-task ``.dump(...)`` for the listed arg. Confirms the existing
-        codegen path consumes a Submit's dump_vars from the new kwarg surface.
+        codegen path consumes a Submit's dump_vars from the kwarg surface.
         """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)

@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Post-outline ``pl.dump_tag`` / ``pl.dump`` resolution for the ``@pl.jit`` +
+"""Post-outline ``pl.dump_tag`` resolution for the ``@pl.jit`` +
 ``@pl.jit.inline`` + ``with pl.incore()`` style (simpler#844).
 
 Unlike the explicit ``self.kernel(...)`` orchestration style (covered by
@@ -17,7 +17,7 @@ intent therefore rides a scope-level ``kAttrDumpVars`` carrier:
 
   - ``pl.dump_tag`` inside an inline helper (forward-sticky) seeds the enclosing
     ``with pl.incore()`` scope's dump list at parse;
-  - ``pl.dump(arg)`` / ``pl.dump_tag`` at the inline call site lands on the
+  - ``pl.dump_tag`` at the inline call site lands on the
     inline call's ``dump_vars``, which ``InlineFunctions`` transfers onto the
     spliced scope;
   - the outliner translates the captured scope dump Vars into the synthesised

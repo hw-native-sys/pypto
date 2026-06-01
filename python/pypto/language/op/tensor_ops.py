@@ -21,7 +21,6 @@ __all__ = [
     "create_tensor",
     "create",
     "no_dep",
-    "dump",
     "dump_tag",
     "read",
     "write",
@@ -199,51 +198,23 @@ def no_dep(tensor: Tensor) -> Tensor:
     return tensor
 
 
-def dump(tensor: Tensor) -> Tensor:
-    """Mark one kernel-call argument for selective tensor dump (per-call).
-
-    Per-call primitive mapping 1:1 to the runtime's ``Arg::dump(...)`` API
-    (simpler#844 selective tensor dump). Wrapping an argument at a kernel
-    call site tells the orchestration codegen to mark that argument's
-    ``Arg`` slot for dump on this task launch only::
-
-        # Dump q and out for this call; k_cache is not dumped.
-        out = self.qk_matmul(pl.dump(q), k_cache, pl.dump(out))
-        # codegen → params_t0.dump(ext_q, ext_out);
-
-    The wrapped tensor is recorded on the IR Call's
-    ``attrs['dump_vars']`` (a list of the dumped argument Vars), so the
-    dump target is tracked by Var identity through every pass — never by
-    name. ``pl.dump_tag(t)`` is the per-tensor convenience layer that
-    desugars to this primitive (see :func:`dump_tag`).
-
-    No-op when ``RunConfig.enable_dump_tensor`` is ``False`` — selective
-    dump only filters within an enabled dump pipeline.
-
-    Only valid as a direct argument to a kernel call. Outside a kernel-call
-    argument list it is a no-op (returns ``tensor`` unchanged); the parser
-    only injects the dump marker at recognized call sites.
-
-    Args:
-        tensor: The tensor argument to mark. Must be a ``Tensor`` value
-            passed positionally to the kernel call.
-
-    Returns:
-        The tensor unchanged. The marker is consumed at parse time.
-    """
-    return tensor
-
-
 def dump_tag(tensor: Tensor) -> Tensor:
     """Mark a tensor for selective dump within the enclosing orchestration.
 
-    Per-tensor convenience sugar over the per-call :func:`dump` primitive
-    (simpler#844 selective tensor dump). Writing ``pl.dump_tag(q)`` as a
-    standalone statement records ``q`` so that every *subsequent* kernel call
-    consuming that exact value gets ``q`` merged into the call's
-    ``dump_vars`` — i.e. it desugars to wrapping ``q`` in ``pl.dump(q)`` at
-    each consuming call. The runtime then marks those ``Arg`` slots via
+    Declarative per-tensor dump marker (simpler#844 selective tensor dump).
+    Writing ``pl.dump_tag(q)`` as a standalone statement records ``q`` so that
+    every *subsequent* kernel dispatch consuming that exact value gets ``q``
+    merged into the dispatch's ``dump_vars`` — whether that dispatch lowers to
+    a plain ``ir.Call`` (the typical ``@pl.jit`` / tensor-op path) or an
+    ``ir.Submit``. The runtime then marks those ``Arg`` slots via
     ``Arg::dump(...)``.
+
+    This is the declarative counterpart to the explicit ``dumps=[...]`` kwarg
+    on ``pl.submit(...)`` / ``pl.at(...)`` — both feed the same ``dump_vars``
+    set (mirroring how a scope's auto-inferred and explicit ``deps=`` edges
+    both feed ``manual_dep_edges``). Use ``dumps=`` when you want to list the
+    targets explicitly at a single task launch; use ``pl.dump_tag`` when one
+    declaration should stick across every subsequent consumer.
 
     Use this to keep ``enable_dump_tensor=True`` viable on large workloads
     (e.g. paged-attention 64bat/8192ctx) where the host-side dump collector
@@ -263,8 +234,8 @@ def dump_tag(tensor: Tensor) -> Tensor:
     * No-op when ``RunConfig.enable_dump_tensor`` is ``False`` — selective
       dump only filters within an enabled dump pipeline; without the
       pipeline there is nothing to filter.
-    * Consumed at parse time — desugars to per-call ``dump_vars`` and emits
-      no IR statement.
+    * Consumed at parse time — recorded into the consuming dispatch's
+      ``dump_vars`` and emits no IR statement of its own.
 
     Valid as a standalone statement inside an Orchestration function or an
     Inline helper (``@pl.jit.inline`` / ``FunctionType.Inline``) that the
@@ -278,10 +249,11 @@ def dump_tag(tensor: Tensor) -> Tensor:
             s = self.qk_matmul(q, k_cache, scratch)  # q is dumped here
             out = self.pv_matmul(s, k_cache, out)    # out is dumped here
 
-    For per-call precision (dump one arg of one call only), use the
-    :func:`dump` wrapper directly: ``self.qk_matmul(pl.dump(q), k_cache, scratch)``.
+    For a single task launch, list the targets explicitly with the
+    ``dumps=[...]`` kwarg: ``out, tid = pl.submit(self.qk_matmul, q, k_cache,
+    scratch, dumps=[q])`` or ``with pl.at(..., dumps=[q]) as tid:``.
 
-    Inside an Inline helper, the desugared ``dump_vars`` ride on the inline
+    Inside an Inline helper, the recorded ``dump_vars`` ride on the inline
     body's kernel calls; the ``InlineFunctions`` pass splices those calls into
     the caller and the mutator substitutes the caller's arg for each inline
     parameter, so tags on both inline parameters and inline body-local
@@ -291,6 +263,23 @@ def dump_tag(tensor: Tensor) -> Tensor:
 
     Limitations (MVP):
 
+    A tag fires only when the tagged Var reaches a kernel dispatch as a
+    **static, whole-tensor Arg**. Values that never reach such an Arg are
+    silently not dumped:
+
+    * Dynamic-offset reads — a value read only through a data-dependent
+      offset (``q_flat[runtime_row : runtime_row + N, ...]``) lowers to a
+      gather / dynamic-address load, not a whole-tensor Arg, so the tag does
+      not attach. Stage it through a buffer read with static, compile-time
+      tiled offsets and tag that buffer.
+    * Orch-level ``pl.assemble`` buffers — ``y = pl.assemble(y, tile, off)``
+      lowers to a pure name-alias and emits no kernel dispatch, so there is
+      no Arg to mark. Use a static in-place slice store ``y[off_slice] =
+      tile`` and tag ``y``, or dump the producer kernels' output Args.
+    * Orch-tier scalar reads — a tensor consumed only by orchestration-level
+      ``pl.read(...)`` (e.g. block tables read to compute offsets) never
+      enters a device kernel as a Tensor Arg; the MVP runtime path covers
+      per-task device Args only.
     * Distributed L3+ programs: only chip-level orchestration tasks honour
       the tag; HOST-tier Python SubWorker tensors are not covered by the
       runtime's selective dump path.

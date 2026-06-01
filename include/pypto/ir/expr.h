@@ -771,9 +771,9 @@ inline std::vector<std::pair<std::string, std::any>> WithManualDepEdgesAttr(
  * call's ``args_`` (tensor Vars) whose ``Arg`` slots orchestration codegen
  * marks via the runtime's per-task ``Arg::dump(...)`` API.
  *
- * Set by the DSL parser for the ``pl.dump(arg)`` call-arg wrapper (per-call
- * primitive) and as the desugaring target of ``pl.dump_tag(t)`` (per-tensor
- * sugar). Because the value is a Var list, it is tracked by Var identity
+ * Set by the DSL parser from the declarative ``pl.dump_tag(t)`` marker and the
+ * explicit ``dumps=[...]`` kwarg on ``pl.submit(...)`` / ``pl.at(...)``.
+ * Because the value is a Var list, it is tracked by Var identity
  * through every pass: SSA rewrites the entries (``SubstCallAttrs``), inlining
  * substitutes the callee Vars for the caller's, and DCE / liveness count them
  * as uses — exactly like ``kAttrManualDepEdges`` / ``kAttrArgDirOverrideVars``.
@@ -788,7 +788,7 @@ inline std::vector<std::pair<std::string, std::any>> WithManualDepEdgesAttr(
  * the outline passes rather than written as an explicit ``self.kernel(...)``.
  * ``pl.dump_tag`` (forward-sticky) seeds the enclosing scope's ``kAttrDumpVars``
  * at parse; ``InlineFunctions`` transfers an inline call's ``kAttrDumpVars``
- * onto the scopes it splices in; the scope list round-trips as ``dump_args=``
+ * onto the scopes it splices in; the scope list round-trips as ``dumps=``
  * on ``pl.at(...)`` and is rewritten by SSA/inline/DCE just like the no_dep
  * scope attr ``kAttrArgDirOverrideVars``. The outliner then translates each
  * captured scope dump Var into the synthesised dispatch's ``kAttrDumpVars`` by

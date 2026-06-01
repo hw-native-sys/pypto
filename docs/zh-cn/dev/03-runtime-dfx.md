@@ -64,19 +64,14 @@ pytest tests/st/runtime/ \
 在大规模工作负载下，host 端 dump 收集器（约 42 MB/s 排空速率）会被打满，
 进而 AICPU 会被 STARS 算子执行超时机制杀掉 —— 1 GB 量级的 KV-cache 等
 大绑定填充队列的速度远快于排空速度。可以标记只关注的张量把 dump 范围
-收窄。提供两层 API，底层都由 runtime 的 `enable_dump_tensor_selective()`
-开关 + `Arg::dump(...)` API（simpler#844）支撑：
+收窄。提供两种入口，底层都由 runtime 的 `enable_dump_tensor_selective()`
+开关 + `Arg::dump(...)` API（simpler#844）支撑。二者与两种 `deps=` 入口
+一一对应 —— 一个声明式标记（`pl.dump_tag`，对应自动推断的 deps），一个
+显式 kwarg（`dumps=`，对应 `deps=`）：
 
-**逐调用（`pl.dump(arg)`）** —— 在 kernel call 上包装某个参数，只 dump
-这一次 task 启动的这个参数槽（与 `Arg::dump` 一一对应）：
-
-```python
-out = self.qk_pv(pl.dump(q), k_cache, pl.dump(out))
-# codegen → params_t0.dump(ext_q, ext_out);
-```
-
-**逐张量（`pl.dump_tag(t)`）** —— 语法糖，desugar 成对每个**后续**消费
-该值的 call 加 `pl.dump`：
+**声明式（`pl.dump_tag(t)`）** —— 一条语句，标记 `t` 后每个**后续**消费
+该值的 kernel 派发都会 dump 它，无论该派发降级为普通 `ir.Call`（典型的
+`@pl.jit` / 张量算子路径）还是 `ir.Submit`：
 
 ```python
 @pl.function(type=pl.FunctionType.Orchestration)
@@ -86,9 +81,9 @@ def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
     out = self.qk_pv(q, k_cache, out)   # q、out 被 dump；k_cache 被过滤掉
 ```
 
-**逐 submit（`dumps=[...]`）** —— `pl.submit(...)` 使用 `dumps=[...]` kwarg
-（与 `deps=[...]` 对称）作为其选择性 dump 入口；`pl.dump(arg)` 包装在 submit
-的参数列表里会被拒绝。每个条目必须是该 submit 的某个张量实参：
+**显式 kwarg（`dumps=[...]`）** —— `pl.submit(...)` 和 `pl.at(...)` 接受
+`dumps=[...]` kwarg（与 `deps=[...]` 对称），列出该次 task 启动要 dump 的张量。
+每个条目必须是该 submit 的某个张量实参 / 该 scope 捕获的某个张量：
 
 ```python
 with pl.manual_scope():
@@ -96,21 +91,23 @@ with pl.manual_scope():
     # codegen → params_t0.dump(ext_q, ext_out);
 ```
 
-dump 目标记录在消费 Call（或 `Submit`）的 `dump_vars` attr 上，以 **Var 身份**跟踪 ——
-而非名字。它像 `manual_dep_edges` 一样随 SSA、内联、codegen 流动，因此没有
-模糊名字匹配、没有误报。`enable_dump_tensor=False` 时两种形式都不起作用
-（dump 流水线整体关闭）。
+**没有调用参数包装** —— 普通 `self.kernel(...)` 调用点不提供 `dumps=` 入口；
+用 `pl.dump_tag` 标记它的输入，或用 `pl.submit(..., dumps=[...])` 提交它。
+两种入口都写入消费 Call / `Submit` 的同一个 `dump_vars` attr，以 **Var 身份**
+跟踪 —— 而非名字。它像 `manual_dep_edges` 一样随 SSA、内联、codegen 流动，
+因此没有模糊名字匹配、没有误报。`enable_dump_tensor=False` 时两种入口都不
+起作用（dump 流水线整体关闭）。
 
 `pl.dump_tag` 同样可以写在 Inline helper（`@pl.jit.inline` /
 `FunctionType.Inline`）内，对两种 kernel 调用风格都生效：
 
-- **显式 `self.kernel(...)` 派发** —— 标记在消费 Call 上 desugar 成
+- **显式 `self.kernel(...)` 派发** —— 标记在消费 Call 上记录为
   `dump_vars`；`InlineFunctions` pass 把该 call splice 进调用方，并把每个
   inline 形参替换为调用方实参，因此写在 inline 形参或 inline 体内的
   `pl.create_tensor(...)` 结果上的标记会在内联点生效。
-- **`@pl.jit` / 张量算子风格（`with pl.incore()`、`c = a + 1.0`）** ——
+- **`@pl.jit` / 张量算子风格（`with pl.at(level=...)`、`c = a + 1.0`）** ——
   此时 kernel 派发由 outline pass *合成*，而非在 parse 阶段写出。标记改为
-  写入所在 scope 的 `dump_vars`（round-trip 成 `pl.at(..., dump_args=[...])`）；
+  写入所在 scope 的 `dump_vars`（round-trip 成 `pl.at(..., dumps=[...])`）；
   写在内联调用点的标记先落在该 call 的 `dump_vars` 上，再由
   `InlineFunctions` 转移到它 splice 进来的 scope 上。outliner 随后按 Var
   身份把每个被 scope 捕获的 dump Var 翻译成合成派发的 `dump_vars` ——
@@ -123,15 +120,19 @@ dump 目标记录在消费 Call（或 `Submit`）的 `dump_vars` attr 上，以 
 
 | 标记位置 / 目标 | 状态 |
 | --------------- | ---- |
-| `pl.dump(arg)` 写在 kernel-call 参数位置 | 支持（逐调用）。 |
-| `dumps=[arg]` 写在 `pl.submit(...)` 上 | 支持 —— submit 侧的逐调用入口（与 `deps=` 对称）；每个条目必须是该 submit 的位置实参。 |
-| `pl.dump(arg)` 包装写在 `pl.submit(...)` 的参数里 | 不支持 —— 抛出 `ParserSyntaxError`。请改用 `dumps=[...]` kwarg。 |
-| `pl.dump_tag(t)` 写在 Orchestration 或 Inline 函数体内的独立语句 | 支持（逐张量语法糖）。 |
-| 标记被 outline 合成的派发消费（`@pl.jit` / `with pl.incore()` / 张量算子风格） | 支持 —— 标记随 scope 级 `dump_vars` 载体（`dump_args=`）传递，outliner 再把它映射到合成派发的实参上。 |
+| `pl.dump_tag(t)` 写在 Orchestration 或 Inline 函数体内的独立语句 | 支持（声明式标记；影响每个后续消费的派发）。 |
+| `dumps=[arg]` 写在 `pl.submit(...)` 上 | 支持 —— submit 侧的显式入口（与 `deps=` 对称）；每个条目必须是该 submit 的位置实参。 |
+| `dumps=[t]` 写在 `pl.at(...)` 上 | 支持 —— scope 侧的显式入口（与 `deps=` 对称）；每个条目必须是该 scope 体捕获的张量。 |
+| `dumps=` 写在普通 `self.kernel(...)` 调用上 | 不支持 —— 抛出 `ParserTypeError`。普通调用是 fire-and-forget；请用 `pl.dump_tag(t)` 声明目标，或用 `pl.submit(..., dumps=[...])` 提交。 |
+| 标记被 outline 合成的派发消费（`@pl.jit` / `with pl.at(level=...)` / 张量算子风格） | 支持 —— 标记随 scope 级 `dump_vars` 载体（`dumps=`）传递，outliner 再把它映射到合成派发的实参上。 |
 | `pl.dump_tag(t)` 写在 `@pl.function(type=pl.FunctionType.InCore/AIC/AIV/Group)` 函数体内 | 不支持 —— parse 阶段抛出 `ParserSyntaxError`。dump 过滤由编排层 codegen 在 kernel 调用点完成；kernel 函数体内没有对应的调用点实参可挂载标记。请将 `pl.dump_tag` 放在外层 `Orchestration`（或 `Inline`）函数里。 |
 | `pl.submit(...)` 的合成输出（隐式 `Out`） | 不支持 —— 合成输出没有调用点实参可包装。 |
 | HOST 层 Python `SubWorker` 张量 | 不支持 —— runtime 没有对应的 `Arg::dump` 接口。 |
 | 对被标记的值重新赋值（如 `q = self.foo(q)`） | rebind 出来的是**新值**；前面的 `pl.dump_tag(q)` **不会**自动覆盖（以 Var 身份跟踪，而非名字）。若 kernel 消费的是新值，需要再标一次。 |
+| 标记的值经过形状/类型变换后才被消费（`q2 = pl.reshape(q)`、`pl.cast`、逐元素算子等） | 变换会产生**新 Var**，所以 `pl.dump_tag(q)` **覆盖不到** `q2`。与重新赋值同源（以 Var 身份跟踪，而非名字）。请标记 kernel 实际接收的那个值 —— 例如 `pl.dump_tag(q2)`。 |
+| 标记只通过动态、数据相关偏移读取的值（`q_flat[runtime_row : runtime_row + N, …]`） | 不支持 —— 该索引读会 lower 成 gather / 动态地址 load，而非静态的整张量 `Arg`。编排层 codegen 从该实参槽取不出整个 Var（`AsVarLike` 无可按身份匹配的对象），标记无从挂载。请将该值先经一个用**静态、编译期分块**偏移读取的 buffer 中转，再标记该 buffer。 |
+| 标记由 `y = pl.assemble(y, tile, offset)` 填充的编排层 buffer | 不支持 —— 编排层的 `pl.assemble` 只 lower 成纯名字别名（`emit_name_map_[lhs] = target`，`HandleTensorAssembleAssign`），**不产生任何 kernel 派发**。该 buffer 从不作为整张量 `Arg` 进入 task，没有可供 `Arg::dump` 标记的对象（且 `assemble` 每次迭代都会 rebind 该 Var）。请改用静态原地切片写 `y[offset_slice] = tile` 并标记 `y`，或改为 dump 各生产者 kernel 的输出 Arg。 |
+| 标记只被编排层标量读消费的张量（`pl.read(block_table_flat, […])`） | 不支持 —— 该张量在 orch/AICPU/HOST 层被逐元素读取（如计算 page 偏移），从不作为 Tensor `Arg` 进入设备 kernel。MVP runtime 的选择性 dump 路径只覆盖 per-task 的**设备** Arg。请将其中转进一个被设备 kernel 作为整 Arg 消费的张量。 |
 
 ## 将 `deps.json` 渲染为 HTML
 

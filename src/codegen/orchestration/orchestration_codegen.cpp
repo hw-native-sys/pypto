@@ -1250,7 +1250,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     ArgDirection direction;
     std::string value;
     /// True when this arg's Var is listed in the Call's ``kAttrDumpVars`` set
-    /// (per-call ``pl.dump(arg)`` / ``pl.dump_tag`` selective dump). Set by
+    /// (selective dump from ``pl.dump_tag`` / ``dumps=``). Set by
     /// VarPtr identity in the param builders — no name comparison.
     bool dump = false;
   };
@@ -1291,7 +1291,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   /// Collect the set of arg Var pointers a Call marks for selective dump via
-  /// its ``kAttrDumpVars`` attr (``pl.dump(arg)`` / ``pl.dump_tag`` desugar).
+  /// its ``kAttrDumpVars`` attr (``pl.dump_tag`` / ``dumps=``).
   /// Matched by VarPtr identity in ``BuildTaskParams`` — never by name.
   std::set<const Var*> CollectDumpVarSet(const CallPtr& call) {
     std::set<const Var*> out;
@@ -1445,7 +1445,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     //     appends them at the tail of the callee signature, so we synth an
     //     add_output(TensorCreateInfo) entry for each. See
     //     `.claude/rules/pass-submit-awareness.md` §5.
-    // Per-call selective dump (``pl.dump(arg)`` / ``pl.dump_tag`` desugar):
+    // Selective dump (``pl.dump_tag`` / ``dumps=``):
     // ``kAttrDumpVars`` lists the arg Vars to mark via ``Arg::dump``. Match by
     // VarPtr identity against each arg — never by name.
     std::set<const Var*> dump_var_set = CollectDumpVarSet(call);

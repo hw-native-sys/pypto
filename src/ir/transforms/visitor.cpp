@@ -82,7 +82,7 @@ void IRVisitor::VisitExpr_(const CallPtr& op) {
   // Var-typed attrs ``manual_dep_edges`` / ``dump_vars`` reference Vars defined
   // elsewhere in the IR. Treat them as real uses so analyses such as the
   // unused-variable check don't flag a Var referenced only via ``deps=[tid]``
-  // or ``pl.dump(arg)``.
+  // or ``dumps=[t]`` / ``pl.dump_tag``.
   for (const auto& [k, v] : op->attrs_) {
     if (k != kAttrManualDepEdges && k != kAttrDumpVars) continue;
     const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);

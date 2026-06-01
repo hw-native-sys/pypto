@@ -537,14 +537,14 @@ def func(x: pl.Tensor[[128, 64], pl.FP16]) -> pl.Tensor[[128, 64], pl.FP16]:
 | -------- | ------- | ---------- |
 | `pl.static_print(*args)` | Print variable types/values to stdout | Requires ≥1 argument |
 | `pl.static_assert(cond, msg="")` | Assert compile-time condition | Raises `ParserError` |
-| `pl.dump_tag(tensor)` | Mark a tensor for selective runtime tensor dump — per-tensor sugar over `pl.dump(arg)` (valid in Orchestration scope, or in an Inline helper that the orch inlines — see [Runtime DFX](../03-runtime-dfx.md#selective-tensor-dump)) | Raises `ParserSyntaxError` outside an Orchestration or Inline function, or for non-`Name` arguments |
+| `pl.dump_tag(tensor)` | Mark a tensor for selective runtime tensor dump — declarative per-tensor marker (valid in Orchestration scope, or in an Inline helper that the orch inlines — see [Runtime DFX](../03-runtime-dfx.md#selective-tensor-dump)) | Raises `ParserSyntaxError` outside an Orchestration or Inline function, or for non-`Name` arguments |
 
 **Key points:**
 
 - All three are statement-only (cannot be used in expressions)
 - `static_print` accepts variables, constants, string labels (printed as-is), and f-strings with plain `{expr}` placeholders (formatted as IR). Conversions (`!r`, `!s`, `!a`) and format specs (`:...`) are not supported.
 - `static_assert` supports closure variable expressions (e.g. `N > 32`) and IR constants; message must be a string literal
-- `dump_tag` takes one bare tensor variable name bound in the enclosing Orchestration (or Inline) scope; it is consumed at parse time and tracked by Var identity (not name) all the way to codegen. At an explicit `self.kernel(...)` site it desugars to the per-call `pl.dump(arg)` wrapper on every subsequent consuming call; in the `@pl.jit` / `with pl.incore()` style (where the dispatch is synthesised by the outline passes) it instead seeds the enclosing scope's `dump_vars` and the outliner maps it onto the synthesised dispatch arg (see [Runtime DFX](../03-runtime-dfx.md#selective-tensor-dump)). For per-call precision, write `pl.dump(arg)` directly at the call site (like `pl.no_dep(arg)`)
+- `dump_tag` takes one bare tensor variable name bound in the enclosing Orchestration (or Inline) scope; it is consumed at parse time and tracked by Var identity (not name) all the way to codegen. At an explicit `self.kernel(...)` site it records the tensor in the consuming Call's `dump_vars` on every subsequent consuming call; in the `@pl.jit` / `with pl.at(level=...)` style (where the dispatch is synthesised by the outline passes) it instead seeds the enclosing scope's `dump_vars` and the outliner maps it onto the synthesised dispatch arg (see [Runtime DFX](../03-runtime-dfx.md#selective-tensor-dump)). To list dump targets explicitly at a single task launch, use the `dumps=[...]` kwarg on `pl.submit(...)` / `pl.at(...)` (symmetric with `deps=`)
 - Output appears even if parsing fails later — useful for debugging parse errors
 
 ### Statement Sequences

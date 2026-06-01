@@ -836,9 +836,9 @@ class ScopeOutliner : public IRMutator {
     VarPtr scope_task_id_var = op->GetAttr<VarPtr>(kAttrTaskIdVar);
     std::vector<VarPtr> scope_dep_edges = op->GetAttr<std::vector<VarPtr>>(kAttrManualDepEdges);
     std::vector<VarPtr> scope_no_dep_vars = op->GetAttr<std::vector<VarPtr>>(kAttrArgDirOverrideVars);
-    // Scope-level selective-dump carrier (from ``pl.dump_tag`` / ``pl.dump`` at
-    // parse, the inline-call ``dump_vars`` transfer, or a ``dump_args=`` round
-    // trip). Each entry is an outer-scope tensor Var that should be dumped on
+    // Scope-level selective-dump carrier (from ``pl.dump_tag`` at parse, an
+    // explicit / round-trip ``dumps=`` list, or the inline-call ``dump_vars``
+    // transfer). Each entry is an outer-scope tensor Var that should be dumped on
     // this dispatch — translated below into the synthesised Call/Submit's
     // ``kAttrDumpVars`` by Var identity, exactly as ``scope_no_dep_vars`` is
     // translated into ``kAttrArgDirectionOverrides``.

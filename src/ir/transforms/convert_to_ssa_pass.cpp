@@ -326,8 +326,8 @@ class SSAConverter {
 
   /// Substitute Var references stored in Call attrs. Currently covers:
   ///   * ``kAttrManualDepEdges`` — ``std::vector<VarPtr>`` (dep edges)
-  ///   * ``kAttrDumpVars`` — ``std::vector<VarPtr>`` (per-call selective dump
-  ///     targets from ``pl.dump(arg)`` / ``pl.dump_tag``)
+  ///   * ``kAttrDumpVars`` — ``std::vector<VarPtr>`` (selective dump
+  ///     targets from ``pl.dump_tag`` / ``dumps=``)
   ///   * ``kAttrDevice`` — ``ExprPtr`` (host-orch dispatch device selector,
   ///     typically a loop induction Var that SSA must version)
   ///
@@ -971,7 +971,7 @@ class SSAConverter {
   /// entry was rewritten — mirrors the per-Call ``SubstCallAttrs`` so SSA
   /// renaming propagates into scope-level attrs the same way it does for Call
   /// attrs. ``dump_vars`` rides here as the carrier from ``pl.dump_tag`` /
-  /// ``pl.dump`` to the outliner: substituting BEFORE the body (see
+  /// ``dumps=`` to the outliner: substituting BEFORE the body (see
   /// ``ConvertScope``) resolves each tagged tensor to the SSA version visible at
   /// scope entry — exactly the value the synthesised dispatch receives as an arg.
   std::pair<std::vector<std::pair<std::string, std::any>>, bool> SubstScopeAttrs(

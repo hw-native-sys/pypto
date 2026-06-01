@@ -7,14 +7,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Parser coverage for ``pl.dump_tag(<name>)`` — the per-tensor sugar over the
-per-call ``pl.dump(arg)`` selective tensor dump primitive (simpler#844).
+"""Parser coverage for ``pl.dump_tag(<name>)`` — the declarative per-tensor
+selective tensor dump marker (simpler#844).
 
 ``pl.dump_tag(t)`` is a statement-position marker that records the bound Var;
-every *subsequent* kernel call consuming that exact Var gets it merged into the
-call's ``attrs['dump_vars']`` (the same per-call attr ``pl.dump(arg)`` writes).
-No IR statement is emitted and no Function-level attr is written — the dump
-target is tracked by Var identity on the consuming Call nodes.
+every *subsequent* kernel dispatch consuming that exact Var gets it merged into
+the dispatch's ``attrs['dump_vars']`` (the same attr the explicit ``dumps=``
+kwarg writes). No IR statement is emitted and no Function-level attr is written —
+the dump target is tracked by Var identity on the consuming Call / Submit nodes.
 """
 
 from __future__ import annotations

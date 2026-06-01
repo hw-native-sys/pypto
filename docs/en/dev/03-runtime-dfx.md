@@ -68,20 +68,16 @@ pytest tests/st/runtime/ \
 collector (~42 MB/s drain) and the AICPU will be killed by the STARS
 op-execute timeout — large bindings such as a 1 GB KV-cache fill the
 queue faster than it drains. Mark the *interesting* tensors to limit dump
-to those tensors. Two layers, both backed by the runtime
+to those tensors. Two surfaces, both backed by the runtime
 `enable_dump_tensor_selective()` toggle + `Arg::dump(...)` API from
-simpler#844:
+simpler#844. They mirror the two `deps=` surfaces exactly — a declarative
+marker (`pl.dump_tag`, the dump analogue of auto-inferred deps) and an
+explicit kwarg (`dumps=`, the dump analogue of `deps=`):
 
-**Per-call (`pl.dump(arg)`)** — wrap an argument at a kernel call to dump
-exactly that arg slot on exactly that task launch (1:1 with `Arg::dump`):
-
-```python
-out = self.qk_pv(pl.dump(q), k_cache, pl.dump(out))
-# codegen → params_t0.dump(ext_q, ext_out);
-```
-
-**Per-tensor (`pl.dump_tag(t)`)** — sugar that desugars to `pl.dump` on
-every *subsequent* call consuming the tagged value:
+**Declarative (`pl.dump_tag(t)`)** — a statement that marks `t` so every
+*subsequent* kernel dispatch consuming that exact value dumps it, whether the
+dispatch lowers to a plain `ir.Call` (the typical `@pl.jit` / tensor-op path)
+or an `ir.Submit`:
 
 ```python
 @pl.function(type=pl.FunctionType.Orchestration)
@@ -91,10 +87,10 @@ def orch(self, q: pl.Tensor[...], k_cache: pl.Tensor[...], out: pl.Out[...]):
     out = self.qk_pv(q, k_cache, out)   # q and out dumped; k_cache filtered out
 ```
 
-**Per-submit (`dumps=[...]`)** — `pl.submit(...)` uses a `dumps=[...]` kwarg
-(symmetric with `deps=[...]`) as its selective-dump surface; the `pl.dump(arg)`
-wrapper is rejected inside a submit's argument list. Each entry must be a tensor
-argument of that submit:
+**Explicit kwarg (`dumps=[...]`)** — `pl.submit(...)` and `pl.at(...)` accept a
+`dumps=[...]` kwarg (symmetric with `deps=[...]`) listing the tensors to dump
+at that one task launch. Each entry must be a tensor argument of that submit /
+a tensor captured by that scope:
 
 ```python
 with pl.manual_scope():
@@ -102,25 +98,27 @@ with pl.manual_scope():
     # codegen → params_t0.dump(ext_q, ext_out);
 ```
 
-The dump target is tracked by **Var identity** on the consuming Call's (or
-`Submit`'s) `dump_vars` attr — never by name. It rides through SSA, inlining, and
-codegen the same way `manual_dep_edges` does, so no fuzzy name matching
-and no false positives. When `enable_dump_tensor=False` both forms are
-inert (the whole dump pipeline is dormant).
+There is **no call-arg wrapper** — a plain `self.kernel(...)` call site offers
+no `dumps=` surface; use `pl.dump_tag` to mark its inputs, or submit it with
+`pl.submit(..., dumps=[...])`. Both surfaces feed the same `dump_vars` attr on
+the consuming Call / `Submit`, tracked by **Var identity** — never by name. It
+rides through SSA, inlining, and codegen the same way `manual_dep_edges` does,
+so no fuzzy name matching and no false positives. When `enable_dump_tensor=False`
+both surfaces are inert (the whole dump pipeline is dormant).
 
 `pl.dump_tag` is also accepted inside an Inline helper
 (`@pl.jit.inline` / `FunctionType.Inline`), and works for both kernel-call
 styles:
 
-- **Explicit `self.kernel(...)` dispatch** — the tag desugars to `dump_vars`
+- **Explicit `self.kernel(...)` dispatch** — the tag records `dump_vars`
   on the consuming Call; the `InlineFunctions` pass splices that call into the
   caller and substitutes the caller's arg for each inline parameter, so tags
   on inline parameters and inline body-local `pl.create_tensor(...)` results
   take effect at the inlined call sites.
-- **`@pl.jit` / tensor-op style (`with pl.incore()`, `c = a + 1.0`)** — here
-  the kernel dispatch is *synthesised by the outline passes*, not written at
-  parse time. The tag instead seeds the enclosing scope's `dump_vars` (which
-  round-trips as `pl.at(..., dump_args=[...])`); a tag applied at the inline
+- **`@pl.jit` / tensor-op style (`with pl.at(level=...)`, `c = a + 1.0`)** —
+  here the kernel dispatch is *synthesised by the outline passes*, not written
+  at parse time. The tag instead seeds the enclosing scope's `dump_vars` (which
+  round-trips as `pl.at(..., dumps=[...])`); a tag applied at the inline
   call site rides the call's `dump_vars` and is transferred by
   `InlineFunctions` onto the scopes it splices in. The outliner then
   translates each captured scope dump Var into the synthesised dispatch's
@@ -135,15 +133,19 @@ the pass's fixpoint.
 
 | Marker location / target | Status |
 | ------------------------ | ------ |
-| `pl.dump(arg)` at a kernel-call argument position | Supported (per-call). |
-| `dumps=[arg]` on `pl.submit(...)` | Supported — submit-side per-call surface (symmetric with `deps=`); each entry must be a positional arg of the submit. |
-| `pl.dump(arg)` wrapper inside `pl.submit(...)` arguments | Not supported — raises `ParserSyntaxError`. Use the `dumps=[...]` kwarg instead. |
-| `pl.dump_tag(t)` as a standalone statement in an Orchestration or Inline body | Supported (per-tensor sugar). |
-| Tag consumed by an outline-synthesised dispatch (`@pl.jit` / `with pl.incore()` / tensor-op style) | Supported — the tag rides a scope-level `dump_vars` carrier (`dump_args=`) and the outliner maps it onto the synthesised dispatch arg. |
+| `pl.dump_tag(t)` as a standalone statement in an Orchestration or Inline body | Supported (declarative marker; affects every subsequent consuming dispatch). |
+| `dumps=[arg]` on `pl.submit(...)` | Supported — explicit submit-side surface (symmetric with `deps=`); each entry must be a positional arg of the submit. |
+| `dumps=[t]` on `pl.at(...)` | Supported — explicit scope-side surface (symmetric with `deps=`); each entry must be a tensor captured by the scope body. |
+| `dumps=` on a plain `self.kernel(...)` call | Not supported — raises `ParserTypeError`. A plain call is fire-and-forget; declare the target with `pl.dump_tag(t)` or submit it with `pl.submit(..., dumps=[...])`. |
+| Tag consumed by an outline-synthesised dispatch (`@pl.jit` / `with pl.at(level=...)` / tensor-op style) | Supported — the tag rides a scope-level `dump_vars` carrier (`dumps=`) and the outliner maps it onto the synthesised dispatch arg. |
 | `pl.dump_tag(t)` inside a `@pl.function(type=pl.FunctionType.InCore/AIC/AIV/Group)` body | Not supported — raises `ParserSyntaxError` at parse time. Dump filtering is applied by orchestration codegen at the kernel-call site; kernel-body functions have no corresponding call-site arg to attach the marker to. Place `pl.dump_tag` in the enclosing `Orchestration` (or `Inline`) function instead. |
 | Synthetic outputs of `pl.submit(...)` (implicit `Out`) | Not supported — synth outputs have no call-site arg to wrap. |
 | HOST-tier Python `SubWorker` tensors | Not supported — runtime exposes no equivalent `Arg::dump` hook. |
 | Reassigning a tagged value (e.g. `q = self.foo(q)`) | The rebound result is a **new value**; a previous `pl.dump_tag(q)` does **not** carry over (tracked by Var identity, not name). Re-tag the rebound value if the kernel consumes it. |
+| Tagging a value consumed only after a shape/dtype transform (`q2 = pl.reshape(q)`, `pl.cast`, an elementwise op, …) | The transform produces a **new Var**, so `pl.dump_tag(q)` does **not** cover `q2`. Same root cause as reassignment (Var identity, not name). Tag the value the kernel actually receives — e.g. `pl.dump_tag(q2)`. |
+| Tagging a value read only through a dynamic, data-dependent offset (`q_flat[runtime_row : runtime_row + N, …]`) | Not supported — the indexed read lowers to a gather / dynamic-address load, not a static whole-tensor `Arg`. Orchestration codegen extracts no whole-Var from that arg slot (`AsVarLike` yields nothing to match by identity), so the tag never attaches. Stage the value through a buffer read with **static, compile-time-tiled** offsets and tag that buffer. |
+| Tagging an orch-tier buffer filled by `y = pl.assemble(y, tile, offset)` | Not supported — an orch-level `pl.assemble` lowers to a pure name-alias (`emit_name_map_[lhs] = target`, `HandleTensorAssembleAssign`) and emits **no kernel dispatch**. The buffer never reaches a task as a whole-tensor `Arg`, so there is nothing for `Arg::dump` to mark (compounded by `assemble` rebinding the Var each iteration). Use a static in-place slice store `y[offset_slice] = tile` and tag `y`, or dump the producer kernels' output Args instead. |
+| Tagging a tensor consumed only by orchestration-level scalar reads (`pl.read(block_table_flat, […])`) | Not supported — the tensor is read element-wise at orch/AICPU/HOST tier (e.g. to compute page offsets) and never enters a device kernel as a Tensor `Arg`. The MVP runtime selective-dump path covers per-task **device** Args only. Stage it into a tensor that a device kernel consumes as a whole Arg. |
 
 ## Rendering `deps.json` to HTML
 

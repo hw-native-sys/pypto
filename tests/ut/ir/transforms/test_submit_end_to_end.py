@@ -96,8 +96,8 @@ def test_submit_with_deps_visible_in_mid_pipeline_dump():
 
 def test_submit_with_dumps_visible_in_mid_pipeline_dump():
     """When ``dumps=[x]`` is attached, the mid-pipeline dump surfaces the
-    Submit's selective-dump targets as a ``dumps=[...]`` kwarg — NOT as
-    ``pl.dump(...)`` arg wrappers (that wrapper is Call-only)."""
+    Submit's selective-dump targets as a ``dumps=[...]`` kwarg — there is no
+    ``pl.dump(...)`` arg-wrapper surface."""
 
     @pl.program
     class Prog:
