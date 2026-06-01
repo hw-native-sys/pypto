@@ -94,6 +94,10 @@ fixable = ["ALL"]
 "tests/ut/language/parser/test_text_parser.py" = ["E501"]
 # IR dumps are formatted at 200-col for readability — suppress line-length lint
 "build_output/**" = ["E501"]
+# Verbatim port of pypto-lib sparse_attn.py @ c225e5a3 (issue #1457 repro): the real
+# decode-attention kernel keeps its 16-arg signature, >100 statements/branches, and
+# aligned type annotations wider than 110 cols — all load-bearing, copied unchanged.
+"tests/st/runtime/framework_and_models/test_deepseek_v4_repro_1457.py" = ["E501", "PLR0913", "PLR0915", "PLR0912", "PLR0914"]
 
 [tool.ruff.lint.pylint]
 max-statements = 100
