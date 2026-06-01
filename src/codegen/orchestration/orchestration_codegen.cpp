@@ -35,6 +35,7 @@
 #include "pypto/codegen/orchestration/orchestration_analysis.h"
 #include "pypto/codegen/orchestration_op_registry.h"
 #include "pypto/core/dtype.h"
+#include "pypto/core/error.h"
 #include "pypto/core/logging.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
@@ -2292,7 +2293,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
       subst.emplace(v.get(), iv);
     }
     ExprPtr resolved = subst.empty() ? ret_expr : transform_utils::Substitute(ret_expr, subst);
-    return GenerateExprString(resolved);
+    // GenerateExprString renders the supported scalar expression kinds (consts,
+    // arithmetic, min/max, comparisons, cast, tuple-get). A resolved return
+    // expression can still contain a kind it does not handle — e.g. a Call to a
+    // scalar-returning helper — in which case it throws NotImplementedError.
+    // Treat that as "this scalar cannot be materialized at the call site" and
+    // fall back to the caller's default ("0"), exactly as before this helper
+    // existed, rather than aborting codegen for a previously-working kernel.
+    try {
+      return GenerateExprString(resolved);
+    } catch (const pypto::NotImplementedError&) {
+      return std::nullopt;
+    }
   }
 
   void GenerateSingleReturnAlias(const CallPtr& call, const std::string& var_name) {
