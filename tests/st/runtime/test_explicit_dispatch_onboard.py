@@ -52,6 +52,7 @@ import pytest
 import torch
 from pypto import ir
 from pypto.runtime import ChipWorker, Worker
+from pypto.runtime.device_runner import ensure_pto_isa_root
 from pypto.runtime.runner import RunConfig
 
 # Compiled programs default to the tensormap_and_ringbuffer runtime; the
@@ -119,8 +120,6 @@ def _pto_isa_root(test_config):
     """
     if str(test_config.platform).endswith("sim"):
         return
-    from pypto.runtime.device_runner import ensure_pto_isa_root
-
     ensure_pto_isa_root(commit=test_config.pto_isa_commit, clone_protocol="https")
 
 
@@ -146,13 +145,19 @@ def test_l2_training_loop_explicit_dispatch(test_config, _no_leak_warning):
     """Weights uploaded once, two callables registered, sustained dispatch loop."""
     platform = test_config.platform
     with tempfile.TemporaryDirectory(prefix="pypto_l2_dispatch_") as work_dir:
-        fwd = ir.compile(ForwardAddProgram, output_dir=f"{work_dir}/fwd", platform=platform, dump_passes=False)
-        bwd = ir.compile(BackwardMulProgram, output_dir=f"{work_dir}/bwd", platform=platform, dump_passes=False)
+        fwd = ir.compile(
+            ForwardAddProgram, output_dir=f"{work_dir}/fwd", platform=platform, dump_passes=False
+        )
+        bwd = ir.compile(
+            BackwardMulProgram, output_dir=f"{work_dir}/bwd", platform=platform, dump_passes=False
+        )
 
         a = torch.full((M, M), 2.0, dtype=torch.float32)
         b = torch.full((M, M), 3.0, dtype=torch.float32)
 
-        worker = ChipWorker(config=RunConfig(platform=platform, device_id=test_config.device_id), runtime=_RUNTIME)
+        worker = ChipWorker(
+            config=RunConfig(platform=platform, device_id=test_config.device_id), runtime=_RUNTIME
+        )
         try:
             assert worker.aicpu_dlopen_count == 0, "no callable dlopened before any dispatch"
 
