@@ -50,8 +50,14 @@ def iter_blocks(data: bytes) -> Iterator[tuple[int, bytes]]:
         body = off + _HEADER.size
         if reserve != _MAGIC or size > len(data) - body:
             raise ValueError(f"corrupt block at offset {off}: size={size}, reserve={reserve:#x}")
+        if padding > 3 or padding > size:
+            raise ValueError(f"corrupt block at offset {off}: size={size}, padding={padding}")
         payload = data[body : body + size]
         if btype == _TYPE_SOURCE:
+            if size < _SOURCE_PATH_LEN:
+                raise ValueError(
+                    f"corrupt SOURCE block at offset {off}: size {size} < path length {_SOURCE_PATH_LEN}"
+                )
             payload = payload[_SOURCE_PATH_LEN:]
         yield btype, payload[: len(payload) - padding]
         off = body + size
@@ -63,9 +69,11 @@ def iter_blocks(data: bytes) -> Iterator[tuple[int, bytes]]:
 _PIPE_ALIAS = {"VEC": "VECTOR"}
 
 
-def _parse_detail(detail: str) -> dict[str, str]:
+def _parse_detail(detail: str | None) -> dict[str, str]:
     """Parse a comma-separated ``KEY:VALUE,`` detail string into a dict."""
     out: dict[str, str] = {}
+    if not detail:
+        return out
     for part in detail.split(","):
         if ":" in part:
             key, _, val = part.partition(":")
@@ -120,6 +128,17 @@ def _first_at_or_after(insts_sorted: list[dict], ts: float) -> dict | None:
     return None
 
 
+def _flag_key(detail: str | None) -> tuple[str, str, str]:
+    """Canonical ``(producer, consumer, flag-id)`` key for matching SET/WAIT
+    flags, independent of detail-string field order or formatting."""
+    parsed = _parse_detail(detail)
+    return (
+        _PIPE_ALIAS.get(parsed.get("PIPE", ""), parsed.get("PIPE", "")),
+        _PIPE_ALIAS.get(parsed.get("TRIGGERPIPE", ""), parsed.get("TRIGGERPIPE", "")),
+        parsed.get("FLAGID", ""),
+    )
+
+
 def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict], int]:
     """Rebuild SET_FLAG/WAIT_FLAG pairs as re-anchored Chrome flow arrows.
 
@@ -139,9 +158,9 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
     for lane in by_lane.values():
         lane.sort(key=lambda inst: inst.get("ts", 0.0))
 
-    waits_by_key: dict[tuple[str, str], list[dict]] = {}
+    waits_by_key: dict[tuple[str, tuple[str, str, str]], list[dict]] = {}
     for wait in _pair_flag_events(events, "WAIT_FLAG"):
-        waits_by_key.setdefault((wait["pid"], wait["detail"]), []).append(wait)
+        waits_by_key.setdefault((wait["pid"], _flag_key(wait["detail"])), []).append(wait)
     for wlist in waits_by_key.values():
         wlist.sort(key=lambda rec: rec["begin_ts"])
 
@@ -152,7 +171,7 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
         detail = _parse_detail(flag["detail"])
         producer = _PIPE_ALIAS.get(detail.get("PIPE", ""), detail.get("PIPE", ""))
         consumer = _PIPE_ALIAS.get(detail.get("TRIGGERPIPE", ""), detail.get("TRIGGERPIPE", ""))
-        wlist = waits_by_key.get((flag["pid"], flag["detail"]))
+        wlist = waits_by_key.get((flag["pid"], _flag_key(flag["detail"])))
         if not wlist:
             skipped += 1
             continue
@@ -436,8 +455,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         blocks: dict[int, bytes] = {}
+        wanted = (_TYPE_TRACE, _TYPE_API_INSTR)
         for btype, payload in iter_blocks(bin_path.read_bytes()):
-            blocks.setdefault(btype, payload)
+            if btype in wanted:
+                blocks.setdefault(btype, payload)
     except ValueError as exc:
         print(f"error: {bin_path}: {exc}", file=sys.stderr)
         return 1
@@ -455,20 +476,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {bin_path}: TRACE block: {exc}", file=sys.stderr)
         return 1
     trace_path = out_dir / "trace.clean.json"
-    trace_path.write_text(json.dumps(trace), encoding="utf-8")
+    with trace_path.open("w", encoding="utf-8") as f:
+        json.dump(trace, f)
     print(f"wrote {trace_path}")
     if skipped:
         print(f"note: {skipped} sync flag(s) could not be re-anchored and were skipped")
 
     if _TYPE_API_INSTR in blocks:
-        try:
-            api = json.loads(blocks[_TYPE_API_INSTR])
-        except ValueError as exc:
-            print(f"error: {bin_path}: API_INSTR block: {exc}", file=sys.stderr)
-            return 1
-        metrics = api if args.raw_metrics else reshape_metrics(api)
         metrics_path = out_dir / "instr_metrics.json"
-        metrics_path.write_text(json.dumps(metrics), encoding="utf-8")
+        if args.raw_metrics:
+            # Preserve the API_INSTR payload byte-for-byte (documented "verbatim").
+            metrics_path.write_bytes(blocks[_TYPE_API_INSTR])
+        else:
+            try:
+                api = json.loads(blocks[_TYPE_API_INSTR])
+            except ValueError as exc:
+                print(f"error: {bin_path}: API_INSTR block: {exc}", file=sys.stderr)
+                return 1
+            with metrics_path.open("w", encoding="utf-8") as f:
+                json.dump(reshape_metrics(api), f)
         print(f"wrote {metrics_path}")
     else:
         print("warning: no API_INSTR block found; skipping instr_metrics.json", file=sys.stderr)

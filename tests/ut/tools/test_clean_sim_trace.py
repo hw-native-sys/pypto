@@ -46,6 +46,11 @@ def test_iter_blocks_rejects_corrupt():
     )
     with pytest.raises(ValueError, match="corrupt"):
         list(clean_sim_trace.iter_blocks(oversize))
+    bad_padding = (
+        clean_sim_trace._HEADER.pack(4, clean_sim_trace._TYPE_TRACE, 7, 0, clean_sim_trace._MAGIC) + b"abcd"
+    )
+    with pytest.raises(ValueError, match="padding"):
+        list(clean_sim_trace.iter_blocks(bad_padding))
 
 
 def test_source_block_path_skipped():
@@ -63,6 +68,14 @@ def test_parse_detail():
         "FLAGID": "0",
     }
     assert clean_sim_trace._parse_detail("") == {}
+    assert clean_sim_trace._parse_detail(None) == {}
+
+
+def test_flag_key_order_independent():
+    a = clean_sim_trace._flag_key("PIPE:MTE2,TRIGGERPIPE:VEC,FLAGID:0,")
+    b = clean_sim_trace._flag_key("FLAGID:0,TRIGGERPIPE:VEC,PIPE:MTE2,")
+    assert a == b == ("MTE2", "VECTOR", "0")  # field order ignored; VEC aliased to VECTOR
+    assert clean_sim_trace._flag_key(None) == ("", "", "")
 
 
 def test_build_sync_arrows_reanchored():
@@ -322,6 +335,21 @@ def test_main_end_to_end(tmp_path):
     assert any(e["ph"] == "X" and e["name"] == "VADD" for e in clean["traceEvents"])
     metrics = json.loads((tmp_path / "instr_metrics.json").read_text())
     assert metrics["instructions"]["c0"][0]["cycles"] == 3
+
+
+def test_main_raw_metrics_verbatim(tmp_path):
+    api_payload = b'{"Cores":["c0"],"keep":"raw"}'
+    buf = _make_bin(
+        [
+            (clean_sim_trace._TYPE_TRACE, b'{"traceEvents":[]}'),
+            (clean_sim_trace._TYPE_API_INSTR, api_payload),
+        ]
+    )
+    bin_path = tmp_path / "visualize_data.bin"
+    bin_path.write_bytes(buf)
+    assert clean_sim_trace.main([str(bin_path), "--raw-metrics"]) == 0
+    # --raw-metrics writes the API_INSTR payload byte-for-byte
+    assert (tmp_path / "instr_metrics.json").read_bytes() == api_payload
 
 
 def test_main_resolves_opprof_dir(tmp_path):
