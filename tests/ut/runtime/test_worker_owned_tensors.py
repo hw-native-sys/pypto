@@ -77,6 +77,21 @@ def test_close_idempotent_after_auto_free(fake_simpler_worker):
     assert fake_simpler_worker.free.call_count == 0
 
 
+def test_free_tensor_twice_is_idempotent(fake_simpler_worker):
+    """A second free_tensor on the same DeviceTensor must NOT call free again.
+
+    Guards against double-free at the C++ layer when the caller's explicit
+    cleanup races with the auto-free path.
+    """
+    w = ChipWorker(config=RunConfig(platform="a2a3sim"))
+    t = w.alloc_tensor((4,), torch.float32)
+    fake_simpler_worker.free.reset_mock()
+    w.free_tensor(t)
+    w.free_tensor(t)  # second call is a no-op
+    assert fake_simpler_worker.free.call_count == 1
+    w.close()
+
+
 def test_explicit_free_tensor_then_close_does_not_double_free(fake_simpler_worker):
     """If caller already freed, close()'s auto-free must NOT free it again."""
     w = ChipWorker(config=RunConfig(platform="a2a3sim"))

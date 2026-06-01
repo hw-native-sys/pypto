@@ -138,8 +138,9 @@ class Worker(ABC):
 
         Calling the handle dispatches without re-checking the registry cache.
         Multiple ``register`` calls for the same *compiled* return aliases of
-        the same underlying cid; release the cid via :meth:`close` (or, for
-        explicit early release, via the handle's ``unregister``).
+        the same underlying cid. ``RegistrationHandle.unregister()`` only
+        marks that handle closed; the underlying cid is released once, in
+        :meth:`close`.
         """
 
     # ------------------------------------------------------------------
@@ -215,18 +216,26 @@ class Worker(ABC):
         """Release a buffer previously returned by :meth:`alloc_tensor`.
 
         Untracks *t* from this Worker's owned-set, then frees the underlying
-        pointer. Safe to call on an already-untracked tensor (e.g. if
-        ``_close_owned_tensors`` ran first); the bookkeeping won't
-        double-release.
+        pointer. Idempotent: if *t* is no longer tracked (e.g. because
+        ``_close_owned_tensors`` ran first, or because the caller already
+        called ``free_tensor`` on this tensor), this is a no-op — the
+        underlying ``free`` is NOT called a second time. This protects
+        against a double-free at the C++ layer, and against a post-close
+        ``RuntimeError`` when the caller's explicit cleanup races with
+        auto-free.
         """
         if worker_id != 0:
             raise ValueError(
                 f"{type(self).__name__}.free_tensor currently only supports worker_id=0. "
                 f"Use free directly if you need a different {self._WORKER_KIND}."
             )
-        # Discard rather than ``remove`` so explicit free after auto-free
-        # doesn't raise. The underlying ``free`` should be idempotent at the
-        # simpler layer; this guard keeps the bookkeeping consistent.
+        # Discard rather than ``remove`` so a double-call doesn't raise. If
+        # the ptr was already discarded by a prior free_tensor or by
+        # _close_owned_tensors, skip the underlying free — that path either
+        # already ran or no longer accepts calls (subclass ``_require_ready``
+        # may now reject post-close).
+        if t.data_ptr not in self._owned_tensors:
+            return
         self._owned_tensors.discard(t.data_ptr)
         self.free(t.data_ptr, worker_id=worker_id)
 

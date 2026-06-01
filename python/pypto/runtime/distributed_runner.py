@@ -601,10 +601,12 @@ class DistributedWorker(Worker):
         """Release the Worker and comm rootinfo file. Idempotent."""
         if self._closed:
             return
-        self._closed = True
-        # Auto-free any DeviceTensors the caller forgot. Run BEFORE we tear
-        # down the underlying worker so the free path is still live.
+        # Auto-free any DeviceTensors the caller forgot. Run BEFORE we set
+        # ``_closed`` so the per-op ``_require_open`` guard inside ``free``
+        # still admits these calls, and BEFORE we tear down the underlying
+        # worker so the free path is still live.
         self._close_owned_tensors()
+        self._closed = True
         # Mark every still-alive RegistrationHandle as closed so subsequent
         # handle(...) calls raise instead of dispatching to a torn-down runtime.
         for handle in list(self._handles):
@@ -658,7 +660,13 @@ class DistributedWorker(Worker):
         during :meth:`__init__` (it must, for COW propagation to forked
         chip children). This method just packages the existing setup as a
         callable handle, exposing ``cid=0`` as a placeholder.
+
+        Raises:
+            RuntimeError: This DistributedWorker has been closed.
+            ValueError: *compiled* is not the program this runtime was prepared
+                from.
         """
+        self._require_open("register")
         if compiled is not self._compiled:
             raise ValueError(
                 "DistributedWorker.register(compiled) requires the same "

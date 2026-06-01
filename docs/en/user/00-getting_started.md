@@ -240,11 +240,11 @@ with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
 ### Caveats
 
 - A `DeviceTensor` is never copied back to the host. If a kernel writes to
-  one, call `ChipWorker.copy_from(host_ptr, t.data_ptr, t.nbytes)` to read
-  the result.
-- Free the handle with `ChipWorker.free_tensor` before the ChipWorker is
-  closed, otherwise the memory leaks for the lifetime of the ChipWorker.
-- Only the ChipWorker that allocated the buffer can use it.
+  one, call `w.copy_from(host_ptr, t.data_ptr, t.nbytes)` on the same
+  ChipWorker instance to read the result.
+- Free the handle with `w.free_tensor(t)` before the ChipWorker is closed,
+  otherwise the memory leaks for the lifetime of the ChipWorker.
+- Only the ChipWorker instance that allocated the buffer can use it.
 
 ### Distributed (L3+) programs
 

@@ -340,6 +340,14 @@ class TestExplicitDispatchAPI:
             rt.register(compiled_b)
         rt.close()
 
+    def test_register_rejects_after_close(self, patched_setup):
+        """register() after close() must raise; mirrors ChipWorker behaviour."""
+        compiled = _fake_compiled([_param("a", [4])], [])
+        rt = DistributedWorker(compiled)
+        rt.close()
+        with pytest.raises(RuntimeError, match="register"):
+            rt.register(compiled)
+
     def test_handle_call_dispatches(self, patched_setup):
         compiled = _fake_compiled([_param("a", [4]), _param("b", [4])], [])
         rt = DistributedWorker(compiled)

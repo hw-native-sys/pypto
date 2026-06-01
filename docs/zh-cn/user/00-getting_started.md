@@ -236,11 +236,11 @@ with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
 
 ### 注意事项
 
-- `DeviceTensor` 永远不会被拷回 host。如果内核写入了它，需要显式调用
-  `ChipWorker.copy_from(host_ptr, t.data_ptr, t.nbytes)` 读回结果。
-- 必须在 ChipWorker 关闭之前用 `ChipWorker.free_tensor` 释放句柄，否则该内存会泄漏到
+- `DeviceTensor` 永远不会被拷回 host。如果内核写入了它，需要在同一个 ChipWorker
+  实例上显式调用 `w.copy_from(host_ptr, t.data_ptr, t.nbytes)` 读回结果。
+- 必须在 ChipWorker 关闭之前用 `w.free_tensor(t)` 释放句柄，否则该内存会泄漏到
   ChipWorker 生命周期结束。
-- 只有分配它的那个 ChipWorker 可以使用该 buffer。
+- 只有分配它的那个 ChipWorker 实例可以使用该 buffer。
 
 ### 分布式（L3+）程序
 
