@@ -2181,6 +2181,120 @@ class OrchestrationStmtCodegen : public CodegenBase {
     mutable_tensor_name_scopes_.pop_back();
   }
 
+  // Try to render a Scalar return-tuple element as a C++ expression in terms of
+  // the call-site arguments.
+  //
+  // A tuple element that is a Scalar (not a Tensor writeback to an Out/InOut
+  // param) carries no runtime output — there is no ``task_<n>_outs`` slot to
+  // alias and no Out arg to copy from. But such a scalar is typically a pure
+  // function of the callee's *input* params (e.g. an index ``o0 = ob * 32``
+  // computed from a loop-index param ``ob``). When the downstream orchestration
+  // code consumes it, we can re-materialize it at the call site by inlining the
+  // callee's defining expression and substituting each callee param with the
+  // expression actually passed for it.
+  //
+  // Returns the rendered C++ scalar expression (e.g. ``(ob * 32)``) on success,
+  // or ``std::nullopt`` when the element cannot be traced to a pure arithmetic
+  // function of the call args (e.g. it depends on a value computed inside the
+  // kernel, or references an un-inlinable local). Callers fall back to a safe
+  // default in that case so the generated code stays compilable.
+  std::optional<std::string> TryRenderCalleeScalarReturn(const CallPtr& call, const FunctionPtr& callee,
+                                                         size_t elem_pos) {
+    if (!callee || !callee->body_) return std::nullopt;
+
+    // Collect the callee's top-level ReturnStmt and per-var scalar definitions.
+    struct ScalarDefCollector : public IRVisitor {
+      ReturnStmtPtr first_return;
+      std::unordered_map<const Var*, ExprPtr> var_def;
+      void VisitStmt_(const ReturnStmtPtr& ret) override {
+        if (!first_return) first_return = ret;
+      }
+      void VisitStmt_(const AssignStmtPtr& assign) override {
+        if (assign->var_) var_def.emplace(assign->var_.get(), assign->value_);
+        IRVisitor::VisitStmt_(assign);
+      }
+    } collector;
+    collector.VisitStmt(callee->body_);
+    if (!collector.first_return || elem_pos >= collector.first_return->value_.size()) {
+      return std::nullopt;
+    }
+
+    // Build a fully-inlined substitution for every Var the return expression
+    // can reach: each callee param Var maps to the expression passed for it at
+    // the call site; each local scalar var maps to its defining expression with
+    // *its own* vars already inlined (so the result is rooted entirely in
+    // call-site arg exprs and constants). A single ``Substitute`` pass over the
+    // return expr then yields a call-site expression — Substitute does
+    // single-level replacement, which is sufficient because every mapped value
+    // is already free of callee-internal vars.
+    //
+    // Only the args_ prefix is caller-supplied; runtime-allocated tail outputs
+    // (Submit) have no corresponding arg and are left unmapped (un-inlinable).
+    std::unordered_map<const Var*, ExprPtr> param_to_arg;
+    size_t n = std::min(callee->params_.size(), call->args_.size());
+    for (size_t i = 0; i < n; ++i) {
+      param_to_arg.emplace(callee->params_[i].get(), call->args_[i]);
+    }
+
+    // Collect every Var referenced in a (sub)expression. A local IRVisitor sees
+    // the same Var leaves ``Substitute``'s IRMutator would rewrite.
+    struct VarRefCollector : public IRVisitor {
+      std::vector<VarPtr> refs;
+      void VisitVarLike_(const VarPtr& v) override { refs.push_back(v); }
+    };
+    auto collect_refs = [](const ExprPtr& e) {
+      VarRefCollector c;
+      c.VisitExpr(e);
+      return c.refs;
+    };
+
+    std::unordered_map<const Var*, ExprPtr> inlined;  // var -> call-site-rooted expr
+    std::unordered_set<const Var*> in_progress;       // cycle guard
+    // Resolve @p var to a call-site-rooted expression (params -> arg, local
+    // scalar -> its inlined def). Returns nullptr if @p var is neither a callee
+    // param nor an inlinable local scalar def, or if a cycle is hit.
+    std::function<ExprPtr(const VarPtr&)> resolve_var = [&](const VarPtr& var) -> ExprPtr {
+      auto pit = param_to_arg.find(var.get());
+      if (pit != param_to_arg.end()) return pit->second;
+      auto cached = inlined.find(var.get());
+      if (cached != inlined.end()) return cached->second;
+      if (!in_progress.insert(var.get()).second) return nullptr;  // cycle
+      auto dit = collector.var_def.find(var.get());
+      if (dit == collector.var_def.end()) {
+        in_progress.erase(var.get());
+        return nullptr;
+      }
+      // Inline the defining expr: resolve each var it references, then apply a
+      // single-level Substitute (each replacement is already fully inlined).
+      std::unordered_map<const Var*, ExprPtr> def_map;
+      bool ok = true;
+      for (const auto& v : collect_refs(dit->second)) {
+        ExprPtr iv = resolve_var(v);
+        if (!iv) {
+          ok = false;
+          break;
+        }
+        def_map.emplace(v.get(), iv);
+      }
+      in_progress.erase(var.get());
+      if (!ok) return nullptr;
+      ExprPtr iv = def_map.empty() ? dit->second : transform_utils::Substitute(dit->second, def_map);
+      inlined.emplace(var.get(), iv);
+      return iv;
+    };
+
+    // Build the full substitution for the return element, then apply it once.
+    const ExprPtr& ret_expr = collector.first_return->value_[elem_pos];
+    std::unordered_map<const Var*, ExprPtr> subst;
+    for (const auto& v : collect_refs(ret_expr)) {
+      ExprPtr iv = resolve_var(v);
+      if (!iv) return std::nullopt;
+      subst.emplace(v.get(), iv);
+    }
+    ExprPtr resolved = subst.empty() ? ret_expr : transform_utils::Substitute(ret_expr, subst);
+    return GenerateExprString(resolved);
+  }
+
   void GenerateSingleReturnAlias(const CallPtr& call, const std::string& var_name) {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     if (!callee) return;
@@ -2252,13 +2366,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
 
       if (!param_idx_opt) {
-        // Not a param writeback: a leading auxiliary value (e.g. an SPMD loop
-        // iv). They carry no runtime output. If such a scalar is referenced
-        // later, materialize a safe default so generated code stays compilable.
+        // Not a param writeback: a Scalar return element (e.g. an index
+        // ``o0 = ob * 32`` computed from an input param) or a leading auxiliary
+        // value (e.g. an SPMD loop iv). These carry no runtime output, so there
+        // is nothing to alias. If the scalar is referenced downstream,
+        // re-materialize it at the call site by inlining the callee's defining
+        // expression with params substituted by the call args (issue #631);
+        // fall back to a 0 default only when that trace fails so the generated
+        // code stays compilable.
         if (effective_uses_.count(elem.var)) {
-          std::string elem_name = ReserveVarEmitName(elem.var);
           if (auto st = As<ScalarType>(elem.var->GetType())) {
-            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
+            std::string elem_name = ReserveVarEmitName(elem.var);
+            auto rendered = TryRenderCalleeScalarReturn(call, callee, elem_pos);
+            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = "
+                  << rendered.value_or("0") << ";\n";
           }
         }
         continue;
@@ -2374,13 +2495,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (out_pos < out_indices.size()) param_idx_opt = out_indices[out_pos];
       }
       if (!param_idx_opt) {
-        // Leading aux scalar / untraced position: no runtime output. If it is
-        // referenced later, materialize a safe scalar default so the generated
-        // code stays compilable (mirrors GenerateTupleReturnAliases).
+        // Scalar return element / leading aux scalar / untraced position: no
+        // runtime output. If it is referenced later, re-materialize it from the
+        // callee's defining expression (params substituted by the call args,
+        // issue #631), falling back to a 0 default when the trace fails so the
+        // generated code stays compilable (mirrors GenerateTupleReturnAliases).
         if (effective_uses_.count(elem.var)) {
-          std::string elem_name = ReserveVarEmitName(elem.var);
           if (auto st = As<ScalarType>(elem.var->GetType())) {
-            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = 0;\n";
+            std::string elem_name = ReserveVarEmitName(elem.var);
+            auto rendered = TryRenderCalleeScalarReturn(call, callee, elem_pos);
+            code_ << Indent() << st->dtype_.ToCTypeString() << " " << elem_name << " = "
+                  << rendered.value_or("0") << ";\n";
           }
         }
         continue;

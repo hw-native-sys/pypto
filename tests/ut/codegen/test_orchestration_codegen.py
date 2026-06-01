@@ -772,6 +772,70 @@ class TestOrchestration:
         assert "const Tensor& o2 = ext_ta;" not in code
         assert "const Tensor& o3 = ext_tb;" not in code
 
+    def test_scalar_tuple_return_materialized(self):
+        """Regression for #631: a kernel returning ``tuple[Tensor, Scalar]``.
+
+        ``producer`` returns a Tensor (writeback to its Out param) AND a Scalar
+        ``off = base * 32`` that is *not* backed by any Out param. The orchestration
+        unpacks both and forwards the Scalar to ``consumer``. The Scalar tuple
+        element has no runtime output slot to alias, so codegen used to drop it,
+        emitting code that referenced an undefined ``off`` (or, after a stop-gap,
+        a wrong ``off = 0``). The fix re-materializes the Scalar by inlining the
+        callee's defining expression with the callee param ``base`` substituted by
+        the call-site arg ``base`` -> ``int64_t off = (base * 32);``.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class ScalarTupleReturnProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def producer(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                base: pl.Scalar[pl.INDEX],
+                out_t: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> tuple[pl.Tensor[[16, 16], pl.FP32], pl.Scalar[pl.INDEX]]:
+                at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                rt: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], out_t)
+                off: pl.Scalar[pl.INDEX] = base * 32
+                return rt, off
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consumer(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                at: pl.Tile[[16, 16], pl.FP32] = pl.load(a, [0, 0], [16, 16])
+                r: pl.Tensor[[16, 16], pl.FP32] = pl.store(at, [0, 0], out)
+                return r
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_scalar_tuple(
+                self,
+                a: pl.Tensor[[16, 16], pl.FP32],
+                base: pl.Scalar[pl.INDEX],
+                mid: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+                final: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                t, off = self.producer(a, base, mid)
+                final = self.consumer(t, off, final)
+                return final
+
+        code = _generate_orch_code(ScalarTupleReturnProgram)
+
+        # The Scalar tuple element is re-materialized from the callee's defining
+        # expression with the param substituted by the call-site arg.
+        assert "int64_t off = (base * 32);" in code
+        # The stop-gap zero default must NOT be emitted for a traceable scalar.
+        assert "int64_t off = 0;" not in code
+        # The Tensor tuple element still aliases its own Out arg.
+        assert "const Tensor& t = ext_mid;" in code
+        # The downstream kernel receives the materialized scalar.
+        assert "add_scalar(off)" in code
+
     def test_tensor_create(self):
         """Test tensor.create generates TensorCreateInfo with shape/dtype."""
         backend.reset_for_testing()
