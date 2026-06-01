@@ -1198,10 +1198,13 @@ class JITFunction:
         """
         import pypto.language as pl  # noqa: PLC0415
 
-        # Extract RunConfig before binding — it is not a JIT function parameter
-        # but is forwarded to CompiledProgram.__call__() / consumed for
-        # compile-side knobs.
-        run_config = kwargs.pop("config", None)
+        # Extract RunConfig without mutating *kwargs* — although the caller's
+        # ``**kwargs`` dict is normally owned by Python at this scope, building
+        # a fresh dict is the same cost and removes the ambiguity for readers
+        # who don't track the calling convention.
+        run_config = kwargs.get("config")
+        if "config" in kwargs:
+            kwargs = {k: v for k, v in kwargs.items() if k != "config"}
 
         param_names, arguments, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = self._bind_args(
             args, kwargs

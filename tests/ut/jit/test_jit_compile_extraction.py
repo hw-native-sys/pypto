@@ -123,9 +123,11 @@ class TestCompileExposesExtractionSurface:
     in PR #1496 (chip_callable / build_orch_args / build_call_config),
     enabling worker integration as required by issue #1455.
 
-    These tests only verify that the attributes exist on the returned object —
-    actually exercising compile_and_assemble requires simpler + a device, which
-    unit tests don't have.
+    These tests only verify that the attributes are *defined on the class* —
+    actually exercising compile_and_assemble (which several of these properties
+    invoke lazily on first access) requires simpler + a device, which unit
+    tests don't have. ``hasattr(instance, ...)`` would trigger the property
+    getter and import simpler, so check the class directly.
     """
 
     def test_compiled_program_has_extraction_attributes(self):
@@ -136,7 +138,10 @@ class TestCompileExposesExtractionSurface:
         c = torch.empty(8, 8, dtype=torch.float32)
 
         compiled = add_kernel.compile(a, b, c)
+        cls = type(compiled)
         # The properties + methods that ChipWorker.run / register rely on.
+        # Checking ``cls`` instead of ``compiled`` avoids invoking lazy
+        # property getters (chip_callable etc.) which call compile_and_assemble.
         for name in (
             "chip_callable",
             "runtime_name",
@@ -147,7 +152,7 @@ class TestCompileExposesExtractionSurface:
             "platform",
             "output_indices",
         ):
-            assert hasattr(compiled, name), f"CompiledProgram missing {name!r}"
+            assert hasattr(cls, name), f"CompiledProgram missing {name!r}"
 
 
 if __name__ == "__main__":
