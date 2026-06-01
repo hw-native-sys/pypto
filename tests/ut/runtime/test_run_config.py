@@ -162,7 +162,7 @@ class TestExecuteOnDeviceDfxValidation:
         with patch.object(device_runner, "Worker") as worker_cls:
             worker = worker_cls.return_value
             # _PyptoWorker.current returns None → falls to the new-Worker path.
-            with patch("pypto.runtime.worker.Worker.current", return_value=None):
+            with patch("pypto.runtime.worker.ChipWorker.current", return_value=None):
                 device_runner.execute_on_device(
                     chip_callable=MagicMock(),
                     orch_args=MagicMock(),

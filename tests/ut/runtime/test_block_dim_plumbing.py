@@ -75,7 +75,7 @@ def patched_execute_on_device():
         patch("pypto.runtime.device_runner.CallConfig", return_value=spy_cfg),
         patch("pypto.runtime.device_runner.Worker", fake_worker_cls),
         # Disable active-Worker lookup so the one-shot path runs.
-        patch("pypto.runtime.worker.Worker.current", return_value=None),
+        patch("pypto.runtime.worker.ChipWorker.current", return_value=None),
     ):
         yield spy_cfg
 
