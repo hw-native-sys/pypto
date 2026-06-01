@@ -1531,11 +1531,11 @@ void OpConversionRegistry::RegisterScatterOps() {
           // 2-byte tile has at least one column), but guard against 0 anyway.
           const int64_t kMaxFlat = 32768;
           const int64_t max_rows = cols == 0 ? kMaxFlat : kMaxFlat / cols;
-          CHECK(n <= max_rows) << "tensor.scatter with element dtype " << input_tile->dtype_.ToString()
-                               << " uses INT16 flattened indices, but the destination is too large: rows("
-                               << n << ") * cols(" << cols
-                               << ") exceeds the INT16 index range (max flat index 32767, rows <= "
-                               << max_rows << "). Use a smaller tile or split the scatter into chunks.";
+          CHECK_SPAN(n <= max_rows, span)
+              << "tensor.scatter with element dtype " << input_tile->dtype_.ToString()
+              << " uses INT16 flattened indices, but the destination is too large: rows(" << n << ") * cols("
+              << cols << ") exceeds the INT16 index range (max flat index 32767, rows <= " << max_rows
+              << "). Use a smaller tile or split the scatter into chunks.";
         }
 
         auto make_idx = [&](int64_t v) -> ExprPtr {
@@ -1665,7 +1665,7 @@ void OpConversionRegistry::RegisterScatterOps() {
         auto& op_reg = OpRegistry::GetInstance();
         auto input_tile = As<TileType>(args[0]->GetType());
         auto dst_tile = As<TileType>(args[1]->GetType());
-        CHECK(input_tile && dst_tile)
+        INTERNAL_CHECK_SPAN(input_tile && dst_tile, span)
             << "tensor.scatter_mask conversion: input/dst must be Vec tiles after bridge";
 
         // pto.tscatter (mask form) zero-fills the entire dst tile before writing
@@ -1682,7 +1682,7 @@ void OpConversionRegistry::RegisterScatterOps() {
         auto in_rows = As<ConstInt>(input_tile->shape_[0]);
         auto in_cols = As<ConstInt>(input_tile->shape_[1]);
         auto dst_cols_c = As<ConstInt>(dst_tile->shape_[1]);
-        CHECK(in_rows && in_cols && dst_cols_c)
+        INTERNAL_CHECK_SPAN(in_rows && in_cols && dst_cols_c, span)
             << "tensor.scatter_mask conversion requires static shapes for the preserve blend";
         const int64_t b = in_rows->value_;
         const int64_t c = in_cols->value_;
