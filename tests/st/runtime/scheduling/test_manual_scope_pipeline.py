@@ -191,13 +191,13 @@ def manual_scope_swimlane_file(test_runner) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip("pass --enable-l2-swimlane to validate the manual_scope swimlane")
 
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(_ManualScopePipelinePTO())
     assert result.passed, f"Manual-scope pipeline failed: {result.error}"
 
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     new_files = after - before
-    assert new_files, "No l2_perf_records.json was generated for the manual_scope run"
+    assert new_files, "No l2_swimlane_records.json was generated for the manual_scope run"
     return max(new_files, key=lambda p: p.stat().st_mtime)
 
 
@@ -483,12 +483,12 @@ class TestPhaseFenceAuto:
 def phase_fence_swimlane_file(test_runner) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip("pass --enable-l2-swimlane to validate the phase-fence swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(_PhaseFenceManualScopePTO())
     assert result.passed, f"phase-fence manual_scope failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     new_files = after - before
-    assert new_files, "No l2_perf_records.json generated for the phase-fence run"
+    assert new_files, "No l2_swimlane_records.json generated for the phase-fence run"
     return max(new_files, key=lambda p: p.stat().st_mtime)
 
 
@@ -501,12 +501,12 @@ def phase_fence_swimlane_data(phase_fence_swimlane_file: Path) -> dict:
 def phase_fence_auto_swimlane_file(test_runner) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip("pass --enable-l2-swimlane to validate the auto phase-fence swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(_PhaseFenceAutoPTO())
     assert result.passed, f"phase-fence auto failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     new_files = after - before
-    assert new_files, "No l2_perf_records.json generated for the auto phase-fence run"
+    assert new_files, "No l2_swimlane_records.json generated for the auto phase-fence run"
     return max(new_files, key=lambda p: p.stat().st_mtime)
 
 
@@ -703,12 +703,12 @@ class TestBranchChainManualScope:
 def branch_chain_swimlane_file(test_runner) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip("pass --enable-l2-swimlane to validate the branch-chain swimlane")
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(_BranchChainManualScopePTO())
     assert result.passed, f"branch-chain manual_scope failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     new_files = after - before
-    assert new_files, "No l2_perf_records.json generated for the branch-chain run"
+    assert new_files, "No l2_swimlane_records.json generated for the branch-chain run"
     return max(new_files, key=lambda p: p.stat().st_mtime)
 
 
@@ -925,12 +925,12 @@ def original_kv_proj_swimlane_file(test_runner) -> Path:
     if not test_runner.config.enable_l2_swimlane:
         pytest.skip("pass --enable-l2-swimlane to validate the original kv_proj swimlane")
 
-    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    before: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     result = test_runner.run(_OriginalKVProjOuterParallelPTO())
     assert result.passed, f"original kv_proj outer-parallel execution failed: {result.error}"
-    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_perf_records.json"))
+    after: set[Path] = set(_BUILD_OUTPUT_DIR.glob("*/dfx_outputs/l2_swimlane_records.json"))
     new_files = after - before
-    assert new_files, "No l2_perf_records.json generated for the original kv_proj run"
+    assert new_files, "No l2_swimlane_records.json generated for the original kv_proj run"
     return max(new_files, key=lambda p: p.stat().st_mtime)
 
 

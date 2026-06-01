@@ -183,7 +183,7 @@ def pytest_addoption(parser):
         "--enable-l2-swimlane",
         action="store_true",
         default=False,
-        help="Capture per-task L2 perf records into <work_dir>/dfx_outputs/l2_perf_records.json "
+        help="Capture per-task L2 perf records into <work_dir>/dfx_outputs/l2_swimlane_records.json "
         "and render merged_swimlane_*.json after execution.",
     )
     parser.addoption(

@@ -84,10 +84,10 @@ class RunConfig:
         pto_isa_commit: If set, pin the pto-isa clone to this specific git
             commit (hash or tag).  ``None`` means use the latest remote HEAD.
         enable_l2_swimlane: Capture per-task L2 perf records into
-            ``<work_dir>/dfx_outputs/l2_perf_records.json``. On onboard
+            ``<work_dir>/dfx_outputs/l2_swimlane_records.json``. On onboard
             platforms, ``swimlane_converter`` then produces
             ``merged_swimlane_*.json`` alongside it. Simulator platforms
-            (``*sim``) only emit ``l2_perf_records.json`` — the merged
+            (``*sim``) only emit ``l2_swimlane_records.json`` — the merged
             swimlane file is intentionally skipped because the simulator
             does not yet ship the task metadata the converter needs.
             Mirrors runtime's ``--enable-l2-swimlane`` flag.
@@ -565,17 +565,17 @@ def _collect_dfx_artifacts(
     ``CallConfig.output_prefix`` passed at submit). Each branch below is
     independent and skips silently when its artefact is missing — a
     partial DFX run (e.g. only ``enable_dump_tensor``) must not crash on
-    the swimlane converter looking for ``l2_perf_records.json``.
+    the swimlane converter looking for ``l2_swimlane_records.json``.
     """
-    if dfx.enable_l2_swimlane and (dfx_dir / "l2_perf_records.json").exists():
+    if dfx.enable_l2_swimlane and (dfx_dir / "l2_swimlane_records.json").exists():
         # Swimlane conversion is onboard-only — the simulator produces
-        # ``l2_perf_records.json`` but does not yet ship the matching
+        # ``l2_swimlane_records.json`` but does not yet ship the matching
         # task metadata the converter expects.
         if not platform.endswith("sim"):
             _generate_swimlane(
                 dfx_dir.parent,
                 dfx_dir,
-                dfx_dir / "l2_perf_records.json",
+                dfx_dir / "l2_swimlane_records.json",
             )
         else:
             print(
@@ -619,12 +619,12 @@ def _generate_swimlane(
 ) -> None:
     """Run ``python -m simpler_setup.tools.swimlane_converter`` to generate ``merged_swimlane_*.json``.
 
-    Output is written to *swimlane_dir* alongside the input ``l2_perf_records_*.json``.
+    Output is written to *swimlane_dir* alongside the input ``l2_swimlane_records_*.json``.
 
     Args:
         work_dir: Directory containing ``kernel_config.py``.
         swimlane_dir: Directory where swimlane JSON files are written.
-        perf_file: Path to the ``l2_perf_records_*.json`` file produced by
+        perf_file: Path to the ``l2_swimlane_records_*.json`` file produced by
             CodeRunner and already moved into *swimlane_dir*.  When ``None``,
             swimlane conversion is skipped.
     """
@@ -638,7 +638,7 @@ def _generate_swimlane(
         return
 
     if perf_file is None:
-        print("No l2_perf_records_*.json found, skipping swimlane conversion")
+        print("No l2_swimlane_records_*.json found, skipping swimlane conversion")
         return
 
     kernel_config_path = work_dir / "kernel_config.py"
