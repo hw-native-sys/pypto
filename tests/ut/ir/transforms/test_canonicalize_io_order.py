@@ -1107,6 +1107,67 @@ class TestCrossCorePipeline:
         # The receives still cluster (CrossCorePop) ahead of all the sends.
         assert max(_positions(text, "tpop_from_aic")) < min(push)
 
+    def test_roundtrip_return_pop_stays_after_its_tpush(self):
+        """Round-trip handshake (fa_fused AIV): ``pop(raw) -> softmax -> push(exp)
+        -> pop(oi)``. The second ``tpop_from_aic`` (``oi``) is the value the peer
+        AIC computes *from* the pushed ``exp`` — a dependency through the cross-core
+        FIFO that the SSA graph cannot see (a ``tpop`` binds no SSA argument). The
+        consumer-phase ``push`` is demoted below ``CrossCorePop``, so without an
+        explicit edge the topo-sort would emit ``pop(oi)`` first, inverting the
+        handshake and deadlocking the AICPU stream (#1610, sync timeout 507046).
+        The fix pins the send before its round-trip return pop."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, out: pl.Tensor[[16, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    raw0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                    exp0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.exp(raw0)
+                    pl.tile.tpush_to_aic(exp0, split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                    res0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(oi0, oi0)
+                    pl.tile.store(res0, [0, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        # The send (exp) precedes the round-trip return pop (oi) -> no deadlock.
+        assert _pos(text, "tpush_to_aic") < _pos(text, "oi0")
+        # The input receive (raw) still precedes the send (ordinary SSA order).
+        assert _pos(text, "raw0") < _pos(text, "tpush_to_aic")
+
+    def test_roundtrip_multi_clone_keeps_per_clone_handshake(self):
+        """Two fused round-trip clones (``pop(raw), push(exp), pop(oi)`` each). The
+        fix must keep every clone's ``push(exp)`` before its own return ``pop(oi)``
+        — so neither clone deadlocks — while leaving the independent input pops free
+        to cluster. Each return pop is terminal (followed by the next clone's input
+        pop, a pop — not a push), so it is pinned to its send; the input pops are
+        not pinned, so cross-clone clustering is preserved."""
+
+        @pl.program
+        class Before:
+            @pl.function(strict_ssa=True)
+            def main(self, out: pl.Tensor[[32, 64], pl.FP32]):
+                for i in pl.pipeline(0, 2, 1, stage=1):
+                    raw0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                    exp0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.exp(raw0)
+                    pl.tile.tpush_to_aic(exp0, split=0)
+                    oi0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                    res0: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(oi0, oi0)
+                    pl.tile.store(res0, [0, 0], out)
+                    raw1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                    exp1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.exp(raw1)
+                    pl.tile.tpush_to_aic(exp1, split=0)
+                    oi1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.tpop_from_aic(split=0)
+                    res1: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(oi1, oi1)
+                    pl.tile.store(res1, [16, 0], out)
+
+        text = ir.python_print(_run_pass(Before))
+        push = _positions(text, "tpush_to_aic")
+        assert len(push) == 2
+        # Per-clone handshake: each send precedes its own round-trip return pop.
+        assert push[0] < _pos(text, "oi0")
+        assert push[1] < _pos(text, "oi1")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

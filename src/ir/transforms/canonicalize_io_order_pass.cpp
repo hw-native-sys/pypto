@@ -274,10 +274,18 @@ class CanonicalizeIOOrderMutator : public IRMutator {
     if (sort_count < 2) return seq;  // nothing to reorder among non-terminators
 
     std::vector<IOCategory> cats(sort_count);
+    // Original cross-core roles, captured before the demotion sweeps below
+    // mutate `cats` (an after-pop CrossCorePush is demoted to ConsumerCompute).
+    // The round-trip edge added before the sort needs the *original* push/pop
+    // identity, not the post-demotion category.
+    std::vector<bool> is_cc_push(sort_count, false);
+    std::vector<bool> is_cc_pop(sort_count, false);
     std::unordered_map<const Stmt*, size_t> idx_of;
     idx_of.reserve(sort_count);
     for (size_t i = 0; i < sort_count; ++i) {
       cats[i] = CategorizeStmt(stmts[i], io_ops_);
+      is_cc_push[i] = (cats[i] == IOCategory::CrossCorePush);
+      is_cc_pop[i] = (cats[i] == IOCategory::CrossCorePop);
       idx_of.emplace(stmts[i].get(), i);
     }
 
@@ -377,6 +385,48 @@ class CanonicalizeIOOrderMutator : public IRMutator {
         }
       }
       if (all_consumer) cats[r] = IOCategory::ConsumerCompute;
+    }
+
+    // Cross-core round-trip edge (issue #1610). A consumer-phase `tpush` hands a
+    // tile to the peer core, which computes the value a *subsequent* `tpop`
+    // retrieves from the same body — e.g. the AIV sends the softmax result and
+    // the AIC returns the SV product (fa_fused: `pop(raw), push(exp), pop(oi)`).
+    // A `tpop` binds no SSA argument, so this dependency is invisible to
+    // BuildStmtDependencyGraph; meanwhile the after-pop demotion above ranks the
+    // push (now ConsumerCompute) *below* the pop (CrossCorePop). Without an
+    // explicit edge the topo-sort emits the pop first, inverting the handshake
+    // and deadlocking the cross-core stream (the AICPU stream-sync timeout this
+    // pass otherwise tries to avoid).
+    //
+    // The edge must fire ONLY for a genuine round-trip return, not for a sibling
+    // clone's *input* pop. Compare two consumer-side shapes (push P, pops below):
+    //   round-trip : pop(raw), push(exp), pop(oi)               -> oi waits on exp
+    //   per-clone  : pop(s0), push(m0) | pop(s1), push(m1)      -> s1 ⟂ m0
+    // Both place a pop after the demoted push, but `s1` begins its own
+    // `pop→push` cycle (a fresh input), so pinning `m0→s1` would wrongly
+    // serialize independent clones and defeat the clustering. The distinguishing
+    // signal is what *follows* the candidate pop: a round-trip return is terminal
+    // (followed by another pop or end-of-body), whereas a clone input is followed
+    // by its own push. So link P to its nearest following pop Q only when the
+    // first cross-core op after Q is not a push. This is a structural heuristic
+    // tuned to the per-clone shape the C/V splitter emits today; the principled
+    // form is a global cross-core dependency graph (SSA edges that survive the
+    // AIC/AIV split), tracked as a follow-up. Edges run low→high index, so the
+    // graph stays acyclic; both lookup tables are filled in one reverse pass to
+    // keep the step O(N).
+    std::vector<size_t> next_pop(sort_count + 1, sort_count);
+    std::vector<int> next_cc(sort_count + 1, 0);  // first cross-core kind at >= i: 1=push, 2=pop, 0=none
+    for (size_t i = sort_count; i-- > 0;) {
+      next_pop[i] = is_cc_pop[i] ? i : next_pop[i + 1];
+      next_cc[i] = is_cc_push[i] ? 1 : (is_cc_pop[i] ? 2 : next_cc[i + 1]);
+    }
+    for (size_t i = 0; i < sort_count; ++i) {
+      if (!is_cc_push[i] || !after_pop[i]) continue;  // only demoted consumer-phase pushes
+      const size_t q = next_pop[i + 1];
+      if (q >= sort_count) continue;      // no following pop — nothing to pin
+      if (next_cc[q + 1] == 1) continue;  // pop begins a new clone's cycle — clustering stays safe
+      successors[i].push_back(q);         // round-trip return must wait for the push
+      ++remaining[q];
     }
 
     // Ready-set as a min-heap keyed by (category, original_index). Emitting the
