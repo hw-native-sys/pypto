@@ -275,8 +275,8 @@ class ChunkedLoopSplitter : public IRMutator {
     // chunk_size and step must always be compile-time constants
     int64_t chunk_size = GetConstIntValue(op->chunk_config_->size, "chunk_size");
     int64_t step = GetConstIntValue(op->step_, "step");
-    INTERNAL_CHECK(step != 0) << "Chunked loop step cannot be zero";
-    INTERNAL_CHECK(chunk_size > 0) << "Chunk size must be positive, got " << chunk_size;
+    INTERNAL_CHECK_SPAN(step != 0, op->span_) << "Chunked loop step cannot be zero";
+    INTERNAL_CHECK_SPAN(chunk_size > 0, op->span_) << "Chunk size must be positive, got " << chunk_size;
 
     Span sp = op->span_;
     auto step_expr = MakeConstIndex(step, sp);

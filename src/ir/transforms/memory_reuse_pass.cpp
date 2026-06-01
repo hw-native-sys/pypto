@@ -949,9 +949,10 @@ LifetimeAnalysisResult ComputeLifetimes(const StmtPtr& func_body) {
     interval.def_point = min_def_point;
     interval.last_use_point = max_last_use;
     auto representative_tile_type = As<TileType>(sharing_group[0]->GetType());
-    INTERNAL_CHECK(representative_tile_type != nullptr) << "Expected TileType for reuse interval";
+    INTERNAL_CHECK_SPAN(representative_tile_type != nullptr, sharing_group[0]->span_)
+        << "Expected TileType for reuse interval";
     auto memory_space = representative_tile_type->GetMemorySpace();
-    INTERNAL_CHECK(memory_space.has_value())
+    INTERNAL_CHECK_SPAN(memory_space.has_value(), sharing_group[0]->span_)
         << "TileType with MemRef must have memory_space for reuse analysis";
     interval.memory_space = *memory_space;
     interval.size = memref->size_;

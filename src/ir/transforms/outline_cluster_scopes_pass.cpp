@@ -46,7 +46,7 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
 
    protected:
     StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
-      INTERNAL_CHECK(core_num == nullptr)  // NOLINT(misc-include-cleaner)
+      INTERNAL_CHECK_SPAN(core_num == nullptr, op->span_)  // NOLINT(misc-include-cleaner)
           << "Only one pl.spmd() block is allowed per cluster scope";
       core_num = op->core_num_;
       sync_start = op->sync_start_;

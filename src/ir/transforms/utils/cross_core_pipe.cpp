@@ -159,7 +159,7 @@ CallPtr CreateSystemOpCall(const std::string& op_name, const std::vector<ExprPtr
 }
 
 CallPtr CreateReserveBuffer(const std::string& buffer_name, int64_t size_bytes, const Span& span) {
-  INTERNAL_CHECK(size_bytes >= 0 && size_bytes <= std::numeric_limits<int>::max())
+  INTERNAL_CHECK_SPAN(size_bytes >= 0 && size_bytes <= std::numeric_limits<int>::max(), span)
       << "Cross-core reserve_buffer size out of range: " << size_bytes;
   return CreateSystemOpCall("system.reserve_buffer",
                             {{"name", std::any(buffer_name)},
@@ -177,7 +177,7 @@ CallPtr CreateImportPeerBuffer(const std::string& buffer_name, const std::string
 CallPtr CreateInitializePipe(core_affinity::CoreSide side, int dir_mask, int slot_size_bytes,
                              const ExprPtr& c2v_consumer_buf, const ExprPtr& v2c_consumer_buf,
                              const Span& span) {
-  INTERNAL_CHECK(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max())
+  INTERNAL_CHECK_SPAN(slot_size_bytes >= 0 && slot_size_bytes <= std::numeric_limits<int>::max(), span)
       << "Cross-core slot_size out of range: " << slot_size_bytes;
   const std::string op_name = core_side_ops::InitializePipeOp(side);
   return CreateSystemOpCall(op_name, {c2v_consumer_buf, v2c_consumer_buf},
@@ -284,7 +284,7 @@ AutomaticPipeSetup BuildAutomaticPipeSetup(const std::string& func_name, const s
   }
 
   const int64_t buffer_size = common_slot_size.value() * GetSlotNumForDirMask(dir_mask);
-  INTERNAL_CHECK(common_slot_size.value() <= std::numeric_limits<int>::max())
+  INTERNAL_CHECK_SPAN(common_slot_size.value() <= std::numeric_limits<int>::max(), span)
       << "Cross-core slot_size out of range: " << common_slot_size.value();
   const int slot_size_bytes = static_cast<int>(common_slot_size.value());
   AutomaticPipeSetup setup;

@@ -191,7 +191,7 @@ FunctionPtr LowerInCoreFunction(const FunctionPtr& func) {
   for (size_t idx : sorted_promoted) {
     const auto& param = func->params_[idx];
     auto param_tensor_type = As<TensorType>(param->GetType());
-    INTERNAL_CHECK(param_tensor_type)
+    INTERNAL_CHECK_SPAN(param_tensor_type, param->span_)
         << "LowerTransposeLoadParamLayout: promoted parameter at index " << idx << " must be TensorType";
 
     // Reject the (DN view + explicit physical stride) combination — these

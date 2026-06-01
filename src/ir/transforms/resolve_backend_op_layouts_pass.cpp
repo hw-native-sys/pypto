@@ -84,7 +84,7 @@ CallPtr CreateReshapeCall(const ExprPtr& input, const std::vector<ExprPtr>& shap
   auto expr =
       OpRegistry::GetInstance().Create("tile.reshape", {input, MakeShapeTuple(shape, span)}, {}, span);
   auto call = As<Call>(expr);
-  INTERNAL_CHECK(call) << "ResolveBackendOpLayouts: tile.reshape must produce a Call";
+  INTERNAL_CHECK_SPAN(call, span) << "ResolveBackendOpLayouts: tile.reshape must produce a Call";
   return call;
 }
 
@@ -117,7 +117,7 @@ CallPtr CreateLayoutMoveCall(const ExprPtr& input, MemorySpace target_memory, Ti
   auto expr = OpRegistry::GetInstance().Create("tile.move", {input},
                                                MakeLayoutMoveKwargs(target_memory, blayout, slayout), span);
   auto call = As<Call>(expr);
-  INTERNAL_CHECK(call) << "ResolveBackendOpLayouts: tile.move must produce a Call";
+  INTERNAL_CHECK_SPAN(call, span) << "ResolveBackendOpLayouts: tile.move must produce a Call";
   return call;
 }
 
