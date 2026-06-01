@@ -107,7 +107,7 @@ const Tensor& tmp = alloc_0.get_ref(0);
 
 All task submission is wrapped in a top-level `PTO2_SCOPE()`. Codegen no longer
 decides scope placement from the `for` / `if` structure: the
-[MaterializeRuntimeScopes](../passes/37-materialize_runtime_scopes.md) pass
+[MaterializeRuntimeScopes](../passes/38-materialize_runtime_scopes.md) pass
 inserts explicit AUTO `RuntimeScopeStmt` nodes (the function body and each
 `for` / `if` body) into the IR, and codegen emits `PTO2_SCOPE` 1:1 from those
 nodes (manual scopes lower to `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`):
@@ -418,10 +418,13 @@ always-true branch for ids known valid.
 
 There is no `params.add_dep(...)` call any more, and there is no 16-dep cap
 — the runtime `Arg::set_dependencies` primitive has no upper bound, and the
-stack array is sized to the exact count. The dep edges come straight from
-the parser: it writes the user's `pl.submit(..., deps=[tid1, tid2])` kwarg
-into `Call.attrs["manual_dep_edges"]` as a `vector<VarPtr>` of
-`Scalar[TASK_ID]` variables.
+stack array is sized to the exact count. User edges come from the parser:
+it writes the user's `pl.submit(..., deps=[tid1, tid2])` kwarg into
+`Call.attrs["manual_dep_edges"]`. Compiler-derived manual-scope edges come
+from [`AutoDeriveTaskDependencies`](../passes/35-auto_derive_task_dependencies.md)
+in `Call.attrs["compiler_manual_dep_edges"]`. Codegen merges the two lists
+in that order and deduplicates by Var identity before emitting the stack
+array.
 
 ### TaskId sourcing
 

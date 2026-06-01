@@ -700,16 +700,40 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
       // A non-empty vector with a mismatched size is invalid IR — fail loudly
       // instead of silently dropping the metadata.
       auto call_arg_directions = op->GetArgDirections();
-      if (!call_arg_directions.empty()) {
-        INTERNAL_CHECK_SPAN(call_arg_directions.size() == op->args_.size(), op->span_)
-            << "Call arg_directions size (" << call_arg_directions.size() << ") must match args size ("
-            << op->args_.size() << ")";
-        stream_ << (need_kwarg_comma ? ", " : "") << "attrs={\"arg_directions\": [";
-        for (size_t i = 0; i < call_arg_directions.size(); ++i) {
-          if (i > 0) stream_ << ", ";
-          stream_ << prefix_ << ".adir." << ArgDirectionToDslName(call_arg_directions[i]);
+      const std::vector<VarPtr>* compiler_deps_to_print = nullptr;
+      for (const auto& [k, v] : op->attrs_) {
+        if (k != kAttrCompilerManualDepEdges) continue;
+        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+        if (!edges || edges->empty()) continue;
+        compiler_deps_to_print = edges;
+        break;
+      }
+      if (!call_arg_directions.empty() || compiler_deps_to_print) {
+        stream_ << (need_kwarg_comma ? ", " : "") << "attrs={";
+        bool need_attr_comma = false;
+        if (!call_arg_directions.empty()) {
+          INTERNAL_CHECK_SPAN(call_arg_directions.size() == op->args_.size(), op->span_)
+              << "Call arg_directions size (" << call_arg_directions.size() << ") must match args size ("
+              << op->args_.size() << ")";
+          stream_ << "\"arg_directions\": [";
+          for (size_t i = 0; i < call_arg_directions.size(); ++i) {
+            if (i > 0) stream_ << ", ";
+            stream_ << prefix_ << ".adir." << ArgDirectionToDslName(call_arg_directions[i]);
+          }
+          stream_ << "]";
+          need_attr_comma = true;
         }
-        stream_ << "]}";
+        if (compiler_deps_to_print) {
+          stream_ << (need_attr_comma ? ", " : "") << "\"compiler_manual_dep_edges\": [";
+          for (size_t i = 0; i < compiler_deps_to_print->size(); ++i) {
+            if (i > 0) stream_ << ", ";
+            if ((*compiler_deps_to_print)[i]) {
+              stream_ << GetVarName((*compiler_deps_to_print)[i].get());
+            }
+          }
+          stream_ << "]";
+        }
+        stream_ << "}";
       }
 
       stream_ << ")";

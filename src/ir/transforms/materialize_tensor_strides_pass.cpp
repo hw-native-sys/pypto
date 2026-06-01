@@ -165,7 +165,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
     auto new_return_type = MaterializeType(op->GetType());
     bool type_changed = new_return_type.get() != op->GetType().get();
 
-    // ``manual_dep_edges`` / ``user_manual_dep_edges`` carry VarPtrs that
+    // ``manual_dep_edges`` / ``compiler_manual_dep_edges`` carry VarPtrs that
     // reference Vars defined elsewhere in the IR. When this pass mints a
     // fresh Var for a Tensor whose view stride is being materialized, the
     // attr entries must follow — otherwise they dangle to the pre-pass
@@ -174,7 +174,7 @@ class MaterializeTensorStridesMutator : public IRMutator {
     new_attrs.reserve(op->attrs_.size());
     bool attrs_changed = false;
     for (const auto& [k, v] : op->attrs_) {
-      if (k == kAttrManualDepEdges) {
+      if (k == kAttrManualDepEdges || k == kAttrCompilerManualDepEdges) {
         if (const auto* edges = std::any_cast<std::vector<VarPtr>>(&v)) {
           std::vector<VarPtr> new_edges;
           new_edges.reserve(edges->size());

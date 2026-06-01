@@ -1590,26 +1590,41 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// runtime adds these on top of any auto-tracked deps in auto scope (final
   /// fanin = auto ∪ explicit), so this count fires whenever the parser
   /// attached ``deps=[...]`` to the Call.
-  size_t CountManualDeps(const CallPtr& call) const {
-    for (const auto& [k, v] : call->attrs_) {
-      if (k != kAttrManualDepEdges) continue;
-      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-      if (edges == nullptr) return 0;
-      size_t total = 0;
-      for (const auto& edge : *edges) {
-        if (!edge) continue;
-        auto it = manual_task_id_map_.find(edge.get());
-        if (it == manual_task_id_map_.end()) continue;
-        if (std::get_if<int>(&it->second)) continue;
-        if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
-          total += names->size();
-        } else {
-          total += 1;
+  std::vector<VarPtr> GetDependencyEdges(const CallPtr& call) const {
+    std::vector<VarPtr> merged;
+    std::unordered_set<uint64_t> seen;
+    auto append_edges = [&](const char* key) {
+      for (const auto& [k, v] : call->attrs_) {
+        if (k != key) continue;
+        const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
+        if (edges == nullptr) return;
+        for (const auto& edge : *edges) {
+          if (!edge) continue;
+          if (!seen.insert(edge->UniqueId()).second) continue;
+          merged.push_back(edge);
         }
+        return;
       }
-      return total;
+    };
+    append_edges(kAttrManualDepEdges);
+    append_edges(kAttrCompilerManualDepEdges);
+    return merged;
+  }
+
+  size_t CountManualDeps(const std::vector<VarPtr>& edges) const {
+    size_t total = 0;
+    for (const auto& edge : edges) {
+      if (!edge) continue;
+      auto it = manual_task_id_map_.find(edge.get());
+      if (it == manual_task_id_map_.end()) continue;
+      if (std::get_if<int>(&it->second)) continue;
+      if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
+        total += names->size();
+      } else {
+        total += 1;
+      }
     }
-    return 0;
+    return total;
   }
 
   /// Emit the per-task ``Arg`` declaration. Dependency edges (if any) are
@@ -1655,57 +1670,50 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// fanin = auto ∪ explicit), so this fires in both auto and manual scopes.
   /// No-op when there are no edges attached.
   void EmitManualDeps(const CallPtr& call, const std::string& task_var) {
-    const size_t dep_capacity = CountManualDeps(call);
+    const auto edges = GetDependencyEdges(call);
+    const size_t dep_capacity = CountManualDeps(edges);
     if (dep_capacity == 0) return;
-    for (const auto& [k, v] : call->attrs_) {
-      if (k != kAttrManualDepEdges) continue;
-      const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
-      INTERNAL_CHECK_SPAN(edges != nullptr, call->span_)
-          << "Internal error: " << kAttrManualDepEdges << " attr must hold std::vector<VarPtr>";
-      const std::string deps_arr = task_var + "_deps";
-      const std::string deps_cnt = task_var + "_deps_count";
-      code_ << Indent() << "PTO2TaskId " << deps_arr << "[" << dep_capacity << "];\n";
-      code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
-      for (const auto& edge : *edges) {
-        if (!edge) continue;
-        auto it = manual_task_id_map_.find(edge.get());
-        // Skip edges whose producer TaskId is not visible in the current C++
-        // scope. With per-PTO2_SCOPE lexical scoping, a dep that references a
-        // TaskId declared inside an already-closed scope is legitimately absent
-        // from the map; emitting it would name an out-of-scope identifier. Skip
-        // it — matching ``CountManualDeps``, which sizes the stack array the
-        // same way — so a mixed in-scope / out-of-scope deps list does not abort.
-        if (it == manual_task_id_map_.end()) continue;
-        if (std::get_if<int>(&it->second)) {
-          // Invariant: a ``manual_dep_edges`` entry should never resolve
-          // directly to a kernel-Call LHS (int-variant entry). The parser
-          // enforces that ``deps=[...]`` only accepts ``Scalar[TASK_ID]``
-          // Vars, so dep edges should always resolve to a TaskId binding
-          // (string variant) or a TaskId iter_arg array (vector variant).
-          INTERNAL_CHECK_SPAN(false, call->span_)
-              << "Internal error: manual_dep_edge var '" << edge->name_hint_
-              << "' resolves to a kernel-Call LHS (int variant). Expected "
-              << "a Scalar[TASK_ID] Var (string variant).";
-        } else if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
-          // Array-carry iter_arg: include every valid slot.
-          for (const auto& name : *names) {
-            code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
-                  << "++] = " << name << ";\n";
-          }
-        } else {
-          const auto& name = std::get<std::string>(it->second);
-          // Any scalar TaskId may hold the ``PTO2TaskId::invalid()`` sentinel
-          // — an iter_arg carry on the first loop iteration, or a ``None``
-          // (``system.task_invalid``) loop-carry seed. Guard every entry with
-          // ``is_valid()``; the branch is a harmless always-true test for ids
-          // already known valid.
+    const std::string deps_arr = task_var + "_deps";
+    const std::string deps_cnt = task_var + "_deps_count";
+    code_ << Indent() << "PTO2TaskId " << deps_arr << "[" << dep_capacity << "];\n";
+    code_ << Indent() << "uint32_t " << deps_cnt << " = 0;\n";
+    for (const auto& edge : edges) {
+      if (!edge) continue;
+      auto it = manual_task_id_map_.find(edge.get());
+      if (it == manual_task_id_map_.end()) {
+        // Compiler-derived edges may reference TaskIds produced inside a
+        // closed ``pl.scope()`` that is no longer visible at this point in
+        // the manual scope.  ``CountManualDeps`` already skips these, so
+        // emit must be consistent: silently drop the out-of-scope edge.
+        continue;
+      }
+      if (std::get_if<int>(&it->second)) {
+        // Invariant: a ``manual_dep_edges`` entry should never resolve
+        // directly to a kernel-Call LHS (int-variant entry). The parser
+        // enforces that ``deps=[...]`` only accepts ``Scalar[TASK_ID]``
+        // Vars, so dep edges should always resolve to a TaskId binding
+        // (string variant) or a TaskId iter_arg array (vector variant).
+        INTERNAL_CHECK_SPAN(false, call->span_) << "Internal error: manual_dep_edge var '" << edge->name_hint_
+                                                << "' resolves to a kernel-Call LHS (int variant). Expected "
+                                                << "a Scalar[TASK_ID] Var (string variant).";
+      } else if (auto* names = std::get_if<std::vector<std::string>>(&it->second)) {
+        // Array-carry iter_arg: include every valid slot.
+        for (const auto& name : *names) {
           code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
                 << "++] = " << name << ";\n";
         }
+      } else {
+        const auto& name = std::get<std::string>(it->second);
+        // Any scalar TaskId may hold the ``PTO2TaskId::invalid()`` sentinel
+        // — an iter_arg carry on the first loop iteration, or a ``None``
+        // (``system.task_invalid``) loop-carry seed. Guard every entry with
+        // ``is_valid()``; the branch is a harmless always-true test for ids
+        // already known valid.
+        code_ << Indent() << "if (" << name << ".is_valid()) " << deps_arr << "[" << deps_cnt
+              << "++] = " << name << ";\n";
       }
-      code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
-      break;
     }
+    code_ << Indent() << task_var << ".set_dependencies(" << deps_arr << ", " << deps_cnt << ");\n";
   }
 
   void EmitDummyTask(const CallPtr& call, const std::string& tid_name) {
@@ -1713,7 +1721,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     const std::string task_var = "params_phase_fence_barrier_" + std::to_string(barrier_idx);
     const std::string deps_cnt = task_var + "_deps_count";
     const std::string outs_var = "phase_fence_barrier_" + std::to_string(barrier_idx) + "_outs";
-    const size_t dep_capacity = CountManualDeps(call);
+    const size_t dep_capacity = CountManualDeps(GetDependencyEdges(call));
     code_ << "\n";
     code_ << Indent() << "// Phase-fence barrier " << barrier_idx << ": dependency-only dummy task\n";
     EmitTaskParamsDecl(Indent(), task_var);

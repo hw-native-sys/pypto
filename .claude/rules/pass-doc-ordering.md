@@ -47,9 +47,10 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 32 | `32-fold_no_op_reshape.md` | 32nd pass |
 | 33 | `33-fuse_create_assemble_to_slice.md` | 33rd pass |
 | 34 | `34-derive_call_directions.md` | 34th pass (two-phase: arg directions + manual-scope lowering) |
-| 35 | `35-expand_manual_phase_fence.md` | 35th pass (manual-scope phase-fence TaskId dep compression; runs after DeriveCallDirections) |
-| 36 | `36-collect_comm_groups.md` | 36th pass (distributed: WindowBuffer + Program.comm_groups_; runs immediately before the final Simplify) |
-| 37 | `37-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
+| 35 | `35-auto_derive_task_dependencies.md` | 35th pass (manual-scope compiler deps; no-op for auto scope) |
+| 36 | `36-expand_manual_phase_fence.md` | 36th pass (manual-scope phase-fence TaskId dep compression; runs after DeriveCallDirections) |
+| 37 | `37-collect_comm_groups.md` | 37th pass (distributed: WindowBuffer + Program.comm_groups_; runs immediately before the final Simplify) |
+| 38 | `38-materialize_runtime_scopes.md` | Last pass (after the final Simplify; inserts AUTO RuntimeScopeStmt so orchestration codegen emits PTO2_SCOPE 1:1) |
 | 91 | `91-utility_passes.md` | Not in Default strategy |
 | 99 | `99-verifier.md` | Infrastructure (not a pipeline pass) |
 

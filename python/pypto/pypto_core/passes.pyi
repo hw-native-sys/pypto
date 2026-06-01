@@ -540,6 +540,15 @@ def derive_call_directions() -> Pass:
     auto-verified by the pipeline.
     """
 
+def auto_derive_task_dependencies() -> Pass:
+    """Create a pass that derives compiler-owned manual-scope task dependencies.
+
+    Runs after :func:`derive_call_directions` and writes
+    ``Call.attrs['compiler_manual_dep_edges']`` for RAW/WAR/WAW hazards inside
+    ``with pl.manual_scope():`` regions. User-written ``deps=[...]`` entries
+    remain under ``Call.attrs['manual_dep_edges']``.
+    """
+
 def expand_manual_phase_fence() -> Pass:
     """Create a pass that inserts dummy TaskId barriers for manual phase fences."""
 
@@ -764,6 +773,7 @@ __all__ = [
     "inline_functions",
     "normalize_stmt_structure",
     "derive_call_directions",
+    "auto_derive_task_dependencies",
     "expand_manual_phase_fence",
     "NestedCallErrorType",
     "UseAfterDefErrorType",

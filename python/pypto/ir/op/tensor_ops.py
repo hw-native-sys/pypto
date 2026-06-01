@@ -1538,7 +1538,13 @@ def gather(  # noqa: PLR0913
         raise ValueError("gather() index form requires both dim and index")
     if output_dtype is not None:
         raise ValueError("gather() output_dtype is only valid for the mask form; use mask_pattern=<int>")
-    return _ir_core.create_op_call("tensor.gather", [input, index], {"dim": dim}, actual_span)
+    if isinstance(dim, ConstInt):
+        dim_val = int(dim.value)
+    elif isinstance(dim, int):
+        dim_val = dim
+    else:
+        raise TypeError(f"dim must be int or ConstInt, got {type(dim)}")
+    return _ir_core.create_op_call("tensor.gather", [input, index], {"dim": dim_val}, actual_span)
 
 
 def gather_mask(

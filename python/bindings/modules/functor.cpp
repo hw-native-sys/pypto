@@ -50,7 +50,7 @@ using namespace pypto::ir;  // NOLINT(build/namespaces)
 
 // --- IRVisitor trampoline ---
 struct PyIRVisitor : IRVisitor {
-  NB_TRAMPOLINE(IRVisitor, 60);  // 32 base + 23 binary + 5 unary (5 scope kinds)
+  NB_TRAMPOLINE(IRVisitor, 61);  // 33 base + 23 binary + 5 unary (6 scope kinds)
 
   // Top-level entry points
   void VisitProgram(const ProgramPtr& p) override { NB_OVERRIDE_NAME("visit_program", VisitProgram, p); }
@@ -134,6 +134,7 @@ struct PyIRVisitor : IRVisitor {
   VISITOR_STMT_TRAMPOLINE(ClusterScopeStmt, visit_cluster_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(HierarchyScopeStmt, visit_hierarchy_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(SpmdScopeStmt, visit_spmd_scope_stmt)
+  VISITOR_STMT_TRAMPOLINE(RuntimeScopeStmt, visit_runtime_scope_stmt)
   VISITOR_STMT_TRAMPOLINE(SeqStmts, visit_seq_stmts)
   VISITOR_STMT_TRAMPOLINE(YieldStmt, visit_yield_stmt)
   VISITOR_STMT_TRAMPOLINE(ReturnStmt, visit_return_stmt)
@@ -144,7 +145,7 @@ struct PyIRVisitor : IRVisitor {
 
 // --- IRMutator trampoline ---
 struct PyIRMutator : IRMutator {
-  NB_TRAMPOLINE(IRMutator, 59);  // 31 base + 23 binary + 5 unary (5 scope kinds)
+  NB_TRAMPOLINE(IRMutator, 60);  // 32 base + 23 binary + 5 unary (6 scope kinds)
 
   // Top-level entry points
   ProgramPtr VisitProgram(const ProgramPtr& p) override {
@@ -229,6 +230,7 @@ struct PyIRMutator : IRMutator {
   MUTATOR_STMT_TRAMPOLINE(ClusterScopeStmt, visit_cluster_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(HierarchyScopeStmt, visit_hierarchy_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(SpmdScopeStmt, visit_spmd_scope_stmt)
+  MUTATOR_STMT_TRAMPOLINE(RuntimeScopeStmt, visit_runtime_scope_stmt)
   MUTATOR_STMT_TRAMPOLINE(SeqStmts, visit_seq_stmts)
   MUTATOR_STMT_TRAMPOLINE(YieldStmt, visit_yield_stmt)
   MUTATOR_STMT_TRAMPOLINE(ReturnStmt, visit_return_stmt)
@@ -358,6 +360,7 @@ void BindFunctor(nb::module_& m) {
   BIND_VISITOR(visitor_cls, ClusterScopeStmt, visit_cluster_scope_stmt);
   BIND_VISITOR(visitor_cls, HierarchyScopeStmt, visit_hierarchy_scope_stmt);
   BIND_VISITOR(visitor_cls, SpmdScopeStmt, visit_spmd_scope_stmt);
+  BIND_VISITOR(visitor_cls, RuntimeScopeStmt, visit_runtime_scope_stmt);
   BIND_VISITOR(visitor_cls, SeqStmts, visit_seq_stmts);
   BIND_VISITOR(visitor_cls, YieldStmt, visit_yield_stmt);
   BIND_VISITOR(visitor_cls, ReturnStmt, visit_return_stmt);
@@ -454,6 +457,7 @@ void BindFunctor(nb::module_& m) {
   BIND_MUTATOR(mutator_cls, ClusterScopeStmt, visit_cluster_scope_stmt);
   BIND_MUTATOR(mutator_cls, HierarchyScopeStmt, visit_hierarchy_scope_stmt);
   BIND_MUTATOR(mutator_cls, SpmdScopeStmt, visit_spmd_scope_stmt);
+  BIND_MUTATOR(mutator_cls, RuntimeScopeStmt, visit_runtime_scope_stmt);
   BIND_MUTATOR(mutator_cls, SeqStmts, visit_seq_stmts);
   BIND_MUTATOR(mutator_cls, YieldStmt, visit_yield_stmt);
   BIND_MUTATOR(mutator_cls, ReturnStmt, visit_return_stmt);

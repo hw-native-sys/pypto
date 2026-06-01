@@ -374,14 +374,31 @@ bool ExprContainsCallLike(const ExprPtr& expr) {
   return finder.found;
 }
 
+bool IsTaskIdTupleElement(const AssignStmtPtr& assign) {
+  auto tuple_get = As<TupleGetItemExpr>(assign ? assign->value_ : ExprPtr{});
+  if (!tuple_get) return false;
+
+  auto tuple_var = AsVarLike(tuple_get->tuple_);
+  auto tuple_ty = As<TupleType>(tuple_var ? tuple_var->GetType() : TypePtr{});
+  if (!tuple_ty || tuple_ty->types_.empty()) return false;
+
+  const int task_id_index = static_cast<int>(tuple_ty->types_.size()) - 1;
+  if (tuple_get->index_ != task_id_index) return false;
+
+  auto scalar_ty = As<ScalarType>(tuple_ty->types_.back());
+  return scalar_ty && scalar_ty->dtype_ == DataType::TASK_ID;
+}
+
 /// Predicate for `EliminateDeadScalarAssignments`: an AssignStmt with a
 /// scalar-typed LHS whose RHS contains no `Call` anywhere. Any expression
 /// containing a Call is conservatively preserved because the IR has no
-/// purity annotations yet.
+/// purity annotations yet. TaskId tuple extractions are also preserved: a
+/// later manual-scope dependency pass uses them to recover submit producers.
 bool IsRemovableScalarAssign(const StmtPtr& stmt) {
   auto assign = std::dynamic_pointer_cast<const AssignStmt>(stmt);
   if (!assign) return false;
   if (!As<ScalarType>(assign->var_->GetType())) return false;
+  if (IsTaskIdTupleElement(assign)) return false;
   if (ExprContainsCallLike(assign->value_)) return false;
   return true;
 }

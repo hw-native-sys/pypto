@@ -192,7 +192,7 @@ Verifier：`signal` 必须是 `DistributedTensorType`；`expected` 必须是
 ## 流水线集成
 
 窗口缓冲和 comm group 由
-[`CollectCommGroups`](passes/36-collect_comm_groups.md) pass 收集,该 pass 填充
+[`CollectCommGroups`](passes/37-collect_comm_groups.md) pass 收集,该 pass 填充
 `Program.comm_groups_` 以及运行时据以绑定物理缓冲的按窗口 `WindowBuffer` 记录。
 
 ## 测试

@@ -106,7 +106,7 @@ const Tensor& tmp = alloc_0.get_ref(0);
 ### 阶段 6–8：任务提交与控制流
 
 所有任务提交包裹在顶层 `PTO2_SCOPE()` 中。codegen 不再依据 `for` / `if` 结构
-决定 scope 位置：[MaterializeRuntimeScopes](../passes/37-materialize_runtime_scopes.md)
+决定 scope 位置：[MaterializeRuntimeScopes](../passes/38-materialize_runtime_scopes.md)
 pass 会向 IR 中插入显式的 AUTO `RuntimeScopeStmt` 节点（函数体以及每个
 `for` / `if` 体），codegen 从这些节点 1:1 地 emit `PTO2_SCOPE`（manual scope
 降级为 `PTO2_SCOPE(PTO2ScopeMode::MANUAL)`）：
@@ -414,13 +414,17 @@ iter_arg carry，或未写入的数组槽——invalid id 绝不能进入
 
 不再有 `params.add_dep(...)` 调用，也没有 16 条依赖上限——runtime 的
 `Arg::set_dependencies` 原语没有上限，栈数组按精确数量定长。dep 边
-直接来自 parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])` kwarg
-写入 `Call.attrs["manual_dep_edges"]`，每项为 `Scalar[TASK_ID]` 类型的 Var。
+用户依赖来自 parser：parser 把用户的 `pl.submit(..., deps=[tid1, tid2])`
+kwarg 写入 `Call.attrs["manual_dep_edges"]`。编译器推导的 manual-scope
+依赖来自 [`AutoDeriveTaskDependencies`](../passes/35-auto_derive_task_dependencies.md)，
+保存在 `Call.attrs["compiler_manual_dep_edges"]`。Codegen 会按这个顺序合并
+两组列表，并按 Var identity 去重后再发出栈数组。
 
 ### TaskId 的来源
 
-每个 manual scope 内的 kernel `Call` 会携带 `attrs["manual_dep_edges"]`——一个
-`vector<VarPtr>`，元素类型为 `Scalar[TASK_ID]`。每个条目在 codegen 时通过
+`attrs["manual_dep_edges"]` 或 `attrs["compiler_manual_dep_edges"]` 中的每个
+显式依赖条目都是 TaskId `VarPtr`（`Scalar[TASK_ID]` 或
+`Array[N, TASK_ID]`）。每个条目在 codegen 时通过
 `manual_task_id_map_` 解析为以下三种来源之一：
 
 | Producer 种类 | codegen 发出的 C++ |
