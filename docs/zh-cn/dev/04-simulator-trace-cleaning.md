@@ -7,6 +7,26 @@ Insight 使用的二进制容器）。直接在 Perfetto UI 中打开 `trace.jso
 
 `clean_sim_trace` 将该 dump 重建为一个去噪的、可在 Chrome 中查看的流水线 trace。
 
+## 生成 dump
+
+本工具消费的 `OPPROF_*/simulator/visualize_data.bin` 由 Ascend `msprof op
+simulator`（cycle-accurate 的 camodel）生成，普通的 PyPTO 运行不会产生它。
+**`incore-profiling` skill** 会按 kernel 驱动它——对 `build_output/<case>/` 中的每个
+PTOAS kernel 生成独立 testcase，用 `ccec`/`bisheng` 编译，并运行该 op-simulator：
+
+```bash
+python .claude/skills/incore-profiling/incore_profile.py \
+  --build-dir build_output/<case> --func <kernel> --target a2a3
+```
+
+它会写出 `.../kernel_insight_all_funcs_<ts>/funcs/<kernel>/collect/out/OPPROF_*/`；
+将 `clean_sim_trace` 指向该 `OPPROF_*` 目录即可。
+
+> **数据相关（data-dependent）的 kernel**——其循环次数或 work-table 大小从输入张量读取
+> ——在 skill 自动生成的零值输入下会得到一个近乎空的 trace（`CUBE`/`VECTOR` 仅记录
+> ~0 cycles）。这是合成输入造成的假象，而非 kernel 真的很快；如何注入全尺寸真实
+> 中间张量，参见该 skill 的 *Caveats*。
+
 ## 用法
 
 ```bash
@@ -50,10 +70,14 @@ python -m pypto.tools.clean_sim_trace <path> [-o OUTPUT_DIR] [--keep-scalar] [--
    `BAR` 切片。
 3. **车道排序** —— 发出 `process_*` / `thread_*` 元数据，使核与流水线车道按
    数据流顺序（加载 -> 计算 -> 存储）显示。
-4. **同步转为箭头** —— 每个 `SET_FLAG` -> `WAIT_FLAG` 对变成一条流向箭头，
-   从生产指令重新锚定到消费指令。
-5. **着色** —— 切片按流水线车道重新着色。
-6. **时间戳** —— 原样保留，使清洗后的 trace 与原始 `trace.json` 对齐。
+4. **子车道拆分（sub-lane）** —— 软件流水的指令在同一 pipe 上常常同时有多条在飞，
+   且只是*部分*重叠。Chrome trace 的 `X` 事件在同一 `tid` 上必须互不相交或严格嵌套，
+   因此把每个 pipe 中重叠的指令贪心拆分到多个子车道（`MTE1`、`MTE1#1`……）——
+   每条同时存活的指令占一行——在查看器中保留真实的流水线深度（否则深度会塌缩到约 2）。
+5. **同步转为箭头** —— 每个 `SET_FLAG` -> `WAIT_FLAG` 对变成一条流向箭头，
+   从生产指令重新锚定到消费指令（落在其所在的子车道上）。
+6. **着色** —— 切片按流水线车道重新着色。
+7. **时间戳** —— 原样保留，使清洗后的 trace 与原始 `trace.json` 对齐。
 
 ## 指标旁车文件
 

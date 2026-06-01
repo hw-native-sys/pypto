@@ -131,9 +131,11 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
         ``(flow_events, skipped_count)`` — one ``s``/``f`` flow-event pair per
         re-anchored flag, plus the count of flags that could not be anchored.
     """
+    # Group by the logical pipe (``_pipe``), not the rendered sub-lane tid, so a
+    # flag's producer/consumer is found across all sub-lanes of the pipe.
     by_lane: dict[tuple[str, str], list[dict]] = {}
     for inst in insts:
-        by_lane.setdefault((inst.get("pid", ""), inst.get("tid", "")), []).append(inst)
+        by_lane.setdefault((inst.get("pid", ""), inst.get("_pipe", inst.get("tid", ""))), []).append(inst)
     for lane in by_lane.values():
         lane.sort(key=lambda inst: inst.get("ts", 0.0))
 
@@ -169,7 +171,7 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
                 "cat": "sync",
                 "name": label,
                 "pid": flag["pid"],
-                "tid": producer,
+                "tid": prod.get("_tid", producer),
                 "ts": prod.get("ts", 0.0),
             }
         )
@@ -181,7 +183,7 @@ def _build_sync_arrows(insts: list[dict], events: list[dict]) -> tuple[list[dict
                 "bp": "e",
                 "name": label,
                 "pid": flag["pid"],
-                "tid": consumer,
+                "tid": cons.get("_tid", consumer),
                 "ts": cons.get("ts", 0.0),
             }
         )
@@ -221,6 +223,39 @@ _LANE_CNAME = {
 }
 
 
+def _assign_sublanes(insts: list[dict]) -> None:
+    """Pack partially-overlapping instructions on each pipe into sub-lanes.
+
+    Chrome Trace ``X`` (complete) events on the same ``tid`` must be disjoint or
+    strictly nested. Software-pipelined instructions on a pipe (e.g. several MTE1
+    L1->L0 loads in flight at once) only *partially* overlap, so placing them all
+    on one tid makes the viewer collapse the visible depth (the true 6-7-deep
+    concurrency renders as ~2). Greedily interval-partition each ``(pid, pipe)``
+    group into the minimum number of disjoint sub-lanes (= peak concurrency) and
+    stamp ``_pipe`` / ``_lane`` / ``_tid`` on each instruction. Lane 0 keeps the
+    bare pipe name so non-overlapping pipes are unchanged; extra lanes become
+    ``"<pipe>#<n>"``.
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for e in insts:
+        groups.setdefault((e.get("pid", ""), e.get("tid", "")), []).append(e)
+    for (_, pipe), evs in groups.items():
+        evs.sort(key=lambda e: (e.get("ts", 0.0), e.get("dur", 0.0)))
+        lane_end: list[float] = []  # next-free ts per open sub-lane
+        for e in evs:
+            start = e.get("ts", 0.0)
+            end = start + e.get("dur", 0.0)
+            lane = next((i for i, le in enumerate(lane_end) if le <= start), None)
+            if lane is None:
+                lane = len(lane_end)
+                lane_end.append(end)
+            else:
+                lane_end[lane] = end
+            e["_pipe"] = pipe
+            e["_lane"] = lane
+            e["_tid"] = pipe if lane == 0 else f"{pipe}#{lane}"
+
+
 def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
     """Rebuild a raw simulator trace into a clean AI-core pipeline view.
 
@@ -248,24 +283,32 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
         if e.get("ph") == "X" and lane_kept(e.get("tid", "")) and e.get("name") not in _SYNC_NAMES
     ]
 
+    # Pipelined instructions on a pipe only partially overlap; split them into
+    # sub-lanes so the viewer shows the true concurrency instead of collapsing it.
+    _assign_sublanes(insts)
+
     out: list[dict] = []
 
     # Rule 3: process/thread metadata for a deterministic dataflow ordering.
     for proc_index, pid in enumerate(sorted({e.get("pid", "") for e in insts})):
         out.append({"name": "process_name", "ph": "M", "pid": pid, "args": {"name": pid}})
         out.append({"name": "process_sort_index", "ph": "M", "pid": pid, "args": {"sort_index": proc_index}})
-        lanes = sorted(
-            {e.get("tid", "") for e in insts if e.get("pid", "") == pid},
-            key=lambda tid: _PIPELINE_ORDER.get(tid, 99),
-        )
-        for tid in lanes:
+        lane_info = {e["_tid"]: (e["_pipe"], e["_lane"]) for e in insts if e.get("pid", "") == pid}
+        for tid in sorted(
+            lane_info,
+            key=lambda t: (_PIPELINE_ORDER.get(lane_info[t][0], 99), lane_info[t][1]),
+        ):
+            pipe, lane = lane_info[tid]
+            label = _LANE_LABEL.get(pipe, pipe)
+            if lane:
+                label = f"{label} #{lane}"
             out.append(
                 {
                     "name": "thread_name",
                     "ph": "M",
                     "pid": pid,
                     "tid": tid,
-                    "args": {"name": _LANE_LABEL.get(tid, tid)},
+                    "args": {"name": label},
                 }
             )
             out.append(
@@ -274,7 +317,7 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
                     "ph": "M",
                     "pid": pid,
                     "tid": tid,
-                    "args": {"sort_index": _PIPELINE_ORDER.get(tid, 99)},
+                    "args": {"sort_index": _PIPELINE_ORDER.get(pipe, 99) * 100 + lane},
                 }
             )
 
@@ -284,9 +327,9 @@ def rebuild_trace(raw: dict, keep_scalar: bool = False) -> tuple[dict, int]:
             "name": e["name"],
             "ph": "X",
             "pid": e.get("pid", ""),
-            "tid": e.get("tid", ""),
+            "tid": e["_tid"],
             "ts": e["ts"],
-            "cname": _LANE_CNAME.get(e.get("tid", ""), "grey"),
+            "cname": _LANE_CNAME.get(e["_pipe"], "grey"),
         }
         if "dur" in e:
             slice_["dur"] = e["dur"]

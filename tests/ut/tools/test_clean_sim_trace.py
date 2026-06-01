@@ -249,6 +249,41 @@ def test_rebuild_sync_arrows():
     assert len({e["id"] for e in flows}) == 1
 
 
+def _overlapping_pipe_trace() -> dict:
+    """Three partially-overlapping MTE1 loads on one core (peak concurrency 3),
+    plus a single non-overlapping MTE2 load."""
+    ev = [
+        {"name": "LOAD_2D", "ph": "X", "pid": "c0", "tid": "MTE1", "ts": t, "dur": 0.3, "args": {}}
+        for t in (1.0, 1.1, 1.2)  # each starts before the previous ends -> partial overlap
+    ]
+    ev.append({"name": "MOV", "ph": "X", "pid": "c0", "tid": "MTE2", "ts": 5.0, "dur": 0.1, "args": {}})
+    return {"traceEvents": ev}
+
+
+def test_rebuild_splits_overlapping_pipe_into_sublanes():
+    trace, _ = clean_sim_trace.rebuild_trace(_overlapping_pipe_trace())
+    x = [e for e in trace["traceEvents"] if e["ph"] == "X"]
+    # all events preserved
+    assert len(x) == 4
+    # the 3 partially-overlapping MTE1 loads land on 3 distinct sub-lanes
+    mte1_tids = {e["tid"] for e in x if str(e["tid"]).startswith("MTE1")}
+    assert mte1_tids == {"MTE1", "MTE1#1", "MTE1#2"}
+    # the non-overlapping MTE2 keeps the bare pipe name (lane 0)
+    assert [e["tid"] for e in x if e["name"] == "MOV"] == ["MTE2"]
+    # within every sub-lane, slices are disjoint (valid Chrome-trace nesting)
+    by_tid: dict[str, list[dict]] = {}
+    for e in x:
+        by_tid.setdefault(e["tid"], []).append(e)
+    for evs in by_tid.values():
+        evs.sort(key=lambda e: e["ts"])
+        assert all(evs[i]["ts"] >= evs[i - 1]["ts"] + evs[i - 1]["dur"] for i in range(1, len(evs)))
+    # dataflow order preserved (MTE2 lane first) with MTE1 sub-lanes grouped + ordered
+    sort_idx = {
+        e["tid"]: e["args"]["sort_index"] for e in trace["traceEvents"] if e["name"] == "thread_sort_index"
+    }
+    assert sort_idx["MTE2"] < sort_idx["MTE1"] < sort_idx["MTE1#1"] < sort_idx["MTE1#2"]
+
+
 def test_reshape_metrics():
     api = {
         "Cores": ["c0", "c1"],
