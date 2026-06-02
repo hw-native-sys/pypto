@@ -1367,6 +1367,116 @@ StmtPtr ApplyMemRefSharing(const StmtPtr& stmt, const std::map<VarPtr, VarPtr>& 
 }
 
 /**
+ * @brief Align loop-carried MemRefs to their initValue, top-down (fixes #1352).
+ *
+ * Greedy reuse (ApplyMemRefSharing) retypes an accumulator's *producer* and
+ * *init* AssignStmt vars onto a reused buffer, but the loop-carried iter_arg /
+ * return_var nodes never enter the lifetime/reuse maps (ComputeLifetimes
+ * deliberately excludes them — see RegisterReturnVars), so they keep their
+ * original buffer.  For *nested* pipelined accumulators this splits the chain:
+ * an inner K-loop's initValue is the *outer* loop's iter_arg, and
+ * YieldFixupMutator runs bottom-up — so it patches the inner carry against the
+ * still-stale outer iter_arg and then inserts acc->acc tile.move ops to
+ * reconcile the two buffers.  Ascend 910B has no hardware path between disjoint
+ * accumulator addresses, so ptoas rejects those moves.
+ *
+ * This mutator restores the invariant codegen already assumes — "iter_arg /
+ * return_var share initValue's buffer" — *before* YieldFixupMutator, and does
+ * it top-down: it retypes each ForStmt's iter_args/return_vars to their
+ * initValue's MemRef and seeds var_remap_ before recursing, so a nested loop
+ * observes the corrected outer iter_arg as its init.  Once producers and
+ * carries agree on one buffer, YieldFixupMutator inserts no spurious move.
+ *
+ * It only ever aligns a carry to its own init (a no-op when reuse left them
+ * consistent), so a loop that genuinely yields a different buffer than its init
+ * is untouched here and still gets its legitimate move from YieldFixupMutator.
+ */
+class AlignLoopCarriesToInitMutator : public IRMutator {
+ public:
+  StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+    if (op->iter_args_.empty()) return IRMutator::VisitStmt_(op);
+
+    std::vector<IterArgPtr> new_iter_args = op->iter_args_;
+    std::vector<VarPtr> new_return_vars = op->return_vars_;
+    bool changed = false;
+
+    for (size_t i = 0; i < op->iter_args_.size(); ++i) {
+      // Resolve initValue through var_remap_ so an enclosing loop's alignment
+      // (which rebuilt the init var this iter_arg carries) is observed here.
+      auto init_expr = VisitExpr(op->iter_args_[i]->initValue_);
+      bool init_changed = init_expr.get() != op->iter_args_[i]->initValue_.get();
+
+      // MemRef alignment only applies when the init resolves to a tile-typed
+      // var/iter_arg with a defined MemRef.  A non-tile or non-var carry (e.g.
+      // a scalar, or a non-Var init expression) has no MemRef to align to, but
+      // any remapped init_expr must still be propagated to the rebuilt IterArg
+      // below — otherwise an enclosing loop's alignment is silently dropped.
+      auto init_var = AsVarLike(init_expr);
+      auto init_tile = init_var ? GetTileTypeWithMemRef(init_var->GetType()) : nullptr;
+      MemRefPtr init_memref = nullptr;
+      std::optional<MemorySpace> init_memory = std::nullopt;
+      if (init_tile) {
+        init_memref = GetDefinedMemRef(init_tile);
+        init_memory = init_tile->GetMemorySpace();
+      }
+
+      // Re-type a carry's TileType onto init's MemRef, remapping any embedded
+      // exprs (shape/strides) through var_remap_.  Only invoked when init_tile
+      // is non-null, so init_memref is always defined at the call sites.
+      auto retype_to_init = [&](const TileTypePtr& tile) {
+        return CloneTypeWithMemRefAndRemapExprs(
+            tile, init_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, init_memory);
+      };
+
+      // Align the iter_arg's TileType to init's MemRef when both have a defined
+      // MemRef, and always rebuild when the carried init reference changed so a
+      // remapped init_expr is preserved regardless of the carry's type.
+      auto ia_tile = As<TileType>(op->iter_args_[i]->GetType());
+      bool ia_memref_differs = init_tile && ia_tile && ia_tile->memref_.has_value() &&
+                               !MemRef::SameAllocation(GetDefinedMemRef(ia_tile), init_memref);
+      if (ia_memref_differs || init_changed) {
+        TypePtr new_ia_type = ia_memref_differs ? retype_to_init(ia_tile) : op->iter_args_[i]->GetType();
+        new_iter_args[i] = std::make_shared<IterArg>(op->iter_args_[i]->name_hint_, new_ia_type, init_expr,
+                                                     op->iter_args_[i]->span_);
+        var_remap_[op->iter_args_[i].get()] = new_iter_args[i];
+        changed = true;
+      }
+
+      // Align the matching return_var's TileType to init's MemRef (only when
+      // init has a tile MemRef to align to).
+      if (init_tile && i < new_return_vars.size()) {
+        auto rv_tile = As<TileType>(op->return_vars_[i]->GetType());
+        if (rv_tile && rv_tile->memref_.has_value() &&
+            !MemRef::SameAllocation(GetDefinedMemRef(rv_tile), init_memref)) {
+          new_return_vars[i] = std::make_shared<Var>(op->return_vars_[i]->name_hint_, retype_to_init(rv_tile),
+                                                     op->return_vars_[i]->span_);
+          var_remap_[op->return_vars_[i].get()] = new_return_vars[i];
+          changed = true;
+        }
+      }
+    }
+
+    // Recurse into the body AFTER seeding var_remap_ so nested loops observe
+    // the corrected outer iter_args as their init.
+    auto new_body = VisitStmt(op->body_);
+
+    // iter_arg references are confined to the loop body; drop them so a sibling
+    // loop cannot pick up a stale remap.  return_var remaps must persist for
+    // post-loop uses, so they are intentionally left in place.
+    for (const auto& old_iter_arg : op->iter_args_) {
+      var_remap_.erase(old_iter_arg.get());
+    }
+
+    if (!changed && new_body == op->body_) return op;
+    auto new_for = MutableCopy(op);
+    new_for->iter_args_ = std::move(new_iter_args);
+    new_for->return_vars_ = std::move(new_return_vars);
+    new_for->body_ = new_body;
+    return new_for;
+  }
+};
+
+/**
  * @brief Fix yield/return_var MemRef mismatch after MemoryReuse.
  *
  * Handles both ForStmt and IfStmt:
@@ -1710,6 +1820,14 @@ FunctionPtr TransformMemoryReuse(const FunctionPtr& func) {
   // Step 3: Apply MemRef sharing (skip if no reuse candidates)
   if (!reuse_map.empty()) {
     new_body = ApplyMemRefSharing(new_body, reuse_map, analysis_result.var_sharing_groups);
+
+    // Step 3.5: Re-align loop-carried iter_arg/return_var MemRefs to their
+    // (now-reused) initValue, top-down.  Reuse retypes producer/init AssignStmt
+    // vars but leaves loop-carry nodes stale; for nested pipelined accumulators
+    // that split chain would otherwise force YieldFixupMutator to emit invalid
+    // acc->acc tile.move ops (#1352).
+    AlignLoopCarriesToInitMutator align;
+    new_body = align.VisitStmt(new_body);
   }
 
   // Step 4: Fix ForStmt/IfStmt yield/return_var MemRef mismatches

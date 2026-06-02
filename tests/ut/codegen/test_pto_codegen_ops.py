@@ -1663,6 +1663,13 @@ class TestTileMoveAccNoopElision:
     """
 
     def _generate_mlir(self, program_cls) -> str:
+        """Generate MLIR for all InCore functions, joined by blank lines.
+
+        Programs that lower to split AIC/AIV kernels (e.g. ``split=UP_DOWN``)
+        produce multiple InCore functions; the bad acc→acc ``pto.tmov`` may
+        appear on the AIC side only.  Codegen each InCore function and
+        concatenate their MLIR so regression assertions cover every variant.
+        """
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)
 
@@ -1671,9 +1678,11 @@ class TestTileMoveAccNoopElision:
         codegen_instance = codegen.PTOCodegen()
         funcs = list(optimized.functions.values())
         assert funcs, "Program has no functions"
-        target = next((f for f in funcs if ir.is_incore_type(f.func_type)), funcs[0])
-        single = ir.Program([target], target.name, optimized.span)
-        return codegen_instance.generate(single)
+        incore = [f for f in funcs if ir.is_incore_type(f.func_type)]
+        targets = incore if incore else [funcs[0]]
+        return "\n\n".join(
+            codegen_instance.generate(ir.Program([f], f.name, optimized.span)) for f in targets
+        )
 
     @staticmethod
     def _has_acc_to_acc_tmov(mlir: str) -> bool:
@@ -1729,6 +1738,103 @@ class TestTileMoveAccNoopElision:
         mlir = self._generate_mlir(Prog)
         assert not self._has_acc_to_acc_tmov(mlir), (
             f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1310):\n{mlir}"
+        )
+
+    def test_pipeline_matmul_acc_no_acc_to_acc_tmov(self):
+        """Dual-accumulator pl.pipeline(stage=2) matmul_acc must not produce
+        pto.tmov acc→acc (#1352).
+
+        Reproduces the Qwen3-32B gate_up_silu shape that triggered the bug: two
+        independent accumulators (gate, up) built with prolog-then-pipeline
+        matmul_acc under ``pl.at(CORE_GROUP, split=UP_DOWN)``.
+
+        Why this shape triggers it:
+        - Mat-resident inputs + K_CHUNK=128/N=256 make AutoTileMatmulL0 insert an
+          inner K-loop (K_L0=64) with a fresh ``_l0_c`` accumulator IterArg.
+        - pl.pipeline(stage=2) replicates the loop body, nesting that IterArg.
+        - split=UP_DOWN forces the AIC/AIV split, so MemoryReuse runs on the AIC
+          function where gate is consumed before up, so up *reuses* gate's freed
+          Acc buffer.
+
+        The bug (before the Path 2 fix): MemoryReuse's greedy pass retyped up's
+        producer/init AssignStmt vars onto gate's buffer but left up's
+        loop-carried iter_arg/return_var on its own buffer, splitting the chain.
+        YieldFixupMutator (bottom-up) then bridged the two Acc buffers with
+        ``tile.move`` ops that lowered to acc→acc ``pto.tmov`` — which ptoas
+        rejects on Ascend 910B.
+
+        The fix (AlignLoopCarriesToInitMutator) re-aligns loop-carried MemRefs to
+        their reused init top-down, so the whole up chain lands on the single
+        reused Acc buffer and no acc→acc move is ever inserted.  This test
+        asserts the generated MLIR (across all split InCore functions) carries no
+        acc→acc ``pto.tmov``; it fails without the fix.
+        """
+        BATCH, K_CHUNK, N, NUM_CHUNKS = 16, 128, 256, 4
+
+        @pl.program
+        class PipelineGateUpProg:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[BATCH, K_CHUNK * NUM_CHUNKS], pl.BF16],
+                wg: pl.Tensor[[K_CHUNK * NUM_CHUNKS, N], pl.BF16],
+                wu: pl.Tensor[[K_CHUNK * NUM_CHUNKS, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[BATCH, N], pl.BF16]],
+            ) -> pl.Tensor[[BATCH, N], pl.BF16]:
+                out_tile = pl.create_tensor([BATCH, N], dtype=pl.BF16)
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+                    name_hint="gate_up_pipeline_acc",
+                ):
+                    x0 = pl.slice(x, [BATCH, K_CHUNK], [0, 0])
+                    x1 = pl.slice(x, [BATCH, K_CHUNK], [0, K_CHUNK])
+                    wg0 = pl.slice(wg, [K_CHUNK, N], [0, 0])
+                    wg1 = pl.slice(wg, [K_CHUNK, N], [K_CHUNK, 0])
+                    wu0 = pl.slice(wu, [K_CHUNK, N], [0, 0])
+                    wu1 = pl.slice(wu, [K_CHUNK, N], [K_CHUNK, 0])
+                    gate_acc = pl.matmul(x0, wg0, out_dtype=pl.FP32)
+                    gate_acc = pl.matmul_acc(gate_acc, x1, wg1)
+                    for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
+                        k0 = kb * K_CHUNK
+                        gate_acc = pl.matmul_acc(
+                            gate_acc,
+                            pl.slice(x, [BATCH, K_CHUNK], [0, k0]),
+                            pl.slice(wg, [K_CHUNK, N], [k0, 0]),
+                        )
+                    # Consume gate (to Vec) before the up pipeline so up reuses
+                    # gate's freed Acc buffer — the condition that exposed #1352.
+                    gate_fp32 = pl.add(gate_acc, 0.0)
+                    up_acc = pl.matmul(x0, wu0, out_dtype=pl.FP32)
+                    up_acc = pl.matmul_acc(up_acc, x1, wu1)
+                    for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
+                        k0 = kb * K_CHUNK
+                        up_acc = pl.matmul_acc(
+                            up_acc,
+                            pl.slice(x, [BATCH, K_CHUNK], [0, k0]),
+                            pl.slice(wu, [K_CHUNK, N], [k0, 0]),
+                        )
+                    combined = pl.mul(gate_fp32, up_acc)
+                    out_tile = pl.assemble(out_tile, pl.cast(combined, pl.BF16), [0, 0])
+                out = pl.assemble(out, out_tile, [0, 0])
+                return out
+
+        # Guard: assert split=UP_DOWN actually produced split InCore kernels.
+        # The acc→acc regression only exists on the AIC side after the AIC/AIV
+        # split, so without this guard a split-lowering regression would make
+        # the test pass vacuously and stop covering #1352.
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(PipelineGateUpProg)
+        incore = [f for f in optimized.functions.values() if ir.is_incore_type(f.func_type)]
+        assert len(incore) >= 2, (
+            f"Expected split=UP_DOWN to produce split InCore variants for #1352, "
+            f"got {len(incore)} InCore function(s)"
+        )
+
+        mlir = self._generate_mlir(PipelineGateUpProg)
+        assert not self._has_acc_to_acc_tmov(mlir), (
+            f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1352):\n{mlir}"
         )
 
 
