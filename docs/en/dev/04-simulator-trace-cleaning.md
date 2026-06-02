@@ -1,14 +1,27 @@
 # Simulator Trace Cleaning
 
-The operator simulator emits, per kernel run, an `OPPROF_*/simulator/`
-directory containing `trace.json` (a Chrome Trace Event JSON) and
-`visualize_data.bin` (a binary container for MindStudio Insight). Opening
-`trace.json` directly in the Perfetto UI is hard to read: `SET_FLAG` /
-`WAIT_FLAG` synchronization slices and scalar address-arithmetic instructions
-bury the actual AI-core pipeline.
+`clean_sim_trace` converts the MindStudio Insight binary dump
+(`visualize_data.bin`) emitted by the operator simulator into a de-cluttered,
+Perfetto-viewable AI-core pipeline trace (Chrome Trace Event JSON).
 
-`clean_sim_trace` rebuilds the dump into a de-cluttered, Chrome-viewable
-pipeline trace.
+The simulator writes, per kernel run, an `OPPROF_*/simulator/` directory with
+two profiling artifacts:
+
+- `trace.json` — the **official** simulator-generated Perfetto/Chrome trace.
+- `visualize_data.bin` — the binary container consumed by MindStudio Insight.
+
+**The official `trace.json` is lossy — it carries strictly less information
+than `visualize_data.bin`.** The binary container holds the full set of
+MindStudio Insight blocks: the trace events *plus* per-instruction metrics
+(`API_INSTR`), source mapping, and other detail blocks. `trace.json` exports
+only the trace events. So `clean_sim_trace` reads the richer binary file
+directly, recovering the per-instruction metrics — emitted as an
+`instr_metrics.json` sidecar — that the official Perfetto export drops.
+
+It also de-clutters the trace itself: opening `trace.json` in the Perfetto UI
+is hard to read because `SET_FLAG` / `WAIT_FLAG` synchronization slices and
+scalar address-arithmetic instructions bury the actual AI-core pipeline.
+`clean_sim_trace` rebuilds it into a clean pipeline view (see *Rebuild rules*).
 
 ## Producing the dump
 

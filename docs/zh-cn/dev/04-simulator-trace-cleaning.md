@@ -1,11 +1,23 @@
 # 仿真器 Trace 清洗
 
-算子仿真器每次 kernel 运行都会生成一个 `OPPROF_*/simulator/` 目录，其中包含
-`trace.json`（Chrome Trace Event JSON）和 `visualize_data.bin`（供 MindStudio
-Insight 使用的二进制容器）。直接在 Perfetto UI 中打开 `trace.json` 很难阅读：
-`SET_FLAG` / `WAIT_FLAG` 同步切片和标量地址运算指令淹没了真正的 AI Core 流水线。
+`clean_sim_trace` 将算子仿真器生成的 MindStudio Insight 二进制文件
+（`visualize_data.bin`）转换为去噪的、可在 Perfetto 中查看的 AI Core 流水线 trace
+（Chrome Trace Event JSON）。
 
-`clean_sim_trace` 将该 dump 重建为一个去噪的、可在 Chrome 中查看的流水线 trace。
+仿真器每次 kernel 运行都会生成一个 `OPPROF_*/simulator/` 目录，其中包含两个 profiling 产物：
+
+- `trace.json` —— 仿真器**官方**生成的 Perfetto/Chrome trace。
+- `visualize_data.bin` —— 供 MindStudio Insight 使用的二进制容器。
+
+**官方的 `trace.json` 是有损的（lossy）—— 它携带的信息严格少于
+`visualize_data.bin`。** 该二进制容器保存了完整的 MindStudio Insight 数据块：除了
+trace 事件，还包括逐指令指标（`API_INSTR`）、源码映射以及其它细节块；而 `trace.json`
+只导出 trace 事件。因此 `clean_sim_trace` 直接读取信息更丰富的二进制文件，恢复出官方
+Perfetto 导出所丢弃的逐指令指标（写入 `instr_metrics.json` 旁车文件）。
+
+它同时也对 trace 本身去噪：直接在 Perfetto UI 中打开 `trace.json` 很难阅读，因为
+`SET_FLAG` / `WAIT_FLAG` 同步切片和标量地址运算指令淹没了真正的 AI Core 流水线。
+`clean_sim_trace` 会将其重建为一个干净的流水线视图（见*重建规则*）。
 
 ## 生成 dump
 
