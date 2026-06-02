@@ -9,10 +9,12 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-/// CanonicalizeMatSlice
-/// --------------------
-/// Lowers Mat-resident ``tile.slice`` into the canonical ``tile.extract``
-/// form so that Mat->Left/Right movement is unified on ``pto.textract``.
+/// CanonicalizeTileSlice
+/// ---------------------
+/// Lowers a ``tile.slice`` into the canonical ``tile.extract`` form so that
+/// movement is unified on ``pto.textract`` — both Mat-resident slices (folded
+/// into matmul / ``tile.extract`` consumers) and dynamic-offset Vec slices
+/// (materialized for ``tile.col_expand_mul`` / ``tile.col_expand_add``, #1640).
 ///
 /// A ``tile.slice`` whose result tile is ``Mem.Mat`` is a legal high-level
 /// "sub-window of a Mat tile" construct — ``FlattenTileNdTo2D`` emits one per
@@ -36,6 +38,21 @@
 ///     ``tile.extract(src, or, oc, shape, target_memory=Left|Right)`` (Left for
 ///     the lhs operand, Right for the rhs).  This is the same Mat->Left/Right
 ///     extract that ``AutoTileMatmulL0`` emits for tiled matmuls.
+///
+/// It also canonicalizes a **dynamic-offset Vec** ``tile.slice`` consumed by
+/// ``tile.col_expand_mul`` / ``tile.col_expand_add`` (issue #1640).
+/// ``pto.tcolexpandmul`` / ``pto.tcolexpandadd`` cannot read a ``pto.subview``
+/// operand, so codegen lazily materializes the slice via ``pto.textract`` into
+/// the slice's own result buffer.  Because ``tile.slice`` inherits its source's
+/// memory, and ``AllocateMemoryAddr`` cannot encode a dynamic offset as a
+/// ``ConstInt`` address, that buffer falls back to the bare source base — the
+/// materialization then writes the extracted row into the source's row 0.
+/// Replacing the operand with a fresh
+/// ``tile.extract(src, or, oc, shape, target_memory=Vec)`` — whose result gets
+/// its own non-inherited allocation — removes the aliasing.  Only **dynamic**
+/// offsets are the hazard: ``AllocateMemoryAddr`` folds a const offset into
+/// ``base + off``, so the lazy ``pto.textract`` is an identity copy and a
+/// static-offset slice is left untouched.
 ///
 /// After all consumers are rewritten the now-dead ``tile.slice`` is dropped.
 /// Chained slices (a slice of a slice) are peeled, accumulating the offset.
@@ -77,7 +94,7 @@ namespace pass {
 
 namespace {
 
-constexpr const char* kPassName = "CanonicalizeMatSlice";
+constexpr const char* kPassName = "CanonicalizeTileSlice";
 
 /// Build a canonical index add, folding ConstInt cases so a zero offset leaves
 /// the original index untouched (avoids spurious ``ko + 0`` forms).
@@ -100,67 +117,77 @@ bool IsMatTile(const TypePtr& type) {
   return mem.has_value() && *mem == MemorySpace::Mat;
 }
 
-/// A Mat-resident `tile.slice` peeled to its (non-slice) base tile plus the
-/// accumulated row/column offset.
-struct MatSliceInfo {
+/// A canonical `tile.slice` peeled to its (non-slice) base tile plus the
+/// accumulated row/column offset.  Covers both Mem.Mat slices (folded into
+/// matmul / `tile.extract` consumers) and Vec slices (materialized for a
+/// `tile.col_expand_mul` consumer, see #1640).
+struct SliceInfo {
   VarPtr base;      ///< Tile the consumer's `tile.extract` should read from.
   ExprPtr off_row;  ///< Row offset to fold into the consumer index.
   ExprPtr off_col;  ///< Column offset to fold into the consumer index.
+  std::optional<MemorySpace>
+      memory_space;  ///< Result tile's space (nullopt until InferTileMemorySpace runs).
+  bool is_mat;       ///< memory_space == Mem.Mat (drives the matmul/extract rewrite).
 };
 
-/// If `assign` is `var = tile.slice(src, shape, [off_row, off_col])` with a
-/// Mat-resident result, return the peeled base/offset.  `known` holds slices
-/// collected so far; a slice whose source is itself a Mat slice is peeled
-/// through it (offsets summed), so `base` is always a non-slice tile.
-std::optional<MatSliceInfo> ParseMatSlice(const AssignStmtPtr& assign,
-                                          const std::unordered_map<const Var*, MatSliceInfo>& known) {
+/// If `assign` is `var = tile.slice(src, shape, [off_row, off_col])`, return the
+/// peeled base/offset.  `known` holds slices collected so far; a slice whose
+/// source is itself a recorded slice is peeled through it (offsets summed), so
+/// `base` is always a non-slice tile.
+std::optional<SliceInfo> ParseCanonicalSlice(const AssignStmtPtr& assign,
+                                             const std::unordered_map<const Var*, SliceInfo>& known) {
   if (!assign || !assign->var_) return std::nullopt;
   auto call = As<Call>(assign->value_);
   if (!call || !call->op_ || call->op_->name_ != "tile.slice") return std::nullopt;
   // Only canonical 3-arg slices (input, shape, offset).  A slice carrying
   // valid_shape / drop_dims is not a plain window and is left untouched.
   if (call->args_.size() != 3) return std::nullopt;
-  if (!IsMatTile(assign->var_->GetType())) return std::nullopt;
 
   auto src = AsVarLike(call->args_[0]);
   if (!src) return std::nullopt;
   auto offset = As<MakeTuple>(call->args_[2]);
   if (!offset || offset->elements_.size() != 2) return std::nullopt;
 
+  // Record the slice result's actual memory space.  This pass runs before
+  // InferTileMemorySpace, so it may be unset (nullopt); that is treated as
+  // "Vec-or-unassigned" by the col-expand rewrite (see TryRewriteColExpand).
+  auto slice_tile = As<TileType>(assign->var_->GetType());
+  std::optional<MemorySpace> memory_space = slice_tile ? slice_tile->GetMemorySpace() : std::nullopt;
+  bool is_mat = IsMatTile(assign->var_->GetType());
   ExprPtr off_row = offset->elements_[0];
   ExprPtr off_col = offset->elements_[1];
   VarPtr base = src;
-  // Peel a chained Mat slice: src itself may be a slice we already recorded.
+  // Peel a chained slice: src itself may be a slice we already recorded.
   auto it = known.find(src.get());
   if (it != known.end()) {
     base = it->second.base;
     off_row = MakeCanonicalIndexAdd(it->second.off_row, off_row, assign->span_);
     off_col = MakeCanonicalIndexAdd(it->second.off_col, off_col, assign->span_);
   }
-  return MatSliceInfo{base, off_row, off_col};
+  return SliceInfo{base, off_row, off_col, memory_space, is_mat};
 }
 
-/// Phase 1 — collect every Mat-resident `tile.slice` definition in the
-/// function, keyed by its result Var.  AssignStmts are visited in program
-/// order, so a chained slice's source is always already recorded.
-class MatSliceCollector : public IRVisitor {
+/// Phase 1 — collect every canonical `tile.slice` definition in the function,
+/// keyed by its result Var.  AssignStmts are visited in program order, so a
+/// chained slice's source is always already recorded.
+class SliceCollector : public IRVisitor {
  public:
-  std::unordered_map<const Var*, MatSliceInfo> slices;
+  std::unordered_map<const Var*, SliceInfo> slices;
 
  protected:
   void VisitStmt_(const AssignStmtPtr& op) override {
-    if (auto info = ParseMatSlice(op, slices)) {
+    if (auto info = ParseCanonicalSlice(op, slices)) {
       slices.emplace(op->var_.get(), *info);
     }
   }
 };
 
-/// Phase 2 — rewrite `tile.extract` / matmul consumers so they no longer
-/// reference any Mat-resident `tile.slice`.
+/// Phase 2 — rewrite `tile.extract` / matmul (Mat slices) and
+/// `tile.col_expand_mul` / `tile.col_expand_add` (Vec slices) consumers so they
+/// no longer reference a canonicalizable `tile.slice`.
 class CanonicalizeMutator : public IRMutator {
  public:
-  explicit CanonicalizeMutator(const std::unordered_map<const Var*, MatSliceInfo>& slices)
-      : slices_(slices) {}
+  explicit CanonicalizeMutator(const std::unordered_map<const Var*, SliceInfo>& slices) : slices_(slices) {}
 
  protected:
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override {
@@ -172,6 +199,11 @@ class CanonicalizeMutator : public IRMutator {
       // handled here at SeqStmts level rather than in VisitStmt_(AssignStmt).
       if (auto assign = As<AssignStmt>(child)) {
         if (auto rewrite = TryRewriteMatmul(assign)) {
+          for (auto& s : *rewrite) out.push_back(std::move(s));
+          changed = true;
+          continue;
+        }
+        if (auto rewrite = TryRewriteColExpand(assign)) {
           for (auto& s : *rewrite) out.push_back(std::move(s));
           changed = true;
           continue;
@@ -196,7 +228,7 @@ class CanonicalizeMutator : public IRMutator {
     auto src = AsVarLike(call->args_[0]);
     if (!src) return base;
     auto it = slices_.find(src.get());
-    if (it == slices_.end()) return base;
+    if (it == slices_.end() || !it->second.is_mat) return base;
 
     // extract(slice(base, _, [or, oc]), ir, ic, shape)
     //   -> extract(base, ir + or, ic + oc, shape)
@@ -230,11 +262,11 @@ class CanonicalizeMutator : public IRMutator {
   /// slice's result tile shape is forwarded as the extract shape — passing the
   /// existing shape expressions through (rather than extracting int64 values
   /// and rebuilding ConstInts) keeps the path safe under future symbolic dims.
-  AssignStmtPtr BuildOperandExtract(const VarPtr& slice_var, const MatSliceInfo& info, MemorySpace target,
+  AssignStmtPtr BuildOperandExtract(const VarPtr& slice_var, const SliceInfo& info, MemorySpace target,
                                     const Span& span) {
     auto slice_tile = As<TileType>(slice_var->GetType());
     INTERNAL_CHECK(slice_tile && slice_tile->shape_.size() == 2)
-        << "CanonicalizeMatSlice: matmul-operand slice must have a 2-D TileType result";
+        << "CanonicalizeTileSlice: matmul-operand slice must have a 2-D TileType result";
     auto shape_tuple = std::make_shared<MakeTuple>(slice_tile->shape_, span);
     std::vector<ExprPtr> args = {info.base, info.off_row, info.off_col, shape_tuple};
     std::vector<std::pair<std::string, std::any>> kwargs = {{"target_memory", target}};
@@ -262,7 +294,7 @@ class CanonicalizeMutator : public IRMutator {
       auto operand = AsVarLike(call->args_[arg_idx]);
       if (!operand) return;
       auto it = slices_.find(operand.get());
-      if (it == slices_.end()) return;
+      if (it == slices_.end() || !it->second.is_mat) return;
       auto extract = BuildOperandExtract(operand, it->second, target, sp);
       extracts.push_back(extract);
       new_args[arg_idx] = extract->var_;
@@ -281,7 +313,81 @@ class CanonicalizeMutator : public IRMutator {
     return out;
   }
 
-  const std::unordered_map<const Var*, MatSliceInfo>& slices_;
+  /// True for the col-expand ops whose `pto.*` lowering materializes a subview
+  /// operand via the lazy `pto.textract` path (pto_ops_common.cpp): both
+  /// `tile.col_expand_mul` and `tile.col_expand_add` (#1640).
+  static bool IsColExpandMaterializingOp(const std::string& name) {
+    return name == "tile.col_expand_mul" || name == "tile.col_expand_add";
+  }
+
+  /// True when a slice offset is dynamic (either component is not a `ConstInt`).
+  /// Only a dynamic offset is the #1640 hazard: `AllocateMemoryAddr` folds a
+  /// const offset into `base + off`, so the lazy `pto.textract` materializes the
+  /// row into its own (offset-correct) address — an identity copy that leaves
+  /// the source intact.  A dynamic offset cannot be encoded as a `ConstInt`
+  /// address, so the slice buffer falls back to the bare source base and the
+  /// materialization writes the extracted row into the source's row 0.
+  static bool IsDynamicSliceOffset(const SliceInfo& info) {
+    return !As<ConstInt>(info.off_row) || !As<ConstInt>(info.off_col);
+  }
+
+  /// If `assign` is `tile.col_expand_mul(a, b)` / `tile.col_expand_add(a, b)`
+  /// with a dynamic-offset Vec `tile.slice` operand, return a fresh
+  /// `tile.extract(src, off_row, off_col, shape, target_memory=Vec)` for each
+  /// sliced operand followed by the rebuilt col-expand op (issue #1640).
+  ///
+  /// Codegen materializes a subview operand of `pto.tcolexpandmul` /
+  /// `pto.tcolexpandadd` via `pto.textract` into the slice's own result buffer
+  /// (pto_ops_common.cpp).  For a dynamic-offset slice of a local tile that
+  /// buffer inherits — and aliases — the bare source allocation base, so the
+  /// materialization corrupts the source.  Materializing through `tile.extract`
+  /// (which gets its own fresh non-inherited allocation) instead removes the
+  /// aliasing.  Static-offset slices are skipped (`AllocateMemoryAddr` folds the
+  /// offset into `base + off`, so their lazy textract is a safe identity copy).
+  /// Returns nullopt when no operand is a rewritable dynamic Vec slice.
+  std::optional<std::vector<StmtPtr>> TryRewriteColExpand(const AssignStmtPtr& assign) {
+    auto call = As<Call>(assign->value_);
+    if (!call || !call->op_ || !IsColExpandMaterializingOp(call->op_->name_) || call->args_.size() != 2) {
+      return std::nullopt;
+    }
+
+    const Span& sp = call->span_;
+    std::vector<StmtPtr> extracts;
+    std::vector<ExprPtr> new_args = call->args_;
+    bool rewrote = false;
+
+    // Both operands are materialized by the codegen lazy path, so both can be
+    // a hazardous Vec slice.
+    for (size_t i = 0; i < call->args_.size(); ++i) {
+      auto operand = AsVarLike(call->args_[i]);
+      if (!operand) continue;
+      auto it = slices_.find(operand.get());
+      if (it == slices_.end()) continue;
+      // Only Vec-or-unassigned slices: an explicit non-Vec slice (Left/Right/Acc)
+      // feeding a col-expand op keeps the later InferTileMemorySpace implicit
+      // move(..., Vec) path; rewriting it here would synthesize a tile.extract
+      // from the wrong source memory class.  (memory_space is unset before that
+      // pass — treat nullopt as Vec.)
+      const auto& ms = it->second.memory_space;
+      if (ms.has_value() && *ms != MemorySpace::Vec) continue;
+      if (!IsDynamicSliceOffset(it->second)) continue;  // static offset → identity textract, safe
+      auto extract = BuildOperandExtract(operand, it->second, MemorySpace::Vec, sp);
+      extracts.push_back(extract);
+      new_args[i] = extract->var_;
+      rewrote = true;
+    }
+    if (!rewrote) return std::nullopt;
+
+    auto& reg = OpRegistry::GetInstance();
+    auto new_call = reg.Create(call->op_->name_, new_args, call->kwargs_, sp);
+    auto new_assign = MutableCopy(assign);
+    new_assign->value_ = new_call;
+    std::vector<StmtPtr> out = std::move(extracts);
+    out.push_back(new_assign);
+    return out;
+  }
+
+  const std::unordered_map<const Var*, SliceInfo>& slices_;
 };
 
 /// Phase 3a — collect every Var *used* (referenced on a statement's RHS).  An
@@ -328,25 +434,26 @@ class DropDeadSliceMutator : public IRMutator {
 
 }  // namespace
 
-Pass CanonicalizeMatSlice() {
+Pass CanonicalizeTileSlice() {
   auto pass_func = [](const FunctionPtr& func) -> FunctionPtr {
     if (!func || !func->body_) return func;
     if (!IsInCoreType(func->func_type_)) return func;
 
-    // Phase 1 — index every Mat-resident tile.slice.
-    MatSliceCollector collector;
+    // Phase 1 — index every canonical tile.slice.
+    SliceCollector collector;
     collector.VisitStmt(func->body_);
     if (collector.slices.empty()) return func;
 
-    // Phase 2 — fold each slice into its tile.extract / matmul consumers.
+    // Phase 2 — fold each slice into its tile.extract / matmul / col_expand_mul
+    // consumers.
     CanonicalizeMutator mutator(collector.slices);
     auto new_body = mutator.VisitStmt(func->body_);
 
-    // Phase 3 — drop the Mat-slice defs that no longer have any use.  A chained
+    // Phase 3 — drop the slice defs that no longer have any use.  A chained
     // slice (a slice of a slice) only becomes dead once the slice that consumes
-    // it is dropped, so iterate to a fixpoint — bounded by the Mat-slice count,
+    // it is dropped, so iterate to a fixpoint — bounded by the slice count,
     // since every non-terminating iteration drops at least one statement.  A
-    // Mat slice still used at the end had a consumer this pass does not
+    // slice still used at the end had a consumer this pass does not
     // canonicalize; it is left intact (no regression versus the pre-pass IR).
     for (size_t round = 0; round <= collector.slices.size(); ++round) {
       VarUseCollector uses;
@@ -367,7 +474,7 @@ Pass CanonicalizeMatSlice() {
     new_func->body_ = new_body;
     return new_func;
   };
-  return CreateFunctionPass(pass_func, kPassName, kCanonicalizeMatSliceProperties);
+  return CreateFunctionPass(pass_func, kPassName, kCanonicalizeTileSliceProperties);
 }
 
 }  // namespace pass

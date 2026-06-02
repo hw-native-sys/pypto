@@ -445,7 +445,7 @@ def auto_tile_matmul_l0() -> Pass:
     ``K % k != 0`` cases emit a perf hint and skip.
     """
 
-def canonicalize_mat_slice() -> Pass:
+def canonicalize_tile_slice() -> Pass:
     """Create a pass that lowers Mat-resident ``tile.slice`` into ``tile.extract``.
 
     A ``tile.slice`` whose result tile is ``Mem.Mat`` (e.g. a batch-page slice
@@ -750,7 +750,7 @@ __all__ = [
     "optimize_orch_tensors",
     "flatten_tile_nd_to_2d",
     "auto_tile_matmul_l0",
-    "canonicalize_mat_slice",
+    "canonicalize_tile_slice",
     "infer_tile_memory_space",
     "lower_transpose_load_param_layout",
     "materialize_tensor_strides",

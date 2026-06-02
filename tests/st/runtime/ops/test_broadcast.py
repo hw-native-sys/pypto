@@ -204,6 +204,80 @@ class TestTensorExpandClone(PTOTestCase):
             raise ValueError(f"Unsupported broadcast_dim: {self.broadcast_dim}")
 
 
+class TestColExpandMulSliceSourceUnchanged(PTOTestCase):
+    """Regression for #1640: a dynamic-offset ``tile.slice`` of a local tile
+    feeding ``tile.col_expand_mul`` must not mutate the source tile.
+
+    The kernel slices ``local`` row-by-row with the dynamic loop offset ``r``,
+    multiplies each row by ``gamma`` via ``col_expand_mul``, then echoes
+    ``local`` back out.  With the pre-fix lowering, ``pto.tcolexpandmul``'s lazy
+    ``pto.textract`` materialized the dynamic-offset slice into its own
+    source-aliasing result buffer (address fell back to the source base),
+    overwriting ``local`` row 0 with the last-materialized row — so ``out_echo``
+    diverged from ``scores``.  Materializing through a fresh ``tile.extract``
+    (CanonicalizeTileSlice) leaves ``out_echo`` bit-identical to ``scores``.
+    """
+
+    __test__ = False
+
+    def __init__(self, m: int = 16, n: int = 256, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+        self.M = m
+        self.N = n
+
+    def get_name(self) -> str:
+        return f"col_expand_mul_slice_src_unchanged_{self.M}x{self.N}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("scores", [self.M, self.N], DataType.FP32, init_value=torch.randn),
+            TensorSpec("gamma", [1, self.N], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out_scaled", [self.M, self.N], DataType.FP32, is_output=True),
+            TensorSpec("out_echo", [self.M, self.N], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        M, N = self.M, self.N
+
+        @pl.program
+        class ColExpandMulSliceProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def col_expand_mul_slice_kernel(
+                self,
+                scores: pl.Tensor[[M, N], pl.FP32],
+                gamma: pl.Tensor[[1, N], pl.FP32],
+                out_scaled: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+                out_echo: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
+                local: pl.Tile[[M, N], pl.FP32] = pl.load(scores, [0, 0], [M, N])
+                gamma_t: pl.Tile[[1, N], pl.FP32] = pl.load(gamma, [0, 0], [1, N])
+                acc: pl.Tile[[M, N], pl.FP32] = pl.tile.create([M, N], dtype=pl.FP32)
+                for r in pl.range(M):
+                    row: pl.Tile[[1, N], pl.FP32] = pl.tile.slice(local, [1, N], [r, 0])
+                    scaled: pl.Tile[[1, N], pl.FP32] = pl.tile.col_expand_mul(row, gamma_t)
+                    acc = pl.tile.assemble(acc, scaled, [r, 0])
+                out_scaled = pl.store(acc, [0, 0], out_scaled)
+                out_echo = pl.store(local, [0, 0], out_echo)  # re-read local: exposes corruption
+                return out_scaled, out_echo
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                scores: pl.Tensor[[M, N], pl.FP32],
+                gamma: pl.Tensor[[1, N], pl.FP32],
+                out_scaled: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+                out_echo: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> tuple[pl.Tensor[[M, N], pl.FP32], pl.Tensor[[M, N], pl.FP32]]:
+                out_scaled, out_echo = self.col_expand_mul_slice_kernel(scores, gamma, out_scaled, out_echo)
+                return out_scaled, out_echo
+
+        return ColExpandMulSliceProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out_scaled"][:] = tensors["scores"] * tensors["gamma"]
+        tensors["out_echo"][:] = tensors["scores"]
+
+
 class TestBroadcastOperations:
     """Test suite for tile broadcast operations."""
 
@@ -226,6 +300,13 @@ class TestBroadcastOperations:
     def test_tensor_expand_clone(self, test_runner, platform, broadcast_dim):
         """Test tensor.expand_clone across platforms."""
         result = test_runner.run(TestTensorExpandClone(broadcast_dim=broadcast_dim, platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_col_expand_mul_slice_source_unchanged(self, test_runner, platform):
+        """Regression for #1640: col_expand_mul on a dynamic-offset slice of a
+        local tile must leave the source tile unchanged."""
+        result = test_runner.run(TestColExpandMulSliceSourceUnchanged(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 

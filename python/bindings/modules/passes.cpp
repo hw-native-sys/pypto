@@ -428,7 +428,7 @@ void BindPass(nb::module_& m) {
              "pipeline_stages=2 so LowerPipelineLoops produces a 2-deep ping-pong. Already-L0-\n"
              "sized matmuls are left untouched. tile.matmul_bias is not yet supported. Only K\n"
              "tiling; M/N tiling and K%k!=0 cases emit a PerfHint and skip.");
-  passes.def("canonicalize_mat_slice", &pass::CanonicalizeMatSlice,
+  passes.def("canonicalize_tile_slice", &pass::CanonicalizeTileSlice,
              "Create a pass that lowers Mat-resident tile.slice into tile.extract\n\n"
              "A tile.slice whose result tile is Mem.Mat (e.g. a batch-page slice emitted by\n"
              "FlattenTileNdTo2D when unrolling tile.batch_matmul) has no standalone hardware\n"

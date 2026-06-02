@@ -29,7 +29,7 @@ Developers read pass docs sequentially to understand the compilation pipeline. I
 | 14 | `14-lower_composite_ops.md` | 14th pass (first tile_pto pass) |
 | 15 | `15-flatten_tile_nd_to_2d.md` | 15th pass |
 | 16 | `16-auto_tile_matmul_l0.md` | 16th pass |
-| 17 | `17-canonicalize_mat_slice.md` | Runs immediately after `AutoTileMatmulL0` (lowers Mat `tile.slice` → `tile.extract`) |
+| 17 | `17-canonicalize_tile_slice.md` | Runs immediately after `AutoTileMatmulL0` (lowers Mat/Vec `tile.slice` → `tile.extract`) |
 | 18 | `18-infer_tile_memory_space.md` | 18th pass |
 | 19 | `19-lower_transpose_load_param_layout.md` | 19th pass (RFC #1300 P6 — replaces ResolveTransposeLayout) |
 | 20 | `20-resolve_backend_op_layouts.md` | 20th pass |

@@ -148,7 +148,7 @@ inline const PassProperties kAutoTileMatmulL0Properties{
 // their tile.extract / tile.matmul consumers, so it requires and produces the
 // same property set as AutoTileMatmulL0.
 
-inline const PassProperties kCanonicalizeMatSliceProperties{
+inline const PassProperties kCanonicalizeTileSliceProperties{
     .required = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,
                  IRProperty::TileOps2D, IRProperty::NormalizedStmtStructure},
     .produced = {IRProperty::SSAForm, IRProperty::SplitIncoreOrch, IRProperty::IncoreTileOps,

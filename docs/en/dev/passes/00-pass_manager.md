@@ -74,7 +74,7 @@ struct PassProperties {
 | LowerCompositeOps | — | — | — |
 | FlattenTileNdTo2D | SSAForm, IncoreTileOps | SSAForm, TileOps2D | — |
 | AutoTileMatmulL0 | SSAForm, IncoreTileOps, TileOps2D | SSAForm, IncoreTileOps, TileOps2D | — |
-| CanonicalizeMatSlice | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, NormalizedStmtStructure | — |
+| CanonicalizeTileSlice | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, NormalizedStmtStructure | SSAForm, SplitIncoreOrch, IncoreTileOps, TileOps2D, NormalizedStmtStructure | — |
 | ResolveBackendOpLayouts | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D, NormalizedStmtStructure | — |
 | ExpandMixedKernel | SSAForm, IncoreTileOps, SplitIncoreOrch, TileOps2D | SSAForm, MixedKernelExpanded | — |
 | NormalizeReturnOrder | SplitIncoreOrch, IncoreTileOps | — | — |
@@ -375,7 +375,7 @@ The PTO-oriented tile stage shared by `Default` and `DebugTileOptimization` is:
 1. [`LowerCompositeOps`](14-lower_composite_ops.md)
 2. [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md)
 3. [`AutoTileMatmulL0`](16-auto_tile_matmul_l0.md)
-4. [`CanonicalizeMatSlice`](17-canonicalize_mat_slice.md)
+4. [`CanonicalizeTileSlice`](17-canonicalize_tile_slice.md)
 5. `InferTileMemorySpace`
 6. [`LowerTransposeLoadParamLayout`](19-lower_transpose_load_param_layout.md) (RFC #1300 P6 — replaces `ResolveTransposeLayout`)
 7. [`ResolveBackendOpLayouts`](20-resolve_backend_op_layouts.md) (self-normalizes statement structure internally)

@@ -469,7 +469,7 @@ Pass AutoTileMatmulL0();
  * Requirements:
  * - Input IR must have tile ops in 2D form; runs after ``AutoTileMatmulL0``
  */
-Pass CanonicalizeMatSlice();
+Pass CanonicalizeTileSlice();
 
 /**
  * @brief Infer target memory space for TileType variables in InCore functions

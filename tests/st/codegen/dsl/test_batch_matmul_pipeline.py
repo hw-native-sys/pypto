@@ -17,7 +17,7 @@ accumulator and an ``if kb == 0`` first-iteration branch.
 batch dimension; with a 1-sized batch the per-page extraction emits a no-op
 full-shape, offset-0 ``tile.slice`` whose result is ``Mem.Mat``. Without
 canonicalization that dead slice lowers to an unsupported
-``loc=mat -> loc=mat`` ``pto.tmov``. The ``CanonicalizeMatSlice`` pass folds
+``loc=mat -> loc=mat`` ``pto.tmov``. The ``CanonicalizeTileSlice`` pass folds
 every Mat-resident ``tile.slice`` into its ``tile.extract`` consumer, so the
 generated ``.pto`` contains zero Mat->Mat ``pto.tmov``.
 """

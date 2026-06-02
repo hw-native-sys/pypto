@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Before / After / Expected tests for the CanonicalizeMatSlice pass.
+"""Before / After / Expected tests for the CanonicalizeTileSlice pass.
 
 The pass lowers Mat-resident ``tile.slice`` into ``tile.extract``:
 
@@ -15,7 +15,13 @@ The pass lowers Mat-resident ``tile.slice`` into ``tile.extract``:
   reads the slice's source directly, with the slice offset added into the
   extract index;
 * a ``tile.slice`` consumed by a ``tile.matmul`` family operand is replaced by
-  a ``tile.extract(target_memory=Left|Right)``.
+  a ``tile.extract(target_memory=Left|Right)``;
+* a *dynamic-offset* Vec ``tile.slice`` consumed by ``tile.col_expand_mul`` /
+  ``tile.col_expand_add`` is replaced by a ``tile.extract(target_memory=Vec)``
+  (issue #1640 — avoids the lazy ``pto.textract`` materializing into the slice's
+  source-aliasing buffer; a static-offset slice is left untouched because
+  ``AllocateMemoryAddr`` folds it to ``base + off``, making the textract a safe
+  identity copy).
 
 The now-dead ``tile.slice`` is dropped. ``ir.assert_structural_equal`` with
 auto-mapping compares After against a hand-written Expected, so intermediate
@@ -27,6 +33,10 @@ Coverage:
   extracted inside it);
 * a slice with multiple ``tile.extract`` consumers;
 * a slice consumed directly by ``tile.matmul`` and ``tile.matmul_acc``;
+* a dynamic-offset Vec slice consumed by ``tile.col_expand_mul`` /
+  ``tile.col_expand_add`` (materialized), and static-offset slices — const
+  ``[0,0]`` and a sub-window const ``[5,0]`` — into ``col_expand_mul`` (left
+  untouched, since a const offset folds to ``base + off``);
 * no-op cases — no Mat slice, and a Vec-resident slice (left untouched).
 """
 
@@ -36,7 +46,7 @@ from pypto import ir, passes
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
-    return passes.canonicalize_mat_slice()(program)
+    return passes.canonicalize_tile_slice()(program)
 
 
 class TestSliceIntoExtract:
@@ -728,6 +738,172 @@ class TestSliceIntoMatmul:
         ir.assert_structural_equal(_run_pass(Before), Expected)
 
 
+class TestSliceIntoColExpand:
+    """A Vec tile.slice consumed by tile.col_expand_mul / tile.col_expand_add is
+    materialized through a fresh tile.extract (issue #1640) so the lazy
+    pto.textract no longer writes into the slice's (source-aliasing) result
+    buffer."""
+
+    def test_dynamic_offset_vec_slice_into_col_expand_mul_materialized(self):
+        """A dynamic-offset Vec ``tile.slice`` feeding ``tile.col_expand_mul`` is
+        replaced by a fresh ``tile.extract(target_memory=Vec)`` and dropped."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                gamma: pl.Tensor[[1, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 256], target_memory=pl.Mem.Vec
+                )
+                row: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [1, 256], [row_off, 0])
+                scaled: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(row, gamma_t)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                gamma: pl.Tensor[[1, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 256], target_memory=pl.Mem.Vec
+                )
+                row_ext: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    local, row_off, 0, shape=[1, 256], target_memory=pl.Mem.Vec
+                )
+                scaled: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(row_ext, gamma_t)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_dynamic_offset_vec_slice_into_col_expand_add_materialized(self):
+        """``tile.col_expand_add`` shares the lazy ``pto.textract`` materialization
+        with ``col_expand_mul``, so a dynamic-offset Vec slice operand is likewise
+        replaced by a fresh ``tile.extract(target_memory=Vec)`` and dropped."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                gamma: pl.Tensor[[1, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 256], target_memory=pl.Mem.Vec
+                )
+                row: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [1, 256], [row_off, 0])
+                scaled: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_add(row, gamma_t)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 256], pl.FP32],
+                gamma: pl.Tensor[[1, 256], pl.FP32],
+                row_off: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[1, 256], pl.FP32]],
+            ) -> pl.Tensor[[1, 256], pl.FP32]:
+                local: pl.Tile[[16, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 256], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 256], target_memory=pl.Mem.Vec
+                )
+                row_ext: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.extract(
+                    local, row_off, 0, shape=[1, 256], target_memory=pl.Mem.Vec
+                )
+                scaled: pl.Tile[[1, 256], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_add(row_ext, gamma_t)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Expected)
+
+    def test_const_zero_offset_vec_slice_into_col_expand_left_untouched(self):
+        """A const-``[0,0]`` Vec ``tile.slice`` feeding ``tile.col_expand_mul`` is
+        NOT the #1640 hazard: ``AllocateMemoryAddr`` folds the const offset into
+        ``base + 0``, so the lazy ``pto.textract`` is a safe identity copy. The
+        pass leaves the slice untouched."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 64], pl.FP32],
+                gamma: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 64], pl.FP32]],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                local: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 64], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 64], target_memory=pl.Mem.Vec
+                )
+                full: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [16, 64], [0, 0])
+                scaled: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(full, gamma_t)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Before)
+
+    def test_static_nonzero_offset_vec_slice_into_col_expand_left_untouched(self):
+        """A *static non-zero* offset Vec ``tile.slice`` feeding
+        ``tile.col_expand_mul`` is also NOT the #1640 hazard: ``AllocateMemoryAddr``
+        folds the const offset into ``base + off``, so the lazy ``pto.textract``
+        materializes the row into its own offset-correct address — an identity
+        copy that leaves the source intact. Only a *dynamic* offset falls back to
+        the bare base. The pass must leave this sub-window static slice untouched."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                scores: pl.Tensor[[16, 64], pl.FP32],
+                gamma: pl.Tensor[[1, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[1, 64], pl.FP32]],
+            ) -> pl.Tensor[[1, 64], pl.FP32]:
+                local: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    scores, [0, 0], [16, 64], target_memory=pl.Mem.Vec
+                )
+                gamma_t: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    gamma, [0, 0], [1, 64], target_memory=pl.Mem.Vec
+                )
+                row: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.tile.slice(local, [1, 64], [5, 0])
+                scaled: pl.Tile[[1, 64], pl.FP32, pl.Mem.Vec] = pl.tile.col_expand_mul(row, gamma_t)
+                out = pl.store(scaled, [0, 0], out)
+                return out
+
+        ir.assert_structural_equal(_run_pass(Before), Before)
+
+
 class TestNoOp:
     """Cases the pass must leave untouched."""
 
@@ -778,8 +954,8 @@ class TestNoOp:
 
     def test_non_canonical_4arg_mat_slice_left_untouched(self):
         """A Mat ``tile.slice`` carrying a ``valid_shape`` is a 4-argument IR
-        call — not a plain window. ``ParseMatSlice`` rejects it (pass line 122:
-        ``if (call->args_.size() != 3) return nullopt``), so it is never
+        call — not a plain window. ``ParseCanonicalSlice`` rejects it
+        (``if (call->args_.size() != 3) return nullopt``), so it is never
         collected and both the slice and its ``tile.extract`` consumer survive
         unchanged."""
 

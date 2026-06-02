@@ -984,6 +984,98 @@ class TestTileSliceCodegen:
         assert "sizes [16, 16]" in line, f"sizes attribute must be [16, 16], got:\n{line}"
         assert "rows=16, cols=16" in line, f"result tile_buf must carry rows=16, cols=16, got:\n{line}"
 
+    @pytest.mark.parametrize(
+        "op_name, pto_op",
+        [("col_expand_mul", "pto.tcolexpandmul"), ("col_expand_add", "pto.tcolexpandadd")],
+    )
+    def test_tile_slice_into_col_expand_materializes_via_extract(self, op_name, pto_op):
+        """Regression for #1640: a dynamic-offset Vec ``tile.slice`` feeding
+        ``tile.col_expand_mul`` / ``tile.col_expand_add`` must NOT be materialized
+        into the slice's own (source-aliasing) result buffer.
+
+        ``pto.tcolexpandmul`` / ``pto.tcolexpandadd`` cannot consume a
+        ``pto.subview`` operand, so codegen used to lazily emit
+        ``pto.textract ins(src, off) outs(slice_buf)``.  For a dynamic offset the
+        slice buffer inherits the source allocation base, so the materialization
+        overwrote the source tile's row 0.  ``CanonicalizeTileSlice`` now rewrites
+        the operand to a fresh ``tile.extract`` (own non-inherited allocation), so
+        the slice's ``pto.subview`` disappears and the materialization lands in a
+        distinct buffer.
+        """
+        if op_name == "col_expand_mul":
+
+            @pl.program
+            class ProgMul:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    scores: pl.Tensor[[16, 256], pl.FP32],
+                    gamma: pl.Tensor[[1, 256], pl.FP32],
+                    row_off: pl.Scalar[pl.INDEX],
+                    dst: pl.Tensor[[1, 256], pl.FP32],
+                ) -> pl.Tensor[[1, 256], pl.FP32]:
+                    local: pl.Tile[[16, 256], pl.FP32] = pl.load(scores, [0, 0], [16, 256])
+                    gamma_t: pl.Tile[[1, 256], pl.FP32] = pl.load(gamma, [0, 0], [1, 256])
+                    # Dynamic-offset slice of a local tile — the #1640 hazard.
+                    row: pl.Tile[[1, 256], pl.FP32] = pl.tile.slice(local, [1, 256], [row_off, 0])
+                    scaled: pl.Tile[[1, 256], pl.FP32] = pl.tile.col_expand_mul(row, gamma_t)
+                    return pl.store(scaled, [0, 0], dst)
+
+            prog = ProgMul
+        else:
+
+            @pl.program
+            class ProgAdd:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    scores: pl.Tensor[[16, 256], pl.FP32],
+                    gamma: pl.Tensor[[1, 256], pl.FP32],
+                    row_off: pl.Scalar[pl.INDEX],
+                    dst: pl.Tensor[[1, 256], pl.FP32],
+                ) -> pl.Tensor[[1, 256], pl.FP32]:
+                    local: pl.Tile[[16, 256], pl.FP32] = pl.load(scores, [0, 0], [16, 256])
+                    gamma_t: pl.Tile[[1, 256], pl.FP32] = pl.load(gamma, [0, 0], [1, 256])
+                    # Dynamic-offset slice of a local tile — the #1640 hazard.
+                    row: pl.Tile[[1, 256], pl.FP32] = pl.tile.slice(local, [1, 256], [row_off, 0])
+                    scaled: pl.Tile[[1, 256], pl.FP32] = pl.tile.col_expand_add(row, gamma_t)
+                    return pl.store(scaled, [0, 0], dst)
+
+            prog = ProgAdd
+
+        mlir = self._generate_mlir(prog)
+        assert pto_op in mlir, f"{op_name} should still lower to {pto_op}, got:\n{mlir}"
+        # The slice is canonicalized to tile.extract, so its subview is gone and
+        # the materialization is a pto.textract into a fresh buffer. With the bug
+        # present, the slice emits a pto.subview and the textract writes into the
+        # (source-aliasing) slice buffer instead.
+        assert "pto.subview" not in mlir, (
+            f"slice feeding {op_name} must be canonicalized to tile.extract (no subview), got:\n{mlir}"
+        )
+        assert "pto.textract" in mlir, f"materialization should be a pto.textract, got:\n{mlir}"
+
+        # The col-expand operand must be the pto.textract's fresh output buffer
+        # (materialized into a distinct tile), not the source tile.
+        textract_lines = [ln.strip() for ln in mlir.splitlines() if "pto.textract" in ln]
+        colexpand_lines = [ln.strip() for ln in mlir.splitlines() if pto_op in ln]
+        assert textract_lines and colexpand_lines, f"expected both ops, got:\n{mlir}"
+
+        def _ssa_tokens(clause: str) -> list[str]:
+            # Operands before the optional `: type` annotation, split on commas.
+            head = clause.split(":", 1)[0]
+            return [tok.strip() for tok in head.split(",") if tok.strip().startswith("%")]
+
+        tex = textract_lines[0]
+        tex_src = _ssa_tokens(tex.split("ins(", 1)[1])[0]
+        tex_out = _ssa_tokens(tex.split("outs(", 1)[1])[0]
+        assert tex_out != tex_src, f"pto.textract must not write into its own source, got:\n{tex}"
+
+        cem_ins = _ssa_tokens(colexpand_lines[0].split("ins(", 1)[1])
+        assert tex_out in cem_ins, (
+            f"{pto_op} must consume the freshly-materialized extract buffer {tex_out}, got:\n"
+            f"{colexpand_lines[0]}"
+        )
+
     def test_tile_slice_codegen_rank_reducing(self):
         """A rank-reducing tile subscript `t[i]` (→ tile.slice with drop_dims) reaches
         PTO codegen and emits pto.subview — the result is clamped to 2D [1, N]."""
