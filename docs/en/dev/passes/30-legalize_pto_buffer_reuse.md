@@ -53,7 +53,7 @@ The pass only rebinds variables and inserts new `tile.alloc` statements; it does
 
 ## Algorithm
 
-The transform runs in four phases over each `Function`:
+The transform runs in five phases over each `Function`:
 
 1. **Collect (`MemRefUsageCollector`)** — visit every `AssignStmt` that defines a tile-typed variable. For each MemRef base pointer, record:
    - **Writers**: non-view producers (e.g. `tile.load`, `tile.add`, `tile.tpop_from_aic`) plus the `TileBufSignature` extracted from the LHS `TileType` (`TileBufSignature::FromTileType`); the input `Var`s of the RHS call are collected separately and used downstream (e.g. for the Ascend910B `load + tpop_from_aic` hazard detection), not as part of the signature.
@@ -69,9 +69,11 @@ The transform runs in four phases over each `Function`:
 
    `next_id` is seeded by `MaxMemRefIdCollector`, which extracts the highest existing `mem_<space>_<n>` counter so generated names never collide.
 
-3. **Mutate (`MemRefSplitMutator`)** — clone every affected `Var` / `IterArg` with a new `TileType` whose `MemRef` is the split target; all references to the old `Var` are remapped through `var_remap_` so SSA users follow the rebinding.
+3. **Extend to loop carries (`LoopCarryReturnVarCollector`)** — a loop's `iter_args_[i]` and `return_vars_[i]` are the two halves of the same carry slot (post-`MemoryReuse` the init, iter_arg, yield and return_var all share one `MemRef`). When a carry's *init writer* is split, both halves must follow the fresh `MemRef`. This collector registers each such `return_vars_[i]` into the `splits` set (keyed to its split init writer's new `MemRef`) so the mutator rewrites it uniformly — both in the loop's `return_vars` list and at later use sites.
 
-4. **Insert allocs (`InsertNewAllocStatements`)** — for each unique new base pointer, build a `tile.alloc` `AssignStmt` via `CreateAllocStatement(memref, memory_space)`. When the function body is already a non-empty `SeqStmts`, the pass prepends the new allocs to that sequence so they appear before any user of the new MemRef; otherwise the body is returned unchanged. In the `Default` pipeline this precondition holds because upstream passes establish the `NormalizedStmtStructure` property required by `MemoryReuse`.
+4. **Mutate (`MemRefSplitMutator`)** — clone every affected `Var` / `IterArg` with a new `TileType` whose `MemRef` is the split target; all references to the old `Var` are remapped through `var_remap_` so SSA users follow the rebinding. An `IterArg` is never a `splits` key on its own (it is not an `AssignStmt` writer), so its declared `TileType` is synced to its **remapped init value**'s `MemRef` — otherwise the carry would declare the abandoned slot while its init lives in the fresh one.
+
+5. **Insert allocs (`InsertNewAllocStatements`)** — for each unique new base pointer, build a `tile.alloc` `AssignStmt` via `CreateAllocStatement(memref, memory_space)`. When the function body is already a non-empty `SeqStmts`, the pass prepends the new allocs to that sequence so they appear before any user of the new MemRef; otherwise the body is returned unchanged. In the `Default` pipeline this precondition holds because upstream passes establish the `NormalizedStmtStructure` property required by `MemoryReuse`.
 
 ### Ascend910B split-AIV `load + tpop_from_aic` hazard
 
@@ -135,6 +137,35 @@ t3: Tile[[64, 64],  FP32, memref=mem_vec_1, Mem.Vec, view(pad=max)]
 
 See `TestIllegalSharingSplit::test_split_propagates_through_view_chain`.
 
+### Loop carry follows the split
+
+A split writer used as a loop `init_values` carry pulls the whole carry slot onto the fresh MemRef. The `IterArg` (`acc`, declared type) and the `return_var` (`acc_out`, final value) are the two halves of that slot, so both must follow `t2` — leaving either behind on `mem_vec_0` would declare an abandoned slot.
+
+**Before** (in-place carry — `init` / `iter_arg` / `yield` / `return_var` all on `mem_vec_0`):
+
+```python
+t1: Tile[[128, 128], FP32, memref=mem_vec_0, Mem.Vec] = tile.load(a, ...)
+t2: Tile[[64, 64],  FP32, memref=mem_vec_0, Mem.Vec] = tile.load(a, ...)
+for _i, (acc,) in range(0, 4, init_values=(t2,)):          # acc: memref=mem_vec_0
+    acc_next: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.adds(acc, 1.0)
+    acc_out = yield(acc_next)                              # acc_out: memref=mem_vec_0
+result = tile.store(acc_out, [0, 0], b)
+```
+
+**After** (`t2`, `acc`, `acc_next`, `acc_out` all move to `mem_vec_1`):
+
+```python
+mem_vec_1: pl.Ptr = tile.alloc(Vec, 65536)
+t1: Tile[[128, 128], FP32, memref=mem_vec_0, Mem.Vec] = tile.load(a, ...)
+t2: Tile[[64, 64],  FP32, memref=mem_vec_1, Mem.Vec] = tile.load(a, ...)
+for _i, (acc,) in range(0, 4, init_values=(t2,)):          # acc: memref=mem_vec_1
+    acc_next: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.adds(acc, 1.0)
+    acc_out = yield(acc_next)                              # acc_out: memref=mem_vec_1
+result = tile.store(acc_out, [0, 0], b)
+```
+
+See `TestIllegalSharingSplit::test_split_follows_loop_carry`.
+
 ### Legal sharing preserved
 
 Two writers with the **same** `TileBufSignature` (or differences materializable by `tile.fillpad` / `tile.reshape` / `valid_shape`) keep their shared MemRef untouched. See `TestLegalSharingPreserved`.
@@ -154,8 +185,9 @@ Pass LegalizePTOBufferReuse();
 - `CollectLoadFamilyVars` / `CollectForcedSplitWriterIndices` — Ascend910B split-AIV hazard detection
 - `PlanMemRefSplits` — Phase 2: signature grouping and fresh MemRef allocation
 - `PropagateSplitToViewUsers` — Phase 2 helper: BFS over `view_edges` to redirect transitive views
-- `MemRefSplitMutator` — Phase 3: rewrite `Var` / `IterArg` types with the new MemRef
-- `InsertNewAllocStatements` — Phase 4: prepend `tile.alloc` for each fresh MemRef
+- `LoopCarryReturnVarCollector` — Phase 3: extend `splits` to loop-carry `return_vars` whose init writer was split
+- `MemRefSplitMutator` — Phase 4: rewrite `Var` / `IterArg` types with the new MemRef (`IterArg` declared type follows its remapped init)
+- `InsertNewAllocStatements` — Phase 5: prepend `tile.alloc` for each fresh MemRef
 - `MaxMemRefIdCollector` — seeds fresh-id counter from existing names
 
 **Backend dispatch**: `BackendHandler::RequiresSplitLoadTpopWorkaround()` accessed via `PassContext::Current()->GetBackendHandler()` (per `.claude/rules/pass-context-config.md`).
@@ -180,5 +212,5 @@ def legalize_pto_buffer_reuse() -> Pass:
 
 - `TestLegalSharingPreserved` — same-signature and `tile.fillpad`-view sharing kept intact
 - `TestAscend910BSplitLoadTpopHazard` — split-AIV hazard force-split on 910B; no force-split on Ascend950
-- `TestIllegalSharingSplit` — different-shape split and view-chain propagation
+- `TestIllegalSharingSplit` — different-shape split, view-chain propagation, and loop-carry (`IterArg` + `return_var`) follow-through
 - `TestLegalizeWithCodegen` — end-to-end alloc count / address checks via PTO codegen

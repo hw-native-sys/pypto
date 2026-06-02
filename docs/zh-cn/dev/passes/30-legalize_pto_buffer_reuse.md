@@ -53,7 +53,7 @@ program_legal = legalize_pass(program)
 
 ## 算法
 
-变换以四个阶段在每个 `Function` 上执行：
+变换以五个阶段在每个 `Function` 上执行：
 
 1. **收集 (`MemRefUsageCollector`)** —— 访问每个定义 tile 类型变量的 `AssignStmt`。对每个 MemRef base 指针记录：
    - **Writers**：非 view 的产生者（如 `tile.load`、`tile.add`、`tile.tpop_from_aic`），其 `TileBufSignature` 仅由 LHS 的 `TileType` 提取（`TileBufSignature::FromTileType`）；RHS call 的输入 `Var` 列表则单独收集，用于下游分析（例如 Ascend910B `load + tpop_from_aic` hazard 检测），并不计入签名本身。
@@ -69,9 +69,11 @@ program_legal = legalize_pass(program)
 
    `next_id` 由 `MaxMemRefIdCollector` 提取已有 `mem_<space>_<n>` 计数的最大值后递增，避免新生成的名字冲突。
 
-3. **变换 (`MemRefSplitMutator`)** —— 克隆所有受影响的 `Var` / `IterArg`，使其新 `TileType` 指向拆分后的 `MemRef`。所有对旧 `Var` 的引用都通过 `var_remap_` 重映射，使 SSA 用户跟随这次改绑。
+3. **扩展到 loop carry (`LoopCarryReturnVarCollector`)** —— 一个循环的 `iter_args_[i]` 与 `return_vars_[i]` 是同一 carry slot 的两半（`MemoryReuse` 之后，init、iter_arg、yield 与 return_var 共享同一个 `MemRef`）。当某个 carry 的 *init writer* 被拆分时，这两半都必须跟随到新 `MemRef`。本收集器把每个这样的 `return_vars_[i]` 注册进 `splits` 集合（绑定到其被拆分的 init writer 的新 `MemRef`），使 mutator 能统一改写它——无论是在循环的 `return_vars` 列表中，还是在后续的使用点。
 
-4. **插入 alloc (`InsertNewAllocStatements`)** —— 对每个唯一的新 base 指针，使用 `CreateAllocStatement(memref, memory_space)` 构造一条 `tile.alloc` `AssignStmt`。当函数体本身已经是非空的 `SeqStmts` 时，Pass 会将这些新 alloc 前插到该 `SeqStmts` 开头，确保它们出现在使用新 MemRef 的任何用户之前；否则直接返回原 body 不作改动。在 `Default` 流水线中，这一前提由上游建立 `MemoryReuse` 所要求的 `NormalizedStmtStructure` 属性的 pass 保证。
+4. **变换 (`MemRefSplitMutator`)** —— 克隆所有受影响的 `Var` / `IterArg`，使其新 `TileType` 指向拆分后的 `MemRef`。所有对旧 `Var` 的引用都通过 `var_remap_` 重映射，使 SSA 用户跟随这次改绑。`IterArg` 自身永远不是 `splits` 的 key（它不是 `AssignStmt` writer），因此它的声明类型 `TileType` 会同步到其**重映射后的 init 值**的 `MemRef`——否则该 carry 会声明被废弃的 slot，而其 init 却位于新的 slot 上。
+
+5. **插入 alloc (`InsertNewAllocStatements`)** —— 对每个唯一的新 base 指针，使用 `CreateAllocStatement(memref, memory_space)` 构造一条 `tile.alloc` `AssignStmt`。当函数体本身已经是非空的 `SeqStmts` 时，Pass 会将这些新 alloc 前插到该 `SeqStmts` 开头，确保它们出现在使用新 MemRef 的任何用户之前；否则直接返回原 body 不作改动。在 `Default` 流水线中，这一前提由上游建立 `MemoryReuse` 所要求的 `NormalizedStmtStructure` 属性的 pass 保证。
 
 ### Ascend910B split-AIV `load + tpop_from_aic` hazard
 
@@ -135,6 +137,35 @@ t3: Tile[[64, 64],  FP32, memref=mem_vec_1, Mem.Vec, view(pad=max)]
 
 参见 `TestIllegalSharingSplit::test_split_propagates_through_view_chain`。
 
+### Loop carry 跟随拆分
+
+被拆分的 writer 作为循环 `init_values` carry 时，会把整个 carry slot 拉到新 MemRef 上。`IterArg`（`acc`，声明类型）与 `return_var`（`acc_out`，最终值）是该 slot 的两半，二者都必须跟随 `t2`——任何一半留在 `mem_vec_0` 上都会声明一个被废弃的 slot。
+
+**之前**（in-place carry —— `init` / `iter_arg` / `yield` / `return_var` 均在 `mem_vec_0`）：
+
+```python
+t1: Tile[[128, 128], FP32, memref=mem_vec_0, Mem.Vec] = tile.load(a, ...)
+t2: Tile[[64, 64],  FP32, memref=mem_vec_0, Mem.Vec] = tile.load(a, ...)
+for _i, (acc,) in range(0, 4, init_values=(t2,)):          # acc: memref=mem_vec_0
+    acc_next: Tile[[64, 64], FP32, memref=mem_vec_0] = tile.adds(acc, 1.0)
+    acc_out = yield(acc_next)                              # acc_out: memref=mem_vec_0
+result = tile.store(acc_out, [0, 0], b)
+```
+
+**之后**（`t2`、`acc`、`acc_next`、`acc_out` 一同迁移到 `mem_vec_1`）：
+
+```python
+mem_vec_1: pl.Ptr = tile.alloc(Vec, 65536)
+t1: Tile[[128, 128], FP32, memref=mem_vec_0, Mem.Vec] = tile.load(a, ...)
+t2: Tile[[64, 64],  FP32, memref=mem_vec_1, Mem.Vec] = tile.load(a, ...)
+for _i, (acc,) in range(0, 4, init_values=(t2,)):          # acc: memref=mem_vec_1
+    acc_next: Tile[[64, 64], FP32, memref=mem_vec_1] = tile.adds(acc, 1.0)
+    acc_out = yield(acc_next)                              # acc_out: memref=mem_vec_1
+result = tile.store(acc_out, [0, 0], b)
+```
+
+参见 `TestIllegalSharingSplit::test_split_follows_loop_carry`。
+
 ### 合法共享保留
 
 具有**相同** `TileBufSignature`（或仅在 `tile.fillpad` / `tile.reshape` / `valid_shape` 等可 view 实现的差异内不同）的两个 writer 保持原有 MemRef 共享不变。参见 `TestLegalSharingPreserved`。
@@ -154,8 +185,9 @@ Pass LegalizePTOBufferReuse();
 - `CollectLoadFamilyVars` / `CollectForcedSplitWriterIndices` —— Ascend910B split-AIV hazard 检测
 - `PlanMemRefSplits` —— 阶段 2：签名分组与新 MemRef 分配
 - `PropagateSplitToViewUsers` —— 阶段 2 辅助：在 `view_edges` 上 BFS，传递性改绑 view
-- `MemRefSplitMutator` —— 阶段 3：用新 MemRef 重写 `Var` / `IterArg` 的类型
-- `InsertNewAllocStatements` —— 阶段 4：为每个新 MemRef 在函数体前部插入 `tile.alloc`
+- `LoopCarryReturnVarCollector` —— 阶段 3：把 init writer 被拆分的 loop-carry `return_vars` 扩展进 `splits`
+- `MemRefSplitMutator` —— 阶段 4：用新 MemRef 重写 `Var` / `IterArg` 的类型（`IterArg` 声明类型跟随其重映射后的 init）
+- `InsertNewAllocStatements` —— 阶段 5：为每个新 MemRef 在函数体前部插入 `tile.alloc`
 - `MaxMemRefIdCollector` —— 由现有名字推断新 id 计数器起点
 
 **后端分派**：`BackendHandler::RequiresSplitLoadTpopWorkaround()`，通过 `PassContext::Current()->GetBackendHandler()` 访问（遵循 `.claude/rules/pass-context-config.md`）。
@@ -180,5 +212,5 @@ def legalize_pto_buffer_reuse() -> Pass:
 
 - `TestLegalSharingPreserved` —— 相同签名与 `tile.fillpad` view 共享被保留
 - `TestAscend910BSplitLoadTpopHazard` —— 910B 上 split-AIV hazard 触发强制拆分；Ascend950 上不强制
-- `TestIllegalSharingSplit` —— 不同 shape 拆分与 view 链传递
+- `TestIllegalSharingSplit` —— 不同 shape 拆分、view 链传递，以及 loop-carry（`IterArg` + `return_var`）跟随拆分
 - `TestLegalizeWithCodegen` —— 通过 PTO codegen 端到端校验 alloc 数量 / 地址

@@ -24,6 +24,7 @@
  * are illegal and trigger a MemRef split.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -328,7 +329,7 @@ std::map<const Var*, MemRefPtr> PlanMemRefSplits(const std::map<const Var*, MemR
 }
 
 // -------------------------------------------------------------------------
-// Phase 3 — Mutate: replace MemRef in split variables
+// Phase 4 — Mutate: replace MemRef in split variables
 // -------------------------------------------------------------------------
 
 class MemRefSplitMutator : public IRMutator {
@@ -362,12 +363,28 @@ class MemRefSplitMutator : public IRMutator {
     auto split_it = splits_.find(op.get());
     if (split_it == splits_.end() && new_init == op->initValue_) return op;
 
-    TypePtr new_type = op->GetType();
+    // Choose the MemRef the IterArg's declared type must carry.
+    //
+    // An IterArg is a loop carry declared in `ForStmt.iter_args`; it is never
+    // an AssignStmt-defined writer, so it is never a `splits_` key (only
+    // writers and their view-users are). When its init value *is* a split
+    // writer, the carry's entry storage moved to the fresh MemRef, so the
+    // declared type must follow it — otherwise the IterArg declares the
+    // abandoned original slot while its init value lives in the fresh one.
+    // MemoryReuse (which runs before this pass) guarantees init and iter_arg
+    // share a MemRef on entry, so following the remapped init restores that
+    // invariant.
+    MemRefPtr new_memref;
     if (split_it != splits_.end()) {
-      if (auto tile_type = As<TileType>(op->GetType())) {
-        new_type = std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, split_it->second,
-                                              tile_type->tile_view_, tile_type->memory_space_);
-      }
+      new_memref = split_it->second;
+    } else if (auto init_tile = GetTileTypeWithMemRef(new_init->GetType())) {
+      new_memref = GetDefinedMemRef(init_tile);
+    }
+
+    TypePtr new_type = op->GetType();
+    if (auto tile_type = new_memref ? As<TileType>(op->GetType()) : nullptr) {
+      new_type = std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, new_memref,
+                                            tile_type->tile_view_, tile_type->memory_space_);
     }
 
     auto new_iter = std::make_shared<IterArg>(op->name_hint_, new_type, new_init, op->span_);
@@ -381,7 +398,7 @@ class MemRefSplitMutator : public IRMutator {
 };
 
 // -------------------------------------------------------------------------
-// Phase 4 — Create alloc statements for newly-split MemRefs
+// Phase 5 — Create alloc statements for newly-split MemRefs
 // -------------------------------------------------------------------------
 
 StmtPtr InsertNewAllocStatements(const StmtPtr& body, const std::map<const Var*, MemRefPtr>& splits) {
@@ -438,6 +455,45 @@ class MaxMemRefIdCollector : public IRVisitor {
   uint64_t max_id_ = 0;
 };
 
+/// Extend `splits` to loop-carry return_vars whose init writer was split.
+///
+/// A loop's `return_vars_[i]` captures the final value of carry `i` and is
+/// declared on the *same* carry slot as `iter_args_[i]` (post-MemoryReuse the
+/// init, iter_arg, yield and return_var all share one MemRef). When that carry
+/// slot's init writer is split, the iter_arg follows it in
+/// `MemRefSplitMutator::VisitExpr_(IterArgPtr)`, but the return_var is a plain
+/// `Var` that is never a `splits_` key on its own — so it would be left behind
+/// on the abandoned slot. Registering it here lets `VisitExpr_(VarPtr)` rewrite
+/// it uniformly, both in the loop's return_vars list and at later use sites.
+class LoopCarryReturnVarCollector : public IRVisitor {
+ public:
+  explicit LoopCarryReturnVarCollector(std::map<const Var*, MemRefPtr>& splits) : splits_(splits) {}
+
+  void VisitStmt_(const ForStmtPtr& op) override {
+    RegisterCarries(op->iter_args_, op->return_vars_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const WhileStmtPtr& op) override {
+    RegisterCarries(op->iter_args_, op->return_vars_);
+    IRVisitor::VisitStmt_(op);
+  }
+
+ private:
+  void RegisterCarries(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars) {
+    const size_t n = std::min(iter_args.size(), return_vars.size());
+    for (size_t i = 0; i < n; ++i) {
+      auto init_var = AsVarLike(iter_args[i]->initValue_);
+      if (!init_var) continue;
+      auto it = splits_.find(init_var.get());
+      if (it == splits_.end()) continue;
+      splits_[return_vars[i].get()] = it->second;
+    }
+  }
+
+  std::map<const Var*, MemRefPtr>& splits_;
+};
+
 FunctionPtr TransformLegalizePTOBufferReuse(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "LegalizePTOBufferReuse cannot run on null function";
 
@@ -458,13 +514,21 @@ FunctionPtr TransformLegalizePTOBufferReuse(const FunctionPtr& func) {
       PlanMemRefSplits(usages, collector.GetTpopFromAicVars(), enable_ascend910b_split_workaround, next_id);
   if (splits.empty()) return func;
 
+  // Phase 3: Extend splits to loop-carry return_vars.
+  // A split init writer carries its loop's iter_arg (handled in the mutator)
+  // and return_var to the fresh MemRef; register the latter so it follows too.
+  if (func->body_) {
+    LoopCarryReturnVarCollector return_var_collector(splits);
+    return_var_collector.VisitStmt(func->body_);
+  }
+
   LOG_DEBUG << "LegalizePTOBufferReuse: splitting " << splits.size() << " variable(s) into new MemRefs";
 
-  // Phase 3: Mutate
+  // Phase 4: Mutate
   MemRefSplitMutator mutator(splits);
   StmtPtr new_body = mutator.VisitStmt(func->body_);
 
-  // Phase 4: Insert alloc statements for new MemRefs
+  // Phase 5: Insert alloc statements for new MemRefs
   new_body = InsertNewAllocStatements(new_body, splits);
 
   return std::make_shared<const Function>(func->name_, func->params_, func->param_directions_,

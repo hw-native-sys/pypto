@@ -605,6 +605,66 @@ class TestIllegalSharingSplit:
         After = passes.legalize_pto_buffer_reuse()(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_split_follows_loop_carry(self):
+        """A split writer used as a loop init carry.
+
+        ``t2`` shares ``mem_vec_0`` with the incompatible ``t1`` and is the
+        loop ``init_values`` carry. When ``t2`` is split to a fresh MemRef, the
+        two halves of the carry slot — the ``IterArg`` (declared type) and the
+        ``return_var`` capturing the final value — must both follow the fresh
+        MemRef, not stay on the abandoned original slot.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                t1: pl.Tile[[128, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                # In-place carry: init / iter_arg / yield / return_var all share mem_vec_0.
+                for _i, (acc,) in pl.range(0, 4, init_values=(t2,)):
+                    acc_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                        pl.tile.adds(acc, 1.0)
+                    )
+                    acc_out = pl.yield_(acc_next)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(acc_out, [0, 0], b)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                a: pl.Tensor[[128, 128], pl.FP32],
+                b: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                mem_vec_1: pl.Ptr = pl.tile.alloc(pl.Mem.Vec, 65536)
+                t1: pl.Tile[[128, 128], pl.FP32, pl.MemRef("mem_vec_0", -1, 65536), pl.Mem.Vec] = (
+                    pl.tile.load(a, [0, 0], [128, 128], [128, 128], target_memory=pl.Mem.Vec, transpose=False)
+                )
+                t2: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_1, 0, 65536), pl.Mem.Vec] = pl.tile.load(
+                    a, [0, 0], [64, 64], [64, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                # iter_arg `acc` and return_var `acc_out` both follow t2 onto mem_vec_1.
+                for _i, (acc,) in pl.range(0, 4, init_values=(t2,)):
+                    acc_next: pl.Tile[[64, 64], pl.FP32, pl.MemRef(mem_vec_1, 0, 65536), pl.Mem.Vec] = (
+                        pl.tile.adds(acc, 1.0)
+                    )
+                    acc_out = pl.yield_(acc_next)
+                result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(acc_out, [0, 0], b)
+                return result
+
+        After = passes.legalize_pto_buffer_reuse()(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 # ---------------------------------------------------------------------------
 # Integration tests: legalize + codegen
