@@ -298,6 +298,14 @@ def _assert_consumer_uses_score_window_input(code: str) -> None:
 
 
 def _assert_task_uses_window_inputs(code: str, task_name: str, parent_names: list[str]) -> None:
+    _assert_task_uses_window_args(code, task_name, parent_names, "input")
+
+
+def _assert_task_uses_window_outputs(code: str, task_name: str, parent_names: list[str]) -> None:
+    _assert_task_uses_window_args(code, task_name, parent_names, "output")
+
+
+def _assert_task_uses_window_args(code: str, task_name: str, parent_names: list[str], arg_kind: str) -> None:
     task_match = re.search(rf"// Task \d+: {re.escape(task_name)}__windowed", code)
     assert task_match is not None, code
 
@@ -315,8 +323,8 @@ def _assert_task_uses_window_inputs(code: str, task_name: str, parent_names: lis
         )
         assert window_match is not None, code
         window_name = window_match.group(1)
-        assert f"add_input({window_name})" in task_region, code
-        assert f"add_input({parent_name})" not in task_region, code
+        assert f"add_{arg_kind}({window_name})" in task_region, code
+        assert f"add_{arg_kind}({parent_name})" not in task_region, code
 
 
 def _assert_pass_dump_has_window(optimized: str, parent_prefix: str, shape: str) -> None:
@@ -348,6 +356,7 @@ class TestWindowedConsumerInputDepsCodegen:
         assert "produce__windowed" in optimized, optimized
 
         code = _read_single(work_dir / "orchestration", "*.cpp")
+        _assert_task_uses_window_outputs(code, "produce", ["score_flat"])
         _assert_consumer_uses_score_window_input(code)
 
     def test_flattened_cache_consumer_uses_cache_window(self, request, tmp_path, monkeypatch):
@@ -371,6 +380,7 @@ class TestWindowedConsumerInputDepsCodegen:
         assert "cache_read__windowed(" in optimized and "__window" in optimized, optimized
 
         code = _read_single(work_dir / "orchestration", "*.cpp")
+        _assert_task_uses_window_outputs(code, "cache_write", ["cache_flat"])
         _assert_task_uses_window_inputs(code, "cache_read", ["cache_flat"])
 
     def test_state_pair_consumer_uses_both_state_windows(self, request, tmp_path, monkeypatch):
@@ -395,6 +405,7 @@ class TestWindowedConsumerInputDepsCodegen:
         assert "state_read__windowed(" in optimized and "__window" in optimized, optimized
 
         code = _read_single(work_dir / "orchestration", "*.cpp")
+        _assert_task_uses_window_outputs(code, "state_write", ["kv_flat", "score_flat"])
         _assert_task_uses_window_inputs(code, "state_read", ["kv_flat", "score_flat"])
 
 
