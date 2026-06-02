@@ -145,7 +145,7 @@ v1 限制: 不支持切片 `step`、tile 切片的下界必须可静态折叠、
 
 实现机制: 非平凡的下标会下降为 `tensor.slice` / `tile.slice`, 其 `shape`/`offset` 保持满秩, 并附带一个 `drop_dims` 列表记录被标量索引的轴 (详见 IR 算子文档)。赋值左侧 (LHS) 遵循相同规则 —— `C[i, j] = rhs` 会在 `tensor.assemble` 之前把 `rhs` reshape 回满秩窗口 (尚不支持链式写入 `C[i][j] = rhs`)。
 
-代码生成: 带 `drop_dims` 的编排层 `tensor.slice` 先发射满秩的 `Tensor::view(shapes, offsets)` (运行时 view 按父张量的秩遍历), 再跟一个降秩的 `Tensor::reshape(reduced_shapes, reduced_ndim)`, 把单位长度的视图重解释为结果的秩。仅当被丢弃的轴构成**前导前缀** `{0, 1, ..., k-1}` 时这才正确 (即 `C[i]` / `C[i, j, :, :]` 这类 numpy 下标语法) —— 在行主序 DDR 张量上切片前导轴会留下 `reshape` 所要求的连续尾部块; 丢弃**非前导**轴 (例如 `C[:, i, :]` → `drop_dims=[1]`) 会得到跨步视图, 会以可操作的错误信息被拒绝 (支持它需要分布式 `tensor.slice` handler 所用的逐轴索引下降 —— 编排层的后续工作)。对 **>2D** tile 的降秩 `tile.slice` (例如对字面 `>2D pl.Tile` 取下标) 尚未支持下降 —— `FlattenTileNdTo2D` 会以可操作的错误信息拒绝它, 因为这需要先把被切的源窗口合并到 2D 再重新推导 `drop_dims`; 请改为对 2D tile 切片。
+代码生成: 带 `drop_dims` 的编排层 `tensor.slice` 先发射满秩的 `Tensor::view(shapes, offsets)` (运行时 view 按父张量的秩遍历), 再跟一个降秩的 `Tensor::reshape(reduced_shapes, reduced_ndim)`, 把单位长度的视图重解释为结果的秩 (当所有轴都被丢弃时 —— 例如对 1D 张量 `C[i]` —— 0D 结果以 `reshape(nullptr, 0)` 发射, 因为零长度的 C++ 形状数组是非法的)。`reshape` 仅在视图连续时才是零拷贝, 因此该下降同时要求: (1) 被丢弃的轴构成**前导前缀** `{0, 1, ..., k-1}` (即 `C[i]` / `C[i, j, :, :]` 这类 numpy 下标语法), 且 (2) **最外层之后的每个保留轴**都覆盖其完整长度 —— 在行主序视图里只有最外层保留轴可以被部分切片。违反者会以可操作的错误信息被拒绝, 而非发射会在运行时 assert 的代码: 丢弃**非前导**轴 (例如 `C[:, i, :]` → `drop_dims=[1]`) 会得到跨步视图, 被部分切片的**内层**保留轴 (例如 `C[i, :, 2:6]`) 同样是跨步的。二者都需要分布式 `tensor.slice` handler 所用的逐轴索引下降 —— 编排层的后续工作。对 **>2D** tile 的降秩 `tile.slice` (例如对字面 `>2D pl.Tile` 取下标) 尚未支持下降 —— `FlattenTileNdTo2D` 会以可操作的错误信息拒绝它, 因为这需要先把被切的源窗口合并到 2D 再重新推导 `drop_dims`; 请改为对 2D tile 切片。
 
 ### 二元操作
 

@@ -322,6 +322,50 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
                "lowering not yet wired for orchestration (see #1349 / the "
                "distributed tensor.slice handler).";
       }
+
+      // Each dropped axis must be unit-extent: a scalar index (``C[i]``)
+      // addresses one element, so the slice shape on that axis is 1. Upstream
+      // (the subscript-sugar parser) guarantees this, but assert it loudly here
+      // so a malformed drop_dims fails at codegen rather than slipping through to
+      // the runtime ``reshape`` numel ``debug_assert`` — which is compiled out in
+      // release builds. (The message reads ``->value_`` only on failure, where
+      // the ConstInt is non-null.)
+      for (size_t d = 0; d < dropped.size(); ++d) {
+        auto axis_extent = As<ConstInt>(shape_tuple->elements_[d]);
+        CHECK(!axis_extent || axis_extent->value_ == 1)
+            << "tensor.slice drop_dims axis " << d
+            << " must have unit extent (a scalar index addresses one element), got slice shape "
+            << axis_extent->value_ << ".";
+      }
+
+      // Contiguity guard. The leading-prefix check above is necessary but not
+      // sufficient: dropping unit leading axes {0..k-1} leaves a contiguous block
+      // only when every kept axis *after the outermost kept one* spans its full
+      // extent. In a row-major view only the outermost (here, the first kept)
+      // axis may be partially sliced; a partially-sliced inner kept axis (e.g.
+      // ``C[i, :, 2:6]`` -> slice [1, 8, 4] of a [4, 8, 16] tensor) produces a
+      // strided view that ``reshape``'s runtime ``always_assert(is_contiguous)``
+      // would reject. Reject it here, statically, with an actionable message
+      // instead of emitting code that asserts on device. Only provably-partial
+      // const axes are rejected; dynamic extents fall through to the runtime
+      // contiguity assert as a backstop.
+      auto input_type = As<TensorType>(op->args_[0]->GetType());
+      if (input_type && input_type->shape_.size() == ndim) {
+        for (size_t d = dropped.size() + 1; d < ndim; ++d) {
+          auto slice_extent = As<ConstInt>(shape_tuple->elements_[d]);
+          auto parent_extent = As<ConstInt>(input_type->shape_[d]);
+          if (slice_extent && parent_extent) {
+            CHECK(slice_extent->value_ == parent_extent->value_)
+                << "Orchestration tensor.slice with drop_dims requires every kept axis after the "
+                   "outermost to span its full extent (only the outermost kept axis may be partially "
+                   "sliced); axis "
+                << d << " slices " << slice_extent->value_ << " of " << parent_extent->value_
+                << ", which produces a non-contiguous view that reshape cannot lower. Slice the "
+                   "outermost kept axis instead, or copy to a contiguous tensor first.";
+          }
+        }
+      }
+
       if (reduced_ndim == 0) {
         // Dropping every axis (e.g. ``C[i]`` on a 1D tensor) yields a 0D scalar
         // result. A zero-sized array (``uint32_t shapes[0]``) is ill-formed in

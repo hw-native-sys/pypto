@@ -1227,6 +1227,62 @@ class TestOrchestration:
         with pytest.raises(Exception, match="leading prefix"):
             _generate_orch_code(DropMiddleProgram)
 
+    def test_tensor_slice_drop_dims_strided_inner_rejected(self):
+        """tensor.slice with a leading-prefix drop but a partially-sliced *inner*
+        kept axis (numpy ``C[i, :, 2:6]``) is rejected.
+
+        Leading-prefix is necessary but not sufficient for contiguity: in a
+        row-major view only the outermost kept axis may be partially sliced. Here
+        the inner kept axis slices 4 of 16, so the view is strided and the
+        view().reshape() lowering would hit reshape's runtime is_contiguous
+        assert. Codegen must reject it statically with an actionable message.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class StridedInnerProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice(
+                self,
+                data: pl.Tensor[[4, 8, 16], pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[8, 4], pl.FP32]:
+                # C[i, :, 2:6] -> drop leading axis 0, but inner axis 2 slices 4 of 16.
+                chunk: pl.Tensor[[8, 4], pl.FP32] = pl.slice(data, [1, 8, 4], [i, 0, 2], drop_dims=[0])
+                return chunk
+
+        with pytest.raises(Exception, match="full extent"):
+            _generate_orch_code(StridedInnerProgram)
+
+    def test_tensor_slice_drop_dims_scalar_0d(self):
+        """tensor.slice dropping every axis (numpy ``C[i]`` on a 1D tensor) yields a
+        0D scalar result, lowered via a ``reshape(nullptr, 0)`` (a zero-length
+        ``uint32_t[]`` is ill-formed in standard C++).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Scalar0DProgram:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orch_slice(
+                self,
+                data: pl.Tensor[[16], pl.FP32],
+                i: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[], pl.FP32]:
+                # C[i] -> drop axis 0, result is a 0D scalar tensor.
+                chunk: pl.Tensor[[], pl.FP32] = pl.slice(data, [1], [i], drop_dims=[0])
+                return chunk
+
+        code = _generate_orch_code(Scalar0DProgram)
+
+        # Full-rank view at the parent (1D) rank, then a 0D reshape with no shape array.
+        assert "uint32_t chunk_shapes[1] = {" in code
+        assert "Tensor chunk = ext_data.view(chunk_shapes, chunk_offsets);" in code
+        assert "chunk = chunk.reshape(nullptr, 0);" in code
+        assert "chunk_reduced_shapes" not in code  # 0D takes the nullptr branch, not the array branch
+
     def test_tensor_transpose_external_input(self):
         """tensor.transpose on an external orchestration input emits Tensor::transpose on ext_<name>."""
         backend.reset_for_testing()
