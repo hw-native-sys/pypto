@@ -322,14 +322,21 @@ REGISTER_ORCHESTRATION_OP(tensor_slice, ("tensor.slice")) {
                "lowering not yet wired for orchestration (see #1349 / the "
                "distributed tensor.slice handler).";
       }
-      oss << "\nuint32_t " << result_var << "_reduced_shapes[" << reduced_ndim << "] = {";
-      for (size_t i = 0; i < reduced_ndim; ++i) {
-        if (i > 0) oss << ", ";
-        oss << EmitAsUint32(result_type->shape_[i], codegen);
+      if (reduced_ndim == 0) {
+        // Dropping every axis (e.g. ``C[i]`` on a 1D tensor) yields a 0D scalar
+        // result. A zero-sized array (``uint32_t shapes[0]``) is ill-formed in
+        // standard C++, so emit a nullptr/0 reshape instead of the array form.
+        oss << "\n" << result_var << " = " << result_var << ".reshape(nullptr, 0);";
+      } else {
+        oss << "\nuint32_t " << result_var << "_reduced_shapes[" << reduced_ndim << "] = {";
+        for (size_t i = 0; i < reduced_ndim; ++i) {
+          if (i > 0) oss << ", ";
+          oss << EmitAsUint32(result_type->shape_[i], codegen);
+        }
+        oss << "};\n";
+        oss << result_var << " = " << result_var << ".reshape(" << result_var << "_reduced_shapes, "
+            << reduced_ndim << ");";
       }
-      oss << "};\n";
-      oss << result_var << " = " << result_var << ".reshape(" << result_var << "_reduced_shapes, "
-          << reduced_ndim << ");";
     }
   }
   return oss.str();
