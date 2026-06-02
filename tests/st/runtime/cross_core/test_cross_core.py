@@ -844,38 +844,28 @@ class TestCrossCore:
         result = test_runner.run(C2VUDTest(backend_type=backend_type))
         assert result.passed, f"Cross-core C2V updown compilation failed: {result.error}"
 
-    def test_tpop_c2v_nosplit(self, test_runner, backend_type, platform):
+    def test_tpop_c2v_nosplit(self, test_runner, backend_type):
         """C2V no-split pipe: compile through full pipeline and verify correctness."""
-        if platform == "a5sim":
-            pytest.xfail("950 backend cross-core C2V no-split not yet stable on sim")
         result = test_runner.run(C2VNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core C2V no-split compilation failed: {result.error}"
 
-    def test_tpop_bidirect_updown(self, test_runner, backend_type, platform):
+    def test_tpop_bidirect_updown(self, test_runner, backend_type):
         """Bidirect updown pipe: compile through full pipeline and verify correctness."""
-        if platform == "a5sim":
-            pytest.xfail("950 backend cross-core bidirect updown not yet stable on sim")
         result = test_runner.run(BiDirectUDTest(backend_type=backend_type))
         assert result.passed, f"Cross-core bidirect updown compilation failed: {result.error}"
 
-    def test_tpop_bidirect_leftright(self, test_runner, backend_type, platform):
+    def test_tpop_bidirect_leftright(self, test_runner, backend_type):
         """Bidirect left-right pipe: compile through full pipeline and verify correctness."""
-        if platform == "a5sim":
-            pytest.xfail("950 backend cross-core bidirect left-right not yet stable on sim")
         result = test_runner.run(BiDirectLRTest(backend_type=backend_type))
         assert result.passed, f"Cross-core bidirect left-right compilation failed: {result.error}"
 
-    def test_tpop_bidirect_nosplit(self, test_runner, backend_type, platform):
+    def test_tpop_bidirect_nosplit(self, test_runner, backend_type):
         """Bidirect no-split pipe: compile through full pipeline and verify correctness."""
-        if platform == "a5sim":
-            pytest.xfail("950 backend cross-core bidirect no-split not yet stable on sim")
         result = test_runner.run(BiDirectNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core bidirect no-split compilation failed: {result.error}"
 
-    def test_multiple_pipes_nosplit(self, test_runner, backend_type, platform):
+    def test_multiple_pipes_nosplit(self, test_runner, backend_type):
         """Explicit multiple pipe ids: compile through full pipeline and verify correctness."""
-        if platform == "a5sim":
-            pytest.xfail("950 backend explicit multi-pipe no-split not yet validated on sim")
         result = test_runner.run(MultiPipeNoSplitTest(backend_type=backend_type))
         assert result.passed, f"Cross-core explicit multi-pipe no-split failed: {result.error}"
 

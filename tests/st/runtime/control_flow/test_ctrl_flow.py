@@ -20,9 +20,9 @@ Limitations:
     scf.if (if-else) inside InCore functions with tile operations is not yet
     fully supported at runtime. The PTO codegen's ForStmt/IfStmt type inference
     only handles ScalarType for iter_args/return_vars (TileType/TensorType fall
-    through to "index"). These limitations also affect break/continue tests
-    since the CtrlFlowTransform pass converts them into if-else + while
-    constructs.
+    through to "index"). These limitations still affect break-based tests,
+    which remain skipped; continue-only lowering is covered by the active
+    runtime test below.
 """
 
 from typing import Any
@@ -748,7 +748,6 @@ class TestCtrlFlowOperations:
         result = test_runner.run(TestForIfElseNested(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.skip(reason="PTOAS BUG")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_while_loop_add(self, test_runner, platform):
         """Test while loop add (scf.while codegen)."""
@@ -762,7 +761,6 @@ class TestCtrlFlowOperations:
         result = test_runner.run(TestForLoopBreak(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
-    @pytest.mark.skip(reason="PTOAS BUG")
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_for_loop_continue(self, test_runner, platform):
         """Test for loop with continue."""
