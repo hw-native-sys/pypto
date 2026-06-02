@@ -1064,6 +1064,7 @@ def _infer_return_type(
     func_def: ast.FunctionDef,
     tensor_meta: dict[str, TensorMeta],
     out_params: list[str],
+    distributed_params: set[str] | None = None,
 ) -> str | None:
     """Infer the return type annotation string from the return statement.
 
@@ -1080,7 +1081,14 @@ def _infer_return_type(
     Falls back to the first ``Out`` param's tensor type as a last resort —
     matches the legacy single-return convention before bare ``pl.Tensor``
     inline params were supported.
+
+    ``distributed_params`` carries the subset of returnable names whose head
+    type is ``pld.DistributedTensor`` rather than ``pl.Tensor`` — propagated
+    here so a function returning a window-bound view does not leak as plain
+    ``pl.Tensor`` (the two kinds have distinct IR ``ObjectKind``).
     """
+    dist_set = distributed_params or set()
+
     # Find the first return-with-value
     return_node: ast.Return | None = None
     for node in ast.walk(func_def):
@@ -1094,7 +1102,9 @@ def _infer_return_type(
         for elt in return_node.value.elts:
             if not isinstance(elt, ast.Name) or elt.id not in tensor_meta:
                 return None  # Can't infer this element — drop the annotation
-            elt_annotations.append(_build_tensor_annotation(tensor_meta[elt.id], is_out=False))
+            elt_annotations.append(
+                _build_tensor_annotation(tensor_meta[elt.id], is_out=False, is_distributed=elt.id in dist_set)
+            )
         return f"tuple[{', '.join(elt_annotations)}]"
 
     # `return f(...)`: the result type depends on f's declared return types,
@@ -1109,11 +1119,13 @@ def _infer_return_type(
         and isinstance(return_node.value, ast.Name)
         and return_node.value.id in tensor_meta
     ):
-        return _build_tensor_annotation(tensor_meta[return_node.value.id], is_out=False)
+        name = return_node.value.id
+        return _build_tensor_annotation(tensor_meta[name], is_out=False, is_distributed=name in dist_set)
 
     # Fallback: first Out param's tensor type (legacy single-return convention).
     if out_params and out_params[0] in tensor_meta:
-        return _build_tensor_annotation(tensor_meta[out_params[0]], is_out=False)
+        name = out_params[0]
+        return _build_tensor_annotation(tensor_meta[name], is_out=False, is_distributed=name in dist_set)
 
     return None
 
@@ -1494,7 +1506,7 @@ class Specializer:
         )
 
         # Infer return type
-        ret_type = _infer_return_type(func_def, ctx.tensor_meta, out_params)
+        ret_type = _infer_return_type(func_def, ctx.tensor_meta, out_params, distributed_params)
         ret_ann = f" -> {ret_type}" if ret_type else ""
 
         # Transform body

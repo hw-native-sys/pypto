@@ -696,6 +696,41 @@ class TestSpecializer:
         assert "recv_x: pld.DistributedTensor[[256], pl.INT8]" in out
         assert "import pypto.language.distributed as pld" in out
 
+    def test_distributed_tensor_return_annotation(self):
+        """Return-type inference must preserve the distributed head — a function
+        returning a pld.DistributedTensor must annotate the return as
+        ``pld.DistributedTensor[...]``, not ``pl.Tensor[...]`` (the two kinds
+        have distinct IR ObjectKind, so a leaked head type would be a real
+        type-system bug)."""
+        src = """
+            def kernel(recv_x: pld.DistributedTensor):
+                return recv_x
+        """
+        out = self._specialize_simple(
+            src,
+            ["recv_x"],
+            {"recv_x": TensorMeta((256,), DataType.INT8)},
+        )
+        assert "-> pld.DistributedTensor[[256], pl.INT8]" in out
+        assert "-> pl.Tensor" not in out
+
+    def test_distributed_tensor_tuple_return_annotation(self):
+        """Multi-return: the tuple element keeps the distributed head when the
+        returned name is a pld.DistributedTensor param."""
+        src = """
+            def kernel(a: pl.Tensor, recv_x: pld.DistributedTensor):
+                return a, recv_x
+        """
+        out = self._specialize_simple(
+            src,
+            ["a", "recv_x"],
+            {
+                "a": TensorMeta((128,), DataType.FP32),
+                "recv_x": TensorMeta((256,), DataType.INT8),
+            },
+        )
+        assert "-> tuple[pl.Tensor[[128], pl.FP32], pld.DistributedTensor[[256], pl.INT8]]" in out
+
     def test_incore_decorator_generated(self):
         src = """
             def kernel(a: pl.Tensor, c: pl.Out[pl.Tensor]):
