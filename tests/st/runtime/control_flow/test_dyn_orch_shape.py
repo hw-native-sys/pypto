@@ -70,6 +70,11 @@ _DYN_SHAPES = [(16, 16)]
 _MIXED_SHAPES = [(128, 16)]
 # Asymmetric shapes — used to actually exercise transpose semantics (rows != cols).
 _ASYM_SHAPES = [(16, 32)]
+# (nbatch, rows, cols, batch_index) for the rank-reducing drop_dims slice test.
+# batch_index is non-zero so the dropped leading axis folds a non-trivial
+# start_offset into the runtime view; a buggy offset-0 lowering would still pass
+# on batch 0, so picking the last batch makes that bug observable.
+_DROP_DIMS_SHAPES = [(4, 16, 16, 3)]
 
 # (batch, num_heads, head_dim, block_size, context_len, max_model_len)
 _PA_CONFIGS = [(2, 16, 128, 128, 256, 1024)]
@@ -213,6 +218,91 @@ class DynOrchReshapeAddTestCase(PTOTestCase):
     def compute_expected(self, tensors, params=None):
         rows, cols = self._rows, self._cols
         tensors["c"][:] = (tensors["a_flat"] + tensors["b_flat"]).reshape(rows, cols)
+
+
+class DropDimsSliceAddTestCase(PTOTestCase):
+    """Test add where the orchestration rank-reduces a 3D input via a ``drop_dims`` slice.
+
+    Validates the orchestration ``tensor.slice`` ``drop_dims`` codegen path wired in
+    issue #1349: ``a[batch_index]`` (numpy ``C[i]``) drops the leading axis of a
+    ``[nbatch, rows, cols]`` DDR tensor, producing a ``[rows, cols]`` sub-tensor that
+    is forwarded to a 2D InCore add kernel. End-to-end this exercises the full-rank
+    ``Tensor::view`` + rank-reduced ``Tensor::reshape`` lowering: the view folds the
+    non-zero ``batch_index`` offset into ``start_offset`` and the reshape drops the
+    unit leading axis. A buggy lowering that ignored ``drop_dims`` (leaving the result
+    at the parent rank) would mismatch the 2D kernel-call binding; a buggy offset would
+    add the wrong batch slab and fail the numerical check.
+    Expected result: c = a[batch_index] + b.
+    """
+
+    __test__ = False
+
+    def __init__(
+        self,
+        nbatch: int,
+        rows: int,
+        cols: int,
+        batch_index: int,
+        *,
+        platform: str | None = None,
+        config: RunConfig | None = None,
+    ):
+        super().__init__(config, platform=platform)
+        self._nbatch = nbatch
+        self._rows = rows
+        self._cols = cols
+        self._batch_index = batch_index
+
+    def get_name(self) -> str:
+        return f"drop_dims_slice_add_{self._nbatch}x{self._rows}x{self._cols}_b{self._batch_index}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("a", [self._nbatch, self._rows, self._cols], DataType.FP32, init_value=torch.randn),
+            TensorSpec("b", [self._rows, self._cols], DataType.FP32, init_value=3.0),
+            TensorSpec("c", [self._rows, self._cols], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        nbatch = self._nbatch
+        rows = self._rows
+        cols = self._cols
+        bidx = self._batch_index
+
+        @pl.program
+        class DropDimsSliceAddProgram:
+            @pl.function(type=pl.FunctionType.InCore)
+            def add_kernel(
+                self,
+                a: pl.Tensor[[M, N], pl.FP32],
+                b: pl.Tensor[[M, N], pl.FP32],
+                c: pl.Out[pl.Tensor[[M, N], pl.FP32]],
+            ) -> pl.Tensor[[M, N], pl.FP32]:
+                """Add two 2D tiles element-wise."""
+                a_tile = pl.load(a, [0, 0], [rows, cols], target_memory=pl.MemorySpace.Vec)
+                b_tile = pl.load(b, [0, 0], [rows, cols])
+                result = pl.add(a_tile, b_tile)
+                out = pl.store(result, [0, 0], c)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                a: pl.Tensor[[nbatch, rows, cols], pl.FP32],
+                b: pl.Tensor[[rows, cols], pl.FP32],
+                c: pl.Out[pl.Tensor[[rows, cols], pl.FP32]],
+            ) -> pl.Tensor[[rows, cols], pl.FP32]:
+                # a[bidx] -> drop leading axis 0, result is 2D [rows, cols].
+                a2d: pl.Tensor[[rows, cols], pl.FP32] = pl.slice(
+                    a, [1, rows, cols], [bidx, 0, 0], drop_dims=[0]
+                )
+                c_out = self.add_kernel(a2d, b, c)
+                return c_out
+
+        return DropDimsSliceAddProgram
+
+    def compute_expected(self, tensors, params=None):
+        tensors["c"][:] = tensors["a"][self._batch_index] + tensors["b"]
 
 
 class DynOrchTransposeAddTestCase(PTOTestCase):
@@ -762,6 +852,20 @@ class TestDynOrchShapeOperations:
         """
         result = test_runner.run(DynOrchReshapeAddTestCase(shape, platform=platform))
         assert result.passed, f"Test failed for shape {shape}: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    @pytest.mark.parametrize("nbatch,rows,cols,batch_index", _DROP_DIMS_SHAPES)
+    def test_dyn_orch_drop_dims_slice_add(self, test_runner, nbatch, rows, cols, batch_index, platform):
+        """Test add where the orchestration rank-reduces a 3D input via an ``a[i]`` slice.
+
+        Validates the orchestration ``tensor.slice`` ``drop_dims`` codegen path (issue
+        #1349) lowering to a full-rank ``Tensor::view`` + rank-reduced ``Tensor::reshape``.
+        Uses a non-zero ``batch_index`` so the dropped leading axis folds a real offset
+        into the view — a lowering that ignored ``drop_dims`` or mis-folded the offset
+        would fail either the kernel-call binding or the numerical check.
+        """
+        result = test_runner.run(DropDimsSliceAddTestCase(nbatch, rows, cols, batch_index, platform=platform))
+        assert result.passed, f"Test failed for [{nbatch},{rows},{cols}] batch {batch_index}: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     @pytest.mark.parametrize("shape", _ASYM_SHAPES)
