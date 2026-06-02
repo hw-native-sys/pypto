@@ -95,9 +95,7 @@ class TileInnermostDimVisitor : public IRVisitor {
   void Flush() {
     for (auto& [key, site] : sites_) {
       (void)key;
-      diagnostics_.emplace_back(DiagnosticSeverity::PerfHint, "TileInnermostDimGranularity",
-                                kTileInnermostDimGranularityCode, /*hint_code=*/"PH001", BuildMessage(site),
-                                site.span);
+      EmitSite(site);
     }
   }
 
@@ -118,10 +116,10 @@ class TileInnermostDimVisitor : public IRVisitor {
   }
 
  private:
-  /// One deduplicated diagnostic site, keyed by (file, line, col, op_name).
-  /// `Span` has const members (no default ctor / copy-assign), so Site is
-  /// constructed once via try_emplace and never reassigned; `count` is the
-  /// only field that mutates after insertion.
+  /// One deduplicated diagnostic site, keyed by (file, line, col, op_name) plus
+  /// the transfer facts (see SiteKey). `Span` has const members (no default
+  /// ctor / copy-assign), so Site is constructed once via try_emplace and never
+  /// reassigned; `count` is the only field that mutates after insertion.
   struct Site {
     Site(TileTransferInfo i, Span s, std::string op)
         : info(std::move(i)), span(std::move(s)), op_name(std::move(op)) {}
@@ -131,10 +129,17 @@ class TileInnermostDimVisitor : public IRVisitor {
     uint32_t count = 0;
   };
 
-  // Dedup key per issue #1305 ask (4): (file, line, col, op_name). Loop-unroll
-  // and per-fragment expansion produce many tile ops at the same source span;
-  // collapsing them to one hint with a count keeps the signal readable.
-  using SiteKey = std::tuple<std::string, int, int, std::string>;
+  // Dedup key per issue #1305 ask (4): (file, line, col, op_name) plus the
+  // transfer facts the hint actually renders (dtype, innermost_bytes, memory).
+  // Loop-unroll and per-fragment expansion produce many tile ops at the same
+  // source span; collapsing *identical* transfers to one hint with a count
+  // keeps the signal readable. The transfer facts are part of the key so that
+  // distinct tiles sharing a span (e.g. multiple loads on one line, or macro
+  // expansion) are not conflated — each (size, dtype, memory) gets its own
+  // hint with an accurate count, rather than all collapsing onto the
+  // first-seen tuple.
+  using SiteKey =
+      std::tuple<std::string, int, int, std::string, std::string, uint64_t, std::optional<MemorySpace>>;
 
   void RecordIfBelowThreshold(const std::string& op_name, const TypePtr& tile_type, const Span& span) {
     auto info_opt = InspectTile(tile_type);
@@ -150,10 +155,30 @@ class TileInnermostDimVisitor : public IRVisitor {
 
     if (info.innermost_bytes >= recommended_bytes_) return;
 
-    SiteKey key{span.filename_, span.begin_line_, span.begin_column_, op_name};
+    // Invalid/unknown spans (Span::unknown() -> "", -1, -1) carry no real
+    // source location, so they cannot be meaningfully deduplicated by site:
+    // every such op would collapse onto the same ("", -1, -1, op, ...) key,
+    // conflating unrelated transfers across the whole program into one bogus
+    // "N occurrences at this source location" hint. Emit them individually.
+    if (!span.is_valid()) {
+      Site site(info, span, op_name);
+      site.count = 1;
+      EmitSite(site);
+      return;
+    }
+
+    SiteKey key{span.filename_,  span.begin_line_,     span.begin_column_, op_name,
+                info.dtype_name, info.innermost_bytes, info.memory};
     auto [it, inserted] = sites_.try_emplace(key, info, span, op_name);
     (void)inserted;
     ++it->second.count;
+  }
+
+  /// Append one diagnostic for a fully-populated site.
+  void EmitSite(const Site& site) {
+    diagnostics_.emplace_back(DiagnosticSeverity::PerfHint, "TileInnermostDimGranularity",
+                              kTileInnermostDimGranularityCode, /*hint_code=*/"PH001", BuildMessage(site),
+                              site.span);
   }
 
   std::string BuildMessage(const Site& site) const {
@@ -214,7 +239,8 @@ class TileInnermostDimVerifier : public PropertyVerifier {
       visitor.VisitStmt(func->body_);
     }
     // Deduplicated sites are accumulated during the walk; emit one diagnostic
-    // per (file, line, col, op) site now (issue #1305 ask 4).
+    // per (file, line, col, op, dtype, bytes, memory) site now (issue #1305
+    // ask 4). Hits at invalid spans were already emitted individually.
     visitor.Flush();
   }
 

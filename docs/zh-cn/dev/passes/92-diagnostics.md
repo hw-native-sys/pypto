@@ -80,7 +80,7 @@ Register(DiagnosticCheck::MyCheck,
 
 ### 第一项检查：`TileInnermostDimGranularity` (PH001)
 
-检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时发出 diagnostic，指向源代码 span。该检查**感知内存空间**：阈值建模的是 L2 cache-line 关注点，因此 `target_memory` 为 cube 私有 L0/L1（`Mat`/`Left`/`Right`/`Acc`）的 tile 不会经过 L2，会被跳过，以避免在已调优的 cube kernel 上误报。命中按 `(file, line, col, op)` 站点**去重**——循环展开 / 分片展开在同一源 span 产生的多个 tile op 会折叠为一条带出现次数的 hint。消息会回显其评估的 `(dtype[innermost], target_memory)` 元组，便于将字节数与 IR 对照。上下文中存在 `ReportInstrument` 时全部写入 `perf_hints.log`，stderr 仅见摘要行；否则每条 hint 输出到 stderr。
+检查每个 `tile.load` / `tile.store` 操作。当最内层维度的字节数（`shape[-1] * sizeof(dtype)`）低于 `GetRecommendedInnermostDimBytes()` 时发出 diagnostic，指向源代码 span。该检查**感知内存空间**：阈值建模的是 L2 cache-line 关注点，因此 `target_memory` 为 cube 私有 L0/L1（`Mat`/`Left`/`Right`/`Acc`）的 tile 不会经过 L2，会被跳过，以避免在已调优的 cube kernel 上误报。命中按 `(file, line, col, op, dtype, innermost_bytes, target_memory)` 站点**去重**——循环展开 / 分片展开在同一源 span 产生的多个*相同* tile 传输会折叠为一条带出现次数的 hint；而共享同一 span 的不同传输（dtype/大小/内存空间不同）各自保留自己的 hint，使计数不会产生误导。位于无效 / 未知 span 的命中会单独发出，而非折叠在一起。消息会回显其评估的 `(dtype[innermost], target_memory)` 元组，便于将字节数与 IR 对照。上下文中存在 `ReportInstrument` 时全部写入 `perf_hints.log`，stderr 仅见摘要行；否则每条 hint 输出到 stderr。
 
 > **源 span 限制：** span 为流水线后 IR 文本位置（`<string>:line:col`），并非原始 DSL `pl.at` / 切片表达式，也未命名控制内层维度的 chunk 常量。回溯到用户源代码并命名内层维度常量需要将 DSL 源 span 通过 parser/IR 传递到 tile op 上——目前 `TileType`、`Call` op、`Span` 都未携带该元数据（issue #1305 第 2/3 项）。
 
