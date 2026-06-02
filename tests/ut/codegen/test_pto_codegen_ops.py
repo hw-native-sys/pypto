@@ -1798,7 +1798,9 @@ class TestTileMoveAccNoopElision:
                     for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
                         k0 = kb * K_CHUNK
                         gate_acc = pl.matmul_acc(
-                            gate_acc, pl.slice(x, [BATCH, K_CHUNK], [0, k0]), pl.slice(wg, [K_CHUNK, N], [k0, 0])
+                            gate_acc,
+                            pl.slice(x, [BATCH, K_CHUNK], [0, k0]),
+                            pl.slice(wg, [K_CHUNK, N], [k0, 0]),
                         )
                     # Consume gate (to Vec) before the up pipeline so up reuses
                     # gate's freed Acc buffer — the condition that exposed #1352.
@@ -1808,12 +1810,27 @@ class TestTileMoveAccNoopElision:
                     for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
                         k0 = kb * K_CHUNK
                         up_acc = pl.matmul_acc(
-                            up_acc, pl.slice(x, [BATCH, K_CHUNK], [0, k0]), pl.slice(wu, [K_CHUNK, N], [k0, 0])
+                            up_acc,
+                            pl.slice(x, [BATCH, K_CHUNK], [0, k0]),
+                            pl.slice(wu, [K_CHUNK, N], [k0, 0]),
                         )
                     combined = pl.mul(gate_fp32, up_acc)
                     out_tile = pl.assemble(out_tile, pl.cast(combined, pl.BF16), [0, 0])
                 out = pl.assemble(out, out_tile, [0, 0])
                 return out
+
+        # Guard: assert split=UP_DOWN actually produced split InCore kernels.
+        # The acc→acc regression only exists on the AIC side after the AIC/AIV
+        # split, so without this guard a split-lowering regression would make
+        # the test pass vacuously and stop covering #1352.
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+        optimized = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(PipelineGateUpProg)
+        incore = [f for f in optimized.functions.values() if ir.is_incore_type(f.func_type)]
+        assert len(incore) >= 2, (
+            f"Expected split=UP_DOWN to produce split InCore variants for #1352, "
+            f"got {len(incore)} InCore function(s)"
+        )
 
         mlir = self._generate_mlir(PipelineGateUpProg)
         assert not self._has_acc_to_acc_tmov(mlir), (

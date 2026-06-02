@@ -1404,42 +1404,52 @@ class AlignLoopCarriesToInitMutator : public IRMutator {
       // Resolve initValue through var_remap_ so an enclosing loop's alignment
       // (which rebuilt the init var this iter_arg carries) is observed here.
       auto init_expr = VisitExpr(op->iter_args_[i]->initValue_);
+      bool init_changed = init_expr.get() != op->iter_args_[i]->initValue_.get();
+
+      // MemRef alignment only applies when the init resolves to a tile-typed
+      // var/iter_arg with a defined MemRef.  A non-tile or non-var carry (e.g.
+      // a scalar, or a non-Var init expression) has no MemRef to align to, but
+      // any remapped init_expr must still be propagated to the rebuilt IterArg
+      // below — otherwise an enclosing loop's alignment is silently dropped.
       auto init_var = AsVarLike(init_expr);
-      if (!init_var) continue;
-      auto init_tile = GetTileTypeWithMemRef(init_var->GetType());
-      if (!init_tile) continue;
-      auto init_memref = GetDefinedMemRef(init_tile);
-      auto init_memory = init_tile->GetMemorySpace();
+      auto init_tile = init_var ? GetTileTypeWithMemRef(init_var->GetType()) : nullptr;
+      MemRefPtr init_memref = nullptr;
+      std::optional<MemorySpace> init_memory = std::nullopt;
+      if (init_tile) {
+        init_memref = GetDefinedMemRef(init_tile);
+        init_memory = init_tile->GetMemorySpace();
+      }
 
       // Re-type a carry's TileType onto init's MemRef, remapping any embedded
-      // exprs (shape/strides) through var_remap_.
+      // exprs (shape/strides) through var_remap_.  Only invoked when init_tile
+      // is non-null, so init_memref is always defined at the call sites.
       auto retype_to_init = [&](const TileTypePtr& tile) {
         return CloneTypeWithMemRefAndRemapExprs(
             tile, init_memref, [this](const ExprPtr& e) { return VisitExpr(e); }, init_memory);
       };
 
-      // Align the iter_arg's TileType to init's MemRef (rebuild if the type
-      // changed or the carried init reference changed).
+      // Align the iter_arg's TileType to init's MemRef when both have a defined
+      // MemRef, and always rebuild when the carried init reference changed so a
+      // remapped init_expr is preserved regardless of the carry's type.
       auto ia_tile = As<TileType>(op->iter_args_[i]->GetType());
-      bool ia_memref_differs =
-          ia_tile && ia_tile->memref_.has_value() &&
-          !MemRef::SameAllocation(GetDefinedMemRef(ia_tile), init_memref);
-      if (ia_memref_differs || init_expr.get() != op->iter_args_[i]->initValue_.get()) {
-        TypePtr new_ia_type =
-            ia_memref_differs ? retype_to_init(ia_tile) : op->iter_args_[i]->GetType();
-        new_iter_args[i] = std::make_shared<IterArg>(op->iter_args_[i]->name_hint_, new_ia_type,
-                                                     init_expr, op->iter_args_[i]->span_);
+      bool ia_memref_differs = init_tile && ia_tile && ia_tile->memref_.has_value() &&
+                               !MemRef::SameAllocation(GetDefinedMemRef(ia_tile), init_memref);
+      if (ia_memref_differs || init_changed) {
+        TypePtr new_ia_type = ia_memref_differs ? retype_to_init(ia_tile) : op->iter_args_[i]->GetType();
+        new_iter_args[i] = std::make_shared<IterArg>(op->iter_args_[i]->name_hint_, new_ia_type, init_expr,
+                                                     op->iter_args_[i]->span_);
         var_remap_[op->iter_args_[i].get()] = new_iter_args[i];
         changed = true;
       }
 
-      // Align the matching return_var's TileType to init's MemRef.
-      if (i < new_return_vars.size()) {
+      // Align the matching return_var's TileType to init's MemRef (only when
+      // init has a tile MemRef to align to).
+      if (init_tile && i < new_return_vars.size()) {
         auto rv_tile = As<TileType>(op->return_vars_[i]->GetType());
         if (rv_tile && rv_tile->memref_.has_value() &&
             !MemRef::SameAllocation(GetDefinedMemRef(rv_tile), init_memref)) {
-          new_return_vars[i] = std::make_shared<Var>(
-              op->return_vars_[i]->name_hint_, retype_to_init(rv_tile), op->return_vars_[i]->span_);
+          new_return_vars[i] = std::make_shared<Var>(op->return_vars_[i]->name_hint_, retype_to_init(rv_tile),
+                                                     op->return_vars_[i]->span_);
           var_remap_[op->return_vars_[i].get()] = new_return_vars[i];
           changed = true;
         }
