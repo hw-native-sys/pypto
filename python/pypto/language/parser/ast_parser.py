@@ -3423,9 +3423,13 @@ class ASTParser:
         ``sync_start=True/False`` is optional and must be a boolean literal.
         Returns ``(core_num_expr, sync_start)``.
         """
-        # Show the minimal required form (core_num is required; sync_start is
-        # optional and defaults to False, so it is omitted from the hint).
-        usage_hint = f"Use `out, tid = pl.spmd_submit(self.{method_name}, *args, core_num=N)`."
+        # Concrete, arg-syntax-free hint: this fires on core_num / sync_start
+        # validation, so point at the keyword itself (core_num is required, a
+        # positive int; sync_start is optional and defaults to False).
+        usage_hint = (
+            f"pl.spmd_submit(self.{method_name}, ...) requires a positive integer "
+            "'core_num' keyword (e.g. core_num=8); 'sync_start' is optional (default False)."
+        )
         core_num: ir.Expr | None = None
         sync_start = False
         for kw in keywords:

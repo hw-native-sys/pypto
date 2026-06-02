@@ -929,6 +929,17 @@ class Submit : public Expr {
     if (core_num_.has_value() && !*core_num_) {
       throw pypto::TypeError("Submit core_num must be a non-null Expr when present");
     }
+    // core_num is an SPMD block count — reject a non-integer launch dimension
+    // at the public boundary (the DSL parser already enforces this, but direct
+    // C++/Python construction would otherwise let a float/bool expr through).
+    // Only reject a *typed* non-integer scalar; leave other expr shapes alone.
+    if (core_num_.has_value()) {
+      if (auto scalar = std::dynamic_pointer_cast<const ScalarType>((*core_num_)->GetType())) {
+        if (!scalar->dtype_.IsInt() && !scalar->dtype_.IsIndexLike()) {
+          throw pypto::TypeError("Submit core_num must be an integer/index expression (SPMD block count)");
+        }
+      }
+    }
   }
 
   void ValidateArgDirectionsAttr() const {
@@ -975,7 +986,13 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
   std::vector<std::pair<std::string, std::any>> attrs;
   attrs.reserve(submit->attrs_.size());
   for (const auto& [k, v] : submit->attrs_) {
-    if (k != kAttrManualDepEdges) attrs.emplace_back(k, v);
+    // ``core_num`` / ``sync_start`` are first-class Submit fields and are
+    // re-emitted below from core_num_ / sync_start_. Drop any stray attr of
+    // the same key so the field stays the single source of truth (Call::GetAttr
+    // returns the first match, so a stale attr would otherwise shadow it).
+    if (k != kAttrManualDepEdges && k != "core_num" && k != "sync_start") {
+      attrs.emplace_back(k, v);
+    }
   }
   if (!submit->deps_.empty()) {
     std::vector<VarPtr> dep_vars;

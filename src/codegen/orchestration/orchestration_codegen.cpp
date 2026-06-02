@@ -1802,10 +1802,15 @@ class OrchestrationStmtCodegen : public CodegenBase {
       auto callee_func = program_->GetFunction(gv->name_);
       if (!callee_func) return std::nullopt;
 
-      auto core_num_expr = callee_func->GetAttr<ExprPtr>("core_num", nullptr);
+      // Resolve core_num from the same source as the launch spec: pl.spmd_submit
+      // carries it on the dispatch call's attrs, while scope-based pl.spmd /
+      // Group wrappers carry it on the callee function's attrs. Sizing the
+      // GM-pipe workspace from callee attrs alone would under-allocate for a
+      // direct ``pl.spmd_submit(self.aic_or_aiv_kernel, ..., core_num=N)``
+      // (N blocks launched, 1-block workspace).
+      auto core_num_expr = EffectiveLaunchSpec(call, callee_func).first;
       std::string rendered_core_num;
-      if ((callee_func->func_type_ == FunctionType::Spmd || callee_func->func_type_ == FunctionType::Group) &&
-          core_num_expr) {
+      if (core_num_expr) {
         rendered_core_num = RenderLaunchCoreNum(core_num_expr);
       }
       return GMPipeCreateUse{callee_func, rendered_core_num};

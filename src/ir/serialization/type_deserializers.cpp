@@ -421,7 +421,10 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
   // (default false), only meaningful when core_num is present.
   std::optional<ExprPtr> core_num;
   auto core_num_opt = GetOptionalFieldObj(fields_obj, "core_num", ctx);
-  if (core_num_opt.has_value()) {
+  // GetOptionalFieldObj already maps a NIL payload to nullopt, but guard
+  // explicitly so a present-but-NIL field never deserializes to a null ExprPtr
+  // (which would trip the Submit ctor's launch-spec validation).
+  if (core_num_opt.has_value() && core_num_opt->type != msgpack::type::NIL) {
     core_num = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(*core_num_opt, zone));
   }
   bool sync_start = false;
@@ -804,8 +807,17 @@ static IRNodePtr DeserializeRuntimeScopeStmt(const msgpack::object& fields_obj, 
 
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+
+  // ScopeStmt serializes its attrs_ via reflection; preserve them on round-trip
+  // (later passes treat some scope attrs as semantic — see VisitScopeAttrs).
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_opt, "attrs");
+  }
+
   return std::make_shared<RuntimeScopeStmt>(manual, std::move(name_hint), body, span,
-                                            DeserializeLeadingComments(fields_obj));
+                                            DeserializeLeadingComments(fields_obj), std::move(attrs));
 }
 
 // Deserialize SeqStmts

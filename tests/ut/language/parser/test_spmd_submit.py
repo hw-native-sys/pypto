@@ -33,17 +33,6 @@ def _flatten(stmt):
     return [stmt]
 
 
-def _first_runtime_scope(stmt):
-    if isinstance(stmt, ir.RuntimeScopeStmt):
-        return stmt
-    if isinstance(stmt, ir.SeqStmts):
-        for s in stmt.stmts:
-            r = _first_runtime_scope(s)
-            if r is not None:
-                return r
-    return None
-
-
 def _submits_in(stmt):
     """Collect every ``ir.Submit`` bound as an AssignStmt RHS in the subtree."""
     return [
@@ -192,7 +181,7 @@ class TestSpmdSubmitParsing:
             def main(
                 self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
             ) -> pl.Tensor[[128], pl.FP32]:
-                out, tid = pl.spmd_submit(self.k, x, out, core_num=4, sync_start=True)
+                out, _tid = pl.spmd_submit(self.k, x, out, core_num=4, sync_start=True)
                 return out
 
         submits = _main_submits(Prog)
@@ -269,6 +258,16 @@ class TestSpmdSubmitConstructorValidation:
         ret = ir.ScalarType(DataType.TASK_ID)
         with pytest.raises(ValueError, match="sync_start"):
             ir.Submit(gv, [], [], {}, None, ret, span, core_num=None, sync_start=True)
+
+    def test_non_integer_core_num_rejected(self):
+        # The IR constructor guards the launch-spec invariant at the public
+        # boundary: core_num must be an integer/index expression, not float/bool.
+        span = ir.Span.unknown()
+        gv = ir.GlobalVar("k")
+        ret = ir.TupleType([ir.ScalarType(DataType.INDEX), ir.ScalarType(DataType.TASK_ID)])
+        bad_core_num = ir.ConstFloat(4.0, DataType.FP32, span)
+        with pytest.raises(TypeError, match="core_num must be an integer"):
+            ir.Submit(gv, [], [], {}, None, ret, span, core_num=bad_core_num, sync_start=False)
 
 
 class TestSpmdSubmitErrors:
