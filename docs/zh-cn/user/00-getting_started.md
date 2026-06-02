@@ -242,6 +242,45 @@ with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
   ChipWorker 生命周期结束。
 - 只有分配它的那个 ChipWorker 实例可以使用该 buffer。
 
+### 显式 dispatch（`worker.run`、`worker.register`）
+
+上面的 `with ChipWorker(): compiled(...)` 隐式模式依赖 `ContextVar` 发现：块内任何
+`compiled(...)` 调用都会找到当前活跃的 worker 并复用它。这对脚本写法很方便，但 worker
+对象本身被藏起来了 —— 库代码需要把 worker 传来传去，或者常驻服务想预注册多个 kernel
+时，应该显式地驱动 dispatch：
+
+```python
+worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+try:
+    out = worker.run(compiled, a, b)                 # 单次
+    handle = worker.register(compiled)               # 预注册
+    for _ in range(1000):                            # 热循环，无 cid lookup
+        handle(a, b, out)
+finally:
+    worker.close()                                   # cid + DeviceTensor 统一释放
+```
+
+`worker.register(compiled)` 立即触发 `compile_and_assemble` + simpler `register`，
+配置错误会在这里抛出而不是到第一次 dispatch 才暴露。返回的 `RegistrationHandle` 是
+可调用的、支持 `with handle:` 作用域清理，也有 `handle.unregister()` 用于显式提前
+关闭。对同一个 `compiled.chip_callable` 多次 `register` 返回的是同一个 cid 的别名；
+真正的 simpler 反注册在 `worker.close()` 里集中做。
+
+`@pl.jit` 内核走同样的流程，先经过 `JITFunction.compile()`：
+
+```python
+@pl.jit
+def add_kernel(a, b, out): ...
+
+compiled = add_kernel.compile(sample_a, sample_b, sample_out)
+handle = worker.register(compiled)
+for batch in stream:
+    handle(batch.a, batch.b, batch.out)
+```
+
+完整三种使用模式（推理服务、训练循环、register/dispatch 开销验证）见
+`examples/runtime/explicit_dispatch.py`。
+
 ### 分布式（L3+）程序
 
 `ir.compile` 对 L3+ 分布式程序返回的 `DistributedCompiledProgram` 与 `CompiledProgram`

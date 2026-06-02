@@ -571,6 +571,44 @@ output_dir = ir.compile(
 18. **LegalizePTOBufferReuse** —— 规范化 PTO 缓冲区复用模式
 19. **AllocateMemoryAddr** —— 分配具体内存地址
 
+### `JITFunction.compile()`（用于 `@pl.jit` 内核）
+
+`@pl.jit` 内核在 `kernel(*args)` 一次调用中完成 specialize + compile + dispatch
+三步。当你需要**把 compile 与 runtime 阶段分开**——自己用 `ChipWorker.run` /
+`ChipWorker.register` 驱动执行，查看 `compiled.output_dir` 下的产物，或者做 AOT
+codegen 验证——调用 `JITFunction.compile(*sample_args)` 即可拿到底层
+`CompiledProgram`，不会触发 device dispatch：
+
+```python
+@pl.jit
+def my_kernel(x, w, out): ...
+
+# Stage 1：只编译，不上设备
+compiled = my_kernel.compile(sample_x, sample_w, sample_out)
+print("artifacts in:", compiled.output_dir)
+
+# Stage 2：用新的 worker API 显式驱动 runtime
+from pypto.runtime import ChipWorker, RunConfig
+
+worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+handle = worker.register(compiled)
+for batch in stream:
+    handle(batch.x, w_dev, batch.out)
+worker.close()
+```
+
+- `compile()` 与 `__call__` 对 `config=RunConfig(...)` 的处理一致：
+  compile-side 参数（`strategy`、`dump_passes`、diagnostics 等）会转发到
+  `ir.compile()`，runtime-side 字段（`device_id`、DFX flag）在这里不生效
+  ——它们只影响 dispatch，不影响 compile 产物。
+- 返回的 `CompiledProgram` 就是 JIT 缓存里那一个；同一 specialization key 的
+  `kernel(*args)` 和 `kernel.compile(*args)` 后续调用都会命中缓存，返回完全相同
+  的对象。
+- 该 `CompiledProgram` 暴露完整的抽取接口 —— `chip_callable`、`runtime_name`、
+  `runtime_config`、`build_orch_args`、`build_call_config`、`output_dir`、
+  `platform`、`output_indices` —— 因此需要直接操纵 `simpler.worker.Worker` 的
+  harness 也可以直接用 JIT 内核，无需再包一个 `@pl.program` wrapper。
+
 ### 调试
 
 使用 `node.as_python()` 查看函数或程序的 IR。传入 `concise=True` 可省略中间类型标注以获得更清晰的输出。编译时设置 `dump_passes=True`，可在输出目录下的 `passes_dump/` 中得到各优化阶段的 IR 快照。

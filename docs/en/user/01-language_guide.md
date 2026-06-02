@@ -585,6 +585,46 @@ The `Default` strategy runs these passes in order:
 18. **LegalizePTOBufferReuse** — legalize PTO buffer reuse patterns
 19. **AllocateMemoryAddr** — assign concrete memory addresses
 
+### `JITFunction.compile()` (for `@pl.jit` kernels)
+
+`@pl.jit` kernels normally fuse specialize + compile + dispatch into a single
+`kernel(*args)` call. When you want to **split compile from runtime** — to
+drive execution through `ChipWorker.run` / `ChipWorker.register` yourself,
+to inspect the generated artifacts under `compiled.output_dir`, or to do
+ahead-of-time codegen validation — call `JITFunction.compile(*sample_args)`
+to get the underlying `CompiledProgram` without dispatching:
+
+```python
+@pl.jit
+def my_kernel(x, w, out): ...
+
+# Stage 1: compile only — no device call.
+compiled = my_kernel.compile(sample_x, sample_w, sample_out)
+print("artifacts in:", compiled.output_dir)
+
+# Stage 2: explicit runtime via the new worker API.
+from pypto.runtime import ChipWorker, RunConfig
+
+worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+handle = worker.register(compiled)
+for batch in stream:
+    handle(batch.x, w_dev, batch.out)
+worker.close()
+```
+
+- `compile()` honours `config=RunConfig(...)` the same way `__call__` does:
+  compile-side knobs (`strategy`, `dump_passes`, diagnostics, ...) are
+  forwarded to `ir.compile()`. Runtime-side fields (`device_id`, DFX flags)
+  do not apply here — they affect dispatch, not the compiled artifact.
+- The returned `CompiledProgram` is the same object the JIT cache holds, so
+  subsequent `kernel(*args)` or `kernel.compile(*args)` calls with the same
+  specialization key hit the cache and return the exact same instance.
+- The `CompiledProgram` exposes the full extraction surface — `chip_callable`,
+  `runtime_name`, `runtime_config`, `build_orch_args`, `build_call_config`,
+  `output_dir`, `platform`, `output_indices` — so harnesses that drive
+  `simpler.worker.Worker` directly can do so on a JIT kernel without writing
+  a `@pl.program` wrapper.
+
 ### Debugging
 
 Use `node.as_python()` to inspect IR for functions or programs. Pass `concise=True` to omit intermediate type annotations for cleaner output. Compile with `dump_passes=True` to dump IR snapshots for each optimization stage under `passes_dump/` in the output directory.

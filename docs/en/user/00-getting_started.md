@@ -246,6 +246,49 @@ with ChipWorker(config=RunConfig(platform="a2a3sim")) as w:
   otherwise the memory leaks for the lifetime of the ChipWorker.
 - Only the ChipWorker instance that allocated the buffer can use it.
 
+### Explicit dispatch (`worker.run`, `worker.register`)
+
+The implicit `with ChipWorker(): compiled(...)` pattern shown above relies on
+`ContextVar` discovery: any `compiled(...)` call inside the block finds the
+active worker and reuses it. That's convenient for scripts but leaves the
+worker hidden — library code that needs to pass the worker around, or a
+serving runtime that wants to pre-register many kernels, should drive
+dispatch explicitly:
+
+```python
+worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+try:
+    out = worker.run(compiled, a, b)                 # one-shot
+    handle = worker.register(compiled)               # eager registration
+    for _ in range(1000):                            # hot loop, no cid lookup
+        handle(a, b, out)
+finally:
+    worker.close()                                   # cids + DeviceTensors released
+```
+
+`worker.register(compiled)` triggers `compile_and_assemble` + simpler
+`register` immediately, so configuration errors surface here rather than on
+first dispatch. The returned `RegistrationHandle` is callable, supports
+`with handle:` for scoped cleanup, and exposes `handle.unregister()` for
+explicit early release. Multiple `register` calls for the same
+`compiled.chip_callable` return aliases of the same cid; the underlying
+simpler unregister runs once, in `worker.close()`.
+
+For `@pl.jit` kernels, the same flow works via `JITFunction.compile()`:
+
+```python
+@pl.jit
+def add_kernel(a, b, out): ...
+
+compiled = add_kernel.compile(sample_a, sample_b, sample_out)
+handle = worker.register(compiled)
+for batch in stream:
+    handle(batch.a, batch.b, batch.out)
+```
+
+See `examples/runtime/explicit_dispatch.py` for three end-to-end patterns
+(inference service, training loop, register/dispatch overhead check).
+
 ### Distributed (L3+) programs
 
 L3+ distributed programs returned by `ir.compile` (a `DistributedCompiledProgram`)
