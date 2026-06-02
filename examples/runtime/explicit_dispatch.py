@@ -15,6 +15,7 @@ relying on ``with ChipWorker(): compiled(...)`` ContextVar discovery:
   mode_a_inference_service — pre-register N compiled kernels, dispatch by name
   mode_b_training_loop      — persistent weight DeviceTensor + hot register/run loop
   mode_c_register_dispatch_overhead — register warms the callable cache once
+                                       (uses its own ChipWorker — see note in the mode)
 
 All three modes use a ``@pl.jit`` kernel and the new
 :meth:`JITFunction.compile` entry point so the same script demonstrates:
@@ -42,7 +43,7 @@ from pypto.runtime import ChipWorker, RunConfig
 @pl.jit
 def tile_add_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     """c = a + b on 128x128 fp32 tiles."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_c = pl.add(tile_a, tile_b)
@@ -53,7 +54,7 @@ def tile_add_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
 @pl.jit
 def tile_mul_128(a: pl.Tensor, b: pl.Tensor, c: pl.Out[pl.Tensor]):
     """c = a * b on 128x128 fp32 tiles."""
-    with pl.incore():
+    with pl.at(level=pl.Level.CORE_GROUP):
         tile_a = pl.load(a, [0, 0], [128, 128])
         tile_b = pl.load(b, [0, 0], [128, 128])
         tile_c = pl.mul(tile_a, tile_b)
@@ -129,6 +130,9 @@ def mode_b_training_loop(worker: ChipWorker) -> None:
         expected = x + host_weight
         assert torch.allclose(out, expected, rtol=1e-5, atol=1e-5), f"step {step} mismatch"
 
+    # Explicit free even though ``worker.close()`` would auto-free —
+    # documented best practice (and shown in 00-getting_started.md caveats).
+    worker.free_tensor(w_dev)
     print("mode B OK — 5 dispatches with persistent weight DeviceTensor")
 
 
@@ -137,7 +141,7 @@ def mode_b_training_loop(worker: ChipWorker) -> None:
 # ---------------------------------------------------------------------------
 
 
-def mode_c_register_dispatch_overhead(worker: ChipWorker) -> None:
+def mode_c_register_dispatch_overhead() -> None:
     """Demonstrate that ``worker.register(compiled)`` triggers exactly one
     AICPU dlopen for that callable, and subsequent ``handle(*args)`` calls
     reuse it.
@@ -145,32 +149,44 @@ def mode_c_register_dispatch_overhead(worker: ChipWorker) -> None:
     The diagnostic counter ``ChipWorker.aicpu_dlopen_count`` is a direct
     passthrough to the underlying simpler worker — useful for benchmarking
     and for verifying the cid cache is doing its job.
+
+    **Uses its own ChipWorker** rather than sharing with the other modes:
+    ``ChipWorker._cid_cache`` is keyed by ``id(chip_callable)``, so once
+    ``tile_add_128`` is registered on a worker (e.g. by ``mode_a`` above),
+    a second ``worker.register`` of the same kernel would be a cache hit
+    and would NOT bump ``aicpu_dlopen_count``. A fresh worker guarantees
+    the first ``register`` is observable.
     """
-    before = worker.aicpu_dlopen_count
+    worker = ChipWorker(config=RunConfig())
+    try:
+        before = worker.aicpu_dlopen_count
 
-    sample = torch.zeros((128, 128), dtype=torch.float32)
-    compiled = tile_add_128.compile(sample, sample, sample.clone())
-    h = worker.register(compiled)
+        sample = torch.zeros((128, 128), dtype=torch.float32)
+        compiled = tile_add_128.compile(sample, sample, sample.clone())
+        h = worker.register(compiled)
 
-    after_register = worker.aicpu_dlopen_count
+        after_register = worker.aicpu_dlopen_count
 
-    a = torch.full((128, 128), 1.0, dtype=torch.float32)
-    b = torch.full((128, 128), 2.0, dtype=torch.float32)
-    out = torch.zeros((128, 128), dtype=torch.float32)
-    for _ in range(20):
-        h(a, b, out)
+        a = torch.full((128, 128), 1.0, dtype=torch.float32)
+        b = torch.full((128, 128), 2.0, dtype=torch.float32)
+        out = torch.zeros((128, 128), dtype=torch.float32)
+        for _ in range(20):
+            h(a, b, out)
 
-    after_runs = worker.aicpu_dlopen_count
+        after_runs = worker.aicpu_dlopen_count
 
-    assert after_register == before + 1, (
-        f"register should dlopen exactly once: before={before}, after_register={after_register}"
-    )
-    assert after_runs == after_register, (
-        f"20 dispatches should not re-dlopen: after_register={after_register}, after_runs={after_runs}"
-    )
-    print(
-        f"mode C OK — aicpu_dlopen_count: {before} -> {after_register} (1 register) -> {after_runs} (20 runs)"
-    )
+        assert after_register == before + 1, (
+            f"register should dlopen exactly once: before={before}, after_register={after_register}"
+        )
+        assert after_runs == after_register, (
+            f"20 dispatches should not re-dlopen: after_register={after_register}, after_runs={after_runs}"
+        )
+        print(
+            f"mode C OK — aicpu_dlopen_count: "
+            f"{before} -> {after_register} (1 register) -> {after_runs} (20 runs)"
+        )
+    finally:
+        worker.close()
 
 
 # ---------------------------------------------------------------------------
@@ -179,15 +195,17 @@ def mode_c_register_dispatch_overhead(worker: ChipWorker) -> None:
 
 
 if __name__ == "__main__":
-    # One ChipWorker amortises init / close across all three modes.
+    # Modes A and B share a worker (init / close amortised); mode C uses
+    # its own to keep the ``aicpu_dlopen_count`` assertion meaningful.
     # ``RunConfig()`` picks the default simulator platform; pass
     # ``RunConfig(platform="a2a3")`` to target a real device.
     worker = ChipWorker(config=RunConfig())
     try:
         mode_a_inference_service(worker)
         mode_b_training_loop(worker)
-        mode_c_register_dispatch_overhead(worker)
     finally:
         worker.close()
+
+    mode_c_register_dispatch_overhead()
 
     print("OK")

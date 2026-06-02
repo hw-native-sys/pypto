@@ -606,9 +606,11 @@ print("artifacts in:", compiled.output_dir)
 from pypto.runtime import ChipWorker, RunConfig
 
 worker = ChipWorker(config=RunConfig(platform="a2a3sim"))
+w_dev = worker.alloc_tensor(sample_w.shape, sample_w.dtype, init=sample_w)
 handle = worker.register(compiled)
 for batch in stream:
     handle(batch.x, w_dev, batch.out)
+worker.free_tensor(w_dev)
 worker.close()
 ```
 
