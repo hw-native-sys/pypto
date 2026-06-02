@@ -1741,64 +1741,81 @@ class TestTileMoveAccNoopElision:
         )
 
     def test_pipeline_matmul_acc_no_acc_to_acc_tmov(self):
-        """pl.pipeline(stage=2) + matmul_acc must not produce pto.tmov acc→acc.
+        """Dual-accumulator pl.pipeline(stage=2) matmul_acc must not produce
+        pto.tmov acc→acc (#1352).
 
-        When a pl.pipeline loop with stage=2 carries a matmul_acc accumulation
-        and each K tile is large enough to trigger AutoTileMatmulL0, two
-        conditions combine:
-        - LowerPipelineLoops replicates the loop body (factor=2, for stage=2),
-          creating additional IterArg Vars for the pipeline overhead.
-        - AutoTileMatmulL0 rewrites each matmul_acc into an inner K-loop with a
-          fresh IterArg ("l0_c" accumulator), whose MemRef base differs from the
-          outer pipeline loop's acc IterArg base.
-        MemoryReuse fails to unify these bases, so AllocateMemoryAddr assigns
-        different physical addresses (e.g. addr=0 and addr=16384).
-        YieldFixupMutator then inserts tile.move acc→acc between them, forming
-        a round-trip (0→16384→0) that ptoas rejects on Ascend 910B.
-        Codegen must elide all acc→acc tile.move ops unconditionally (#1352).
+        Reproduces the Qwen3-32B gate_up_silu shape that triggered the bug: two
+        independent accumulators (gate, up) built with prolog-then-pipeline
+        matmul_acc under ``pl.at(CORE_GROUP, split=UP_DOWN)``.
 
-        Dimensions: K_tile=128, N=256 on 910B.  K_tile=128 exceeds the
-        effective L0B capacity for N=256 (L0B=64KB double-buffered → 32KB;
-        128×256×2=32KB > 32KB-1), so ChooseL0Tile picks K_L0=64, creating the
-        inner K-loop that exposes the MemRef-base mismatch.
+        Why this shape triggers it:
+        - Mat-resident inputs + K_CHUNK=128/N=256 make AutoTileMatmulL0 insert an
+          inner K-loop (K_L0=64) with a fresh ``_l0_c`` accumulator IterArg.
+        - pl.pipeline(stage=2) replicates the loop body, nesting that IterArg.
+        - split=UP_DOWN forces the AIC/AIV split, so MemoryReuse runs on the AIC
+          function where gate is consumed before up, so up *reuses* gate's freed
+          Acc buffer.
+
+        The bug (before the Path 2 fix): MemoryReuse's greedy pass retyped up's
+        producer/init AssignStmt vars onto gate's buffer but left up's
+        loop-carried iter_arg/return_var on its own buffer, splitting the chain.
+        YieldFixupMutator (bottom-up) then bridged the two Acc buffers with
+        ``tile.move`` ops that lowered to acc→acc ``pto.tmov`` — which ptoas
+        rejects on Ascend 910B.
+
+        The fix (AlignLoopCarriesToInitMutator) re-aligns loop-carried MemRefs to
+        their reused init top-down, so the whole up chain lands on the single
+        reused Acc buffer and no acc→acc move is ever inserted.  This test
+        asserts the generated MLIR (across all split InCore functions) carries no
+        acc→acc ``pto.tmov``; it fails without the fix.
         """
+        BATCH, K_CHUNK, N, NUM_CHUNKS = 16, 128, 256, 4
 
         @pl.program
-        class PipelineAccProg:
-            @pl.function(type=pl.FunctionType.InCore)
-            def kernel(
+        class PipelineGateUpProg:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
                 self,
-                x: pl.Tensor[[16, 1024], pl.BF16],
-                w: pl.Tensor[[1024, 256], pl.BF16],
-                dst: pl.Tensor[[16, 256], pl.FP32],
-            ) -> pl.Tensor[[16, 256], pl.FP32]:
-                # Prolog: first two K=128 chunks, Mat-resident so that
-                # AutoTileMatmulL0 processes them.  K=128, N=256 on Ascend 910B:
-                # B-tile = 128*256*2 = 64 KB = L0B capacity; with double-
-                # buffering the effective L0B is 32 KB < 64 KB, so ChooseL0Tile
-                # picks K_L0=64 and inserts an inner K-loop around each matmul.
-                # This inner loop introduces a fresh IterArg ("_l0_c" acc) whose
-                # MemRef base may not be unified with the outer accumulator's
-                # base by MemoryReuse, producing acc→acc tile.move.  The
-                # pl.pipeline(stage=2) further replicates the loop body, making
-                # the MemRef-base mismatch more likely (#1352).
-                x0 = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                w0 = pl.load(w, [0, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
-                x1 = pl.load(x, [0, 128], [16, 128], target_memory=pl.MemorySpace.Mat)
-                w1 = pl.load(w, [128, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
-                acc: pl.Tile[[16, 256], pl.FP32] = pl.matmul(x0, w0)
-                acc = pl.matmul_acc(acc, x1, w1)
-                # Pipeline loop with stage=2: LowerPipelineLoops replicates this
-                # body (factor=2), compounding the _l0_c IterArg nesting.
-                for kb in pl.pipeline(2, 8, stage=2):
-                    k0 = kb * 128
-                    xk = pl.load(x, [0, k0], [16, 128], target_memory=pl.MemorySpace.Mat)
-                    wk = pl.load(w, [k0, 0], [128, 256], target_memory=pl.MemorySpace.Mat)
-                    acc = pl.matmul_acc(acc, xk, wk)
-                vec = pl.move(acc, target_memory=pl.MemorySpace.Vec)
-                return pl.store(vec, [0, 0], dst)
+                x: pl.Tensor[[BATCH, K_CHUNK * NUM_CHUNKS], pl.BF16],
+                wg: pl.Tensor[[K_CHUNK * NUM_CHUNKS, N], pl.BF16],
+                wu: pl.Tensor[[K_CHUNK * NUM_CHUNKS, N], pl.BF16],
+                out: pl.Out[pl.Tensor[[BATCH, N], pl.BF16]],
+            ) -> pl.Tensor[[BATCH, N], pl.BF16]:
+                out_tile = pl.create_tensor([BATCH, N], dtype=pl.BF16)
+                with pl.at(
+                    level=pl.Level.CORE_GROUP,
+                    optimizations=[pl.split(pl.SplitMode.UP_DOWN)],
+                    name_hint="gate_up_pipeline_acc",
+                ):
+                    x0 = pl.slice(x, [BATCH, K_CHUNK], [0, 0])
+                    x1 = pl.slice(x, [BATCH, K_CHUNK], [0, K_CHUNK])
+                    wg0 = pl.slice(wg, [K_CHUNK, N], [0, 0])
+                    wg1 = pl.slice(wg, [K_CHUNK, N], [K_CHUNK, 0])
+                    wu0 = pl.slice(wu, [K_CHUNK, N], [0, 0])
+                    wu1 = pl.slice(wu, [K_CHUNK, N], [K_CHUNK, 0])
+                    gate_acc = pl.matmul(x0, wg0, out_dtype=pl.FP32)
+                    gate_acc = pl.matmul_acc(gate_acc, x1, wg1)
+                    for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
+                        k0 = kb * K_CHUNK
+                        gate_acc = pl.matmul_acc(
+                            gate_acc, pl.slice(x, [BATCH, K_CHUNK], [0, k0]), pl.slice(wg, [K_CHUNK, N], [k0, 0])
+                        )
+                    # Consume gate (to Vec) before the up pipeline so up reuses
+                    # gate's freed Acc buffer — the condition that exposed #1352.
+                    gate_fp32 = pl.add(gate_acc, 0.0)
+                    up_acc = pl.matmul(x0, wu0, out_dtype=pl.FP32)
+                    up_acc = pl.matmul_acc(up_acc, x1, wu1)
+                    for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
+                        k0 = kb * K_CHUNK
+                        up_acc = pl.matmul_acc(
+                            up_acc, pl.slice(x, [BATCH, K_CHUNK], [0, k0]), pl.slice(wu, [K_CHUNK, N], [k0, 0])
+                        )
+                    combined = pl.mul(gate_fp32, up_acc)
+                    out_tile = pl.assemble(out_tile, pl.cast(combined, pl.BF16), [0, 0])
+                out = pl.assemble(out, out_tile, [0, 0])
+                return out
 
-        mlir = self._generate_mlir(PipelineAccProg)
+        mlir = self._generate_mlir(PipelineGateUpProg)
         assert not self._has_acc_to_acc_tmov(mlir), (
             f"Generated MLIR contains invalid pto.tmov acc→acc (regression #1352):\n{mlir}"
         )

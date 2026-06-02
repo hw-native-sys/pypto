@@ -507,14 +507,17 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
        introduced by AutoTileMatmulL0.
 
     3. **CORE_GROUP + split=UP_DOWN** — the AIC/AIV split causes MemoryReuse to
-       run only on the AIC function.  With two concurrent same-shape ``[16, 256]``
-       FP32 accumulators live in the function, AllocateMemoryAddr assigns them
-       addr=0 and addr=16384 respectively.  MemoryReuse fails to unify the
-       ``_l0_c`` IterArg base with the outer acc base, so YieldFixupMutator
-       inserts ``tile.move acc@0 → acc@16384 → acc@0``.  Without the fix in
-       ``src/backend/common/pto_ops_common.cpp``, ptoas rejects these with
+       run only on the AIC function.  gate is consumed (to Vec) before the up
+       pipeline, so up *reuses* gate's freed Acc buffer.  Before the fix,
+       MemoryReuse's greedy pass retyped up's producer/init vars onto gate's
+       buffer but left up's loop-carried iter_arg/return_var on its own buffer,
+       splitting the chain; YieldFixupMutator then bridged the two Acc buffers
+       with ``tile.move acc→acc`` ops that ptoas rejects on Ascend 910B with
        ``'pto.tmov' op expects a supported tmov address-space pair for this
-       target``.
+       target``.  The fix (``AlignLoopCarriesToInitMutator`` in
+       ``src/ir/transforms/memory_reuse_pass.cpp``) re-aligns loop-carried
+       MemRefs to their reused init top-down, so the whole up chain lands on the
+       single reused Acc buffer and no acc→acc move is ever inserted.
 
     Note: only ``split=UP_DOWN`` is used (no ``auto_chunk``).  ``split=UP_DOWN``
     alone is what forces the AIC/AIV split that triggers MemoryReuse on the AIC
@@ -524,18 +527,20 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
     Usage note on sequential consumption
     -------------------------------------
-    Because Path 1 aliases *both* gate_acc and up_acc to the same physical
-    buffer (acc@0) in the generated code, the final add must read each
-    accumulator **at the point where acc@0 holds its correct value**:
+    Because MemoryReuse legitimately reuses *one* physical Acc buffer for both
+    gate_acc and up_acc (gate is dead by the time up runs), the final add must
+    read each accumulator **at the point where that buffer holds its correct
+    value**:
 
-    - After the gate pipeline completes, acc@0 = gate result.
+    - After the gate pipeline completes, the buffer = gate result.
       → cast gate_acc to BF16 (Vec space) **before** the up pipeline starts.
-    - After the up pipeline completes, acc@0 = up result.
-      → cast up_acc to BF16 **after** the up pipeline.
+    - After the up pipeline completes, the buffer = up result.
+      → read up_acc **after** the up pipeline.
 
     This is exactly the access order used in the Qwen3-32B gate_up_silu kernel:
     gate is consumed (cast + silu) between the two pipeline loops, so by the time
-    up pipeline overwrites acc@0 the gate value has already been saved.
+    the up pipeline overwrites the shared buffer the gate value has already been
+    saved.
     """
 
     __test__ = False
@@ -643,7 +648,7 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
                     # emit a tpush for gate_acc BEFORE the up pipeline starts.
                     # Without this intermediate use, both tpushes would be
                     # scheduled after both pipelines, so gate_acc's tpop would
-                    # read acc@0 = up_final (wrong).
+                    # read the shared Acc buffer = up_final (wrong).
                     #
                     # Here we approximate sigmoid with a no-op-equivalent
                     # pl.add(gate_acc, 0.0) that forces the tpush between the
@@ -652,8 +657,8 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
                     gate_fp32 = pl.add(gate_acc, 0.0)
 
                     # Up projection — independent pipeline loop, same shape.
-                    # AIC overwrites acc@0 with up values here; gate_fp32 is
-                    # already in Vec space so it is unaffected.
+                    # AIC overwrites the shared Acc buffer with up values here;
+                    # gate_fp32 is already in Vec space so it is unaffected.
                     up_acc = pl.matmul(x0, wu0, out_dtype=pl.FP32)
                     up_acc = pl.matmul_acc(up_acc, x1, wu1)
                     for kb in pl.pipeline(2, NUM_CHUNKS, stage=2):
@@ -664,7 +669,7 @@ class TestPipelineMatmulAccGateUp(PTOTestCase):
 
                     # gate_fp32 × up_acc (FP32 tmul, supported on A2/A3).
                     # up_acc's tpush happens after the up pipeline, reading
-                    # acc@0 = up_final ✓.
+                    # the shared Acc buffer = up_final ✓.
                     combined = pl.mul(gate_fp32, up_acc)
                     combined_bf16 = pl.cast(combined, pl.BF16)
                     out_tile = pl.assemble(out_tile, combined_bf16, [0, 0])
@@ -792,9 +797,10 @@ class TestMatmulOperations:
 
         This reproduces the exact gate_up_silu kernel shape from Qwen3-32B
         that triggered 'pto.tmov expects a supported tmov address-space pair'
-        on Ascend 910B.  Without the fix in pto_ops_common.cpp the kernel
-        fails to compile; with the fix it compiles and produces numerically
-        correct results.
+        on Ascend 910B.  Without the MemoryReuse fix (AlignLoopCarriesToInit)
+        the kernel fails to compile; with the fix the up accumulator's chain
+        lands on a single reused Acc buffer, so no acc→acc move is emitted and
+        the kernel compiles and produces numerically correct results.
         """
         # BF16 output: product of two scaled matmul results (~K=512 accumulations).
         # Inputs are scaled (weights by 1/sqrt(K)) to keep output magnitude small,

@@ -43,10 +43,11 @@ program_optimized = reuse_pass(program)
 1. **Lifetime Analysis**: Walk the full IR tree (including nested control flow bodies) to compute variable lifetimes via def-use analysis. Variables defined outside a loop but used inside have their lifetime extended to the end of the loop (loop-aware extension)
 2. **Interference Check**: Identify variables with overlapping lifetimes
 3. **MemRef Sharing**: Assign same MemRef pointer to non-interfering variables in the same memory space
-4. **Yield fixup**: Fix MemRef mismatches in control flow return variables:
+4. **Loop-carry re-alignment** (`AlignLoopCarriesToInitMutator`): Sharing (step 3) only retypes `AssignStmt`-defined vars (producers/init); loop-carried `iter_arg`/`return_var` nodes are excluded from the lifetime/sharing maps and keep their original MemRef. This step walks `ForStmt`s **top-down** and retypes each loop's `iter_arg`/`return_var` to its (now-reused) `initValue` MemRef, seeding `var_remap_` before recursing so a nested loop observes the corrected outer `iter_arg` as its init. Without it, a reused **nested pipelined `matmul_acc`** accumulator splits across two Acc buffers and step 5 emits invalid `acc→acc tile.move` ops that ptoas rejects on Ascend 910B ([#1352](https://github.com/hw-native-sys/pypto/issues/1352))
+5. **Yield fixup**: Fix MemRef mismatches in control flow return variables:
    - **ForStmt**: Ensure all 4 loop-carry variables (initValue, iter_arg, yield value, return_var) share the same MemRef. Inserts `tile.move` before yield if MemRefs differ
    - **IfStmt**: Patch return_vars to match yield value's MemRef
-5. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
+6. **Remove redundant allocs**: Collect all MemRefs still referenced by TileType variables, then remove `tile.alloc` statements whose MemRef is no longer in use
 
 **Reuse conditions**:
 
