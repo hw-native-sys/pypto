@@ -15,6 +15,7 @@ import pypto.language as pl
 import pytest
 from pypto import backend, ir, passes
 from pypto.backend import BackendType
+from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 
 
 @pytest.fixture(autouse=True)
@@ -306,6 +307,74 @@ def test_span_propagates_to_tile_op():
     # parser attaches spans to every Call expression.
     spans_with_loc = [d.span for d in perf_hints if d.span.is_valid()]
     assert len(spans_with_loc) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Deduplication on transfer facts (issue #1305 ask 4)
+# ---------------------------------------------------------------------------
+
+
+def _site_of(diag: passes.Diagnostic) -> tuple[str, int, int, str]:
+    """The (file, line, col, op) site a diagnostic is keyed on for dedup.
+
+    The op name is the leading token of the message (``tile.load`` /
+    ``tile.store``), before the ``B`` byte figure / count suffix that vary per
+    transfer.
+    """
+    return (diag.span.filename, diag.span.begin_line, diag.span.begin_column, diag.message.split(" ", 1)[0])
+
+
+def test_dedup_collapses_repeated_site_a3():
+    """Repeated identical transfers at one source span collapse to a single hint
+    with an occurrence count (issue #1305 ask 4).
+
+    A per-iteration ``pl.load`` inside a ``pl.range`` loop expands, through the
+    default pipeline, into several identical GM<->Vec transfers that all carry
+    the originating source span. The verifier must collapse them into one
+    diagnostic with an ``(N occurrences ...)`` count rather than emit N separate
+    identical hints, and no two surviving hits may share a ``(file, line, col,
+    op)`` site. This is the post-pipeline shape the unit fixtures above (single
+    hand-built ops) cannot exercise, so the full pipeline is run here.
+    """
+    _activate_a3()
+    rows, inner = 64, 64  # fp32 inner = 256B < 512B (a3) -> fires; rows give the loop distinct offsets
+
+    @pl.program
+    class LoopLoadProg:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            x: pl.Tensor[[rows, inner], pl.FP32],
+            out: pl.Out[pl.Tensor[[16, inner], pl.FP32]],
+        ) -> pl.Tensor[[16, inner], pl.FP32]:
+            acc: pl.Tile[[16, inner], pl.FP32] = pl.load(x, [0, 0], [16, inner])
+            for i in pl.range(4):
+                # Distinct offset per iteration (not loop-invariant, so it is not
+                # CSE'd) but identical shape/dtype/memory and source span — the
+                # exact "same site, same facts, many copies" case dedup targets.
+                t: pl.Tile[[16, inner], pl.FP32] = pl.load(x, [i * 16, 0], [16, inner])
+                acc = pl.add(acc, t)
+            return pl.store(acc, [0, 0], out)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.Default)
+    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
+        post = pm.run_passes(LoopLoadProg)
+        diags = _run_perf_hint_check(post)
+    perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
+    assert len(perf_hints) >= 1
+    assert all(d.hint_code == "PH001" for d in perf_hints)
+
+    # Dedup invariant: every surviving hit is at a distinct (file, line, col, op)
+    # site — identical transfers were collapsed, not emitted repeatedly.
+    sites = [_site_of(d) for d in perf_hints]
+    assert len(sites) == len(set(sites)), f"hits not deduplicated per site: {sites}"
+
+    # The repeated per-iteration load must have collapsed into one counted hit
+    # (the count text only appears when count > 1), proving the collapse path ran
+    # rather than the loads slipping through as separate identical hints.
+    collapsed = [d for d in perf_hints if "occurrences at this source location" in d.message]
+    messages = [d.message for d in perf_hints]
+    assert len(collapsed) >= 1, f"expected a collapsed '(N occurrences)' hit, got {messages}"
 
 
 if __name__ == "__main__":
