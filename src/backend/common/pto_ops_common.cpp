@@ -426,13 +426,16 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   CHECK(op->args_.size() == arity) << "Operation:[" << pto_op_name << "] requires " << arity << " argument"
                                    << (arity != 1 ? "s" : "") << ", but got " << op->args_.size();
-  // pto.tcolexpandmul requires materialized tile data — its hardware lowering
-  // reads physical tile rows/cols from the operand type, which is incorrect for
-  // a pto.subview alias.  Other tile ops (tmov, tfillpad, tadd, ...) accept
-  // subview SSAs natively, so only tcolexpandmul needs eager materialization.
-  if (pto_op_name == "pto.tcolexpandmul") {
-    auto lhs_operand = MaterializeSubviewOperandIfNeeded(op->args_[0], codegen, "colexpandmul_mat");
-    auto rhs_operand = MaterializeSubviewOperandIfNeeded(op->args_[1], codegen, "colexpandmul_vec");
+  // pto.tcolexpand{mul,add} require materialized tile data — their hardware
+  // lowering reads physical tile rows/cols from the operand type, which is
+  // incorrect for a pto.subview alias.  Other tile ops (tmov, tfillpad, tadd,
+  // ...) accept subview SSAs natively, so only the tcolexpand family needs
+  // eager materialization.
+  if (pto_op_name == "pto.tcolexpandmul" || pto_op_name == "pto.tcolexpandadd") {
+    // Derive a debug hint from the op name (e.g. "pto.tcolexpandmul" -> "colexpandmul").
+    const std::string mat_tag = pto_op_name.substr(std::string("pto.t").size());
+    auto lhs_operand = MaterializeSubviewOperandIfNeeded(op->args_[0], codegen, mat_tag + "_mat");
+    auto rhs_operand = MaterializeSubviewOperandIfNeeded(op->args_[1], codegen, mat_tag + "_vec");
     std::string lhs_orig = codegen.GetExprAsCode(op->args_[0]);
     std::string rhs_orig = codegen.GetExprAsCode(op->args_[1]);
     if (lhs_operand != lhs_orig || rhs_operand != rhs_orig) {
@@ -447,7 +450,7 @@ static std::string MakeNaryCodegenPTO(const std::string& pto_op_name, size_t ari
       if (rhs_mat) rhs_type = rhs_mat->materialize_target_type;
 
       std::ostringstream oss;
-      oss << "pto.tcolexpandmul ins(" << lhs_operand << ", " << rhs_operand;
+      oss << pto_op_name << " ins(" << lhs_operand << ", " << rhs_operand;
       if (!lhs_type.empty() && !rhs_type.empty()) {
         oss << " : " << lhs_type << ", " << rhs_type;
       }
@@ -2119,6 +2122,7 @@ static const SimpleOpEntry kSimpleOps[] = {
     {"tile.col_max",         "pto.tcolmax",          1},
     {"tile.col_min",         "pto.tcolmin",          1},
     {"tile.col_expand_mul",  "pto.tcolexpandmul",    2},
+    {"tile.col_expand_add",  "pto.tcolexpandadd",    2},
     {"tile.row_expand_add",  "pto.trowexpandadd",    2},
     {"tile.row_expand_div",  "pto.trowexpanddiv",    2},
     {"tile.row_expand_mul",  "pto.trowexpandmul",    2},

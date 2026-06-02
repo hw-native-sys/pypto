@@ -41,6 +41,7 @@ __all__ = [
     "col_expand_mul",
     "col_expand_div",
     "col_expand_sub",
+    "col_expand_add",
     "concat",
     "expands",
     "reshape",
@@ -407,6 +408,15 @@ def col_expand_sub(lhs: T, rhs: T) -> T:
     if isinstance(lhs, Tile) and isinstance(rhs, Tile):
         return _tile.col_expand_sub(lhs, rhs)
     _raise_type_dispatch_error("col_expand_sub", lhs, rhs)
+
+
+def col_expand_add(lhs: T, rhs: T) -> T:
+    """Column-wise broadcast addition, dispatched by input type."""
+    if isinstance(lhs, Tensor) and isinstance(rhs, Tensor):
+        return _tensor.col_expand_add(lhs, rhs)
+    if isinstance(lhs, Tile) and isinstance(rhs, Tile):
+        return _tile.col_expand_add(lhs, rhs)
+    _raise_type_dispatch_error("col_expand_add", lhs, rhs)
 
 
 def expands(target: Tensor | Tile, scalar: int | float | Scalar) -> Tensor | Tile:

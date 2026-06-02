@@ -163,6 +163,7 @@
 | `col_expand_mul` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile * col_vec` 广播 |
 | `col_expand_div` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile / col_vec` 广播 |
 | `col_expand_sub` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile - col_vec` 广播 |
+| `col_expand_add` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile + col_vec` 广播 |
 | `expands` | `(target: Tile, scalar: int \| float \| Scalar) -> Tile` | 将标量扩展到 tile 形状 |
 
 ## 比较/选择（`pl.tile.*`）

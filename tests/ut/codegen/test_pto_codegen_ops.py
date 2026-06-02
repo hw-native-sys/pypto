@@ -19,9 +19,10 @@ import warnings
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
+
+from pypto import DataType, backend, codegen, ir
 
 # ============================================================================
 # Operation to PTO API Mapping
@@ -856,6 +857,26 @@ class TestBroadcastOpsCodegen:
 
         mlir = self._generate_mlir(Prog)
         assert "pto.tcolexpandmul" in mlir, f"col_expand_mul should generate pto.tcolexpandmul, got:\n{mlir}"
+
+    def test_col_expand_add_codegen(self):
+        """tile.col_expand_add(tile[M,N], col_vec[1,N]) should generate pto.tcolexpandadd."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 16], pl.FP32],
+                col_vec_tensor: pl.Tensor[[1, 16], pl.FP32],
+                dst: pl.Tensor[[16, 16], pl.FP32],
+            ) -> pl.Tensor[[16, 16], pl.FP32]:
+                src_tile: pl.Tile[[16, 16], pl.FP32] = pl.load(src, [0, 0], [16, 16])
+                col_tile: pl.Tile[[1, 16], pl.FP32] = pl.load(col_vec_tensor, [0, 0], [1, 16])
+                result: pl.Tile[[16, 16], pl.FP32] = pl.tile.col_expand_add(src_tile, col_tile)
+                return pl.store(result, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        assert "pto.tcolexpandadd" in mlir, f"col_expand_add should generate pto.tcolexpandadd, got:\n{mlir}"
 
     def test_col_expand_codegen(self):
         """tile.col_expand(target, col_vec) should emit pto.tcolexpand with only col_vec in ins()."""

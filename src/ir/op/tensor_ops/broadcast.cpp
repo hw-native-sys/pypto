@@ -249,6 +249,16 @@ REGISTER_OP("tensor.col_expand_mul")
       return DeduceTensorColExpandType(args, kwargs, "tensor.col_expand_mul");
     });
 
+REGISTER_OP("tensor.col_expand_add")
+    .set_op_category("TensorOp")
+    .set_description("Column-wise broadcast addition: tensor + col_vec (broadcasted)")
+    .add_argument("tensor", "Input tensor (TensorType [M, N])")
+    .add_argument("col_vec", "Column vector (TensorType [1, N])")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTensorColExpandType(args, kwargs, "tensor.col_expand_add");
+    });
+
 REGISTER_OP("tensor.row_expand")
     .set_op_category("TensorOp")
     .set_description("Row-wise expansion: expand row_vec [M,1] to target shape [M,N]")

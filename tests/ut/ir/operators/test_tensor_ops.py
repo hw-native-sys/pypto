@@ -21,8 +21,9 @@ import math
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir
 from pypto.ir.op import tensor
+
+from pypto import DataType, ir
 
 
 def test_tensor_create():
@@ -2235,6 +2236,52 @@ def test_tensor_col_expand_sub_dtype_promotion():
     col_var = ir.Var("cv", col_type, span)
 
     call = ir.op.tensor.col_expand_sub(tensor_var, col_var)
+
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP32
+
+
+# =============================================================================
+# Tensor col_expand_add tests
+# =============================================================================
+
+
+def test_tensor_col_expand_add():
+    """Test tensor.col_expand_add operation."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP16)
+    tensor_var = ir.Var("t", tensor_type, span)
+    col_var = ir.Var("cv", col_type, span)
+
+    call = ir.op.tensor.col_expand_add(tensor_var, col_var)
+
+    assert isinstance(call, ir.Call)
+    assert call.op.name == "tensor.col_expand_add"
+    result_type = call.type
+    assert isinstance(result_type, ir.TensorType)
+    assert result_type.dtype == DataType.FP16
+    assert len(result_type.shape) == 2
+
+
+def test_tensor_col_expand_add_dtype_promotion():
+    """Test tensor.col_expand_add promotes data types."""
+    span = ir.Span.unknown()
+    dim64 = ir.ConstInt(64, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+
+    tensor_type = ir.TensorType([dim64, dim128], DataType.FP16)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP32)
+    tensor_var = ir.Var("t", tensor_type, span)
+    col_var = ir.Var("cv", col_type, span)
+
+    call = ir.op.tensor.col_expand_add(tensor_var, col_var)
 
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)

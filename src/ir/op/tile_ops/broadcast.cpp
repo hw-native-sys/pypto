@@ -244,6 +244,19 @@ REGISTER_OP("tile.col_expand_mul")
       return DeduceTileColExpandType(args, kwargs, "tile.col_expand_mul");
     });
 
+REGISTER_OP("tile.col_expand_add")
+    .set_op_category("TileOp")
+    .set_description("Expand column tile and add to target tile")
+    .add_argument("target", "Target tile (TileType)")
+    .add_argument("col_tile", "Column tile to expand and add (TileType, shape [1, cols])")
+    .set_input_memory(0, MemorySpace::Vec)
+    .set_input_memory(1, MemorySpace::Vec)
+    .set_output_memory(MemorySpace::Vec)
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceTileColExpandType(args, kwargs, "tile.col_expand_add");
+    });
+
 REGISTER_OP("tile.col_expand_div")
     .set_op_category("TileOp")
     .set_description("Expand column tile and divide target tile by it")

@@ -14,11 +14,12 @@ from collections.abc import Callable
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
-from pypto import DataType, ir, passes
 from pypto.ir import IRBuilder
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile as tile_ops
 from pypto.pypto_core.ir import MemorySpace, PadValue
+
+from pypto import DataType, ir, passes
 
 # ---------------------------------------------------------------------------
 # Programmatic IRBuilder factories for parametrized tests.
@@ -255,6 +256,7 @@ _COL_EXPAND_OPS = [
     ("col_expand_mul", tensor_ops.col_expand_mul, tile_ops.col_expand_mul),
     ("col_expand_div", tensor_ops.col_expand_div, tile_ops.col_expand_div),
     ("col_expand_sub", tensor_ops.col_expand_sub, tile_ops.col_expand_sub),
+    ("col_expand_add", tensor_ops.col_expand_add, tile_ops.col_expand_add),
     ("col_expand", tensor_ops.col_expand, tile_ops.col_expand),
 ]
 

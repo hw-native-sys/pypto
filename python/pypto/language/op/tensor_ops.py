@@ -57,6 +57,7 @@ __all__ = [
     "col_expand",
     "col_expand_div",
     "col_expand_sub",
+    "col_expand_add",
     "expands",
     "expand_clone",
     "exp",
@@ -852,6 +853,22 @@ def col_expand_div(tensor: Tensor, col_vec: Tensor) -> Tensor:
     tensor_expr = tensor.unwrap()
     col_vec_expr = col_vec.unwrap()
     call_expr = _ir_ops.col_expand_div(tensor_expr, col_vec_expr)
+    return Tensor(expr=call_expr)
+
+
+def col_expand_add(tensor: Tensor, col_vec: Tensor) -> Tensor:
+    """Column-wise broadcast addition: tensor[:,j] + col_vec[0,j].
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+
+    Returns:
+        Tensor wrapping the col_expand_add operation
+    """
+    tensor_expr = tensor.unwrap()
+    col_vec_expr = col_vec.unwrap()
+    call_expr = _ir_ops.col_expand_add(tensor_expr, col_vec_expr)
     return Tensor(expr=call_expr)
 
 

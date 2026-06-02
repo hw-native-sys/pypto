@@ -16,9 +16,10 @@ they produce structurally equal IR.
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir
 from pypto.language.op import unified_ops
 from pypto.language.typing import Tensor, Tile
+
+from pypto import DataType, ir
 
 
 class TestUnifiedTensorDispatch:
@@ -397,6 +398,23 @@ class TestUnifiedTensorDispatch:
 
         ir.assert_structural_equal(unified, explicit)
 
+    def test_col_expand_add(self):
+        @pl.function
+        def unified(
+            a: pl.Tensor[[64, 128], pl.FP32], cv: pl.Tensor[[1, 128], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.col_expand_add(a, cv)
+            return c
+
+        @pl.function
+        def explicit(
+            a: pl.Tensor[[64, 128], pl.FP32], cv: pl.Tensor[[1, 128], pl.FP32]
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            c: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.col_expand_add(a, cv)
+            return c
+
+        ir.assert_structural_equal(unified, explicit)
+
     def test_expands(self):
         @pl.function
         def unified(a: pl.Tensor[[64, 128], pl.FP32]) -> pl.Tensor[[64, 128], pl.FP32]:
@@ -768,6 +786,29 @@ class TestUnifiedBlockDispatch:
             a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
             cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
             b: pl.Tile[[64, 64], pl.FP32] = pl.tile.col_expand_sub(a, cv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        ir.assert_structural_equal(unified, explicit)
+
+    def test_col_expand_add(self):
+        @pl.function
+        def unified(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.col_expand_add(a, cv)
+            result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
+            return result
+
+        @pl.function
+        def explicit(
+            t: pl.Tensor[[64, 64], pl.FP32], out: pl.Tensor[[64, 64], pl.FP32]
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            a: pl.Tile[[64, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[64, 64])
+            cv: pl.Tile[[1, 64], pl.FP32] = pl.tile.load(t, offsets=[0, 0], shapes=[1, 64])
+            b: pl.Tile[[64, 64], pl.FP32] = pl.tile.col_expand_add(a, cv)
             result: pl.Tensor[[64, 64], pl.FP32] = pl.tile.store(b, offsets=[0, 0], output_tensor=out)
             return result
 

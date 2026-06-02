@@ -13,8 +13,9 @@ import math
 
 import pypto.language as pl
 import pytest
-from pypto import DataType, ir
 from pypto.ir.op import tile
+
+from pypto import DataType, ir
 
 
 class TestTileElementwiseOps:
@@ -944,6 +945,27 @@ class TestTileBroadcastOps:
         ir_str = str(Program)
         assert "tile.col_expand_sub" in ir_str
 
+    def test_tile_col_expand_add(self):
+        """Test tile.col_expand_add operator - expand column and add to tile."""
+
+        @pl.program
+        class Program:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main(
+                self,
+                col: pl.Tensor[[128, 128], pl.FP32],
+                tile: pl.Tensor[[128, 128], pl.FP32],
+                output: pl.Tensor[[128, 128], pl.FP32],
+            ) -> pl.Tensor[[128, 128], pl.FP32]:
+                tile_col: pl.Tile[[1, 32], pl.FP32] = pl.load(col, [0, 0], [1, 32])
+                tile_a: pl.Tile[[32, 32], pl.FP32] = pl.load(tile, [0, 0], [32, 32])
+                tile_c: pl.Tile[[32, 32], pl.FP32] = pl.col_expand_add(tile_a, tile_col)
+                result: pl.Tensor[[128, 128], pl.FP32] = pl.store(tile_c, [0, 0], output)
+                return result
+
+        ir_str = str(Program)
+        assert "tile.col_expand_add" in ir_str
+
     def test_tile_row_expand_add(self):
         """Test tile.row_expand_add operator - expand row and add to tile."""
 
@@ -1198,6 +1220,18 @@ class TestTileBroadcastOps:
         main = self._make_sliced_tile_with_valid_shape()
         col_vec = self._make_col_vec_with_valid_shape()
         call = tile.col_expand_sub(main, col_vec)
+        result_type = call.type
+        assert isinstance(result_type, ir.TileType)
+        assert result_type.tile_view is not None
+        valid_shape = result_type.tile_view.valid_shape
+        assert isinstance(valid_shape[0], ir.ConstInt) and valid_shape[0].value == 8
+        assert isinstance(valid_shape[1], ir.ConstInt) and valid_shape[1].value == 4
+
+    def test_tile_col_expand_add_preserves_input_valid_shape(self):
+        """tile.col_expand_add must propagate the target tile's valid_shape (issue #1450)."""
+        main = self._make_sliced_tile_with_valid_shape()
+        col_vec = self._make_col_vec_with_valid_shape()
+        call = tile.col_expand_add(main, col_vec)
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
         assert result_type.tile_view is not None

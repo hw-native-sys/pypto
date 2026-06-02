@@ -160,6 +160,7 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
   RegisterSimple("tensor.row_expand_mul", "tile.row_expand_mul");
   RegisterSimple("tensor.row_expand_div", "tile.row_expand_div");
   RegisterSimple("tensor.col_expand_mul", "tile.col_expand_mul");
+  RegisterSimple("tensor.col_expand_add", "tile.col_expand_add");
   RegisterSimple("tensor.row_expand", "tile.row_expand");
   RegisterSimple("tensor.row_expand_add", "tile.row_expand_add");
   RegisterSimple("tensor.row_expand_sub", "tile.row_expand_sub");

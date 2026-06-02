@@ -865,6 +865,24 @@ def col_expand_div(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Cal
     return _ir_core.create_op_call("tensor.col_expand_div", [tensor, col_vec], {}, actual_span)
 
 
+def col_expand_add(tensor: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Column-wise broadcast addition.
+
+    Adds a column vector to each column of the tensor.
+    tensor[:, j] + col_vec[0, j] for all j.
+
+    Args:
+        tensor: Input tensor (TensorType [M, N])
+        col_vec: Column vector (TensorType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast addition
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tensor.col_expand_add", [tensor, col_vec], {}, actual_span)
+
+
 def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) -> Call:
     """Expand scalar to target tensor shape.
 

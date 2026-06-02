@@ -1690,6 +1690,24 @@ def col_expand_sub(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
     return _ir_core.create_op_call("tile.col_expand_sub", [tile, col_vec], {}, actual_span)
 
 
+def col_expand_add(tile: Expr, col_vec: Expr, span: Span | None = None) -> Call:
+    """Expand column vector and add to target tile.
+
+    Adds a column vector to each column of the tile.
+    tile[:, j] + col_vec[0, j] for all j.
+
+    Args:
+        tile: Input tile (TileType [M, N])
+        col_vec: Column vector (TileType [1, N])
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for column-wise broadcast addition
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("tile.col_expand_add", [tile, col_vec], {}, actual_span)
+
+
 def expands(target: Expr, scalar: int | float | Expr, span: Span | None = None) -> Call:
     """Expand scalar to target tile shape.
 

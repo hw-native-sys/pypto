@@ -84,6 +84,7 @@ __all__ = [
     "col_expand_mul",
     "col_expand_div",
     "col_expand_sub",
+    "col_expand_add",
     "expands",
     "minimum",
     "cmp",
@@ -1249,6 +1250,20 @@ def col_expand_sub(tile: Tile, col_vec: Tile) -> Tile:
         Tile wrapping the col_expand_sub operation
     """
     call_expr = _ir_ops.col_expand_sub(tile.unwrap(), col_vec.unwrap())
+    return Tile(expr=call_expr)
+
+
+def col_expand_add(tile: Tile, col_vec: Tile) -> Tile:
+    """Expand column vector and add to tile.
+
+    Args:
+        tile: Input tile [M, N]
+        col_vec: Column vector [1, N]
+
+    Returns:
+        Tile wrapping the col_expand_add operation
+    """
+    call_expr = _ir_ops.col_expand_add(tile.unwrap(), col_vec.unwrap())
     return Tile(expr=call_expr)
 
 
