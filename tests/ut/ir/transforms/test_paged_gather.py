@@ -94,10 +94,16 @@ def test_paged_gather_lowers_to_scalar_per_row_l1_loop():
     # Paged address math, all scalar.
     assert "// 128" in text
     assert "% 128" in text
-    # Bulk KV goes GM->L1 via a per-row Mat load (never UB).
-    assert "pl.tile.load(src, [pg_phys, 0], [1, 128], [1, 128], target_memory=pl.Mem.Mat" in text
-    assert "pl.tile.assemble(" in text
-    # The whole src is NOT preloaded into a Vec tile.
+    # Bulk KV goes GM->L1 via a per-row tile.gather_row (pto.subview + GM->Mat
+    # pto.tload, no MAT->MAT pto.tmov): the row is written straight into the
+    # accumulator sub-region [pg_i, 0].
+    assert (
+        "pl.tile.gather_row(paged_gather_iter, src, [pg_i, 0], [pg_phys, 0], [1, 128], transpose=False)"
+        in text
+    )
+    # No tile.assemble (would lower to an unsupported MAT->MAT tmov) and the whole
+    # src is NOT preloaded into a Vec tile.
+    assert "pl.tile.assemble(" not in text
     assert "target_memory=pl.Mem.Vec" not in text
 
 
@@ -107,8 +113,11 @@ def test_paged_gather_transpose_swaps_output_and_load():
     # Accumulator is [size, max_indices] when transposed.
     assert "pl.tile.create([128, 16]" in text
     assert "transpose=True" in text
-    # Row written at column offset [0, i].
-    assert "pl.tile.assemble(paged_gather_iter, pg_row, [0, pg_i])" in text
+    # Row written as a column at destination offset [0, i].
+    assert (
+        "pl.tile.gather_row(paged_gather_iter, src, [0, pg_i], [pg_phys, 0], [1, 128], transpose=True)"
+        in text
+    )
 
 
 def test_paged_gather_space_vec():

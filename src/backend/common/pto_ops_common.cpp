@@ -785,6 +785,102 @@ static std::string MakeTileAssembleCodegenPTO(const CallPtr& op, codegen::Codege
   return "";
 }
 
+// tile.gather_row: load one GM row directly into a sub-region of the destination
+// (Mat/Vec) accumulator. Lowering (no pto.tmov):
+//   1. %dst_view = pto.subview %dst[row, col] sizes [R, C] valid [R, C] : ... -> ...
+//   2. %src_pview = pto.partition_view %src_view, offsets = [...], sizes = [r, c] : ... -> ...
+//   3. pto.tload ins(%src_pview) outs(%dst_view)
+// Filling an L1 (Mat) tile is only valid via GM->Mat tload (MAT->MAT tmov is
+// unsupported on a2a3), so the row is written straight into the accumulator
+// sub-region. DPS: %dst is the in-place result target. ``transpose`` swaps the
+// destination subview dims (GM row [r, c] -> L1 column [c, r]) for the matmul
+// B-operand layout.
+static std::string MakeGatherRowCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 5) << "tile.gather_row requires 5 arguments "
+                                  "(dst, src, dst_offset, src_offset, shapes), got "
+                               << op->args_.size();
+
+  auto dst_tile_type = ir::As<ir::TileType>(op->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(dst_tile_type, op->span_) << "tile.gather_row dst must be a TileType";
+  auto src = ir::AsVarLike(op->args_[1]);
+  INTERNAL_CHECK_SPAN(src, op->span_) << "tile.gather_row src must be a Var or IterArg";
+  auto src_tensor_type = ir::AsTensorTypeLike(src->GetType());
+  INTERNAL_CHECK_SPAN(src_tensor_type, op->span_) << "tile.gather_row src must have TensorType";
+
+  auto dst_off = ir::As<ir::MakeTuple>(op->args_[2]);
+  auto src_off = ir::As<ir::MakeTuple>(op->args_[3]);
+  auto shapes = ir::As<ir::MakeTuple>(op->args_[4]);
+  INTERNAL_CHECK_SPAN(dst_off && src_off && shapes, op->span_)
+      << "tile.gather_row offsets and shapes must be literal tuples";
+  INTERNAL_CHECK_SPAN(dst_off->elements_.size() >= 2 && shapes->elements_.size() >= 2, op->span_)
+      << "tile.gather_row dst_offset and shapes must have at least 2 elements";
+
+  bool transpose = false;
+  for (const auto& [k, v] : op->kwargs_) {
+    if (k == "transpose") transpose = AnyCast<bool>(v, "transpose");
+  }
+
+  auto r_const = ir::As<ir::ConstInt>(shapes->elements_[0]);
+  auto c_const = ir::As<ir::ConstInt>(shapes->elements_[1]);
+  INTERNAL_CHECK_SPAN(r_const && c_const, op->span_)
+      << "tile.gather_row shapes must be compile-time constants for pto.subview sizes";
+  // Destination subview shape: transpose maps a GM row [r, c] to an L1 column [c, r].
+  const int64_t sv_rows = transpose ? c_const->value_ : r_const->value_;
+  const int64_t sv_cols = transpose ? r_const->value_ : c_const->value_;
+
+  std::string dst = codegen.GetCurrentResultTarget();
+  std::string dst_type = codegen.GetCurrentResultTileBufTypeString();
+  std::string row_off = codegen.GetExprAsCode(dst_off->elements_[0]);
+  std::string col_off = codegen.GetExprAsCode(dst_off->elements_[1]);
+
+  // Build the destination subview type from the accumulator's tile type, with the
+  // per-row shape/valid.
+  const auto dst_space = dst_tile_type->memory_space_.value_or(ir::MemorySpace::Mat);
+  auto view_info =
+      codegen::ExtractTileTypeInfo(*dst_tile_type, codegen.GetTypeString(dst_tile_type->dtype_));
+  view_info.rows = sv_rows;
+  view_info.cols = sv_cols;
+  view_info.v_row = sv_rows;
+  view_info.v_row_dynamic = false;
+  view_info.v_col = sv_cols;
+  view_info.v_col_dynamic = false;
+  std::string view_type = codegen::FormatTileBufTypeString(
+      codegen::MemorySpaceToMLIR(dst_space), view_info.dtype_str, view_info.rows, view_info.cols,
+      view_info.blayout, view_info.slayout, view_info.fractal, view_info.pad, view_info.v_row,
+      view_info.v_col, view_info.v_row_dynamic, view_info.v_col_dynamic);
+
+  std::string valid_rows = codegen.GetOrEmitConstant(sv_rows, DataType::INDEX);
+  std::string valid_cols = codegen.GetOrEmitConstant(sv_cols, DataType::INDEX);
+  std::string dst_view = codegen.NewNamedTemp("gather_row_view");
+  std::ostringstream sv;
+  sv << dst_view << " = pto.subview " << dst << "[" << row_off << ", " << col_off << "] sizes [" << sv_rows
+     << ", " << sv_cols << "] valid [" << valid_rows << ", " << valid_cols << "]";
+  if (!dst_type.empty() && !view_type.empty()) {
+    sv << " : " << dst_type << " -> " << view_type;
+  }
+  codegen.Emit(sv.str());
+  if (!view_type.empty()) codegen.RegisterTileBufType(dst_view, view_type);
+
+  // GM source window [r, c] -> partition_view, then tload straight into the subview.
+  std::string src_view = codegen.GetOrCreateTensorView(src);
+  std::string dtype_str = codegen.GetTypeString(src_tensor_type->dtype_);
+  std::string src_view_type = codegen.GetTensorViewTypeString(src_tensor_type.get());
+  const auto& shape_elems = shapes->elements_;
+  const auto& soff_elems = src_off->elements_;
+  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(shape_elems), dtype_str);
+  std::string src_pview =
+      EmitPartitionViewPTO(src->name_hint_, src_view, src_view_type, partition_type,
+                           GetIndexOffsetCodes(soff_elems, codegen), GetSizeCodes(shape_elems, codegen), codegen);
+
+  std::ostringstream tload_line;
+  tload_line << "pto.tload ins(" << src_pview << " : " << partition_type << ") outs(" << dst_view;
+  if (!view_type.empty()) tload_line << " : " << view_type;
+  tload_line << ")";
+  codegen.Emit(tload_line.str());
+  return "";
+}
+
 // Helper function for Assign
 static std::string MakeAssignCodegenPTO(const std::string& pto_op_name, const CallPtr& op,
                                         codegen::CodegenBase& codegen_base) {
@@ -3589,6 +3685,9 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
   });
   reg("tile.assemble", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
     return MakeTileAssembleCodegenPTO(op, codegen);
+  });
+  reg("tile.gather_row", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+    return MakeGatherRowCodegenPTO(op, codegen);
   });
   reg("tile.extract", [](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
     auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);

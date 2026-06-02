@@ -271,6 +271,43 @@ def assemble(
     return _ir_core.create_op_call("tile.assemble", [target, source, offset_tuple], {}, actual_span)
 
 
+def gather_row(
+    dst: Expr,
+    src: Expr,
+    dst_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
+    src_offset: Sequence[int | Expr] | _ir_core.MakeTuple,
+    shapes: Sequence[int | Expr] | _ir_core.MakeTuple,
+    transpose: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Load one GM row directly into a sub-region of an on-chip (Mat/Vec) tile.
+
+    Per-row primitive of the paged-gather lowering: emits ``pto.subview`` (of
+    ``dst``) + ``pto.partition_view`` (of ``src``) + ``pto.tload`` writing
+    GM -> the subview directly (no ``pto.tmov``). DPS — writes into ``dst`` in
+    place.
+
+    Args:
+        dst: Destination accumulator tile (Mat or Vec).
+        src: Source tensor in GM (TensorType).
+        dst_offset: ``[row, col]`` offset within ``dst``, or a MakeTuple.
+        src_offset: ``[row, col]`` offset within the GM ``src``, or a MakeTuple.
+        shapes: GM row window shape ``[r, c]``, or a MakeTuple.
+        transpose: Place the GM row ``[r, c]`` as an L1 column ``[c, r]``.
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression returning ``dst``'s TileType (written in place).
+    """
+    actual_span = _get_span_or_capture(span)
+    dst_off = _to_make_tuple(dst_offset, actual_span)
+    src_off = _to_make_tuple(src_offset, actual_span)
+    shapes_tuple = _to_make_tuple(shapes, actual_span)
+    return _ir_core.create_op_call(
+        "tile.gather_row", [dst, src, dst_off, src_off, shapes_tuple], {"transpose": transpose}, actual_span
+    )
+
+
 def scatter_update(
     input: Expr,
     *args: Expr | int,

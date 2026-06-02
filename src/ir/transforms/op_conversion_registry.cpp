@@ -1572,22 +1572,20 @@ void OpConversionRegistry::RegisterPagedGatherOps() {
         auto pblk = bind("pg_pblk", MakeCast(pblk_raw, DataType::INDEX, span));
         auto phys = bind("pg_phys", MakeAdd(MakeMul(pblk, bs, span), rem, span));
 
-        // row = tile.load(src, [phys, col_off], [1, size], [1, size], target_memory=space, transpose)
-        auto row_offsets = make_tuple({phys, make_idx(col_off)});
+        // acc' = tile.gather_row(acc, src, dst_offset, src_offset, [1, size]).
+        // Loads the physical GM row straight into the accumulator sub-region via
+        // pto.subview + pto.tload (GM -> on-chip, no pto.tmov). DPS: writes acc in
+        // place, so the loop-carried chain (init / iter_arg / yield / return_var)
+        // keeps the accumulator's TileType throughout. is_trans places the row as a
+        // column at [0, i]; otherwise as a row at [i, 0].
+        ExprPtr dst_offset = is_trans ? make_tuple({zero, loop_var}) : make_tuple({loop_var, zero});
+        ExprPtr src_offset = make_tuple({phys, make_idx(col_off)});
         auto row_shapes = MakeShapeTuple({one, make_idx(size)}, span);
-        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", space},
-                                                                     {"transpose", is_trans}};
-        auto load_call =
-            op_reg.Create("tile.load", {src, row_offsets, row_shapes, row_shapes}, load_kwargs, span);
-        auto row_tile = bind("pg_row", load_call);
-
-        // acc' = tile.assemble(acc, row, offset). assemble inherits the target's
-        // effective layout, so the loop-carried chain (init / iter_arg / yield /
-        // return_var) stays tile_view-consistent for the ForStmt verifier.
-        ExprPtr asm_offset = is_trans ? make_tuple({zero, loop_var}) : make_tuple({loop_var, zero});
-        auto asm_call = op_reg.Create("tile.assemble", {iter_arg, row_tile, asm_offset}, span);
-        auto asm_var = bind("pg_asm", asm_call);
-        body.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{asm_var}, span));
+        std::vector<std::pair<std::string, std::any>> gr_kwargs = {{"transpose", is_trans}};
+        auto gr_call = op_reg.Create("tile.gather_row", {iter_arg, src, dst_offset, src_offset, row_shapes},
+                                     gr_kwargs, span);
+        auto gr_var = bind("pg_row", gr_call);
+        body.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{gr_var}, span));
 
         auto loop_body = SeqStmts::Flatten(std::move(body), span);
         auto for_stmt =

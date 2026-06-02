@@ -169,11 +169,11 @@ class TestPagedGather:
     """On-device paged gather into L1 / UB, validated against a torch golden."""
 
     @pytest.mark.xfail(
-        reason="paged_gather(space=Mat) assembles rows into an L1 accumulator via tile.assemble, "
-        "which lowers to an L1->L1 pto.tmov; a2a3 ptoas only supports MAT->{Left,Right,Bias,Scaling}, "
-        "VEC->VEC, ACC->MAT, ACC->VEC tmov pairs (MAT->MAT is unsupported). Filling L1 needs the "
-        "per-row GM->L1 tload to target the accumulator sub-region directly (no tmov) — pending a "
-        "MemoryReuse retarget or a dedicated tload-into-subview lowering.",
+        reason="paged_gather(space=Mat) now lowers to per-row tile.gather_row (pto.subview + GM->Mat "
+        "pto.tload, no tmov), but the L1 accumulator carries the matmul-operand NZ (boxed) fractal "
+        "layout, so a per-row [1, size] pto.subview is not inner-box-aligned (ptoas: 'boxed layout "
+        "subview sizes must be multiples of inner shape'). Filling L1 per-row needs CANN-style "
+        "NZ-aware / ND2ND c0-aligned loading. space=Vec passes on-device.",
         strict=False,
     )
     @pytest.mark.parametrize("platform", PLATFORMS)
