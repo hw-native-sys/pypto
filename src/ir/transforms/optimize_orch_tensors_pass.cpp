@@ -1874,9 +1874,18 @@ class OutWindowExternalizer {
     size_t iter_arg_index = SIZE_MAX;
   };
 
+  struct InputRewriteInfo {
+    size_t in_param_index;
+    std::vector<ExprPtr> parent_shape;
+    std::vector<ExprPtr> window_shape;
+    std::vector<ExprPtr> callsite_offsets;
+    std::vector<ExprPtr> local_slice_offsets;
+  };
+
   struct CalleeRewriteAnalysis {
     RewriteKind kind = RewriteKind::FinalStore;
     std::vector<OutputRewriteInfo> outputs;
+    std::vector<InputRewriteInfo> inputs;
   };
 
   using AnalysisMap = std::unordered_map<std::string, CalleeRewriteAnalysis>;
@@ -2019,6 +2028,48 @@ class OutWindowExternalizer {
     std::unordered_map<const Var*, VarPtr> result_var_remap_;
   };
 
+  class WindowReadLocalizer : public IRMutator {
+   public:
+    explicit WindowReadLocalizer(const std::unordered_map<const Var*, InputRewriteInfo>& in_info_by_var)
+        : in_info_by_var_(in_info_by_var) {}
+
+   protected:
+    StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
+      auto visited_value = VisitExpr(op->value_);
+      auto assign = MutableCopy(op);
+      assign->value_ = visited_value;
+
+      auto call = As<Call>(assign->value_);
+      if (!call) return assign;
+
+      size_t offset_arg_index = SIZE_MAX;
+      if (call->op_->name_ == "tensor.slice" && call->args_.size() >= 3) {
+        offset_arg_index = 2;
+      } else if (call->op_->name_ == "tile.load" && call->args_.size() >= 3) {
+        offset_arg_index = 1;
+      } else {
+        return assign;
+      }
+
+      auto parent_var = AsVarLike(call->args_[0]);
+      auto info_it = parent_var ? in_info_by_var_.find(parent_var.get()) : in_info_by_var_.end();
+      if (info_it == in_info_by_var_.end()) return assign;
+
+      auto offsets = As<MakeTuple>(call->args_[offset_arg_index]);
+      if (!offsets) return assign;
+
+      std::vector<ExprPtr> new_args = call->args_;
+      new_args[offset_arg_index] =
+          std::make_shared<MakeTuple>(info_it->second.local_slice_offsets, offsets->span_);
+      assign->value_ = std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->attrs_,
+                                              call->GetType(), call->span_);
+      return assign;
+    }
+
+   private:
+    const std::unordered_map<const Var*, InputRewriteInfo>& in_info_by_var_;
+  };
+
   class OrchRewriter : public IRMutator {
    public:
     using RootSet = std::unordered_set<const Var*>;
@@ -2028,9 +2079,14 @@ class OutWindowExternalizer {
                  const FunctionPtr& current_func)
         : program_(std::move(program)), analyses_(analyses), cloned_funcs_(cloned_funcs) {
       if (current_func) {
-        for (const auto& param : current_func->params_) {
+        for (size_t i = 0; i < current_func->params_.size(); ++i) {
+          const auto& param = current_func->params_[i];
           if (param && AsTensorTypeLike(param->GetType())) {
             full_buffer_roots_[param.get()] = param.get();
+            if (i < current_func->param_directions_.size() &&
+                IsOutputDirection(current_func->param_directions_[i], /*include_inout=*/true)) {
+              writable_buffer_roots_.insert(param.get());
+            }
           }
         }
         PrecomputeFullBufferRoots(current_func->body_);
@@ -2186,6 +2242,11 @@ class OutWindowExternalizer {
       return var && full_buffer_roots_.count(var.get()) > 0 && ResolveBufferRoot(var.get()) != nullptr;
     }
 
+    bool IsWritableRootExpr(const ExprPtr& expr) const {
+      auto root = ResolveBufferRoot(expr);
+      return root && writable_buffer_roots_.count(root) > 0;
+    }
+
     static bool IsReadDirection(ParamDirection direction) {
       return direction == ParamDirection::In || direction == ParamDirection::InOut;
     }
@@ -2213,7 +2274,7 @@ class OutWindowExternalizer {
         std::vector<const Var*> roots;
         roots.reserve(tuple->elements_.size());
         for (const auto& element : tuple->elements_) {
-          roots.push_back(IsTensorTypedExpr(element) ? ResolveBufferRoot(element) : nullptr);
+          roots.push_back(IsTensorTypedArg(element) ? ResolveBufferRoot(element) : nullptr);
         }
         tuple_output_roots_[assign->var_.get()] = std::move(roots);
       }
@@ -2344,15 +2405,26 @@ class OutWindowExternalizer {
 
     void AddFullRootReadsFromCall(const CallPtr& call, RootSet& reads) const {
       if (!call || !program_ || codegen::IsBuiltinOp(call->op_->name_)) return;
-      auto callee = program_->GetFunction(call->op_->name_);
+      auto callee_name = call->op_->name_;
+      auto callee = program_->GetFunction(callee_name);
       if (!callee) return;
       for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
         if (!IsReadDirection(callee->param_directions_[i])) continue;
+        if (HasAnalyzedInputWindow(callee_name, i) && IsWritableRootExpr(call->args_[i])) continue;
         if (!IsFullRootExpr(call->args_[i])) continue;
         if (const Var* root = ResolveBufferRoot(call->args_[i])) {
           reads.insert(root);
         }
       }
+    }
+
+    bool HasAnalyzedInputWindow(const std::string& callee_name, size_t param_index) const {
+      auto analysis_it = analyses_.find(callee_name);
+      if (analysis_it == analyses_.end() || !cloned_funcs_.count(callee_name)) return false;
+      const auto& inputs = analysis_it->second.inputs;
+      return std::any_of(inputs.begin(), inputs.end(), [param_index](const InputRewriteInfo& input) {
+        return input.in_param_index == param_index;
+      });
     }
 
     // A later reader can be a Call OR a Submit (pl.submit in a manual_scope).
@@ -2438,8 +2510,39 @@ class OutWindowExternalizer {
       }
 
       std::unordered_map<size_t, SliceBundle> slices_by_out_index;
+      std::unordered_map<size_t, VarPtr> slices_by_in_index;
       std::vector<StmtPtr> stmts;
-      stmts.reserve(analysis.outputs.size() * 2 + 2);
+      stmts.reserve((analysis.outputs.size() + analysis.inputs.size()) * 2 + 2);
+
+      for (const auto& input : analysis.inputs) {
+        if (input.in_param_index >= call->args_.size()) return std::nullopt;
+        auto in_arg = AsVarLike(call->args_[input.in_param_index]);
+        if (!in_arg) return std::nullopt;
+        if (!IsWritableRootExpr(call->args_[input.in_param_index])) continue;
+
+        std::vector<ExprPtr> shape_exprs;
+        shape_exprs.reserve(input.window_shape.size());
+        for (const auto& dim : input.window_shape) {
+          shape_exprs.push_back(transform_utils::Substitute(dim, callsite_subst));
+        }
+        auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, call_assign->span_);
+
+        std::vector<ExprPtr> offset_exprs;
+        offset_exprs.reserve(input.callsite_offsets.size());
+        for (const auto& offset : input.callsite_offsets) {
+          offset_exprs.push_back(
+              arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
+        }
+        auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
+
+        ExprPtr parent_expr = VisitExpr(call->args_[input.in_param_index]);
+        auto slice_call = OpRegistry::GetInstance().Create(
+            "tensor.slice", {parent_expr, shape_tuple, offset_tuple}, call_assign->span_);
+        auto slice_var =
+            std::make_shared<Var>(in_arg->name_hint_ + "__window", slice_call->GetType(), in_arg->span_);
+        stmts.push_back(std::make_shared<AssignStmt>(slice_var, slice_call, call_assign->span_));
+        slices_by_in_index.emplace(input.in_param_index, slice_var);
+      }
 
       for (const auto& output : analysis.outputs) {
         if (output.out_param_index >= call->args_.size()) return std::nullopt;
@@ -2474,6 +2577,11 @@ class OutWindowExternalizer {
       std::vector<ExprPtr> new_args;
       new_args.reserve(call->args_.size());
       for (size_t i = 0; i < call->args_.size(); ++i) {
+        auto input_slice_it = slices_by_in_index.find(i);
+        if (input_slice_it != slices_by_in_index.end()) {
+          new_args.push_back(input_slice_it->second);
+          continue;
+        }
         auto slice_it = slices_by_out_index.find(i);
         if (slice_it != slices_by_out_index.end()) {
           new_args.push_back(slice_it->second.slice_var);
@@ -2731,6 +2839,7 @@ class OutWindowExternalizer {
     std::unordered_map<const Var*, ExprPtr> loop_iter_init_subst_;
     std::unordered_map<const Var*, ExprPtr> scalar_defs_;
     std::unordered_map<const Var*, const Var*> full_buffer_roots_;
+    std::unordered_set<const Var*> writable_buffer_roots_;
     std::unordered_map<const Var*, std::vector<const Var*>> tuple_output_roots_;
     std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_result_subst_;
     RootSet enclosing_later_full_parent_reads_;
@@ -2899,6 +3008,357 @@ class OutWindowExternalizer {
       break;
     }
     return result;
+  }
+
+  static std::vector<InputRewriteInfo> AnalyzeInputWindows(const FunctionPtr& func,
+                                                           const std::vector<OutputRewriteInfo>& outputs) {
+    std::vector<InputRewriteInfo> inputs;
+    if (!func || outputs.empty()) return inputs;
+
+    auto body_stmts = FlattenToStmts(func->body_);
+    std::unordered_set<const Var*> output_params;
+    for (const auto& output : outputs) {
+      if (output.out_param_index < func->params_.size())
+        output_params.insert(func->params_[output.out_param_index].get());
+    }
+
+    std::unordered_map<size_t, InputRewriteInfo> by_index;
+    std::unordered_set<size_t> conflicted;
+    for (const auto& stmt : body_stmts) {
+      auto assign = As<AssignStmt>(stmt);
+      auto call = assign ? As<Call>(assign->value_) : nullptr;
+      if (!call) continue;
+
+      size_t shape_arg_index = SIZE_MAX;
+      size_t offset_arg_index = SIZE_MAX;
+      if (call->op_->name_ == "tensor.slice" && call->args_.size() >= 3) {
+        shape_arg_index = 1;
+        offset_arg_index = 2;
+      } else if (call->op_->name_ == "tile.load" && call->args_.size() >= 3) {
+        offset_arg_index = 1;
+        shape_arg_index = 2;
+      } else {
+        continue;
+      }
+
+      auto parent = AsVarLike(call->args_[0]);
+      auto shape_tuple = As<MakeTuple>(call->args_[shape_arg_index]);
+      auto offset_tuple = As<MakeTuple>(call->args_[offset_arg_index]);
+      if (!parent || !shape_tuple || !offset_tuple) continue;
+
+      size_t param_index = SIZE_MAX;
+      for (size_t i = 0; i < func->params_.size() && i < func->param_directions_.size(); ++i) {
+        if (func->params_[i].get() == parent.get()) {
+          param_index = i;
+          break;
+        }
+      }
+      if (param_index == SIZE_MAX) continue;
+      if (func->param_directions_[param_index] != ParamDirection::In) continue;
+      if (output_params.count(parent.get()) > 0) continue;
+
+      auto tensor_type = As<TensorType>(func->params_[param_index]->GetType());
+      if (!tensor_type) continue;
+      if (shape_tuple->elements_.size() != offset_tuple->elements_.size() ||
+          shape_tuple->elements_.size() != tensor_type->shape_.size()) {
+        conflicted.insert(param_index);
+        by_index.erase(param_index);
+        continue;
+      }
+      if (AreExprVectorsEqual(shape_tuple->elements_, tensor_type->shape_) &&
+          IsAllZeroOffsets(offset_tuple->elements_)) {
+        continue;
+      }
+
+      std::unordered_set<const Var*> allowed_params;
+      for (const auto& param : func->params_) allowed_params.insert(param.get());
+      bool exprs_ok = true;
+      for (const auto& expr : shape_tuple->elements_) {
+        if (!ExprReferencesOnlyVarsIn(expr, allowed_params)) {
+          exprs_ok = false;
+          break;
+        }
+      }
+      for (const auto& expr : offset_tuple->elements_) {
+        if (!ExprReferencesOnlyVarsIn(expr, allowed_params)) {
+          exprs_ok = false;
+          break;
+        }
+      }
+      if (!exprs_ok) {
+        conflicted.insert(param_index);
+        by_index.erase(param_index);
+        continue;
+      }
+
+      std::vector<ExprPtr> local_zero_offsets;
+      local_zero_offsets.reserve(offset_tuple->elements_.size());
+      for (size_t i = 0; i < offset_tuple->elements_.size(); ++i) {
+        local_zero_offsets.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, func->span_));
+      }
+
+      InputRewriteInfo info{param_index, tensor_type->shape_, shape_tuple->elements_, offset_tuple->elements_,
+                            std::move(local_zero_offsets)};
+      auto existing = by_index.find(param_index);
+      if (existing == by_index.end()) {
+        by_index.emplace(param_index, std::move(info));
+        continue;
+      }
+      if (!AreExprVectorsEqual(existing->second.window_shape, info.window_shape) ||
+          !AreExprVectorsEqual(existing->second.callsite_offsets, info.callsite_offsets)) {
+        conflicted.insert(param_index);
+        by_index.erase(param_index);
+      }
+    }
+
+    inputs.reserve(by_index.size());
+    for (auto& [param_index, info] : by_index) {
+      if (conflicted.count(param_index) == 0) inputs.push_back(std::move(info));
+    }
+    return inputs;
+  }
+
+  class InputWindowCallsiteFilter {
+   public:
+    InputWindowCallsiteFilter(ProgramPtr program, const AnalysisMap& analyses)
+        : program_(std::move(program)), analyses_(analyses) {}
+
+    std::unordered_map<std::string, std::unordered_set<size_t>> Run() {
+      if (!program_) return {};
+      for (const auto& [gvar, func] : program_->functions_) {
+        if (!func || func->func_type_ != FunctionType::Orchestration) continue;
+        ScanFunction(func);
+      }
+      std::unordered_map<std::string, std::unordered_set<size_t>> eligible_inputs;
+      for (const auto& [func_name, candidates] : input_callsites_) {
+        for (const auto& [param_index, callsites] : candidates) {
+          if (callsites.seen && callsites.all_writable) eligible_inputs[func_name].insert(param_index);
+        }
+      }
+      return eligible_inputs;
+    }
+
+   private:
+    struct InputCallsites {
+      bool seen = false;
+      bool all_writable = true;
+    };
+
+    void ScanFunction(const FunctionPtr& func) {
+      full_buffer_roots_.clear();
+      writable_buffer_roots_.clear();
+      tuple_output_roots_.clear();
+      loop_iter_init_subst_.clear();
+      for (size_t i = 0; i < func->params_.size(); ++i) {
+        const auto& param = func->params_[i];
+        if (!param || !AsTensorTypeLike(param->GetType())) continue;
+        full_buffer_roots_[param.get()] = param.get();
+        if (i < func->param_directions_.size() &&
+            IsOutputDirection(func->param_directions_[i], /*include_inout=*/true)) {
+          writable_buffer_roots_.insert(param.get());
+        }
+      }
+      VisitStmt(func->body_);
+    }
+
+    void VisitStmt(const StmtPtr& stmt) {
+      if (!stmt) return;
+      if (auto seq = As<SeqStmts>(stmt)) {
+        for (const auto& child : seq->stmts_) VisitStmt(child);
+      } else if (auto loop = As<ForStmt>(stmt)) {
+        auto saved_loop_iter_init_subst = loop_iter_init_subst_;
+        for (const auto& iter_arg : loop->iter_args_) {
+          if (!iter_arg || !iter_arg->initValue_) continue;
+          loop_iter_init_subst_[iter_arg.get()] = iter_arg->initValue_;
+          if (const Var* root = ResolveBufferRoot(iter_arg->initValue_)) {
+            full_buffer_roots_[iter_arg.get()] = root;
+          }
+        }
+        VisitStmt(loop->body_);
+        AddLoopReturnRoots(loop);
+        loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
+      } else if (auto loop = As<WhileStmt>(stmt)) {
+        auto saved_loop_iter_init_subst = loop_iter_init_subst_;
+        for (const auto& iter_arg : loop->iter_args_) {
+          if (!iter_arg || !iter_arg->initValue_) continue;
+          loop_iter_init_subst_[iter_arg.get()] = iter_arg->initValue_;
+          if (const Var* root = ResolveBufferRoot(iter_arg->initValue_)) {
+            full_buffer_roots_[iter_arg.get()] = root;
+          }
+        }
+        VisitStmt(loop->body_);
+        AddLoopReturnRoots(loop);
+        loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
+      } else if (auto if_stmt = As<IfStmt>(stmt)) {
+        VisitStmt(if_stmt->then_body_);
+        if (if_stmt->else_body_.has_value()) VisitStmt(if_stmt->else_body_.value());
+      } else if (auto scope = As<ScopeStmt>(stmt)) {
+        VisitStmt(scope->body_);
+      } else if (auto rscope = As<RuntimeScopeStmt>(stmt)) {
+        VisitStmt(rscope->body_);
+      } else if (auto assign = As<AssignStmt>(stmt)) {
+        VisitCallsite(assign->value_);
+        AddFullBufferRootForAssign(assign);
+      } else if (auto eval = As<EvalStmt>(stmt)) {
+        VisitCallsite(eval->expr_);
+      }
+    }
+
+    void VisitCallsite(const ExprPtr& expr) {
+      auto call = As<Call>(expr);
+      if (!call || codegen::IsBuiltinOp(call->op_->name_)) return;
+      auto analysis_it = analyses_.find(call->op_->name_);
+      if (analysis_it == analyses_.end()) return;
+      for (const auto& input : analysis_it->second.inputs) {
+        if (input.in_param_index >= call->args_.size()) continue;
+        auto& callsites = input_callsites_[call->op_->name_][input.in_param_index];
+        callsites.seen = true;
+        if (!IsWritableRootExpr(call->args_[input.in_param_index])) {
+          callsites.all_writable = false;
+        }
+      }
+    }
+
+    const Var* ResolveBufferRoot(const ExprPtr& expr) const {
+      auto current = ResolveLoopInitExpr(expr);
+      auto var = AsVarLike(current);
+      if (!var) return nullptr;
+      return ResolveBufferRoot(var.get());
+    }
+
+    const Var* ResolveBufferRoot(const Var* var) const {
+      const Var* current = var;
+      std::unordered_set<const Var*> seen;
+      while (current && seen.insert(current).second) {
+        auto it = full_buffer_roots_.find(current);
+        if (it == full_buffer_roots_.end()) return nullptr;
+        if (it->second == current) return current;
+        current = it->second;
+      }
+      return current;
+    }
+
+    bool IsWritableRootExpr(const ExprPtr& expr) const {
+      auto root = ResolveBufferRoot(expr);
+      return root && writable_buffer_roots_.count(root) > 0;
+    }
+
+    ExprPtr ResolveLoopInitExpr(const ExprPtr& expr) const {
+      ExprPtr current = expr;
+      std::unordered_set<const Var*> seen;
+      while (auto var = AsVarLike(current)) {
+        if (!seen.insert(var.get()).second) break;
+        auto it = loop_iter_init_subst_.find(var.get());
+        if (it == loop_iter_init_subst_.end()) break;
+        current = it->second;
+      }
+      return current;
+    }
+
+    void AddFullBufferRootForAssign(const AssignStmtPtr& assign) {
+      if (!assign) return;
+      if (auto call = As<Call>(assign->value_)) {
+        const auto& op_name = call->op_->name_;
+        if ((op_name == "tensor.reshape" || op_name == "tensor.assemble") && !call->args_.empty()) {
+          if (const Var* root = ResolveBufferRoot(call->args_[0])) {
+            full_buffer_roots_[assign->var_.get()] = root;
+          }
+        } else if (IsTensorAllocationOp(call)) {
+          full_buffer_roots_[assign->var_.get()] = assign->var_.get();
+        } else if (!codegen::IsBuiltinOp(op_name)) {
+          AddCallOutputRoots(assign, call);
+        }
+      } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
+        AddTupleGetItemRoot(assign, tuple_get);
+      } else if (auto src_var = AsVarLike(assign->value_)) {
+        if (const Var* root = ResolveBufferRoot(src_var.get())) {
+          full_buffer_roots_[assign->var_.get()] = root;
+        }
+      } else if (auto tuple = As<MakeTuple>(assign->value_)) {
+        std::vector<const Var*> roots;
+        roots.reserve(tuple->elements_.size());
+        for (const auto& element : tuple->elements_) {
+          roots.push_back(IsTensorTypedArg(element) ? ResolveBufferRoot(element) : nullptr);
+        }
+        tuple_output_roots_[assign->var_.get()] = std::move(roots);
+      }
+    }
+
+    void AddCallOutputRoots(const AssignStmtPtr& assign, const CallPtr& call) {
+      auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+      if (!callee) return;
+
+      std::vector<const Var*> roots(callee->return_types_.size(), nullptr);
+      for (const auto& mapping : BuildOutParamReturnMappings(callee, /*include_inout=*/true)) {
+        if (mapping.return_index >= roots.size() || mapping.param_index >= call->args_.size()) continue;
+        roots[mapping.return_index] = ResolveBufferRoot(call->args_[mapping.param_index]);
+      }
+
+      if (As<TupleType>(call->GetType())) {
+        tuple_output_roots_[assign->var_.get()] = std::move(roots);
+      } else if (!roots.empty() && roots[0]) {
+        full_buffer_roots_[assign->var_.get()] = roots[0];
+      }
+    }
+
+    void AddTupleGetItemRoot(const AssignStmtPtr& assign, const TupleGetItemExprPtr& tuple_get) {
+      auto tuple_var = AsVarLike(tuple_get->tuple_);
+      if (!tuple_var) return;
+      auto roots_it = tuple_output_roots_.find(tuple_var.get());
+      if (roots_it == tuple_output_roots_.end()) return;
+      if (tuple_get->index_ < 0 || static_cast<size_t>(tuple_get->index_) >= roots_it->second.size()) return;
+      if (const Var* root = roots_it->second[static_cast<size_t>(tuple_get->index_)]) {
+        full_buffer_roots_[assign->var_.get()] = root;
+      }
+    }
+
+    void AddLoopReturnRoots(const ForStmtPtr& loop) {
+      if (!loop) return;
+      auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+      for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
+        const Var* root = nullptr;
+        if (i < loop->iter_args_.size()) root = ResolveBufferRoot(loop->iter_args_[i].get());
+        if (!root && yield && i < yield->value_.size()) root = ResolveBufferRoot(yield->value_[i]);
+        if (root) full_buffer_roots_[loop->return_vars_[i].get()] = root;
+      }
+    }
+
+    void AddLoopReturnRoots(const WhileStmtPtr& loop) {
+      if (!loop) return;
+      auto yield = transform_utils::GetLastYieldStmt(loop->body_);
+      for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
+        const Var* root = nullptr;
+        if (i < loop->iter_args_.size()) root = ResolveBufferRoot(loop->iter_args_[i].get());
+        if (!root && yield && i < yield->value_.size()) root = ResolveBufferRoot(yield->value_[i]);
+        if (root) full_buffer_roots_[loop->return_vars_[i].get()] = root;
+      }
+    }
+
+    ProgramPtr program_;
+    const AnalysisMap& analyses_;
+    std::unordered_map<std::string, std::unordered_map<size_t, InputCallsites>> input_callsites_;
+    std::unordered_map<const Var*, const Var*> full_buffer_roots_;
+    std::unordered_set<const Var*> writable_buffer_roots_;
+    std::unordered_map<const Var*, ExprPtr> loop_iter_init_subst_;
+    std::unordered_map<const Var*, std::vector<const Var*>> tuple_output_roots_;
+  };
+
+  static void FilterInputWindowsByCallsites(const ProgramPtr& program, AnalysisMap* analyses) {
+    if (!program || !analyses) return;
+    auto eligible = InputWindowCallsiteFilter(program, *analyses).Run();
+    for (auto& [func_name, analysis] : *analyses) {
+      auto eligible_it = eligible.find(func_name);
+      if (eligible_it == eligible.end()) {
+        analysis.inputs.clear();
+        continue;
+      }
+      const auto& eligible_indices = eligible_it->second;
+      analysis.inputs.erase(std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
+                                           [&eligible_indices](const InputRewriteInfo& input) {
+                                             return eligible_indices.count(input.in_param_index) == 0;
+                                           }),
+                            analysis.inputs.end());
+    }
   }
 
   static std::optional<CalleeRewriteAnalysis> AnalyzeAggregateWindowLoop(
@@ -3186,15 +3646,18 @@ class OutWindowExternalizer {
       }
       if (all_final && !analysis.outputs.empty()) {
         analysis.kind = RewriteKind::FinalStore;
+        analysis.inputs = AnalyzeInputWindows(func, analysis.outputs);
         analyses.emplace(func->name_, std::move(analysis));
         continue;
       }
 
       auto aggregate_analysis = AnalyzeAggregateWindowLoop(func, out_indices);
       if (aggregate_analysis.has_value() && !aggregate_analysis->outputs.empty()) {
+        aggregate_analysis->inputs = AnalyzeInputWindows(func, aggregate_analysis->outputs);
         analyses.emplace(func->name_, std::move(*aggregate_analysis));
       }
     }
+    FilterInputWindowsByCallsites(program, &analyses);
     return analyses;
   }
 
@@ -3238,6 +3701,33 @@ class OutWindowExternalizer {
                                                   out_tensor_type->memref_, new_view);
         new_return_types[rewrite_it->return_index] = param_type;
       }
+      auto input_rewrite_it =
+          std::find_if(analysis.inputs.begin(), analysis.inputs.end(),
+                       [i](const InputRewriteInfo& info) { return info.in_param_index == i; });
+      if (input_rewrite_it != analysis.inputs.end()) {
+        auto in_tensor_type = As<TensorType>(func->params_[i]->GetType());
+        if (!in_tensor_type) return nullptr;
+
+        std::optional<TensorView> new_view = std::nullopt;
+        if (in_tensor_type->tensor_view_.has_value()) {
+          new_view = in_tensor_type->tensor_view_;
+          if (new_view->stride.empty()) {
+            if (new_view->layout == TensorLayout::NZ) return nullptr;
+            new_view->stride = tensor_view_semantics::BuildLogicalStridesFromLayout(in_tensor_type->shape_,
+                                                                                    new_view->layout);
+          }
+          if (!new_view->valid_shape.empty()) new_view->valid_shape = input_rewrite_it->window_shape;
+        } else {
+          auto parent_strides = ComputeRowMajorStrides(input_rewrite_it->parent_shape);
+          if (parent_strides.empty() || parent_strides.size() != input_rewrite_it->window_shape.size()) {
+            return nullptr;
+          }
+          new_view = TensorView(std::move(parent_strides), TensorLayout::ND);
+        }
+
+        param_type = std::make_shared<TensorType>(input_rewrite_it->window_shape, in_tensor_type->dtype_,
+                                                  in_tensor_type->memref_, new_view);
+      }
 
       auto new_param =
           std::make_shared<Var>(func->params_[i]->name_hint_, param_type, func->params_[i]->span_);
@@ -3262,6 +3752,23 @@ class OutWindowExternalizer {
       }
     }
     StmtPtr new_body = cloned.cloned_body;
+
+    std::unordered_map<const Var*, InputRewriteInfo> in_info_by_var;
+    for (auto input : analysis.inputs) {
+      if (input.in_param_index >= func->params_.size()) return nullptr;
+      if (input.in_param_index >= new_params.size()) return nullptr;
+      for (auto& offset : input.callsite_offsets) {
+        offset = transform_utils::Substitute(offset, body_subst);
+      }
+      for (auto& offset : input.local_slice_offsets) {
+        offset = transform_utils::Substitute(offset, body_subst);
+      }
+      in_info_by_var.emplace(new_params[input.in_param_index].get(), std::move(input));
+    }
+    if (!in_info_by_var.empty()) {
+      WindowReadLocalizer read_localizer(in_info_by_var);
+      new_body = read_localizer.VisitStmt(new_body);
+    }
 
     if (analysis.kind == RewriteKind::AggregateWindowLoop) {
       auto find_aggregate_loop = [&](const StmtPtr& body) -> ForStmtPtr {
