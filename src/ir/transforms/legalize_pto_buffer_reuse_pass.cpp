@@ -24,7 +24,6 @@
  * are illegal and trigger a MemRef split.
  */
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -359,6 +358,7 @@ class MemRefSplitMutator : public IRMutator {
     if (it != var_remap_.end()) return it->second;
 
     auto new_init = VisitExpr(op->initValue_);
+    INTERNAL_CHECK_SPAN(new_init, op->span_) << "Internal error: IterArg initValue mutated to null";
 
     auto split_it = splits_.find(op.get());
     if (split_it == splits_.end() && new_init == op->initValue_) return op;
@@ -470,19 +470,25 @@ class LoopCarryReturnVarCollector : public IRVisitor {
   explicit LoopCarryReturnVarCollector(std::map<const Var*, MemRefPtr>& splits) : splits_(splits) {}
 
   void VisitStmt_(const ForStmtPtr& op) override {
-    RegisterCarries(op->iter_args_, op->return_vars_);
+    RegisterCarries(op->iter_args_, op->return_vars_, op->span_);
     IRVisitor::VisitStmt_(op);
   }
 
   void VisitStmt_(const WhileStmtPtr& op) override {
-    RegisterCarries(op->iter_args_, op->return_vars_);
+    RegisterCarries(op->iter_args_, op->return_vars_, op->span_);
     IRVisitor::VisitStmt_(op);
   }
 
  private:
-  void RegisterCarries(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars) {
-    const size_t n = std::min(iter_args.size(), return_vars.size());
-    for (size_t i = 0; i < n; ++i) {
+  void RegisterCarries(const std::vector<IterArgPtr>& iter_args, const std::vector<VarPtr>& return_vars,
+                       const Span& span) {
+    // iter_args and return_vars are 1:1 by the loop contract (see ForStmt /
+    // WhileStmt docs); a mismatch here means an earlier pass produced malformed
+    // IR.
+    INTERNAL_CHECK_SPAN(iter_args.size() == return_vars.size(), span)
+        << "Internal error: loop iter_args (" << iter_args.size() << ") and return_vars ("
+        << return_vars.size() << ") count mismatch";
+    for (size_t i = 0; i < iter_args.size(); ++i) {
       auto init_var = AsVarLike(iter_args[i]->initValue_);
       if (!init_var) continue;
       auto it = splits_.find(init_var.get());
