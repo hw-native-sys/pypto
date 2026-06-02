@@ -380,18 +380,23 @@ def _collect_dep_names(func_def: ast.FunctionDef, jit_func_names: set[str]) -> l
 # ---------------------------------------------------------------------------
 
 
-def _build_tensor_annotation(meta: TensorMeta, is_out: bool) -> str:
+def _build_tensor_annotation(meta: TensorMeta, is_out: bool, is_distributed: bool = False) -> str:
     """Build the type annotation string for a tensor parameter.
 
     Static dims emit as integer literals; DynDim entries emit as their
-    DynVar variable name.
+    DynVar variable name. When ``is_distributed`` is True the head type
+    becomes ``pld.DistributedTensor`` instead of ``pl.Tensor`` — same
+    shape/dtype subscript form, only the IR ObjectKind differs (see
+    ``pld.DistributedTensor``).
 
     Returns:
-        Annotation string such as ``pl.Tensor[[M, 128], pl.FP32]`` or
-        ``pl.Out[pl.Tensor[[128, 128], pl.FP32]]``.
+        Annotation string such as ``pl.Tensor[[M, 128], pl.FP32]``,
+        ``pl.Out[pl.Tensor[[128, 128], pl.FP32]]``, or
+        ``pld.DistributedTensor[[256], pl.INT8]``.
     """
     dims = [d.name if isinstance(d, DynDim) else str(d) for d in meta.shape]
-    inner = f"pl.Tensor[[{', '.join(dims)}], {_dtype_str(meta.dtype)}]"
+    head = "pld.DistributedTensor" if is_distributed else "pl.Tensor"
+    inner = f"{head}[[{', '.join(dims)}], {_dtype_str(meta.dtype)}]"
     return f"pl.Out[{inner}]" if is_out else inner
 
 
@@ -1120,18 +1125,23 @@ def _infer_return_type(
 
 def _classify_params(
     func_def: ast.FunctionDef,
-) -> tuple[list[str], list[str], dict[str, str]]:
+) -> tuple[list[str], list[str], dict[str, str], set[str]]:
     """Classify function parameters.
 
     Returns:
-        (out_params, tensor_params, scalar_dtype_strs)
-        - out_params: names annotated Out[pl.Tensor]
-        - tensor_params: all names annotated pl.Tensor (including Out ones)
+        (out_params, tensor_params, scalar_dtype_strs, distributed_params)
+        - out_params: names annotated Out[pl.Tensor] / Out[pld.DistributedTensor]
+        - tensor_params: all names annotated as tensor-like — pl.Tensor or
+          pld.DistributedTensor (including Out ones)
         - scalar_dtype_strs: param_name → dtype string for scalar params
+        - distributed_params: subset of tensor_params whose annotation uses
+          ``DistributedTensor`` (and should round-trip as
+          ``pld.DistributedTensor[...]`` in the generated @pl.program source)
     """
     out_params: list[str] = []
     tensor_params: list[str] = []
     scalar_dtype_strs: dict[str, str] = {}
+    distributed_params: set[str] = set()
 
     for arg in func_def.args.args:
         name = arg.arg
@@ -1141,7 +1151,7 @@ def _classify_params(
         if ann is None:
             continue
 
-        # Detect Out[pl.Tensor] or pl.Out[pl.Tensor]
+        # Detect Out[pl.Tensor] / Out[pld.DistributedTensor] etc.
         if isinstance(ann, ast.Subscript):
             outer = ann.value
             is_out = (isinstance(outer, ast.Name) and outer.id == "Out") or (
@@ -1153,6 +1163,8 @@ def _classify_params(
             if is_out and is_tensor:
                 out_params.append(name)
                 tensor_params.append(name)
+                if _is_distributed_tensor_annotation(inner):
+                    distributed_params.add(name)
                 continue
             # Check for Scalar dtype annotations: pl.INDEX, pl.FP32, etc.
             is_scalar_ann = _is_scalar_annotation(outer)
@@ -1160,9 +1172,11 @@ def _classify_params(
                 scalar_dtype_strs[name] = _ast_to_str(inner)
                 continue
 
-        # Detect pl.Tensor (bare, no subscript)
+        # Detect pl.Tensor / pld.DistributedTensor (bare or subscripted)
         if _is_tensor_annotation(ann):
             tensor_params.append(name)
+            if _is_distributed_tensor_annotation(ann):
+                distributed_params.add(name)
             continue
 
         # Detect bare dtype annotation: pl.INDEX, pl.FP32, etc. (no Scalar wrapper)
@@ -1170,18 +1184,36 @@ def _classify_params(
         if dtype_str is not None:
             scalar_dtype_strs[name] = dtype_str
 
-    return out_params, tensor_params, scalar_dtype_strs
+    return out_params, tensor_params, scalar_dtype_strs, distributed_params
 
 
 def _is_tensor_annotation(node: ast.expr) -> bool:
-    """Return True if the AST node represents pl.Tensor or Tensor (bare or subscripted)."""
+    """Return True if the AST node represents a tensor-like annotation.
+
+    Matches both ``pl.Tensor`` / ``Tensor`` and ``pld.DistributedTensor`` /
+    ``DistributedTensor`` (bare or subscripted). ``DistributedTensor`` shares
+    the same ``[shape, dtype, ...]`` subscript form as ``Tensor`` — only the
+    IR ObjectKind differs — so treating both as tensor-like at the classifier
+    level lets the rest of the specializer reuse the same plumbing. Call
+    :func:`_is_distributed_tensor_annotation` to distinguish the two kinds.
+    """
     if isinstance(node, ast.Name):
-        return node.id == "Tensor"
+        return node.id in ("Tensor", "DistributedTensor")
     if isinstance(node, ast.Attribute):
-        return node.attr == "Tensor"
-    # Handle subscripted form: pl.Tensor[[...], dtype] or Tensor[[...], dtype]
+        return node.attr in ("Tensor", "DistributedTensor")
     if isinstance(node, ast.Subscript):
         return _is_tensor_annotation(node.value)
+    return False
+
+
+def _is_distributed_tensor_annotation(node: ast.expr) -> bool:
+    """Return True iff the annotation specifically names DistributedTensor."""
+    if isinstance(node, ast.Name):
+        return node.id == "DistributedTensor"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "DistributedTensor"
+    if isinstance(node, ast.Subscript):
+        return _is_distributed_tensor_annotation(node.value)
     return False
 
 
@@ -1302,6 +1334,11 @@ class Specializer:
         # synthesized statements read as (0, 0), and zipped against the reparsed
         # generated statements in _build_source_map after assembly.
         self._fn_origin: list[tuple[SpecializeContext, list[tuple[int, int]]]] = []
+        # Set by _build_params when any param uses pld.DistributedTensor; the
+        # corresponding ``import pypto.language.distributed as pld`` is then
+        # emitted in the generated module preamble so the source is
+        # self-contained (mirrors the ``import pypto.language as pl`` line).
+        self._needs_pld_import: bool = False
 
     @property
     def rename_map(self) -> dict[str, str]:
@@ -1329,10 +1366,21 @@ class Specializer:
             Python source string ready to pass to ``pl.parse()``.
         """
         self._fn_origin = []
-        lines: list[str] = [
-            "import pypto.language as pl",
-            "",
-        ]
+        self._needs_pld_import = False
+
+        # Specialize bodies first so per-context state (DynVars,
+        # _needs_pld_import) is fully populated before assembling the preamble.
+        body_lines: list[str] = []
+        for ctx in self._contexts:
+            method_lines = self._specialize_function(ctx)
+            for ml in method_lines:
+                body_lines.append("    " + ml)
+            body_lines.append("")
+
+        lines: list[str] = ["import pypto.language as pl"]
+        if self._needs_pld_import:
+            lines.append("import pypto.language.distributed as pld")
+        lines.append("")
 
         # Emit module-level DynVar declarations (deduplicated across contexts)
         dv_seen: set[str] = set()
@@ -1347,12 +1395,7 @@ class Specializer:
         # Open @pl.program class
         lines.append("@pl.program")
         lines.append(f"class {self._class_name}:")
-
-        for ctx in self._contexts:
-            method_lines = self._specialize_function(ctx)
-            for ml in method_lines:
-                lines.append("    " + ml)
-            lines.append("")
+        lines.extend(body_lines)
 
         src = "\n".join(lines)
         self._source_map = self._build_source_map(src)
@@ -1414,7 +1457,7 @@ class Specializer:
         )
 
         # Classify parameters
-        out_params, tensor_params, scalar_dtype_strs = _classify_params(func_def)
+        out_params, tensor_params, scalar_dtype_strs, distributed_params = _classify_params(func_def)
 
         # Inline helpers are spliced at the call site before SSA conversion,
         # so their parameters are already in-place aliases of the caller's
@@ -1441,7 +1484,13 @@ class Specializer:
         decorator = self._build_decorator(ctx, func_def)
 
         params = self._build_params(
-            all_param_names, out_params, tensor_params, scalar_dtype_strs, ctx, is_inline=is_inline
+            all_param_names,
+            out_params,
+            tensor_params,
+            scalar_dtype_strs,
+            distributed_params,
+            ctx,
+            is_inline=is_inline,
         )
 
         # Infer return type
@@ -1560,6 +1609,7 @@ class Specializer:
         out_params: list[str],
         tensor_params: list[str],
         scalar_dtype_strs: dict[str, str],
+        distributed_params: set[str],
         ctx: SpecializeContext,
         is_inline: bool = False,
     ) -> list[str]:
@@ -1568,11 +1618,18 @@ class Specializer:
         When ``is_inline`` is True, ``pl.Out[...]`` wrappers are stripped from
         tensor params — inline helpers don't have a calling convention boundary,
         so the direction tag carries no information.
+
+        Params listed in ``distributed_params`` round-trip as
+        ``pld.DistributedTensor[...]`` and trigger the corresponding import in
+        the generated module preamble.
         """
         result: list[str] = []
         for name in all_param_names:
             if name in tensor_params:
                 is_out = (name in out_params) and not is_inline
+                is_distributed = name in distributed_params
+                if is_distributed:
+                    self._needs_pld_import = True
                 meta = ctx.tensor_meta.get(name)
                 if meta is None:
                     raise ValueError(
@@ -1582,7 +1639,7 @@ class Specializer:
                         "ensure any intermediate pl.create_tensor() used for this parameter "
                         "has a statically inferable shape and dtype."
                     )
-                ann = _build_tensor_annotation(meta, is_out=is_out)
+                ann = _build_tensor_annotation(meta, is_out=is_out, is_distributed=is_distributed)
                 result.append(f"{name}: {ann}")
             elif name in scalar_dtype_strs:
                 dtype_s = scalar_dtype_strs[name]

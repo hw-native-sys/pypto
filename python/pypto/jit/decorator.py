@@ -508,7 +508,7 @@ def _scan_dep_io(func: Any) -> dict[str, tuple[list[str], list[str]]]:
     out: dict[str, tuple[list[str], list[str]]] = {}
     for dep in _discover_deps(func):
         try:
-            out_params, _, _ = _classify_params(_get_func_def(dep._func))
+            out_params, _, _, _ = _classify_params(_get_func_def(dep._func))
         except OSError:
             continue
         out[dep.__name__] = (dep._param_names(), out_params)
