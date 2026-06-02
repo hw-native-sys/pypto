@@ -747,6 +747,77 @@ class TestSpecializer:
         )
         assert "pl.FunctionType.InCore" in out
 
+    def test_jit_host_emits_host_orchestrator_decorator(self):
+        """@pl.jit.host generates a HOST Orchestrator @pl.function decorator —
+        matching the canonical spelling in tests/st/distributed/test_l3_allreduce.py.
+        ``type=`` is omitted (defaults to FunctionType.Opaque, which is correct
+        for a HOST orchestrator)."""
+        # Use ``def kernel(...)`` so _specialize_simple's hard-coded
+        # func_name="kernel" matches; the function-body shape is what we're
+        # testing, not the name.
+        src = """
+            def kernel(inputs: pld.DistributedTensor,
+                       outputs: pl.Out[pld.DistributedTensor]):
+                return outputs
+        """
+        out = self._specialize_simple(
+            src,
+            ["inputs", "outputs"],
+            {
+                "inputs": TensorMeta((2, 1, 256), DataType.FP32),
+                "outputs": TensorMeta((2, 1, 256), DataType.FP32),
+            },
+            func_type="host",
+        )
+        assert "@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)" in out
+        # A host entry must NOT emit a plain Orchestration decorator — that
+        # would lose the HOST level and the role= attribute, leaving the
+        # generated source indistinguishable from a chip orchestrator.
+        assert "@pl.function(type=pl.FunctionType.Orchestration)" not in out
+
+    def test_jit_host_with_orchestration_dep(self):
+        """A host orchestrator calling a chip orchestration dep emits both
+        decorators in the generated source. The host body's
+        ``chip_orch(args, device=r)`` call is rewritten to
+        ``self.chip_orch(args, device=r)``; ``device=`` is preserved as a
+        keyword for the parser to recognise as the orchestration-dispatch
+        kwarg."""
+        host_src = textwrap.dedent("""
+            def host_orch(inputs: pl.Tensor, outputs: pl.Out[pl.Tensor]):
+                for r in pl.range(2):
+                    chip_orch(inputs, outputs, device=r)
+                return outputs
+        """)
+        chip_src = textwrap.dedent("""
+            def chip_orch(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+                return c
+        """)
+        chip_ctx = _make_ctx(
+            func_name="chip_orch",
+            source=chip_src,
+            func_type="orchestration",
+            param_names=["a", "c"],
+            tensor_meta={
+                "a": TensorMeta((1, 256), DataType.FP32),
+                "c": TensorMeta((1, 256), DataType.FP32),
+            },
+        )
+        host_ctx = _make_ctx(
+            func_name="host_orch",
+            source=host_src,
+            func_type="host",
+            param_names=["inputs", "outputs"],
+            tensor_meta={
+                "inputs": TensorMeta((2, 1, 256), DataType.FP32),
+                "outputs": TensorMeta((2, 1, 256), DataType.FP32),
+            },
+            dep_names=["chip_orch"],
+        )
+        out = specialize("_HostProgram", [chip_ctx, host_ctx])
+        assert "@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)" in out
+        assert "@pl.function(type=pl.FunctionType.Orchestration)" in out
+        assert "self.chip_orch(inputs, outputs, device=r)" in out
+
 
 # ---------------------------------------------------------------------------
 # Integration: specialize → parseable by pl.parse()

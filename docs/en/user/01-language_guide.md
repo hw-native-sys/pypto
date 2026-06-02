@@ -397,6 +397,59 @@ class MyProgram:
 - Cross-function calls use `self.method_name(...)`
 - The decorated class becomes an `ir.Program`, not a Python class
 
+### `@pl.jit` family
+
+`@pl.jit` decorators let you author kernels as plain Python functions that
+are specialized into `@pl.program` source on first call (no class boundary
+required). Five variants — one per IR function kind — let a single program
+span host, chip, and core levels:
+
+| Decorator | IR target | Use for |
+| --------- | --------- | ------- |
+| `@pl.jit` | `FunctionType.Orchestration` | Chip-level entry point — top-level kernel that dispatches InCore work |
+| `@pl.jit.host` | `level=HOST, role=Orchestrator` | HOST-level entry — allocates window buffers and dispatches chip orchestrators per rank in distributed (L3+) programs |
+| `@pl.jit.incore` | `FunctionType.InCore` | Separate InCore sub-function (accepts `level=` to target a specific hierarchy level) |
+| `@pl.jit.inline` | `FunctionType.Inline` | Helper spliced at every call site by the `InlineFunctions` pass |
+| `@pl.jit.opaque` | `FunctionType.Opaque` | Separate IR function that may wrap orchestration loops and `pl.at` scopes |
+
+Sub-function deps (`.incore` / `.inline` / `.opaque`) are auto-discovered
+from the entry's body; the user just calls them by name. A `@pl.jit.host`
+entry additionally discovers `@pl.jit` (chip orchestration) deps, so a full
+distributed program can be authored without a single `@pl.program` class:
+
+```python
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+@pl.jit.inline
+def reduce_step(local, peer, out): ...
+
+@pl.jit
+def chip_orch(
+    inp: pl.Tensor, out: pl.Out[pl.Tensor],
+    data: pl.InOut[pld.DistributedTensor], peer: pl.Scalar[pl.INT32],
+):
+    return reduce_step(inp, peer, out)   # auto-discovered sub-function
+
+@pl.jit.host
+def host_orch(
+    inputs: pl.Tensor[[2, 1, 256], pl.FP32],
+    outputs: pl.Out[pl.Tensor[[2, 1, 256], pl.FP32]],
+):
+    data_buf = pld.alloc_window_buffer(256 * 4)
+    for r in pl.range(pld.world_size()):
+        data = pld.window(data_buf, [1, 256], dtype=pl.FP32)
+        chip_orch(inputs[r], outputs[r], data, (r + 1) % pld.world_size(),
+                  device=r)            # device= dispatches per-rank
+    return outputs
+```
+
+`@pl.jit.host` rejects `level=` (HOST is implicit) and specializes into
+`@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)`. Plain
+`@pl.jit` entries do **not** auto-discover other `@pl.jit` entries — only
+`.host` reaches across the chip boundary, to keep two unrelated top-level
+kernels from silently folding into one program.
+
 ### `@pl.inline`
 
 Defines a function whose body is expanded at each call site (no separate function in the program):
