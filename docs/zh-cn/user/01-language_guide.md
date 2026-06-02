@@ -383,6 +383,56 @@ class MyProgram:
 - 跨函数调用使用 `self.method_name(...)`
 - 装饰后的类成为 `ir.Program`，不是 Python 类
 
+### `@pl.jit` 家族
+
+`@pl.jit` 装饰器让你直接以普通 Python 函数的形式编写内核，首次调用时
+被 specialize 成 `@pl.program` 源码（无需类边界）。五个变体分别对应
+一种 IR 函数类型，让一个程序可以跨越 host、chip 与 core 三个层级：
+
+| 装饰器 | 对应 IR | 用途 |
+| ------ | ------- | ---- |
+| `@pl.jit` | `FunctionType.Orchestration` | 芯片级入口——分发 InCore 工作的顶层内核 |
+| `@pl.jit.host` | `level=HOST, role=Orchestrator` | HOST 级入口——分布式（L3+）程序中分配窗口缓冲、按 rank 分发芯片级 orchestrator |
+| `@pl.jit.incore` | `FunctionType.InCore` | 独立的 InCore 子函数（接受 `level=` 指定具体层级） |
+| `@pl.jit.inline` | `FunctionType.Inline` | 在每个调用点由 `InlineFunctions` pass 展开的辅助函数 |
+| `@pl.jit.opaque` | `FunctionType.Opaque` | 独立 IR 函数，可包裹编排循环和 `pl.at` 作用域 |
+
+子函数依赖（`.incore` / `.inline` / `.opaque`）会从入口函数体自动发现；
+用户只需按名字调用。`@pl.jit.host` 入口还会额外发现 `@pl.jit` 芯片级
+编排依赖，因此完整的分布式程序可以不依赖任何 `@pl.program` 类来编写：
+
+```python
+import pypto.language as pl
+import pypto.language.distributed as pld
+
+@pl.jit.inline
+def reduce_step(local, peer, out): ...
+
+@pl.jit
+def chip_orch(
+    inp: pl.Tensor, out: pl.Out[pl.Tensor],
+    data: pl.InOut[pld.DistributedTensor], peer: pl.Scalar[pl.INT32],
+):
+    return reduce_step(inp, peer, out)   # 自动发现的子函数
+
+@pl.jit.host
+def host_orch(
+    inputs: pl.Tensor[[2, 1, 256], pl.FP32],
+    outputs: pl.Out[pl.Tensor[[2, 1, 256], pl.FP32]],
+):
+    data_buf = pld.alloc_window_buffer(256 * 4)
+    for r in pl.range(pld.world_size()):
+        data = pld.window(data_buf, [1, 256], dtype=pl.FP32)
+        chip_orch(inputs[r], outputs[r], data, (r + 1) % pld.world_size(),
+                  device=r)            # device= 按 rank 分发
+    return outputs
+```
+
+`@pl.jit.host` 拒绝 `level=`（HOST 是隐式的），specialize 成
+`@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)`。
+普通的 `@pl.jit` 入口**不会**自动发现其他 `@pl.jit` 入口——只有
+`.host` 会跨越芯片边界，以防两个无关的顶层内核被悄悄折叠成同一个程序。
+
 ### `@pl.inline`
 
 定义一个在每个调用点展开其函数体的函数（程序中不会有单独的函数）：
