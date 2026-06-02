@@ -59,11 +59,9 @@ _DUMP_TAG_WORK_DIR = _BUILD_OUTPUT_DIR / "dump_tag_test"
 
 _REQUIRED_FIELDS: dict[str, type | tuple[type, ...]] = {
     "task_id": str,
-    "subtask_id": int,
     "role": str,
     "stage": str,
     "arg_index": int,
-    "func_id": int,
     "dtype": str,
     "shape": list,
     "strides": list,
@@ -262,13 +260,18 @@ class TestDumpTagManifest:
         value rebound after kernel1 (a distinct Var from the tagged
         ``intermediate``) and writes ``c`` — neither is tagged, so codegen
         emits no ``params_t1.dump`` call. The manifest must therefore contain
-        entries from a single ``func_id`` only.
+        entries from a single task (one ``task_id``) only.
+
+        The runtime manifest identifies each kernel dispatch by ``task_id``
+        (``(ring_id << 32) | local_id``); ``func_id`` / ``subtask_id`` are
+        runtime-internal and not surfaced per entry. One ``task_id`` per
+        dispatch makes it the right discriminator for "single kernel".
         """
         entries, manifest_path, _ = dump_manifest
-        func_ids = {e["func_id"] for e in entries}
-        assert len(func_ids) == 1, (
+        task_ids = {e["task_id"] for e in entries}
+        assert len(task_ids) == 1, (
             f"{manifest_path}: selective dump should retain entries from a single kernel, "
-            f"found {len(func_ids)} func_ids={sorted(func_ids)}"
+            f"found {len(task_ids)} task_ids={sorted(task_ids)}"
         )
         roles = {e["role"] for e in entries}
         assert "input" in roles, f"{manifest_path}: missing role=input entries; have {sorted(roles)}"
@@ -424,14 +427,16 @@ class TestSubmitDumpsManifest:
 
         Only stage1 carries ``dumps=[x, scratch]``; stage2 has no ``dumps=``,
         so codegen emits no ``.dump(...)`` for it. The manifest must therefore
-        contain entries from a single ``func_id`` (stage1) only — the submit
-        analogue of ``test_only_tagged_kernel_dumps`` above.
+        contain entries from a single task (one ``task_id``, stage1) only — the
+        submit analogue of ``test_only_tagged_kernel_dumps`` above. The runtime
+        identifies each dispatch by ``task_id``; ``func_id`` / ``subtask_id``
+        are runtime-internal and not surfaced per manifest entry.
         """
         entries = submit_dumps_manifest
-        func_ids = {e["func_id"] for e in entries}
-        assert len(func_ids) == 1, (
+        task_ids = {e["task_id"] for e in entries}
+        assert len(task_ids) == 1, (
             f"selective dump should retain entries from a single submitted kernel, "
-            f"found {len(func_ids)} func_ids={sorted(func_ids)}"
+            f"found {len(task_ids)} task_ids={sorted(task_ids)}"
         )
 
     def test_dumped_roles_cover_input_and_inout(self, submit_dumps_manifest):

@@ -3004,9 +3004,7 @@ class ASTParser:
             raise ParserSyntaxError(
                 f"Unknown keyword argument '{kw.arg}' in pl.at()",
                 span=self.span_tracker.get_span(kw),
-                hint=(
-                    "Supported arguments: level, role, optimizations, deps, no_dep_args, dumps, name_hint"
-                ),
+                hint=("Supported arguments: level, role, optimizations, deps, no_dep_args, dumps, name_hint"),
             )
 
     def _stash_at_kwarg(self, kw: ast.keyword, state: "_AtKwargState") -> None:

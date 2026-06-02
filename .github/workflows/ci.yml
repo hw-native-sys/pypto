@@ -237,7 +237,7 @@ jobs:
 
       - name: Test dump-tensor output
         run: |
-          pytest tests/st/codegen/dsl/test_dump_tag.py \
+          pytest tests/st/runtime/framework_and_models/test_dump_tag.py \
             -v --device="$DEVICE_ID" --platform=a2a3 --dump-tensor --pto-isa-commit=2c607938 --forked
 
   dist-system-tests:

@@ -26,7 +26,7 @@ intent therefore rides a scope-level ``kAttrDumpVars`` carrier:
 These run the full Default pass pipeline via ``compile_for_test`` (no device),
 so they also exercise the print -> reparse roundtrip after every pass (the
 ``tests/ut/conftest.py`` autouse fixture). The companion device/manifest checks
-live in ``tests/st/codegen/dsl/test_dump_tag.py``.
+live in ``tests/st/runtime/framework_and_models/test_dump_tag.py``.
 """
 
 import pypto.language as pl
@@ -125,7 +125,8 @@ def _base(name: str) -> str:
 
 def test_dump_tag_reaches_outlined_dispatch_single_func():
     """Only the tagged kernel dumps, and it dumps both its tagged input and its
-    tagged inout — the single-``func_id`` invariant the scene test asserts."""
+    tagged inout — the single-kernel (one ``task_id``) invariant the scene test
+    asserts on the runtime manifest."""
     torch = pytest.importorskip("torch")
     _add_mul_with_dump_tags._cache.clear()
 
