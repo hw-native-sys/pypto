@@ -14,7 +14,17 @@ from typing import Any
 
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir_core
-from pypto.pypto_core.ir import Call, ConstFloat, ConstInt, Expr, PadValue, ScalarType, Span, TensorLayout
+from pypto.pypto_core.ir import (
+    Call,
+    ConstFloat,
+    ConstInt,
+    Expr,
+    MemorySpace,
+    PadValue,
+    ScalarType,
+    Span,
+    TensorLayout,
+)
 
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple, resolve_cast_mode
 from ._pad_value import normalize_pad_value
@@ -1608,6 +1618,68 @@ def gather_compare(
         out_cols=out_cols,
         count_dtype=count_dtype,
         span=span,
+    )
+
+
+# ============================================================================
+# Paged Gather Operation
+# ============================================================================
+
+
+def paged_gather(  # noqa: PLR0913
+    src: Expr,
+    indices: Expr,
+    block_table: Expr,
+    block_size: int,
+    size: int,
+    max_indices: int,
+    *,
+    space: MemorySpace = MemorySpace.Mat,
+    col_off: int = 0,
+    is_trans: bool = False,
+    is_b_matrix: bool = False,
+    span: Span | None = None,
+) -> Call:
+    """Paged gather directly into an on-chip buffer (tensor-level).
+
+    Gathers scattered rows of a 2D paged KV pool ``src`` selected by ``indices``,
+    translated through a paged ``block_table``, directly into an L1 (``space=Mat``,
+    default) or UB (``space=Vec``) tile. Lowered by ``ConvertTensorToTileOps`` to a
+    fully-scalar per-row ``GM -> on-chip`` load loop on the Cube core: the bulk KV
+    data goes straight to L1 (never UB), eliminating the GM round-trip.
+
+    Physical row resolution per logical index ``idx``::
+
+        phys = block_table[idx // block_size] * block_size + idx % block_size
+
+    Args:
+        src: Paged KV pool in GM (TensorType, 2D; FP16/BF16/FP32/INT8).
+        indices: Logical row indices to gather (TensorType, INT32; 1D ``[n]`` or 2D ``[1, n]``).
+        block_table: Page table mapping logical block -> physical block (TensorType, INT32).
+        block_size: Number of tokens per page block.
+        size: Number of elements gathered per row (<= src columns).
+        max_indices: Static upper bound on gathered rows; sizes the on-chip tile.
+        space: Destination memory space (``MemorySpace.Mat`` (L1) default, or ``MemorySpace.Vec``).
+        col_off: Column start offset within each src row (default 0).
+        is_trans: Transpose the gathered tile for matmul B-operand layout (requires ``space=Mat``).
+        is_b_matrix: Hint that the result feeds matmul as the B matrix (layout selection).
+        span: Optional source span for debugging (auto-captured if not provided).
+
+    Returns:
+        Call expression with TensorType result ``[max_indices, size]`` (or transposed).
+    """
+    actual_span = _get_span_or_capture(span)
+    kwargs: dict[str, Any] = {
+        "block_size": block_size,
+        "size": size,
+        "max_indices": max_indices,
+        "col_off": col_off,
+        "is_trans": is_trans,
+        "is_b_matrix": is_b_matrix,
+        "space": space,
+    }
+    return _ir_core.create_op_call(
+        "tensor.paged_gather", [src, indices, block_table], kwargs, actual_span
     )
 
 

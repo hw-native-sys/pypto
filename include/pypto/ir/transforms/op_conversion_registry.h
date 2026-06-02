@@ -149,6 +149,7 @@ class OpConversionRegistry {
   void RegisterReductionOps();
   void RegisterSortOps();
   void RegisterGatherOps();
+  void RegisterPagedGatherOps();
   void RegisterScatterOps();
   void RegisterCmpOps();
   void RegisterDistributedOps();

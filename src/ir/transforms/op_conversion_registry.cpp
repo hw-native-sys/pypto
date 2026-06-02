@@ -92,6 +92,7 @@ OpConversionRegistry::OpConversionRegistry() {
   RegisterReductionOps();
   RegisterSortOps();
   RegisterGatherOps();
+  RegisterPagedGatherOps();
   RegisterScatterOps();
   RegisterCmpOps();
   RegisterDistributedOps();
@@ -1447,6 +1448,154 @@ void OpConversionRegistry::RegisterGatherOps() {
         return ConversionResult{std::move(prologue), tile_call};
       },
       std::move(gc_input_reqs));
+}
+
+// ============================================================================
+// Paged gather lowering: tensor.paged_gather -> fully-scalar per-row GM->on-chip
+// load loop on the Cube core.
+//
+// For each gathered row i (i in [0, rows), rows = runtime indices count):
+//   idx   = indices[i]                         (scalar GM read -> pto.load_scalar)
+//   phys  = block_table[idx / block_size] * block_size + idx % block_size  (scalar)
+//   row   = tile.load(src, [phys, col_off], [1, size], target_memory=space)  (GM->L1/UB)
+//   acc'  = tile.assemble(acc, row, [i, 0])     (write row i into the on-chip tile)
+// The bulk KV data goes GM->L1 directly (never UB); only the small index/page-table
+// metadata is scalar-read from GM. Mirrors gitcode.com/cann/pypto experimental
+// GatherInL1 (OpCoreType::AIC). The accumulator is sized statically by max_indices.
+// ============================================================================
+void OpConversionRegistry::RegisterPagedGatherOps() {
+  RegisterCustom(
+      "tensor.paged_gather",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 3, span)
+            << "tensor.paged_gather conversion expects 3 args (src, indices, block_table), but got "
+            << args.size();
+        auto& op_reg = OpRegistry::GetInstance();
+        const auto& src = args[0];
+        const auto& indices = args[1];
+        const auto& block_table = args[2];
+
+        auto src_type = As<TensorType>(src->GetType());
+        INTERNAL_CHECK_SPAN(src_type, span) << "tensor.paged_gather: src must be TensorType";
+        auto idx_type = As<TensorType>(indices->GetType());
+        INTERNAL_CHECK_SPAN(idx_type, span) << "tensor.paged_gather: indices must be TensorType";
+        auto bt_type = As<TensorType>(block_table->GetType());
+        INTERNAL_CHECK_SPAN(bt_type, span) << "tensor.paged_gather: block_table must be TensorType";
+
+        int block_size = 0;
+        int size = 0;
+        int col_off = 0;
+        int max_indices = 0;
+        bool is_trans = false;
+        MemorySpace space = MemorySpace::Mat;
+        for (const auto& [k, v] : kwargs) {
+          if (k == "block_size") {
+            block_size = AnyCast<int>(v, "block_size");
+          } else if (k == "size") {
+            size = AnyCast<int>(v, "size");
+          } else if (k == "col_off") {
+            col_off = AnyCast<int>(v, "col_off");
+          } else if (k == "max_indices") {
+            max_indices = AnyCast<int>(v, "max_indices");
+          } else if (k == "is_trans") {
+            is_trans = AnyCast<bool>(v, "is_trans");
+          } else if (k == "space") {
+            space = AnyCast<MemorySpace>(v, "space");
+          }
+        }
+        INTERNAL_CHECK_SPAN(block_size > 0 && size > 0 && max_indices > 0, span)
+            << "tensor.paged_gather: block_size/size/max_indices must be set and positive";
+        INTERNAL_CHECK_SPAN(!is_trans || space == MemorySpace::Mat, span)
+            << "tensor.paged_gather: is_trans=true requires space=Mat (L1)";
+
+        const DataType dtype = src_type->dtype_;
+        auto make_idx = [&](int64_t value) -> ExprPtr {
+          return std::make_shared<ConstInt>(value, DataType::INDEX, span);
+        };
+        auto make_tuple = [&](std::vector<ExprPtr> elems) -> ExprPtr {
+          return std::make_shared<MakeTuple>(std::move(elems), span);
+        };
+        ExprPtr zero = make_idx(0);
+        ExprPtr one = make_idx(1);
+        ExprPtr bs = make_idx(block_size);
+
+        std::vector<StmtPtr> prologue;
+
+        // Runtime gathered-row count = last dim of indices (1D: [n]; 2D: [1, n]).
+        // Read it via tensor.dim so the loop bound is a proper SSA scalar (works for
+        // both static and dynamic index shapes and survives print/parse round-trip).
+        const int64_t rows_axis = (idx_type->shape_.size() == 1) ? 0 : 1;
+        auto rows_call = op_reg.Create("tensor.dim", {indices, make_idx(rows_axis)}, span);
+        auto rows = std::make_shared<Var>("pg_rows", rows_call->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(rows, rows_call, span));
+
+        // 1) Allocate the static on-chip accumulator tile.
+        std::vector<ExprPtr> acc_shape =
+            is_trans ? std::vector<ExprPtr>{make_idx(size), make_idx(max_indices)}
+                     : std::vector<ExprPtr>{make_idx(max_indices), make_idx(size)};
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dtype},
+                                                                       {"target_memory", space}};
+        auto acc_create =
+            op_reg.Create("tile.create", {MakeShapeTuple(acc_shape, span)}, create_kwargs, span);
+        auto acc_var = std::make_shared<Var>("paged_gather_acc", acc_create->GetType(), span);
+        prologue.push_back(std::make_shared<AssignStmt>(acc_var, acc_create, span));
+
+        // 2) Per-row loop carrying the accumulator tile.
+        auto loop_var = std::make_shared<Var>("pg_i", std::make_shared<ScalarType>(DataType::INDEX), span);
+        auto iter_arg =
+            std::make_shared<IterArg>("paged_gather_iter", acc_create->GetType(), acc_var, span);
+        auto return_var = std::make_shared<Var>("paged_gather_result", acc_create->GetType(), span);
+
+        std::vector<StmtPtr> body;
+        auto bind = [&](const std::string& name_hint, const ExprPtr& expr) -> ExprPtr {
+          auto var = std::make_shared<Var>(name_hint, expr->GetType(), span);
+          body.push_back(std::make_shared<AssignStmt>(var, expr, span));
+          return var;
+        };
+
+        // idx = indices[i] (scalar GM read), cast to INDEX for address math.
+        ExprPtr idx_read = (idx_type->shape_.size() == 1)
+                               ? op_reg.Create("tensor.read", {indices, make_tuple({loop_var})}, span)
+                               : op_reg.Create("tensor.read", {indices, make_tuple({zero, loop_var})}, span);
+        auto idx_raw = bind("pg_idx_raw", idx_read);
+        auto idx_i = bind("pg_idx", MakeCast(idx_raw, DataType::INDEX, span));
+        auto block_id = bind("pg_blk", MakeFloorDiv(idx_i, bs, span));
+        auto rem = bind("pg_rem", MakeFloorMod(idx_i, bs, span));
+
+        // pblk = block_table[block_id] (scalar GM read), cast to INDEX.
+        ExprPtr pblk_read =
+            (bt_type->shape_.size() == 1)
+                ? op_reg.Create("tensor.read", {block_table, make_tuple({block_id})}, span)
+                : op_reg.Create("tensor.read", {block_table, make_tuple({zero, block_id})}, span);
+        auto pblk_raw = bind("pg_pblk_raw", pblk_read);
+        auto pblk = bind("pg_pblk", MakeCast(pblk_raw, DataType::INDEX, span));
+        auto phys = bind("pg_phys", MakeAdd(MakeMul(pblk, bs, span), rem, span));
+
+        // row = tile.load(src, [phys, col_off], [1, size], [1, size], target_memory=space, transpose)
+        auto row_offsets = make_tuple({phys, make_idx(col_off)});
+        auto row_shapes = MakeShapeTuple({one, make_idx(size)}, span);
+        std::vector<std::pair<std::string, std::any>> load_kwargs = {{"target_memory", space},
+                                                                     {"transpose", is_trans}};
+        auto load_call =
+            op_reg.Create("tile.load", {src, row_offsets, row_shapes, row_shapes}, load_kwargs, span);
+        auto row_tile = bind("pg_row", load_call);
+
+        // acc' = tile.assemble(acc, row, offset). assemble inherits the target's
+        // effective layout, so the loop-carried chain (init / iter_arg / yield /
+        // return_var) stays tile_view-consistent for the ForStmt verifier.
+        ExprPtr asm_offset = is_trans ? make_tuple({zero, loop_var}) : make_tuple({loop_var, zero});
+        auto asm_call = op_reg.Create("tile.assemble", {iter_arg, row_tile, asm_offset}, span);
+        auto asm_var = bind("pg_asm", asm_call);
+        body.push_back(std::make_shared<YieldStmt>(std::vector<ExprPtr>{asm_var}, span));
+
+        auto loop_body = SeqStmts::Flatten(std::move(body), span);
+        auto for_stmt =
+            std::make_shared<ForStmt>(loop_var, zero, rows, one, std::vector<IterArgPtr>{iter_arg},
+                                      loop_body, std::vector<VarPtr>{return_var}, span);
+        prologue.push_back(for_stmt);
+        return ConversionResult{std::move(prologue), return_var};
+      });
 }
 
 // ============================================================================

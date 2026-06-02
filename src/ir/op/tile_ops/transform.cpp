@@ -34,6 +34,7 @@
 #include "pypto/ir/memory_space.h"
 #include "pypto/ir/op_registry.h"
 #include "pypto/ir/scalar_expr.h"
+#include "pypto/ir/tile_view_semantics.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/type_inference.h"
 
@@ -451,11 +452,12 @@ TypePtr DeduceTileAssembleType(const std::vector<ExprPtr>& args,
       << target_type->dtype_.ToString() << " and " << source_type->dtype_.ToString();
 
   // Inherit layout metadata (blayout, slayout, fractal, pad) from the target so that
-  // the result type carries the correct tile_buf type annotation for codegen.
-  TileView tile_view;
-  if (target_type->tile_view_.has_value()) {
-    tile_view = *target_type->tile_view_;
-  }
+  // the result type carries the correct tile_buf type annotation for codegen. Use the
+  // target's *effective* view (resolving the implicit layout for its memory space) so a
+  // target with an implicit (nullopt-stored) view — e.g. a Mat accumulator from
+  // tile.create — yields a result that canonicalizes back to the same implicit encoding,
+  // keeping loop-carried iter_arg / yield / return_var chains tile_view-consistent.
+  TileView tile_view = tile_view_semantics::GetEffectiveTileView(*target_type);
   tile_view.valid_shape = target_type->shape_;
   return std::make_shared<TileType>(target_type->shape_, target_type->dtype_, std::nullopt, tile_view,
                                     target_type->memory_space_);

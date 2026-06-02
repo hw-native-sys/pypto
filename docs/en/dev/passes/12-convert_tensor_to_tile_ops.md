@@ -133,6 +133,25 @@ Generated PTO op sequence (FP32 `[32, 32]` input, `[2, 8]` index, `[16, 32]` src
 
 `tile.sel` (not `input * mask`) reconstructs the preserve blend so the lowering emits no `pto.tmul`, which A2/A3 reject for bf16/i8. The index `reshape [b, s] → [n, 1]` is a buffer-view realias, not a separate PTO op.
 
+## Paged Gather Lowering
+
+`tensor.paged_gather(src, indices, block_table, ...)` gathers scattered rows of a paged KV pool directly into an on-chip buffer (L1 / `Mem.Mat` by default, or UB / `Mem.Vec`). The hardware `pto.tgather` instruction can only write UB, so paged-gather-to-L1 is **not** an indexed gather instruction — it is a fully-scalar per-row `GM → on-chip` DMA loop on the **Cube core (AIC)**. `src`, `indices`, and `block_table` are kept as GM tensors (the op is registered self-loading, so the framework does not preload them into Vec tiles).
+
+The pass materializes the loop directly:
+
+```text
+rows = tensor.dim(indices, last_axis)                  # runtime gathered-row count
+acc  = tile.create([max_indices, size], target_memory=space)   # static on-chip buffer
+for i in [0, rows):                                    # ForStmt, iter_arg = acc
+    idx   = tensor.read(indices, [i])                  # scalar GM read (pto.load_scalar)
+    phys  = block_table[idx // block_size] * block_size + idx % block_size   # scalar
+    row   = tile.load(src, [phys, col_off], [1, size], target_memory=space)  # GM->on-chip
+    acc   = tile.assemble(acc, row, [i, 0])            # write row i into the buffer
+    yield acc
+```
+
+Only the small index / page-table metadata is scalar-read from GM; the bulk KV data goes straight `GM → L1` via `pto.tload` and never touches UB — eliminating the GM round-trip that a `gather_kv → qk_pv` pipeline pays today. `is_trans=True` (Mat only) loads each row transposed and assembles at column offset `[0, i]`, giving the matmul B-operand layout. `max_indices` sizes the L1 buffer statically; the runtime `rows` count drives the loop bound, so dynamic gather counts are supported. No new tile op or codegen is added — the loop reuses `tensor.read` (`pto.load_scalar`), scalar arithmetic, `tile.load` (`pto.tload`), and `tile.assemble`.
+
 ## Example
 
 **Before**:
