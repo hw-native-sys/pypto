@@ -9,13 +9,14 @@
 
 
 """
-Runtime test for an InCore kernel that returns ``tuple[Tensor, Scalar]`` whose
-Scalar element is forwarded to a downstream InCore kernel (issue #631).
+Runtime test for an InCore kernel that returns ``tuple[Tensor, Scalar]`` and
+forwards the Scalar to a downstream InCore kernel (issue #631).
 
 Reproduces the orchestration-codegen scenario from issue #631: the producer
 kernel returns a Tensor (writeback to its ``Out`` param) **and** a
 ``Scalar[INDEX]`` (``off = base * 2``) that is *not* backed by any ``Out``
-param. The orchestration unpacks both and forwards the Scalar to the consumer.
+param. The orchestration unpacks both and forwards the Scalar to the consumer,
+which uses it as its valid column count (``valid_shapes=[rows, off]``).
 
 Before the fix, ``OrchestrationStmtCodegen`` mapped each tuple-return position
 to an ``Out``/``InOut`` param index; the Scalar element had no such index, so it
@@ -24,11 +25,10 @@ stop-gap, a wrong ``off = 0``) -> the kernel failed to compile. The fix
 re-materializes the Scalar at the call site by inlining the callee's defining
 expression with the callee param ``base`` substituted by the call-site arg.
 
-The Scalar drives the consumer's ``valid_shapes`` so the result is sensitive to
-the *value* as well: the valid region is ``[16, off]`` where ``off = base * 2``.
-A dropped/zeroed Scalar (``off == 0``) would zero the whole output and a wrong
-value would shift the valid boundary, so this test guards both the original
-compile failure and a materialization-value regression.
+Because the Scalar drives ``valid_shapes``, the result is sensitive to its
+*value*: a dropped/zeroed Scalar would zero the whole output and a wrong value
+would shift the valid boundary, so the test guards both the original compile
+failure and a materialization-value regression.
 """
 
 from typing import Any
@@ -39,42 +39,55 @@ import torch
 from harness.core.harness import PLATFORMS, DataType, PTOTestCase, TensorSpec
 from pypto.runtime.runner import RunConfig
 
-_ROWS = 16
-_COLS = 16
-# Runtime scalar read into the orchestration; the producer returns base * 2,
-# which becomes the consumer's valid column count (4 * 2 = 8, a partial region
-# strictly between 0 and _COLS so the test discriminates drop/zero/full bugs).
-_BASE = 4
+# (shape, base): the producer returns the Scalar ``off = base * 2``, which becomes
+# the consumer's valid column count. ``base * 2`` must be strictly between 0 and
+# ``cols`` so the valid region is partial (discriminates drop / zero / full-region
+# bugs). For (16, 16) with base=4 the valid region is the first 8 columns.
+_SHAPE_BASE = [((16, 16), 4)]
 
 
 class ScalarTupleReturnTestCase(PTOTestCase):
     """InCore producer returns ``tuple[Tensor, Scalar]``; the Scalar is forwarded.
 
     - ``producer`` copies ``a`` into ``mid`` and returns ``(mid, off=base*2)``.
-    - ``consumer`` adds ``mid`` and ``b`` using ``valid_shapes=[16, off]`` and
+    - ``consumer`` adds ``mid`` and ``b`` using ``valid_shapes=[rows, off]`` and
       writes ``c``; elements outside the valid region stay zero.
     """
 
     __test__ = False
 
-    def __init__(self, *, platform: str | None = None, config: RunConfig | None = None):
+    def __init__(
+        self,
+        shape: tuple[int, int],
+        base: int,
+        *,
+        platform: str | None = None,
+        config: RunConfig | None = None,
+    ):
         super().__init__(config, platform=platform)
+        self._rows, self._cols = shape
+        self._base = base
 
     def get_name(self) -> str:
-        return f"scalar_tuple_return_{_ROWS}x{_COLS}_base{_BASE}"
+        return f"scalar_tuple_return_{self._rows}x{self._cols}_base{self._base}"
 
     def define_tensors(self) -> list[TensorSpec]:
         return [
-            TensorSpec("a", [_ROWS, _COLS], DataType.FP32, init_value=2.0),
-            TensorSpec("b", [_ROWS, _COLS], DataType.FP32, init_value=3.0),
-            TensorSpec("base_t", [1], DataType.INT64, init_value=torch.tensor([_BASE], dtype=torch.int64)),
-            TensorSpec("mid", [_ROWS, _COLS], DataType.FP32, is_output=True),
-            TensorSpec("c", [_ROWS, _COLS], DataType.FP32, is_output=True),
+            TensorSpec("a", [self._rows, self._cols], DataType.FP32, init_value=2.0),
+            TensorSpec("b", [self._rows, self._cols], DataType.FP32, init_value=3.0),
+            TensorSpec(
+                "base_t",
+                [1],
+                DataType.INT64,
+                init_value=torch.tensor([self._base], dtype=torch.int64),
+            ),
+            TensorSpec("mid", [self._rows, self._cols], DataType.FP32, is_output=True),
+            TensorSpec("c", [self._rows, self._cols], DataType.FP32, is_output=True),
         ]
 
     def get_program(self) -> Any:
-        rows = _ROWS
-        cols = _COLS
+        rows = self._rows
+        cols = self._cols
 
         @pl.program
         class ScalarTupleReturnProgram:
@@ -125,10 +138,10 @@ class ScalarTupleReturnTestCase(PTOTestCase):
         return ScalarTupleReturnProgram
 
     def compute_expected(self, tensors, params=None):
-        n = int(tensors["base_t"][0]) * 2
+        n = self._base * 2
         # producer copied a into mid
         tensors["mid"][:] = tensors["a"]
-        # consumer add over the valid [rows, n] region; outside stays zero
+        # consumer added a + b over the valid [rows, n] region; outside stays zero
         tensors["c"][:, :n] = tensors["a"][:, :n] + tensors["b"][:, :n]
 
 
@@ -136,10 +149,11 @@ class TestScalarTupleReturn:
     """Pytest suite for issue #631 (Scalar tuple-return forwarding)."""
 
     @pytest.mark.parametrize("platform", PLATFORMS)
-    def test_scalar_tuple_return(self, test_runner, platform):
+    @pytest.mark.parametrize("shape,base", _SHAPE_BASE)
+    def test_scalar_tuple_return(self, test_runner, shape, base, platform):
         """InCore ``tuple[Tensor, Scalar]`` return with the Scalar forwarded downstream."""
-        result = test_runner.run(ScalarTupleReturnTestCase(platform=platform))
-        assert result.passed, f"Test failed: {result.error}"
+        result = test_runner.run(ScalarTupleReturnTestCase(shape, base, platform=platform))
+        assert result.passed, f"Test failed for {shape} base={base}: {result.error}"
 
 
 if __name__ == "__main__":
