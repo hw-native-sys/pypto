@@ -510,9 +510,11 @@ void BindPass(nb::module_& m) {
              "the produced ``Call.attrs['arg_directions']`` is verified automatically by the\n"
              "``CallDirectionsResolved`` PropertyVerifier (no separate verify pass).");
   passes.def("auto_derive_task_dependencies", &pass::AutoDeriveTaskDependencies,
-             "Derive compiler-owned manual-scope task dependency edges.\n\n"
+             "Derive compiler-owned runtime-scope task dependency edges.\n\n"
              "Runs after derive_call_directions and writes "
-             "Call.attrs['compiler_manual_dep_edges'] inside manual runtime scopes. "
+             "Call.attrs['compiler_manual_dep_edges'] inside runtime scopes. "
+             "AUTO scopes are analyzed without changing their runtime scope mode; "
+             "unanalyzable hazards fall back to AUTO tracking with partial compiler deps stripped. "
              "User-provided Call.attrs['manual_dep_edges'] remain separate; orchestration "
              "codegen merges both attrs before emitting Arg::set_dependencies.");
   passes.def("expand_manual_phase_fence", &pass::ExpandManualPhaseFence,

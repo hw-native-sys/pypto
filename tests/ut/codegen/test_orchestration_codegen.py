@@ -3876,6 +3876,47 @@ class TestManualScopeCodegen:
         assert "if (a_tid.is_valid()) params_t1_deps[params_t1_deps_count++] = a_tid;" in code, code
         assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
 
+    def test_compiler_derived_deps_in_auto_scope_emit_set_dependencies_without_manual_scope(self):
+        """AutoDeriveTaskDependencies may add explicit deps inside AUTO scopes.
+
+        The scope must stay AUTO (``PTO2_SCOPE()`` / OverlapMap still enabled),
+        while compiler-derived edges use the same ``set_dependencies`` codegen
+        path as user-written deps.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def fill(
+                self,
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                return out
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                return x
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.AUTO):
+                    produced, producer_tid = pl.submit(self.fill, scratch)
+                    out, _ = pl.submit(self.consume, produced)
+                return out
+
+        pm = PassManager.get_strategy(OptimizationStrategy.Default)
+        transformed = pm.run_passes(Prog)
+        code = _generate_orch_code(transformed)
+
+        assert "PTO2_SCOPE(PTO2ScopeMode::MANUAL)" not in code, code
+        assert "PTO2_SCOPE() {" in code, code
+        assert "PTO2TaskId producer_tid = task_0_outs.task_id();" in code, code
+        assert "PTO2TaskId params_t1_deps[1];" in code, code
+        assert "params_t1_deps[params_t1_deps_count++] = producer_tid;" in code, code
+        assert "params_t1.set_dependencies(params_t1_deps, params_t1_deps_count);" in code, code
+
     def test_auto_scope_task_id_array_slot_dep_uses_scalar_snapshot(self):
         """A TaskId array slot read is a valid explicit dep in auto scope."""
         backend.reset_for_testing()

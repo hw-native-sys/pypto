@@ -772,11 +772,8 @@ class AutoDepMutator : public IRMutator {
   }
 
   StmtPtr VisitStmt_(const RuntimeScopeStmtPtr& op) override {
-    if (!op->manual_) {
-      return IRMutator::VisitStmt_(op);
-    }
-
     DebugLog("enter_runtime_scope name_hint=" + op->name_hint_ +
+             " manual=" + (op->manual_ ? std::string("true") : std::string("false")) +
              " loop_depth=" + std::to_string(loop_depth_));
     prior_stack_.emplace_back();
     fallback_stack_.push_back(false);
@@ -792,7 +789,8 @@ class AutoDepMutator : public IRMutator {
       return std::make_shared<const RuntimeScopeStmt>(false, op->name_hint_, std::move(stripped_body),
                                                       op->span_, op->leading_comments_, op->attrs_);
     }
-    DebugLog("keep_runtime_scope_manual name_hint=" + op->name_hint_);
+    DebugLog("keep_runtime_scope name_hint=" + op->name_hint_ +
+             " manual=" + (op->manual_ ? std::string("true") : std::string("false")));
     if (new_body.get() != op->body_.get()) {
       return std::make_shared<const RuntimeScopeStmt>(op->manual_, op->name_hint_, std::move(new_body),
                                                       op->span_, op->leading_comments_, op->attrs_);

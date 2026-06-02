@@ -3,7 +3,7 @@
 ## Overview
 
 `AutoDeriveTaskDependencies` derives conservative task-to-task dependency
-edges inside `with pl.manual_scope():` regions. It runs after
+edges inside runtime scopes. It runs after
 [`DeriveCallDirections`](34-derive_call_directions.md), reads the resolved
 `Call.attrs["arg_directions"]`, and writes compiler-owned producer TaskId
 edges to `Call.attrs["compiler_manual_dep_edges"]`.
@@ -23,8 +23,10 @@ them immediately before emitting `Arg::set_dependencies(...)`.
     -> Simplify (final)
 ```
 
-The pass only changes manual runtime scopes. Auto scopes keep the runtime
-OverlapMap behaviour unchanged.
+The pass analyzes both MANUAL and AUTO `RuntimeScopeStmt` regions. AUTO scopes
+keep `manual=false` in the output IR, so codegen still emits `PTO2_SCOPE()` and
+runtime OverlapMap/TensorMap tracking remains enabled. Compiler-derived edges,
+when statically encodable, are emitted on top through `Arg::set_dependencies(...)`.
 
 ## Algorithm
 
@@ -46,8 +48,9 @@ For each function body:
 5. Treat MemRef-backed shaped values as aliases when `MemRef::MayAlias` reports
    the same base allocation with overlapping or symbolic byte ranges.
 6. Collect statically bound producer TaskIds from `pl.submit` tuple tails.
-7. Walk each `RuntimeScopeStmt(manual=true)` in source order, maintaining prior
-   accesses for that manual scope only.
+7. Walk each `RuntimeScopeStmt` in source order, maintaining prior accesses for
+   that scope only. For AUTO scopes this is analysis-only; the final scope mode
+   remains AUTO.
 8. For every non-builtin call with resolved `arg_directions`, classify tensor
    arguments as read, write, or read-write. Accesses to the same storage root,
    or to MemRef roots that may alias, are considered for region overlap.
@@ -57,8 +60,9 @@ For each function body:
    and not duplicated.
 
 If dependency-relevant tensor access cannot be represented as bounded static
-roots plus fixed TaskId deps, the pass rewrites the whole enclosing
-`RuntimeScopeStmt` to `manual=false`. Implemented fallback triggers include:
+roots plus fixed TaskId deps, the pass strips any partial compiler-derived deps
+from the whole enclosing `RuntimeScopeStmt` and returns it as `manual=false`.
+Implemented fallback triggers include:
 
 - a required hazard whose prior producer TaskId was not statically bound;
 - a prior producer inside a loop, where one scalar TaskId would not represent
@@ -70,7 +74,7 @@ roots plus fixed TaskId deps, the pass rewrites the whole enclosing
   resolved by the current lineage analysis.
 
 This returns the entire region to runtime OverlapMap/TensorMap tracking instead
-of mixing partial compiler deps with runtime state at manual-scope boundaries.
+of mixing partial compiler deps with runtime state at scope boundaries.
 
 ## Properties
 
