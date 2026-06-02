@@ -21,9 +21,8 @@ import math
 
 import pypto.language as pl
 import pytest
-from pypto.ir.op import tensor
-
 from pypto import DataType, ir
+from pypto.ir.op import tensor
 
 
 def test_tensor_create():
@@ -1167,6 +1166,7 @@ def test_operator_registration():
     assert ir.is_op_registered("tensor.row_expand_mul")
     assert ir.is_op_registered("tensor.row_expand_div")
     assert ir.is_op_registered("tensor.col_expand_mul")
+    assert ir.is_op_registered("tensor.col_expand_add")
     assert ir.is_op_registered("tensor.dim")
     # Check transform operators
     assert ir.is_op_registered("tensor.reshape")
@@ -2286,6 +2286,21 @@ def test_tensor_col_expand_add_dtype_promotion():
     result_type = call.type
     assert isinstance(result_type, ir.TensorType)
     assert result_type.dtype == DataType.FP32
+
+
+def test_tensor_col_expand_add_wrong_type():
+    """Test tensor.col_expand_add rejects non-TensorType inputs."""
+    span = ir.Span.unknown()
+    tile_type = ir.TileType([64, 128], DataType.FP16)
+    tile_var = ir.Var("t", tile_type, span)
+
+    dim1 = ir.ConstInt(1, DataType.INT32, span)
+    dim128 = ir.ConstInt(128, DataType.INT32, span)
+    col_type = ir.TensorType([dim1, dim128], DataType.FP16)
+    col_var = ir.Var("cv", col_type, span)
+
+    with pytest.raises(ValueError, match="TensorType"):
+        ir.op.tensor.col_expand_add(tile_var, col_var)
 
 
 # =============================================================================

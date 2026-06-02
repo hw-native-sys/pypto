@@ -168,7 +168,7 @@ Transfer data between memory hierarchy levels.
 | `col_expand_mul` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile * col_vec` broadcast |
 | `col_expand_div` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile / col_vec` broadcast |
 | `col_expand_sub` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile - col_vec` broadcast |
-| `col_expand_add` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile + col_vec` broadcast |
+| `col_expand_add` | `(tile: Tile, col_vec: Tile) -> Tile` | `tile + col_vec[1,N]` broadcast |
 | `expands` | `(target: Tile, scalar: int \| float \| Scalar) -> Tile` | Expand scalar to tile shape |
 
 ## Comparison / Selection (`pl.tile.*`)

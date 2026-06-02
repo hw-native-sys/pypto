@@ -13,9 +13,8 @@ import math
 
 import pypto.language as pl
 import pytest
-from pypto.ir.op import tile
-
 from pypto import DataType, ir
+from pypto.ir.op import tile
 
 
 class TestTileElementwiseOps:

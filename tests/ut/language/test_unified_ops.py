@@ -16,10 +16,9 @@ they produce structurally equal IR.
 
 import pypto.language as pl
 import pytest
+from pypto import DataType, ir
 from pypto.language.op import unified_ops
 from pypto.language.typing import Tensor, Tile
-
-from pypto import DataType, ir
 
 
 class TestUnifiedTensorDispatch:

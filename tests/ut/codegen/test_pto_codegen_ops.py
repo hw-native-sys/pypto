@@ -19,10 +19,9 @@ import warnings
 
 import pypto.language as pl
 import pytest
+from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
-
-from pypto import DataType, backend, codegen, ir
 
 # ============================================================================
 # Operation to PTO API Mapping

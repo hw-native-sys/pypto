@@ -14,12 +14,11 @@ from collections.abc import Callable
 import pypto.language as pl
 import pypto.language.distributed as pld
 import pytest
+from pypto import DataType, ir, passes
 from pypto.ir import IRBuilder
 from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile as tile_ops
 from pypto.pypto_core.ir import MemorySpace, PadValue
-
-from pypto import DataType, ir, passes
 
 # ---------------------------------------------------------------------------
 # Programmatic IRBuilder factories for parametrized tests.
