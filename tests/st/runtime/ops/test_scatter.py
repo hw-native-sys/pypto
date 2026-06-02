@@ -562,9 +562,7 @@ class ScatterMaskChainTestCase(_ScatterMaskBaseTestCase):
 # --- Tests ---
 
 
-@pytest.mark.skip(
-    reason="PTOAS bug: https://github.com/hw-native-sys/PTOAS/issues/735"
-)
+@pytest.mark.skip(reason="PTOAS bug: https://github.com/hw-native-sys/PTOAS/issues/735")
 class TestScatterIndexForm:
     """Index-form column scatter across the dst/src + indexes dtype matrix."""
 

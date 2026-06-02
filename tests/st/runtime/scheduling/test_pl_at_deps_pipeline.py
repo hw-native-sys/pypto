@@ -62,6 +62,22 @@ from pypto.ir.pass_manager import OptimizationStrategy
 
 _BUILD_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "build_output"
 
+
+def _skip_if_no_fanout(tasks: list[dict]) -> None:
+    """Skip when swimlane records omit per-task fanout (a2a3 hot path).
+
+    On a2a3 the device no longer records ``fanout`` / ``fanout_count`` in the
+    swimlane JSON — dep_gen's ``deps.json`` is the sole fanout source — so the
+    fanout-derived assertions below cannot run. Strict dep wiring is covered by
+    codegen UT, mirroring the existing skip in ``test_intra_iteration_dep_present``.
+    """
+    if tasks and "fanout_count" not in tasks[0]:
+        pytest.skip(
+            "swimlane records omit per-task fanout on this platform (a2a3); "
+            "fanout wiring is covered by deps.json / codegen UT"
+        )
+
+
 # Tile grid — kept small so a single run produces a readable swimlane chart.
 _M = 4
 _N = 4
@@ -224,6 +240,7 @@ class TestPlAtDepsSwimlane:
         inventory.
         """
         tasks = pl_at_deps_swimlane_data["tasks"]
+        _skip_if_no_fanout(tasks)
         total_fanout = sum(t["fanout_count"] for t in tasks)
         if total_fanout < _M * _N:
             pytest.skip(
@@ -258,6 +275,7 @@ class TestPlAtDepsSwimlane:
         pl.submit-variant test to keep the two interfaces' DAG shape aligned.
         """
         tasks = pl_at_deps_swimlane_data["tasks"]
+        _skip_if_no_fanout(tasks)
         max_fanout = max((t["fanout_count"] for t in tasks), default=0)
         assert max_fanout <= 4, (
             f"max fan-out per task is {max_fanout} — pl.at deps appear over-linked; "
@@ -608,7 +626,10 @@ def _reconstruct_linear_chains(tasks: list[dict], *, expected: int) -> list[list
     indegree = {task_id: 0 for task_id in task_by_id}
     fanout_map: dict[int, list[int]] = {}
     for t in tasks:
-        succs = [succ for succ in t["fanout"] if succ in task_by_id]
+        # ``fanout`` is absent on a2a3 (deps.json is the sole fanout source);
+        # an empty edge set yields no reconstructable chains, so callers fall
+        # through to their existing "swimlane does not expose chain edges" skip.
+        succs = [succ for succ in t.get("fanout", []) if succ in task_by_id]
         fanout_map[t["task_id"]] = succs
         for succ in succs:
             indegree[succ] += 1
@@ -678,6 +699,7 @@ class TestBranchChainPlAtSwimlane:
         parallel iterations.
         """
         tasks = branch_chain_pl_at_swimlane_data["tasks"]
+        _skip_if_no_fanout(tasks)
         for t in tasks:
             assert t["fanout_count"] <= 1, (
                 f"task fanout_count = {t['fanout_count']}, expected ≤ 1 (per-branch linear chain only)"
