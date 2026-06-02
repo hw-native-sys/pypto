@@ -18,6 +18,8 @@ Transformation rules
 --------------------
 User writes (JIT style)            Generated DSL (@pl.program style)
 ─────────────────────────────────  ──────────────────────────────────
+@pl.jit                            @pl.function(type=pl.FunctionType.Orchestration)
+@pl.jit.host                       @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
 a: pl.Tensor                       a: pl.Tensor[[128, 128], pl.FP32]
 a: pl.Tensor[[M, 128], pl.FP32]   a: pl.Tensor[[M, 128], pl.FP32]  (M kept dynamic)
 param: pl.INDEX                    param: pl.Scalar[pl.INDEX]  (value substituted)
@@ -1599,7 +1601,20 @@ class Specializer:
         OutlineIncoreScopes can outline them and promote the function to
         Orchestration.  Entry functions without InCore scopes (multi-function
         style B) are emitted directly as Orchestration.
+
+        Host orchestrators (func_type == 'host') emit as
+        ``@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)`` —
+        the canonical spelling for HOST-level orchestration that owns
+        ``pld.alloc_window_buffer`` / ``pld.window`` / ``pld.world_size()``
+        and dispatches chip orchestrators with ``device=`` (see
+        ``tests/st/distributed/test_l3_allreduce.py``). ``type=`` is left at
+        the default ``FunctionType.Opaque``; the C++ ``Function`` constructor
+        only auto-derives level/role for InCore/Group/Orchestration types
+        (``include/pypto/ir/function.h``), so a HOST Opaque function keeps
+        the explicit ``role=Orchestrator``.
         """
+        if ctx.func_type == "host":
+            return "@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)"
         if ctx.func_type is None or ctx.func_type == "orchestration":
             if func_def is not None and _has_incore_scope(func_def):
                 return "@pl.function(type=pl.FunctionType.Opaque)"

@@ -497,16 +497,21 @@ def _func_name_lookup(func: Any) -> dict[str, Any]:
     return out
 
 
-def _scan_dep_io(func: Any) -> dict[str, tuple[list[str], list[str]]]:
+def _scan_dep_io(
+    func: Any, caller_func_type: str = "orchestration"
+) -> dict[str, tuple[list[str], list[str]]]:
     """Return ``dep_name → (param_names, out_param_names)`` for every @pl.jit
     dep called from ``func``'s body.
 
     Used by :func:`_extract_local_tensor_metas` to propagate metas through
     ``v1, ..., vk = dep(args)`` assignments (each ``vi`` inherits the meta of
     the caller arg bound to the i-th ``Out`` parameter).
+
+    ``caller_func_type`` mirrors :func:`_discover_deps`'s gating: a host
+    orchestrator also admits ``orchestration`` deps (its chip orchestrators).
     """
     out: dict[str, tuple[list[str], list[str]]] = {}
-    for dep in _discover_deps(func):
+    for dep in _discover_deps(func, caller_func_type):
         try:
             out_params, _, _, _ = _classify_params(_get_func_def(dep._func))
         except OSError:
@@ -578,6 +583,7 @@ def _extract_local_tensor_metas(
     func: Any,
     seed_meta: dict[str, TensorMeta] | None = None,
     seed_scalars: dict[str, int | float | bool] | None = None,
+    caller_func_type: str = "orchestration",
 ) -> dict[str, TensorMeta]:
     """Infer ``TensorMeta`` for the local tensor variables in ``func``'s body.
 
@@ -738,7 +744,7 @@ def _extract_local_tensor_metas(
             dims.append(v if v is not None else parent_dim)
         return TensorMeta(shape=tuple(dims), dtype=src_meta.dtype)
 
-    dep_io = _scan_dep_io(func)
+    dep_io = _scan_dep_io(func, caller_func_type)
 
     def _record_dep_result_metas(call: ast.Call, dep_name: str, target: ast.expr) -> None:
         _propagate_dep_out_metas(call, dep_name, target, dep_io, local)
@@ -850,6 +856,7 @@ def _resolve_dep_call_metadata(
     caller_scalar_values: dict[str, int | float | bool],
     caller_scalar_dtypes: dict[str, DataType],
     dep_dyn_map: dict[str, dict[int, DynDim]],
+    caller_func_type: str = "orchestration",
 ) -> tuple[
     dict[str, TensorMeta],
     dict[str, int | float | bool],
@@ -865,11 +872,18 @@ def _resolve_dep_call_metadata(
     ``pl.slice`` views, and the return values of other ``@pl.jit`` deps — are
     folded into the metadata pool (see :func:`_extract_local_tensor_metas`).
     Falls back to name-based matching when call-site extraction fails.
+
+    ``caller_func_type`` is forwarded to :func:`_extract_local_tensor_metas`
+    so a host orchestrator's body can also recognise chip-orchestrator deps
+    when walking ``v = chip_orch(...)`` return-capture assignments.
     """
     dep_param_names = dep._param_names()
     call_args = _extract_call_args_for_dep(caller_func, dep.__name__)
     intermediate_metas = _extract_local_tensor_metas(
-        caller_func, seed_meta=caller_tensor_meta, seed_scalars=caller_scalar_values
+        caller_func,
+        seed_meta=caller_tensor_meta,
+        seed_scalars=caller_scalar_values,
+        caller_func_type=caller_func_type,
     )
     all_tensor_meta = {**intermediate_metas, **caller_tensor_meta}
 
@@ -967,7 +981,13 @@ class JITFunction:
 
     Attributes:
         _func: Original Python function.
-        _func_type: 'orchestration' | 'incore' | 'inline' | 'opaque'.
+        _func_type: 'orchestration' | 'host' | 'incore' | 'inline' | 'opaque'.
+            ``'host'`` is the HOST-level orchestrator produced by
+            ``@pl.jit.host`` — it owns ``pld.alloc_window_buffer`` /
+            ``pld.window`` / ``pld.world_size()`` and the per-rank
+            ``device=`` dispatch loop. End-to-end runtime dispatch for a
+            ``'host'`` entry needs a ``distributed_config`` plumbed through
+            :meth:`_compile`; that wiring is tracked as follow-up work.
         _level: pl.Level or None.
         _dep_graph: Lazily-computed transitive JIT dep graph rooted here —
             ``(deps_topo, callers_by_dep_id, callees_by_func_id,
@@ -1062,8 +1082,8 @@ class JITFunction:
             callees_by_func_id: dict[int, list[str]] = {}
             call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | None]] | None] = {}
 
-            def visit(func: Any) -> None:
-                direct = _discover_deps(func)
+            def visit(func: Any, caller_func_type: str) -> None:
+                direct = _discover_deps(func, caller_func_type)
                 callees_by_func_id[id(func)] = [d.__name__ for d in direct]
                 for dep in direct:
                     # Key everything off ``id(dep._func)`` (the underlying
@@ -1083,10 +1103,10 @@ class JITFunction:
                     # guard (a self-recursive JIT function is unsupported
                     # but won't loop forever here).
                     seen.add(id(dep._func))
-                    visit(dep._func)
+                    visit(dep._func, dep._func_type)
                     deps_topo.append(dep)
 
-            visit(self._func)
+            visit(self._func, self._func_type)
             self._dep_graph = (
                 deps_topo,
                 callers_by_dep_id,
@@ -1442,6 +1462,13 @@ class JITFunction:
         deps_topo, callers_by_id, callees_by_id, _ = self._get_dep_graph()
         empty_dyn: dict[str, dict[int, DynDim]] = {}
 
+        # Map each Python function id → its JIT ``_func_type`` so meta
+        # resolution downstream can gate dep discovery on the caller's type
+        # (a host orchestrator additionally admits ``orchestration`` deps).
+        func_type_by_id: dict[int, str] = {id(self._func): self._func_type}
+        for d in deps_topo:
+            func_type_by_id[id(d._func)] = d._func_type
+
         # Walk caller-first to resolve each dep's metadata from its actual
         # caller's already-resolved metadata.
         resolved: dict[
@@ -1465,8 +1492,15 @@ class JITFunction:
             # must agree on shapes/dtypes anyway.
             caller_func = callers_by_id[id(dep._func)][0]
             c_meta, c_sv, c_sd = resolved[id(caller_func)]
+            caller_ftype = func_type_by_id.get(id(caller_func), "orchestration")
             dep_meta, dep_sv, dep_sd = _resolve_dep_call_metadata(
-                dep, caller_func, c_meta, c_sv, c_sd, per_func_dyn.get(id(dep._func), empty_dyn)
+                dep,
+                caller_func,
+                c_meta,
+                c_sv,
+                c_sd,
+                per_func_dyn.get(id(dep._func), empty_dyn),
+                caller_func_type=caller_ftype,
             )
             resolved[id(dep._func)] = (dep_meta, dep_sv, dep_sd)
             dep_contexts.append(
@@ -1561,12 +1595,23 @@ class JITFunction:
 # ---------------------------------------------------------------------------
 
 
-def _discover_deps(func: Any) -> list[JITFunction]:
-    """Discover @pl.jit.incore JITFunctions called by func.
+def _discover_deps(func: Any, caller_func_type: str = "orchestration") -> list[JITFunction]:
+    """Discover JIT dep functions called by ``func``.
 
     Scans the function's AST for bare function calls, then resolves each name
     against both module globals and closure variables (for deps defined in an
     enclosing scope, e.g. inside a test method or a factory function).
+
+    The set of admissible dep ``_func_type`` values is gated by the caller:
+
+    - A regular entry (``caller_func_type`` is ``'orchestration'`` or any
+      ``incore`` / ``inline`` / ``opaque`` sub-function recursing into its
+      own deps) admits ``incore``, ``inline``, ``opaque`` sub-functions.
+    - A host orchestrator (``caller_func_type == 'host'``) additionally
+      admits ``orchestration`` deps — the chip-level orchestrator a host
+      entry dispatches with ``self.chip_orch(..., device=r)``. Plain
+      ``@pl.jit`` entries never discover other ``@pl.jit`` entries; that
+      would conflate two top-level kernels into a single program.
 
     Only top-level (non-method) calls are considered. The returned list
     preserves the order in which deps first appear in the source.
@@ -1590,15 +1635,15 @@ def _discover_deps(func: Any) -> list[JITFunction]:
 
     all_vars = {**func_globals, **closure_vars}
 
+    allowed_dep_types: set[str] = {"incore", "inline", "opaque"}
+    if caller_func_type == "host":
+        allowed_dep_types.add("orchestration")
+
     deps: list[JITFunction] = []
     seen: set[str] = set()
     for name in called_names:
         obj = all_vars.get(name)
-        if (
-            isinstance(obj, JITFunction)
-            and obj._func_type in ("incore", "inline", "opaque")
-            and name not in seen
-        ):
+        if isinstance(obj, JITFunction) and obj._func_type in allowed_dep_types and name not in seen:
             deps.append(obj)
             seen.add(name)
     return deps
@@ -1610,12 +1655,14 @@ def _discover_deps(func: Any) -> list[JITFunction]:
 
 
 class _SubFunctionDecorator:
-    """Sub-decorator factory for ``@jit.<kind>`` (incore / inline / opaque).
+    """Sub-decorator factory for ``@jit.<kind>`` (host / incore / inline / opaque).
 
     Every kind supports both ``@jit.kind`` (bare) and ``@jit.kind()`` (parens).
     Only ``incore`` honors a ``level=`` kwarg; passing it to other kinds raises.
 
     See `_JITDecorator` for the kind semantics:
+      - ``host``    → HOST Orchestrator entry (specialized to
+        ``@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)``).
       - ``incore``  → ``FunctionType.InCore`` (separate IR function, ``level`` selectable).
       - ``inline``  → ``FunctionType.Inline`` (spliced at every call site by the
         ``InlineFunctions`` IR pass).
@@ -1641,13 +1688,22 @@ class _JITDecorator:
     Supports::
 
         @pl.jit                               # entry-point (Orchestration)
+        @pl.jit.host                          # entry-point (HOST Orchestrator)
         @pl.jit.incore                        # InCore sub-function
         @pl.jit.incore(level=pl.Level.AIC)   # InCore with explicit level
         @pl.jit.inline                        # Inline sub-function (spliced at call site)
         @pl.jit.opaque                        # Opaque sub-function (separate IR function)
+
+    ``host`` is the L3+ entry variant: it authors the per-rank dispatch loop
+    (``for r in pl.range(pld.world_size()): chip_orch(..., device=r)``) and
+    window-buffer allocation that today only ``@pl.function(level=HOST,
+    role=Orchestrator)`` inside ``@pl.program`` could express. It is keyed
+    off ``_func_type='host'`` and specializes into
+    ``@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)``.
     """
 
     def __init__(self) -> None:
+        self.host = _SubFunctionDecorator("host", allow_level=False)
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
         self.inline = _SubFunctionDecorator("inline", allow_level=False)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)

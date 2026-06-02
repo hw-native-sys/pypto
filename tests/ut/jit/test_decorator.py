@@ -86,6 +86,102 @@ class TestJitDecoration:
 
 
 # ---------------------------------------------------------------------------
+# @pl.jit.host decoration
+# ---------------------------------------------------------------------------
+
+
+class TestJitHostDecoration:
+    """@pl.jit.host produces a HOST-Orchestrator JITFunction."""
+
+    def test_jit_host_creates_jitfunction(self):
+        @jit.host
+        def host_orch(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return c
+
+        assert isinstance(host_orch, JITFunction)
+        assert host_orch._func_type == "host"
+
+    def test_jit_host_parens_form(self):
+        @jit.host()
+        def host_orch(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return c
+
+        assert isinstance(host_orch, JITFunction)
+        assert host_orch._func_type == "host"
+
+    def test_jit_host_rejects_level_kwarg(self):
+        with pytest.raises(TypeError, match="does not accept a level= argument"):
+
+            @jit.host(level=pl.Level.HOST)
+            def host_orch(a: pl.Tensor):
+                return a
+
+    def test_jit_host_preserves_name(self):
+        @jit.host
+        def my_host(a: pl.Tensor):
+            return a
+
+        assert my_host.__name__ == "my_host"
+
+    def test_jit_host_pl_access(self):
+        @pl.jit.host
+        def host_orch(a: pl.Tensor):
+            return a
+
+        assert isinstance(host_orch, JITFunction)
+        assert host_orch._func_type == "host"
+
+
+class TestHostDiscoversOrchestrationDep:
+    """Host entries discover chip-level orchestrators as deps; other entries don't."""
+
+    def test_host_discovers_orchestration_dep(self):
+        @jit
+        def chip_orch(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return c
+
+        @jit.host
+        def host_orch(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return chip_orch(a, c)
+
+        deps = host_orch._get_deps()
+        assert len(deps) == 1
+        assert deps[0]._func_type == "orchestration"
+        assert deps[0].__name__ == "chip_orch"
+
+    def test_orchestration_entry_does_not_discover_orchestration_dep(self):
+        """A plain @pl.jit entry must still ignore @pl.jit deps — only
+        sub-functions (incore/inline/opaque) are discovered. Otherwise two
+        top-level kernels would silently fold into one program."""
+
+        @jit
+        def other_orch(a: pl.Tensor):
+            return a
+
+        @jit
+        def entry(a: pl.Tensor):
+            return other_orch(a)
+
+        deps = entry._get_deps()
+        assert deps == []
+
+    def test_host_still_discovers_subfunction_deps(self):
+        """Sub-function discovery is unchanged for host entries."""
+
+        @jit.incore
+        def sub(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return c
+
+        @jit.host
+        def host_orch(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return sub(a, c)
+
+        deps = host_orch._get_deps()
+        assert len(deps) == 1
+        assert deps[0]._func_type == "incore"
+
+
+# ---------------------------------------------------------------------------
 # Tensor.bind_dynamic no-op
 # ---------------------------------------------------------------------------
 
