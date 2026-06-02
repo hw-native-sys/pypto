@@ -119,6 +119,84 @@ def test_submit_round_trips_through_ssa():
     assert "pl.submit(self.kernel" in text, text
 
 
+def _build_program_with_spmd_submit(core_num_is_var: bool = False) -> ir.Program:
+    """Build a caller that ``pl.spmd_submit``s a kernel (Submit + launch spec).
+
+    When ``core_num_is_var`` the launch ``core_num`` references the (reassigned)
+    caller arg so SSA conversion must remap it — exercising the IRMutator's
+    first-class ``core_num_`` walk. Otherwise ``core_num`` is a constant.
+    """
+    span = ir.Span.unknown()
+    kernel_x = ir.Var("x", ir.ScalarType(DataType.INDEX), span)
+    kernel = ir.Function(
+        "kernel", [kernel_x], [ir.ScalarType(DataType.INDEX)], ir.ReturnStmt([kernel_x], span), span
+    )
+    kernel_gvar = ir.GlobalVar("kernel")
+
+    caller_arg = ir.Var("a", ir.ScalarType(DataType.INDEX), span)
+    tid_arg = ir.Var("t", ir.ScalarType(DataType.TASK_ID), span)
+    submit_ret_ty = ir.TupleType([ir.ScalarType(DataType.INDEX), ir.ScalarType(DataType.TASK_ID)])
+    res_var = ir.Var("res", submit_ret_ty, span)
+
+    stmts: list[ir.Stmt] = []
+    if core_num_is_var:
+        # Reassign `a` so SSA mints a fresh version; core_num references it.
+        one = ir.ConstInt(1, DataType.INDEX, span)
+        stmts.append(ir.AssignStmt(caller_arg, ir.Add(caller_arg, one, DataType.INDEX, span), span))
+        core_num: ir.Expr = caller_arg
+    else:
+        core_num = ir.ConstInt(4, DataType.INDEX, span)
+
+    submit = ir.Submit(
+        kernel_gvar,
+        [caller_arg],
+        [tid_arg],
+        {},
+        None,
+        submit_ret_ty,
+        span,
+        core_num=core_num,
+        sync_start=True,
+    )
+    stmts.append(ir.AssignStmt(res_var, submit, span))
+    stmts.append(ir.ReturnStmt([res_var], span))
+
+    caller = ir.Function("caller", [caller_arg, tid_arg], [submit_ret_ty], ir.SeqStmts(stmts, span), span)
+    return ir.Program([kernel, caller], "spmd_submit_smoke", span)
+
+
+def test_ssa_preserves_spmd_submit_launch_spec():
+    """convert_to_ssa() must carry the SPMD launch spec (core_num / sync_start)
+    through the Submit reconstruction — a pass that dropped them would silently
+    downgrade an SPMD launch to a single-block submit."""
+    program_after = passes.convert_to_ssa()(_build_program_with_spmd_submit(core_num_is_var=False))
+    caller_after = program_after.get_function("caller")
+    assert caller_after is not None
+    submit_after = _find_submit_in_function(caller_after)
+    assert submit_after is not None
+    assert submit_after.sync_start is True
+    assert isinstance(submit_after.core_num, ir.ConstInt)
+    assert submit_after.core_num.value == 4
+
+
+def test_ssa_remaps_spmd_submit_core_num_var():
+    """When core_num references a Var that SSA renames, the rebuilt Submit's
+    core_num must point at the fresh version (IRMutator walks core_num_)."""
+    program_after = passes.convert_to_ssa()(_build_program_with_spmd_submit(core_num_is_var=True))
+    caller_after = program_after.get_function("caller")
+    assert caller_after is not None
+    submit_after = _find_submit_in_function(caller_after)
+    assert submit_after is not None
+    assert submit_after.core_num is not None
+    core_num_var = submit_after.core_num
+    assert isinstance(core_num_var, ir.Var)
+    # The original `a` parameter was reassigned; core_num must reference the
+    # latest SSA version, not the stale parameter.
+    assert core_num_var is not list(caller_after.params)[0]
+    # And it must be the same Var the (remapped) arg references.
+    assert core_num_var is submit_after.args[0]
+
+
 def test_submit_single_lhs_form_round_trips():
     """The single-LHS print form ``res: pl.Tuple[..., TASK_ID] = pl.submit(...)``
     is re-accepted by the parser, which means

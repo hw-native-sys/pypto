@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -806,6 +807,19 @@ class Submit : public Expr {
   OpPtr op_;                   // Callee (typically a GlobalVar)
   std::vector<ExprPtr> args_;  // Positional arguments
   std::vector<ExprPtr> deps_;  // TaskId dependencies (Scalar[TASK_ID] / Array[N, TASK_ID])
+  // SPMD launch spec — populated only by ``pl.spmd_submit(...)``.
+  // ``core_num_`` is the block count (an INDEX/INT-typed Expr — typically a
+  // ConstInt or a closure Var); ``std::nullopt`` marks a plain
+  // ``pl.submit(...)`` (single-block launch, no launch spec). ``sync_start_``
+  // requires all logical blocks to launch atomically and is only meaningful
+  // when ``core_num_`` is present. These lower to ``Arg::launch_spec`` in
+  // orchestration codegen via SubmitToCallView (attrs ``"core_num"`` /
+  // ``"sync_start"``) → EmitLaunchSpec. ``core_num_`` is a first-class field
+  // (not an attr) because it is an SSA value in the use-def chain — passes
+  // that substitute / DCE / dominance-check Vars must walk it (see
+  // .claude/rules/pass-submit-awareness.md, rule 2).
+  std::optional<ExprPtr> core_num_;
+  bool sync_start_ = false;
   std::vector<std::pair<std::string, std::any>> attrs_;   // Compiler-internal metadata (ordered)
   std::vector<std::pair<std::string, std::any>> kwargs_;  // Keyword arguments (metadata, ordered)
 
@@ -823,19 +837,28 @@ class Submit : public Expr {
   /**
    * @brief Create a Submit with attrs and kwargs.
    *
+   * The trailing ``core_num`` / ``sync_start`` carry the SPMD launch spec for
+   * ``pl.spmd_submit(...)``; they default to "no launch spec" so every
+   * existing 7-arg construction site keeps building a plain submit.
+   *
    * Validates that, when present, ``attrs[kAttrArgDirections]`` is a
-   * ``std::vector<ArgDirection>`` whose length matches ``args``.
+   * ``std::vector<ArgDirection>`` whose length matches ``args``, and that the
+   * launch spec is well-formed (``sync_start`` implies ``core_num``).
    */
   Submit(OpPtr op, std::vector<ExprPtr> args, std::vector<ExprPtr> deps,
          std::vector<std::pair<std::string, std::any>> kwargs,
-         std::vector<std::pair<std::string, std::any>> attrs, TypePtr type, Span span)
+         std::vector<std::pair<std::string, std::any>> attrs, TypePtr type, Span span,
+         std::optional<ExprPtr> core_num = std::nullopt, bool sync_start = false)
       : Expr(std::move(span), std::move(type)),
         op_(std::move(op)),
         args_(std::move(args)),
         deps_(std::move(deps)),
+        core_num_(std::move(core_num)),
+        sync_start_(sync_start),
         attrs_(std::move(attrs)),
         kwargs_(std::move(kwargs)) {
     ValidateArgDirectionsAttr();
+    ValidateLaunchSpec();
   }
 
   template <typename T>
@@ -890,11 +913,24 @@ class Submit : public Expr {
                           std::make_tuple(reflection::UsualField(&Submit::op_, "op"),
                                           reflection::UsualField(&Submit::args_, "args"),
                                           reflection::UsualField(&Submit::deps_, "deps"),
+                                          reflection::UsualField(&Submit::core_num_, "core_num"),
+                                          reflection::UsualField(&Submit::sync_start_, "sync_start"),
                                           reflection::UsualField(&Submit::attrs_, "attrs"),
                                           reflection::UsualField(&Submit::kwargs_, "kwargs")));
   }
 
  private:
+  void ValidateLaunchSpec() const {
+    if (sync_start_ && !core_num_.has_value()) {
+      throw pypto::ValueError(
+          "Submit sync_start=true requires core_num (an SPMD launch). Plain "
+          "pl.submit(...) has no launch spec — use pl.spmd_submit(...) for SPMD.");
+    }
+    if (core_num_.has_value() && !*core_num_) {
+      throw pypto::TypeError("Submit core_num must be a non-null Expr when present");
+    }
+  }
+
   void ValidateArgDirectionsAttr() const {
     for (const auto& [k, v] : attrs_) {
       if (k != kAttrArgDirections) {
@@ -966,6 +1002,15 @@ inline CallPtr SubmitToCallView(const SubmitPtr& submit) {
       dep_vars.push_back(std::static_pointer_cast<const Var>(d));
     }
     attrs = WithManualDepEdgesAttr(std::move(attrs), std::move(dep_vars));
+  }
+  // Carry the SPMD launch spec (pl.spmd_submit) through to the Call view as
+  // attrs so orchestration codegen's EmitLaunchSpec reads core_num/sync_start
+  // uniformly with the scope-based pl.spmd path (which stores them on the
+  // Spmd-wrapper function's attrs). core_num_/sync_start_ are first-class
+  // Submit fields and never appear in submit->attrs_, so no duplication.
+  if (submit->core_num_.has_value()) {
+    attrs.emplace_back("core_num", std::any(*submit->core_num_));
+    attrs.emplace_back("sync_start", std::any(submit->sync_start_));
   }
   return std::make_shared<Call>(submit->op_, submit->args_, submit->kwargs_, std::move(attrs),
                                 submit->GetType(), submit->span_);

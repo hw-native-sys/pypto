@@ -900,7 +900,11 @@ void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
   // Submit is printed standalone (debugging, unit tests that build IR by
   // hand without a Program), fall back to naming the op directly so the
   // printer never crashes — matches the contract in the comment above.
-  stream_ << prefix_ << ".submit(";
+  // ``pl.spmd_submit(...)`` when this Submit carries an SPMD launch spec
+  // (``core_num_`` present); plain ``pl.submit(...)`` otherwise. The surface
+  // form is kind-driven — it follows the presence of the launch spec — so
+  // print → parse round-trips (.claude/rules ir-print-form-follows-kind).
+  stream_ << prefix_ << (op->core_num_.has_value() ? ".spmd_submit(" : ".submit(");
   if (auto gvar = As<GlobalVar>(op->op_)) {
     // ``self.<name>`` inside a Program (the canonical case); bare ``<name>``
     // when the printer is invoked standalone (debugging / unit tests).
@@ -926,6 +930,18 @@ void IRPythonPrinter::VisitExpr_(const SubmitPtr& op) {
       VisitExpr(op->deps_[i]);
     }
     stream_ << "]";
+  }
+
+  // SPMD launch spec — ``core_num=`` (required on pl.spmd_submit) and the
+  // optional ``sync_start=True``. Emitted as kwargs so the parser recovers
+  // them via the spmd_submit kwargs path.
+  if (op->core_num_.has_value()) {
+    INTERNAL_CHECK_SPAN(*op->core_num_, op->span_) << "Submit core_num is null";
+    stream_ << ", core_num=";
+    VisitExpr(*op->core_num_);
+    if (op->sync_start_) {
+      stream_ << ", sync_start=True";
+    }
   }
 
   // Surface ``attrs["arg_directions"]`` post-DeriveCallDirections on Submit

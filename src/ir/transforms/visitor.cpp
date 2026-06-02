@@ -104,6 +104,13 @@ void IRVisitor::VisitExpr_(const SubmitPtr& op) {
     INTERNAL_CHECK_SPAN(op->deps_[i], op->span_) << "Submit has null dep at index " << i;
     VisitExpr(op->deps_[i]);
   }
+  // core_num_ (pl.spmd_submit SPMD block count) is a first-class Expr operand —
+  // a ConstInt or a closure Var defined elsewhere. Visit it so unused-var /
+  // def-use / SSA-liveness analyses see the use (mirrors the deps_ rationale).
+  if (op->core_num_.has_value()) {
+    INTERNAL_CHECK_SPAN(*op->core_num_, op->span_) << "Submit core_num is null";
+    VisitExpr(*op->core_num_);
+  }
   // Var-typed attr ``arg_direction_overrides_vars`` references Vars defined
   // elsewhere in the IR. IRMutator::VisitExpr_(SubmitPtr) already rewrites
   // those Vars on substitution; the visitor must walk them too so unused-var

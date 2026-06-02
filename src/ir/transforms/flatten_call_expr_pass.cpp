@@ -483,7 +483,7 @@ ExprPtr FlattenCallExprMutator::VisitExpr_(const SubmitPtr& op) {
   if (changed) {
     // deps_ are TaskId Vars/Arrays, never nested calls — pass through unchanged.
     return std::make_shared<Submit>(op->op_, new_args, op->deps_, op->kwargs_, op->attrs_, op->GetType(),
-                                    op->span_);
+                                    op->span_, op->core_num_, op->sync_start_);
   }
   return op;
 }

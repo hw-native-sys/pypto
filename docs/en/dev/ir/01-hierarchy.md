@@ -73,7 +73,7 @@ is present, `memory_space` must also be present on the `TileType`.
 | **ConstBool** | `value_` | Boolean constant (always BOOL dtype) |
 | **ConstFloat** | `value_`, `dtype_` | Floating-point constant |
 | **Call** | `op_`, `args_`, `kwargs_`, `attrs_` | Function/operator call (see [Call attrs vs kwargs](#call-attrs-vs-kwargs)) |
-| **Submit** | `op_`, `args_`, `deps_`, `kwargs_`, `attrs_` | Task-launch (`pl.submit(...)` inside `pl.manual_scope`). See [Submit vs Call](#submit-vs-call). |
+| **Submit** | `op_`, `args_`, `deps_`, `core_num_`, `sync_start_`, `kwargs_`, `attrs_` | Task-launch (`pl.submit(...)` / `pl.spmd_submit(...)`). `core_num_`/`sync_start_` carry the SPMD launch spec. See [Submit vs Call](#submit-vs-call). |
 | **TupleGetItemExpr** | `tuple_`, `index_` | Tuple element access |
 
 ### Var Identity
@@ -167,8 +167,9 @@ for the dispatch rule.
 | Where it appears | Anywhere | Inside `manual_scope` bodies (parser-produced; lowered to `Call` at `DeriveCallDirections`) |
 | Return type | Callee's declared return | `Tuple[<callee return>..., Scalar[TASK_ID]]` |
 | Has `deps` | No (uses `attrs["manual_dep_edges"]` only on `ScopeStmt` from `pl.at`) | First-class `deps_` field — `Scalar[TASK_ID]` Vars / `Array[N, TASK_ID]` Vars |
-| Use-def chain | `args_` only | `args_` **and** `deps_` |
-| Python syntax | `out = self.foo(...)` | `out, tid = pl.submit(self.foo, ...)` |
+| SPMD launch spec | none | `core_num_` (`optional<ExprPtr>` block count) + `sync_start_` (bool), set only by `pl.spmd_submit`; `nullopt` ⇒ plain single-block submit |
+| Use-def chain | `args_` only | `args_`, `deps_`, **and** `core_num_` |
+| Python syntax | `out = self.foo(...)` | `out, tid = pl.submit(self.foo, ...)` (or `pl.spmd_submit(self.foo, ..., core_num=N)`) |
 
 The parser emits `Submit`; printer / structural-equal / structural-hash /
 visitor / mutator / DCE / SSA all dispatch on the `Submit` kind directly.

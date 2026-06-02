@@ -428,6 +428,23 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
     }
   }
 
+  // Mutate core_num_ — an SPMD launch-spec Expr (pl.spmd_submit). It is a
+  // first-class field carrying an SSA value (ConstInt or closure Var), so
+  // substitution must rewrite it just like args_/deps_ (see
+  // .claude/rules/pass-submit-awareness.md, rule 2: deps_ / launch operands
+  // are part of the use-def chain).
+  std::optional<ExprPtr> new_core_num = op->core_num_;
+  bool core_num_changed = false;
+  if (op->core_num_.has_value()) {
+    INTERNAL_CHECK_SPAN(*op->core_num_, op->span_) << "Submit core_num is null";
+    auto remapped = ExprFunctor<ExprPtr>::VisitExpr(*op->core_num_);
+    INTERNAL_CHECK_SPAN(remapped, op->span_) << "Submit core_num mutated to null";
+    if (remapped.get() != op->core_num_->get()) {
+      new_core_num = remapped;
+      core_num_changed = true;
+    }
+  }
+
   auto new_type = RemapTypeViaVisitor(op->GetType());
   bool type_changed = (new_type.get() != op->GetType().get());
 
@@ -475,7 +492,7 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
     new_attrs.emplace_back(k, v);
   }
 
-  if (!args_changed && !deps_changed && !type_changed && !attrs_changed) return op;
+  if (!args_changed && !deps_changed && !type_changed && !attrs_changed && !core_num_changed) return op;
   std::vector<std::pair<std::string, std::any>> attrs_to_use;
   if (attrs_changed) {
     attrs_to_use = std::move(new_attrs);
@@ -483,7 +500,8 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
     attrs_to_use = op->attrs_;
   }
   return std::make_shared<const Submit>(op->op_, std::move(new_args), std::move(new_deps), op->kwargs_,
-                                        std::move(attrs_to_use), std::move(new_type), op->span_);
+                                        std::move(attrs_to_use), std::move(new_type), op->span_,
+                                        std::move(new_core_num), op->sync_start_);
 }
 
 ExprPtr IRMutator::VisitExpr_(const MakeTuplePtr& op) {

@@ -244,7 +244,8 @@ class MaterializeTensorStridesMutator : public IRMutator {
     // return TensorType and leaving the trailing Scalar[TASK_ID] untouched.
     // Note the 7-arg Submit ctor order is (op, args, deps, kwargs, attrs, ...).
     return std::make_shared<Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
-                                    submit->attrs_, std::move(new_return_type), submit->span_);
+                                    submit->attrs_, std::move(new_return_type), submit->span_,
+                                    submit->core_num_, submit->sync_start_);
   }
 
   StmtPtr VisitStmt_(const AssignStmtPtr& op) override {

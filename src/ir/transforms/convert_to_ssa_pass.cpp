@@ -298,7 +298,8 @@ class SSAConverter {
       auto new_type = converter_.SubstType(submit->GetType());
       if (new_type.get() != submit->GetType().get()) {
         return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
-                                              submit->attrs_, new_type, submit->span_);
+                                              submit->attrs_, new_type, submit->span_, submit->core_num_,
+                                              submit->sync_start_);
       }
       return result;
     }

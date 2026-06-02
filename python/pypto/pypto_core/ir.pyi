@@ -1431,6 +1431,14 @@ class Submit(Expr):
     """Cross-task dependencies — each entry is a ``Scalar[TASK_ID]`` or
     ``Array[N, TASK_ID]`` Var."""
 
+    core_num: Final[Expr | None]
+    """SPMD block count (``pl.spmd_submit``). ``None`` for a plain
+    ``pl.submit`` (single-block launch)."""
+
+    sync_start: Final[bool]
+    """Require all SPMD logical blocks to launch atomically. Only meaningful
+    when :attr:`core_num` is set."""
+
     @property
     def arg_directions(self) -> Sequence[ArgDirection]:
         """Resolved per-argument call-site directions (see :attr:`Call.arg_directions`)."""
@@ -1472,6 +1480,8 @@ class Submit(Expr):
         attrs: Mapping[str, object] | Sequence[tuple[str, object]] | None,
         type: Type,
         span: Span,
+        core_num: Expr | None = None,
+        sync_start: bool = False,
     ) -> None:
         """Create a Submit expression with kwargs and explicit attrs and type.
 
@@ -1484,6 +1494,10 @@ class Submit(Expr):
                 ``"arg_directions"`` -> ``Sequence[ArgDirection]``.
             type: Explicit result type
             span: Source location
+            core_num: SPMD block count Expr (``pl.spmd_submit``); ``None`` for a
+                plain submit (single block).
+            sync_start: Require atomic launch of all SPMD blocks. Requires
+                ``core_num`` to be set.
         """
         ...
 

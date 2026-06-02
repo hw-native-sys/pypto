@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import cast
 
+import pypto.language as pl
 import pytest
 from pypto import DataType, ir
 
@@ -123,6 +124,73 @@ class TestBasicSerialization:
         restored = ir.deserialize(data)
 
         ir.assert_structural_equal(call, restored, enable_auto_mapping=True)
+
+
+class TestSubmitSerialization:
+    """Round-trip the Submit task-launch node (pl.submit / pl.spmd_submit),
+    including its first-class deps_ and the SPMD launch spec (core_num / sync_start),
+    plus the RuntimeScopeStmt (pl.manual_scope) wrapper it lives inside."""
+
+    @staticmethod
+    def _submit_ret_ty() -> "ir.TupleType":
+        return ir.TupleType([ir.ScalarType(DataType.INDEX), ir.ScalarType(DataType.TASK_ID)])
+
+    def test_serialize_plain_submit(self):
+        """A plain pl.submit (no launch spec): core_num round-trips as None."""
+        span = ir.Span.unknown()
+        gv = ir.GlobalVar("kernel")
+        a = ir.Var("a", ir.ScalarType(DataType.INDEX), span)
+        tid = ir.Var("t", ir.ScalarType(DataType.TASK_ID), span)
+        submit = ir.Submit(gv, [a], [tid], self._submit_ret_ty(), span)
+
+        restored = cast("ir.Submit", ir.deserialize(ir.serialize(submit)))
+        ir.assert_structural_equal(submit, restored, enable_auto_mapping=True)
+        assert restored.core_num is None
+        assert restored.sync_start is False
+        assert len(restored.deps) == 1
+
+    def test_serialize_spmd_submit_launch_spec(self):
+        """pl.spmd_submit: the SPMD launch spec (core_num + sync_start) survives
+        the msgpack round-trip on the Submit's first-class fields."""
+        span = ir.Span.unknown()
+        gv = ir.GlobalVar("kernel")
+        a = ir.Var("a", ir.ScalarType(DataType.INDEX), span)
+        core_num = ir.ConstInt(8, DataType.INDEX, span)
+        submit = ir.Submit(
+            gv, [a], [], {}, None, self._submit_ret_ty(), span, core_num=core_num, sync_start=True
+        )
+
+        restored = cast("ir.Submit", ir.deserialize(ir.serialize(submit)))
+        ir.assert_structural_equal(submit, restored, enable_auto_mapping=True)
+        assert isinstance(restored.core_num, ir.ConstInt)
+        assert restored.core_num.value == 8
+        assert restored.sync_start is True
+
+    def test_serialize_manual_scope_spmd_submit_program(self):
+        """A full @pl.program with `with pl.manual_scope(): out, tid =
+        pl.spmd_submit(...)` round-trips — exercises both RuntimeScopeStmt and
+        the Submit launch spec end-to-end."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def k(
+                self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+            ) -> pl.Tensor[[128], pl.FP32]:
+                t = pl.load(x, [0], [128])
+                out = pl.store(t, [0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+            ) -> pl.Tensor[[128], pl.FP32]:
+                with pl.manual_scope():
+                    out, tid = pl.spmd_submit(self.k, x, out, core_num=4, sync_start=True)
+                return out
+
+        restored = ir.deserialize(ir.serialize(Prog))
+        ir.assert_structural_equal(Prog, restored, enable_auto_mapping=True)
 
 
 class TestComplexExpressions:

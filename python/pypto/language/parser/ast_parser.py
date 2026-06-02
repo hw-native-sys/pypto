@@ -1041,6 +1041,14 @@ class ASTParser:
             # validates the annotation against the inferred Submit return
             # type the way every other annotated RHS does.
             value_expr = self._build_submit_single_lhs_expr(stmt.value)
+        elif _is_pl_call(stmt.value, "spmd_submit"):
+            if not isinstance(stmt.target, ast.Name):
+                raise ParserSyntaxError(
+                    "Annotated assignment of pl.spmd_submit must target a simple variable name",
+                    span=self.span_tracker.get_span(stmt.target),
+                    hint="Use `result: pl.Tuple[..., TASK_ID] = pl.spmd_submit(self.kernel, core_num=N)`.",
+                )
+            value_expr = self._build_submit_single_lhs_expr(stmt.value, is_spmd=True)
         else:
             value_expr = self.parse_expression(stmt.value)
 
@@ -1213,6 +1221,12 @@ class ASTParser:
                 if _is_pl_call(stmt.value, "submit"):
                     self._parse_submit_assignment(target, stmt.value)
                     return
+                # ``out, tid = pl.spmd_submit(self.kernel, *args, core_num=N,
+                # sync_start=..., deps=[...])`` — SPMD task launch. Same desugar
+                # as pl.submit, but the Submit carries the SPMD launch spec.
+                if _is_pl_call(stmt.value, "spmd_submit"):
+                    self._parse_submit_assignment(target, stmt.value, is_spmd=True)
+                    return
 
                 # General tuple unpacking for function calls returning TupleType
                 span = self.span_tracker.get_span(stmt)
@@ -1247,6 +1261,9 @@ class ASTParser:
                 # ``_parse_submit_assignment``.
                 if _is_pl_call(stmt.value, "submit"):
                     self._parse_submit_single_lhs(target, stmt.value)
+                    return
+                if _is_pl_call(stmt.value, "spmd_submit"):
+                    self._parse_submit_single_lhs(target, stmt.value, is_spmd=True)
                     return
 
                 # Check if this is a yield assignment: var = pl.yield_(...)
@@ -1316,38 +1333,42 @@ class ASTParser:
             hint="Use simple variable names in tuple unpacking: a, b, c = func()",
         )
 
-    def _parse_submit_assignment(self, target: ast.Tuple, call: ast.Call) -> None:
-        """Parse ``out, tid = pl.submit(self.kernel, *args, deps=[...])``.
+    def _parse_submit_assignment(self, target: ast.Tuple, call: ast.Call, *, is_spmd: bool = False) -> None:
+        """Parse ``out, tid = pl.submit(self.kernel, *args, deps=[...])`` and the
+        ``pl.spmd_submit(self.kernel, *args, core_num=N, sync_start=...)`` SPMD
+        variant (``is_spmd=True``).
 
-        ``pl.submit`` is a manual_scope construct: it submits a kernel call
-        and binds both the kernel result(s) and the producer TaskId. The
-        desugared IR is a single :class:`ir.Call` whose return type is the
-        flat ``TupleType([*<kernel results>, Scalar[TASK_ID]])`` — elements
-        ``0..N-1`` are the kernel's results (one element per output, matching
-        the kernel's declared return arity) and element ``N`` is the producer
-        ``Scalar[TASK_ID]``.
+        ``pl.submit`` / ``pl.spmd_submit`` are manual_scope constructs: they
+        submit a kernel call and bind both the kernel result(s) and the
+        producer TaskId. The desugared IR is a single :class:`ir.Submit` whose
+        return type is the flat ``TupleType([*<kernel results>, Scalar[TASK_ID]])``
+        — elements ``0..N-1`` are the kernel's results (one element per output,
+        matching the kernel's declared return arity) and element ``N`` is the
+        producer ``Scalar[TASK_ID]``. ``pl.spmd_submit`` additionally records
+        the SPMD launch spec (``core_num`` / ``sync_start``) on the Submit.
         """
+        construct = "pl.spmd_submit" if is_spmd else "pl.submit"
         span = self.span_tracker.get_span(call)
-        # ``pl.submit`` and ``deps=`` are orthogonal to ``manual_scope``: the
-        # runtime's ``Arg::set_dependencies`` adds explicit edges on top of the
-        # auto-tracked deps (final fanin = auto union explicit), so both
-        # flavours of orchestrator scope (auto or manual) accept
-        # ``pl.submit(..., deps=[...])``. In auto scope it is a precision tool
-        # — auto handles most of the dep graph; explicit edges patch the
-        # cases the runtime cannot infer (or infers too conservatively).
+        # ``pl.submit`` / ``pl.spmd_submit`` and ``deps=`` are orthogonal to
+        # ``manual_scope``: the runtime's ``Arg::set_dependencies`` adds
+        # explicit edges on top of the auto-tracked deps (final fanin = auto
+        # union explicit), so both flavours of orchestrator scope (auto or
+        # manual) accept ``deps=[...]``. In auto scope it is a precision tool —
+        # auto handles most of the dep graph; explicit edges patch the cases
+        # the runtime cannot infer (or infers too conservatively).
         if len(target.elts) != 2:
             raise ParserSyntaxError(
-                f"pl.submit(...) must be unpacked as exactly 2 targets "
+                f"{construct}(...) must be unpacked as exactly 2 targets "
                 f"(result, task_id), got {len(target.elts)}",
                 span=span,
-                hint="Use `out, tid = pl.submit(self.kernel, ...)`.",
+                hint=f"Use `out, tid = {construct}(self.kernel, ...)`.",
             )
         out_target, tid_target = target.elts
         if not isinstance(tid_target, ast.Name):
             raise ParserSyntaxError(
-                "pl.submit(...) task_id target must be a plain variable name",
+                f"{construct}(...) task_id target must be a plain variable name",
                 span=span,
-                hint="Use `out, tid = pl.submit(self.kernel, ...)`.",
+                hint=f"Use `out, tid = {construct}(self.kernel, ...)`.",
             )
         # The result target is either a single Name (single-output kernel) or
         # a flat tuple of Names (multi-output kernel). Nested tuples are
@@ -1360,24 +1381,24 @@ class ASTParser:
             out_names = list(out_target.elts)
         else:
             raise ParserSyntaxError(
-                "pl.submit(...) result target must be a variable name or a tuple of names",
+                f"{construct}(...) result target must be a variable name or a tuple of names",
                 span=span,
-                hint="Use `out, tid = pl.submit(...)` or `(a, b), tid = pl.submit(...)`.",
+                hint=f"Use `out, tid = {construct}(...)` or `(a, b), tid = {construct}(...)`.",
             )
         for elt in out_names:
             if not isinstance(elt, ast.Name):
                 raise ParserSyntaxError(
-                    "pl.submit(...) result target must contain plain variable names only "
+                    f"{construct}(...) result target must contain plain variable names only "
                     f"(no nested tuples), got '{ast.unparse(elt)}'",
                     span=span,
-                    hint="Use `out, tid = pl.submit(...)` or `(a, b), tid = pl.submit(...)`.",
+                    hint=f"Use `out, tid = {construct}(...)` or `(a, b), tid = {construct}(...)`.",
                 )
         n_outs = len(out_names)
         if not call.args:
             raise ParserSyntaxError(
-                "pl.submit(...) requires the kernel as its first argument",
+                f"{construct}(...) requires the kernel as its first argument",
                 span=span,
-                hint="Use `out, tid = pl.submit(self.kernel, *kernel_args, deps=[...])`.",
+                hint=f"Use `out, tid = {construct}(self.kernel, *kernel_args, deps=[...])`.",
             )
         method_attr = call.args[0]
         if not (
@@ -1386,20 +1407,22 @@ class ASTParser:
             and method_attr.value.id == "self"
         ):
             raise ParserSyntaxError(
-                "pl.submit(...) first argument must be a `self.<kernel>` method reference",
+                f"{construct}(...) first argument must be a `self.<kernel>` method reference",
                 span=span,
                 hint="Pass the kernel itself, not a call: "
-                "`pl.submit(self.kernel, x, y)` — not `pl.submit(self.kernel(x, y))`.",
+                f"`{construct}(self.kernel, x, y)` — not `{construct}(self.kernel(x, y))`.",
             )
 
-        call_expr = self._parse_kernel_call(method_attr, call.args[1:], call.keywords, span, as_submit=True)
+        call_expr = self._parse_kernel_call(
+            method_attr, call.args[1:], call.keywords, span, as_submit=True, as_spmd=is_spmd
+        )
 
         # The submit Call returns a flat Tuple{*<kernel results>, TaskId};
         # validate the result-target arity against the kernel's return arity.
         ret_type = call_expr.type
         if isinstance(ret_type, ir.TupleType) and len(ret_type.types) != n_outs + 1:
             raise ParserTypeError(
-                f"pl.submit(...) unpacks {n_outs} result value(s) but kernel "
+                f"{construct}(...) unpacks {n_outs} result value(s) but kernel "
                 f"'{method_attr.attr}' returns {len(ret_type.types) - 1}",
                 span=span,
                 hint="Match the number of result targets to the kernel's return arity.",
@@ -1414,21 +1437,23 @@ class ASTParser:
         tid_var = self._assign_or_let(tid_target.id, task_id_expr, span)
         self.scope_manager.define_var(tid_target.id, tid_var, span=span)
 
-    def _build_submit_single_lhs_expr(self, call: ast.Call) -> ir.Expr:
+    def _build_submit_single_lhs_expr(self, call: ast.Call, *, is_spmd: bool = False) -> ir.Expr:
         """Build the ``ir.Submit`` expression for the single-LHS form
-        ``result = pl.submit(self.kernel, ...)`` without binding it.
+        ``result = pl.submit(self.kernel, ...)`` (or ``pl.spmd_submit`` when
+        ``is_spmd=True``) without binding it.
 
         Separated from :meth:`_parse_submit_single_lhs` so the annotated
         assignment path can feed the inferred Submit type through the
         standard annotation-consistency / ``override_type`` validation flow
         that all other RHS expressions go through.
         """
+        construct = "pl.spmd_submit" if is_spmd else "pl.submit"
         span = self.span_tracker.get_span(call)
         if not call.args:
             raise ParserSyntaxError(
-                "pl.submit(...) requires the kernel as its first argument",
+                f"{construct}(...) requires the kernel as its first argument",
                 span=span,
-                hint="Use `result = pl.submit(self.kernel, *kernel_args, deps=[...])`.",
+                hint=f"Use `result = {construct}(self.kernel, *kernel_args, deps=[...])`.",
             )
         method_attr = call.args[0]
         if not (
@@ -1437,15 +1462,18 @@ class ASTParser:
             and method_attr.value.id == "self"
         ):
             raise ParserSyntaxError(
-                "pl.submit(...) first argument must be a `self.<kernel>` method reference",
+                f"{construct}(...) first argument must be a `self.<kernel>` method reference",
                 span=span,
                 hint="Pass the kernel itself, not a call: "
-                "`pl.submit(self.kernel, x, y)` — not `pl.submit(self.kernel(x, y))`.",
+                f"`{construct}(self.kernel, x, y)` — not `{construct}(self.kernel(x, y))`.",
             )
-        return self._parse_kernel_call(method_attr, call.args[1:], call.keywords, span, as_submit=True)
+        return self._parse_kernel_call(
+            method_attr, call.args[1:], call.keywords, span, as_submit=True, as_spmd=is_spmd
+        )
 
-    def _parse_submit_single_lhs(self, target: ast.Name, call: ast.Call) -> None:
-        """Parse the bare single-LHS form ``result = pl.submit(self.kernel, ...)``.
+    def _parse_submit_single_lhs(self, target: ast.Name, call: ast.Call, *, is_spmd: bool = False) -> None:
+        """Parse the bare single-LHS form ``result = pl.submit(self.kernel, ...)``
+        (or ``pl.spmd_submit`` when ``is_spmd=True``).
 
         Used by :meth:`parse_assignment` (no annotation). The annotated form
         ``result: pl.Tuple[..., TASK_ID] = pl.submit(...)`` builds the Submit
@@ -1453,7 +1481,7 @@ class ASTParser:
         annotation-consistency flow before binding.
         """
         span = self.span_tracker.get_span(call)
-        call_expr = self._build_submit_single_lhs_expr(call)
+        call_expr = self._build_submit_single_lhs_expr(call, is_spmd=is_spmd)
         var = self._assign_or_let(target.id, call_expr, span)
         self.scope_manager.define_var(target.id, var, span=span)
 
@@ -3338,6 +3366,89 @@ class ASTParser:
         span = self.span_tracker.get_span(stmt)
         self._parse_scope_body(stmt, scope_kind, span, split=split_mode, name_hint=name_hint)
 
+    # Integer dtypes accepted for an SPMD ``core_num`` (block count). Shared by
+    # the ``pl.spmd`` scope path and the ``pl.spmd_submit`` task-launch path.
+    _CORE_NUM_INTEGER_DTYPES = frozenset(
+        {
+            DataType.INT4,
+            DataType.INT8,
+            DataType.INT16,
+            DataType.INT32,
+            DataType.INT64,
+            DataType.UINT4,
+            DataType.UINT8,
+            DataType.UINT16,
+            DataType.UINT32,
+            DataType.UINT64,
+            DataType.INDEX,
+        }
+    )
+
+    def _parse_and_validate_core_num(
+        self, value_node: ast.AST, source: ast.AST, usage_hint: str
+    ) -> "ir.Expr":
+        """Parse and validate an SPMD ``core_num`` expression.
+
+        ``core_num`` must be an integer-typed IR expression; a compile-time
+        constant must be strictly positive. Shared by ``pl.spmd`` (scope) and
+        ``pl.spmd_submit`` (task launch) so both reject the same bad inputs.
+        """
+        # ast.AST covers any expression; parse_expression expects ast.expr. The
+        # grammar for keyword values and positional args always gives ast.expr
+        # here, but cast for mypy's sake.
+        expr = self.parse_expression(cast("ast.expr", value_node))
+        expr_type = expr.type
+        is_integer = isinstance(expr_type, ir.ScalarType) and expr_type.dtype in self._CORE_NUM_INTEGER_DTYPES
+        if not is_integer:
+            raise ParserSyntaxError(
+                f"core_num must be an integer expression, got {python_print(expr_type, format=False)}",
+                span=self.span_tracker.get_span(source),
+                hint=usage_hint,
+            )
+        if isinstance(expr, ir.ConstInt) and expr.value <= 0:
+            raise ParserSyntaxError(
+                f"core_num must be a positive integer, got {expr.value}",
+                span=self.span_tracker.get_span(source),
+                hint=usage_hint,
+            )
+        return expr
+
+    def _parse_spmd_submit_kwargs(
+        self, method_name: str, keywords: list[ast.keyword], span: ir.Span
+    ) -> tuple["ir.Expr", bool]:
+        """Parse the SPMD launch-spec kwargs of ``pl.spmd_submit(...)``.
+
+        ``core_num=N`` is required (keyword-only — the positional slots are the
+        kernel's own arguments) and must be a positive integer expression.
+        ``sync_start=True/False`` is optional and must be a boolean literal.
+        Returns ``(core_num_expr, sync_start)``.
+        """
+        # Show the minimal required form (core_num is required; sync_start is
+        # optional and defaults to False, so it is omitted from the hint).
+        usage_hint = f"Use `out, tid = pl.spmd_submit(self.{method_name}, *args, core_num=N)`."
+        core_num: ir.Expr | None = None
+        sync_start = False
+        for kw in keywords:
+            if kw.arg == "core_num":
+                core_num = self._parse_and_validate_core_num(kw.value, kw.value, usage_hint)
+            elif kw.arg == "sync_start":
+                if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
+                    raise ParserSyntaxError(
+                        "sync_start must be a boolean literal (True/False)",
+                        span=self.span_tracker.get_span(kw.value),
+                        hint=usage_hint,
+                    )
+                sync_start = kw.value.value
+            # 'deps' / 'attrs' / 'device' are validated and consumed elsewhere
+            # in _parse_kernel_call; ignore them here.
+        if core_num is None:
+            raise ParserSyntaxError(
+                f"pl.spmd_submit(self.{method_name}, ...) requires the core_num keyword argument",
+                span=span,
+                hint=usage_hint,
+            )
+        return core_num, sync_start
+
     def _parse_spmd_kwargs(
         self,
         anchor: ast.AST,
@@ -3354,44 +3465,6 @@ class ASTParser:
         ``optimizations=[...]`` accepts only ``pl.split(MODE)`` — see
         :meth:`_parse_spmd_optimizations_list`.
         """
-
-        integer_dtypes = frozenset(
-            {
-                DataType.INT4,
-                DataType.INT8,
-                DataType.INT16,
-                DataType.INT32,
-                DataType.INT64,
-                DataType.UINT4,
-                DataType.UINT8,
-                DataType.UINT16,
-                DataType.UINT32,
-                DataType.UINT64,
-                DataType.INDEX,
-            }
-        )
-
-        def _parse_core_num_node(value_node: ast.AST, source: ast.AST) -> "ir.Expr":
-            # ast.AST covers any expression; parse_expression expects ast.expr.
-            # The grammar for keyword values and positional args always gives
-            # ast.expr here, but cast for mypy's sake.
-            expr = self.parse_expression(cast("ast.expr", value_node))
-            expr_type = expr.type
-            is_integer = isinstance(expr_type, ir.ScalarType) and expr_type.dtype in integer_dtypes
-            if not is_integer:
-                raise ParserSyntaxError(
-                    f"core_num must be an integer expression, got {python_print(expr_type, format=False)}",
-                    span=self.span_tracker.get_span(source),
-                    hint=usage_hint,
-                )
-            if isinstance(expr, ir.ConstInt) and expr.value <= 0:
-                raise ParserSyntaxError(
-                    f"core_num must be a positive integer, got {expr.value}",
-                    span=self.span_tracker.get_span(source),
-                    hint=usage_hint,
-                )
-            return expr
-
         if len(call.args) > 1:
             raise ParserSyntaxError(
                 "pl.spmd() accepts at most one positional argument (core_num)",
@@ -3400,7 +3473,7 @@ class ASTParser:
             )
         core_num: ir.Expr | None = None
         if call.args:
-            core_num = _parse_core_num_node(call.args[0], call.args[0])
+            core_num = self._parse_and_validate_core_num(call.args[0], call.args[0], usage_hint)
         sync_start: bool = False
         name_hint = ""
         split_mode: ir.SplitMode | None = None
@@ -3422,7 +3495,7 @@ class ASTParser:
                         span=self.span_tracker.get_span(kw.value),
                         hint=usage_hint,
                     )
-                core_num = _parse_core_num_node(kw.value, kw.value)
+                core_num = self._parse_and_validate_core_num(kw.value, kw.value, usage_hint)
             elif kw.arg == "sync_start":
                 if not isinstance(kw.value, ast.Constant) or not isinstance(kw.value.value, bool):
                     raise ParserSyntaxError(
@@ -4378,6 +4451,13 @@ class ASTParser:
                 span=self.span_tracker.get_span(call),
                 hint="pl.submit returns (kernel result, producer TaskId); bind both with tuple unpacking.",
             )
+        if _is_pl_call(call, "spmd_submit"):
+            raise ParserSyntaxError(
+                "pl.spmd_submit(...) must be unpacked as a 2-tuple: "
+                "`out, tid = pl.spmd_submit(self.kernel, ..., core_num=N)`",
+                span=self.span_tracker.get_span(call),
+                hint="pl.spmd_submit returns (kernel result, producer TaskId); unpack both as a 2-tuple.",
+            )
 
         # Handle cross-function calls via self.method_name() in @pl.program classes
         if isinstance(func, ast.Attribute):
@@ -4524,10 +4604,11 @@ class ASTParser:
         span: ir.Span,
         *,
         as_submit: bool,
+        as_spmd: bool = False,
     ) -> ir.Expr:
         """Build the ``ir.Call`` for a cross-function ``self.<method>(...)`` invocation.
 
-        Shared by two call surfaces:
+        Shared by three call surfaces:
 
         * the plain-call path in :meth:`parse_call` (``as_submit=False``) — a
           fire-and-forget kernel call; ``deps=`` is rejected and the call's
@@ -4536,13 +4617,19 @@ class ASTParser:
           (``as_submit=True``) — the call captures a producer TaskId; ``deps=``
           is accepted and the return type is augmented to the flat
           ``TupleType([*<callee returns>, Scalar[TASK_ID]])``.
+        * the ``pl.spmd_submit(...)`` path (``as_submit=True, as_spmd=True``) —
+          as above, plus the ``core_num=`` / ``sync_start=`` SPMD launch-spec
+          kwargs are accepted and recorded on the resulting ``ir.Submit``.
 
         Args:
             method_attr: The ``self.<method>`` attribute node.
             arg_nodes: Positional kernel argument AST nodes (no ``self.method``).
             keywords: Keyword AST nodes from the call site.
             span: Source span of the call.
-            as_submit: Whether this originates from a ``pl.submit(...)`` call.
+            as_submit: Whether this originates from a ``pl.submit``/
+                ``pl.spmd_submit`` call.
+            as_spmd: Whether this originates from a ``pl.spmd_submit(...)`` call
+                (accepts the ``core_num`` / ``sync_start`` launch-spec kwargs).
         """
         method_name = method_attr.attr
         if method_name not in self.global_vars:
@@ -4562,6 +4649,8 @@ class ASTParser:
         allowed_kwargs = {"attrs"}
         if as_submit:
             allowed_kwargs.add("deps")
+        if as_spmd:
+            allowed_kwargs.update({"core_num", "sync_start"})
         if func_obj is not None and func_obj.role == ir.Role.Orchestrator:
             allowed_kwargs.add("device")
         for kw in keywords:
@@ -4572,6 +4661,12 @@ class ASTParser:
                         "Plain self.kernel(...) is fire-and-forget. To attach "
                         "dependency edges, submit it: "
                         "`out, tid = pl.submit(self.kernel, ..., deps=[...])`."
+                    )
+                elif kw.arg in ("core_num", "sync_start") and not as_spmd:
+                    hint = (
+                        f"'{kw.arg}' is an SPMD launch parameter. Launch the kernel "
+                        "across multiple blocks with "
+                        "`out, tid = pl.spmd_submit(self.kernel, ..., core_num=N)`."
                     )
                 raise ParserTypeError(
                     f"Function '{method_name}' does not accept keyword argument '{kw.arg}'",
@@ -4603,6 +4698,13 @@ class ASTParser:
         # Orchestration dispatch ``device=`` kwarg: resolves to a ConstInt or
         # an enclosing-loop induction Var.
         device_expr = self._parse_dispatch_device_kwarg(keywords)
+        # ``pl.spmd_submit`` parses the SPMD launch spec (``core_num=`` /
+        # ``sync_start=``) into a (positive int Expr, bool) pair recorded on
+        # the resulting Submit.
+        core_num_expr: ir.Expr | None = None
+        sync_start = False
+        if as_spmd:
+            core_num_expr, sync_start = self._parse_spmd_submit_kwargs(method_name, keywords, span)
         return_types = func_obj.return_types if func_obj else []
         if func_obj is not None and return_types:
             return_types = ir.deduce_call_return_type(
@@ -4620,6 +4722,8 @@ class ASTParser:
             user_dep_vars=user_dep_vars,
             device_expr=device_expr,
             augment_task_id=as_submit,
+            core_num=core_num_expr,
+            sync_start=sync_start,
         )
 
     def _is_python_resolvable_ast(
@@ -4952,7 +5056,7 @@ class ASTParser:
             return None
         return self.parse_expression(device_kw.value)
 
-    def _make_call_with_return_type(
+    def _make_call_with_return_type(  # noqa: PLR0913 — cohesive call-builder; bundling args hurts clarity
         self,
         gvar: ir.GlobalVar,
         args: list[ir.Expr],
@@ -4963,6 +5067,8 @@ class ASTParser:
         user_dep_vars: list[ir.Var] | None = None,
         device_expr: ir.Expr | None = None,
         augment_task_id: bool = False,
+        core_num: ir.Expr | None = None,
+        sync_start: bool = False,
     ) -> ir.Expr:
         """Create an ir.Call, attaching the return type, optional call-site directions
         and optional per-arg ``NoDep`` overrides.
@@ -4999,6 +5105,12 @@ class ASTParser:
                 ``TupleType([*<callee returns>, Scalar[TASK_ID]])`` — elements
                 ``0..N-1`` are the kernel results, element ``N`` is the
                 producer TaskId.
+            core_num: Optional SPMD block-count :class:`ir.Expr` from the
+                ``pl.spmd_submit(..., core_num=N)`` path. Recorded on the
+                resulting ``ir.Submit.core_num`` (only valid with
+                ``augment_task_id=True``).
+            sync_start: SPMD sync-start flag from ``pl.spmd_submit(...,
+                sync_start=...)``. Recorded on ``ir.Submit.sync_start``.
         """
         if not return_types:
             return_type: ir.Type = ir.UnknownType()
@@ -5038,8 +5150,22 @@ class ASTParser:
                 submit_attrs = {k: v for k, v in attrs.items() if k != "manual_dep_edges"}
                 if not submit_attrs:
                     submit_attrs = None
-            if submit_attrs is not None:
-                return ir.Submit(gvar, args, deps_list, {}, submit_attrs, return_type, span)
+            # pl.spmd_submit carries an SPMD launch spec (core_num/sync_start) on
+            # the Submit; that requires the full ctor form even when there are
+            # no attrs. A plain pl.submit with no attrs keeps the minimal form
+            # so existing golden output is byte-identical.
+            if submit_attrs is not None or core_num is not None:
+                return ir.Submit(
+                    gvar,
+                    args,
+                    deps_list,
+                    {},
+                    submit_attrs,
+                    return_type,
+                    span,
+                    core_num=core_num,
+                    sync_start=sync_start,
+                )
             return ir.Submit(gvar, args, deps_list, return_type, span)
 
         if attrs is not None:

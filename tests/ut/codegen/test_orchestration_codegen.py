@@ -5039,5 +5039,232 @@ def test_mixed_in_and_out_of_scope_deps_does_not_crash_codegen():
     assert code.count(m.group(1)) == 1, code
 
 
+def test_spmd_submit_emits_launch_spec_and_captures_task_id():
+    """``pl.spmd_submit`` lowers to a single submit carrying the SPMD launch
+    spec (set_block_num / set_require_sync_start) and a captured producer
+    TaskId that a downstream submit depends on.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def producer(
+            self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            bi = pl.tile.get_block_idx()
+            off = bi * 128
+            t = pl.load(x, [off, 0], [128, 128])
+            out = pl.store(t, [off, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.InCore)
+        def consumer(
+            self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            t = pl.load(x, [0, 0], [128, 128])
+            out = pl.store(t, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            with pl.manual_scope():
+                scratch = pl.create_tensor([512, 128], dtype=pl.FP32)
+                scratch, tid = pl.spmd_submit(self.producer, x, scratch, core_num=4, sync_start=True)
+                out, _ = pl.spmd_submit(self.consumer, scratch, out, core_num=2, deps=[tid])
+            return out
+
+    code = _generate_orch_full_pipeline(P)
+    # Producer carries core_num=4 + sync_start; consumer carries core_num=2.
+    assert "params_t0.launch_spec.set_block_num(4);" in code, code
+    assert "params_t0.launch_spec.set_require_sync_start(true);" in code, code
+    assert "params_t1.launch_spec.set_block_num(2);" in code, code
+    # sync_start defaults False on the consumer — emitted exactly once.
+    assert code.count("set_require_sync_start(true)") == 1, code
+    # Producer TaskId is captured and the consumer depends on it.
+    assert re.search(r"PTO2TaskId\s+\w+\s*=\s*task_0_outs\.task_id\(\);", code), code
+    assert "set_dependencies(" in code, code
+
+
+def test_spmd_submit_group_emits_mixed_kernels_and_launch_spec():
+    """``pl.spmd_submit`` of a split (cube+vector) kernel routes through the
+    Group dispatch path and still emits the SPMD launch spec.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+        def kernel(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            b: pl.Tensor[[64, 64], pl.FP32],
+            bias: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+            tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+            tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+            tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+            tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+            tile_bias = pl.load(bias, [0, 0], [64, 64])
+            tile_out = pl.add(tile_mm, tile_bias)
+            out = pl.store(tile_out, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            b: pl.Tensor[[64, 64], pl.FP32],
+            bias: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            with pl.manual_scope():
+                out, _ = pl.spmd_submit(self.kernel, a, b, bias, out, core_num=4, sync_start=True)
+            return out
+
+    code = _generate_orch_full_pipeline(P)
+    assert "MixedKernels mixed_0" in code, code
+    assert "rt_submit_task(mixed_0, params_t0);" in code, code
+    assert "params_t0.launch_spec.set_block_num(4);" in code, code
+    assert "params_t0.launch_spec.set_require_sync_start(true);" in code, code
+
+
+def test_plain_submit_emits_no_launch_spec():
+    """Regression: a plain ``pl.submit`` (no SPMD launch spec) must not emit
+    any launch_spec calls — the spmd_submit path is fully opt-in.
+    """
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            t = pl.load(x, [0], [128])
+            out = pl.store(t, [0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            with pl.manual_scope():
+                out, _ = pl.submit(self.k, x, out)
+            return out
+
+    code = _generate_orch_full_pipeline(P)
+    assert "launch_spec" not in code, code
+
+
+def test_spmd_submit_aic_direct_dispatch():
+    """spmd_submit of a directly-declared AIC (cube) kernel routes through the
+    direct dispatch path: rt_submit_aic_task + launch spec (910B)."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend910B)
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.AIC)
+        def cube(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            b: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            ta = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+            tb = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+            la = pl.move(ta, target_memory=pl.MemorySpace.Left)
+            lb = pl.move(tb, target_memory=pl.MemorySpace.Right)
+            mm = pl.matmul(la, lb)
+            out = pl.store(mm, [0, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            a: pl.Tensor[[64, 64], pl.FP32],
+            b: pl.Tensor[[64, 64], pl.FP32],
+            out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+        ) -> pl.Tensor[[64, 64], pl.FP32]:
+            with pl.manual_scope():
+                out, _ = pl.spmd_submit(self.cube, a, b, out, core_num=8)
+            return out
+
+    # Property-only verification: a submit's deps/launch-spec don't survive the
+    # print->parse roundtrip after DeriveCallDirections (pre-existing limitation,
+    # same reason _generate_orch_full_pipeline uses BEFORE_AND_AFTER).
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        code = _generate_orch_code(P)
+    assert "rt_submit_aic_task" in code, code
+    assert "params_t0.launch_spec.set_block_num(8);" in code, code
+
+
+def test_spmd_submit_core_num_variable_emits_var_reference():
+    """A non-constant core_num (an orchestration scalar parameter) is emitted as
+    a variable reference in the launch spec, not constant-folded."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def k(
+            self, x: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            bi = pl.tile.get_block_idx()
+            off = bi * 128
+            t = pl.load(x, [off, 0], [128, 128])
+            out = pl.store(t, [off, 0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self,
+            x: pl.Tensor[[512, 128], pl.FP32],
+            n: pl.Scalar[pl.INDEX],
+            out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+        ) -> pl.Tensor[[512, 128], pl.FP32]:
+            with pl.manual_scope():
+                out, _ = pl.spmd_submit(self.k, x, out, core_num=n)
+            return out
+
+    code = _generate_orch_full_pipeline(P)
+    m = re.search(r"launch_spec\.set_block_num\(([^)]*)\)", code)
+    assert m, f"no set_block_num in:\n{code}"
+    # The argument is a variable reference (a name), not a constant-folded literal.
+    assert not m.group(1).strip().isdigit(), f"core_num was constant-folded, expected a var: {m.group(1)!r}"
+
+
+def test_spmd_submit_950_backend_emits_set_core_num():
+    """On Ascend950 the launch spec uses set_core_num (vs set_block_num on 910B),
+    via the backend handler's GetLaunchSpecCoreCountMethod()."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.Ascend950)
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.AIV)
+        def k(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            t = pl.load(x, [0], [128])
+            out = pl.store(t, [0], out)
+            return out
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(
+            self, x: pl.Tensor[[128], pl.FP32], out: pl.Out[pl.Tensor[[128], pl.FP32]]
+        ) -> pl.Tensor[[128], pl.FP32]:
+            with pl.manual_scope():
+                out, _ = pl.spmd_submit(self.k, x, out, core_num=4)
+            return out
+
+    # Property-only verification (see test_spmd_submit_aic_direct_dispatch).
+    with passes.PassContext([passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)]):
+        code = _generate_orch_code(P)
+    assert "params_t0.launch_spec.set_core_num(4);" in code, code
+    assert "set_block_num" not in code, code
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -386,6 +386,68 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
   return std::make_shared<Call>(op, args, std::move(kwargs), std::move(attrs), type, span);
 }
 
+// Deserialize Submit (pl.submit / pl.spmd_submit task launch). Mirrors
+// DeserializeCall plus the first-class deps_ field and the SPMD launch spec
+// (core_num / sync_start). Serialization is reflection-driven, so this is the
+// only hand-written half (see serializer.cpp SERIALIZE_FIELDS(Submit)).
+static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                   DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+  auto op = ctx.DeserializeOp(GET_FIELD_OBJ("op"));
+  auto type = ctx.DeserializeType(GET_FIELD_OBJ("type"), zone);
+
+  std::vector<ExprPtr> args;
+  auto args_obj = GET_FIELD_OBJ("args");
+  if (args_obj.type == msgpack::type::ARRAY) {
+    for (uint32_t i = 0; i < args_obj.via.array.size; ++i) {
+      args.push_back(
+          std::static_pointer_cast<const Expr>(ctx.DeserializeNode(args_obj.via.array.ptr[i], zone)));
+    }
+  }
+
+  // deps_ is a first-class field (Scalar[TASK_ID] / Array[N, TASK_ID] Vars),
+  // serialized as an array of nodes.
+  std::vector<ExprPtr> deps;
+  auto deps_obj = GET_FIELD_OBJ("deps");
+  if (deps_obj.type == msgpack::type::ARRAY) {
+    for (uint32_t i = 0; i < deps_obj.via.array.size; ++i) {
+      deps.push_back(
+          std::static_pointer_cast<const Expr>(ctx.DeserializeNode(deps_obj.via.array.ptr[i], zone)));
+    }
+  }
+
+  // SPMD launch spec (pl.spmd_submit). core_num is an optional Expr node —
+  // NIL / absent means a plain submit (single block). sync_start is a bool
+  // (default false), only meaningful when core_num is present.
+  std::optional<ExprPtr> core_num;
+  auto core_num_opt = GetOptionalFieldObj(fields_obj, "core_num", ctx);
+  if (core_num_opt.has_value()) {
+    core_num = std::static_pointer_cast<const Expr>(ctx.DeserializeNode(*core_num_opt, zone));
+  }
+  bool sync_start = false;
+  auto sync_start_obj = GetOptionalFieldObj(fields_obj, "sync_start", ctx);
+  if (sync_start_obj.has_value() && sync_start_obj->type != msgpack::type::NIL) {
+    CHECK_SPAN(sync_start_obj->type == msgpack::type::BOOLEAN, span)
+        << "Submit sync_start must be a bool, got msgpack type " << static_cast<int>(sync_start_obj->type);
+    sync_start = sync_start_obj->as<bool>();
+  }
+
+  // Generic attrs map. Submit never stores manual_dep_edges in attrs (deps_ is
+  // the source of truth), so no legacy top-level arg_directions lifting is
+  // needed — arg_directions, when present, round-trips through the attrs map.
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_opt, "attrs");
+  }
+
+  auto kwargs_obj = GET_FIELD_OBJ("kwargs");
+  std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs");
+
+  return std::make_shared<Submit>(op, args, deps, std::move(kwargs), std::move(attrs), type, span,
+                                  std::move(core_num), sync_start);
+}
+
 // Macro for binary expressions
 #define DESERIALIZE_BINARY_EXPR(ClassName)                                                                \
   static IRNodePtr Deserialize##ClassName(const msgpack::object& fields_obj, msgpack::zone& zone,         \
@@ -724,6 +786,28 @@ static IRNodePtr DeserializeSpmdScopeStmt(const msgpack::object& fields_obj, msg
                                          DeserializeLeadingComments(fields_obj));
 }
 
+// Deserialize RuntimeScopeStmt (pl.manual_scope MANUAL wrapper / AUTO PTO2_SCOPE
+// wrapper added by MaterializeRuntimeScopes). Submit nodes live inside this, so
+// serializing a manual_scope program requires it.
+static IRNodePtr DeserializeRuntimeScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
+                                             DeserializerContext& ctx) {
+  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
+
+  // manual is required (bool, defaults to false = AUTO if missing).
+  bool manual = false;
+  auto manual_obj = GetOptionalFieldObj(fields_obj, "manual", ctx);
+  if (manual_obj.has_value() && manual_obj->type != msgpack::type::NIL) {
+    CHECK_SPAN(manual_obj->type == msgpack::type::BOOLEAN, span)
+        << "RuntimeScopeStmt manual must be a bool, got msgpack type " << static_cast<int>(manual_obj->type);
+    manual = manual_obj->as<bool>();
+  }
+
+  auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
+  auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
+  return std::make_shared<RuntimeScopeStmt>(manual, std::move(name_hint), body, span,
+                                            DeserializeLeadingComments(fields_obj));
+}
+
 // Deserialize SeqStmts
 static IRNodePtr DeserializeSeqStmts(const msgpack::object& fields_obj, msgpack::zone& zone,
                                      DeserializerContext& ctx) {
@@ -987,6 +1071,7 @@ static TypeRegistrar _const_int_registrar("ConstInt", DeserializeConstInt);
 static TypeRegistrar _const_float_registrar("ConstFloat", DeserializeConstFloat);
 static TypeRegistrar _const_bool_registrar("ConstBool", DeserializeConstBool);
 static TypeRegistrar _call_registrar("Call", DeserializeCall);
+static TypeRegistrar _submit_registrar("Submit", DeserializeSubmit);
 
 static TypeRegistrar _add_registrar("Add", DeserializeAdd);
 static TypeRegistrar _sub_registrar("Sub", DeserializeSub);
@@ -1030,6 +1115,7 @@ static TypeRegistrar _auto_in_core_scope_stmt_registrar("AutoInCoreScopeStmt",
 static TypeRegistrar _cluster_scope_stmt_registrar("ClusterScopeStmt", DeserializeClusterScopeStmt);
 static TypeRegistrar _hierarchy_scope_stmt_registrar("HierarchyScopeStmt", DeserializeHierarchyScopeStmt);
 static TypeRegistrar _spmd_scope_stmt_registrar("SpmdScopeStmt", DeserializeSpmdScopeStmt);
+static TypeRegistrar _runtime_scope_stmt_registrar("RuntimeScopeStmt", DeserializeRuntimeScopeStmt);
 static TypeRegistrar _seq_stmts_registrar("SeqStmts", DeserializeSeqStmts);
 static TypeRegistrar _eval_stmt_registrar("EvalStmt", DeserializeEvalStmt);
 static TypeRegistrar _break_stmt_registrar("BreakStmt", DeserializeBreakStmt);

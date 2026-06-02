@@ -152,4 +152,40 @@ def submit(*args: Any, **kwargs: Any) -> Any:
     )
 
 
-__all__ = ["ScopeMode", "manual_scope", "scope", "submit"]
+def spmd_submit(*args: Any, **kwargs: Any) -> Any:
+    """Launch a kernel as an SPMD task and capture its producer TaskId.
+
+    ``pl.spmd_submit`` is a **parser construct**, not a runtime function — the
+    DSL parser intercepts ``result, tid = pl.spmd_submit(self.kernel, *args,
+    core_num=N, sync_start=..., deps=[...])`` syntactically and never actually
+    calls this body. It is defined only so the name resolves (imports / linters).
+
+    It is the SPMD sibling of :func:`submit`: a single orchestration task that
+    the runtime fans out across ``core_num`` logical blocks (each kernel reads
+    its block index via ``pl.tile.get_block_idx()``). Like :func:`submit` it
+    returns one producer TaskId, so the whole dispatch can be named as a
+    dependency of later tasks.
+
+    Surface form (must be unpacked as a 2-tuple)::
+
+        out, tid = pl.spmd_submit(self.incore_kernel, x, y, core_num=8)
+        out, tid = pl.spmd_submit(self.kernel, x, core_num=8, sync_start=True,
+                                  deps=[prev_tid])
+
+    ``core_num`` is a **required keyword argument** (a positive integer
+    expression) — the positional slots are the kernel's own arguments.
+    ``sync_start`` (default ``False``) requires all blocks to launch atomically.
+    ``deps=[...]`` works exactly as on :func:`submit`. The callee may be an
+    InCore / AIC / AIV kernel or a co-scheduled Group.
+
+    Like :func:`submit`, it works in both auto and manual scope; its primary use
+    is explicit dependency wiring inside ``pl.manual_scope()``.
+    """
+    raise RuntimeError(
+        "pl.spmd_submit is a DSL parser construct and cannot be called directly; "
+        "use it as `result, task_id = pl.spmd_submit(self.kernel, *args, core_num=N, deps=[...])` "
+        "inside a @pl.function body."
+    )
+
+
+__all__ = ["ScopeMode", "manual_scope", "scope", "submit", "spmd_submit"]

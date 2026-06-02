@@ -346,6 +346,7 @@ See [Language Guide](../../user/01-language_guide.md#incore-scopes) for examples
 
 - `with pl.spmd(N): kernel(...)` — body must be a single call to a pre-defined InCore kernel.
 - `for i in pl.spmd(N): ...` — loop variable binds the per-block index (`pl.tile.get_block_idx()`); the body is auto-outlined into a synthetic InCore region.
+- `out, tid = pl.spmd_submit(kernel, *args, core_num=N)` — **submit form**: dispatches the kernel across `N` blocks *and* captures the dispatch's producer `pl.Scalar[pl.TASK_ID]`, so the whole SPMD launch can be named as a dependency of later tasks. See [Manual dependency primitives](#manual-dependency-primitives).
 
 Optional `optimizations=[pl.split(MODE)]` only (**not** `pl.auto_chunk`; use `pl.at(..., optimizations=[pl.auto_chunk])` inside the body for chunked loops):
 
@@ -385,6 +386,7 @@ shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 | Surface | Producer shape | Notes |
 | ------- | -------------- | ----- |
 | `result, tid = pl.submit(kernel, *args, deps=[...])` | single kernel call | The trailing `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. |
+| `result, tid = pl.spmd_submit(kernel, *args, core_num=N, sync_start=False, deps=[...])` | single SPMD task launch | The SPMD sibling of `pl.submit`: dispatches the kernel across `N` blocks (one orchestration task → one `tid`). `core_num` is a required keyword (positive int expr); `sync_start=True` forces atomic launch of all blocks. Callee may be InCore / AIC / AIV / Group. Records the launch spec on `Submit.core_num` / `Submit.sync_start`. |
 | `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + Call; `tid` captures the synthesized call's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | Submits no kernel. The returned TaskId is a compact fan-in point for later `deps=[barrier]`. |
 | `None` (Python literal) | seed / dep entry | The "no producer yet" sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` in `deps=[None]` is dropped (contributes no edge). Lowers to `system.task_invalid` → `PTO2TaskId::invalid()`. |

@@ -210,6 +210,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(ConstFloat);
     SERIALIZE_FIELDS(ConstBool);
     SERIALIZE_FIELDS(Call);
+    SERIALIZE_FIELDS(Submit);
     SERIALIZE_FIELDS(MakeTuple);
     SERIALIZE_FIELDS(TupleGetItemExpr);
 
@@ -228,6 +229,7 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(ClusterScopeStmt);
     SERIALIZE_FIELDS(HierarchyScopeStmt);
     SERIALIZE_FIELDS(SpmdScopeStmt);
+    SERIALIZE_FIELDS(RuntimeScopeStmt);
     SERIALIZE_FIELDS(SeqStmts);
     SERIALIZE_FIELDS(EvalStmt);
     SERIALIZE_FIELDS(BreakStmt);

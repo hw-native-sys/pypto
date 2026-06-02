@@ -1554,9 +1554,24 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return GenerateExprString(expr);
   }
 
-  void EmitLaunchSpec(const std::string& ind, const std::string& task_var, const FunctionPtr& launch_func) {
-    auto core_num_expr = launch_func->GetAttr<ExprPtr>("core_num", nullptr);
-    bool sync_start = launch_func->GetAttr<bool>("sync_start", false);
+  // Resolve the effective SPMD launch spec for a dispatch. ``pl.spmd_submit``
+  // carries core_num/sync_start on the Submit, surfaced as Call attrs by
+  // SubmitToCallView; the scope-based ``with pl.spmd`` path carries them on
+  // the Spmd-wrapper function. Prefer the call's own attrs (spmd_submit), then
+  // fall back to the launch function's attrs (scope-based spmd / group).
+  [[nodiscard]] std::pair<ExprPtr, bool> EffectiveLaunchSpec(const CallPtr& call,
+                                                             const FunctionPtr& launch_func) const {
+    ExprPtr core_num = call->GetAttr<ExprPtr>("core_num", nullptr);
+    bool sync_start = call->GetAttr<bool>("sync_start", false);
+    if (!core_num && launch_func) {
+      core_num = launch_func->GetAttr<ExprPtr>("core_num", nullptr);
+      sync_start = launch_func->GetAttr<bool>("sync_start", false);
+    }
+    return {core_num, sync_start};
+  }
+
+  void EmitLaunchSpec(const std::string& ind, const std::string& task_var, const ExprPtr& core_num_expr,
+                      bool sync_start) {
     if (core_num_expr) {
       const std::string method = pypto::backend::GetBackend()->GetHandler()->GetLaunchSpecCoreCountMethod();
       code_ << ind << task_var << ".launch_spec." << method << "(" << RenderLaunchCoreNum(core_num_expr)
@@ -1969,6 +1984,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // pointers block) and named ``ext_<outer-arg-name>_ctx``.
     EmitDistTensorCtxScalars(call, callee_func, ind, task_var);
     EmitManualDeps(call, task_var);
+    // SPMD launch spec for pl.spmd_submit targeting an AIC/AIV kernel directly
+    // (no Spmd-wrapper function). core_num/sync_start ride on the Submit and
+    // are surfaced as Call attrs by SubmitToCallView; a plain submit / call
+    // has neither, so EffectiveLaunchSpec yields (nullptr, false) → no-op.
+    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, callee_func);
+    EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
 
     std::string submit_expr =
         CoreTypeToSubmitPrefix(core_type) + std::to_string(func_id) + ", " + task_var + ")";
@@ -2000,7 +2021,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     for (const auto& p : params) {
       code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
     }
-    EmitLaunchSpec(ind, task_var, spmd_func);
+    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, spmd_func);
+    EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
     EmitManualDeps(call, task_var);
 
     std::string submit_expr =
@@ -2040,7 +2062,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
         code_ << ind << task_var << "." << ArgDirectionToMethodName(p.direction) << "(" << p.value << ");\n";
       }
 
-      EmitLaunchSpec(ind, task_var, launch_func);
+      auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
+      EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
       EmitManualDeps(call, task_var);
 
       std::string submit_expr =
@@ -2087,7 +2110,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
     code_ << ind << "MixedKernels mixed_" << task_counter_ << " = {" << aic_id << ", " << aiv_id << ", "
           << third_id << "};\n";
 
-    EmitLaunchSpec(ind, task_var, launch_func);
+    auto [launch_core_num, launch_sync_start] = EffectiveLaunchSpec(call, launch_func);
+    EmitLaunchSpec(ind, task_var, launch_core_num, launch_sync_start);
     EmitManualDeps(call, task_var);
 
     std::string submit_expr = "rt_submit_task(mixed_" + std::to_string(task_counter_) + ", " + task_var + ")";
