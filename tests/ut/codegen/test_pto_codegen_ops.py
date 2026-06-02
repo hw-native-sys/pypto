@@ -1053,6 +1053,54 @@ class TestTileSliceCodegen:
             + "\n".join(set_vs_lines)
         )
 
+    def test_tile_slice_mixed_dynamic_static_valid_shape_per_dim_type(self):
+        """tile.slice(valid_shape=[dynamic_row, static_col]) must keep the static
+        col dim static in the result tile_buf type.
+
+        Regression for the pypto-lib qwen3-14b `lm_head_store` PTOAS failure:
+        when valid_shape mixes a dynamic dim (e.g. `pl.min(...)` row count) with
+        a static dim, the result tile_buf type must reflect each dim's
+        static/dynamic-ness independently. A previous lowering promoted *both*
+        dims to dynamic when either was dynamic, emitting `v_col=?` while the
+        subview's `valid [...]` operand for that dim was a ConstInt — which
+        PTOAS rejects with "'pto.subview' op expects result valid_shape[1] to
+        match inferred/explicit valid_col". The static valid operand must pair
+        with a static `v_col=<N>` result dim.
+        """
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 64], pl.FP32],
+                valid_rows: pl.Scalar[pl.INDEX],
+                dst: pl.Tensor[[16, 64], pl.FP32],
+            ) -> pl.Tensor[[16, 64], pl.FP32]:
+                src_tile: pl.Tile[[16, 64], pl.FP32] = pl.load(src, [0, 0], [16, 64])
+                sliced: pl.Tile[[16, 64], pl.FP32] = pl.tile.slice(
+                    src_tile, [16, 64], [0, 0], valid_shape=[valid_rows, 64]
+                )
+                return pl.store(sliced, [0, 0], dst)
+
+        mlir = self._generate_mlir(Prog)
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert len(subview_lines) == 1, f"expected one pto.subview, got:\n{mlir}"
+        # The result tile_buf type is the right-hand side of the `->`.
+        result_type = subview_lines[0].split("->", 1)[-1]
+        assert "v_col=64" in result_type, (
+            f"static valid col (64) must yield a static v_col=64 result dim (PTOAS "
+            f"requires the valid operand and result type to agree per-dim), got:\n{subview_lines[0]}"
+        )
+        assert "v_col=?" not in result_type, (
+            f"static valid col must NOT be promoted to dynamic v_col=? (this is the "
+            f"lm_head_store PTOAS rejection), got:\n{subview_lines[0]}"
+        )
+        # The dynamic row dim stays dynamic.
+        assert "v_row=?" in result_type, (
+            f"dynamic valid row must yield a dynamic v_row=? result dim, got:\n{subview_lines[0]}"
+        )
+
     def test_tile_slice_multiple_slices_have_correct_types(self):
         """Multiple tile.slice from one reshape must produce correct type annotations.
 

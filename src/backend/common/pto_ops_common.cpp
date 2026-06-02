@@ -3494,19 +3494,21 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     auto view_type_info = InferSubviewTileTypeComponents(*source_tile_type, *shape_tuple, *offset_tuple,
                                                          codegen.GetTypeString(source_tile_type->dtype_));
     if (has_explicit_valid_shape) {
-      // User-supplied valid_shape takes precedence over inference.
+      // User-supplied valid_shape takes precedence over inference. Each dim is
+      // honored independently: a ConstInt valid operand yields a static result
+      // dim, a dynamic operand yields a dynamic one. Do NOT promote both dims
+      // to dynamic when one is — for the explicit `valid [...]` form PTOAS
+      // reads each valid operand directly and requires the result tile_buf
+      // type's v_row/v_col to match per-dim (a static `valid_col` operand with
+      // a `v_col=?` result type is rejected: 'pto.subview' op expects result
+      // valid_shape[1] to match inferred/explicit valid_col). This mirrors
+      // tile.assemble's per-dim handling.
       auto valid_row_const = ir::As<ir::ConstInt>(valid_tuple->elements_[0]);
       auto valid_col_const = ir::As<ir::ConstInt>(valid_tuple->elements_[1]);
       view_type_info.v_row_dynamic = valid_row_const == nullptr;
       view_type_info.v_col_dynamic = valid_col_const == nullptr;
       if (valid_row_const) view_type_info.v_row = valid_row_const->value_;
       if (valid_col_const) view_type_info.v_col = valid_col_const->value_;
-      // Match ExtractTileTypeInfo: PTOAS rejects mixed static/dynamic valid
-      // dims on 2D tiles, so promote both to dynamic when either is.
-      if (view_type_info.v_row_dynamic || view_type_info.v_col_dynamic) {
-        view_type_info.v_row_dynamic = true;
-        view_type_info.v_col_dynamic = true;
-      }
     }
 
     INTERNAL_CHECK_SPAN(source_tile_type->memory_space_.has_value(), op->span_)
