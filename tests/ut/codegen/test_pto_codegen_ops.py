@@ -1011,7 +1011,15 @@ class TestTileSliceCodegen:
         )
 
     def test_tile_slice_codegen_with_valid_shape(self):
-        """tile.slice(..., valid_shape=...) emits pto.subview + pto.tmov + pto.set_validshape."""
+        """tile.slice(..., valid_shape=...) emits a single pto.subview with a `valid [...]` clause.
+
+        tile.slice is a pure view; the explicit valid_shape is encoded directly
+        into pto.subview's `valid [...]` operand list. No materializing pto.tmov
+        or follow-up pto.set_validshape is emitted — that earlier lowering
+        aliased the source allocation and corrupted source rows for dynamic
+        offsets (issue #1622). See also the matching codegen test
+        ``test_pto_codegen_slice_full_window_dynamic_valid_shape_uses_subview_valid``.
+        """
 
         @pl.program
         class Prog:
@@ -1029,13 +1037,21 @@ class TestTileSliceCodegen:
                 return pl.store(sliced, [0, 0], dst)
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.subview" in mlir, f"tile.slice with valid_shape should generate pto.subview, got:\n{mlir}"
-        # With explicit valid_shape, tile.slice emits subview + tmov + set_validshape
-        # instead of a subview with `valid [...]` clause.
+        subview_lines = [line for line in mlir.splitlines() if "pto.subview" in line]
+        assert len(subview_lines) == 1, (
+            f"tile.slice with valid_shape should emit exactly one pto.subview, got:\n{mlir}"
+        )
+        assert "valid [" in subview_lines[0], (
+            f"pto.subview should carry a `valid [...]` clause when valid_shape is explicit, got:\n"
+            f"{subview_lines[0]}"
+        )
         tmov_lines = [line for line in mlir.splitlines() if "pto.tmov" in line]
-        assert tmov_lines, f"Expected pto.tmov after subview for valid_shape slice, got:\n{mlir}"
+        assert not tmov_lines, "tile.slice must not emit pto.tmov (pure view), got:\n" + "\n".join(tmov_lines)
         set_vs_lines = [line for line in mlir.splitlines() if "pto.set_validshape" in line]
-        assert set_vs_lines, f"Expected pto.set_validshape for valid_shape slice, got:\n{mlir}"
+        assert not set_vs_lines, (
+            "tile.slice must not emit pto.set_validshape (valid encoded in subview), got:\n"
+            + "\n".join(set_vs_lines)
+        )
 
     def test_tile_slice_multiple_slices_have_correct_types(self):
         """Multiple tile.slice from one reshape must produce correct type annotations.

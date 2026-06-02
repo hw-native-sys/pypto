@@ -3483,92 +3483,70 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     std::string result_type = codegen.GetCurrentResultTileBufTypeString();
     INTERNAL_CHECK_SPAN(!result_target.empty(), op->span_) << "tile.slice requires assignment target";
 
-    auto row_off_const = ir::As<ir::ConstInt>(offset_tuple->elements_[0]);
-    auto col_off_const = ir::As<ir::ConstInt>(offset_tuple->elements_[1]);
-    bool full_window = row_off_const && col_off_const && row_off_const->value_ == 0 &&
-                       col_off_const->value_ == 0 && source_tile_type->shape_.size() >= 2 &&
-                       ExprsEquivalentForSubview(shape_tuple->elements_[0], source_tile_type->shape_[0]) &&
-                       ExprsEquivalentForSubview(shape_tuple->elements_[1], source_tile_type->shape_[1]);
-
-    // Skip the tmov fast-path when the source is already a subview: tmov
-    // materializes a copy, which breaks view/alias semantics that tile.slice
-    // must preserve.  Fall through to the normal subview emission instead.
-    bool source_is_subview = codegen.GetSubviewMaterialization(src) != nullptr;
-    if (full_window && !source_is_subview) {
-      std::ostringstream mov;
-      mov << "pto.tmov ins(" << src;
-      if (!src_type.empty()) mov << " : " << src_type;
-      mov << ") outs(" << result_target;
-      if (!result_type.empty()) mov << " : " << result_type;
-      mov << ")";
-      codegen.Emit(mov.str());
-      if (has_explicit_valid_shape) {
-        std::ostringstream set_validshape;
-        set_validshape << "pto.set_validshape " << result_target << ", " << valid_row << ", " << valid_col;
-        if (!result_type.empty()) {
-          set_validshape << " : " << result_type;
-        }
-        codegen.Emit(set_validshape.str());
+    // tile.slice is always a pure pto.subview view of its source. The 4-arg
+    // form (explicit valid_shape) encodes the result valid into pto.subview's
+    // `valid [...]` clause; no pto.tmov / pto.set_validshape is emitted. This
+    // keeps tile.slice consistent with its set_output_memory_inherit_input
+    // contract (the result MemRef shares the source base by design) and
+    // avoids the alias corruption seen in #1622 where the previous
+    // materializing path's pto.tmov destination overlapped the source
+    // allocation when the slice offset was dynamic.
+    auto view_type_info = InferSubviewTileTypeComponents(*source_tile_type, *shape_tuple, *offset_tuple,
+                                                         codegen.GetTypeString(source_tile_type->dtype_));
+    if (has_explicit_valid_shape) {
+      // User-supplied valid_shape takes precedence over inference.
+      auto valid_row_const = ir::As<ir::ConstInt>(valid_tuple->elements_[0]);
+      auto valid_col_const = ir::As<ir::ConstInt>(valid_tuple->elements_[1]);
+      view_type_info.v_row_dynamic = valid_row_const == nullptr;
+      view_type_info.v_col_dynamic = valid_col_const == nullptr;
+      if (valid_row_const) view_type_info.v_row = valid_row_const->value_;
+      if (valid_col_const) view_type_info.v_col = valid_col_const->value_;
+      // Match ExtractTileTypeInfo: PTOAS rejects mixed static/dynamic valid
+      // dims on 2D tiles, so promote both to dynamic when either is.
+      if (view_type_info.v_row_dynamic || view_type_info.v_col_dynamic) {
+        view_type_info.v_row_dynamic = true;
+        view_type_info.v_col_dynamic = true;
       }
-      return std::string("");
     }
 
-    // Emit a pto.subview and register its type; returns (view_ssa, view_type).
-    auto emit_subview = [&]() -> std::pair<std::string, std::string> {
-      auto view_type_info = InferSubviewTileTypeComponents(*source_tile_type, *shape_tuple, *offset_tuple,
-                                                           codegen.GetTypeString(source_tile_type->dtype_));
-      INTERNAL_CHECK_SPAN(source_tile_type->memory_space_.has_value(), op->span_)
-          << "tile.slice source must carry a memory space for pto.subview result typing";
-      std::string view_type = codegen::FormatTileBufTypeString(
-          codegen::MemorySpaceToMLIR(*source_tile_type->memory_space_), view_type_info.dtype_str,
-          view_type_info.rows, view_type_info.cols, view_type_info.blayout, view_type_info.slayout,
-          view_type_info.fractal, view_type_info.pad, view_type_info.v_row, view_type_info.v_col,
-          view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
-      std::string view_ssa = codegen.NewNamedTemp("slice_view");
-      std::ostringstream oss;
-      oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
-          << rows_const->value_ << ", " << cols_const->value_ << "]";
-      if (!src_type.empty() && !view_type.empty()) {
-        oss << " : " << src_type << " -> " << view_type;
-      }
-      codegen.Emit(oss.str());
-      codegen.RegisterTileBufType(view_ssa, view_type);
-      return {view_ssa, view_type};
-    };
+    INTERNAL_CHECK_SPAN(source_tile_type->memory_space_.has_value(), op->span_)
+        << "tile.slice source must carry a memory space for pto.subview result typing";
+    std::string view_type = codegen::FormatTileBufTypeString(
+        codegen::MemorySpaceToMLIR(*source_tile_type->memory_space_), view_type_info.dtype_str,
+        view_type_info.rows, view_type_info.cols, view_type_info.blayout, view_type_info.slayout,
+        view_type_info.fractal, view_type_info.pad, view_type_info.v_row, view_type_info.v_col,
+        view_type_info.v_row_dynamic, view_type_info.v_col_dynamic);
 
-    if (!has_explicit_valid_shape) {
-      auto [view_ssa, view_type] = emit_subview();
-      codegen::PTOCodegen::SubviewMaterializationInfo mat_info;
-      mat_info.source_ssa = src;
-      mat_info.source_type = src_type;
-      mat_info.row_off_ssa = row_off;
-      mat_info.col_off_ssa = col_off;
-      mat_info.materialize_target_ssa = result_target;
-      mat_info.materialize_target_type = result_type;
-      codegen.RegisterSubviewMaterialization(view_ssa, mat_info);
-      // For pure static-window slices, keep the result as a true pto.subview
-      // SSA instead of materializing a copy. This preserves view semantics and
-      // avoids backend C++ lowering reconstructing the TMOV source tile with
-      // the base tile's physical cols/rows.
-      codegen.SetCurrentResultBuf(view_ssa);
-      return std::string("");
+    std::string view_ssa = codegen.NewNamedTemp("slice_view");
+    std::ostringstream oss;
+    oss << view_ssa << " = pto.subview " << src << "[" << row_off << ", " << col_off << "] sizes ["
+        << rows_const->value_ << ", " << cols_const->value_ << "]";
+    if (has_explicit_valid_shape) {
+      oss << " valid [" << valid_row << ", " << valid_col << "]";
     }
-
-    auto [producer, producer_type] = emit_subview();
-
-    std::ostringstream mov;
-    mov << "pto.tmov ins(" << producer;
-    if (!producer_type.empty()) mov << " : " << producer_type;
-    mov << ") outs(" << result_target;
-    if (!result_type.empty()) mov << " : " << result_type;
-    mov << ")";
-    codegen.Emit(mov.str());
-    std::ostringstream set_validshape;
-    set_validshape << "pto.set_validshape " << result_target << ", " << valid_row << ", " << valid_col;
-    if (!result_type.empty()) {
-      set_validshape << " : " << result_type;
+    if (!src_type.empty() && !view_type.empty()) {
+      oss << " : " << src_type << " -> " << view_type;
     }
-    codegen.Emit(set_validshape.str());
+    codegen.Emit(oss.str());
+    codegen.RegisterTileBufType(view_ssa, view_type);
+
+    // Lazy materialization fallback: a few downstream ops (e.g. pto.tcolexpandmul)
+    // cannot consume a subview SSA directly because their hardware lowering
+    // reads physical tile dims from the operand type. MaterializeSubviewOperandIfNeeded
+    // will emit pto.textract on demand into result_target if such a consumer appears.
+    codegen::PTOCodegen::SubviewMaterializationInfo mat_info;
+    mat_info.source_ssa = src;
+    mat_info.source_type = src_type;
+    mat_info.row_off_ssa = row_off;
+    mat_info.col_off_ssa = col_off;
+    mat_info.materialize_target_ssa = result_target;
+    mat_info.materialize_target_type = result_type;
+    codegen.RegisterSubviewMaterialization(view_ssa, mat_info);
+
+    // Bind the slice's result variable to the subview SSA; the pre-emitted
+    // alloc_tile for the result becomes dead and is eliminated by downstream
+    // PTOAS passes.
+    codegen.SetCurrentResultBuf(view_ssa);
     return std::string("");
   });
   reg("tile.assemble", [](const ir::CallPtr& op, codegen::CodegenBase& codegen) {

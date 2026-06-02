@@ -2071,9 +2071,11 @@ def test_pto_codegen_mixed_scalar_and_tile_iter_args():
 
 
 def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
-    """Slice with partially dynamic valid_shape followed by fillpad must lower
-    without a scratch slice alloc, and feed a dynamic valid_shape tile into
-    pto.tfillpad."""
+    """Slice with partially dynamic valid_shape feeding fillpad: tile.slice
+    lowers to a single pto.subview carrying the valid clause, then fillpad
+    reads the dynamic-valid subview directly. No materializing data-movement
+    op is emitted between the two.
+    """
 
     @pl.program
     class SliceFillpadProgram:
@@ -2093,21 +2095,26 @@ def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
 
     mlir_code = _generate_default_mlir(SliceFillpadProgram)
 
-    # tile.slice now lowers to a pto.subview view rather than a textract
-    # data-movement op; no slice_buf scratch allocation should appear.
+    # tile.slice lowers to a pto.subview view; no scratch slice_buf alloc and
+    # no textract data-movement op should appear.
     assert "= pto.alloc_tile" not in "\n".join(
         line for line in mlir_code.splitlines() if "slice_buf" in line
     ), f"Unexpected slice_buf alloc_tile — pto.subview is a view, no extra buffer needed.\n{mlir_code}"
     assert "pto.textract" not in mlir_code, f"tile.slice no longer emits pto.textract, got:\n{mlir_code}"
 
-    # Full-window slice with explicit valid_shape lowers via data-preserving
-    # pto.tmov plus a follow-up pto.set_validshape.
+    # Single pto.subview carrying the dynamic valid_shape in its `valid [...]`
+    # clause — no follow-up pto.tmov or pto.set_validshape (issue #1622 fix).
     subview_lines = [line.strip() for line in mlir_code.splitlines() if "pto.subview" in line]
-    assert len(subview_lines) == 0, f"Full-window slice should not emit pto.subview, got: {subview_lines}"
+    assert len(subview_lines) == 1, f"Expected one pto.subview for slice, got: {subview_lines}"
+    assert "valid [" in subview_lines[0], (
+        f"Dynamic valid_shape must feed pto.subview's `valid [...]` clause: {subview_lines[0]}"
+    )
     tmov_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tmov" in line]
-    assert len(tmov_lines) == 1, f"Expected one pto.tmov for full-window slice, got: {tmov_lines}"
+    assert len(tmov_lines) == 0, f"tile.slice must not emit pto.tmov (pure view), got: {tmov_lines}"
     set_validshape_lines = [line.strip() for line in mlir_code.splitlines() if "pto.set_validshape" in line]
-    assert len(set_validshape_lines) == 1, f"Expected one pto.set_validshape, got: {set_validshape_lines}"
+    assert len(set_validshape_lines) == 0, (
+        f"tile.slice must not emit pto.set_validshape (valid encoded in subview), got: {set_validshape_lines}"
+    )
 
     # All tile_buf types use the always-dynamic `v_row=?, v_col=?` form.
     fillpad_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tfillpad" in line]
@@ -2116,9 +2123,19 @@ def test_pto_codegen_slice_fillpad_partial_dynamic_valid_shape():
     assert "v_col=?" in fillpad_lines[0], f"fillpad input should have v_col=?: {fillpad_lines[0]}"
 
 
-def test_pto_codegen_slice_full_window_dynamic_valid_shape_uses_set_validshape():
-    """Full-window slice with runtime valid rows should lower via tmov +
-    set_validshape rather than a subview `valid [...]` clause."""
+def test_pto_codegen_slice_full_window_dynamic_valid_shape_uses_subview_valid():
+    """Full-window slice with runtime valid rows lowers to a single pto.subview
+    whose `valid [...]` clause carries the dynamic valid_shape.
+
+    tile.slice is a pure view: the explicit valid_shape is encoded into
+    pto.subview's `valid [%vr, %vc]` operands instead of a materializing
+    pto.tmov + pto.set_validshape pair. The earlier materializing path wrote
+    into the slice result's MemRef, which is inherited from the source
+    (set_output_memory_inherit_input). For dynamic offsets that fall back to
+    src_base, the tmov destination overlapped the source allocation and
+    corrupted source rows — see #1622. The pure-view lowering eliminates that
+    aliasing class entirely.
+    """
 
     @pl.program
     class FullWindowSliceProgram:
@@ -2137,14 +2154,19 @@ def test_pto_codegen_slice_full_window_dynamic_valid_shape_uses_set_validshape()
 
     mlir_code = _generate_default_mlir(FullWindowSliceProgram)
     subview_lines = [line.strip() for line in mlir_code.splitlines() if "pto.subview" in line]
-    assert len(subview_lines) == 0, f"Full-window slice should not emit pto.subview, got: {subview_lines}"
-    tmov_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tmov" in line]
-    assert len(tmov_lines) == 1, f"Expected one pto.tmov for full-window slice, got: {tmov_lines}"
+    assert len(subview_lines) == 1, f"Expected one pto.subview for slice, got: {subview_lines}"
+    assert "valid [" in subview_lines[0], (
+        f"Dynamic valid_shape must feed pto.subview's `valid [...]` clause: {subview_lines[0]}"
+    )
+    assert "valid_rows" in subview_lines[0] or "%arg2" in subview_lines[0], (
+        f"Runtime valid_rows scalar must appear in the subview's valid clause: {subview_lines[0]}"
+    )
 
+    tmov_lines = [line.strip() for line in mlir_code.splitlines() if "pto.tmov" in line]
+    assert len(tmov_lines) == 0, f"tile.slice must not emit pto.tmov (pure view), got: {tmov_lines}"
     set_validshape_lines = [line.strip() for line in mlir_code.splitlines() if "pto.set_validshape" in line]
-    assert len(set_validshape_lines) == 1, f"Expected one pto.set_validshape, got: {set_validshape_lines}"
-    assert "valid_rows" in set_validshape_lines[0] or "%arg2" in set_validshape_lines[0], (
-        f"Runtime valid_rows should feed pto.set_validshape: {set_validshape_lines[0]}"
+    assert len(set_validshape_lines) == 0, (
+        f"tile.slice must not emit pto.set_validshape (valid encoded in subview), got: {set_validshape_lines}"
     )
 
 
