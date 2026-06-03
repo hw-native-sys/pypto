@@ -1215,6 +1215,172 @@ BatchMatmulAccResult LowerBatchMatmulAcc(const AssignStmtPtr& assign, const Call
   return out;
 }
 
+// ============================================================================
+// Standalone N-D transpose lowering
+// ============================================================================
+//
+// A standalone >2D tile.transpose (not consumed by a tile.batch_matmul) has no
+// dedicated 2D hardware op: the backend pto.ttrans is strictly 2D. The frontend
+// auto-allocates the transpose scratch (tmp) at INPUT rank (see
+// python/pypto/ir/op/tile_ops.py), so a 3D input yields a 3D tmp. The generic
+// re-create path would substitute a flattened 2D tmp while leaving the input
+// rank at 3, tripping the input-rank == tmp-rank CHECK in
+// DeduceTileTransposeType.
+//
+// This lowering mirrors LowerBatchMatmul's non-fused path: it handles only the
+// last-two-axes swap (axes {ndim-2, ndim-1}) with leading batch dims. The
+// already-flattened 2D input [batch_count*A, B] is sliced per batch into an
+// [A, B] page, transposed via a genuine 2D tile.transpose into [B, A], and
+// assembled into a flat [batch_count*B, A] output tile. Every emitted transpose
+// is 2D, so no codegen change is needed. Transposes that move a batch axis
+// cannot be expressed as a per-batch 2D ttrans and are rejected with a clear
+// user-facing error.
+
+/// Result of lowering a standalone N-D tile.transpose operation.
+struct NdTransposeResult {
+  std::vector<StmtPtr> stmts;  ///< Emitted statements
+  VarPtr output_var;           ///< Flat 2D result tile [batch_count*B, A]
+};
+
+/// Lower a standalone >2D last-two-axes tile.transpose into per-batch 2D
+/// tile.transpose calls assembled into a flat 2D output.
+NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& call,
+                                   const FlattenContext& ctx, const OpRegistry& op_registry,
+                                   const Span& span) {
+  NdTransposeResult out;
+
+  // Read the ORIGINAL (pre-substitution) input type: its >2D dims are intact.
+  auto input_type = As<TileType>(call->args_[0]->GetType());
+  INTERNAL_CHECK_SPAN(input_type, span)
+      << "Internal error: tile.transpose input must be TileType in FlattenTileNdTo2D";
+  auto input_dims = ToStaticDims(input_type->shape_, "tile.transpose");
+  size_t ndim = input_dims.size();
+  INTERNAL_CHECK_SPAN(ndim > 2, span)
+      << "Internal error: LowerNdTranspose called on a tile of rank " << ndim << " (expected >2)";
+
+  // Normalize axes and require a last-two-axes swap.
+  auto axis1_const = As<ConstInt>(call->args_[1]);
+  auto axis2_const = As<ConstInt>(call->args_[2]);
+  INTERNAL_CHECK_SPAN(axis1_const && axis2_const, span)
+      << "Internal error: tile.transpose axes must be ConstInt in FlattenTileNdTo2D";
+  int64_t axis1 = NormalizeAxisIndex(axis1_const->value_, ndim, "tile.transpose");
+  int64_t axis2 = NormalizeAxisIndex(axis2_const->value_, ndim, "tile.transpose");
+  CHECK_SPAN(IsTrailingMatrixAxisSwap(axis1, axis2, ndim), span)
+      << "FlattenTileNdTo2D: only last-two-axes tile.transpose on >2D tiles is supported; "
+      << "transpose involving a batch axis (axes " << axis1 << ", " << axis2 << " of rank " << ndim
+      << ") is not yet lowered. Reshape the tile so the transposed axes are the last two.";
+
+  std::vector<int64_t> batch_dims(input_dims.begin(), input_dims.end() - 2);
+  int64_t a = input_dims[ndim - 2];
+  int64_t b = input_dims[ndim - 1];
+  int64_t batch_count = MultiplyStaticDims(batch_dims, "tile.transpose batch size");
+
+  // Resolve the input operand. After var_map substitution it is usually the
+  // already-flattened 2D tile [batch_count*A, B]. But a producer that this pass
+  // leaves at rank>2 (e.g. a tile.reshape to a 3D shape, which the generic path
+  // re-creates without flattening) yields a still-ND operand. In that case emit
+  // a tile.reshape down to the merged 2D [batch_count*A, B] so the per-batch
+  // tile.slice below has a 2D parent.
+  auto operand = Substitute(call->args_[0], ctx.var_map);
+  auto operand_type = As<TileType>(operand->GetType());
+  INTERNAL_CHECK_SPAN(operand_type, span)
+      << "Internal error: tile.transpose input must be TileType in FlattenTileNdTo2D";
+  MemorySpace target_mem =
+      operand_type->memory_space_.has_value() ? *operand_type->memory_space_ : MemorySpace::Vec;
+
+  if (operand_type->shape_.size() > 2) {
+    auto [merged, last] = ComputeMergedShape(operand_type->shape_, "tile.transpose input");
+    INTERNAL_CHECK_SPAN(merged == batch_count * a && last == b, span)
+        << "Internal error: tile.transpose flattened input shape [" << merged << ", " << last
+        << "] does not match expected [" << (batch_count * a) << ", " << b << "]";
+    auto reshape_shape = std::make_shared<MakeTuple>(Make2DShapeExprs(merged, last, span), span);
+    auto reshape = op_registry.Create("tile.reshape", {operand, reshape_shape}, span);
+    auto reshape_var = std::make_shared<Var>("trans_in_2d", reshape->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(reshape_var, reshape, span));
+    operand = reshape_var;
+    operand_type = As<TileType>(operand->GetType());
+  }
+
+  // pto.alloc_tile rejects row-major Vec tiles whose physical row byte size
+  // (cols * sizeof(dtype)) is not 32-byte aligned. Padding a narrow trailing dim
+  // B up to a 32-byte multiple is out of scope for this lowering and tracked as a
+  // separate issue. Reject a misaligned trailing dim here with a clear user-facing
+  // error instead of emitting a per-page tile that PTOAS later rejects.
+  int64_t dtype_bytes = static_cast<int64_t>((operand_type->dtype_.GetBit() + 7) / 8);
+  CHECK_SPAN(dtype_bytes > 0 && (b * dtype_bytes) % 32 == 0, span)
+      << "FlattenTileNdTo2D: standalone N-D tile.transpose requires the trailing "
+      << "dimension's row to be 32-byte aligned (got " << b << " * " << dtype_bytes << " = "
+      << (b * dtype_bytes) << " bytes); narrow-column padding is not yet supported.";
+
+  // Pre-create the flat output tile [batch_count*B, A].
+  auto out_shape = std::make_shared<MakeTuple>(Make2DShapeExprs(batch_count * b, a, span), span);
+  std::vector<std::pair<std::string, std::any>> create_kw = {
+      {"dtype", operand_type->dtype_},
+      {"target_memory", target_mem},
+  };
+  auto create_out = op_registry.Create("tile.create", {out_shape}, create_kw, span);
+  VarPtr out_var = std::make_shared<Var>(assign->var_->name_hint_, create_out->GetType(), span);
+  out.stmts.push_back(std::make_shared<AssignStmt>(out_var, create_out, span));
+
+  // Pre-create one flat scratch pool [batch_count*A, B] sliced per batch.
+  // pto.ttrans requires a scratch operand whose type matches the source page's;
+  // its codegen reuses the SOURCE's type for BOTH ins operands
+  // (MakeTileTransposeCodegenPTO emits "src_type, src_type"). The source page is
+  // a tile.slice -> pto.subview, which produces a NEW SSA value with STATIC valid
+  // [A, B]. The scratch must be the same kind of value, so it is sliced from this
+  // pool per batch (a partial tile.slice -> pto.subview), NOT
+  // created+set_validshape: set_validshape mutates the alloc in place (dynamic
+  // valid ?x?) without renaming it, so ttrans would see the same SSA value typed
+  // both dynamic (at its def/set_validshape) and static (at the ttrans use) ->
+  // ptoas type conflict. The pool lives across the loop; being a single
+  // allocation it is cheap relative to per-batch scratch churn.
+  auto tmp_pool_shape = std::make_shared<MakeTuple>(Make2DShapeExprs(batch_count * a, b, span), span);
+  std::vector<std::pair<std::string, std::any>> tmp_pool_kw = {
+      {"dtype", operand_type->dtype_},
+      {"target_memory", target_mem},
+  };
+  auto tmp_pool_create = op_registry.Create("tile.create", {tmp_pool_shape}, tmp_pool_kw, span);
+  VarPtr tmp_pool_var = std::make_shared<Var>("trans_tmp_pool", tmp_pool_create->GetType(), span);
+  out.stmts.push_back(std::make_shared<AssignStmt>(tmp_pool_var, tmp_pool_create, span));
+
+  auto axis0_expr = std::make_shared<ConstInt>(0, DataType::INDEX, span);
+  auto axis1_expr = std::make_shared<ConstInt>(1, DataType::INDEX, span);
+
+  for (int64_t i = 0; i < batch_count; ++i) {
+    auto suffix = std::to_string(i);
+
+    // Extract the i-th dense 2D input page [A, B] from the flat operand.
+    auto in_offset = MakeShapeTupleFromInts({i * a, 0}, span);
+    auto in_shape = MakeShapeTupleFromInts({a, b}, span);
+    auto slice = op_registry.Create("tile.slice", {operand, in_shape, in_offset}, span);
+    ExprPtr src_page = std::make_shared<Var>("trans_page_" + suffix, slice->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(As<Var>(src_page), slice, span));
+
+    // Slice the i-th 2D scratch page [A, B] from the flat tmp pool (subview with
+    // STATIC valid [A, B], matching the source page's type exactly).
+    auto tmp_offset = MakeShapeTupleFromInts({i * a, 0}, span);
+    auto tmp_shape = MakeShapeTupleFromInts({a, b}, span);
+    auto tmp_slice = op_registry.Create("tile.slice", {tmp_pool_var, tmp_shape, tmp_offset}, span);
+    ExprPtr scratch_page = std::make_shared<Var>("trans_tmp_" + suffix, tmp_slice->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(As<Var>(scratch_page), tmp_slice, span));
+
+    // Transpose the page [A, B] -> [B, A]. Ranks match, CHECK passes.
+    auto transpose =
+        op_registry.Create("tile.transpose", {src_page, axis0_expr, axis1_expr, scratch_page}, span);
+    auto transpose_var = std::make_shared<Var>("trans_" + suffix, transpose->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(transpose_var, transpose, span));
+
+    // Assemble the [B, A] result into the flat output at row offset i*B.
+    auto out_offset = MakeShapeTupleFromInts({i * b, 0}, span);
+    auto assemble = op_registry.Create("tile.assemble", {out_var, transpose_var, out_offset}, span);
+    out_var = std::make_shared<Var>(out_var->name_hint_, assemble->GetType(), span);
+    out.stmts.push_back(std::make_shared<AssignStmt>(out_var, assemble, span));
+  }
+
+  out.output_var = out_var;
+  return out;
+}
+
 /**
  * @brief Recursively transform statements, flattening >2D tile ops to 2D.
  */
@@ -1231,6 +1397,10 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
   // If conditions, For/While bounds, etc.), not just Call arguments. A Var used
   // anywhere outside a tile.batch_matmul Call prevents it from being skipped.
   std::unordered_set<const Var*> batch_matmul_only_vars;
+  // Dead scratch tmp Vars of standalone N-D tile.transpose ops. Collected inside
+  // the block below so the guard can reuse use_count / stmt_def_map; consumed by
+  // the main rewrite loop to skip their defining tile.create.
+  std::unordered_set<const Var*> nd_transpose_dead_tmp_vars;
   {
     std::unordered_map<const Var*, int> use_count;
     std::vector<const Var*> batch_matmul_operands;  // ordered to avoid nondeterministic iteration
@@ -1339,6 +1509,33 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       if (batch_matmul_only_vars.insert(input_var.get()).second) {
         reshape_worklist.push_back(input_var.get());
       }
+    }
+
+    // Collect the dead scratch tmp Vars of standalone N-D tile.transpose ops.
+    // LowerNdTranspose allocates its own per-batch scratch and ignores the DSL
+    // auto-emitted whole-tile tmp (call->args_[3]), so that tmp becomes unused.
+    // It is NOT removed by later DCE (tile.create carries an allocation effect),
+    // so its defining tile.create is skipped in the main rewrite loop below —
+    // otherwise it would emit a narrow pto.alloc_tile that PTOAS rejects. Only
+    // elide a tmp that is (a) defined by a tile.create and (b) used exactly once
+    // (by the transpose being lowered), so a hand-built or rewritten IR that
+    // shares one scratch tile across transposes keeps its defining create.
+    for (const auto& s : stmts) {
+      auto a = As<AssignStmt>(s);
+      if (!a) continue;
+      auto c = As<Call>(a->value_);
+      if (!c || !c->op_ || c->op_->name_ != "tile.transpose") continue;
+      if (batch_matmul_only_vars.count(a->var_.get())) continue;  // peeled by matmul lowering
+      if (c->args_.size() < 4) continue;
+      if (!IsNdTile(As<TileType>(c->args_[0]->GetType()))) continue;  // only >2D goes to LowerNdTranspose
+      auto tmp = As<Var>(c->args_[3]);
+      if (!tmp) continue;
+      if (use_count[tmp.get()] != 1) continue;  // shared scratch — keep its create
+      auto def_it = stmt_def_map.find(tmp.get());
+      if (def_it == stmt_def_map.end()) continue;
+      auto def_call = As<Call>(def_it->second->value_);
+      if (!def_call || !def_call->op_ || def_call->op_->name_ != "tile.create") continue;
+      nd_transpose_dead_tmp_vars.insert(tmp.get());
     }
   }
 
@@ -1587,6 +1784,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     const auto& op_name = call->op_->name_;
 
+    // Drop the dead auto-emitted scratch tmp of a standalone N-D tile.transpose
+    // (see the nd_transpose_dead_tmp_vars pre-scan): LowerNdTranspose allocates
+    // its own scratch, so this tmp's narrow tile.create would otherwise emit a
+    // PTOAS-rejected alloc_tile.
+    if (op_name == "tile.create" && nd_transpose_dead_tmp_vars.count(assign->var_.get())) {
+      ctx.Insert(assign->var_, assign->var_);
+      continue;
+    }
+
     // ---- tile.load on >2D tile: preserve the original tensor-rank source window,
     //      but flatten the result tile ----
     // Keep the original tensor-rank offsets/shapes on the call for codegen, then
@@ -1798,6 +2004,15 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
     // ---- tile.transpose feeding only tile.batch_matmul[_acc]: skip and let lowering peel it ----
     if (op_name == "tile.transpose" && batch_matmul_only_vars.count(assign->var_.get()) != 0) {
       ctx.Insert(assign->var_, assign->var_);  // identity mapping for safety
+      continue;
+    }
+
+    // ---- standalone >2D tile.transpose: delegate to LowerNdTranspose ----
+    // 2D transposes fall through to the generic re-create path unchanged.
+    if (op_name == "tile.transpose" && IsNdTile(As<TileType>(call->args_[0]->GetType()))) {
+      auto lowering = LowerNdTranspose(assign, call, ctx, op_registry, span);
+      result.insert(result.end(), lowering.stmts.begin(), lowering.stmts.end());
+      ctx.Insert(assign->var_, lowering.output_var);
       continue;
     }
 

@@ -45,6 +45,30 @@ COLS = 64
 SCALE_COLS = 8
 C0_FP32 = 8  # 32-byte BLOCK / sizeof(FP32) — c0 strip width for Vec ND tiles
 
+# Standalone N-D transpose deinterleave constants (#1651 regression)
+DEINT_T = 128
+DEINT_RD = 64
+DEINT_RH = DEINT_RD // 2
+
+# Minimal 2D transpose constants (#1651 alignment-hypothesis probe)
+# Input [16, 2] FP32 transposes to [2, 16]; the [16, 2] source row byte size
+# is 2 * sizeof(FP32) = 8 bytes, which is not 32-byte aligned — used to check
+# whether the ptoas alloc_tile 32-byte row-alignment error is triggered by the
+# narrow column dimension alone.
+SIMPLE_R = 16
+SIMPLE_C = 2
+
+# Standalone 3D transpose constants (#1651): [4, 8, 8] swap axes (1, 2) -> [4, 8, 8].
+# The inner dim of both the input and output tensors is 8 on purpose: ptoas
+# infers an `nz` layout for a 3D ND output tensor whose innermost dim is
+# 16-aligned (e.g. [4, 8, 16]), which then conflicts with the `nd` layout the
+# codegen declares for `pto.make_tensor_view`. Keeping the inner dim at 8 (not
+# 16-aligned) keeps the inferred layout `nd`, isolating the FlattenTileNdTo2D
+# 3D-transpose lowering under test from that separate 3D-output codegen gap.
+ND3_B = 4  # leading batch dim (untouched)
+ND3_R = 8  # axis 1
+ND3_C = 8  # axis 2
+
 
 class TransposeSliceAssembleCase(PTOTestCase):
     """#1209 follow-up: orchestration ``pl.transpose`` + ``pl.slice`` + ``pl.assemble``.
@@ -166,6 +190,186 @@ class ColumnLoadRowExpandMulCase(PTOTestCase):
         tensors["y"][:] = tensors["x"] * tensors["scale"][:, 0:1]
 
 
+class NdTransposeDeinterleaveCase(PTOTestCase):
+    """#1651: standalone N-D ``pl.transpose`` (last-two-axes) on a 3D tile.
+
+    The kernel deinterleaves an ``[T, RD]`` row into its even/odd lanes via
+    ``reshape([T, RH, 2]) -> transpose(1, 2) -> reshape([T, RD])``. The middle
+    ``transpose`` is a standalone >2D ``tile.transpose`` (no ``batch_matmul``
+    consumer), which previously failed to compile in ``FlattenTileNdTo2D``
+    because the pass left the transpose input at rank 3 while its flattened
+    scratch ``tmp`` was rank 2. The pass now lowers it to per-batch 2D
+    transposes; the numeric result must equal the even/odd column split.
+    """
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"nd_transpose_deinterleave_{DEINT_T}x{DEINT_RD}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [DEINT_T, DEINT_RD], DataType.FP32, init_value=torch.randn),
+            TensorSpec("even_out", [DEINT_T, DEINT_RH], DataType.FP32, is_output=True),
+            TensorSpec("odd_out", [DEINT_T, DEINT_RH], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class NdTransposeDeinterleave:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[DEINT_T, DEINT_RD], pl.FP32],
+                even_out: pl.Out[pl.Tensor[[DEINT_T, DEINT_RH], pl.FP32]],
+                odd_out: pl.Out[pl.Tensor[[DEINT_T, DEINT_RH], pl.FP32]],
+            ) -> tuple[pl.Tensor[[DEINT_T, DEINT_RH], pl.FP32], pl.Tensor[[DEINT_T, DEINT_RH], pl.FP32]]:
+                x_tile: pl.Tile[[DEINT_T, DEINT_RD], pl.FP32] = pl.load(x, [0, 0], [DEINT_T, DEINT_RD])
+                x3d: pl.Tile[[DEINT_T, DEINT_RH, 2], pl.FP32] = pl.reshape(x_tile, [DEINT_T, DEINT_RH, 2])
+                x3d_t: pl.Tile[[DEINT_T, 2, DEINT_RH], pl.FP32] = pl.transpose(x3d, axis1=1, axis2=2)
+                x_deint: pl.Tile[[DEINT_T, DEINT_RD], pl.FP32] = pl.reshape(x3d_t, [DEINT_T, DEINT_RD])
+                even: pl.Tile[[DEINT_T, DEINT_RH], pl.FP32] = pl.tile.extract(
+                    x_deint, 0, 0, [DEINT_T, DEINT_RH], target_memory=pl.MemorySpace.Vec
+                )
+                odd: pl.Tile[[DEINT_T, DEINT_RH], pl.FP32] = pl.tile.extract(
+                    x_deint, 0, DEINT_RH, [DEINT_T, DEINT_RH], target_memory=pl.MemorySpace.Vec
+                )
+                even_out = pl.store(even, [0, 0], even_out)
+                odd_out = pl.store(odd, [0, 0], odd_out)
+                return even_out, odd_out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[DEINT_T, DEINT_RD], pl.FP32],
+                even_out: pl.Out[pl.Tensor[[DEINT_T, DEINT_RH], pl.FP32]],
+                odd_out: pl.Out[pl.Tensor[[DEINT_T, DEINT_RH], pl.FP32]],
+            ) -> tuple[pl.Tensor[[DEINT_T, DEINT_RH], pl.FP32], pl.Tensor[[DEINT_T, DEINT_RH], pl.FP32]]:
+                even_out, odd_out = self.kernel(x, even_out, odd_out)
+                return even_out, odd_out
+
+        return NdTransposeDeinterleave
+
+    def compute_expected(self, tensors, params=None):
+        x = tensors["x"]
+        tensors["even_out"][:] = x[:, 0::2]
+        tensors["odd_out"][:] = x[:, 1::2]
+
+
+class SimpleTransposeCase(PTOTestCase):
+    """#1651 probe: minimal 2D ``pl.transpose`` on a narrow ``[16, 2]`` tile.
+
+    Loads ``[16, 2]`` into a Vec tile, transposes to ``[2, 16]`` and stores it.
+    The source tile's row byte size is ``2 * sizeof(FP32) = 8`` bytes, which is
+    not 32-byte aligned. This isolates whether the ptoas ``alloc_tile`` 32-byte
+    row-alignment error reproduces with a plain 2D transpose (no reshape / N-D
+    path), confirming the narrow column dimension is the trigger.
+    """
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"simple_transpose_{SIMPLE_R}x{SIMPLE_C}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [SIMPLE_R, SIMPLE_C], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [SIMPLE_C, SIMPLE_R], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class SimpleTranspose:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[SIMPLE_R, SIMPLE_C], pl.FP32],
+                out: pl.Out[pl.Tensor[[SIMPLE_C, SIMPLE_R], pl.FP32]],
+            ) -> pl.Tensor[[SIMPLE_C, SIMPLE_R], pl.FP32]:
+                x_tile: pl.Tile[[SIMPLE_R, SIMPLE_C], pl.FP32] = pl.load(x, [0, 0], [SIMPLE_R, SIMPLE_C])
+                x_t: pl.Tile[[SIMPLE_C, SIMPLE_R], pl.FP32] = pl.transpose(x_tile, axis1=0, axis2=1)
+                return pl.store(x_t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[SIMPLE_R, SIMPLE_C], pl.FP32],
+                out: pl.Out[pl.Tensor[[SIMPLE_C, SIMPLE_R], pl.FP32]],
+            ) -> pl.Tensor[[SIMPLE_C, SIMPLE_R], pl.FP32]:
+                out = self.kernel(x, out)
+                return out
+
+        return SimpleTranspose
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["x"].t()
+
+
+class Nd3DTransposeCase(PTOTestCase):
+    """#1651: standalone 3D ``pl.transpose`` (direct last-two-axes swap).
+
+    Loads ``[ND3_B, ND3_R, ND3_C]`` into a tile, transposes axes ``(1, 2)`` to
+    ``[ND3_B, ND3_C, ND3_R]`` and stores it. Unlike
+    ``NdTransposeDeinterleaveCase`` there is no surrounding reshape — this is a
+    direct >2D last-two-axes swap on a 3D tile with no ``batch_matmul``
+    consumer, exercising the ``LowerNdTranspose`` path in ``FlattenTileNdTo2D``
+    that lowers a standalone N-D transpose to per-batch 2D transposes.
+
+    The inner dim is deliberately 8 (not 16-aligned) on both the input and
+    output tensors — see the ``ND3_*`` constants. A 16-aligned output inner dim
+    makes ptoas infer an ``nz`` tensor-view layout that conflicts with the
+    ``nd`` the codegen declares; the 8-wide shape keeps that inference ``nd`` so
+    this case isolates the 3D-transpose lowering from that separate codegen gap.
+    """
+
+    __test__ = False
+
+    def __init__(self, *, platform: str | None = None, config=None):
+        super().__init__(config, platform=platform)
+
+    def get_name(self) -> str:
+        return f"nd3d_transpose_{ND3_B}x{ND3_R}x{ND3_C}"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return [
+            TensorSpec("x", [ND3_B, ND3_R, ND3_C], DataType.FP32, init_value=torch.randn),
+            TensorSpec("out", [ND3_B, ND3_C, ND3_R], DataType.FP32, is_output=True),
+        ]
+
+    def get_program(self) -> Any:
+        @pl.program
+        class Nd3DTranspose:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[ND3_B, ND3_R, ND3_C], pl.FP32],
+                out: pl.Out[pl.Tensor[[ND3_B, ND3_C, ND3_R], pl.FP32]],
+            ) -> pl.Tensor[[ND3_B, ND3_C, ND3_R], pl.FP32]:
+                x_tile: pl.Tile[[ND3_B, ND3_R, ND3_C], pl.FP32] = pl.load(x, [0, 0, 0], [ND3_B, ND3_R, ND3_C])
+                x_t: pl.Tile[[ND3_B, ND3_C, ND3_R], pl.FP32] = pl.transpose(x_tile, axis1=1, axis2=2)
+                return pl.store(x_t, [0, 0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def orchestrator(
+                self,
+                x: pl.Tensor[[ND3_B, ND3_R, ND3_C], pl.FP32],
+                out: pl.Out[pl.Tensor[[ND3_B, ND3_C, ND3_R], pl.FP32]],
+            ) -> pl.Tensor[[ND3_B, ND3_C, ND3_R], pl.FP32]:
+                out = self.kernel(x, out)
+                return out
+
+        return Nd3DTranspose
+
+    def compute_expected(self, tensors, params=None):
+        tensors["out"][:] = tensors["x"].transpose(1, 2)
+
+
 class TestTransposeColumnOperations:
     """Column-load lowering regressions."""
 
@@ -189,6 +393,57 @@ class TestTransposeColumnOperations:
         workaround sidesteps #1398's lowering gap.
         """
         result = test_runner.run(ColumnLoadRowExpandMulCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.skip(
+        reason="Blocked by a separate transpose alloc_tile gap: ptoas requires the "
+        "transpose source/scratch tile row (cols * sizeof(dtype)) to be 32-byte "
+        "aligned. The deinterleave kernel transposes a [.., 2] page (8-byte row) "
+        "which ptoas rejects. Tracked separately from #1651; to be filed as its "
+        "own issue."
+    )
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_nd_transpose_deinterleave(self, test_runner, platform):
+        """Issue #1651: standalone N-D ``tile.transpose`` (last-two-axes swap).
+
+        Parametrized on all platforms — the kernel uses only Vec ops, so a2a3 /
+        a2a3sim passing confirms ``FlattenTileNdTo2D`` now lowers a standalone
+        >2D transpose to per-batch 2D transposes with the correct numeric
+        deinterleave (even/odd lane split).
+        """
+        result = test_runner.run(NdTransposeDeinterleaveCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.skip(
+        reason="Blocked by a separate transpose alloc_tile gap: the [16, 2] source "
+        "has an 8-byte row (2 * sizeof(FP32)), which ptoas alloc_tile rejects for "
+        "not being 32-byte aligned. This is the narrow-column alignment limitation, "
+        "tracked separately from #1651; to be filed as its own issue."
+    )
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_simple_transpose(self, test_runner, platform):
+        """Issue #1651 probe: minimal 2D ``pl.transpose`` on a ``[16, 2]`` tile.
+
+        Isolates the 32-byte row-alignment hypothesis — the ``[16, 2]`` source
+        has an 8-byte row, so if ptoas ``alloc_tile`` still rejects it here (no
+        reshape / N-D path involved), the narrow column dimension is confirmed
+        as the trigger for the alignment error.
+        """
+        result = test_runner.run(SimpleTransposeCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_nd3d_transpose(self, test_runner, platform):
+        """Issue #1651: standalone 3D ``pl.transpose`` (direct last-two-axes swap).
+
+        Transposes a ``[4, 8, 8]`` tile over axes ``(1, 2)`` to ``[4, 8, 8]``
+        with no surrounding reshape and no ``batch_matmul`` consumer — exercising
+        the ``LowerNdTranspose`` path in ``FlattenTileNdTo2D`` that lowers a
+        standalone >2D transpose to per-batch 2D transposes. The inner dim is 8
+        (not 16-aligned) to keep the 3D output tensor view ``nd`` and avoid the
+        separate 3D-output ``nz`` layout-inference gap.
+        """
+        result = test_runner.run(Nd3DTransposeCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
