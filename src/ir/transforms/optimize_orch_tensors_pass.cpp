@@ -3044,6 +3044,7 @@ class OutWindowExternalizer {
         return std::nullopt;
       }
       if (analysis.outputs.empty() || cloned_func->return_types_.empty()) return std::nullopt;
+      if (!SpmdRewriteCoversAllReturns(analysis, cloned_func->return_types_.size())) return std::nullopt;
 
       std::unordered_map<const Var*, ExprPtr> outer_subst;
       for (size_t i = 0; i < candidate.original_func->params_.size() && i < call->args_.size(); ++i) {
@@ -3334,6 +3335,16 @@ class OutWindowExternalizer {
       if (!tuple_ty || tuple_ty->types_.empty()) return false;
       auto last = As<ScalarType>(tuple_ty->types_.back());
       return last != nullptr && last->dtype_ == DataType::TASK_ID;
+    }
+
+    static bool SpmdRewriteCoversAllReturns(const CalleeRewriteAnalysis& analysis, size_t return_count) {
+      std::vector<bool> covered(return_count, false);
+      for (const auto& output : analysis.outputs) {
+        if (output.return_index == SIZE_MAX) continue;
+        if (output.return_index >= return_count) return false;
+        covered[output.return_index] = true;
+      }
+      return std::all_of(covered.begin(), covered.end(), [](bool is_covered) { return is_covered; });
     }
 
     std::vector<std::pair<std::string, std::any>> RewriteCallAttrs(

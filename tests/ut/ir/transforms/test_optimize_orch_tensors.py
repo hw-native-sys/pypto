@@ -1639,6 +1639,55 @@ class Expected:
         After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_spmd_row_block_with_non_window_return_is_not_rewritten(self):
+        program_text = """
+import pypto.language as pl
+
+@pl.program
+class Before:
+    @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+    def score(
+        score_out__ssa_v0: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+        x__ssa_v0: pl.Tensor[[8, 16], pl.FP32],
+    ) -> tuple[pl.Scalar[pl.INDEX], pl.Tensor[[8, 16], pl.FP32]]:
+        idx__ssa_v0: pl.Scalar[pl.INDEX] = pl.tile.get_block_idx()
+        row__ssa_v0: pl.Scalar[pl.INDEX] = idx__ssa_v0 * 2
+        x_tile__ssa_v0: pl.Tile[[2, 16], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+            x__ssa_v0, [row__ssa_v0, 0], [2, 16], [2, 16], target_memory=pl.Mem.Vec, transpose=False
+        )
+        score_next__ssa_v0: pl.Tensor[[8, 16], pl.FP32] = pl.tile.store(
+            x_tile__ssa_v0, [row__ssa_v0, 0], score_out__ssa_v0
+        )
+        return idx__ssa_v0, score_next__ssa_v0
+
+    @pl.function(type=pl.FunctionType.Spmd, attrs={"core_num": 4})
+    def score_spmd(
+        self,
+        score_out__ssa_v0: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+        x__ssa_v0: pl.Tensor[[8, 16], pl.FP32],
+    ) -> tuple[pl.Scalar[pl.INDEX], pl.Tensor[[8, 16], pl.FP32]]:
+        result__ssa_v0: pl.Tuple[pl.Scalar[pl.INDEX], pl.Tensor[[8, 16], pl.FP32]] = self.score(
+            score_out__ssa_v0, x__ssa_v0
+        )
+        batch_idx__ssa_v0: pl.Scalar[pl.INDEX] = result__ssa_v0[0]
+        score_next__ssa_v0: pl.Tensor[[8, 16], pl.FP32] = result__ssa_v0[1]
+        return batch_idx__ssa_v0, score_next__ssa_v0
+
+    @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+    def main(
+        self,
+        x__ssa_v0: pl.Tensor[[8, 16], pl.FP32],
+        score__ssa_v0: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+    ) -> tuple[pl.Scalar[pl.INDEX], pl.Tensor[[8, 16], pl.FP32]]:
+        result__ssa_v0: pl.UnknownType = self.score_spmd(score__ssa_v0, x__ssa_v0)
+        return result__ssa_v0
+"""
+        Before = pl.parse_program(program_text)
+        Expected = pl.parse_program(program_text.replace("class Before:", "class Expected:"))
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_consumer_input_in_sequential_loop_keeps_parent_baseline(self):
         @pl.program
         class Before:
