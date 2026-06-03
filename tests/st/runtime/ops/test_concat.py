@@ -17,7 +17,6 @@ from examples.kernels.concat import tile_concat_32x32
 class TestConcatOperations:
     """Test suite for tile.concat operations."""
 
-    @pytest.mark.skip(reason="PTOAS doesn't support tconcat now.")
     def test_tile_concat_32x32(self, test_config):
         """Test tile concatenation: 32x16 + 32x16 -> 32x32."""
         tile_concat_32x32._cache.clear()

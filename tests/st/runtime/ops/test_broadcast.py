@@ -225,8 +225,6 @@ class TestBroadcastOperations:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_tensor_expand_clone(self, test_runner, platform, broadcast_dim):
         """Test tensor.expand_clone across platforms."""
-        if platform in ("a5", "a5sim") and broadcast_dim == 2:
-            pytest.skip("Skip broadcast_dim=2 for Ascend 950 due to pto-isa bug.")
         result = test_runner.run(TestTensorExpandClone(broadcast_dim=broadcast_dim, platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 

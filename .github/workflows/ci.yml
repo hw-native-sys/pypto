@@ -127,8 +127,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.42
-      PTOAS_SHA256: 216c68fc9bb629a41ae2c9d1d0ec2f912b48b67c7c8f57687d6161e2f07c66a6
+      PTOAS_VERSION: v0.43
+      PTOAS_SHA256: a7f4e2e67808a36c1491b24a46505105a50aee1d202c0bba25621132b70d806a
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -199,7 +199,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
+          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
 
       - name: Install simpler
         run: |
@@ -219,7 +219,7 @@ jobs:
         # runs here despite the tests/st/codegen ignore: its numeric golden
         # compare is unstable on the CPU container's torch/BLAS build (see the
         # codegen-tests job), so it needs this environment.
-        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143 --ignore=tests/st/distributed --ignore=tests/st/codegen
+        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 --ignore=tests/st/distributed --ignore=tests/st/codegen
 
       - name: Test multi-orch L2 (isolated pytest invocation)
         # A ``Worker(level=2)`` device session currently leaves runtime
@@ -228,12 +228,12 @@ jobs:
         # isolation bug). Running this file in its own pytest process
         # keeps the L2 leak from poisoning ``test_l3_distributed``.
         timeout-minutes: 3
-        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
+        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
 
       - name: Test swimlane output
         run: |
           pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
-            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
+            -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
 
   dist-system-tests:
     # No container: HCCL needs host-only env (HCCL_LOGIC_SUPERPOD_ID, plugin
@@ -251,8 +251,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/dist-checkout/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/dist-checkout/pto-isa
-      PTOAS_VERSION: v0.42
-      PTOAS_SHA256: 216c68fc9bb629a41ae2c9d1d0ec2f912b48b67c7c8f57687d6161e2f07c66a6
+      PTOAS_VERSION: v0.43
+      PTOAS_SHA256: a7f4e2e67808a36c1491b24a46505105a50aee1d202c0bba25621132b70d806a
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -296,7 +296,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
             || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
           cd "$PTO_ISA_ROOT"
-          git checkout 6909e5c4
+          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
 
       - name: Bootstrap conda + per-job venv + write activate.sh
         # Set up a per-job venv layered on conda py310 and generate
@@ -333,7 +333,7 @@ jobs:
         timeout-minutes: 10
         run: |
           source activate.sh
-          python -m pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=6909e5c4 --ignore=tests/st/distributed/test_l2_multi_orch.py
+          python -m pytest tests/st/distributed -v --device="$DEVICE_RANGE" --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 --ignore=tests/st/distributed/test_l2_multi_orch.py
 
   pypto-lib-model:
     runs-on: [self-hosted, linux, arm64, npu-1-device]
@@ -341,8 +341,8 @@ jobs:
       ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.0.0
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
       PTO_ISA_ROOT: ${{ github.workspace }}/pto-isa
-      PTOAS_VERSION: v0.42
-      PTOAS_SHA256: 216c68fc9bb629a41ae2c9d1d0ec2f912b48b67c7c8f57687d6161e2f07c66a6
+      PTOAS_VERSION: v0.43
+      PTOAS_SHA256: a7f4e2e67808a36c1491b24a46505105a50aee1d202c0bba25621132b70d806a
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
@@ -409,7 +409,7 @@ jobs:
           timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
             || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
           cd $GITHUB_WORKSPACE/pto-isa
-          git checkout 8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
+          git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
 
       - name: Install simpler
         run: |
@@ -447,8 +447,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PTOAS_ROOT: ${{ github.workspace }}/ptoas-bin
-      PTOAS_VERSION: v0.42
-      PTOAS_SHA256: 3b3879bd5c991d116a30ff3152d6e2941758b293394bdb106f5bb71bb1e5c9df
+      PTOAS_VERSION: v0.43
+      PTOAS_SHA256: 4fe979dc9759a68c3a19ed16d581249efa3133eeb4045cf42408109fb453ca90
     container:
       image: ghcr.io/hw-native-sys/pypto/github-ci:latest
     steps:
@@ -490,10 +490,10 @@ jobs:
         # against the runtime's bundled pto-isa, which still clones from the
         # stale PTO-ISA/pto-isa mirror (lacks pto::Coalesce) until the runtime
         # submodule is bumped past simpler #806. Re-enable once that lands.
-        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143 -k "not TestMscatter"
+        run: pytest tests/st/runtime/ops/test_assemble.py tests/st/runtime/ops/test_mscatter.py tests/st/runtime/framework_and_models/test_qwen3_decode_scope3_mixed.py tests/st/runtime/control_flow/test_dyn_orch_shape.py::TestDynOrchShapeOperations::test_dyn_orch_paged_attention -v --platform=a5sim --forked --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 -k "not TestMscatter"
 
       - name: Test A5 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a5sim --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
 
       - name: Test A2A3 cross-core system tests (simulator)
-        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=8bd3ac8f30bd237f9eaf12c142002a5cc0edb143
+        run: pytest tests/st/runtime/cross_core/test_cross_core.py -v --forked --platform=a2a3sim --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
