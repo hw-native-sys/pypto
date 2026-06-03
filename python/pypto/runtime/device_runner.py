@@ -582,11 +582,7 @@ def execute_on_device(  # noqa: PLR0913
         )
 
     any_dfx = (
-        enable_l2_swimlane
-        or enable_dump_tensor > 0
-        or enable_pmu > 0
-        or enable_dep_gen
-        or enable_scope_stats
+        enable_l2_swimlane or enable_dump_tensor > 0 or enable_pmu > 0 or enable_dep_gen or enable_scope_stats
     )
     if any_dfx and not output_prefix:
         raise ValueError(

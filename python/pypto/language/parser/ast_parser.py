@@ -3691,6 +3691,11 @@ class ASTParser:
             # split= hint requires an inner InCoreScopeStmt to carry the
             # split_ field. Build SpmdScopeStmt(InCoreScopeStmt(split_=mode, <call>)).
             spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
+            # Like the for-form, this path builds the InCore scope directly
+            # instead of routing through _parse_scope_body, so merge any
+            # forward-sticky pl.dump_tag tensors onto it here (see
+            # _parse_spmd_for_loop for the full rationale).
+            incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
             with self.builder.scope(
                 scope_kind,
                 span,
@@ -3705,6 +3710,7 @@ class ASTParser:
                         span,
                         split=split_mode,
                         name_hint=incore_name_hint,
+                        attrs=incore_attrs,
                     ):
                         with self._scope_kind_context(ir.ScopeKind.InCore):
                             self.scope_manager.enter_scope("spmd_with_incore")
@@ -3750,6 +3756,14 @@ class ASTParser:
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
 
         span = self.span_tracker.get_span(stmt)
+        # Merge forward-sticky pl.dump_tag tensors onto the auto-outlined InCore
+        # scope — the kernel the loop body lowers to. The with-form (pl.at /
+        # pl.spmd / pl.incore) routes through _parse_scope_body for this; the
+        # for-form builds its scope directly, so attach here to keep the two
+        # paths symmetric. OutlineIncoreScopes then carries the dump_vars onto
+        # the synthesised inner-kernel Call; the wrapper-dispatch codegen
+        # (BuildWrapperReorderedParams) honours that inner call's dump_vars.
+        incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
         with self.builder.scope(
             ir.ScopeKind.Spmd,
             span,
@@ -3760,7 +3774,11 @@ class ASTParser:
             with self._scope_kind_context(ir.ScopeKind.Spmd):
                 self.scope_manager.enter_scope("spmd_for")
                 with self.builder.scope(
-                    ir.ScopeKind.InCore, span, split=split_mode, name_hint=incore_name_hint
+                    ir.ScopeKind.InCore,
+                    span,
+                    split=split_mode,
+                    name_hint=incore_name_hint,
+                    attrs=incore_attrs,
                 ):
                     with self._scope_kind_context(ir.ScopeKind.InCore):
                         # Bind `i = pl.tile.get_block_idx()` as the first

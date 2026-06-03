@@ -1561,8 +1561,16 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << outer_arg_directions.size() << " but args size " << outer_call->args_.size()
         << ". DeriveCallDirections must run before orchestration codegen.";
 
-    // Per-call selective dump rides on the outer Call's ``kAttrDumpVars``.
+    // Per-call selective dump rides on the outer Call's ``kAttrDumpVars``
+    // (e.g. a parent ``pl.dump_tag`` transferred onto the wrapper call by
+    // InlineFunctions). It can equally ride on the *inner* call's
+    // ``kAttrDumpVars`` — a ``pl.dump_tag`` inside the wrapped body (e.g. before
+    // a for-form ``pl.spmd`` loop) attaches to the inner InCore scope, which
+    // OutlineIncoreScopes carries onto the inner kernel Call. Match against
+    // both: outer dump vars are outer-arg Vars, inner dump vars are inner-arg
+    // Vars (mapped to the outer arg below via ``wrapper_param_to_outer_idx``).
     std::set<const Var*> dump_var_set = CollectDumpVarSet(outer_call);
+    std::set<const Var*> inner_dump_var_set = CollectDumpVarSet(inner_call);
 
     std::vector<ParamEntry> params;
     for (size_t inner_idx = 0; inner_idx < inner_call->args_.size(); ++inner_idx) {
@@ -1615,6 +1623,10 @@ class OrchestrationStmtCodegen : public CodegenBase {
         bool is_dump = false;
         if (!dump_var_set.empty()) {
           if (auto v = AsVarLike(outer_arg)) is_dump = dump_var_set.count(v.get()) > 0;
+        }
+        // A dump tag inside the wrapped body marks the *inner* arg Var.
+        if (!is_dump && !inner_dump_var_set.empty()) {
+          is_dump = inner_dump_var_set.count(inner_arg_var.get()) > 0;
         }
         params.push_back({outer_arg_directions[outer_idx], ext_name, is_dump});
       } else if (auto const_int = As<ConstInt>(outer_arg)) {

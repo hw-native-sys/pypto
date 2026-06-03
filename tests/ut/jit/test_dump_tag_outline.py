@@ -31,7 +31,7 @@ live in ``tests/st/runtime/framework_and_models/test_dump_tag.py``.
 
 import pypto.language as pl
 import pytest
-from pypto import ir
+from pypto import codegen, ir
 
 
 @pl.jit.inline
@@ -100,6 +100,32 @@ def _entry_tag_through_two_inline_levels(a: pl.Tensor, c: pl.Out[pl.Tensor]):
     return c
 
 
+@pl.jit.inline
+def _spmd_for_writeback(a: pl.Tensor[[128, 128], pl.FP32], c: pl.Tensor[[128, 128], pl.FP32]):
+    """``c = a + 1`` via a for-form ``pl.spmd`` loop, with ``pl.dump_tag(c_view)``
+    before the loop. Mirrors the real orchestration shape: the output is bound
+    through a ``pl.reshape`` alias and written by a per-block slice-assign (which
+    lowers to ``assemble`` — a read-modify-write, so the buffer is a captured
+    *input* of the scope). The for-form auto-outlines the body into a Spmd
+    wrapper dispatch; this checks the forward-sticky tag reaches that wrapper —
+    the call orchestration codegen reads for selective dump."""
+    c_view = pl.reshape(c, [128, 128])
+    pl.dump_tag(c_view)
+    for ob in pl.spmd(2):
+        t0 = ob * 64
+        c_view[t0 : t0 + 64, 0:128] = pl.add(a[t0 : t0 + 64, 0:128], 1.0)
+    c = pl.reshape(c_view, [128, 128])
+    return c
+
+
+@pl.jit
+def _spmd_for_with_dump_tag(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+    """Entry: ``c = a + 1`` through an inline helper whose only write site is a
+    for-form ``pl.spmd`` loop."""
+    c = _spmd_for_writeback(a, c)
+    return c
+
+
 def _dispatch_dump_vars(program: ir.Program) -> dict[str, list[str]]:
     """Map each synthesised kernel-dispatch callee name to its sorted dump_vars
     name_hints. Dispatches are the cross-function Calls to the outlined incore
@@ -162,6 +188,43 @@ def test_tag_survives_multi_level_inline_passthrough():
     assert len(dumping) == 1, f"expected the deep dispatch to dump a, got {dumps}"
     (only_dv,) = dumping.values()
     assert {_base(n) for n in only_dv} == {"a"}, only_dv
+
+
+def test_dump_tag_reaches_for_form_spmd_dispatch():
+    """A ``pl.dump_tag`` before a for-form ``for i in pl.spmd(...):`` loop inside
+    an inline helper reaches the loop's auto-outlined dispatch — both in the IR
+    (the inner kernel Call's ``dump_vars``) and in orchestration codegen (the
+    Spmd wrapper dispatch emits ``.dump(...)``).
+
+    Two-part regression:
+      1. Parser: the for-form path (``_parse_spmd_for_loop``) built its InCore
+         scope directly and skipped ``_merge_forward_sticky_dump``, so the tag
+         was dropped — unlike the ``with pl.at`` / with-form / ``pl.incore``
+         paths that route through ``_parse_scope_body``.
+      2. Codegen: ``BuildWrapperReorderedParams`` read selective-dump only from
+         the outer wrapper Call, missing a tag attached to the inner kernel Call
+         (where a body-local ``pl.dump_tag`` lands)."""
+    torch = pytest.importorskip("torch")
+    _spmd_for_with_dump_tag._cache.clear()
+
+    a = torch.randn(128, 128, dtype=torch.float32)
+    c = torch.zeros(128, 128, dtype=torch.float32)
+    program = _spmd_for_with_dump_tag.compile_for_test(a, c)
+
+    # (1) Parser: the inner outlined kernel dispatch carries the tagged Var.
+    dumps = _dispatch_dump_vars(program)
+    dumping = {name: dv for name, dv in dumps.items() if dv}
+    assert len(dumping) == 1, f"for-form spmd dispatch should dump c_view, got {dumps}"
+    (only_dv,) = dumping.values()
+    # Helper-internal Var carries an ``_inlineN`` suffix; match by prefix.
+    assert len(only_dv) == 1 and only_dv[0].startswith("c_view"), only_dv
+
+    # (2) Codegen: the Spmd wrapper dispatch emits a ``.dump(c_view...)`` call.
+    orch = next(fn for fn in program.functions.values() if fn.func_type == ir.FunctionType.Orchestration)
+    code = codegen.generate_orchestration(program, orch).code
+    dump_lines = [ln.strip() for ln in code.splitlines() if ".dump(" in ln]
+    assert len(dump_lines) == 1, f"expected one emitted .dump(), got {dump_lines}"
+    assert ".dump(c_view" in dump_lines[0], dump_lines[0]
 
 
 def test_no_dump_tag_yields_no_dispatch_dump_vars():
