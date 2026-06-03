@@ -78,6 +78,7 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // eliminating.
   Register(IRProperty::TensorViewCanonical,
            []() { return CreateTensorViewCanonicalPropertyVerifier(/*require_materialized=*/true); });
+  Register(IRProperty::CommGroupsCollected, CreateCommGroupsCollectedPropertyVerifier);
 }
 
 void PropertyVerifierRegistry::Register(IRProperty prop, std::function<PropertyVerifierPtr()> factory) {

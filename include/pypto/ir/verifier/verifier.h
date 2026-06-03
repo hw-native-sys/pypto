@@ -356,6 +356,20 @@ PropertyVerifierPtr CreateOrchestrationReferencesResolvedPropertyVerifier();
  */
 PropertyVerifierPtr CreateTensorViewCanonicalPropertyVerifier(bool require_materialized = false);
 
+/**
+ * @brief Factory function for creating CommGroupsCollected property verifier
+ *
+ * Verifies that every ``WindowBuffer`` slot in ``Program.comm_groups_`` appears
+ * in exactly one ``CommGroup``. ``DistributedCodegen`` relies on this
+ * shared_ptr-identity uniqueness to route each Submit's per-arg ``device_ctx``
+ * handle to the correct domain; a duplicate slot would misroute communication
+ * traffic at runtime. The ``CollectCommGroups`` pass enforces this invariant
+ * by construction; the verifier independently checks it.
+ *
+ * @return Shared pointer to CommGroupsCollected PropertyVerifier
+ */
+PropertyVerifierPtr CreateCommGroupsCollectedPropertyVerifier();
+
 }  // namespace ir
 }  // namespace pypto
 

@@ -30,6 +30,7 @@
 #include "pypto/ir/transforms/utils/mutable_copy.h"
 #include "pypto/ir/transforms/utils/transform_utils.h"
 #include "pypto/ir/type.h"
+#include "pypto/ir/verifier/verifier.h"
 
 namespace pypto {
 namespace ir {
@@ -431,6 +432,48 @@ Pass CollectCommGroups() {
 }
 
 }  // namespace pass
+
+// ============================================================================
+// CommGroupsCollected property verifier
+// ============================================================================
+
+class CommGroupsCollectedPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "CommGroupsCollected"; }
+
+  void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
+    if (!program) return;
+    std::unordered_map<const WindowBuffer*, size_t> first_seen_group;
+    for (size_t gi = 0; gi < program->comm_groups_.size(); ++gi) {
+      const auto& group = program->comm_groups_[gi];
+      if (!group) {
+        diagnostics.emplace_back(DiagnosticSeverity::Error, "CommGroupsCollected", 0,
+                                 "CommGroup at index " + std::to_string(gi) + " is null", Span::unknown());
+        continue;
+      }
+      for (const auto& slot : group->slots_) {
+        if (!slot) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "CommGroupsCollected", 0,
+                                   "CommGroup at index " + std::to_string(gi) + " has a null slot",
+                                   group->span_);
+          continue;
+        }
+        auto [it, inserted] = first_seen_group.emplace(slot.get(), gi);
+        if (!inserted) {
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "CommGroupsCollected", 0,
+                                   "WindowBuffer '" + slot->name_hint_ +
+                                       "' appears in multiple CommGroups (" + std::to_string(it->second) +
+                                       " and " + std::to_string(gi) + ")",
+                                   slot->span_);
+        }
+      }
+    }
+  }
+};
+
+PropertyVerifierPtr CreateCommGroupsCollectedPropertyVerifier() {
+  return std::make_shared<CommGroupsCollectedPropertyVerifierImpl>();
+}
 
 }  // namespace ir
 }  // namespace pypto

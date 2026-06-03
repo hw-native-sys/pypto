@@ -565,5 +565,64 @@ def test_loop_bound_via_assigned_temp_const_int():
     assert list(g.devices) == [0, 1]
 
 
+# ---------------------------------------------------------------------------
+# CommGroupsCollected property verifier
+# ---------------------------------------------------------------------------
+
+
+def _build_pass_output_with_two_groups() -> ir.Program:
+    """Run the pass on a 2-group program; return its (uniqueness-correct) output."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, data: pld.DistributedTensor[[256], pl.FP32]):
+            return data
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf_a = pld.alloc_window_buffer(1024)
+            buf_b = pld.alloc_window_buffer(1024)
+            data_a = pld.window(buf_a, [256], dtype=pl.FP32)
+            data_b = pld.window(buf_b, [256], dtype=pl.FP32)
+            for r in pl.range(pld.world_size()):
+                self.chip_orch(data_a, device=r)
+            self.chip_orch(data_b, device=0)
+            return 0
+
+    return _apply(P)
+
+
+def test_verifier_passes_on_pass_output():
+    """Verifier emits no errors on the pass's own output (slot-uniqueness holds)."""
+    program = _build_pass_output_with_two_groups()
+    assert len(program.comm_groups) == 2
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.CommGroupsCollected)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
+    errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+    assert errors == []
+
+
+def test_verifier_flags_duplicate_slot_across_groups():
+    """A WindowBuffer reused across two CommGroups is rejected with a clear error."""
+    program = _build_pass_output_with_two_groups()
+    cg0, cg1 = program.comm_groups[0], program.comm_groups[1]
+
+    # Inject a duplicate: build a new CommGroup that reuses cg0's first slot
+    # while cg0 still owns it. The verifier must flag the cross-group reuse.
+    duplicated = ir.CommGroup(list(cg1.devices), [cg0.slots[0]], cg1.span)
+    bad_program = ir.Program(list(program.functions.values()), [cg0, duplicated], program.name, program.span)
+
+    props = passes.IRPropertySet()
+    props.insert(passes.IRProperty.CommGroupsCollected)
+    diagnostics = passes.PropertyVerifierRegistry.verify(props, bad_program)
+    errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
+    assert len(errors) == 1
+    assert "appears in multiple CommGroups" in errors[0].message
+    assert errors[0].rule_name == "CommGroupsCollected"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
