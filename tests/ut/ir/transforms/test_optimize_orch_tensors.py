@@ -1479,6 +1479,91 @@ class TestOutWindowExternalizer:
         After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_consumer_input_in_sequential_loop_keeps_parent_baseline(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def produce(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                r0: pl.Scalar[pl.INDEX],
+                c0: pl.Scalar[pl.INDEX],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                x_tile: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [r0, c0], [32, 32])
+                doubled: pl.Tile[[32, 32], pl.FP32] = pl.tile.add(x_tile, x_tile)
+                return pl.store(doubled, [r0, c0], score)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                score: pl.Tensor[[64, 128], pl.FP32],
+                r0: pl.Scalar[pl.INDEX],
+                c0: pl.Scalar[pl.INDEX],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                block: pl.Tensor[[32, 64], pl.FP32] = score[r0 : r0 + 32, c0 : c0 + 64]
+                return pl.assemble(probe, pl.add(block, block), [r0, c0])
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 128], pl.FP32], pl.Tensor[[64, 128], pl.FP32]]:
+                score_next: pl.Tensor[[64, 128], pl.FP32] = self.produce(x, 0, 0, score)
+                for _, (probe_iter,) in pl.range(2, init_values=(probe,)):
+                    probe_next: pl.Tensor[[64, 128], pl.FP32] = self.consume(score_next, 0, 0, probe_iter)
+                    new_probe = pl.yield_(probe_next)
+                return score_next, new_probe
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume(
+                score: pl.Tensor[[64, 128], pl.FP32],
+                r0: pl.Scalar[pl.INDEX],
+                c0: pl.Scalar[pl.INDEX],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                block: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    score, [r0, c0], [32, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                doubled: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(block, block)
+                result: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(doubled, [r0, c0], probe)
+                return result
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def produce(
+                x: pl.Tensor[[64, 128], pl.FP32],
+                r0: pl.Scalar[pl.INDEX],
+                c0: pl.Scalar[pl.INDEX],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                x_tile: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [r0, c0], [32, 32], [32, 32], target_memory=pl.Mem.Vec, transpose=False
+                )
+                doubled: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.tile.add(x_tile, x_tile)
+                result: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(doubled, [r0, c0], score)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def main(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 128], pl.FP32], pl.Tensor[[64, 128], pl.FP32]]:
+                score_next: pl.Tensor[[64, 128], pl.FP32] = self.produce(x, 0, 0, score)
+                for _, (probe_iter,) in pl.range(2, init_values=(probe,)):
+                    probe_next: pl.Tensor[[64, 128], pl.FP32] = self.consume(score_next, 0, 0, probe_iter)
+                    new_probe = pl.yield_(probe_next)
+                return score_next, new_probe
+
+        After = _run_to_optimize_orch_tensors(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_consumer_input_with_other_full_use_keeps_parent_baseline(self):
         @pl.program
         class Before:

@@ -2178,7 +2178,7 @@ class OutWindowExternalizer {
       later_reads_by_stmt.reserve(op->stmts_.size());
       for (auto stmt_it = op->stmts_.rbegin(); stmt_it != op->stmts_.rend(); ++stmt_it) {
         later_reads_by_stmt.emplace(stmt_it->get(), later_reads);
-        AddFullRootReadsFromStmt(*stmt_it, later_reads);
+        AddFullRootReadsFromStmt(*stmt_it, later_reads, /*allow_windowed_call_skip=*/true);
       }
 
       for (const auto& stmt : op->stmts_) {
@@ -2443,9 +2443,27 @@ class OutWindowExternalizer {
       return false;
     }
 
-    bool CanRewriteCallsite(const AssignStmtPtr& call_assign, const CallPtr& call,
-                            const CalleeRewriteAnalysis& analysis, const RootSet& reads) const {
+    bool CanSkipFullRootReadForWindowedCallsite(const AssignStmtPtr& call_assign, const CallPtr& call,
+                                                const CalleeRewriteAnalysis& analysis,
+                                                const RootSet& reads) const {
       if (!call_assign || analysis.outputs.empty()) return false;
+      for (const auto& input : analysis.inputs) {
+        if (input.in_param_index >= call->args_.size()) return false;
+        if (!AsVarLike(call->args_[input.in_param_index])) return false;
+        if (!IsWritableRootExpr(call->args_[input.in_param_index])) return false;
+      }
+      for (const auto& output : analysis.outputs) {
+        if (output.out_param_index >= call->args_.size()) return false;
+        if (!AsVarLike(call->args_[output.out_param_index])) return false;
+      }
+      if (IsSubmitCall(call)) {
+        auto clone_it = cloned_funcs_.find(call->op_->name_);
+        auto tuple_ty = As<TupleType>(call->GetType());
+        if (clone_it == cloned_funcs_.end() || !tuple_ty ||
+            tuple_ty->types_.size() != clone_it->second->return_types_.size() + 1) {
+          return false;
+        }
+      }
       if (!ProveCallsiteDisjointness(call_assign, call, analysis)) return false;
       return !HasLaterFullParentReadOfRewrittenOutput(call, analysis, reads);
     }
@@ -2460,10 +2478,12 @@ class OutWindowExternalizer {
       const CalleeRewriteAnalysis* analysis =
           analysis_it == analyses_.end() || !cloned_funcs_.count(callee_name) ? nullptr
                                                                               : &analysis_it->second;
-      const bool callsite_rewrites = analysis && CanRewriteCallsite(call_assign, call, *analysis, reads);
+      const bool can_skip_windowed_reads =
+          analysis && CanSkipFullRootReadForWindowedCallsite(call_assign, call, *analysis, reads);
       for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
         if (!IsReadDirection(callee->param_directions_[i])) continue;
-        if (callsite_rewrites && HasAnalyzedInputWindow(*analysis, i) && IsWritableRootExpr(call->args_[i])) {
+        if (can_skip_windowed_reads && HasAnalyzedInputWindow(*analysis, i) &&
+            IsWritableRootExpr(call->args_[i])) {
           continue;
         }
         if (!IsFullRootExpr(call->args_[i])) continue;
@@ -2485,7 +2505,7 @@ class OutWindowExternalizer {
     // reads are counted by the later-read safety guard — otherwise a windowed
     // submit could be externalized even though a subsequent submit reads the
     // full output (.claude/rules/pass-submit-awareness.md).
-    void AddFullRootReadsFromCallLike(const ExprPtr& value, RootSet& reads) const {
+    void AddFullRootReadsFromCallLike(const ExprPtr& value, RootSet& reads) {
       if (auto call = As<Call>(value)) {
         AddFullRootReadsFromCall(nullptr, call, reads);
       } else if (auto submit = As<Submit>(value)) {
@@ -2493,33 +2513,65 @@ class OutWindowExternalizer {
       }
     }
 
-    void AddFullRootReadsFromStmt(const StmtPtr& stmt, RootSet& reads) const {
+    void AddFullRootReadsFromStmt(const StmtPtr& stmt, RootSet& reads, bool allow_windowed_call_skip) {
       if (!stmt) return;
       if (auto assign = As<AssignStmt>(stmt)) {
         if (auto call = As<Call>(assign->value_)) {
-          AddFullRootReadsFromCall(assign, call, reads);
+          AddFullRootReadsFromCall(allow_windowed_call_skip ? assign : nullptr, call, reads);
         } else if (auto submit = As<Submit>(assign->value_)) {
-          AddFullRootReadsFromCall(assign, SubmitToCallView(submit), reads);
+          AddFullRootReadsFromCall(allow_windowed_call_skip ? assign : nullptr, SubmitToCallView(submit),
+                                   reads);
         }
       } else if (auto eval = As<EvalStmt>(stmt)) {
         AddFullRootReadsFromCallLike(eval->expr_, reads);
       } else if (auto seq = As<SeqStmts>(stmt)) {
         for (auto it = seq->stmts_.rbegin(); it != seq->stmts_.rend(); ++it) {
-          AddFullRootReadsFromStmt(*it, reads);
+          AddFullRootReadsFromStmt(*it, reads, allow_windowed_call_skip);
         }
       } else if (auto for_stmt = As<ForStmt>(stmt)) {
-        AddFullRootReadsFromStmt(for_stmt->body_, reads);
+        auto saved_loop_iter_init_subst = loop_iter_init_subst_;
+        for (const auto& iter_arg : for_stmt->iter_args_) {
+          if (!iter_arg || !iter_arg->initValue_) continue;
+          loop_iter_init_subst_[iter_arg.get()] = iter_arg->initValue_;
+          if (const Var* root = ResolveBufferRoot(iter_arg->initValue_)) {
+            full_buffer_roots_[iter_arg.get()] = root;
+          }
+        }
+        bool is_sequential = for_stmt->kind_ != ForKind::Parallel;
+        if (is_sequential) {
+          sequential_loops_.push_back(for_stmt);
+          loop_local_allocs_.emplace_back(CollectLoopLocalTensorAllocs(for_stmt));
+        }
+        AddFullRootReadsFromStmt(for_stmt->body_, reads, allow_windowed_call_skip);
+        if (is_sequential) {
+          loop_local_allocs_.pop_back();
+          sequential_loops_.pop_back();
+        }
+        AddLoopReturnRoots(for_stmt);
+        loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
       } else if (auto while_stmt = As<WhileStmt>(stmt)) {
-        AddFullRootReadsFromStmt(while_stmt->body_, reads);
+        auto saved_loop_iter_init_subst = loop_iter_init_subst_;
+        for (const auto& iter_arg : while_stmt->iter_args_) {
+          if (!iter_arg || !iter_arg->initValue_) continue;
+          loop_iter_init_subst_[iter_arg.get()] = iter_arg->initValue_;
+          if (const Var* root = ResolveBufferRoot(iter_arg->initValue_)) {
+            full_buffer_roots_[iter_arg.get()] = root;
+          }
+        }
+        ++while_depth_;
+        AddFullRootReadsFromStmt(while_stmt->body_, reads, allow_windowed_call_skip);
+        --while_depth_;
+        AddLoopReturnRoots(while_stmt);
+        loop_iter_init_subst_ = std::move(saved_loop_iter_init_subst);
       } else if (auto if_stmt = As<IfStmt>(stmt)) {
-        AddFullRootReadsFromStmt(if_stmt->then_body_, reads);
+        AddFullRootReadsFromStmt(if_stmt->then_body_, reads, allow_windowed_call_skip);
         if (if_stmt->else_body_.has_value()) {
-          AddFullRootReadsFromStmt(if_stmt->else_body_.value(), reads);
+          AddFullRootReadsFromStmt(if_stmt->else_body_.value(), reads, allow_windowed_call_skip);
         }
       } else if (auto scope = As<ScopeStmt>(stmt)) {
-        AddFullRootReadsFromStmt(scope->body_, reads);
+        AddFullRootReadsFromStmt(scope->body_, reads, allow_windowed_call_skip);
       } else if (auto rscope = As<RuntimeScopeStmt>(stmt)) {
-        AddFullRootReadsFromStmt(rscope->body_, reads);
+        AddFullRootReadsFromStmt(rscope->body_, reads, allow_windowed_call_skip);
       }
     }
 
