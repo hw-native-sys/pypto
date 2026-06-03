@@ -241,15 +241,19 @@ class TestMakeCacheKey:
         distinct keys; equal configs collide so a genuine re-call still hits the
         cache.
         """
-        common = dict(
-            param_names=["a"],
-            tensor_shapes={"a": (8, 8)},
-            tensor_dtypes={"a": DataType.FP32},
-        )
-        k_none = self._make_key(**common)
-        k_01 = self._make_key(**common, distributed_config=DistributedConfig(device_ids=[0, 1]))
-        k_23 = self._make_key(**common, distributed_config=DistributedConfig(device_ids=[2, 3]))
-        k_01_again = self._make_key(**common, distributed_config=DistributedConfig(device_ids=[0, 1]))
+
+        def key_for(distributed_config):
+            return self._make_key(
+                param_names=["a"],
+                tensor_shapes={"a": (8, 8)},
+                tensor_dtypes={"a": DataType.FP32},
+                distributed_config=distributed_config,
+            )
+
+        k_none = key_for(None)
+        k_01 = key_for(DistributedConfig(device_ids=[0, 1]))
+        k_23 = key_for(DistributedConfig(device_ids=[2, 3]))
+        k_01_again = key_for(DistributedConfig(device_ids=[0, 1]))
 
         assert len({k_none, k_01, k_23}) == 3  # all distinct, and key stays hashable
         assert k_01 == k_01_again  # equal config → cache hit

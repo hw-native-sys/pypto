@@ -1639,20 +1639,23 @@ class TestCompileKwargForwarding:
         from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
         from pypto.jit.cache import make_cache_key  # noqa: PLC0415
 
-        base = dict(
-            source_hash="h",
-            param_names=["x"],
-            tensor_shapes={"x": (128, 128)},
-            tensor_dtypes={"x": DataType.FP32},
-            dynamic_dims=set(),
-            scalar_values={},
-            platform="a2a3",
-            strategy=OptimizationStrategy.Default,
-        )
-        key_none = make_cache_key(**base)
-        key_01 = make_cache_key(**base, distributed_config=DistributedConfig(device_ids=[0, 1]))
-        key_23 = make_cache_key(**base, distributed_config=DistributedConfig(device_ids=[2, 3]))
-        key_01_again = make_cache_key(**base, distributed_config=DistributedConfig(device_ids=[0, 1]))
+        def key_for(distributed_config):
+            return make_cache_key(
+                source_hash="h",
+                param_names=["x"],
+                tensor_shapes={"x": (128, 128)},
+                tensor_dtypes={"x": DataType.FP32},
+                dynamic_dims=set(),
+                scalar_values={},
+                platform="a2a3",
+                strategy=OptimizationStrategy.Default,
+                distributed_config=distributed_config,
+            )
+
+        key_none = key_for(None)
+        key_01 = key_for(DistributedConfig(device_ids=[0, 1]))
+        key_23 = key_for(DistributedConfig(device_ids=[2, 3]))
+        key_01_again = key_for(DistributedConfig(device_ids=[0, 1]))
 
         # Distinct device_ids must not collide, and a distributed config must
         # not collide with the single-chip (None) default.
