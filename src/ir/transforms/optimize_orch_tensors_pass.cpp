@@ -2431,14 +2431,41 @@ class OutWindowExternalizer {
       }
     }
 
-    void AddFullRootReadsFromCall(const CallPtr& call, RootSet& reads) const {
+    bool HasLaterFullParentReadOfRewrittenOutput(const CallPtr& call, const CalleeRewriteAnalysis& analysis,
+                                                 const RootSet& reads) const {
+      for (const auto& output : analysis.outputs) {
+        if (output.out_param_index >= call->args_.size()) return true;
+        const Var* root = ResolveBufferRoot(call->args_[output.out_param_index]);
+        if (root && reads.count(root) > 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    bool CanRewriteCallsite(const AssignStmtPtr& call_assign, const CallPtr& call,
+                            const CalleeRewriteAnalysis& analysis, const RootSet& reads) const {
+      if (!call_assign || analysis.outputs.empty()) return false;
+      if (!ProveCallsiteDisjointness(call_assign, call, analysis)) return false;
+      return !HasLaterFullParentReadOfRewrittenOutput(call, analysis, reads);
+    }
+
+    void AddFullRootReadsFromCall(const AssignStmtPtr& call_assign, const CallPtr& call,
+                                  RootSet& reads) const {
       if (!call || !program_ || codegen::IsBuiltinOp(call->op_->name_)) return;
       auto callee_name = call->op_->name_;
       auto callee = program_->GetFunction(callee_name);
       if (!callee) return;
+      auto analysis_it = analyses_.find(callee_name);
+      const CalleeRewriteAnalysis* analysis =
+          analysis_it == analyses_.end() || !cloned_funcs_.count(callee_name) ? nullptr
+                                                                              : &analysis_it->second;
+      const bool callsite_rewrites = analysis && CanRewriteCallsite(call_assign, call, *analysis, reads);
       for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
         if (!IsReadDirection(callee->param_directions_[i])) continue;
-        if (HasAnalyzedInputWindow(callee_name, i) && IsWritableRootExpr(call->args_[i])) continue;
+        if (callsite_rewrites && HasAnalyzedInputWindow(*analysis, i) && IsWritableRootExpr(call->args_[i])) {
+          continue;
+        }
         if (!IsFullRootExpr(call->args_[i])) continue;
         if (const Var* root = ResolveBufferRoot(call->args_[i])) {
           reads.insert(root);
@@ -2446,10 +2473,8 @@ class OutWindowExternalizer {
       }
     }
 
-    bool HasAnalyzedInputWindow(const std::string& callee_name, size_t param_index) const {
-      auto analysis_it = analyses_.find(callee_name);
-      if (analysis_it == analyses_.end() || !cloned_funcs_.count(callee_name)) return false;
-      const auto& inputs = analysis_it->second.inputs;
+    static bool HasAnalyzedInputWindow(const CalleeRewriteAnalysis& analysis, size_t param_index) {
+      const auto& inputs = analysis.inputs;
       return std::any_of(inputs.begin(), inputs.end(), [param_index](const InputRewriteInfo& input) {
         return input.in_param_index == param_index;
       });
@@ -2462,16 +2487,20 @@ class OutWindowExternalizer {
     // full output (.claude/rules/pass-submit-awareness.md).
     void AddFullRootReadsFromCallLike(const ExprPtr& value, RootSet& reads) const {
       if (auto call = As<Call>(value)) {
-        AddFullRootReadsFromCall(call, reads);
+        AddFullRootReadsFromCall(nullptr, call, reads);
       } else if (auto submit = As<Submit>(value)) {
-        AddFullRootReadsFromCall(SubmitToCallView(submit), reads);
+        AddFullRootReadsFromCall(nullptr, SubmitToCallView(submit), reads);
       }
     }
 
     void AddFullRootReadsFromStmt(const StmtPtr& stmt, RootSet& reads) const {
       if (!stmt) return;
       if (auto assign = As<AssignStmt>(stmt)) {
-        AddFullRootReadsFromCallLike(assign->value_, reads);
+        if (auto call = As<Call>(assign->value_)) {
+          AddFullRootReadsFromCall(assign, call, reads);
+        } else if (auto submit = As<Submit>(assign->value_)) {
+          AddFullRootReadsFromCall(assign, SubmitToCallView(submit), reads);
+        }
       } else if (auto eval = As<EvalStmt>(stmt)) {
         AddFullRootReadsFromCallLike(eval->expr_, reads);
       } else if (auto seq = As<SeqStmts>(stmt)) {
@@ -2496,14 +2525,7 @@ class OutWindowExternalizer {
 
     bool HasLaterFullParentReadOfRewrittenOutput(const CallPtr& call,
                                                  const CalleeRewriteAnalysis& analysis) const {
-      for (const auto& output : analysis.outputs) {
-        if (output.out_param_index >= call->args_.size()) return true;
-        const Var* root = ResolveBufferRoot(call->args_[output.out_param_index]);
-        if (root && enclosing_later_full_parent_reads_.count(root) > 0) {
-          return true;
-        }
-      }
-      return false;
+      return HasLaterFullParentReadOfRewrittenOutput(call, analysis, enclosing_later_full_parent_reads_);
     }
 
     std::optional<RewriteBundle> TryRewriteCall(const AssignStmtPtr& call_assign) {
@@ -3157,6 +3179,9 @@ class OutWindowExternalizer {
       auto matched_refs = matched_it == matched_refs_by_index.end() ? 0 : matched_it->second;
       if (total_refs == matched_refs) inputs.push_back(std::move(info));
     }
+    std::sort(inputs.begin(), inputs.end(), [](const InputRewriteInfo& lhs, const InputRewriteInfo& rhs) {
+      return lhs.in_param_index < rhs.in_param_index;
+    });
     return inputs;
   }
 
