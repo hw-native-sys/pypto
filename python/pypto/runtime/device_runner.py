@@ -506,6 +506,7 @@ def execute_on_device(  # noqa: PLR0913
     enable_dump_tensor: bool = False,
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
+    enable_scope_stats: bool = False,
     runtime_env: dict[str, str] | None = None,
 ) -> None:
     """Execute *chip_callable* on device via Simpler's unified ``Worker``.
@@ -544,8 +545,8 @@ def execute_on_device(  # noqa: PLR0913
             field unset and uses the simpler runtime default.
         output_prefix: Directory under which the runtime writes diagnostic
             artifacts (``l2_swimlane_records.json`` / ``tensor_dump/`` /
-            ``pmu.csv`` / ``deps.json``). Required whenever any
-            ``enable_*`` DFX flag is set — Simpler's
+            ``pmu.csv`` / ``deps.json`` / ``scope_stats/``). Required
+            whenever any ``enable_*`` DFX flag is set — Simpler's
             ``CallConfig::validate()`` would otherwise reject the call.
             Passing it with all flags off creates no artefacts.
         enable_l2_swimlane: Capture per-task L2 perf records
@@ -558,6 +559,9 @@ def execute_on_device(  # noqa: PLR0913
             Mirrors ``--enable-pmu N``.
         enable_dep_gen: Capture PTO2 dependency edges (``deps.json``).
             Mirrors ``--enable-dep-gen``.
+        enable_scope_stats: Capture per-scope ring-fill peaks
+            (``scope_stats/scope_stats.jsonl``). Mirrors
+            ``--enable-scope-stats``.
         runtime_env: Optional per-example environment variable overrides.
             Applied around the device ``run`` call. When an active
             :class:`pypto.runtime.ChipWorker` is reused, ``init()`` has already
@@ -575,12 +579,15 @@ def execute_on_device(  # noqa: PLR0913
             f"L3 execution is not yet exposed at the pypto user-API layer."
         )
 
-    any_dfx = enable_l2_swimlane or enable_dump_tensor or enable_pmu > 0 or enable_dep_gen
+    any_dfx = (
+        enable_l2_swimlane or enable_dump_tensor or enable_pmu > 0 or enable_dep_gen or enable_scope_stats
+    )
     if any_dfx and not output_prefix:
         raise ValueError(
             "execute_on_device: output_prefix is required when any DFX flag "
-            "(enable_l2_swimlane / enable_dump_tensor / enable_pmu / enable_dep_gen) "
-            "is enabled — runtime CallConfig::validate() would otherwise reject the call."
+            "(enable_l2_swimlane / enable_dump_tensor / enable_pmu / enable_dep_gen / "
+            "enable_scope_stats) is enabled — runtime CallConfig::validate() would "
+            "otherwise reject the call."
         )
 
     from .worker import ChipWorker as _PyptoWorker  # noqa: PLC0415
@@ -596,6 +603,7 @@ def execute_on_device(  # noqa: PLR0913
     cfg.enable_dump_tensor = enable_dump_tensor
     cfg.enable_pmu = enable_pmu
     cfg.enable_dep_gen = enable_dep_gen
+    cfg.enable_scope_stats = enable_scope_stats
     if output_prefix:
         cfg.output_prefix = output_prefix
 

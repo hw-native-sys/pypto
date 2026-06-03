@@ -209,6 +209,13 @@ def pytest_addoption(parser):
         help="Enable AICore PMU CSV collection. Bare flag = PIPE_UTILIZATION(2). "
         "Pass an event type (e.g. 4 = MEMORY) to override.",
     )
+    parser.addoption(
+        "--enable-scope-stats",
+        action="store_true",
+        default=False,
+        help="Capture per-scope ring-fill peaks into "
+        "<work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl.",
+    )
 
 
 def _parse_device_option(raw: str | int) -> list[int]:
@@ -381,6 +388,7 @@ def test_config(request) -> RunConfig:
         enable_dump_tensor=request.config.getoption("--dump-tensor"),
         enable_pmu=request.config.getoption("--enable-pmu"),
         enable_dep_gen=request.config.getoption("--enable-dep-gen"),
+        enable_scope_stats=request.config.getoption("--enable-scope-stats"),
     )
 
 
@@ -606,6 +614,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     enable_dump_tensor: bool = session.config.getoption("--dump-tensor")
     enable_pmu: int = session.config.getoption("--enable-pmu")
     enable_dep_gen: bool = session.config.getoption("--enable-dep-gen")
+    enable_scope_stats: bool = session.config.getoption("--enable-scope-stats")
 
     # ── determine cache directory ─────────────────────────────────────────────
     save_kernels: bool = session.config.getoption("--save-kernels")
@@ -650,6 +659,7 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         enable_dump_tensor=enable_dump_tensor,
         enable_pmu=enable_pmu,
         enable_dep_gen=enable_dep_gen,
+        enable_scope_stats=enable_scope_stats,
     )
     print("[PyPTO] Pipeline scheduled — pytest item loop starting\n")
 

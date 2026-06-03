@@ -413,6 +413,7 @@ def start_pipeline(  # noqa: PLR0913
     enable_dump_tensor: bool = False,
     enable_pmu: int = 0,
     enable_dep_gen: bool = False,
+    enable_scope_stats: bool = False,
 ) -> None:
     """Spin up the compile pipeline and populate :data:`_compile_futures`.
 
@@ -453,6 +454,7 @@ def start_pipeline(  # noqa: PLR0913
             enable_dump_tensor=enable_dump_tensor,
             enable_pmu=enable_pmu,
             enable_dep_gen=enable_dep_gen,
+            enable_scope_stats=enable_scope_stats,
         ),
     }
     n_devices = device_pool.qsize()

@@ -1,6 +1,6 @@
 # Runtime DFX (Design For X) Flags
 
-PyPTO exposes Simpler's four runtime diagnostic sub-features as independent
+PyPTO exposes Simpler's five runtime diagnostic sub-features as independent
 toggles on [`RunConfig`](../../../python/pypto/runtime/runner.py). Each
 toggle maps 1:1 to a field on Simpler's `CallConfig` and to the matching
 flag in `runtime/conftest.py`, so the two surfaces stay aligned.
@@ -13,8 +13,9 @@ flag in `runtime/conftest.py`, so the two surfaces stay aligned.
 | `enable_dump_tensor: bool` | `--dump-tensor` | `enable_dump_tensor` | `tensor_dump/{tensor_dump.json,bin}` | `dump_viewer` (manual) |
 | `enable_pmu: int` | `--enable-pmu [N]` (bare = `2`) | `enable_pmu` (`0` off, `>0` event type) | `pmu.csv` | — |
 | `enable_dep_gen: bool` | `--enable-dep-gen` | `enable_dep_gen` | `deps.json` | `deps_to_graph` (manual) |
+| `enable_scope_stats: bool` | `--enable-scope-stats` | `enable_scope_stats` | `scope_stats/scope_stats.jsonl` | `scope_stats_plot` (manual) |
 
-The four flags are **fully independent** and may be combined in any
+The five flags are **fully independent** and may be combined in any
 subset. Enabling *any* of them auto-forces `RunConfig.save_kernels=True`
 so the `<work_dir>/dfx_outputs/` directory survives the run.
 
@@ -23,7 +24,10 @@ so the `<work_dir>/dfx_outputs/` directory survives the run.
 The runtime writes every artefact under a single directory passed via
 `CallConfig.output_prefix`. PyPTO sets that prefix to
 `<work_dir>/dfx_outputs/` and the constituent subpaths are fixed per the
-table above. Simpler's `CallConfig::validate()` rejects the call if any
+table above. Most artefacts are flat files directly under the prefix;
+`scope_stats` is the exception — its collector writes a `scope_stats/`
+subdir holding `scope_stats.jsonl`. Simpler's `CallConfig::validate()`
+rejects the call if any
 flag is enabled but `output_prefix` is empty; PyPTO mirrors that contract
 on the Python side and raises `ValueError` from `execute_on_device`
 *before* the C++ boundary so the failure traceback points at the
@@ -85,6 +89,22 @@ prints this same hint at the end of every dep_gen-enabled run.
 Requires Graphviz on `PATH` (`apt install graphviz` /
 `brew install graphviz`). Open the resulting HTML in any browser —
 drag to pan, wheel to zoom, `f` to fit, `r` to reset.
+
+## Rendering `scope_stats.jsonl` to HTML
+
+`enable_scope_stats` emits the raw `scope_stats/scope_stats.jsonl`
+(line 1 is run metadata; each later line is one per-scope record). Turn
+it into a single self-contained HTML report — one timeline per ring with
+the heap / task_window / tensormap peaks — with the offline renderer:
+
+```bash
+python runtime/tools/scope_stats_plot.py \
+    <work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl
+```
+
+The report is written next to the input as `scope_stats.html`. Like
+`deps_to_graph`, it is **not** invoked automatically — the runner prints
+this hint at the end of every scope-stats-enabled run.
 
 ## Implementation map
 
@@ -208,6 +228,6 @@ module / CLI is still usable directly against the output directory.
 ## Related
 
 - Simpler's runtime-side reference: `runtime/docs/dfx/{l2-swimlane,
-  tensor-dump,pmu-profiling,dep_gen}.md`.
+  tensor-dump,pmu-profiling,dep_gen,scope-stats}.md`.
 - Compile-time profiling (orthogonal, single PyPTO process):
   [01-compile-profiling.md](01-compile-profiling.md).

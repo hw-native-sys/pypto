@@ -104,6 +104,11 @@ class RunConfig:
             ``<work_dir>/dfx_outputs/deps.json``. Render to HTML on demand
             via ``python -m simpler_setup.tools.deps_to_graph``. Mirrors
             ``--enable-dep-gen``.
+        enable_scope_stats: Capture per-scope heap / task_window / tensormap
+            ring-fill peaks into
+            ``<work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl``. Render to
+            HTML on demand via ``runtime/tools/scope_stats_plot.py``. Mirrors
+            ``--enable-scope-stats``.
         compile_profiling: If ``True``, enable compile profiling that records
             per-stage wall-clock timings (parse, passes, codegen).
             Results are written to ``report/pipeline_profile.{txt,json}`` in
@@ -150,6 +155,7 @@ class RunConfig:
     enable_dump_tensor: bool = False
     enable_pmu: int = 0
     enable_dep_gen: bool = False
+    enable_scope_stats: bool = False
     compile_profiling: bool = False
     diagnostic_phase: DiagnosticPhase | None = None
     disabled_diagnostics: DiagnosticCheckSet | None = None
@@ -185,13 +191,17 @@ class RunConfig:
     def any_dfx_enabled(self) -> bool:
         """Return ``True`` when at least one DFX flag is enabled.
 
-        DFX (Design For X) covers the four runtime diagnostic sub-features
+        DFX (Design For X) covers the five runtime diagnostic sub-features
         carried on :class:`~simpler.task_interface.CallConfig`:
-        L2 swimlane, tensor dump, PMU and dep_gen. They are independent
-        toggles that share an output directory.
+        L2 swimlane, tensor dump, PMU, dep_gen and scope_stats. They are
+        independent toggles that share an output directory.
         """
         return (
-            self.enable_l2_swimlane or self.enable_dump_tensor or self.enable_pmu > 0 or self.enable_dep_gen
+            self.enable_l2_swimlane
+            or self.enable_dump_tensor
+            or self.enable_pmu > 0
+            or self.enable_dep_gen
+            or self.enable_scope_stats
         )
 
 
@@ -345,10 +355,15 @@ class _DfxOpts:
     enable_dump_tensor: bool = False
     enable_pmu: int = 0
     enable_dep_gen: bool = False
+    enable_scope_stats: bool = False
 
     def any(self) -> bool:
         return (
-            self.enable_l2_swimlane or self.enable_dump_tensor or self.enable_pmu > 0 or self.enable_dep_gen
+            self.enable_l2_swimlane
+            or self.enable_dump_tensor
+            or self.enable_pmu > 0
+            or self.enable_dep_gen
+            or self.enable_scope_stats
         )
 
     @classmethod
@@ -358,6 +373,7 @@ class _DfxOpts:
             enable_dump_tensor=cfg.enable_dump_tensor,
             enable_pmu=cfg.enable_pmu,
             enable_dep_gen=cfg.enable_dep_gen,
+            enable_scope_stats=cfg.enable_scope_stats,
         )
 
 
@@ -457,6 +473,7 @@ def _build_call_config(
     cfg.enable_dump_tensor = run_config.enable_dump_tensor
     cfg.enable_pmu = run_config.enable_pmu
     cfg.enable_dep_gen = run_config.enable_dep_gen
+    cfg.enable_scope_stats = run_config.enable_scope_stats
     if dfx_dir is not None:
         cfg.output_prefix = str(dfx_dir)
     return cfg
@@ -535,6 +552,7 @@ def _execute_on_device(
         enable_dump_tensor=dfx.enable_dump_tensor,
         enable_pmu=dfx.enable_pmu,
         enable_dep_gen=dfx.enable_dep_gen,
+        enable_scope_stats=dfx.enable_scope_stats,
     )
 
     if dfx_dir is not None:
@@ -610,6 +628,20 @@ def _collect_dfx_artifacts(
 
     if dfx.enable_pmu > 0 and (dfx_dir / "pmu.csv").exists():
         print(f"PMU CSV written to: {dfx_dir / 'pmu.csv'}")
+
+    # scope_stats writes a ``scope_stats/`` subdir (sibling of the flat
+    # artefacts above), not a top-level file — the collector groups the
+    # JSONL alongside any future per-scope companions. ``scope_stats_plot``
+    # is an offline renderer; leave the JSONL in place and point the user
+    # at the HTML-report command rather than running Graphviz-style layout
+    # on the hot path.
+    scope_stats_jsonl = dfx_dir / "scope_stats" / "scope_stats.jsonl"
+    if dfx.enable_scope_stats and scope_stats_jsonl.exists():
+        jsonl_path = shlex.quote(str(scope_stats_jsonl))
+        print(
+            f"scope_stats written to {jsonl_path} — render an HTML report with:\n"
+            f"  python runtime/tools/scope_stats_plot.py {jsonl_path}"
+        )
 
 
 def _generate_swimlane(
@@ -813,6 +845,7 @@ def execute_compiled(  # noqa: PLR0913
         enable_dump_tensor=dfx.enable_dump_tensor,
         enable_pmu=dfx.enable_pmu,
         enable_dep_gen=dfx.enable_dep_gen,
+        enable_scope_stats=dfx.enable_scope_stats,
     )
 
     # Collect DFX artefacts after execution (no-op when dfx_dir is None)

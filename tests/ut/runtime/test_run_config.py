@@ -43,7 +43,7 @@ class TestRunConfigPlatformResolution:
 
 
 class TestRunConfigDfxFlags:
-    """Verify the four DFX flags are independent and propagate correctly."""
+    """Verify the five DFX flags are independent and propagate correctly."""
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -52,6 +52,7 @@ class TestRunConfigDfxFlags:
             {"enable_dump_tensor": True},
             {"enable_pmu": 2},
             {"enable_dep_gen": True},
+            {"enable_scope_stats": True},
         ],
     )
     def test_any_dfx_flag_forces_save_kernels(self, kwargs):
@@ -83,21 +84,40 @@ class TestRunConfigDfxFlags:
         assert cfg.enable_l2_swimlane is False
         assert cfg.enable_dump_tensor is False
         assert cfg.enable_pmu == 0
+        assert cfg.enable_scope_stats is False
 
-    def test_dfx_opts_from_run_config_carries_all_four(self):
+    def test_scope_stats_forces_save_kernels(self):
+        # scope_stats is the fifth DFX flag; like the others it must be
+        # independent and auto-force kernel retention.
+        cfg = RunConfig(platform="a5", enable_scope_stats=True)
+        assert cfg.enable_scope_stats is True
+        assert cfg.any_dfx_enabled() is True
+        assert cfg.save_kernels is True
+        assert cfg.enable_l2_swimlane is False
+        assert cfg.enable_dump_tensor is False
+        assert cfg.enable_pmu == 0
+        assert cfg.enable_dep_gen is False
+
+    def test_dfx_opts_from_run_config_carries_all_five(self):
         cfg = RunConfig(
             platform="a5",
             enable_l2_swimlane=True,
             enable_dump_tensor=True,
             enable_pmu=2,
             enable_dep_gen=True,
+            enable_scope_stats=True,
         )
         opts = _DfxOpts.from_run_config(cfg)
         assert opts.enable_l2_swimlane is True
         assert opts.enable_dump_tensor is True
         assert opts.enable_pmu == 2
         assert opts.enable_dep_gen is True
+        assert opts.enable_scope_stats is True
         assert opts.any() is True
+
+    def test_dfx_opts_any_true_for_scope_stats_only(self):
+        # _DfxOpts.any() must report True when scope_stats is the sole flag.
+        assert _DfxOpts(enable_scope_stats=True).any() is True
 
     def test_dfx_opts_any_false_when_all_off(self):
         assert _DfxOpts().any() is False
@@ -141,6 +161,7 @@ class TestExecuteOnDeviceDfxValidation:
             {"enable_dump_tensor": True},
             {"enable_pmu": 2},
             {"enable_dep_gen": True},
+            {"enable_scope_stats": True},
         ]:
             with pytest.raises(ValueError, match="output_prefix is required"):
                 execute_on_device(

@@ -256,6 +256,7 @@ class TestCrossCoreGroupedTpopTfree:
                     enable_dump_tensor=test_config.enable_dump_tensor,
                     enable_pmu=test_config.enable_pmu,
                     enable_dep_gen=test_config.enable_dep_gen,
+                    enable_scope_stats=test_config.enable_scope_stats,
                 )
                 validate_golden(
                     outputs,

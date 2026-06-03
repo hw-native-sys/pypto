@@ -120,6 +120,7 @@ def test_replay_forwards_dfx_flags(tmp_path: Path) -> None:
         enable_pmu=2,
         enable_dump_tensor=True,
         enable_dep_gen=True,
+        enable_scope_stats=True,
     )
     with patch.object(replay_module, "execute_compiled") as ec:
         replay(work_dir, config=config)
@@ -128,6 +129,7 @@ def test_replay_forwards_dfx_flags(tmp_path: Path) -> None:
     assert dfx.enable_pmu == 2
     assert dfx.enable_dump_tensor is True
     assert dfx.enable_dep_gen is True
+    assert dfx.enable_scope_stats is True
 
 
 def test_replay_invalidates_by_default(tmp_path: Path) -> None:
@@ -315,7 +317,7 @@ def test_cli_invokes_replay_with_dfx_flags(tmp_path: Path) -> None:
         patch.object(replay_module, "replay", side_effect=fake_replay),
         patch.object(replay_module, "_load_named_inputs_from_golden", return_value=[("a", torch.zeros(1))]),
     ):
-        rc = _main([str(work_dir), "--pmu", "2", "--swimlane", "--device-id", "5"])
+        rc = _main([str(work_dir), "--pmu", "2", "--swimlane", "--scope-stats", "--device-id", "5"])
     assert rc == 0
     assert captured["work_dir"] == work_dir
     assert captured["recompile"] is True
@@ -323,6 +325,7 @@ def test_cli_invokes_replay_with_dfx_flags(tmp_path: Path) -> None:
     cfg = captured["config"]
     assert cfg.enable_pmu == 2
     assert cfg.enable_l2_swimlane is True
+    assert cfg.enable_scope_stats is True
     assert cfg.device_id == 5
 
 
