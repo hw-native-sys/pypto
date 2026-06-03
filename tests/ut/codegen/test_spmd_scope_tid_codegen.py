@@ -15,6 +15,8 @@ through ``EffectiveLaunchSpec``'s function-attr fallback. These tests pin that
 fallback plus producer-TaskId capture and explicit ``deps=`` emission.
 """
 
+import re
+
 import pypto.language as pl
 import pytest
 from pypto import backend, codegen, passes
@@ -146,10 +148,20 @@ class TestSpmdScopeTaskIdCodegen:
         assert len(spmd_fns) == 2
 
         code = self._codegen(transformed)
-        # The first dispatch's producer TaskId is captured ...
-        assert "task_0_outs.task_id()" in code, code
-        # ... and threaded as the second dispatch's explicit dependency.
-        assert "set_dependencies(" in code, code
+        # Bind the producer TaskId alias captured from the first dispatch ...
+        m = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        assert m is not None, f"first dispatch's producer TaskId not captured\n{code}"
+        alias = m.group(1)
+        # ... assert THAT alias (not just any TaskId) is pushed into a deps array ...
+        m2 = re.search(
+            rf"if \({re.escape(alias)}\.is_valid\(\)\) (\w+)\[[^\]]*\] = {re.escape(alias)};", code
+        )
+        assert m2 is not None, f"captured TaskId {alias!r} not wired into a deps array\n{code}"
+        deps_arr = m2.group(1)
+        # ... and that the same deps array is handed to the consumer's set_dependencies.
+        assert re.search(rf"\.set_dependencies\({re.escape(deps_arr)},", code) is not None, (
+            f"expected set_dependencies({deps_arr}, ...) tying the dep to {alias!r}\n{code}"
+        )
 
 
 if __name__ == "__main__":

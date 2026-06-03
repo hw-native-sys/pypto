@@ -1180,8 +1180,8 @@ class TestSpmdScopeTaskId:
     # ── Rejections ──────────────────────────────────────────────────────────
 
     def test_deps_without_tid_rejected(self):
-        """``with pl.spmd(n, deps=[tid0]):`` (no ``as tid``) is rejected — deps need a capture anchor."""
-        with pytest.raises(ParserSyntaxError, match="only together with 'as tid'"):
+        """``deps=`` on the plain ``with pl.spmd(n):`` form (no ``as tid``) is rejected."""
+        with pytest.raises(ParserSyntaxError, match="does not accept 'deps='"):
 
             @pl.program
             class Bad:
@@ -1197,6 +1197,37 @@ class TestSpmdScopeTaskId:
                     with pl.spmd(4, deps=[tid0]):  # type: ignore[call-arg]  # deps without `as tid`
                         j = pl.tile.get_block_idx()
                         out = pl.store(pl.load(out, [j * 128, 0], [128, 128]), [j * 128, 0], out)
+                    return out
+
+    def test_empty_deps_without_tid_rejected(self):
+        """``deps=[]`` (empty / normalized to []) without ``as tid`` is rejected too.
+
+        Gating is by keyword *presence* (allow_deps=optional_vars is not None), not by
+        the resolved dep list being non-empty — so even an empty/None-only ``deps=``
+        on the non-capturing with-form surfaces a clear error rather than silently
+        passing.
+        """
+        with pytest.raises(ParserSyntaxError, match="does not accept 'deps='"):
+
+            @pl.program
+            class Bad:
+                @pl.function(type=pl.FunctionType.InCore)
+                def kernel(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    out = pl.store(pl.load(a, [0, 0], [512, 128]), [0, 0], out)
+                    return out
+
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.spmd(4, deps=[]):  # type: ignore[call-arg]  # empty deps, no `as tid`
+                        out = self.kernel(a, out)
                     return out
 
     def test_for_spmd_deps_rejected(self):

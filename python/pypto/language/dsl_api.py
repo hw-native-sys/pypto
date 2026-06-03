@@ -866,8 +866,15 @@ class SpmdContext:
         self.optimizations = optimizations
         self.deps = deps
 
-    def __enter__(self) -> None:
-        pass
+    def __enter__(self) -> Any:
+        # The parser intercepts the ``with pl.spmd(...) [as tid]:`` pattern and
+        # binds ``tid`` (when present) to the dispatch's producer TaskId. This
+        # runtime return value is not consumed in practice — the ``@pl.program``
+        # decorator parses the function source rather than executing it — but
+        # returning ``self`` keeps ``as`` syntactically legal (and ``tid``
+        # non-``None`` under static checking) when a script is executed directly
+        # (e.g. for linting), matching :meth:`AtContext.__enter__`.
+        return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         pass
@@ -900,7 +907,7 @@ def spmd(
     ``range(n)``. Loop start is fixed at 0 and step at 1; each block gets an
     index ``i`` in ``[0, core_num)``.
 
-    Two usage forms:
+    Usage forms:
 
     1. ``with pl.spmd(n):`` — body must be a single call to a pre-defined
        InCore kernel. Can stand alone (implicit cluster) or nest inside

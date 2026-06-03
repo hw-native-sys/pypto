@@ -3694,8 +3694,15 @@ class ASTParser:
             "Use 'with pl.spmd(4):' with a single function call inside, or "
             "'with pl.spmd(4) as tid:' to capture the dispatch TaskId."
         )
+        # ``deps=`` is accepted ONLY with ``as tid`` — gate it by keyword presence,
+        # not by the resolved list being non-empty. _parse_submit_deps_kwarg
+        # normalizes ``deps=[]`` / ``deps=[None]`` to ``[]``, so a truthiness check
+        # would silently accept those unsupported forms on the plain with-form.
+        # Passing allow_deps=(optional_vars is not None) makes _parse_spmd_kwargs
+        # reject any ``deps=`` on the non-capturing form (and keeps its "supported
+        # keywords" hint accurate).
         core_num, sync_start, name_hint, split_mode, dep_vars = self._parse_spmd_kwargs(
-            stmt, context_expr, usage_hint=with_hint, allow_deps=True
+            stmt, context_expr, usage_hint=with_hint, allow_deps=optional_vars is not None
         )
         scope_kind = scope_kind_map["spmd"]
         span = self.span_tracker.get_span(stmt)
@@ -3706,17 +3713,8 @@ class ASTParser:
             )
             return
 
-        # No ``as tid``: deps= is meaningless without a captured/consumed task
-        # graph anchor here — steer to the capturing form. Keeps the historical
-        # single-call with-form (SpmdScopeStmt(<call>)) untouched.
-        if dep_vars:
-            raise ParserSyntaxError(
-                "pl.spmd() with-form accepts 'deps=' only together with 'as tid'",
-                span=span,
-                hint="Use `with pl.spmd(n, deps=[...]) as tid:`. The plain `with pl.spmd(n):` "
-                "form wraps a single kernel call with no explicit deps.",
-            )
-
+        # No ``as tid``: the historical single-kernel-call with-form. ``deps=`` was
+        # already rejected above (allow_deps=False), so dep_vars is empty here.
         # Validate body is exactly one statement that is a function call.
         # The loop form (for i in pl.spmd(n):) and the `as tid` with-form are
         # what accept inline multi-statement bodies.
