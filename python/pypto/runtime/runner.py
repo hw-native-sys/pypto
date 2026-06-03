@@ -32,7 +32,7 @@ from ctypes import _SimpleCData
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -42,6 +42,13 @@ from pypto.pypto_core import backend as _backend_core
 from pypto.pypto_core.passes import DiagnosticCheckSet, DiagnosticPhase
 
 from .device_tensor import DeviceTensor
+
+if TYPE_CHECKING:
+    # Imported under TYPE_CHECKING only: ``distributed_compiled_program`` already
+    # imports from ``pypto.runtime`` (``device_tensor``), so importing it eagerly
+    # here would risk a partially-initialised ``pypto.runtime`` package at import
+    # time. The field is plumbed through to ``ir.compile()`` lazily anyway.
+    from pypto.ir.distributed_compiled_program import DistributedConfig
 
 
 def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
@@ -136,6 +143,15 @@ class RunConfig:
             counts.
         aicpu_thread_num: Optional per-invocation override of the AICPU
             thread count. Same precedence rules as ``block_dim``.
+        distributed_config: Optional L3 distributed-execution config, consumed
+            only on the ``@pl.jit`` path. When set, it is forwarded to
+            ``ir.compile()`` (via :func:`~pypto.jit.decorator._run_config_compile_kwargs`)
+            so a HOST-level ``@pl.jit.host`` kernel compiles to a
+            :class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`
+            and dispatches per-rank. ``None`` (default) compiles a regular
+            single-chip :class:`~pypto.ir.compiled_program.CompiledProgram`. The
+            ``@pl.program`` :func:`run` path ignores this field — it receives a
+            ``distributed_config`` through its own ``compile_cfg`` instead.
     """
 
     __test__ = False  # Not a pytest test class
@@ -162,6 +178,7 @@ class RunConfig:
     golden_data_dir: str | None = None
     block_dim: int | None = None
     aicpu_thread_num: int | None = None
+    distributed_config: "DistributedConfig | None" = None
 
     def __post_init__(self) -> None:
         if self.platform not in ("a2a3sim", "a2a3", "a5sim", "a5"):

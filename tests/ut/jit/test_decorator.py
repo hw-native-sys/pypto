@@ -1619,6 +1619,21 @@ class TestCompileKwargForwarding:
         kwargs = _run_config_compile_kwargs(RunConfig())
         assert "output_dir" not in kwargs
 
+    def test_run_config_compile_kwargs_forwards_distributed_config(self):
+        """A RunConfig.distributed_config is forwarded so @pl.jit.host kernels go distributed."""
+        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+
+        dc = DistributedConfig(device_ids=[0, 1])
+        kwargs = _run_config_compile_kwargs(RunConfig(distributed_config=dc))
+        # Forwarded verbatim (same object) so ir.compile() emits a
+        # DistributedCompiledProgram for the HOST-level entry.
+        assert kwargs["distributed_config"] is dc
+
+    def test_run_config_compile_kwargs_omits_unset_distributed_config(self):
+        """distributed_config left unset is omitted so ir.compile()'s single-chip default applies."""
+        kwargs = _run_config_compile_kwargs(RunConfig())
+        assert "distributed_config" not in kwargs
+
     def test_compile_forwards_run_config_kwargs(self, monkeypatch):
         """_compile forwards ir_compile_kwargs verbatim to ir.compile()."""
         # `pypto.ir.compile` the attribute is the re-exported function, so
@@ -1642,10 +1657,14 @@ class TestCompileKwargForwarding:
         # so patching the module attribute intercepts the real compilation.
         monkeypatch.setattr(ir_compile_mod, "compile", fake_compile)
 
+        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+
+        dc = DistributedConfig(device_ids=[0, 1])
         cfg = RunConfig(
             strategy=OptimizationStrategy.DebugTileOptimization,
             dump_passes=True,
             compile_profiling=True,
+            distributed_config=dc,
         )
         result = fwd_kernel._compile(
             tensor_meta={
@@ -1665,6 +1684,9 @@ class TestCompileKwargForwarding:
         assert captured["profiling"] is True
         assert captured["platform"] == "a2a3sim"
         assert "skip_ptoas" in captured
+        # distributed_config reaches ir.compile() so a @pl.jit.host entry can
+        # compile to a DistributedCompiledProgram and dispatch per-rank.
+        assert captured["distributed_config"] is dc
 
     def test_compile_without_kwargs_forwards_only_defaults(self, monkeypatch):
         """_compile with no extra kwargs forwards only skip_ptoas + platform."""
