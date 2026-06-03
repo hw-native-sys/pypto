@@ -2,8 +2,8 @@
 
 PyPTO 将 Simpler 的五项运行时诊断子功能以独立开关的形式暴露在
 [`RunConfig`](../../../python/pypto/runtime/runner.py) 上。每个开关都
-1:1 映射到 Simpler 的 `CallConfig` 字段，以及 `runtime/conftest.py` 中
-对应的 flag，保持两侧命名一致。
+1:1 映射到 Simpler 的 `CallConfig` 字段，以及 `tests/st/conftest.py` 中
+对应的 pytest flag，保持两侧命名一致。
 
 ## 开关映射表
 

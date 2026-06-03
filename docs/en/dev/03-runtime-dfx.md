@@ -3,7 +3,7 @@
 PyPTO exposes Simpler's five runtime diagnostic sub-features as independent
 toggles on [`RunConfig`](../../../python/pypto/runtime/runner.py). Each
 toggle maps 1:1 to a field on Simpler's `CallConfig` and to the matching
-flag in `runtime/conftest.py`, so the two surfaces stay aligned.
+pytest flag in `tests/st/conftest.py`, so the two surfaces stay aligned.
 
 ## Flag matrix
 

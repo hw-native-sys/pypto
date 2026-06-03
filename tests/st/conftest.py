@@ -213,8 +213,7 @@ def pytest_addoption(parser):
         "--enable-scope-stats",
         action="store_true",
         default=False,
-        help="Capture per-scope ring-fill peaks into "
-        "<work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl.",
+        help="Capture per-scope ring-fill peaks into <work_dir>/dfx_outputs/scope_stats/scope_stats.jsonl.",
     )
 
 
