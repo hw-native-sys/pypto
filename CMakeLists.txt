@@ -229,6 +229,7 @@ set(PYPTO_SOURCES
     src/ir/verifier/verify_pipeline_resolved.cpp
     src/ir/verifier/verify_call_directions.cpp
     src/ir/verifier/verify_tile_type_coherence.cpp
+    src/ir/verifier/verify_assign_type_symmetry.cpp
     src/ir/verifier/verify_orchestration_references.cpp
     src/ir/verifier/verify_tensor_view_canonical.cpp
     src/ir/verifier/diagnostic_check_registry.cpp

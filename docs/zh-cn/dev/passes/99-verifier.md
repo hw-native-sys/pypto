@@ -77,6 +77,7 @@
 | **InOutUseValid** | InOutUseValid | 作为 InOut/Out 传入用户函数调用的变量，在调用之后不得再被读取（RFC #1026）。Group 类型函数体目前跳过，待后续完善。 |
 | **PipelineLoopValid** | PipelineLoopValid | 每个 `ForStmt` 上的双向不变量：`kind_ == ForKind::Pipeline` ⇔ 含有 `pipeline_stages` 属性。任一方向失败即表示 pipeline 循环格式错误。 |
 | **OrchestrationReferencesResolved** | OrchestrationReferencesResolved | `FunctionType::Orchestration` 函数体内每一个非 builtin Call 必须对应到 Program 中存在的 Function。取代 codegen 端原本在生成时抛错的 `ValidateOrchestrationReferences` 遍历。 |
+| **AssignTypeSymmetry** | AssignTypeSymmetry | 每个 `AssignStmt(var, value)` 满足 `structural_equal(var.type, value.type)`。覆盖 dtype、shape 以及 tile_view/tensor_view；此外比较 TileType 的 `memory_space`（TensorType 没有 `memory_space`）和 DistributedTensorType 的 `window_buffer`；元组赋值逐元素递归比较。**不包含** `memref_`——`structural_equal` 将其视为绑定在 Var 上的内存分配细节，由 `HasMemRefs` / `AllocatedMemoryAddr` 负责。用于捕获只修改赋值一侧类型的 Pass（例如 #1262 的 TileType memory_space、#1278 的 tile_view）。已在 `PropertyVerifierRegistry` 注册，但尚未加入 `GetStructuralProperties()`——可通过 `PropertyVerifierRegistry::verify` 或将该属性加入 `VerificationInstrument` 按需运行。 |
 
 ### SSAVerify
 

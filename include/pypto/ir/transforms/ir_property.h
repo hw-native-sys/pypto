@@ -66,6 +66,10 @@ enum class IRProperty : uint64_t {
   RuntimeScopesMaterialized,        ///< Orchestration functions carry explicit RuntimeScopeStmt nodes for the
                                     ///< function body and for/if bodies; codegen no longer emits implicit
                                     ///< PTO2_SCOPE() wrappers
+  AssignTypeSymmetry,               ///< Every AssignStmt has structural_equal(var->GetType(),
+                                    ///< value->GetType()) — covers dtype, shape, tile_view/tensor_view, and
+                                    ///< TileType memory_space (memref excluded as an allocation detail;
+                                    ///< memory_space exists only on TileType, not TensorType)
   kCount                            ///< Sentinel (must be last)
 };
 

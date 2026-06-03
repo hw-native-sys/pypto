@@ -95,7 +95,11 @@ void BindPass(nb::module_& m) {
              "DistributedTensorType.window_buffer_ back-references")
       .value("RuntimeScopesMaterialized", IRProperty::RuntimeScopesMaterialized,
              "Orchestration functions carry explicit RuntimeScopeStmt nodes for the function body and "
-             "for/if bodies; codegen no longer emits implicit PTO2_SCOPE() wrappers");
+             "for/if bodies; codegen no longer emits implicit PTO2_SCOPE() wrappers")
+      .value("AssignTypeSymmetry", IRProperty::AssignTypeSymmetry,
+             "Every AssignStmt has structural_equal(var->GetType(), value->GetType()) — covers dtype, "
+             "shape, tile_view/tensor_view, and TileType memory_space (memref excluded as an allocation "
+             "detail; memory_space exists only on TileType, not TensorType)");
 
   // Bind IRPropertySet
   auto ir_property_set = nb::class_<IRPropertySet>(passes, "IRPropertySet", "A set of IR properties");

@@ -21,15 +21,16 @@
  * update_element inside a function/region remains fine.
  */
 
+#include <cstddef>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "pypto/core/error.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
 #include "pypto/ir/program.h"
-#include "pypto/ir/span.h"
 #include "pypto/ir/type.h"
 #include "pypto/ir/verifier/verifier.h"
 

@@ -85,6 +85,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "CommGroupsCollected";
     case IRProperty::RuntimeScopesMaterialized:
       return "RuntimeScopesMaterialized";
+    case IRProperty::AssignTypeSymmetry:
+      return "AssignTypeSymmetry";
     default:
       return "Unknown";
   }
