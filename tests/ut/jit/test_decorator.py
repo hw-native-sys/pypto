@@ -9,21 +9,29 @@
 
 """Tests for @pl.jit decorator: decoration, cache hit/miss, and bind_dynamic."""
 
+import ast
 import importlib
 import inspect
 import warnings
 
 import pypto.language as pl
+import pypto.language.distributed as pld
 import pytest
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.compiled_program import CompiledProgram
 from pypto.jit.decorator import (
     JITFunction,
+    _arg_ref,
+    _build_param_mapping,
+    _compute_per_func_dyndim_maps,
     _discover_deps,
+    _extract_call_args_for_dep,
     _extract_local_tensor_metas,
+    _resolve_dep_call_metadata,
     _rewrite_jit_error,
     _run_config_compile_kwargs,
     _scan_dynamic_dims,
+    _SlicedArg,
     jit,
 )
 from pypto.jit.specializer import TensorMeta
@@ -1022,6 +1030,203 @@ class TestDynamicLocalTensorMetadata:
         # Should not raise — previously failed with
         # "missing inferred tensor metadata for parameter 'hidden_states'".
         fwd_1524.compile_for_test(hidden, out)
+
+
+# ---------------------------------------------------------------------------
+# Per-rank sliced dispatch (chip_orch(x[r], ...)) and pld.window metadata.
+# Module-level dynvar + functions so inspect.getsource / inspect.signature
+# see real source and annotations (the host-orchestration distributed shape).
+# ---------------------------------------------------------------------------
+_M_SLICE = pl.dynamic("M_SLICE")
+
+
+@jit.incore
+def _sliced_chip(data: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Chip orchestrator dep reached via a per-rank ``_sliced_chip(x[r], ...)``
+    dispatch from a host orchestrator body."""
+    M, N = data.shape
+    t = pl.load(data, [0, 0], [M, N])
+    pl.store(t, [0, 0], out)
+    return out
+
+
+@jit.incore
+def _dyn_sliced_chip(data: pl.Tensor[[_M_SLICE, 128], pl.FP32], out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Chip orchestrator dep whose leading dim is dynamic — used to verify the
+    DynDim cascade does not flow through a per-rank sliced (dropped) dim."""
+    M, N = data.shape
+    t = pl.load(data, [0, 0], [M, N])
+    pl.store(t, [0, 0], out)
+    return out
+
+
+def _per_rank_dispatch_body(inputs: pl.Tensor, outputs: pl.Out[pl.Tensor]) -> None:
+    """Host orchestrator body: dispatch one chip orchestrator per rank by
+    subscripting the leading (rank) dim — ``_sliced_chip(inputs[r], outputs[r])``."""
+    for r in pl.range(2):
+        _sliced_chip(inputs[r], outputs[r])
+
+
+def _window_local_body(data_buf, signal_buf):
+    """Host orchestrator body: per-rank window views over window buffers.
+    The body is parsed from source only (never executed) — matching the
+    existing ``_slice_then_dep_body`` style."""
+    data = pld.window(data_buf, [1, 256], dtype=pl.FP32)
+    signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
+    return data, signal
+
+
+class TestArgRef:
+    """Unit tests for ``_arg_ref`` — caller-side reference classification."""
+
+    @staticmethod
+    def _ref(expr_src: str):
+        return _arg_ref(ast.parse(expr_src, mode="eval").body)
+
+    def test_plain_name(self):
+        assert self._ref("x") == "x"
+
+    def test_single_integer_index_drops_one_dim(self):
+        assert self._ref("x[r]") == _SlicedArg("x", 1)
+
+    def test_multi_integer_index_drops_each_dim(self):
+        assert self._ref("x[r, 0]") == _SlicedArg("x", 2)
+
+    def test_slice_index_keeps_dim(self):
+        # ``x[r:r+1]`` selects a range — the dim survives, so drop == 0 → None.
+        assert self._ref("x[r:r+1]") is None
+
+    def test_mixed_integer_and_slice_counts_only_integers(self):
+        # One integer index (dropped) + one slice (kept) → drop == 1.
+        assert self._ref("x[r, 0:2]") == _SlicedArg("x", 1)
+
+    def test_literal_returns_none(self):
+        assert self._ref("3") is None
+
+    def test_attribute_returns_none(self):
+        assert self._ref("obj.attr") is None
+
+    def test_subscript_of_non_name_returns_none(self):
+        # ``f()[0]`` — base is a call, not a Name.
+        assert self._ref("f()[0]") is None
+
+
+class TestExtractCallArgsSlicedDispatch:
+    """``_extract_call_args_for_dep`` + ``_build_param_mapping`` must carry a
+    per-rank subscript (``x[r]``) through as a ``_SlicedArg``."""
+
+    def test_sliced_positional_args_extracted(self):
+        call_args = _extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
+        assert call_args == [
+            (None, _SlicedArg("inputs", 1)),
+            (None, _SlicedArg("outputs", 1)),
+        ]
+
+    def test_param_mapping_pairs_sliced_args_by_position(self):
+        call_args = _extract_call_args_for_dep(_per_rank_dispatch_body, "_sliced_chip")
+        assert call_args is not None
+        mapping = _build_param_mapping(["data", "out"], call_args)
+        assert mapping == {
+            "data": _SlicedArg("inputs", 1),
+            "out": _SlicedArg("outputs", 1),
+        }
+
+
+class TestWindowLocalMetadata:
+    """``_extract_local_tensor_metas`` must infer metas for ``pld.window`` views
+    so a host orchestrator's per-rank window locals propagate into the chip
+    orchestrator's ``pld.DistributedTensor`` parameters."""
+
+    def test_window_view_meta_inferred(self):
+        metas = _extract_local_tensor_metas(_window_local_body, seed_meta={})
+        # Shape from the 2nd positional arg, dtype from the ``dtype=`` keyword.
+        assert metas["data"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
+        assert metas["signal"] == TensorMeta(shape=(1, 1), dtype=DataType.INT32)
+
+    def test_window_missing_dtype_untracked(self):
+        def body(buf):
+            data = pld.window(buf, [1, 256])  # no dtype= kw
+            return data
+
+        metas = _extract_local_tensor_metas(body, seed_meta={})
+        assert "data" not in metas
+
+    def test_window_missing_shape_untracked(self):
+        def body(buf):
+            data = pld.window(buf, dtype=pl.FP32)  # no shape arg
+            return data
+
+        metas = _extract_local_tensor_metas(body, seed_meta={})
+        assert "data" not in metas
+
+
+class TestSlicedDispatchMetadata:
+    """``_resolve_dep_call_metadata`` must give a per-rank chip orchestrator dep
+    the base tensor's meta with the subscripted leading dims removed, and the
+    DynDim cascade must not flow through a dropped dim."""
+
+    def test_sliced_arg_drops_leading_dim(self):
+        # Host passes ``inputs[r]`` / ``outputs[r]`` — each drops the rank dim.
+        seed = {
+            "inputs": TensorMeta(shape=(2, 1, 256), dtype=DataType.FP32),
+            "outputs": TensorMeta(shape=(2, 1, 256), dtype=DataType.FP32),
+        }
+        tensor_meta, _, _ = _resolve_dep_call_metadata(
+            _sliced_chip,
+            _per_rank_dispatch_body,
+            seed,
+            {},
+            {},
+            {},
+            caller_func_type="host",
+        )
+        assert tensor_meta["data"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
+        assert tensor_meta["out"] == TensorMeta(shape=(1, 256), dtype=DataType.FP32)
+
+    def test_sliced_arg_drop_at_or_past_rank_is_untracked(self):
+        # Base is 1-D; dropping a leading dim leaves nothing meaningful, so the
+        # guard ``drop < len(shape)`` skips it rather than producing an empty meta.
+        seed = {
+            "inputs": TensorMeta(shape=(2,), dtype=DataType.FP32),
+            "outputs": TensorMeta(shape=(2,), dtype=DataType.FP32),
+        }
+        tensor_meta, _, _ = _resolve_dep_call_metadata(
+            _sliced_chip,
+            _per_rank_dispatch_body,
+            seed,
+            {},
+            {},
+            {},
+            caller_func_type="host",
+        )
+        assert "data" not in tensor_meta
+        assert "out" not in tensor_meta
+
+    def test_dyndim_cascade_skips_sliced_arg(self):
+        # The dep declares a dynamic leading dim; the host reaches it via
+        # ``_dyn_sliced_chip(inputs[r], ...)``. The DynDim must NOT cascade onto
+        # a ``_SlicedArg`` key — doing so would corrupt the caller's dim map with
+        # a non-string key (and is semantically wrong: the rank dim is dropped).
+        call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | _SlicedArg | None]] | None] = {
+            (id(_per_rank_dispatch_body), "_dyn_sliced_chip"): [
+                (None, _SlicedArg("inputs", 1)),
+                (None, _SlicedArg("outputs", 1)),
+            ]
+        }
+        maps = _compute_per_func_dyndim_maps(
+            entry_func=_per_rank_dispatch_body,
+            entry_param_names=["inputs", "outputs"],
+            deps=[_dyn_sliced_chip],
+            callers_by_dep_id={id(_dyn_sliced_chip._func): [_per_rank_dispatch_body]},
+            call_args_cache=call_args_cache,
+        )
+        host_map = maps[id(_per_rank_dispatch_body)]
+        # Sanity: the dep itself carries the dynamic dim.
+        assert maps[id(_dyn_sliced_chip._func)]["data"][0].literal == "M_SLICE"
+        # The host map must only ever be keyed by parameter name strings.
+        assert all(isinstance(key, str) for key in host_map)
+        assert _SlicedArg("inputs", 1) not in host_map
+        assert _SlicedArg("outputs", 1) not in host_map
 
 
 class TestInlineFuncIntegration:

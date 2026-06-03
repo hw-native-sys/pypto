@@ -698,6 +698,11 @@ class _BodyTransformer(ast.NodeTransformer):
             return cast("ast.stmt", self.generic_visit(node))
         var_name = node.target.id
         node.value = self.visit(node.value)
+        # Inline shape constants in the local annotation too (e.g. a body-level
+        # ``x: pl.Tile[[1, W_PAD], pl.FP32]`` where ``W_PAD`` is a module-level
+        # int). Without this the un-inlined name leaks into the generated source
+        # and the parser rejects it ("Unknown shape variable: W_PAD").
+        node.annotation = self.visit(node.annotation)
         if var_name in self._assign_count:
             if self._scope_depth == self._assign_depth[var_name]:
                 new_name = self._rebind(var_name)

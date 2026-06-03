@@ -59,7 +59,7 @@ import os
 import re
 import shutil
 import textwrap
-from typing import Any
+from typing import Any, NamedTuple
 
 from pypto.pypto_core import DataType
 
@@ -340,7 +340,7 @@ def _compute_per_func_dyndim_maps(
     entry_param_names: list[str],
     deps: list[Any],
     callers_by_dep_id: dict[int, list[Any]],
-    call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | None]] | None],
+    call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | _SlicedArg | None]] | None],
 ) -> dict[int, dict[str, dict[int, DynDim]]]:
     """Per JIT function in the dep graph, return ``param → dim_idx → DynDim``.
 
@@ -382,7 +382,10 @@ def _compute_per_func_dyndim_maps(
                 continue
             for dep_param, dim_to_dyn in dep_map.items():
                 caller_arg = param_mapping.get(dep_param)
-                if caller_arg is None:
+                # A per-rank sliced arg (x[r]) is keyed by a _SlicedArg, not a
+                # caller variable name; DynDim does not flow through the dropped
+                # leading dim, so skip it here.
+                if caller_arg is None or isinstance(caller_arg, _SlicedArg):
                     continue
                 target = caller_map.setdefault(caller_arg, {})
                 for i, dyn in dim_to_dyn.items():
@@ -705,20 +708,34 @@ def _extract_local_tensor_metas(
             dims.append(v)
         return tuple(dims)
 
-    def _create_tensor_meta(call: ast.Call) -> TensorMeta | None:
-        shape = _resolve_shape(call.args[0]) if call.args else None
-        if shape is None:
-            return None
+    def _dtype_from_kw(call: ast.Call) -> DataType | None:
         for kw in call.keywords:
             if (
                 kw.arg == "dtype"
                 and isinstance(kw.value, ast.Attribute)
                 and isinstance(kw.value.value, ast.Name)
             ):
-                dtype_val = dtype_map.get(kw.value.attr)
-                if dtype_val is not None:
-                    return TensorMeta(shape=shape, dtype=dtype_val)
+                return dtype_map.get(kw.value.attr)
         return None
+
+    def _create_tensor_meta(call: ast.Call) -> TensorMeta | None:
+        shape = _resolve_shape(call.args[0]) if call.args else None
+        dtype_val = _dtype_from_kw(call)
+        if shape is None or dtype_val is None:
+            return None
+        return TensorMeta(shape=shape, dtype=dtype_val)
+
+    def _window_meta(call: ast.Call) -> TensorMeta | None:
+        # pld.window(buffer, [shape], dtype=pl.XXX) — a distributed window view
+        # over a window buffer. Shape is the 2nd positional arg; dtype is the
+        # ``dtype=`` keyword (same spelling as create_tensor). Lets a host
+        # orchestrator's per-rank window locals propagate their meta into the
+        # ``pld.DistributedTensor`` parameters of the chip orchestrator it calls.
+        shape = _resolve_shape(call.args[1]) if len(call.args) >= 2 else None
+        dtype_val = _dtype_from_kw(call)
+        if shape is None or dtype_val is None:
+            return None
+        return TensorMeta(shape=shape, dtype=dtype_val)
 
     def _slice_meta(call: ast.Call) -> TensorMeta | None:
         # pl.slice(tensor, shape, offset, ...) — shape is positional index 1 or kw `shape=`.
@@ -784,6 +801,11 @@ def _extract_local_tensor_metas(
                     if meta is not None:
                         local[target.id] = meta
                     continue
+                if fn.attr == "window":
+                    meta = _window_meta(call)
+                    if meta is not None:
+                        local[target.id] = meta
+                    continue
             if isinstance(fn, ast.Name) and fn.id in dep_io:
                 _record_dep_result_metas(call, fn.id, target)
 
@@ -791,17 +813,51 @@ def _extract_local_tensor_metas(
     return local
 
 
-def _extract_call_args_for_dep(entry_func: Any, dep_name: str) -> list[tuple[str | None, str | None]] | None:
-    """Find the argument names passed to ``dep_name`` in ``entry_func``'s body.
+class _SlicedArg(NamedTuple):
+    """A call-site argument of the form ``base[i]`` / ``base[i, j]`` that drops
+    one or more leading dims of a Name (the per-rank ``chip_orch(x[r], ...)``
+    dispatch pattern). ``drop`` counts the integer (non-slice) index elements;
+    the dep parameter inherits ``base``'s meta with those leading dims removed.
+    """
 
-    Returns a unified list of ``(param_name, arg_name)`` pairs:
+    base: str
+    drop: int
+
+
+def _arg_ref(arg: ast.expr) -> str | _SlicedArg | None:
+    """Caller-side reference for a call argument.
+
+    - ``ast.Name`` → the variable name (``str``).
+    - ``ast.Subscript`` of a Name with integer indices (``x[r]``, ``x[r, 0]``)
+      → a :class:`_SlicedArg` recording the base name and how many leading
+      dims the indexing drops. Slice indices (``x[r:r+1]``) keep their dim and
+      are not counted.
+    - anything else (literal, attribute, computed expr) → ``None``.
+    """
+    if isinstance(arg, ast.Name):
+        return arg.id
+    if isinstance(arg, ast.Subscript) and isinstance(arg.value, ast.Name):
+        sl = arg.slice
+        elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
+        drop = sum(1 for e in elts if not isinstance(e, ast.Slice))
+        if drop > 0:
+            return _SlicedArg(arg.value.id, drop)
+    return None
+
+
+def _extract_call_args_for_dep(
+    entry_func: Any, dep_name: str
+) -> list[tuple[str | None, str | _SlicedArg | None]] | None:
+    """Find the arguments passed to ``dep_name`` in ``entry_func``'s body.
+
+    Returns a unified list of ``(param_name, arg_ref)`` pairs:
 
     - ``param_name`` is ``None`` for a positional argument (the consumer
       pairs it with the dep's parameter list by index) and the keyword
       name for a keyword argument.
-    - ``arg_name`` is the caller-side variable name, or ``None`` for
-      non-``Name`` expressions (literals, attribute access, computed
-      expressions, …).
+    - ``arg_ref`` is the caller-side reference: a variable name (``str``), a
+      :class:`_SlicedArg` for a per-rank subscript (``x[r]``), or ``None`` for
+      other non-``Name`` expressions (literals, attribute access, …).
 
     Mixed calls like ``dep(a, out=out)`` are preserved correctly. Returns
     ``None`` if no call site to ``dep_name`` is found. Only the first call
@@ -813,11 +869,11 @@ def _extract_call_args_for_dep(entry_func: Any, dep_name: str) -> list[tuple[str
             continue
         if not (isinstance(node.func, ast.Name) and node.func.id == dep_name):
             continue
-        result: list[tuple[str | None, str | None]] = [
-            (None, arg.id if isinstance(arg, ast.Name) else None) for arg in node.args
+        result: list[tuple[str | None, str | _SlicedArg | None]] = [
+            (None, _arg_ref(arg)) for arg in node.args
         ]
         result.extend(
-            (kw.arg, kw.value.id if isinstance(kw.value, ast.Name) else None)
+            (kw.arg, _arg_ref(kw.value))
             for kw in node.keywords
             if kw.arg is not None  # skip **kwargs splats
         )
@@ -827,17 +883,18 @@ def _extract_call_args_for_dep(entry_func: Any, dep_name: str) -> list[tuple[str
 
 def _build_param_mapping(
     dep_param_names: list[str],
-    call_args: list[tuple[str | None, str | None]],
-) -> dict[str, str | None]:
-    """Map dep parameter name → caller argument name from call-site args.
+    call_args: list[tuple[str | None, str | _SlicedArg | None]],
+) -> dict[str, str | _SlicedArg | None]:
+    """Map dep parameter name → caller argument ref from call-site args.
 
     ``call_args`` is the unified form returned by
-    ``_extract_call_args_for_dep``: a list of ``(param_name, arg_name)``
+    ``_extract_call_args_for_dep``: a list of ``(param_name, arg_ref)``
     pairs where ``param_name is None`` marks a positional argument (paired
-    with ``dep_param_names`` by index) and a string is a keyword name.
+    with ``dep_param_names`` by index) and a string is a keyword name. The
+    ``arg_ref`` may be a name (``str``), a :class:`_SlicedArg`, or ``None``.
     Mixed positional + keyword call sites collapse to the same dict.
     """
-    mapping: dict[str, str | None] = {}
+    mapping: dict[str, str | _SlicedArg | None] = {}
     pos_idx = 0
     for param_name, arg_name in call_args:
         if param_name is None:
@@ -894,6 +951,17 @@ def _resolve_dep_call_metadata(
     if call_args is not None:
         for dep_param, caller_arg in _build_param_mapping(dep_param_names, call_args).items():
             if caller_arg is None:
+                continue
+            if isinstance(caller_arg, _SlicedArg):
+                # Per-rank dispatch ``chip_orch(x[r], ...)``: the dep parameter
+                # inherits the base tensor's meta with ``drop`` leading dims
+                # removed (the subscripted dims selected by integer indices).
+                base_meta = all_tensor_meta.get(caller_arg.base)
+                if base_meta is not None and caller_arg.drop < len(base_meta.shape):
+                    dep_tensor_meta[dep_param] = TensorMeta(
+                        shape=base_meta.shape[caller_arg.drop :],
+                        dtype=base_meta.dtype,
+                    )
                 continue
             if caller_arg in all_tensor_meta:
                 dep_tensor_meta[dep_param] = all_tensor_meta[caller_arg]
@@ -1011,7 +1079,7 @@ class JITFunction:
                 list[JITFunction],
                 dict[int, list[Any]],
                 dict[int, list[str]],
-                dict[tuple[int, str], list[tuple[str | None, str | None]] | None],
+                dict[tuple[int, str], list[tuple[str | None, str | _SlicedArg | None]] | None],
             ]
             | None
         ) = None
@@ -1045,7 +1113,7 @@ class JITFunction:
         list[JITFunction],
         dict[int, list[Any]],
         dict[int, list[str]],
-        dict[tuple[int, str], list[tuple[str | None, str | None]] | None],
+        dict[tuple[int, str], list[tuple[str | None, str | _SlicedArg | None]] | None],
     ]:
         """Return the transitive JIT dep graph rooted at this function.
 
@@ -1080,7 +1148,9 @@ class JITFunction:
             seen: set[int] = set()
             callers_by_dep_id: dict[int, list[Any]] = {}
             callees_by_func_id: dict[int, list[str]] = {}
-            call_args_cache: dict[tuple[int, str], list[tuple[str | None, str | None]] | None] = {}
+            call_args_cache: dict[
+                tuple[int, str], list[tuple[str | None, str | _SlicedArg | None]] | None
+            ] = {}
 
             def visit(func: Any, caller_func_type: str) -> None:
                 direct = _discover_deps(func, caller_func_type)

@@ -483,6 +483,55 @@ class TestBodyTransformer:
         # Substitution happens in the body; parameter name stays in the signature
         assert "pl.load(a, [0], [64])" in out
 
+    def _transform_with_globals(self, src: str, tensor_meta: dict, py_globals: dict):
+        src = textwrap.dedent(src)
+        tree = ast.parse(src)
+        func_def = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef))
+        transformer = _BodyTransformer(
+            tensor_meta=tensor_meta,
+            scalar_values={},
+            dep_names=set(),
+            py_globals=py_globals,
+        )
+        new_body = []
+        for stmt in func_def.body:
+            result = transformer.visit(stmt)
+            if result is None:
+                continue
+            if isinstance(result, list):
+                new_body.extend(result)
+            else:
+                new_body.append(result)
+        new_func = ast.FunctionDef(
+            name="f",
+            args=func_def.args,
+            body=new_body or [ast.Pass()],
+            decorator_list=[],
+            returns=None,
+            lineno=1,
+            col_offset=0,
+        )
+        ast.fix_missing_locations(new_func)
+        return ast.unparse(new_func)
+
+    def test_local_annotation_shape_constant_inlined(self):
+        """A module-level int used in a body-level annotation (``t: pl.Tile[[1,
+        W_PAD], pl.FP32]``) must be inlined to its value. Otherwise the un-inlined
+        name leaks into the generated source and the parser rejects it with
+        "Unknown shape variable: W_PAD"."""
+        src = """
+            def f(a: pl.Tensor):
+                t: pl.Tile[[1, W_PAD], pl.FP32] = pl.load(a, [0, 0], [1, W_PAD])
+        """
+        out = self._transform_with_globals(
+            src,
+            tensor_meta={"a": TensorMeta((1, 96), DataType.FP32)},
+            py_globals={"W_PAD": 96},
+        )
+        # The constant is inlined in BOTH the annotation and the value expression.
+        assert "W_PAD" not in out
+        assert "pl.Tile[[1, 96], pl.FP32]" in out
+
 
 # ---------------------------------------------------------------------------
 # Specializer (source generation)
