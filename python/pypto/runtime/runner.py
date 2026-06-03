@@ -150,8 +150,10 @@ class RunConfig:
             :class:`~pypto.ir.distributed_compiled_program.DistributedCompiledProgram`
             and dispatches per-rank. ``None`` (default) compiles a regular
             single-chip :class:`~pypto.ir.compiled_program.CompiledProgram`. The
-            ``@pl.program`` :func:`run` path ignores this field — it receives a
-            ``distributed_config`` through its own ``compile_cfg`` instead.
+            ``@pl.program`` :func:`run` entry point does not read this field; it
+            forwards no compile-side overrides, so distributed ``@pl.program``
+            execution is driven by ``ir.compile(..., distributed_config=...)``
+            directly rather than through ``RunConfig``.
     """
 
     __test__ = False  # Not a pytest test class

@@ -1634,6 +1634,75 @@ class TestCompileKwargForwarding:
         kwargs = _run_config_compile_kwargs(RunConfig())
         assert "distributed_config" not in kwargs
 
+    def test_make_cache_key_splits_on_distributed_config(self):
+        """distributed_config participates in the cache key (distinct device_ids ≠ collide)."""
+        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+        from pypto.jit.cache import make_cache_key  # noqa: PLC0415
+
+        base = dict(
+            source_hash="h",
+            param_names=["x"],
+            tensor_shapes={"x": (128, 128)},
+            tensor_dtypes={"x": DataType.FP32},
+            dynamic_dims=set(),
+            scalar_values={},
+            platform="a2a3",
+            strategy=OptimizationStrategy.Default,
+        )
+        key_none = make_cache_key(**base)
+        key_01 = make_cache_key(**base, distributed_config=DistributedConfig(device_ids=[0, 1]))
+        key_23 = make_cache_key(**base, distributed_config=DistributedConfig(device_ids=[2, 3]))
+        key_01_again = make_cache_key(**base, distributed_config=DistributedConfig(device_ids=[0, 1]))
+
+        # Distinct device_ids must not collide, and a distributed config must
+        # not collide with the single-chip (None) default.
+        assert len({key_none, key_01, key_23}) == 3
+        # Equal configs yield equal keys, so a genuine re-call still hits the
+        # cache; the key stays hashable (usable in a set / as a dict key).
+        assert key_01 == key_01_again
+
+    def test_resolve_compiled_splits_cache_on_distributed_config(self, monkeypatch):
+        """Two calls differing only in distributed_config compile distinct artifacts.
+
+        Regression for the JIT cache key omitting ``distributed_config``: the
+        config is baked into the ``DistributedCompiledProgram`` and drives
+        per-rank dispatch, so reusing the first artifact for a second call with
+        different ``device_ids`` would silently target the wrong ranks.
+        """
+        torch = pytest.importorskip("torch")
+        from pypto.ir.distributed_compiled_program import DistributedConfig  # noqa: PLC0415
+
+        @jit
+        def cfg_kernel(a: pl.Tensor[[128, 128], pl.FP32], c: pl.Out[pl.Tensor[[128, 128], pl.FP32]]):
+            c = a
+            return c
+
+        # Stub out the actual compile so the test stays device-free and only
+        # exercises the cache-key / cache-miss logic in _resolve_compiled.
+        compile_calls = {"n": 0}
+
+        def fake_compile(*_args, **_kwargs):
+            compile_calls["n"] += 1
+            return f"compiled-{compile_calls['n']}"
+
+        monkeypatch.setattr(cfg_kernel, "_compile", fake_compile)
+
+        a = torch.randn(128, 128)
+        c = torch.empty(128, 128)
+
+        def resolve(device_ids):
+            cfg = RunConfig(distributed_config=DistributedConfig(device_ids=device_ids))
+            return cfg_kernel._resolve_compiled((a, c), {"config": cfg})[0]
+
+        first = resolve([0, 1])
+        second = resolve([2, 3])  # different device_ids → cache miss
+        third = resolve([0, 1])  # same as first → cache hit
+
+        assert compile_calls["n"] == 2  # only two compiles, not three
+        assert len(cfg_kernel._cache) == 2  # two distinct cached artifacts
+        assert first != second  # not the same cached object
+        assert third == first  # re-uses the first artifact
+
     def test_compile_forwards_run_config_kwargs(self, monkeypatch):
         """_compile forwards ir_compile_kwargs verbatim to ir.compile()."""
         # `pypto.ir.compile` the attribute is the re-exported function, so

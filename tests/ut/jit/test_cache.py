@@ -11,6 +11,7 @@
 
 import pytest
 from pypto.ir import OptimizationStrategy
+from pypto.ir.distributed_compiled_program import DistributedConfig
 from pypto.jit.cache import (
     compute_source_hash,
     make_cache_key,
@@ -56,6 +57,7 @@ class TestMakeCacheKey:
         scalar_values=None,
         platform=None,
         strategy=None,
+        distributed_config=None,
     ):
         return make_cache_key(
             source_hash=source_hash,
@@ -66,6 +68,7 @@ class TestMakeCacheKey:
             scalar_values=scalar_values or {},
             platform=platform,
             strategy=strategy,
+            distributed_config=distributed_config,
         )
 
     def test_basic_key_structure(self):
@@ -75,13 +78,14 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
         )
         assert isinstance(key, tuple)
-        assert len(key) == 5
-        source_hash, platform, strategy, tensor_part, scalar_part = key
+        assert len(key) == 6
+        source_hash, platform, strategy, tensor_part, scalar_part, dist_part = key
         assert source_hash == "abc"
         assert platform is None
         assert strategy is None
         assert isinstance(tensor_part, tuple)
         assert isinstance(scalar_part, tuple)
+        assert dist_part is None  # single-chip default
 
     def test_tensor_shape_in_key(self):
         key = self._make_key(
@@ -89,7 +93,7 @@ class TestMakeCacheKey:
             tensor_shapes={"a": (128, 64)},
             tensor_dtypes={"a": DataType.FP32},
         )
-        _, _, _, tensor_part, _ = key
+        _, _, _, tensor_part, _, _ = key
         assert len(tensor_part) == 1
         info = tensor_part[0]
         assert info.name == "a"
@@ -103,7 +107,7 @@ class TestMakeCacheKey:
             tensor_dtypes={"a": DataType.FP32},
             dynamic_dims={("a", 0)},
         )
-        _, _, _, tensor_part, _ = key
+        _, _, _, tensor_part, _, _ = key
         assert tensor_part[0].shape == (None, 128)
 
     def test_dynamic_dim_cache_hit_on_different_concrete_value(self):
@@ -151,7 +155,7 @@ class TestMakeCacheKey:
             param_names=["BLOCK_M"],
             scalar_values={"BLOCK_M": 64},
         )
-        _, _, _, _, scalar_part = key
+        _, _, _, _, scalar_part, _ = key
         assert len(scalar_part) == 1
         assert scalar_part[0].name == "BLOCK_M"
         assert scalar_part[0].value == 64
@@ -171,7 +175,7 @@ class TestMakeCacheKey:
             dynamic_dims=set(),
             scalar_values={},
         )
-        _, _, _, tensor_part, _ = key
+        _, _, _, tensor_part, _, _ = key
         assert tensor_part[0].name == "b"
         assert tensor_part[1].name == "a"
 
@@ -229,6 +233,26 @@ class TestMakeCacheKey:
             platform="a2a3sim",
         )
         assert k1 == k2
+
+    def test_distributed_config_in_key(self):
+        """distributed_config is baked into the artifact, so it must split the key.
+
+        Different ``device_ids`` (and the single-chip ``None`` default) produce
+        distinct keys; equal configs collide so a genuine re-call still hits the
+        cache.
+        """
+        common = dict(
+            param_names=["a"],
+            tensor_shapes={"a": (8, 8)},
+            tensor_dtypes={"a": DataType.FP32},
+        )
+        k_none = self._make_key(**common)
+        k_01 = self._make_key(**common, distributed_config=DistributedConfig(device_ids=[0, 1]))
+        k_23 = self._make_key(**common, distributed_config=DistributedConfig(device_ids=[2, 3]))
+        k_01_again = self._make_key(**common, distributed_config=DistributedConfig(device_ids=[0, 1]))
+
+        assert len({k_none, k_01, k_23}) == 3  # all distinct, and key stays hashable
+        assert k_01 == k_01_again  # equal config → cache hit
 
     def test_none_platform_differs_from_named_platform(self):
         """platform=None and platform='a2a3sim' must not collide."""

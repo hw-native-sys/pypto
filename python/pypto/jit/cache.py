@@ -20,12 +20,13 @@ Dynamic dimensions (marked via bind_dynamic) are stored as None in the key
 so different concrete values for that dimension share the same cache entry.
 """
 
+import dataclasses
 import hashlib
 import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pypto.pypto_core import DataType
 
@@ -73,7 +74,7 @@ class ScalarCacheInfo:
 
 
 # A cache key is a tuple of
-# (source_hash, platform, strategy, tensor_infos, scalar_infos).
+# (source_hash, platform, strategy, tensor_infos, scalar_infos, dist_config).
 # Using a plain tuple keeps it hashable without a custom __hash__.
 CacheKey = tuple[
     str,
@@ -81,7 +82,24 @@ CacheKey = tuple[
     "OptimizationStrategy | None",
     tuple[TensorCacheInfo, ...],
     tuple[ScalarCacheInfo, ...],
+    tuple[Any, ...] | None,
 ]
+
+
+def _freeze(value: Any) -> Any:
+    """Recursively convert a value into a hashable, deterministic form.
+
+    Dataclasses become a tuple of ``(field_name, frozen_value)`` pairs and
+    lists/tuples become tuples, so a ``DistributedConfig`` (which has a mutable
+    ``device_ids`` list and is therefore unhashable) can participate in the
+    cache key. Field-name pairing keeps the key stable and self-describing if
+    new fields are added.
+    """
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return tuple((f.name, _freeze(getattr(value, f.name))) for f in dataclasses.fields(value))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
 
 
 def compute_source_hash(sources: list[str]) -> str:
@@ -113,6 +131,7 @@ def make_cache_key(
     scalar_values: dict[str, int | float | bool],
     platform: str | None = None,
     strategy: "OptimizationStrategy | None" = None,
+    distributed_config: Any = None,
 ) -> CacheKey:
     """Build a cache key for a JIT call site.
 
@@ -134,6 +153,14 @@ def make_cache_key(
             artifact; without it, calling the same kernel with two strategies
             (an A/B comparison) would return the first-compiled artifact for
             both.
+        distributed_config: Optional ``DistributedConfig`` forwarded to
+            ``ir.compile()`` on the ``@pl.jit.host`` path. Included in the key
+            because it is baked into the resulting
+            ``DistributedCompiledProgram`` and drives per-rank dispatch; without
+            it, calling the same host kernel with two different ``device_ids``
+            would silently reuse the first-compiled artifact. ``None`` (the
+            single-chip default) leaves the key unchanged for non-distributed
+            callers.
 
     Returns:
         Hashable CacheKey tuple.
@@ -154,7 +181,8 @@ def make_cache_key(
             continue
         scalar_infos.append(ScalarCacheInfo(name=name, value=scalar_values[name]))
 
-    return (source_hash, platform, strategy, tuple(tensor_infos), tuple(scalar_infos))
+    dist_key = _freeze(distributed_config) if distributed_config is not None else None
+    return (source_hash, platform, strategy, tuple(tensor_infos), tuple(scalar_infos), dist_key)
 
 
 def _key_to_hash(key: CacheKey) -> str:

@@ -1256,6 +1256,10 @@ class JITFunction:
 
         platform = run_config.platform if run_config is not None else None
         strategy = run_config.strategy if run_config is not None else OptimizationStrategy.Default
+        # distributed_config is baked into the DistributedCompiledProgram and
+        # drives per-rank dispatch, so it must split the cache: two @pl.jit.host
+        # calls with different device_ids compile to distinct artifacts.
+        distributed_config = run_config.distributed_config if run_config is not None else None
         key = make_cache_key(
             source_hash=self._get_source_hash(),
             param_names=param_names,
@@ -1265,6 +1269,7 @@ class JITFunction:
             scalar_values=scalar_values,
             platform=platform,
             strategy=strategy,
+            distributed_config=distributed_config,
         )
 
         # L1 cache lookup
