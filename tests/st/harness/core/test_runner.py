@@ -19,6 +19,7 @@ Orchestrates the full test execution pipeline:
 """
 
 import logging
+import os
 import queue
 import shutil
 import tempfile
@@ -32,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.runtime import compile_program
 from pypto.runtime.golden_writer import (
@@ -430,6 +432,22 @@ def start_pipeline(  # noqa: PLR0913
     progress reporting during collection.
     """
     global _device_pool, _execute_pool, _pipeline_ctx  # noqa: PLW0603
+
+    # Bound torch intra-op threads so the compile pool does not oversubscribe
+    # the host.  Golden computation (`_materialize_tensors` + `compute_expected`)
+    # runs inside compile-pool worker *threads*; without a cap each torch op
+    # defaults to ~`nproc` intra-op threads, so `compile_workers` workers each
+    # grabbing the full core count thrash a single process-wide pool.  Capping
+    # to `cores // compile_workers` keeps outer x intra ~= cores.  On a
+    # multi-socket NUMA host a modest intra count also curbs cross-socket
+    # traffic for the bandwidth-bound tensor materialisation.  Env-overridable
+    # via `PYPTO_GOLDEN_THREADS` (e.g. raise it when few heavy goldens dominate
+    # the tail and the suite is otherwise idle).
+    cores = os.cpu_count() or 1
+    intra = int(
+        os.environ.get("PYPTO_GOLDEN_THREADS", max(1, cores // max(1, compile_workers)))
+    )
+    torch.set_num_threads(intra)
 
     # Resolve PTO_ISA_ROOT once on the main thread before any compile workers
     # start.  Otherwise concurrent workers race on `git clone` into the same
