@@ -43,7 +43,8 @@ program_ssa = ssa_pass(program)
 3. **循环的 Iter_args**：将循环中修改的变量转换为 iter_args + return_vars 模式，带有 YieldStmt
 4. **逃逸变量提升**：通过前向使用分析，将首次在循环体内定义但在循环后使用的变量提升为 iter_args + return_vars
 5. **作用域跟踪**：跨嵌套作用域跟踪变量定义
-6. **保留**：保持现有 SSA 构造不变
+6. **跨作用域的 escaping 防护**：除 `RuntimeScopeStmt` 外的 `ScopeStmt` 子类（`HierarchyScopeStmt` / `InCoreScopeStmt` / `AutoInCoreScopeStmt` / `ClusterScopeStmt` / `SpmdScopeStmt`），`ConvertScope` 在进入 body 前把 `future_needs_` 裁剪到仅包含 scope 之前已经存在的变量。这样可以阻止 scope body 内的嵌套循环把 **scope-local 新变量**根据 scope 之后的引用错误地提升成 `init_values=(foo__FREE_VAR,)`。scope body 内首次定义、然后在 scope 之外引用的变量仍然能正常替换（`InterchangeChunkLoops` 等后续 pass 依赖这一行为）。`RuntimeScopeStmt`（`pl.scope()`）只是 codegen 包装节点，保持完全透传。
+7. **保留**：保持现有 SSA 构造不变
 
 **关键变换**：
 

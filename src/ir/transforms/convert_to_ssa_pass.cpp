@@ -1036,7 +1036,47 @@ class SSAConverter {
       new_core_num = SubstExpr(spmd->core_num_);
       core_num_changed = (new_core_num.get() != spmd->core_num_.get());
     }
+
+    // Block escaping-var promotion across non-Runtime scope boundaries (#1351).
+    //
+    // ``HierarchyScopeStmt`` / ``InCoreScopeStmt`` / ``AutoInCoreScopeStmt`` /
+    // ``ClusterScopeStmt`` / ``SpmdScopeStmt`` separate the loops *inside*
+    // their body from the use-site of any variable defined further down the
+    // *outer* sequence. The inner loops cannot manufacture a working init
+    // value for such a use (FindInitValue typically falls back to an
+    // unversioned ``foo__FREE_VAR`` placeholder, which the SSA verifier
+    // rejects) and would carry a value that is never threaded back to the
+    // outer use site anyway. Trim ``future_needs_`` to variables already
+    // visible in ``cur_`` at scope entry so the inner-loop escaping
+    // detection (see ConvertFor::escaping above) ignores scope-local vars.
+    //
+    // ``cur_`` is intentionally NOT restored after the body — variables
+    // first-defined inside the body and referenced after the scope must
+    // still substitute to their in-body SSA version (relied on by passes
+    // like InterchangeChunkLoops that emit ``out = pl.assemble(...)`` inside
+    // ``pl.at`` and return ``out`` outside). Whether such a leak is
+    // user-legal is enforced by other property verifiers, not by SSA.
+    //
+    // ``RuntimeScopeStmt`` is a thin ``pl.scope()`` codegen wrapper, not a
+    // boundary — its body shares SSA state with the enclosing function and
+    // stays fully transparent.
+    const bool is_outline_boundary = !As<RuntimeScopeStmt>(op);
+    std::unordered_set<const Var*> saved_future_needs;
+    if (is_outline_boundary) {
+      saved_future_needs = future_needs_;
+      std::unordered_set<const Var*> restricted;
+      restricted.reserve(future_needs_.size());
+      for (const auto* v : future_needs_) {
+        if (cur_.count(v)) restricted.insert(v);
+      }
+      future_needs_ = std::move(restricted);
+    }
+
     auto body = ConvertStmt(op->body_);
+
+    if (is_outline_boundary) {
+      future_needs_ = std::move(saved_future_needs);
+    }
     auto& new_attrs = subst.first;
     const bool attrs_changed = subst.second;
     if (body == op->body_ && !attrs_changed && !core_num_changed) return op;

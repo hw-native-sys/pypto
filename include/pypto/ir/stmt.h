@@ -712,8 +712,16 @@ using WhileStmtPtr = std::shared_ptr<const WhileStmt>;
  * **Semantics:**
  * - Marks a region of code as belonging to a specific scope (e.g., InCore, Cluster)
  * - Executes body exactly once (no iteration, no branching)
- * - Variables flow through transparently (no iter_args/return_vars needed)
- * - SSA conversion treats it as transparent (just visits body)
+ * - Variables defined *before* the scope flow IN transparently (no iter_args /
+ *   return_vars needed). For every subclass except ``RuntimeScopeStmt``,
+ *   ``ConvertToSSA`` blocks scope-local newly-defined variables from
+ *   driving escaping-variable promotion in *nested loops* inside the body
+ *   (those promotions would emit unusable ``foo__FREE_VAR`` placeholders
+ *   for an outer use site that the inner loop cannot reach). ``cur_``
+ *   itself stays transparent in both directions, so sequential uses of a
+ *   scope-local variable outside the scope still substitute to its
+ *   in-scope SSA version. ``RuntimeScopeStmt`` is a thin ``pl.scope()``
+ *   codegen wrapper and is fully transparent in both directions.
  * - OutlineIncoreScopes extracts InCore scopes into InCore functions
  * - OutlineClusterScopes extracts Cluster scopes into Group functions
  * - Hierarchy scopes are outlined into level-/role-annotated functions
