@@ -32,8 +32,7 @@ def _run_inject(program: ir.Program) -> ir.Program:
     so ExpandMixedKernel is not in the loop and does not contribute to the
     Expected output.
     """
-    with passes.PassContext([], ir.VerificationLevel.NONE):
-        return passes.inject_gm_pipe_buffer()(passes.convert_to_ssa()(program))
+    return passes.inject_gm_pipe_buffer()(passes.convert_to_ssa()(program))
 
 
 def test_inject_gm_pipe_buffer_is_no_op_on_non_gm_backend():
@@ -77,9 +76,8 @@ def test_inject_gm_pipe_buffer_is_no_op_on_non_gm_backend():
             self.group_func()
 
     # The expected post-pass IR is exactly the SSA-converted input, unchanged.
-    with passes.PassContext([], ir.VerificationLevel.NONE):
-        ssa = passes.convert_to_ssa()(Before)
-        after = passes.inject_gm_pipe_buffer()(ssa)
+    ssa = passes.convert_to_ssa()(Before)
+    after = passes.inject_gm_pipe_buffer()(ssa)
     ir.assert_structural_equal(after, ssa)
 
 
@@ -476,7 +474,13 @@ def test_gm_pipe_injection_handles_nested_initialize_pipe_ops():
             updated = self.group_func(a, out, gm_pipe_buffer_0)
             return updated
 
-    After = _run_inject(Before)
+    # NOTE: This Before intentionally places aic/aiv_initialize_pipe inside an
+    # `if True:` block (non-dominating) to exercise the pass on nested init_pipe
+    # ops. The MixedKernelExpanded property verifier rejects this as invalid
+    # input, so this test keeps a local VerificationLevel.NONE wrapper rather
+    # than going through the full-verification _run_inject path.
+    with passes.PassContext([], ir.VerificationLevel.NONE):
+        After = passes.inject_gm_pipe_buffer()(passes.convert_to_ssa()(Before))
     ir.assert_structural_equal(After, Expected)
 
 

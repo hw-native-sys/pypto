@@ -82,8 +82,7 @@ def test_below_threshold_a5_emits():
     """A5 backend, FP32 [16, 16] → 64B innermost → fires PH001."""
     _activate_a5()
     program = _make_load_program(16, pl.FP32)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     # Both the tile.load and the tile.store carry a 64B innermost-dim tile,
     # so the check fires on both. We assert at least one with the correct code.
@@ -101,8 +100,7 @@ def test_above_threshold_a5_silent():
     """A5 backend, FP32 [16, 128] → 512B innermost → silent."""
     _activate_a5()
     program = _make_load_program(128, pl.FP32)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     assert [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint] == []
 
 
@@ -110,8 +108,7 @@ def test_at_threshold_a5_silent():
     """A5 backend, FP32 [16, 32] → exactly 128B innermost → silent (>= recommended)."""
     _activate_a5()
     program = _make_load_program(32, pl.FP32)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     assert [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint] == []
 
 
@@ -119,8 +116,7 @@ def test_below_threshold_a3_emits():
     """A3 backend (512B threshold), FP32 [16, 32] → 128B innermost → fires."""
     _activate_a3()
     program = _make_load_program(32, pl.FP32)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     assert len(perf_hints) >= 1
     msg = perf_hints[0].message
@@ -133,8 +129,7 @@ def test_above_threshold_a3_silent():
     """A3 backend, FP32 [16, 128] → 512B innermost → silent (matches threshold)."""
     _activate_a3()
     program = _make_load_program(128, pl.FP32)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     assert [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint] == []
 
 
@@ -147,8 +142,7 @@ def test_dtype_int8_silent_at_128_elements_a5():
     """A5: INT8 with innermost=128 → 128B → silent (boundary)."""
     _activate_a5()
     program = _make_load_program(128, pl.INT8)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     assert [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint] == []
 
 
@@ -156,8 +150,7 @@ def test_dtype_int8_below_threshold_a5_emits():
     """A5: INT8 with innermost=64 → 64B → fires."""
     _activate_a5()
     program = _make_load_program(64, pl.INT8)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     assert len(perf_hints) >= 1
     assert "64B" in perf_hints[0].message
@@ -167,8 +160,7 @@ def test_dtype_fp16_threshold_a5_silent():
     """A5: FP16 with innermost=64 → 128B → silent."""
     _activate_a5()
     program = _make_load_program(64, pl.FP16)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     assert [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint] == []
 
 
@@ -185,8 +177,7 @@ def test_tile_store_also_checked():
     """
     _activate_a5()
     program = _make_load_program(16, pl.FP32)  # tile.load + tile.store both 64B
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     rules = {d.rule_name for d in perf_hints}
     assert rules == {"TileInnermostDimGranularity"}
@@ -207,9 +198,7 @@ def test_disabled_perf_hint_silent():
     disabled = passes.DiagnosticCheckSet()
     disabled.insert(passes.DiagnosticCheck.UnusedControlFlowResult)
     disabled.insert(passes.DiagnosticCheck.TileInnermostDimGranularity)
-    with passes.PassContext(
-        [], verification_level=passes.VerificationLevel.NONE, disabled_diagnostics=disabled
-    ):
+    with passes.PassContext([], disabled_diagnostics=disabled):
         all_checks = passes.DiagnosticCheckRegistry.get_all_checks()
         effective = all_checks.difference(disabled)
         diags = passes.DiagnosticCheckRegistry.run_checks(
@@ -227,8 +216,7 @@ def test_span_propagates_to_tile_op():
     """Diagnostic span resolves to a valid source location, not Span::unknown."""
     _activate_a5()
     program = _make_load_program(16, pl.FP32)
-    with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-        diags = _run_perf_hint_check(program)
+    diags = _run_perf_hint_check(program)
     perf_hints = [d for d in diags if d.severity == passes.DiagnosticSeverity.PerfHint]
     assert len(perf_hints) >= 1
     # At least one diagnostic must have a real source location: the @pl.program

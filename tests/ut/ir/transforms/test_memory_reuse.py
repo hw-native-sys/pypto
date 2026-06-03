@@ -2727,6 +2727,26 @@ class TestStructuralShapeEquality:
         func = ir.Function("main", [input_x, output_x], [], body, span, ir.FunctionType.InCore)
         Before = ir.Program([func], "test_struct_shape_reuse", span)
 
+        # NOTE: VerificationLevel.NONE is required here (cannot use the conftest
+        # default roundtrip verification). The whole point of this regression is
+        # a *pointer-distinct composite* shape dimension that is structurally
+        # equal across the two tiles — that is the only construct that exercises
+        # the structural_equal (non-ConstInt) compatibility path the pass now
+        # uses. But such a dim is not print->parse round-trippable:
+        #   - A composite over constants (Add(32, 32)) constant-folds to 64 on
+        #     reparse, so the printed dim != the reparsed dim.
+        #   - A composite over a shared symbolic Var (Add(m, 0)) — the only form
+        #     that is both pointer-distinct AND structurally equal (so the pass
+        #     aliases, shares_memref_with == True) — is rejected by the parser:
+        #     "Shape dimension must be int literal, variable, or evaluable
+        #     expression". The printer emits it but the parser cannot rebuild it.
+        #   - Two distinct same-name Vars are NOT structurally equal (variable
+        #     pointer mapping), so the pass would NOT alias — defeating intent.
+        # Making this round-trip would require a printer/parser change (composite
+        # shape-dim support), not a test-side fixture edit. Removing NONE without
+        # that change would force weakening the regression to a bare shared Var
+        # (pointer-identical dims), which only exercises the old pointer-equality
+        # path, not the structural_equal regression this test guards.
         with passes.PassContext([], passes.VerificationLevel.NONE):
             After = passes.memory_reuse()(Before)
 

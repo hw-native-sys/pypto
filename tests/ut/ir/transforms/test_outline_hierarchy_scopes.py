@@ -587,10 +587,8 @@ class TestHierarchyOutlinedVerifier:
                     y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
                 return y
 
-        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-        with ctx:
-            program = passes.convert_to_ssa()(Input)
-            program = passes.outline_hierarchy_scopes()(program)
+        program = passes.convert_to_ssa()(Input)
+        program = passes.outline_hierarchy_scopes()(program)
 
         # Should not throw — no Hierarchy scopes remain.
         passes.verify_properties(self._hierarchy_outlined_props(), program, "test")
@@ -607,9 +605,7 @@ class TestHierarchyOutlinedVerifier:
                 return y
 
         # Don't outline — just convert to SSA, leaving Hierarchy scope intact.
-        ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-        with ctx:
-            program = passes.convert_to_ssa()(Input)
+        program = passes.convert_to_ssa()(Input)
 
         # verify_properties should throw because Hierarchy scope remains.
         with pytest.raises(Exception, match="Hierarchy ScopeStmt"):

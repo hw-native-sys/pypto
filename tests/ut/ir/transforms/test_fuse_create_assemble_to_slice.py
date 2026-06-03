@@ -24,9 +24,7 @@ def _run_prereqs_only(program):
     pipeline.add_pass(passes.outline_hierarchy_scopes())
     pipeline.add_pass(passes.outline_incore_scopes())
     pipeline.add_pass(passes.outline_cluster_scopes())
-    ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-    with ctx:
-        return pipeline.run(program)
+    return pipeline.run(program)
 
 
 def _run_prereqs_and_fuse(program):
@@ -39,9 +37,7 @@ def _run_prereqs_and_fuse(program):
     pipeline.add_pass(passes.outline_incore_scopes())
     pipeline.add_pass(passes.outline_cluster_scopes())
     pipeline.add_pass(passes.fuse_create_assemble_to_slice())
-    ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-    with ctx:
-        return pipeline.run(program)
+    return pipeline.run(program)
 
 
 def _collect_tensor_ops_in_orch(program):

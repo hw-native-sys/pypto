@@ -30,15 +30,12 @@ def _setup_backend():
 
 
 def _run_pipeline(program: ir.Program) -> ir.Program:
-    """Run SSA -> infer-memory -> expand-mixed-kernel under VerificationLevel.NONE.
+    """Run SSA -> infer-memory -> expand-mixed-kernel.
 
     InjectGMPipeBuffer is intentionally excluded so this file's Expecteds
     pin only what ExpandMixedKernel produces.
     """
-    with passes.PassContext([], ir.VerificationLevel.NONE):
-        return passes.expand_mixed_kernel()(
-            passes.infer_tile_memory_space()(passes.convert_to_ssa()(program))
-        )
+    return passes.expand_mixed_kernel()(passes.infer_tile_memory_space()(passes.convert_to_ssa()(program)))
 
 
 def _run_pipeline_from_tensor(program: ir.Program) -> ir.Program:
@@ -47,12 +44,11 @@ def _run_pipeline_from_tensor(program: ir.Program) -> ir.Program:
     Mirrors _run_pipeline but inserts convert_tensor_to_tile_ops between SSA
     and InferTileMemorySpace, for cases that start from tensor-level IR.
     """
-    with passes.PassContext([], ir.VerificationLevel.NONE):
-        return passes.expand_mixed_kernel()(
-            passes.infer_tile_memory_space()(
-                passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(program))
-            )
+    return passes.expand_mixed_kernel()(
+        passes.infer_tile_memory_space()(
+            passes.convert_tensor_to_tile_ops()(passes.convert_to_ssa()(program))
         )
+    )
 
 
 def _op_name(stmt: ir.Stmt) -> str:

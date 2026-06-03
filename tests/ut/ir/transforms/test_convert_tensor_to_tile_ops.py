@@ -2033,6 +2033,9 @@ class TestScatterUpdateConversion:
                 result: pl.Tensor[[16, 64], pl.FP16] = self.main_incore_0(index, src)
                 return result
 
+        # NOTE: bypass tracks a known pass bug — ConvertTensorToTileOps scatter_update
+        # emits tile.cast without the declared `mode` attr (op_conversion_registry.cpp),
+        # which fails the print->parse roundtrip. Remove NONE once the pass is fixed.
         with passes.PassContext([], passes.VerificationLevel.NONE):
             After = passes.convert_tensor_to_tile_ops()(Before)
         text = ir.python_print(After)
@@ -2068,8 +2071,7 @@ class TestScatterUpdateConversion:
                 return result
 
         with pytest.raises(Exception, match="i16 flat-index limit"):
-            with passes.PassContext([], passes.VerificationLevel.NONE):
-                passes.convert_tensor_to_tile_ops()(Before)
+            passes.convert_tensor_to_tile_ops()(Before)
 
     def test_scatter_update_rejects_4d(self):
         """4D input type-checks but is not yet lowered — must raise a clear user error, not crash."""
@@ -2096,8 +2098,7 @@ class TestScatterUpdateConversion:
                 return result
 
         with pytest.raises(Exception, match="only 2D input/src is currently supported"):
-            with passes.PassContext([], passes.VerificationLevel.NONE):
-                passes.convert_tensor_to_tile_ops()(Before)
+            passes.convert_tensor_to_tile_ops()(Before)
 
 
 class TestTensorFullConversion:
@@ -2850,8 +2851,7 @@ class TestSubmitCallSiteUpdate:
                     a, a_tid = pl.submit(self.kernel, x, ret0__out)
                 return a
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            After = passes.convert_tensor_to_tile_ops()(Before)
+        After = passes.convert_tensor_to_tile_ops()(Before)
         ir.assert_structural_equal(After, Expected)
 
 

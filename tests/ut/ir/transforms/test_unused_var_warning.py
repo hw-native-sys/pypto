@@ -256,10 +256,9 @@ def test_pipeline_disabled_diagnostics_no_output():
 
     program = ir.Program([f.get_result()], "prog", ir.Span.unknown())
 
-    # Disable verification to avoid structural errors, disable diagnostics
+    # Disable diagnostics so the pipeline emits no warnings.
     ctx = passes.PassContext(
         [],
-        verification_level=passes.VerificationLevel.NONE,
         diagnostic_phase=passes.DiagnosticPhase.NONE,
     )
     with ctx:

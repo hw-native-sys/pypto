@@ -15,12 +15,10 @@ from pypto import ir, passes
 
 
 def _run_normalize(program):
-    """Run normalize_return_order without property verification."""
+    """Run normalize_return_order via a single-pass pipeline."""
     pipeline = passes.PassPipeline()
     pipeline.add_pass(passes.normalize_return_order())
-    ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-    with ctx:
-        return pipeline.run(program)
+    return pipeline.run(program)
 
 
 def _run_normalize_direct(program):
@@ -28,13 +26,11 @@ def _run_normalize_direct(program):
 
     ``manual_scope``/``submit`` programs trip the pipeline's PostPipeline
     perf-hint diagnostic (it needs a configured backend handler), so the
-    Submit-bearing cases call the pass object directly inside a
-    ``VerificationLevel.NONE`` context — the same convention used by
-    ``test_expand_manual_phase_fence.py``. The single-pass behaviour is
-    identical; only the pipeline's post-run diagnostic checks are skipped.
+    Submit-bearing cases call the pass object directly rather than through
+    a ``PassPipeline``. The single-pass behaviour is identical; only the
+    pipeline's post-run diagnostic checks are skipped.
     """
-    with passes.PassContext([], passes.VerificationLevel.NONE):
-        return passes.normalize_return_order()(program)
+    return passes.normalize_return_order()(program)
 
 
 class TestNormalizeReturnOrder:

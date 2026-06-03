@@ -192,7 +192,6 @@ def _run_pipeline_with_perf_hint(instruments, dphase=passes.DiagnosticPhase.PRE_
     program = _make_program_with_perf_hint(16)
     ctx = passes.PassContext(
         instruments,
-        verification_level=passes.VerificationLevel.NONE,
         diagnostic_phase=dphase,
     )
     with ctx:
@@ -260,7 +259,6 @@ def test_warning_does_not_appear_in_perf_hints_log(tmp_path, capfd):
     report = passes.ReportInstrument(str(tmp_path))
     ctx = passes.PassContext(
         [report],
-        verification_level=passes.VerificationLevel.NONE,
         diagnostic_phase=passes.DiagnosticPhase.PRE_PIPELINE,
         disabled_diagnostics=passes.DiagnosticCheckSet(),  # warning enabled
     )
@@ -297,7 +295,6 @@ def test_perf_hint_visible_at_default_log_level(capfd):
 
     ctx = passes.PassContext(
         [],
-        verification_level=passes.VerificationLevel.NONE,
         diagnostic_phase=passes.DiagnosticPhase.PRE_PIPELINE,
     )
     with ctx:

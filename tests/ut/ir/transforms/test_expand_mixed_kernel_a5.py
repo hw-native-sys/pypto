@@ -3836,11 +3836,6 @@ class TestDCERegression:
         chain from original_def_map -- which requires BuildDefMap to recurse
         into nested loop bodies.
 
-        Uses PassContext(verification_level=NONE) because the Vec-typed init
-        and Acc-typed yield from matmul_acc intentionally mismatch at this IR
-        stage; in a full pipeline, NormalizeStmtStructure resolves this before
-        ExpandMixedKernel.
-
         FixupIterArgInitValues rewrites the ``tile.full`` call's deduced type
         from Vec to Acc so the init value matches the Acc-typed iter_arg. While
         ``pl.tile.full`` has no ``target_memory`` parameter, the rewritten
@@ -3876,8 +3871,7 @@ class TestDCERegression:
                     out_0 = pl.store(acc_vec, [0, 0], out_0)
                 return out_0
 
-        with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-            After = _expand(Before)
+        After = _expand(Before)
 
         @pl.program
         class Expected:
@@ -3927,8 +3921,7 @@ class TestDCERegression:
                 result = self.main_incore_0_aiv(x, w, out_0)
                 return result
 
-        with passes.PassContext([], verification_level=passes.VerificationLevel.NONE):
-            ir.assert_structural_equal(After, passes.convert_to_ssa()(Expected))
+        ir.assert_structural_equal(After, passes.convert_to_ssa()(Expected))
 
     def test_orphan_if_yields_after_split_dont_leak_acc_memref(self):
         """Regression for issue #1501.

@@ -24,6 +24,26 @@ from pypto.pypto_core import passes
 
 
 def _expand(program: ir.Program) -> ir.Program:
+    # NOTE: VerificationLevel.NONE is required here. The fixtures use plain
+    # cross-function calls (``self.kernel(...)``) that carry manual_scope
+    # dependency edges in ``attrs["manual_dep_edges"]`` — exactly the IR shape
+    # this pass consumes and produces. Two layers of the conftest default
+    # verification block these fixtures:
+    #
+    #   1. CallDirectionsResolved (BEFORE_AND_AFTER property verification) —
+    #      fixable by giving ``kernel`` a real scalar param and a matching
+    #      ``arg_directions=[pl.adir.scalar]`` at each call site.
+    #   2. The print->parse roundtrip instrument — NOT fixable in this file.
+    #      The printer emits a plain Call's ``manual_dep_edges`` as the
+    #      ``deps=[...]`` kwarg (src/ir/transforms/python_printer.cpp:670), but
+    #      the parser only accepts ``deps=`` on ``pl.submit(...)`` and rejects
+    #      it on a plain ``self.kernel(...)`` call
+    #      (python/pypto/language/parser/ast_parser.py:4570). So any plain Call
+    #      bearing manual_dep_edges fails the roundtrip regardless of args.
+    #
+    # Removing this NONE wrapper trips (2) for every test. The fix belongs in
+    # the printer/parser (a non-test change), not in these fixtures, since the
+    # tests legitimately require plain-Call manual_dep_edges.
     with passes.PassContext([], passes.VerificationLevel.NONE):
         return passes.expand_manual_phase_fence()(program)
 

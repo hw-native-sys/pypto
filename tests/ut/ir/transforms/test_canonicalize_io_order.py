@@ -27,11 +27,9 @@ from pypto import ir, passes
 
 
 def _run_pass(program: ir.Program) -> ir.Program:
-    """Run CanonicalizeIOOrder with structural verification disabled — our
-    Before programs use minimal tile IR that doesn't satisfy the full set of
-    structural prerequisites the pipeline normally enforces."""
-    with passes.PassContext([], passes.VerificationLevel.NONE):
-        return passes.canonicalize_io_order()(program)
+    """Run CanonicalizeIOOrder under the conftest's default full verification
+    (BEFORE_AND_AFTER property verification + print/parse roundtrip)."""
+    return passes.canonicalize_io_order()(program)
 
 
 class TestCanonicalizeIOOrder:
@@ -559,7 +557,11 @@ class TestCanonicalizeIOOrder:
                     _c: pl.Tile[[64, 64], pl.FP32] = pl.tile.add(t2, t2)
                 return y
 
-        After = _run_pass(Before)
+        # NOTE: intentional InOutUseDiscipline violation to exercise the pass
+        # skip-guard; structural pre-verify would otherwise reject the input, so
+        # this test keeps VerificationLevel.NONE rather than the shared helper.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            After = passes.canonicalize_io_order()(Before)
         # Violation → whole-program identity (no reorder, no Pipeline→Sequential demotion).
         assert After is Before
 
@@ -670,10 +672,9 @@ class TestCanonicalizeIOOrder:
 
 def _run_lower_then_canon(program: ir.Program) -> ir.Program:
     """Replicate (LowerPipelineLoops) then reorder (CanonicalizeIOOrder) — the
-    real pipeline order — with structural verification disabled."""
-    with passes.PassContext([], passes.VerificationLevel.NONE):
-        lowered = passes.lower_pipeline_loops()(program)
-        return passes.canonicalize_io_order()(lowered)
+    real pipeline order — under the conftest's default full verification."""
+    lowered = passes.lower_pipeline_loops()(program)
+    return passes.canonicalize_io_order()(lowered)
 
 
 def _positions(text: str, marker: str) -> list[int]:

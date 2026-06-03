@@ -30,25 +30,22 @@ def _setup_backend():
 def _run_split_vector_kernel(program):
     """Run convert_to_ssa then split_vector_kernel.
 
-    Verification is disabled because these tests target SplitVectorKernel in
-    isolation — the input IR uses cross-core ops (``tpush_to_aiv`` /
-    ``tpop_from_aic``) directly, without the pipe-init / peer-buffer-import /
-    reserve / tfree-to-aic scaffolding that ``ExpandMixedKernel`` would have
-    added in the real pipeline. The ``MixedKernelExpanded`` property verifier
-    flags the missing calls as errors. Re-running the full pipeline through
-    ``ExpandMixedKernel`` here would change the test contract (and a lot of
-    hand-built IR wouldn't survive the upstream passes), so we skip
-    verification for this isolated-pass test harness instead. Round-trip
+    Runs under the conftest's default verification context (BEFORE_AND_AFTER
+    property verification + print->parse roundtrip). SplitVectorKernel requires
+    the ``MixedKernelExpanded`` property, so every fixture supplies the
+    cross-core pipe scaffolding (``aic_initialize_pipe`` / ``aiv_initialize_pipe``
+    + ``reserve_buffer`` / ``import_peer_buffer`` and a matching ``tfree_to_aic`` /
+    ``tfree_to_aiv``) that ``ExpandMixedKernel`` would add in the real pipeline.
+    The scaffolding is inert for SplitVectorKernel — it is passed through
+    untouched — so the before/after contract still asserts exactly the split
+    rewrite (mode inference, shape halving, offset adjustment). Round-trip
     correctness — including def-use closure on Var refs embedded inside type
-    annotations — is exercised explicitly by
-    ``_assert_roundtrip_structural_equal``.
+    annotations — is exercised by the same roundtrip instrument.
     """
     ssa = passes.convert_to_ssa()(program)
     pipeline = passes.PassPipeline()
     pipeline.add_pass(passes.split_vector_kernel())
-    ctx = passes.PassContext([], passes.VerificationLevel.NONE)
-    with ctx:
-        return pipeline.run(ssa)
+    return pipeline.run(ssa)
 
 
 def _assert_roundtrip_structural_equal(program, printed: str | None = None):
@@ -79,6 +76,8 @@ class TestSplitVectorKernelUpDown:
         class Before:
             @pl.function(type=pl.FunctionType.AIC)
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -88,9 +87,12 @@ class TestSplitVectorKernelUpDown:
 
             @pl.function(type=pl.FunctionType.AIV)
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=1
                 )
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0_store
 
@@ -98,6 +100,8 @@ class TestSplitVectorKernelUpDown:
         class Expected:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -111,7 +115,10 @@ class TestSplitVectorKernelUpDown:
             )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
                 return out_0_store
 
@@ -124,6 +131,8 @@ class TestSplitVectorKernelUpDown:
         class Before:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -133,9 +142,12 @@ class TestSplitVectorKernelUpDown:
 
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
                 )
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0_store
 
@@ -143,6 +155,8 @@ class TestSplitVectorKernelUpDown:
         class Expected:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -156,7 +170,10 @@ class TestSplitVectorKernelUpDown:
             )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
                 return out_0_store
 
@@ -169,6 +186,8 @@ class TestSplitVectorKernelUpDown:
         class Before:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -183,12 +202,15 @@ class TestSplitVectorKernelUpDown:
                 valid_cols: pl.Scalar[pl.INDEX],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[
                     [16, 128],
                     pl.FP32,
                     pl.MemorySpace.Vec,
                     pl.TileView(valid_shape=[valid_rows, valid_cols]),
                 ] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0_store
 
@@ -196,6 +218,8 @@ class TestSplitVectorKernelUpDown:
         class Expected:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -214,6 +238,8 @@ class TestSplitVectorKernelUpDown:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[
                     [8, 128],
                     pl.FP32,
@@ -222,6 +248,7 @@ class TestSplitVectorKernelUpDown:
                         valid_shape=[pl.max(pl.min(valid_rows - subblock_idx * 8, 8), 0), valid_cols]
                     ),
                 ] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0 + subblock_idx * 8, 0], out_0)
                 return out_0_store
 
@@ -234,6 +261,8 @@ class TestSplitVectorKernelUpDown:
         class Before:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -245,12 +274,15 @@ class TestSplitVectorKernelUpDown:
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
                 )
                 pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
                 )
+                pl.tfree_to_aic(pop_tile)
                 result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
                 return out_0_store
@@ -259,6 +291,8 @@ class TestSplitVectorKernelUpDown:
         class Expected:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -274,10 +308,13 @@ class TestSplitVectorKernelUpDown:
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
                 )
                 pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(pop_tile)
                 result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
                     result, [0 + subblock_idx * 8, 0], out_0
@@ -295,6 +332,8 @@ class TestSplitVectorKernelUpDown:
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 accum: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
                 )
@@ -303,6 +342,7 @@ class TestSplitVectorKernelUpDown:
                     pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
                         pl.tpop_from_aic(split=0)
                     )
+                    pl.tfree_to_aic(pop_tile)
                     accum = pl.add(accum, pop_tile)
                 return out_0
 
@@ -316,12 +356,15 @@ class TestSplitVectorKernelUpDown:
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 accum: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
                 )
                 for i in pl.range(2):
                     out_0 = pl.store(accum, [0 + subblock_idx * 8, 0], out_0)
                     pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                    pl.tfree_to_aic(pop_tile)
                     accum = pl.add(accum, pop_tile)
                 return out_0
 
@@ -336,6 +379,8 @@ class TestSplitVectorKernelUpDown:
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 accum: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
                 )
@@ -343,6 +388,7 @@ class TestSplitVectorKernelUpDown:
                     pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
                         pl.tpop_from_aic(split=0)
                     )
+                    pl.tfree_to_aic(pop_tile)
                     accum = pl.add(accum, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(accum, [0, 0], out_0)
                 return out_0_store
@@ -357,11 +403,14 @@ class TestSplitVectorKernelUpDown:
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 accum: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     data, [0 + subblock_idx * 8, 0], [8, 128], target_memory=pl.MemorySpace.Vec
                 )
                 for i in pl.range(2):
                     pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                    pl.tfree_to_aic(pop_tile)
                     accum = pl.add(accum, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(accum, [0 + subblock_idx * 8, 0], out_0)
                 return out_0_store
@@ -379,12 +428,15 @@ class TestSplitVectorKernelUpDown:
                 subblock_idx: pl.Tensor[[16, 128], pl.FP32],
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     subblock_idx, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
                 )
                 pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
                 )
+                pl.tfree_to_aic(pop_tile)
                 result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
                 return out_0_store
@@ -401,6 +453,8 @@ class TestSplitVectorKernelUpDown:
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx__ssa_v0: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 prev: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     subblock_idx,
                     [0 + subblock_idx__ssa_v0 * 8, 0],
@@ -408,6 +462,7 @@ class TestSplitVectorKernelUpDown:
                     target_memory=pl.MemorySpace.Vec,
                 )
                 pop_tile: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                pl.tfree_to_aic(pop_tile)
                 result: pl.Tile[[8, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
                     result, [0 + subblock_idx__ssa_v0 * 8, 0], out_0
@@ -426,9 +481,12 @@ class TestSplitVectorKernelUpDown:
                 self,
                 out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]],
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
                 )
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0_store
 
@@ -442,6 +500,8 @@ class TestSplitVectorKernelUpDown:
         class Before:
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 acc: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
                     [16, 64], dtype=pl.FP32, value=0.0
                 )
@@ -449,6 +509,7 @@ class TestSplitVectorKernelUpDown:
                     pop_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = (
                         pl.tpop_from_aic(split=0)
                     )
+                    pl.tfree_to_aic(pop_tile)
                     new_acc: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, pop_tile)
                     acc_rv = pl.yield_(new_acc)
                 out = pl.store(acc_rv, [0, 0], out_0)
@@ -462,11 +523,14 @@ class TestSplitVectorKernelUpDown:
             )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 64], pl.FP32]]) -> pl.Tensor[[16, 64], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tile.full(
                     [8, 64], dtype=pl.FP32, value=0.0
                 )
                 for _, (acc_iter,) in pl.range(4, init_values=(acc,)):
                     pop_tile: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=1)
+                    pl.tfree_to_aic(pop_tile)
                     new_acc: pl.Tile[[8, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(acc_iter, pop_tile)
                     acc_rv = pl.yield_(new_acc)
                 out = pl.store(acc_rv, [0 + subblock_idx * 8, 0], out_0)
@@ -518,6 +582,8 @@ class TestSplitVectorKernelUpDown:
         class Before:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16]):
+                slot_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
                 a_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat, pl.TileView()] = pl.tpop_from_aiv(
                     split=0
                 )
@@ -527,6 +593,8 @@ class TestSplitVectorKernelUpDown:
         class Expected:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.UP_DOWN})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16]):
+                slot_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                pl.aic_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
                 a_tile: pl.Tile[[16, 128], pl.BF16, pl.MemorySpace.Mat, pl.TileView()] = pl.tpop_from_aiv(
                     split=1
                 )
@@ -615,6 +683,8 @@ class TestSplitVectorKernelLeftRight:
         class Before:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -624,9 +694,12 @@ class TestSplitVectorKernelLeftRight:
 
             @pl.function(type=pl.FunctionType.AIV, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
                 )
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(z_vec, [0, 0], out_0)
                 return out_0_store
 
@@ -634,6 +707,8 @@ class TestSplitVectorKernelLeftRight:
         class Expected:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -647,7 +722,10 @@ class TestSplitVectorKernelLeftRight:
             )
             def main_aiv(self, out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 z_vec: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
+                pl.tfree_to_aic(z_vec)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
                     z_vec, [0, 0 + subblock_idx * 64], out_0
                 )
@@ -662,6 +740,8 @@ class TestSplitVectorKernelLeftRight:
         class Before:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -673,12 +753,15 @@ class TestSplitVectorKernelLeftRight:
             def main_aiv(
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 prev: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     data, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec
                 )
                 pop_tile: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec, pl.TileView()] = pl.tpop_from_aic(
                     split=0
                 )
+                pl.tfree_to_aic(pop_tile)
                 result: pl.Tile[[16, 128], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(result, [0, 0], out_0)
                 return out_0_store
@@ -687,6 +770,8 @@ class TestSplitVectorKernelLeftRight:
         class Expected:
             @pl.function(type=pl.FunctionType.AIC, attrs={"split": pl.SplitMode.LEFT_RIGHT})
             def main_aic(self, x: pl.Tensor[[16, 128], pl.BF16], y: pl.Tensor[[128, 128], pl.BF16]):
+                peer_buf = pl.import_peer_buffer(name="c2v_slot_buffer", peer_func="main_aiv")
+                pl.aic_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=peer_buf)
                 x_mat = pl.load(x, [0, 0], [16, 128], target_memory=pl.MemorySpace.Mat)
                 x_left = pl.move(x_mat, target_memory=pl.MemorySpace.Left)
                 y_mat = pl.load(y, [0, 0], [128, 128], target_memory=pl.MemorySpace.Mat)
@@ -702,10 +787,13 @@ class TestSplitVectorKernelLeftRight:
                 self, data: pl.Tensor[[16, 128], pl.FP32], out_0: pl.Out[pl.Tensor[[16, 128], pl.FP32]]
             ) -> pl.Tensor[[16, 128], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
+                slot_buf = pl.reserve_buffer(name="c2v_slot_buffer", size=4096, base=0x1000)
+                pl.aiv_initialize_pipe(dir_mask=1, slot_size=512, c2v_consumer_buf=slot_buf)
                 prev: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     data, [0, 0 + subblock_idx * 64], [16, 64], target_memory=pl.MemorySpace.Vec
                 )
                 pop_tile: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.tpop_from_aic(split=2)
+                pl.tfree_to_aic(pop_tile)
                 result: pl.Tile[[16, 64], pl.FP32, pl.MemorySpace.Vec] = pl.add(prev, pop_tile)
                 out_0_store: pl.Tensor[[16, 128], pl.FP32] = pl.store(
                     result, [0, 0 + subblock_idx * 64], out_0
@@ -818,7 +906,7 @@ class TestSplitVectorKernelNoSplitA2A3:
                 b: pl.Tensor[[16, 16], pl.FP32],
                 out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
-                slot_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
                 pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
                 a_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
                     a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec
@@ -840,7 +928,7 @@ class TestSplitVectorKernelNoSplitA2A3:
                 out: pl.Out[pl.Tensor[[16, 16], pl.FP32]],
             ) -> pl.Tensor[[16, 16], pl.FP32]:
                 subblock_idx: pl.Scalar[pl.INDEX] = pl.tile.get_subblock_idx()
-                slot_buf = pl.reserve_buffer(name="v2c_slot_buffer", size=4096, base=0x1000)
+                slot_buf = pl.import_peer_buffer(name="v2c_slot_buffer", peer_func="main_aic")
                 pl.aiv_initialize_pipe(dir_mask=2, slot_size=512, v2c_consumer_buf=slot_buf)
                 if subblock_idx == 0:
                     a_tile: pl.Tile[[16, 16], pl.FP32, pl.MemorySpace.Vec] = pl.load(
@@ -910,6 +998,16 @@ class TestSplitVectorKernelNoSplitA2A3:
             attrs={"dual_aiv_dispatch": True},
         )
 
+        # NOTE: Verification is disabled only for this case because the body is
+        # hand-built with a non-canonical 3-arg ``tile.load`` (explicit
+        # ``valid_shape`` operand). The printer canonicalizes that to the 2-arg
+        # form, so print->reparse yields a 2-arg load and the roundtrip
+        # structural-equality check fails on ``body[...].value.args`` — already
+        # at ``convert_to_ssa``, independent of SplitVectorKernel and of the
+        # MixedKernelExpanded property. The purpose of this test is the lane1
+        # 3-arg ``tile.load`` -> ``tile.create`` rewrite (asserted on printed
+        # text below), which the NONE bypass preserves; the roundtrip
+        # limitation of the raw 3-arg load is orthogonal.
         with passes.PassContext([], passes.VerificationLevel.NONE):
             actual = _run_split_vector_kernel(ir.Program([func], "three_arg_tile_load_program", span))
         printed = python_print(actual)

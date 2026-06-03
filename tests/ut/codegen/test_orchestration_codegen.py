@@ -2977,8 +2977,7 @@ class TestTensorReadWriteOffsetCodegen:
                 updated = self.group_func(a, out)
                 return updated
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SplitGroupProgram)
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SplitGroupProgram)
         vector_producer = transformed.get_function("vector_producer")
         cube_consumer = transformed.get_function("cube_consumer")
         assert vector_producer is not None
@@ -3019,10 +3018,7 @@ class TestTensorReadWriteOffsetCodegen:
                     out = pl.assemble(out, result, [0, 0])
                 return out
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-                NoSplitGroupProgram
-            )
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(NoSplitGroupProgram)
 
         aic_funcs = [func for func in transformed.functions.values() if func.func_type == pl.FunctionType.AIC]
         aiv_funcs = [func for func in transformed.functions.values() if func.func_type == pl.FunctionType.AIV]
@@ -3078,12 +3074,11 @@ class TestTensorReadWriteOffsetCodegen:
                     out = self.kernel(a, b, bias, out)
                 return out
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            transformed = passes.expand_mixed_kernel()(
-                passes.infer_tile_memory_space()(
-                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMixedProgram))
-                )
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(
+                passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMixedProgram))
             )
+        )
         spmd_func = transformed.get_function("main_spmd_0")
         group_func = transformed.get_function("kernel")
         assert spmd_func is not None
@@ -3164,12 +3159,11 @@ class TestTensorReadWriteOffsetCodegen:
                 final = self.consumer(out, final)
                 return final
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            transformed = passes.expand_mixed_kernel()(
-                passes.infer_tile_memory_space()(
-                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiOutSingleReturnProgram))
-                )
+        transformed = passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(
+                passes.outline_cluster_scopes()(passes.convert_to_ssa()(SpmdMultiOutSingleReturnProgram))
             )
+        )
 
         code = _generate_orch_code(transformed)
 
@@ -3243,6 +3237,12 @@ class TestTensorReadWriteOffsetCodegen:
                     out0, out1 = self.kernel(a, b0, b1, out0, out1)
                 return out0, out1
 
+        # NOTE: bypass tracks a known print->parse round-trip limitation — a
+        # multi-output `out0, out1 = self.kernel(...)` inside `with pl.spmd(N):`
+        # desugars to a 3-statement body the printer emits verbatim, which the
+        # parser then rejects (spmd body must be a single statement). The IR is
+        # valid (passes BEFORE_AND_AFTER property verification); only roundtrip
+        # fails. Remove NONE once the printer/parser round-trips this shape.
         with passes.PassContext([], passes.VerificationLevel.NONE):
             transformed = passes.expand_mixed_kernel()(
                 passes.infer_tile_memory_space()(
@@ -3292,8 +3292,7 @@ class TestTensorReadWriteOffsetCodegen:
                     out = self.kernel(a, b, bias, out)
                 return out
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SpmdGMPipeProgram)
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SpmdGMPipeProgram)
 
         code = _generate_orch_code(transformed)
         assert "params_t0.launch_spec.set_block_num(4);" in code
@@ -3348,10 +3347,9 @@ class TestTensorReadWriteOffsetCodegen:
                 self.small_group()
                 self.large_group()
 
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
-                PerCalleeGMPipeProgram
-            )
+        transformed = PassManager.get_strategy(OptimizationStrategy.Default).run_passes(
+            PerCalleeGMPipeProgram
+        )
 
         code = _generate_orch_code(transformed)
         shape_values = re.findall(r"gm_pipe_buffer_\d+_ci_shapes\[1\]\s*=\s*\{(\d+)\};", code)
