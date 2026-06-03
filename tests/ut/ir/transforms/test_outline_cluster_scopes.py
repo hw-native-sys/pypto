@@ -767,5 +767,114 @@ class TestOutlineClusterScopes:
             passes.verify_properties(props, Program, "OutlineClusterScopes")
 
 
+class TestOutlineSpmdScopeTaskId:
+    """``with pl.spmd(...) as tid:`` outlines to an ``ir.Submit`` (grid dispatch + producer TaskId).
+
+    The captured-TaskId Spmd scope rides the same ``kAttrTaskIdVar`` rail as
+    ``pl.at(...) as tid:``: ``OutlineIncoreScopes`` outlines the inner InCore body
+    into a kernel (preserving the outer scope's attrs), then
+    ``OutlineClusterScopes``' Spmd outliner — seeing ``kAttrTaskIdVar`` — emits an
+    ``ir.Submit`` whose return type ends in ``Scalar[TASK_ID]`` instead of a plain
+    Call. ``core_num`` rides on the outlined Spmd ``Function`` attrs, so the
+    Submit's own ``core_num`` is ``None`` (codegen reads it via the launch-function
+    fallback). Explicit ``deps=[tid]`` fold into the consumer Submit's ``deps``.
+    """
+
+    @staticmethod
+    def _run(prog):
+        prog = passes.convert_to_ssa()(prog)
+        prog = passes.outline_incore_scopes()(prog)
+        prog = passes.outline_cluster_scopes()(prog)
+        return prog
+
+    @staticmethod
+    def _submit_values(func):
+        """All ``ir.Submit`` exprs bound by an AssignStmt in ``func`` (in body order)."""
+        found = []
+
+        def walk(n):
+            if isinstance(n, ir.SeqStmts):
+                for s in n.stmts:
+                    walk(s)
+            elif isinstance(n, ir.AssignStmt):
+                if isinstance(n.value, ir.Submit):
+                    found.append(n.value)
+            elif hasattr(n, "body") and n.body is not None:
+                walk(n.body)
+
+        walk(func.body)
+        return found
+
+    @staticmethod
+    def _funcs_by_type(prog, ftype):
+        return [f for f in prog.functions.values() if f.func_type == ftype]
+
+    def test_as_tid_outlines_to_submit(self):
+        """A captured Spmd dispatch lowers to a deps-free ``ir.Submit`` (not a plain Call)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1") as tid:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        After = self._run(Before)
+
+        # A Spmd wrapper function was synthesised carrying the launch spec.
+        spmd_fns = self._funcs_by_type(After, ir.FunctionType.Spmd)
+        assert len(spmd_fns) == 1
+        assert "core_num" in spmd_fns[0].attrs
+
+        # The orchestration entry lowers the dispatch to exactly one Submit.
+        orch = self._funcs_by_type(After, ir.FunctionType.Orchestration)[0]
+        submits = self._submit_values(orch)
+        assert len(submits) == 1
+        submit = submits[0]
+        # core_num rides on the Spmd Function attrs, NOT on the Submit.
+        assert submit.core_num is None
+        # No explicit deps on a lone captured dispatch.
+        assert len(submit.deps) == 0
+
+    def test_as_tid_deps_fold_into_submit_deps(self):
+        """``deps=[tid0]`` on a second captured Spmd folds into that Submit's ``deps``."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1") as tid0:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(t, [i * 128, 0], out)
+                with pl.spmd(4, name_hint="stage2", deps=[tid0]) as tid1:
+                    j = pl.tile.get_block_idx()
+                    u: pl.Tile[[128, 128], pl.FP32] = pl.load(out, [j * 128, 0], [128, 128])
+                    out = pl.store(pl.add(u, u), [j * 128, 0], out)
+                return out
+
+        After = self._run(Before)
+        orch = self._funcs_by_type(After, ir.FunctionType.Orchestration)[0]
+        submits = self._submit_values(orch)
+        assert len(submits) == 2
+        # First dispatch has no explicit deps; second carries the first's producer TaskId.
+        assert len(submits[0].deps) == 0
+        assert len(submits[1].deps) == 1
+        assert isinstance(submits[1].deps[0], ir.Var)
+        # Two distinct Spmd wrapper functions were synthesised.
+        assert len(self._funcs_by_type(After, ir.FunctionType.Spmd)) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

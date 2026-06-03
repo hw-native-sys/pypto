@@ -618,7 +618,7 @@ class TestSpmdForLoop:
                 out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
             ) -> pl.Tensor[[512, 128], pl.FP32]:
                 # Outer `i` shadows the loop var; the printer must rename.
-                i = 0  # noqa: F841
+                i = 0
                 for i in pl.spmd(4):  # type: ignore[assignment]
                     offset = i * 128
                     t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
@@ -942,6 +942,313 @@ class TestSpmdOptimizations:
                 for i in pl.spmd(4, optimizations=[42]):  # type: ignore[list-item]
                     _ = i
                 return a
+
+
+class TestSpmdScopeTaskId:
+    """Test ``with pl.spmd(...) as tid:`` — capturing the grid dispatch's producer TaskId.
+
+    Mirrors ``with pl.at(...) as tid:``: the parser allocates a fresh
+    ``Scalar[TASK_ID]`` Var, records it as the ``task_id_var`` attr on the
+    ``SpmdScopeStmt``, and emits a transient ``AssignStmt(tid,
+    system.task_invalid())`` placeholder before the scope (for ConvertToSSA).
+    Unlike the plain ``with pl.spmd(...):`` form, the ``as tid`` form accepts an
+    inline multi-statement body (auto-outlined into an InCore kernel), so the
+    per-block index is read via ``pl.tile.get_block_idx()``.
+    """
+
+    @staticmethod
+    def _descendants(node, cls):
+        found = []
+
+        def walk(n):
+            if isinstance(n, cls):
+                found.append(n)
+            if isinstance(n, ir.SeqStmts):
+                for s in n.stmts:
+                    walk(s)
+            elif hasattr(n, "body") and n.body is not None:
+                walk(n.body)
+
+        walk(node)
+        return found
+
+    @classmethod
+    def _unique(cls, node, klass):
+        found = cls._descendants(node, klass)
+        assert len(found) == 1, f"expected exactly one {klass.__name__}, got {len(found)}"
+        return found[0]
+
+    @staticmethod
+    def _top_level_stmts(func):
+        body = func.body
+        return list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+
+    @staticmethod
+    def _is_task_invalid_placeholder(stmt):
+        return (
+            isinstance(stmt, ir.AssignStmt)
+            and isinstance(stmt.value, ir.Call)
+            and stmt.value.op.name == "system.task_invalid"
+        )
+
+    def _build(self):
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1") as tid:
+                    i = pl.tile.get_block_idx()
+                    offset = i * 128
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [offset, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [offset, 0], out)
+                return out
+
+        return list(Prog.functions.values())[0]
+
+    def test_as_tid_sets_task_id_var_on_spmd_scope(self):
+        """``as tid`` records a Scalar[TASK_ID] Var as the SpmdScopeStmt task_id_var attr."""
+        main_func = self._build()
+        spmd = self._unique(main_func.body, ir.SpmdScopeStmt)
+        assert "task_id_var" in spmd.attrs
+        tid_var = spmd.attrs["task_id_var"]
+        assert isinstance(tid_var, ir.Var)
+        assert tid_var.name_hint == "tid"
+        # The inline body is auto-wrapped in an InCoreScopeStmt (like the for-form).
+        incore = self._unique(spmd.body, ir.InCoreScopeStmt)
+        assert incore is not None
+
+    def test_as_tid_emits_task_invalid_placeholder_before_scope(self):
+        """A transient ``AssignStmt(tid, system.task_invalid())`` precedes the scope."""
+        main_func = self._build()
+        stmts = self._top_level_stmts(main_func)
+        spmd_idx = next(i for i, s in enumerate(stmts) if isinstance(s, ir.SpmdScopeStmt))
+        assert spmd_idx > 0, "expected a placeholder statement before the SpmdScopeStmt"
+        placeholder = stmts[spmd_idx - 1]
+        spmd_scope = stmts[spmd_idx]
+        assert self._is_task_invalid_placeholder(placeholder)
+        assert isinstance(placeholder, ir.AssignStmt)
+        assert isinstance(spmd_scope, ir.SpmdScopeStmt)
+        # The placeholder defines the SAME Var carried by the scope's task_id_var attr.
+        assert placeholder.var is spmd_scope.attrs["task_id_var"]
+
+    def test_as_tid_accepts_inline_multi_statement_body(self):
+        """The ``as tid`` form lifts the single-call guard — inline ops are allowed."""
+        main_func = self._build()  # body has get_block_idx + load + add + store
+        spmd = self._unique(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique(spmd.body, ir.InCoreScopeStmt)
+        body = incore.body
+        stmts = list(body.stmts) if isinstance(body, ir.SeqStmts) else [body]
+        # User-written get_block_idx is the first body stmt (NOT a synthesized loop var).
+        first = stmts[0]
+        assert isinstance(first, ir.AssignStmt)
+        assert isinstance(first.value, ir.Call) and first.value.op.name == "tile.get_block_idx"
+        assert len(stmts) > 1, "inline body should carry multiple statements"
+
+    def test_as_tid_deps_sets_manual_dep_edges(self):
+        """``with pl.spmd(n, deps=[tid0]) as tid1:`` records manual_dep_edges referencing tid0."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1") as tid0:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(t, [i * 128, 0], out)
+                with pl.spmd(4, name_hint="stage2", deps=[tid0]) as tid1:
+                    j = pl.tile.get_block_idx()
+                    u: pl.Tile[[128, 128], pl.FP32] = pl.load(out, [j * 128, 0], [128, 128])
+                    out = pl.store(pl.add(u, u), [j * 128, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmds = self._descendants(main_func.body, ir.SpmdScopeStmt)
+        assert len(spmds) == 2
+        first_tid = spmds[0].attrs["task_id_var"]
+        edges = spmds[1].attrs["manual_dep_edges"]
+        assert isinstance(edges, (list, tuple)) and len(edges) == 1
+        assert edges[0] is first_tid, "deps=[tid0] must reference the first scope's task_id_var"
+
+    def test_as_tid_split_optimizations_on_inner_incore(self):
+        """``optimizations=[pl.split(...)]`` sets split_ on the inner InCore wrapper."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]) as tid:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(t, [i * 128, 0], out)
+                return out
+
+        main_func = list(Prog.functions.values())[0]
+        spmd = self._unique(main_func.body, ir.SpmdScopeStmt)
+        incore = self._unique(spmd.body, ir.InCoreScopeStmt)
+        assert incore.split == ir.SplitMode.UP_DOWN
+
+    def test_plain_with_spmd_has_no_task_id_var(self):
+        """Regression: the plain ``with pl.spmd(n):`` single-call form carries no tid attr."""
+
+        @pl.program
+        class Prog:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                t = pl.load(a, [0, 0], [512, 128])
+                out = pl.store(t, [0, 0], out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.kernel(a, out)
+                return out
+
+        main_func = list(Prog.functions.values())[-1]
+        spmd = self._unique(main_func.body, ir.SpmdScopeStmt)
+        assert "task_id_var" not in spmd.attrs
+        assert "manual_dep_edges" not in spmd.attrs
+
+    def test_as_tid_round_trip(self):
+        """``with pl.spmd(...) as tid:`` survives print -> parse round-trip."""
+
+        @pl.program
+        class Original:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1") as tid:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(pl.add(t, t), [i * 128, 0], out)
+                return out
+
+        printed = Original.as_python()
+        assert ".spmd(" in printed and " as tid:" in printed
+        Reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Original, Reparsed)
+
+    def test_as_tid_deps_round_trip(self):
+        """``deps=[tid0]`` on a captured spmd survives print -> parse round-trip."""
+
+        @pl.program
+        class Original:
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[512, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="stage1") as tid0:
+                    i = pl.tile.get_block_idx()
+                    t: pl.Tile[[128, 128], pl.FP32] = pl.load(a, [i * 128, 0], [128, 128])
+                    out = pl.store(t, [i * 128, 0], out)
+                with pl.spmd(4, name_hint="stage2", deps=[tid0]) as tid1:
+                    j = pl.tile.get_block_idx()
+                    u: pl.Tile[[128, 128], pl.FP32] = pl.load(out, [j * 128, 0], [128, 128])
+                    out = pl.store(pl.add(u, u), [j * 128, 0], out)
+                return out
+
+        printed = Original.as_python()
+        assert "deps=[tid0]" in printed
+        Reparsed = pl.parse_program(printed)
+        ir.assert_structural_equal(Original, Reparsed)
+
+    # ── Rejections ──────────────────────────────────────────────────────────
+
+    def test_deps_without_tid_rejected(self):
+        """``with pl.spmd(n, deps=[tid0]):`` (no ``as tid``) is rejected — deps need a capture anchor."""
+        with pytest.raises(ParserSyntaxError, match="only together with 'as tid'"):
+
+            @pl.program
+            class Bad:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.spmd(4, name_hint="s1") as tid0:
+                        i = pl.tile.get_block_idx()
+                        out = pl.store(pl.load(a, [i * 128, 0], [128, 128]), [i * 128, 0], out)
+                    with pl.spmd(4, deps=[tid0]):  # type: ignore[call-arg]  # deps without `as tid`
+                        j = pl.tile.get_block_idx()
+                        out = pl.store(pl.load(out, [j * 128, 0], [128, 128]), [j * 128, 0], out)
+                    return out
+
+    def test_for_spmd_deps_rejected(self):
+        """The for-form does not accept ``deps=`` — steer to the ``as tid`` with-form."""
+        with pytest.raises(ParserSyntaxError, match="does not accept 'deps='"):
+
+            @pl.function
+            def bad(a: pl.Tensor[[512, 128], pl.FP32]) -> pl.Tensor[[512, 128], pl.FP32]:
+                for i in pl.spmd(4, deps=[]):  # type: ignore[call-arg]
+                    _ = i
+                return a
+
+    def test_as_tid_tuple_target_rejected(self):
+        """The ``as`` target must be a plain name, not a tuple."""
+        with pytest.raises(ParserSyntaxError, match="must be a plain variable name"):
+
+            @pl.function
+            def bad(
+                a: pl.Tensor[[512, 128], pl.FP32], out: pl.Out[pl.Tensor[[512, 128], pl.FP32]]
+            ) -> pl.Tensor[[512, 128], pl.FP32]:
+                with pl.spmd(4) as (x, y):  # type: ignore[misc]
+                    i = pl.tile.get_block_idx()
+                    out = pl.store(pl.load(a, [i * 128, 0], [128, 128]), [i * 128, 0], out)
+                return out
+
+    def test_as_tid_nested_in_cluster_rejected(self):
+        """A captured spmd cannot nest inside pl.cluster() (it is unwrapped, losing the tid)."""
+        with pytest.raises(ParserSyntaxError, match="cannot capture a TaskId when nested"):
+
+            @pl.program
+            class Bad:
+                @pl.function(type=pl.FunctionType.Orchestration)
+                def main(
+                    self,
+                    a: pl.Tensor[[512, 128], pl.FP32],
+                    out: pl.Out[pl.Tensor[[512, 128], pl.FP32]],
+                ) -> pl.Tensor[[512, 128], pl.FP32]:
+                    with pl.cluster():
+                        with pl.spmd(4) as tid:
+                            i = pl.tile.get_block_idx()
+                            out = pl.store(pl.load(a, [i * 128, 0], [128, 128]), [i * 128, 0], out)
+                    return out
+
+    def test_other_scope_as_tid_still_rejected(self):
+        """``as`` on a non-at/non-spmd scope is still rejected (mentions both supported forms)."""
+        with pytest.raises(ParserSyntaxError, match="only applies to"):
+
+            @pl.function
+            def bad(x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.cluster() as tid:  # type: ignore[misc]
+                    y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
 
 
 if __name__ == "__main__":

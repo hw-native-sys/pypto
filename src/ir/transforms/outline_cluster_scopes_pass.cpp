@@ -48,6 +48,15 @@ FunctionPtr UnwrapNestedSpmd(const FunctionPtr& group_func) {
     StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override {
       INTERNAL_CHECK_SPAN(core_num == nullptr, op->span_)  // NOLINT(misc-include-cleaner)
           << "Only one pl.spmd() block is allowed per cluster scope";
+      // A cluster-nested pl.spmd is unwrapped into the Group function and never
+      // outlined to a Submit, so a captured producer TaskId would be silently
+      // lost. The parser rejects `with pl.spmd(...) as tid:` inside pl.cluster()
+      // (see ASTParser._parse_spmd_scope_with_tid); guard here for hand-built /
+      // deserialized IR.
+      INTERNAL_CHECK_SPAN(op->GetAttr<VarPtr>(kAttrTaskIdVar) == nullptr, op->span_)
+          << "Internal error: a pl.spmd() nested inside pl.cluster() cannot carry a "
+             "producer TASK_ID (kAttrTaskIdVar); it is unwrapped into the Group function "
+             "and never outlined to a Submit. The parser must reject this at parse time.";
       core_num = op->core_num_;
       sync_start = op->sync_start_;
       return VisitStmt(op->body_);

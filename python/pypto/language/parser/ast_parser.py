@@ -3409,8 +3409,14 @@ class ASTParser:
         context_expr: ast.Call,
         func_attr: str,
         scope_kind_map: dict[str, "ir.ScopeKind"],
+        optional_vars: "ast.expr | None" = None,
     ) -> None:
-        """Parse legacy scope context managers (pl.incore, pl.auto_incore, pl.cluster)."""
+        """Parse legacy scope context managers (pl.incore, pl.auto_incore, pl.cluster, pl.spmd).
+
+        ``optional_vars`` (the ``as <target>`` clause) is only meaningful for
+        ``pl.spmd`` (``with pl.spmd(...) as tid:``); the caller rejects it on the
+        other kinds before dispatching here.
+        """
         split_mode = None
         name_hint = ""
         if func_attr in ("auto_incore", "incore"):
@@ -3467,7 +3473,7 @@ class ASTParser:
             self._parse_scope_body(stmt, scope_kind, span, name_hint=name_hint)
             return
         elif func_attr == "spmd":
-            self._parse_spmd_scope(stmt, context_expr, scope_kind_map)
+            self._parse_spmd_scope(stmt, context_expr, scope_kind_map, optional_vars=optional_vars)
             return
         elif context_expr.args or context_expr.keywords:
             raise ParserSyntaxError(
@@ -3572,15 +3578,23 @@ class ASTParser:
         call: ast.Call,
         *,
         usage_hint: str,
-    ) -> tuple["ir.Expr", bool, str, "ir.SplitMode | None"]:
-        """Parse ``pl.spmd(core_num, *, sync_start=, name_hint=, optimizations=)`` arguments.
+        allow_deps: bool = False,
+    ) -> tuple["ir.Expr", bool, str, "ir.SplitMode | None", "list[ir.Var]"]:
+        """Parse ``pl.spmd(core_num, *, sync_start=, name_hint=, optimizations=, deps=)`` arguments.
 
         The first positional argument is ``core_num`` (range-like). Returns
-        ``(core_num, sync_start, name_hint, split_mode)`` with ``sync_start``
-        defaulting to ``False`` and ``split_mode`` to ``None``.
+        ``(core_num, sync_start, name_hint, split_mode, dep_vars)`` with
+        ``sync_start`` defaulting to ``False``, ``split_mode`` to ``None``, and
+        ``dep_vars`` to ``[]``.
 
         ``optimizations=[...]`` accepts only ``pl.split(MODE)`` — see
         :meth:`_parse_spmd_optimizations_list`.
+
+        ``deps=[...]`` is accepted only when ``allow_deps`` is True (the
+        ``with pl.spmd(...) as tid:`` form). It takes the same shapes as
+        ``pl.submit(..., deps=)`` / ``pl.at(..., deps=)`` — producer TaskId
+        ``Scalar[TASK_ID]`` Vars, an ``Array[N, TASK_ID]`` carry, or the ``None``
+        sentinel — resolved via :meth:`_parse_submit_deps_kwarg`.
         """
         if len(call.args) > 1:
             raise ParserSyntaxError(
@@ -3594,6 +3608,7 @@ class ASTParser:
         sync_start: bool = False
         name_hint = ""
         split_mode: ir.SplitMode | None = None
+        deps_kw: ast.keyword | None = None
         for kw in call.keywords:
             if kw.arg is None:
                 # `pl.spmd(**cfg)` — ast.keyword.arg is None for **kwargs unpacking.
@@ -3623,11 +3638,26 @@ class ASTParser:
                 sync_start = kw.value.value
             elif kw.arg == "optimizations":
                 split_mode = self._parse_spmd_optimizations_list(kw.value, span_anchor=anchor)
+            elif kw.arg == "deps":
+                if not allow_deps:
+                    raise ParserSyntaxError(
+                        "pl.spmd() does not accept 'deps=' here",
+                        span=self.span_tracker.get_span(kw.value),
+                        hint="Use `with pl.spmd(n, deps=[...]) as tid:` (the with-form) to "
+                        "declare explicit TaskId deps, or `out, tid = pl.spmd_submit(..., "
+                        "deps=[...])` for the single-call form.",
+                    )
+                deps_kw = kw
             else:
+                supported = (
+                    "Supported keywords: 'sync_start', 'name_hint', 'optimizations', 'deps'"
+                    if allow_deps
+                    else "Supported keywords: 'sync_start', 'name_hint', 'optimizations'"
+                )
                 raise ParserSyntaxError(
                     f"pl.spmd() got unexpected keyword argument '{kw.arg}'",
                     span=self.span_tracker.get_span(anchor),
-                    hint="Supported keywords: 'sync_start', 'name_hint', 'optimizations'",
+                    hint=supported,
                 )
         if core_num is None:
             raise ParserSyntaxError(
@@ -3635,26 +3665,65 @@ class ASTParser:
                 span=self.span_tracker.get_span(anchor),
                 hint=usage_hint,
             )
-        return core_num, sync_start, name_hint, split_mode
+        dep_vars: list[ir.Var] = []
+        if deps_kw is not None:
+            anchor_span = self.span_tracker.get_span(anchor)
+            dep_vars = self._parse_submit_deps_kwarg("pl.spmd()", [deps_kw], anchor_span)
+        return core_num, sync_start, name_hint, split_mode, dep_vars
 
     def _parse_spmd_scope(
         self,
         stmt: ast.With,
         context_expr: ast.Call,
         scope_kind_map: dict[str, "ir.ScopeKind"],
+        optional_vars: "ast.expr | None" = None,
     ) -> None:
-        """Parse ``with pl.spmd(...):`` into a ScopeStmt(Spmd)."""
-        with_hint = "Use 'with pl.spmd(4):' with a single function call inside."
-        core_num, sync_start, name_hint, split_mode = self._parse_spmd_kwargs(
-            stmt, context_expr, usage_hint=with_hint
+        """Parse ``with pl.spmd(...):`` / ``with pl.spmd(...) as tid:`` into a ScopeStmt(Spmd).
+
+        Two forms:
+
+        * ``with pl.spmd(n): self.kernel(...)`` — wraps a single kernel call
+          (historical shape; no producer TaskId captured, no ``deps=``).
+        * ``with pl.spmd(n, deps=[...]) as tid:`` — captures the grid dispatch's
+          producer ``Scalar[TASK_ID]`` (mirrors ``with pl.at(...) as tid:``) and
+          accepts an inline multi-statement body that is auto-outlined into an
+          InCore kernel, exactly like ``for i in pl.spmd(n):``. The per-block
+          index is read inside the body via ``pl.tile.get_block_idx()``.
+        """
+        with_hint = (
+            "Use 'with pl.spmd(4):' with a single function call inside, or "
+            "'with pl.spmd(4) as tid:' to capture the dispatch TaskId."
         )
+        core_num, sync_start, name_hint, split_mode, dep_vars = self._parse_spmd_kwargs(
+            stmt, context_expr, usage_hint=with_hint, allow_deps=True
+        )
+        scope_kind = scope_kind_map["spmd"]
+        span = self.span_tracker.get_span(stmt)
+
+        if optional_vars is not None:
+            self._parse_spmd_scope_with_tid(
+                stmt, span, scope_kind, core_num, sync_start, name_hint, split_mode, dep_vars, optional_vars
+            )
+            return
+
+        # No ``as tid``: deps= is meaningless without a captured/consumed task
+        # graph anchor here — steer to the capturing form. Keeps the historical
+        # single-call with-form (SpmdScopeStmt(<call>)) untouched.
+        if dep_vars:
+            raise ParserSyntaxError(
+                "pl.spmd() with-form accepts 'deps=' only together with 'as tid'",
+                span=span,
+                hint="Use `with pl.spmd(n, deps=[...]) as tid:`. The plain `with pl.spmd(n):` "
+                "form wraps a single kernel call with no explicit deps.",
+            )
+
         # Validate body is exactly one statement that is a function call.
-        # The loop form (for i in pl.spmd(n):) is what accepts inline
-        # multi-statement bodies.
+        # The loop form (for i in pl.spmd(n):) and the `as tid` with-form are
+        # what accept inline multi-statement bodies.
         spmd_hint = (
-            "The 'with pl.spmd()' form wraps a single kernel call. Use "
-            "'for i in pl.spmd(4):' to write inline tile/tensor ops with "
-            "access to the block index."
+            "The 'with pl.spmd()' form (without 'as tid') wraps a single kernel call. "
+            "Use 'with pl.spmd(4) as tid:' to write inline tile/tensor ops and capture the "
+            "dispatch TaskId, or 'for i in pl.spmd(4):' for an inline loop body."
         )
         if len(stmt.body) != 1:
             raise ParserSyntaxError(
@@ -3674,8 +3743,6 @@ class ASTParser:
                 span=self.span_tracker.get_span(stmt),
                 hint=spmd_hint,
             )
-        scope_kind = scope_kind_map["spmd"]
-        span = self.span_tracker.get_span(stmt)
         if split_mode is None:
             # No optimizations — preserve the historical IR shape:
             # SpmdScopeStmt(<call>) with no inner InCore wrapper.
@@ -3719,6 +3786,123 @@ class ASTParser:
                             self.scope_manager.exit_scope(leak_vars=True)
                     self.scope_manager.exit_scope(leak_vars=True)
 
+    def _parse_spmd_scope_with_tid(  # noqa: PLR0913 — args map 1:1 to the SpmdScopeStmt + capture
+        self,
+        stmt: ast.With,
+        span: "ir.Span",
+        scope_kind: "ir.ScopeKind",
+        core_num: "ir.Expr",
+        sync_start: bool,
+        name_hint: str,
+        split_mode: "ir.SplitMode | None",
+        dep_vars: "list[ir.Var]",
+        optional_vars: "ast.expr",
+    ) -> None:
+        """Parse ``with pl.spmd(n, deps=[...]) as tid:`` capturing the dispatch TaskId.
+
+        Records ``{manual_dep_edges?, task_id_var}`` on the ``SpmdScopeStmt`` and
+        emits the ``system.task_invalid()`` placeholder. The body shape mirrors the
+        plain with-form so the IR is identical to the post-``OutlineIncoreScopes``
+        shape (a single Call) and round-trips through print -> reparse:
+
+        * single call, no split → ``SpmdScopeStmt(attrs, body=Call)`` (no InCore
+          wrapper) — the same shape ``OutlineIncoreScopes`` leaves behind once the
+          inline body is outlined, so reparse is stable across passes.
+        * inline multi-statement body, or single-call with split → wrap in
+          ``InCoreScopeStmt(split, <body>)``, exactly like the for-form (minus the
+          synthesised ``loop_var = tile.get_block_idx()``; the body reads the block
+          index explicitly via ``pl.tile.get_block_idx()``).
+
+        The ``kAttrTaskIdVar`` on the outer Spmd scope makes ``OutlineClusterScopes``
+        lower the dispatch to an ``ir.Submit`` whose trailing tuple element is the
+        grid-wide producer TaskId — identical to the ``pl.at(...) as tid:`` rail.
+        """
+        if self._is_inside_scope(ir.ScopeKind.Cluster):
+            raise ParserSyntaxError(
+                "`with pl.spmd(...) as tid:` cannot capture a TaskId when nested inside "
+                "`pl.cluster()` — a cluster-nested pl.spmd is unwrapped into the Group "
+                "function and never produces a Submit.",
+                span=span,
+                hint="Use a standalone `with pl.spmd(...) as tid:` (implicit cluster) to "
+                "capture the dispatch TaskId.",
+            )
+        if not isinstance(optional_vars, ast.Name):
+            raise ParserSyntaxError(
+                "`as` target on `with pl.spmd(...)` must be a plain variable name",
+                span=span,
+                hint="Use `with pl.spmd(...) as tid:` (single name; nested tuples are not allowed).",
+            )
+
+        # Canonical attr order (deps before tid) mirrors _parse_at_meta so a
+        # print -> reparse cycle compares equal under structural_equal's
+        # positional attr check.
+        scope_attrs: list[tuple[str, Any]] = []
+        if dep_vars:
+            scope_attrs.append(("manual_dep_edges", dep_vars))
+        tid_var = self.builder.var(optional_vars.id, ir.ScalarType(DataType.TASK_ID), span=span)
+        self.scope_manager.define_var(optional_vars.id, tid_var, span=span)
+        scope_attrs.append(("task_id_var", tid_var))
+
+        # Emit the transient ``AssignStmt(tid, system.task_invalid())`` placeholder
+        # one stmt BEFORE the scope so ConvertToSSA has a def for the tid Var; the
+        # spmd outliner drops it and synthesises the real
+        # ``AssignStmt(tid, TupleGetItem(ret_tmp, n_outputs))`` binding. Pop/re-push
+        # pending leading comments so they land on the surviving SpmdScopeStmt, not
+        # the placeholder (mirrors _parse_at_scope).
+        leading = self.builder.pop_pending_leading_comments()
+        placeholder_rhs = ir.create_op_call("system.task_invalid", [], {}, span)
+        self.builder.assign(tid_var, placeholder_rhs, span=span)
+        self.builder.push_pending_leading_comments(leading)
+
+        # A lone kernel call (no split) keeps the no-InCore-wrapper shape — the
+        # same SpmdScopeStmt(body=Call) that OutlineIncoreScopes leaves behind once
+        # an inline body is outlined — so the IR round-trips identically across
+        # passes. Anything else (inline multi-statement body, or single-call with a
+        # split hint) wraps in an InCoreScopeStmt, exactly like the for-form.
+        body_stmt = stmt.body[0] if len(stmt.body) == 1 else None
+        is_single_call = body_stmt is not None and (
+            (isinstance(body_stmt, ast.Assign) and isinstance(body_stmt.value, ast.Call))
+            or (isinstance(body_stmt, ast.AnnAssign) and isinstance(body_stmt.value, ast.Call))
+            or (isinstance(body_stmt, ast.Expr) and isinstance(body_stmt.value, ast.Call))
+        )
+        if is_single_call and split_mode is None:
+            self._parse_scope_body(
+                stmt,
+                scope_kind,
+                span,
+                name_hint=name_hint,
+                core_num=core_num,
+                sync_start=sync_start,
+                attrs=scope_attrs,
+            )
+            return
+
+        spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
+        incore_attrs = self._merge_forward_sticky_dump(None, ir.ScopeKind.InCore)
+        with self.builder.scope(
+            scope_kind,
+            span,
+            name_hint=spmd_name_hint,
+            core_num=core_num,
+            sync_start=sync_start,
+            attrs=scope_attrs,
+        ):
+            with self._scope_kind_context(scope_kind):
+                self.scope_manager.enter_scope("spmd_with")
+                with self.builder.scope(
+                    ir.ScopeKind.InCore,
+                    span,
+                    split=split_mode,
+                    name_hint=incore_name_hint,
+                    attrs=incore_attrs,
+                ):
+                    with self._scope_kind_context(ir.ScopeKind.InCore):
+                        self.scope_manager.enter_scope("spmd_with_incore")
+                        self._parse_body_siblings(stmt.body)
+                        self._discard_tail_block_comments(stmt.body, upper_line=stmt.end_lineno)
+                        self.scope_manager.exit_scope(leak_vars=True)
+                self.scope_manager.exit_scope(leak_vars=True)
+
     def _parse_spmd_for_loop(self, stmt: ast.For, iter_call: ast.Call) -> None:
         """Parse ``for i in pl.spmd(N, ...): body`` into
         ``SpmdScopeStmt(body=InCoreScopeStmt(body=<bind i; body>))``.
@@ -3750,7 +3934,10 @@ class ASTParser:
                     hint=spmd_hint,
                 )
 
-        core_num, sync_start, name_hint, split_mode = self._parse_spmd_kwargs(
+        # The for-form does not capture a TaskId, so it rejects deps= (allow_deps
+        # defaults False): use the with-form `with pl.spmd(n, deps=[...]) as tid:`
+        # to wire explicit deps. dep_vars is therefore always empty here.
+        core_num, sync_start, name_hint, split_mode, _ = self._parse_spmd_kwargs(
             stmt, iter_call, usage_hint=spmd_hint
         )
         spmd_name_hint, incore_name_hint = _split_spmd_for_loop_name_hints(name_hint)
@@ -4230,17 +4417,20 @@ class ASTParser:
         if isinstance(context_expr, ast.Call):
             func = context_expr.func
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "pl":
-                # ``as <target>`` is currently only meaningful on ``pl.at(...)``
-                # (binds the producer TaskId of the outlined kernel Call).
-                # Reject it on every other scope construct so misuses surface
-                # at parse time rather than silently dropping the binding.
-                if optional_vars is not None and func.attr != "at":
+                # ``as <target>`` binds the producer TaskId of the outlined kernel
+                # dispatch. It is meaningful on ``pl.at(...) as tid:`` (InCore /
+                # Hierarchy scope) and ``pl.spmd(...) as tid:`` (grid dispatch).
+                # Reject it on every other scope construct so misuses surface at
+                # parse time rather than silently dropping the binding.
+                if optional_vars is not None and func.attr not in ("at", "spmd"):
                     raise ParserSyntaxError(
                         f"`with pl.{func.attr}(...) as ...:` is not supported "
-                        "— the `as` clause only applies to `with pl.at(...) as tid:`",
+                        "— the `as` clause only applies to `with pl.at(...) as tid:` and "
+                        "`with pl.spmd(...) as tid:`",
                         span=self.span_tracker.get_span(stmt),
-                        hint="Drop the `as` target, or use `with pl.at(...) as tid:` "
-                        "to capture the outlined kernel's producer TaskId.",
+                        hint="Drop the `as` target, or use `with pl.at(...) as tid:` / "
+                        "`with pl.spmd(...) as tid:` to capture the outlined dispatch's "
+                        "producer TaskId.",
                     )
 
                 # Unified runtime scope: with pl.scope(mode=...): ...
@@ -4253,9 +4443,11 @@ class ASTParser:
                     self._parse_manual_scope(stmt, context_expr)
                     return
 
-                # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster()
+                # Existing scope kinds: pl.incore(), pl.auto_incore(), pl.cluster(), pl.spmd()
                 if func.attr in _SCOPE_KIND_MAP:
-                    self._parse_legacy_scope(stmt, context_expr, func.attr, _SCOPE_KIND_MAP)
+                    self._parse_legacy_scope(
+                        stmt, context_expr, func.attr, _SCOPE_KIND_MAP, optional_vars=optional_vars
+                    )
                     return
 
                 # pl.at(level=..., role=..., deps=...) [as tid]

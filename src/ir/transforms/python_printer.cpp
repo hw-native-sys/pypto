@@ -849,11 +849,11 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
     stream_ << (need_comma ? ", " : "") << "deps=[";
     if (deps_to_print) {
       bool printed_dep = false;
-      for (size_t i = 0; i < deps_to_print->size(); ++i) {
+      for (const auto& dep : *deps_to_print) {
         // Invalid/null dependency slots do not contribute user-visible edges.
-        if (!(*deps_to_print)[i]) continue;
+        if (!dep) continue;
         if (printed_dep) stream_ << ", ";
-        stream_ << GetVarName((*deps_to_print)[i].get());
+        stream_ << GetVarName(dep.get());
         printed_dep = true;
       }
     }
@@ -1495,9 +1495,10 @@ bool IRPythonPrinter::PrintScopeTaskIdVarSuffix(const ScopeStmtPtr& op) {
 VarPtr IRPythonPrinter::GetScopeTaskIdVar(const StmtPtr& stmt) const {
   // ``As<ScopeStmt>`` is the polymorphic form — KindTrait<ScopeStmt> matches
   // every concrete scope subclass (see include/pypto/ir/kind_traits.h:152).
-  // Cluster / Spmd / Runtime scopes never carry ``kAttrTaskIdVar`` today, but
-  // ``GetAttr<VarPtr>`` returns null for them, so the broader cast is harmless
-  // and keeps the helper future-proof.
+  // InCore / AutoInCore / Hierarchy scopes carry ``kAttrTaskIdVar`` via
+  // ``with pl.at(...) as tid:``; Spmd scopes carry it via
+  // ``with pl.spmd(...) as tid:``. Cluster / Runtime scopes never do, but
+  // ``GetAttr<VarPtr>`` returns null for them, so the broader cast is harmless.
   if (auto s = As<ScopeStmt>(stmt)) return s->GetAttr<VarPtr>(kAttrTaskIdVar);
   return nullptr;
 }
@@ -1603,6 +1604,48 @@ void IRPythonPrinter::VisitStmt_(const SpmdScopeStmtPtr& op) {
   // to reparse).
   auto incore = As<InCoreScopeStmt>(op->body_);
   auto incore_seq = incore ? As<SeqStmts>(incore->body_) : nullptr;
+
+  // ``with pl.spmd(...) [deps=] as tid:`` — the scope carries kAttrTaskIdVar
+  // (the grid-dispatch producer TaskId, mirroring ``pl.at ... as tid``). Checked
+  // BEFORE the for-form sniff because an inline ``as tid`` body's first statement
+  // may itself be a user ``x = pl.tile.get_block_idx()`` call, which would
+  // otherwise be mistaken for the synthesised for-loop variable. The body is the
+  // inner InCore (auto-outlined kernel); print its statements directly (no
+  // synthesised loop-var to skip), reconstructing optimizations / deps / `as tid`.
+  if (op->GetAttr<VarPtr>(kAttrTaskIdVar)) {
+    stream_ << "with " << prefix_ << ".spmd(";
+    VisitExpr(op->core_num_);
+    if (op->sync_start_) {
+      stream_ << ", sync_start=True";
+    }
+    if (!op->name_hint_.empty()) {
+      stream_ << ", name_hint=\"" << op->name_hint_ << "\"";
+    }
+    if (incore && incore->split_.has_value() && incore->split_.value() != SplitMode::None) {
+      stream_ << ", optimizations=[" << prefix_ << ".split(" << prefix_ << ".SplitMode."
+              << SplitModeToPythonString(incore->split_.value()) << ")]";
+    }
+    PrintScopeDepsAttr(op);
+    stream_ << ")";
+    PrintScopeTaskIdVarSuffix(op);
+    stream_ << ":\n";
+    IncreaseIndent();
+    if (incore_seq && !incore_seq->stmts_.empty()) {
+      for (size_t i = 0; i < incore_seq->stmts_.size(); ++i) {
+        if (ShouldSuppressPlaceholder(incore_seq->stmts_, i)) continue;
+        PrintStmtBlock(incore_seq->stmts_[i]);
+        if (i + 1 < incore_seq->stmts_.size()) stream_ << "\n";
+      }
+    } else if (incore) {
+      PrintStmtBlock(incore->body_);
+    } else {
+      // Defensive: an `as tid` Spmd scope should always wrap its body in InCore.
+      PrintStmtBlock(op->body_);
+    }
+    DecreaseIndent();
+    return;
+  }
+
   auto first_assign = incore_seq
                           ? (incore_seq->stmts_.empty() ? nullptr : As<AssignStmt>(incore_seq->stmts_[0]))
                           : (incore ? As<AssignStmt>(incore->body_) : nullptr);

@@ -86,9 +86,14 @@ fixable = ["ALL"]
 "tests/ut/ir/transforms/test_optimize_orch_tensors.py" = ["F841"]
 "tests/ut/ir/transforms/test_outline_incore_interleaved_ops.py" = ["E501"]
 "tests/ut/ir/transforms/test_outline_incore_scopes.py" = ["F841"]
+"tests/ut/ir/transforms/test_outline_cluster_scopes.py" = ["F841"]
 "tests/ut/ir/transforms/test_legalize_pto_buffer_reuse.py" = ["E501", "F841"]
 "tests/ut/ir/transforms/test_ctrl_flow_transform.py" = ["F841"]
 "tests/ut/ir/transforms/test_split_vector_kernel.py" = ["F841"]
+# `with pl.spmd(...) as tid:` / `with pl.at(...) as tid:` capture targets are
+# intentionally unused Python bindings — the capture records an IR scope attr.
+"tests/ut/language/parser/test_scope_parsing.py" = ["F841"]
+"tests/ut/codegen/test_spmd_scope_tid_codegen.py" = ["F841"]
 # Embedded DSL repro deliberately collapses `with pl.at(...)` onto one line to
 # mimic @pl.jit's ast.unparse output — load-bearing, cannot be wrapped.
 "tests/ut/language/parser/test_text_parser.py" = ["E501"]

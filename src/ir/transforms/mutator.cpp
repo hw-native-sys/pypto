@@ -1007,10 +1007,16 @@ StmtPtr IRMutator::VisitStmt_(const SpmdScopeStmtPtr& op) {
   auto new_body = StmtFunctor<StmtPtr>::VisitStmt(op->body_);
   INTERNAL_CHECK_SPAN(new_body, op->span_) << "SpmdScopeStmt body mutated to null";
 
-  if (new_core_num.get() != op->core_num_.get() || new_body.get() != op->body_.get()) {
+  // Spmd scopes can carry kAttrTaskIdVar / kAttrManualDepEdges (the
+  // `with pl.spmd(...) as tid:` capture form), so substitute over the attr Vars
+  // just like the InCore / AutoInCore / Hierarchy handlers — otherwise a
+  // Var-substituting pass would leave the tid / dep edges pointing at stale Vars.
+  auto [new_attrs, attrs_changed] = MutateScopeAttrs(op->attrs_);
+  if (new_core_num.get() != op->core_num_.get() || new_body.get() != op->body_.get() || attrs_changed) {
     auto result = MutableCopy(op);
     result->core_num_ = std::move(new_core_num);
     result->body_ = std::move(new_body);
+    if (attrs_changed) result->attrs_ = std::move(new_attrs);
     return result;
   }
   return op;

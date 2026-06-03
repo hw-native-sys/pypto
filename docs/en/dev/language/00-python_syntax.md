@@ -342,11 +342,12 @@ See [Language Guide](../../user/01-language_guide.md#incore-scopes) for examples
 
 #### `pl.spmd` multi-block dispatch
 
-`pl.spmd(N)` dispatches a kernel across `N` blocks. Two forms:
+`pl.spmd(N)` dispatches a kernel across `N` blocks. Forms:
 
 - `with pl.spmd(N): kernel(...)` — body must be a single call to a pre-defined InCore kernel.
 - `for i in pl.spmd(N): ...` — loop variable binds the per-block index (`pl.tile.get_block_idx()`); the body is auto-outlined into a synthetic InCore region.
-- `out, tid = pl.spmd_submit(kernel, *args, core_num=N)` — **submit form**: dispatches the kernel across `N` blocks *and* captures the dispatch's producer `pl.Scalar[pl.TASK_ID]`, so the whole SPMD launch can be named as a dependency of later tasks. See [Manual dependency primitives](#manual-dependency-primitives).
+- `with pl.spmd(N, deps=[...]) as tid: ...` — **capture form**: mirrors `with pl.at(...) as tid:`. Captures the dispatch's grid-wide producer `pl.Scalar[pl.TASK_ID]` in `tid` (usable as a `deps=` edge, stored into a `pl.array.create(N, pl.TASK_ID)`, or crossed into `pl.manual_scope`), and accepts an inline multi-statement body like the for-form (read the per-block index via `pl.tile.get_block_idx()`). Lowers to an `ir.Submit` whose trailing tuple element is the grid TaskId; `core_num` / `sync_start` ride on the outlined `Spmd` Function attrs. See [Manual dependency primitives](#manual-dependency-primitives).
+- `out, tid = pl.spmd_submit(kernel, *args, core_num=N)` — **submit form**: dispatches the kernel across `N` blocks *and* captures the dispatch's producer `pl.Scalar[pl.TASK_ID]` (the `pl.submit` sibling for a pre-defined kernel). See [Manual dependency primitives](#manual-dependency-primitives).
 
 Optional `optimizations=[pl.split(MODE)]` only (**not** `pl.auto_chunk`; use `pl.at(..., optimizations=[pl.auto_chunk])` inside the body for chunked loops):
 
@@ -388,6 +389,7 @@ shape (single kernel call, outlined `pl.at` region, or dependency-only fan-in).
 | `result, tid = pl.submit(kernel, *args, deps=[...])` | single kernel call | The trailing `tid` is the producer `pl.Scalar[pl.TASK_ID]`. A parser construct (like `pl.range`), not a runtime function. |
 | `result, tid = pl.spmd_submit(kernel, *args, core_num=N, sync_start=False, deps=[...])` | single SPMD task launch | The SPMD sibling of `pl.submit`: dispatches the kernel across `N` blocks (one orchestration task → one `tid`). `core_num` is a required keyword (positive int expr); `sync_start=True` forces atomic launch of all blocks. Callee may be InCore / AIC / AIV / Group. Records the launch spec on `Submit.core_num` / `Submit.sync_start`. |
 | `with pl.at(level=pl.Level.CORE_GROUP, deps=[...]) as tid:` | outlined `pl.at`-block | The whole block is outlined into an `InCore` kernel + Call; `tid` captures the synthesized call's TaskId, usable as a dep for later `pl.submit` / `pl.at` sites. |
+| `with pl.spmd(N, deps=[...]) as tid:` | outlined SPMD dispatch | The SPMD sibling of the `pl.at ... as tid` form. The inline body is auto-outlined into an `InCore` kernel and dispatched across `N` blocks; `tid` captures the grid-wide producer TaskId. `deps=` accepted only with `as tid`. `core_num` / `sync_start` ride on the outlined `Spmd` Function attrs (the lowered `Submit.core_num` is `None`); codegen reads them via the launch-function fallback. Cannot nest inside `pl.cluster()`. |
 | `barrier = pl.system.task_dummy(deps=[...])` | dependency-only barrier | Submits no kernel. The returned TaskId is a compact fan-in point for later `deps=[barrier]`. |
 | `None` (Python literal) | seed / dep entry | The "no producer yet" sentinel. `prev_tid = None` seeds a TaskId loop iter_arg; `None` in `deps=[None]` is dropped (contributes no edge). Lowers to `system.task_invalid` → `PTO2TaskId::invalid()`. |
 

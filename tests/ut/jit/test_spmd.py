@@ -158,5 +158,38 @@ def test_jit_spmd_sibling_pipeline_loops_reuse_names():
     )
 
 
+def test_jit_spmd_with_form_as_tid_captures_and_wires_deps():
+    """``with pl.spmd(N) as tid:`` (capture form) compiles end-to-end through @pl.jit.
+
+    Exercises the full pipeline on the SPMD producer-TaskId capture: an inline
+    ``as tid`` body (auto-outlined like the for-form) plus a downstream dispatch
+    wired via ``deps=[tid0]``. Two separate Out buffers keep the dependency on the
+    explicit ``deps=`` edge (not on a chained tuple-return). Expect two Spmd
+    wrapper functions and a clean compile.
+    """
+    torch = pytest.importorskip("torch")
+
+    @jit
+    def entry(a: pl.Tensor, out1: pl.Out[pl.Tensor], out2: pl.Out[pl.Tensor]):
+        with pl.spmd(2, name_hint="stage1") as tid0:
+            i = pl.tile.get_block_idx()
+            t = pl.load(a, [i * 64, 0], [64, 128])
+            out1 = pl.store(pl.add(t, t), [i * 64, 0], out1)
+        with pl.spmd(2, name_hint="stage2", deps=[tid0]) as tid1:  # noqa: F841
+            j = pl.tile.get_block_idx()
+            u = pl.load(a, [j * 64, 0], [64, 128])
+            out2 = pl.store(pl.add(u, u), [j * 64, 0], out2)
+        return out2
+
+    post = entry.compile_for_test(torch.randn(128, 128), torch.empty(128, 128), torch.empty(128, 128))
+    spmd_fns = [f for f in post.functions.values() if f.func_type == ir.FunctionType.Spmd]
+    assert len(spmd_fns) == 2, (
+        f"expected two Spmd functions from the two captured pl.spmd() dispatches, got {len(spmd_fns)}"
+    )
+    assert any(
+        f.name == "entry" and f.func_type == ir.FunctionType.Orchestration for f in post.functions.values()
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

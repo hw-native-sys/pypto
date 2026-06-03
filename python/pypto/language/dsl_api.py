@@ -844,10 +844,12 @@ def cluster(*, name_hint: str = "") -> ClusterContext:
 class SpmdContext:
     """Context manager / loop iterator for SPMD dispatch scope.
 
-    The parser recognizes both ``with pl.spmd(...):`` (builds a
-    ``ScopeStmt(Spmd)`` whose body must be a single function call) and
-    ``for i in pl.spmd(...):`` (auto-outlines the loop body into an InCore
-    function with ``i`` bound to ``pl.tile.get_block_idx()``).
+    The parser recognizes ``with pl.spmd(...):`` (builds a ``ScopeStmt(Spmd)``
+    whose body must be a single function call), ``with pl.spmd(...) as tid:``
+    (captures the grid dispatch's producer ``Scalar[TASK_ID]`` and accepts an
+    inline multi-statement body), and ``for i in pl.spmd(...):`` (auto-outlines
+    the loop body into an InCore function with ``i`` bound to
+    ``pl.tile.get_block_idx()``).
     """
 
     def __init__(
@@ -856,11 +858,13 @@ class SpmdContext:
         sync_start: bool = False,
         name_hint: str = "",
         optimizations: list[Optimization] | None = None,
+        deps: list[Any] | None = None,
     ) -> None:
         self.core_num = core_num
         self.sync_start = sync_start
         self.name_hint = name_hint
         self.optimizations = optimizations
+        self.deps = deps
 
     def __enter__(self) -> None:
         pass
@@ -888,6 +892,7 @@ def spmd(
     sync_start: bool = False,
     name_hint: str = "",
     optimizations: list[Optimization] | None = None,
+    deps: list[Any] | None = None,
 ) -> SpmdContext:
     """Dispatch a kernel with SPMD (Single Program Multiple Data) multi-block execution.
 
@@ -907,11 +912,18 @@ def spmd(
        tile/tensor ops work without a separate ``@pl.function(type=InCore)``
        declaration.
 
+    3. ``with pl.spmd(n, deps=[...]) as tid:`` — captures the grid dispatch's
+       producer ``Scalar[TASK_ID]`` in ``tid`` (mirroring ``with pl.at(...) as
+       tid:``), usable as a ``deps=`` edge on later tasks, stored into a
+       ``pl.array.create(N, pl.TASK_ID)``, or crossing into ``pl.manual_scope``.
+       Unlike form 1, this form accepts an inline multi-statement body (like the
+       loop form); read the per-block index inside via ``pl.tile.get_block_idx()``.
+
     Optional ``optimizations=[pl.split(mode)]`` applies to the inner InCore scope
-    (auto-generated for the for-form, wrapped around the call for the with-form).
-    ``pl.auto_chunk`` is not supported on ``pl.spmd`` — use
-    ``pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])`` inside
-    the loop body for chunked parallel loops.
+    (auto-generated for the for-form and the ``as tid`` form, wrapped around the
+    call for the plain with-form). ``pl.auto_chunk`` is not supported on
+    ``pl.spmd`` — use ``pl.at(level=pl.Level.CORE_GROUP, optimizations=[pl.auto_chunk])``
+    inside the loop body for chunked parallel loops.
 
     Args:
         core_num: Number of blocks for SPMD dispatch. Positional; accepts a
@@ -923,6 +935,10 @@ def spmd(
         name_hint: Optional name hint for the outlined function.
         optimizations: Optional list literal containing only ``pl.split(mode)``
             entries (the parser inspects the AST).
+        deps: Optional explicit producer-edge list (TaskId Vars and/or ``None``
+            sentinels), accepted only with the ``as tid`` form. Lowered to the
+            outlined Submit's ``manual_dep_edges``; codegen packs it into a
+            ``set_dependencies(...)`` invocation (union'd with auto-deps).
 
     Returns:
         Context manager / loop iterator for the SPMD scope.
@@ -938,6 +954,15 @@ def spmd(
         ...     tile_a = pl.load(a, [offset, 0], [128, 128])
         ...     tile_b = pl.load(b, [offset, 0], [128, 128])
         ...     out = pl.store(pl.add(tile_a, tile_b), [offset, 0], out)
+        >>>
+        >>> # Capture-form: inline body + producer TaskId for explicit dep wiring
+        >>> with pl.spmd(4, name_hint="stage1") as tid_a:
+        ...     i = pl.tile.get_block_idx()
+        ...     offset = i * 128
+        ...     out = pl.store(pl.add(a[offset], b[offset]), [offset, 0], out)
+        >>> with pl.spmd(4, name_hint="stage2", deps=[tid_a]) as tid_b:
+        ...     i = pl.tile.get_block_idx()
+        ...     out2 = pl.store(pl.relu(out[i * 128]), [i * 128, 0], out2)
         >>>
         >>> # With-form with split hint on the inner InCore wrapper
         >>> with pl.spmd(4, optimizations=[pl.split(pl.SplitMode.UP_DOWN)]):
@@ -957,6 +982,7 @@ def spmd(
         sync_start=sync_start,
         name_hint=name_hint,
         optimizations=optimizations,
+        deps=deps,
     )
 
 
