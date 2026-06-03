@@ -82,7 +82,10 @@ PropertyVerifierRegistry::PropertyVerifierRegistry() {
   // AssignTypeSymmetry (#1285): every AssignStmt(var, value) must satisfy
   // structural_equal(var->GetType(), value->GetType()). Registered so callers
   // can run it on demand via PropertyVerifierRegistry::verify; not yet promoted
-  // to GetStructuralProperties() (Phase 2 — pending a clean test-suite run).
+  // to GetStructuralProperties() (Phase 2) — that promotion is deferred until
+  // the latent violation it surfaces (the transposed-weight 3D batch-matmul
+  // rank asymmetry in LowerTransposeLoadParamLayout) is fixed, so it does not
+  // hard-fail that compile path.
   Register(IRProperty::AssignTypeSymmetry, CreateAssignTypeSymmetryPropertyVerifier);
 }
 

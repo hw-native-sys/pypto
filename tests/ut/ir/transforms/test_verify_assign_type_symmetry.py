@@ -10,10 +10,12 @@
 """Tests for the AssignTypeSymmetry property verifier (#1285).
 
 The verifier asserts that every ``AssignStmt(var, value)`` satisfies
-``structural_equal(var.type, value.type)`` — covering dtype, shape, memref,
-memory_space, and tile_view. It catches passes that mutate one side of an
-assignment without keeping the other in sync (e.g. #1262, where
-``InferTileMemorySpace`` wrote ``Mem.Acc`` onto a Var whose producing
+``structural_equal(var.type, value.type)`` — covering dtype, shape,
+memory_space, and tile_view/tensor_view. ``memref`` is intentionally excluded
+(``structural_equal`` treats it as an allocation detail; see
+``test_memref_difference_is_tolerated_by_design``). It catches passes that
+mutate one side of an assignment without keeping the other in sync (e.g. #1262,
+where ``InferTileMemorySpace`` wrote ``Mem.Acc`` onto a Var whose producing
 ``tile.full`` Call still declared ``Mem.Vec``).
 """
 
