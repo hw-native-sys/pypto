@@ -2292,6 +2292,11 @@ class OutWindowExternalizer {
         } else if (!codegen::IsBuiltinOp(op_name)) {
           AddCallOutputRoots(assign, call);
         }
+      } else if (auto submit = As<Submit>(assign->value_)) {
+        auto call = SubmitToCallView(submit);
+        if (!codegen::IsBuiltinOp(call->op_->name_)) {
+          AddCallOutputRoots(assign, call);
+        }
       } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {
         AddTupleGetItemRoot(assign, tuple_get);
       } else if (auto src_var = AsVarLike(assign->value_)) {
@@ -3390,6 +3395,11 @@ class OutWindowExternalizer {
         } else if (IsTensorAllocationOp(call)) {
           full_buffer_roots_[assign->var_.get()] = assign->var_.get();
         } else if (!codegen::IsBuiltinOp(op_name)) {
+          AddCallOutputRoots(assign, call);
+        }
+      } else if (auto submit = As<Submit>(assign->value_)) {
+        auto call = SubmitToCallView(submit);
+        if (!codegen::IsBuiltinOp(call->op_->name_)) {
           AddCallOutputRoots(assign, call);
         }
       } else if (auto tuple_get = As<TupleGetItemExpr>(assign->value_)) {

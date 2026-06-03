@@ -3194,6 +3194,238 @@ class TestOutWindowSubmitCall:
         After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_submit_returned_output_can_feed_windowed_consumer_input(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def produce(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                tile: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
+                doubled: pl.Tile[[32, 32], pl.FP32] = pl.tile.add(tile, tile)
+                return pl.store(doubled, [0, 0], score)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                score: pl.Tensor[[64, 128], pl.FP32],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                block: pl.Tensor[[32, 64], pl.FP32] = score[0:32, 0:64]
+                return pl.assemble(probe, pl.add(block, block), [0, 0])
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 128], pl.FP32], pl.Tensor[[64, 128], pl.FP32]]:
+                with pl.manual_scope():
+                    score_next, tid0 = pl.submit(self.produce, x, score)
+                    probe_next, tid1 = pl.submit(self.consume, score_next, probe, deps=[tid0])
+                return score_next, probe_next
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume(
+                score: pl.Tensor[[64, 128], pl.FP32],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                block: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    score, [0, 0], [32, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                doubled: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(block, block)
+                result: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(doubled, [0, 0], probe)
+                return result
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume__windowed(
+                score: pl.Tensor[
+                    [32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                ],
+                probe: pl.Out[
+                    pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]
+                ],
+            ) -> pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]:
+                block: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    score, [0, 0], [32, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                doubled: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(block, block)
+                result: pl.Tensor[
+                    [32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                ] = pl.tile.store(doubled, [0, 0], probe)
+                return result
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def produce__windowed(
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[
+                    pl.Tensor[[32, 32], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]
+                ],
+            ) -> pl.Tensor[[32, 32], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)]:
+                tile: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec, transpose=False
+                )
+                doubled: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.tile.add(tile, tile)
+                result: pl.Tensor[
+                    [32, 32], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                ] = pl.tile.store(doubled, [0, 0], score)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def main(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> tuple[pl.Tensor[[64, 128], pl.FP32], pl.Tensor[[64, 128], pl.FP32]]:
+                with pl.scope(mode=pl.ScopeMode.MANUAL):
+                    score_window: pl.Tensor[[32, 32], pl.FP32] = pl.tensor.slice(score, [32, 32], [0, 0])
+                    submit_windowed: pl.Tuple[
+                        pl.Tensor[
+                            [32, 32],
+                            pl.FP32,
+                            pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND),
+                        ],
+                        pl.Scalar[pl.TASK_ID],
+                    ] = pl.submit(self.produce__windowed, x, score_window)
+                    submit_windowed_0: pl.Tensor[
+                        [32, 32], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                    ] = submit_windowed[0]
+                    submit_assembled_0: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.assemble(
+                        score, submit_windowed_0, [0, 0]
+                    )
+                    submit_pass_1: pl.Scalar[pl.TASK_ID] = submit_windowed[1]
+                    submit_result: pl.Tuple[pl.Tensor[[64, 128], pl.FP32], pl.Scalar[pl.TASK_ID]] = [
+                        submit_assembled_0,
+                        submit_pass_1,
+                    ]
+                    score_next: pl.Tensor[[64, 128], pl.FP32] = submit_assembled_0
+                    tid0: pl.Scalar[pl.TASK_ID] = submit_pass_1
+                    score_next_window: pl.Tensor[[32, 64], pl.FP32] = pl.tensor.slice(
+                        score_next, [32, 64], [0, 0]
+                    )
+                    probe_window: pl.Tensor[[32, 64], pl.FP32] = pl.tensor.slice(probe, [32, 64], [0, 0])
+                    submit_windowed_1: pl.Tuple[
+                        pl.Tensor[
+                            [32, 64],
+                            pl.FP32,
+                            pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND),
+                        ],
+                        pl.Scalar[pl.TASK_ID],
+                    ] = pl.submit(self.consume__windowed, score_next_window, probe_window, deps=[tid0])
+                    submit_windowed_0_1: pl.Tensor[
+                        [32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                    ] = submit_windowed_1[0]
+                    submit_assembled_0_1: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.assemble(
+                        probe, submit_windowed_0_1, [0, 0]
+                    )
+                    submit_pass_1_1: pl.Scalar[pl.TASK_ID] = submit_windowed_1[1]
+                    submit_result_1: pl.Tuple[pl.Tensor[[64, 128], pl.FP32], pl.Scalar[pl.TASK_ID]] = [
+                        submit_assembled_0_1,
+                        submit_pass_1_1,
+                    ]
+                    probe_next: pl.Tensor[[64, 128], pl.FP32] = submit_assembled_0_1
+                return score_next, probe_next
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def produce(
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                tile: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec, transpose=False
+                )
+                doubled: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.tile.add(tile, tile)
+                result: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(doubled, [0, 0], score)
+                return result
+
+        After = _run_to_optimize_orch_tensors(Before)
+        ir.assert_structural_equal(After, Expected)
+
+    def test_submit_returned_output_later_full_read_stays_baseline(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def produce(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                tile: pl.Tile[[32, 32], pl.FP32] = pl.load(x, [0, 0], [32, 32])
+                return pl.store(tile, [0, 0], score)
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume_full(
+                self,
+                score: pl.Tensor[[64, 128], pl.FP32],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32] = pl.load(score, [0, 0], [64, 128])
+                return pl.store(tile, [0, 0], probe)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                with pl.manual_scope():
+                    score_next, tid0 = pl.submit(self.produce, x, score)
+                    probe_next, tid1 = pl.submit(self.consume_full, score_next, probe, deps=[tid0])
+                return probe_next
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume_full(
+                score: pl.Tensor[[64, 128], pl.FP32],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                tile: pl.Tile[[64, 128], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    score, [0, 0], [64, 128], [64, 128], target_memory=pl.Mem.Vec, transpose=False
+                )
+                result: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(tile, [0, 0], probe)
+                return result
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def produce(
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                tile: pl.Tile[[32, 32], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    x, [0, 0], [32, 32], [32, 32], target_memory=pl.Mem.Vec, transpose=False
+                )
+                result: pl.Tensor[[64, 128], pl.FP32] = pl.tile.store(tile, [0, 0], score)
+                return result
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def main(
+                self,
+                x: pl.Tensor[[64, 128], pl.FP32],
+                score: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+                probe: pl.Out[pl.Tensor[[64, 128], pl.FP32]],
+            ) -> pl.Tensor[[64, 128], pl.FP32]:
+                with pl.scope(mode=pl.ScopeMode.MANUAL):
+                    submit_result: pl.Tuple[pl.Tensor[[64, 128], pl.FP32], pl.Scalar[pl.TASK_ID]] = pl.submit(
+                        self.produce, x, score
+                    )
+                    score_next: pl.Tensor[[64, 128], pl.FP32] = submit_result[0]
+                    tid0: pl.Scalar[pl.TASK_ID] = submit_result[1]
+                    submit_result_1: pl.Tuple[pl.Tensor[[64, 128], pl.FP32], pl.Scalar[pl.TASK_ID]] = (
+                        pl.submit(self.consume_full, score_next, probe, deps=[tid0])
+                    )
+                    probe_next: pl.Tensor[[64, 128], pl.FP32] = submit_result_1[0]
+                return probe_next
+
+        After = _run_to_optimize_orch_tensors(Before)
+        ir.assert_structural_equal(After, Expected)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
