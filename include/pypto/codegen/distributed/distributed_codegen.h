@@ -16,6 +16,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -153,14 +154,16 @@ class DistributedCodegen : public CodegenBase {
   void CollectHostOrchHoistableAllocs(const ir::FunctionPtr& host_orch);
   void EmitAllocIntermediatesFunction(const ir::FunctionPtr& host_orch);
 
-  // Emit `with orch.allocate_domain(name=..., workers=..., window_size=...,
-  // buffers=[CommBufferSpec(...), ...]) as __comm_d<idx>:` for every
-  // CommGroup on the program (single-group only for now; multi-group is
-  // CHECKed against). Increments emitter_'s indent level once per emitted
-  // with-block so the function body's subsequent emission lands inside; the
-  // caller is responsible for DecreaseIndent() after VisitStmt finishes.
-  // Returns the number of with-blocks emitted (== number of DecreaseIndent
-  // calls the caller owes).
+  // Emit one `with orch.allocate_domain(name=..., workers=..., window_size=...,
+  // buffers=[CommBufferSpec(...), ...]) as __comm_d<idx>:` per CommGroup on
+  // the program, in declaration order. Multi-group programs emit nested
+  // with-blocks; `simpler.Orchestrator.allocate_domain` is a per-call context
+  // manager whose `name=` is only uniqueness-checked against currently-live
+  // handles, so the nested handles coexist without restriction. Increments
+  // emitter_'s indent level once per emitted with-block so the function
+  // body's subsequent emission lands inside; the caller is responsible for
+  // DecreaseIndent() after VisitStmt finishes. Returns the number of
+  // with-blocks emitted (== number of DecreaseIndent calls the caller owes).
   int EmitCommDomainAllocations();
 
   // Scalar-expression Python-emission helpers (see distributed_scalar_expr_codegen.cpp).
@@ -198,8 +201,24 @@ class DistributedCodegen : public CodegenBase {
   /// rank-1 tuples to keep the literal a tuple.
   [[nodiscard]] std::string FormatShapeTuple(const std::vector<ir::ExprPtr>& shape);
 
+  /// Look up the CommGroup index a WindowBuffer belongs to. The reverse
+  /// map is built once per Generate() from program_->comm_groups_.
+  /// Triggers INTERNAL_CHECK if ``wb`` is not a slot of any group — that
+  /// would mean either CollectCommGroups did not run or the IR was
+  /// rewritten after it ran without updating Program.comm_groups_.
+  [[nodiscard]] size_t GroupIdxForWindowBuffer(const ir::WindowBufferPtr& wb) const;
+
   ir::ProgramPtr program_;
   CodeEmitter emitter_;
+
+  // Built once per Generate() from program_->comm_groups_. Maps the
+  // shared_ptr identity of each WindowBuffer slot to the CommGroup it
+  // belongs to. Used by EmitCallToWorker to pick `__comm_d<idx>` for each
+  // DistributedTensor arg — the source WindowBuffer is reachable via
+  // DistributedTensorType::window_buffer_, populated by the N4
+  // CollectCommGroups pass and shared by shared_ptr identity with the
+  // slot stored in Program.comm_groups_[g].slots_.
+  std::unordered_map<const ir::WindowBuffer*, size_t> window_to_group_idx_;
 
   // Function classification
   std::map<std::string, ir::FunctionPtr> workers_;

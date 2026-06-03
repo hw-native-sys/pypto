@@ -316,5 +316,136 @@ def test_world_size_lowers_to_kwarg_in_expression_context():
     assert "len(contexts)" not in code, code
 
 
+# ---------------------------------------------------------------------------
+# Multi-CommGroup: two allocs dispatched to disjoint device subsets emit
+# nested ``with orch.allocate_domain(...)`` blocks and route each
+# DistributedTensor through its own ``__comm_d<idx>`` handle.
+# Mirrors the IR-level test
+# ``test_two_allocs_different_descriptors_two_groups`` in
+# tests/ut/ir/transforms/test_collect_comm_groups.py.
+# ---------------------------------------------------------------------------
+
+
+def test_two_groups_emit_nested_allocate_domain():
+    """Two ``pld.alloc_window_buffer`` allocs dispatched to disjoint
+    device subsets (``device=0/1`` vs ``device=2/3``) emit two nested
+    ``with orch.allocate_domain(...)`` blocks; each dispatch routes its
+    DistributedTensor arg through the matching ``__comm_d<idx>`` handle.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch_a(self, a: pld.DistributedTensor[[SIZE], pl.FP32]):
+            return a
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch_b(self, b: pld.DistributedTensor[[SIZE], pl.FP32]):
+            return b
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf_a = pld.alloc_window_buffer(SIZE * 4)
+            buf_b = pld.alloc_window_buffer(SIZE * 4)
+            a = pld.window(buf_a, [SIZE], dtype=pl.FP32)
+            b = pld.window(buf_b, [SIZE], dtype=pl.FP32)
+            self.chip_orch_a(a, device=0)
+            self.chip_orch_a(a, device=1)
+            self.chip_orch_b(b, device=2)
+            self.chip_orch_b(b, device=3)
+            return 0
+
+    code = _lower(Prog)
+
+    # Both groups emit their own allocate_domain block, in source order.
+    d0_match = re.search(
+        r'with orch\.allocate_domain\(\s*name="comm_d0",\s*workers=\[0, 1\],',
+        code,
+    )
+    d1_match = re.search(
+        r'with orch\.allocate_domain\(\s*name="comm_d1",\s*workers=\[2, 3\],',
+        code,
+    )
+    assert d0_match is not None, code
+    assert d1_match is not None, code
+    assert d0_match.start() < d1_match.start(), code
+
+    # Each group exposes its own slot via its own handle var.
+    assert re.search(r"as __comm_d0:", code), code
+    assert re.search(r"as __comm_d1:", code), code
+
+    # The d1 block is nested INSIDE d0 — its `with` line is indented further
+    # than d0's. Pull each line and compare leading whitespace.
+    lines = code.split("\n")
+    d0_line = next(line for line in lines if 'name="comm_d0"' in line)
+    d1_line = next(line for line in lines if 'name="comm_d1"' in line)
+    d0_indent = len(d0_line) - len(d0_line.lstrip())
+    d1_indent = len(d1_line) - len(d1_line.lstrip())
+    assert d1_indent > d0_indent, (d0_line, d1_line)
+
+    # Each dispatch's DistributedTensor arg routes through the right handle.
+    # group A dispatches: ContinuousTensor.make(... __comm_d0[...].buffer_ptrs["buf_a"] ...)
+    # and add_scalar(__comm_d0[...].device_ctx).
+    assert re.search(
+        r'ContinuousTensor\.make\(data=__comm_d0\[\w+\]\.buffer_ptrs\["buf_a"\],',
+        code,
+    ), code
+    assert re.search(
+        r'ContinuousTensor\.make\(data=__comm_d1\[\w+\]\.buffer_ptrs\["buf_b"\],',
+        code,
+    ), code
+    # The trailing per-tensor ctx scalar uses the matching handle too.
+    assert re.search(r"\.add_scalar\(__comm_d0\[\w+\]\.device_ctx\)", code), code
+    assert re.search(r"\.add_scalar\(__comm_d1\[\w+\]\.device_ctx\)", code), code
+
+
+def test_two_groups_handle_routing_is_per_dispatch_not_state_bleed():
+    """Two dispatches, one per group, using the *same* ``chip_orch`` callee
+    must each route through the handle of their own group — even though
+    nothing about the callee signature changes between calls. Rules out a
+    bug where ``EmitCallToWorker`` caches the first dispatch's handle and
+    reuses it for the second (state-bleed); the routing comes from the
+    arg's ``WindowBuffer`` identity, not from any per-callee state.
+    """
+
+    @pl.program
+    class Prog:
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(self, x: pld.DistributedTensor[[SIZE], pl.FP32]):
+            return x
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(self):
+            buf_a = pld.alloc_window_buffer(SIZE * 4)
+            buf_b = pld.alloc_window_buffer(SIZE * 4)
+            a = pld.window(buf_a, [SIZE], dtype=pl.FP32)
+            b = pld.window(buf_b, [SIZE], dtype=pl.FP32)
+            # buf_a → group on {0}; buf_b → group on {2}. Distinct device
+            # subsets → distinct CommGroups even though the *same*
+            # chip_orch is dispatched against each. The handle picked at
+            # emit time must reflect the *arg's* WindowBuffer, not any
+            # callee-keyed cache.
+            self.chip_orch(a, device=0)
+            self.chip_orch(b, device=2)
+            return 0
+
+    code = _lower(Prog)
+
+    # Each dispatch site emits one ContinuousTensor.make line; the handle
+    # prefix uniquely identifies the group.
+    cont_makes = re.findall(
+        r'ContinuousTensor\.make\(data=(__comm_d\d+)\[\w+\]\.buffer_ptrs\["([^"]+)"\],',
+        code,
+    )
+    assert cont_makes == [
+        ("__comm_d0", "buf_a"),
+        ("__comm_d1", "buf_b"),
+    ], (cont_makes, code)
+
+    # Each dispatch's trailing ctx scalar follows the same routing.
+    scalars = re.findall(r"\.add_scalar\((__comm_d\d+)\[\w+\]\.device_ctx\)", code)
+    assert scalars == ["__comm_d0", "__comm_d1"], (scalars, code)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

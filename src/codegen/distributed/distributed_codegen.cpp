@@ -71,6 +71,18 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   host_orch_body_after_hoist_ = false;
   tuple_element_tensors_.clear();
 
+  // Build a WindowBuffer* → group_idx lookup so EmitCallToWorker can route
+  // each DistributedTensor arg to the right `__comm_d<idx>` handle. The N4
+  // CollectCommGroups pass shares the same shared_ptr<const WindowBuffer>
+  // between Program.comm_groups_[g].slots_ and
+  // DistributedTensorType.window_buffer_, so identity lookup is sufficient.
+  window_to_group_idx_.clear();
+  for (size_t gi = 0; gi < program_->comm_groups_.size(); ++gi) {
+    for (const auto& slot : program_->comm_groups_[gi]->slots_) {
+      window_to_group_idx_.emplace(slot.get(), gi);
+    }
+  }
+
   ClassifyFunctions();
   CHECK(!workers_.empty() || !orchestrators_.empty())
       << "Program has no distributed functions (no functions with level/role metadata)";
@@ -114,6 +126,15 @@ std::string DistributedCodegen::Generate(const ir::ProgramPtr& program) {
   }
 
   return emitter_.GetCode();
+}
+
+size_t DistributedCodegen::GroupIdxForWindowBuffer(const ir::WindowBufferPtr& wb) const {
+  auto it = window_to_group_idx_.find(wb.get());
+  INTERNAL_CHECK(it != window_to_group_idx_.end())
+      << "WindowBuffer '" << wb->name_hint_
+      << "' is not a slot of any CommGroup "
+         "(CollectCommGroups pass must run before DistributedCodegen)";
+  return it->second;
 }
 
 // ========================================================================
@@ -248,74 +269,73 @@ void DistributedCodegen::EmitFunction(const ir::FunctionPtr& func) {
 
 int DistributedCodegen::EmitCommDomainAllocations() {
   if (!program_ || program_->comm_groups_.empty()) return 0;
-  CHECK(program_->comm_groups_.size() == 1)
-      << "distributed_codegen currently supports at most one CommGroup; got " << program_->comm_groups_.size()
-      << ". Multi-group will emit nested `with orch.allocate_domain(...)` per group; "
-         "see EmitCommDomainAllocations for the extension point.";
 
-  constexpr size_t group_idx = 0;
-  const auto& group = program_->comm_groups_[group_idx];
-  const std::string handle_var = HandleVarForGroup(group_idx);
-  const std::string domain_name = DomainNameForGroup(group_idx);
+  int with_blocks = 0;
+  for (size_t group_idx = 0; group_idx < program_->comm_groups_.size(); ++group_idx) {
+    const auto& group = program_->comm_groups_[group_idx];
+    const std::string handle_var = HandleVarForGroup(group_idx);
+    const std::string domain_name = DomainNameForGroup(group_idx);
 
-  // workers: literal list of worker indices into DistributedConfig.device_ids.
-  // Empty devices_ in the IR means "all" — resolved at runtime via world_size.
-  std::ostringstream workers;
-  workers << "[";
-  if (group->devices_.empty()) {
-    workers << "*range(world_size)";
-  } else {
-    for (size_t i = 0; i < group->devices_.size(); ++i) {
-      if (i > 0) workers << ", ";
-      workers << group->devices_[i];
+    // workers: literal list of worker indices into DistributedConfig.device_ids.
+    // Empty devices_ in the IR means "all" — resolved at runtime via world_size.
+    std::ostringstream workers;
+    workers << "[";
+    if (group->devices_.empty()) {
+      workers << "*range(world_size)";
+    } else {
+      for (size_t i = 0; i < group->devices_.size(); ++i) {
+        if (i > 0) workers << ", ";
+        workers << group->devices_[i];
+      }
     }
-  }
-  workers << "]";
+    workers << "]";
 
-  // Lower each slot's size_ expression to a Python string. Constant sizes
-  // become int literals; dynamic sizes (e.g. `pld.world_size() * 4`) lower
-  // to the Python equivalent (e.g. `(world_size * 4)`) — `world_size` is
-  // bound at the host_orch signature.
-  std::vector<std::string> slot_nbytes;
-  slot_nbytes.reserve(group->slots_.size());
-  for (const auto& slot : group->slots_) {
-    slot_nbytes.push_back(GetExprAsCode(slot->size_));
-  }
-
-  // window_size = sum of all slot byte expressions. Parenthesise each summand
-  // to keep operator precedence safe under any sub-expression shape.
-  std::ostringstream window_size_expr;
-  if (slot_nbytes.empty()) {
-    window_size_expr << "0";
-  } else {
-    for (size_t i = 0; i < slot_nbytes.size(); ++i) {
-      if (i > 0) window_size_expr << " + ";
-      window_size_expr << "(" << slot_nbytes[i] << ")";
+    // Lower each slot's size_ expression to a Python string. Constant sizes
+    // become int literals; dynamic sizes (e.g. `pld.world_size() * 4`) lower
+    // to the Python equivalent (e.g. `(world_size * 4)`) — `world_size` is
+    // bound at the host_orch signature.
+    std::vector<std::string> slot_nbytes;
+    slot_nbytes.reserve(group->slots_.size());
+    for (const auto& slot : group->slots_) {
+      slot_nbytes.push_back(GetExprAsCode(slot->size_));
     }
-  }
 
-  emitter_.EmitLine("with orch.allocate_domain(");
-  emitter_.IncreaseIndent();
-  emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
-  emitter_.EmitLine("workers=" + workers.str() + ",");
-  emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
-  emitter_.EmitLine("buffers=[");
-  emitter_.IncreaseIndent();
-  for (size_t i = 0; i < group->slots_.size(); ++i) {
-    const auto& slot = group->slots_[i];
-    const std::string& nbytes = slot_nbytes[i];
-    // dtype="opaque" mirrors the manifest-era placeholder: WindowBuffer is
-    // intentionally dtype-agnostic (the field is unused by simpler). count is
-    // also in opaque bytes so it shares the same expression as nbytes.
-    emitter_.EmitLine(std::string("CommBufferSpec(name=\"") + SanitizeName(slot->name_hint_) +
-                      "\", dtype=\"opaque\", count=" + nbytes + ", nbytes=" + nbytes + "),");
+    // window_size = sum of all slot byte expressions. Parenthesise each summand
+    // to keep operator precedence safe under any sub-expression shape.
+    std::ostringstream window_size_expr;
+    if (slot_nbytes.empty()) {
+      window_size_expr << "0";
+    } else {
+      for (size_t i = 0; i < slot_nbytes.size(); ++i) {
+        if (i > 0) window_size_expr << " + ";
+        window_size_expr << "(" << slot_nbytes[i] << ")";
+      }
+    }
+
+    emitter_.EmitLine("with orch.allocate_domain(");
+    emitter_.IncreaseIndent();
+    emitter_.EmitLine(std::string("name=\"") + domain_name + "\",");
+    emitter_.EmitLine("workers=" + workers.str() + ",");
+    emitter_.EmitLine("window_size=" + window_size_expr.str() + ",");
+    emitter_.EmitLine("buffers=[");
+    emitter_.IncreaseIndent();
+    for (size_t i = 0; i < group->slots_.size(); ++i) {
+      const auto& slot = group->slots_[i];
+      const std::string& nbytes = slot_nbytes[i];
+      // dtype="opaque" mirrors the manifest-era placeholder: WindowBuffer is
+      // intentionally dtype-agnostic (the field is unused by simpler). count is
+      // also in opaque bytes so it shares the same expression as nbytes.
+      emitter_.EmitLine(std::string("CommBufferSpec(name=\"") + SanitizeName(slot->name_hint_) +
+                        "\", dtype=\"opaque\", count=" + nbytes + ", nbytes=" + nbytes + "),");
+    }
+    emitter_.DecreaseIndent();
+    emitter_.EmitLine("],");
+    emitter_.DecreaseIndent();
+    emitter_.EmitLine(") as " + handle_var + ":");
+    emitter_.IncreaseIndent();
+    ++with_blocks;
   }
-  emitter_.DecreaseIndent();
-  emitter_.EmitLine("],");
-  emitter_.DecreaseIndent();
-  emitter_.EmitLine(") as " + handle_var + ":");
-  emitter_.IncreaseIndent();
-  return 1;
+  return with_blocks;
 }
 
 void DistributedCodegen::EmitEntryFunction() {
@@ -650,18 +670,15 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
              "(N3 parser writes attrs[\"device\"] on chip-orch dispatch sites)";
       INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
           << "DistributedTensorType arg must have window_buffer_ populated by N4 pass";
-      const std::string name = SanitizeName(dist_type->window_buffer_.value()->name_hint_);
+      const auto& window_buffer = dist_type->window_buffer_.value();
+      const std::string name = SanitizeName(window_buffer->name_hint_);
       const std::string shape = FormatShapeTuple(dist_type->shape_);
       const std::string dtype_enum = "DataType." + DataTypeToSimplerEnum(dist_type->dtype_);
       std::string tag = "TensorArgType.INOUT";
       if (i < callee->param_directions_.size()) {
         tag = ParamDirectionToTensorArgType(callee->param_directions_[i]);
       }
-      // Single-group only: every DistributedTensor routes through `__comm_d0`.
-      // Multi-group will need a WindowBuffer→group_idx lookup to pick the
-      // right `__comm_d<idx>` handle (the EmitCommDomainAllocations CHECK
-      // currently fail-fast guards against that case).
-      const std::string handle_var = HandleVarForGroup(0);
+      const std::string handle_var = HandleVarForGroup(GroupIdxForWindowBuffer(window_buffer));
       emitter_.EmitLine(ta_var + ".add_tensor(ContinuousTensor.make(data=" + handle_var + "[" + rank_expr +
                         "].buffer_ptrs[\"" + name + "\"], shapes=" + shape + ", dtype=" + dtype_enum +
                         ", child_memory=True), " + tag + ")");
@@ -694,16 +711,19 @@ void DistributedCodegen::EmitCallToWorker(const ir::CallPtr& call, const ir::Fun
   }
 
   // After all add_tensor lines, append one
-  // ``add_scalar(__comm_d0[<r>].device_ctx)`` per DistributedTensor arg, in
-  // IR-arg order — matches the N6 incore PTO signature's trailing ctx-ptr
-  // segment. Single-group only: every DistributedTensor routes through
-  // `__comm_d0`. Multi-group will pick the per-group handle via the same
-  // WindowBuffer→group_idx lookup used above.
-  const std::string device_ctx_handle = HandleVarForGroup(0);
+  // ``add_scalar(__comm_d<group_idx>[<r>].device_ctx)`` per DistributedTensor
+  // arg, in IR-arg order — matches the N6 incore PTO signature's trailing
+  // ctx-ptr segment. The group lookup uses the same WindowBuffer-identity
+  // map as the add_tensor branch above so two DistributedTensors from
+  // different CommGroups route to their respective handles.
   for (const auto& arg : call->args_) {
-    if (ir::As<ir::DistributedTensorType>(arg->GetType())) {
-      emitter_.EmitLine(ta_var + ".add_scalar(" + device_ctx_handle + "[" + rank_expr + "].device_ctx)");
-    }
+    auto dist_type = ir::As<ir::DistributedTensorType>(arg->GetType());
+    if (!dist_type) continue;
+    INTERNAL_CHECK_SPAN(dist_type->window_buffer_.has_value(), call->span_)
+        << "DistributedTensorType arg must have window_buffer_ populated by N4 pass";
+    const std::string device_ctx_handle =
+        HandleVarForGroup(GroupIdxForWindowBuffer(dist_type->window_buffer_.value()));
+    emitter_.EmitLine(ta_var + ".add_scalar(" + device_ctx_handle + "[" + rank_expr + "].device_ctx)");
   }
 
   // If this call has an assignment target (return value) but the callee already
