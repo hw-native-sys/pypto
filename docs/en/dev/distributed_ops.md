@@ -44,7 +44,8 @@ The namespace encodes the IR level the op lives at, not an arbitrary grouping:
   TPUT bounces through is **not** on the DSL surface: `ConvertTensorToTileOps`
   materializes it as `tile.create` plus internal `pld.tile.put` so the memory
   allocator assigns UB before codegen (`MakePutCodegenPTO` emits
-  `pto.comm.tput` with that stage). Sibling of `pld.tensor.alloc_window_buffer` /
+  `pto.comm.tput` with that stage). It is therefore a sibling of
+  `pld.tensor.alloc_window_buffer` /
   `pld.tensor.window`, **not** of the tile-producing `remote_load`.
 - **`pld.system.notify` / `pld.system.wait`** drive the per-rank signal slot —
   pure control-plane synchronisation with no data operand — so they live in
@@ -146,8 +147,8 @@ allocated stage — it does **not** synthesize the stage tile at codegen (unlike
 
 Verifier: `dst` / `src` must both be `DistributedTensorType`; `peer` must be a
 `ScalarType`; `dst` and `src` must share element type. Full-slice puts require
-identical **positive static** shape; subregion puts supply static
-`dst_offsets`, `src_offsets`, and `shape` tuples (all three together) and the
+identical **positive static** shape; subregion puts supply `dst_offsets`,
+`src_offsets`, and static `shape` tuples (all three together) and the
 staging tile is sized to `shape`. `atomic` selects overwrite vs atomic-add
 (see `AtomicType`).
 

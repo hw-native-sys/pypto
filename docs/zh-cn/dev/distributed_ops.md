@@ -34,13 +34,13 @@ SSA 值而存在。
 - **`pld.tensor.get`** 读写 *tensor*（GM）操作数 —— `dst` 和 `src` 都是窗口绑定的
   `DistributedTensor` 视图,TGET 中转用的 VEC staging tile 在 codegen 阶段合成,
   不出现在 DSL 表面。因此它是 `pld.tensor.alloc_window_buffer` /
-  `pld.tensor.window` 的兄弟,而**不是**产出 tile 的 `remote_load` 的兄弟。
+  `pld.tensor.window` 的兄弟，而**不是**产出 tile 的 `remote_load` 的兄弟。
 - **`pld.tensor.put`** 读写 *tensor*（GM）操作数 —— `dst` 和 `src` 都是窗口绑定的
   `DistributedTensor` 视图。TPUT 中转用的 VEC staging tile **不出现在** DSL 表面：
   `ConvertTensorToTileOps` 将其物化为 `tile.create` 加内部 `pld.tile.put`，以便
   内存分配器在 codegen 之前分配 UB（`MakePutCodegenPTO` 用该 stage 发出
   `pto.comm.tput`）。因此它是 `pld.tensor.alloc_window_buffer` /
-  `pld.tensor.window` 的兄弟,而**不是**产出 tile 的 `remote_load` 的兄弟。
+  `pld.tensor.window` 的兄弟，而**不是**产出 tile 的 `remote_load` 的兄弟。
 - **`pld.system.notify` / `pld.system.wait`** 驱动按 rank 的信号槽位 —— 纯控制面
   同步,无数据操作数 —— 因此归入 `pld.system`。
 
@@ -132,7 +132,7 @@ TGET 不同）。
 
 Verifier：`dst` / `src` 必须都是 `DistributedTensorType`；`peer` 必须是
 `ScalarType`；`dst` 与 `src` 必须 element type 相同。全切片 put 要求形状为相同的**正的静态
-（positive static）**形状；子区域 put 须同时提供静态 `dst_offsets`、`src_offsets` 与
+（positive static）**形状；子区域 put 须同时提供 `dst_offsets`、`src_offsets` 与静态
 `shape` 元组，staging tile 按 `shape` 定尺寸。`atomic` 选择覆盖还是原子加（见 `AtomicType`）。
 
 ### `pld.tensor.get`（TGET）
