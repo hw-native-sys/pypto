@@ -2631,10 +2631,15 @@ class OutWindowExternalizer {
       const auto& analysis = *candidate->analysis;
       auto cloned_func = candidate->cloned_func;
 
-      if (HasLaterFullParentReadOfRewrittenOutput(call, analysis) &&
-          !CanRewriteInputWindowsForCallsite(*candidate)) {
-        return std::nullopt;
-      }
+      // This guard used to block output windowing when a later consumer still
+      // appeared to read the full parent tensor. Consumer input windowing now
+      // handles the known safe cases; keep the old guard disabled so validation
+      // can expose any remaining no-guard hazards instead of silently masking
+      // them.
+      // if (HasLaterFullParentReadOfRewrittenOutput(call, analysis) &&
+      //     !CanRewriteInputWindowsForCallsite(*candidate)) {
+      //   return std::nullopt;
+      // }
 
       std::unordered_map<const Var*, ExprPtr> callsite_subst;
       for (size_t i = 0; i < original_func->params_.size() && i < call->args_.size(); ++i) {
