@@ -161,6 +161,7 @@ def _load_orch_entry(output_dir: Path) -> tuple[Any, Any]:
         obj
         for name in dir(orch_module)
         if isinstance((obj := getattr(orch_module, name)), types.FunctionType)
+        and getattr(obj, "__module__", None) == orch_module.__name__
         and getattr(obj, _ENTRY_MARKER, False)
     ]
     if len(entry_candidates) != 1:
