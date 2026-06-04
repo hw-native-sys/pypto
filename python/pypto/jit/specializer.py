@@ -112,6 +112,11 @@ class SpecializeContext:
         scalar_values: Concrete value per scalar param name.
         scalar_dtypes: DataType annotation per scalar param name.
         dep_names: Names of dep functions called from this function.
+        auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
+            (PTO2_SCOPE). ``True`` by default; ``False`` emits
+            ``@pl.function(..., auto_scope=False)`` so the body places scopes
+            by hand. Only honored for the Orchestration entry and HOST
+            orchestrator decorators (see :meth:`Specializer._build_decorator`).
         py_globals: The originating function's ``__globals__``. The specializer
             uses this to resolve module-level int/float/bool constants (e.g.
             ``BATCH``, ``HIDDEN`` imported from a config module) by inlining
@@ -135,6 +140,7 @@ class SpecializeContext:
     scalar_values: dict[str, int | float | bool]
     scalar_dtypes: dict[str, DataType]
     dep_names: list[str] = field(default_factory=list)
+    auto_scope: bool = True
     py_globals: dict[str, Any] = field(default_factory=dict)
     orig_file: str | None = None
     orig_start_line: int = 1
@@ -1618,12 +1624,17 @@ class Specializer:
         (``include/pypto/ir/function.h``), so a HOST Opaque function keeps
         the explicit ``role=Orchestrator``.
         """
+        # auto_scope=False is only meaningful for orchestration-level entries
+        # (the Orchestration entry and the HOST orchestrator); sub-function
+        # kinds reject it at the decorator layer, so ctx.auto_scope is always
+        # True for them and the suffix stays empty.
+        auto_scope_suffix = "" if ctx.auto_scope else ", auto_scope=False"
         if ctx.func_type == "host":
-            return "@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)"
+            return f"@pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator{auto_scope_suffix})"
         if ctx.func_type is None or ctx.func_type == "orchestration":
             if func_def is not None and _has_incore_scope(func_def):
-                return "@pl.function(type=pl.FunctionType.Opaque)"
-            return "@pl.function(type=pl.FunctionType.Orchestration)"
+                return f"@pl.function(type=pl.FunctionType.Opaque{auto_scope_suffix})"
+            return f"@pl.function(type=pl.FunctionType.Orchestration{auto_scope_suffix})"
         if ctx.func_type == "inline":
             return "@pl.function(type=pl.FunctionType.Inline)"
         if ctx.func_type == "opaque":
@@ -1714,6 +1725,7 @@ def build_specialize_context(
     scalar_values: dict[str, int | float | bool],
     scalar_dtypes: dict[str, DataType],
     dep_names: list[str],
+    auto_scope: bool = True,
 ) -> SpecializeContext:
     """Build a SpecializeContext from a Python function and call-site data.
 
@@ -1726,6 +1738,9 @@ def build_specialize_context(
         scalar_values: Concrete scalar values from the call site.
         scalar_dtypes: DataType per scalar param name.
         dep_names: Names of @pl.jit.incore functions called from this function.
+        auto_scope: Whether the compiler auto-inserts AUTO runtime scopes.
+            Forwarded to the generated ``@pl.function`` decorator; only the
+            Orchestration entry and HOST orchestrator honor ``False``.
 
     Dynamic dims live inside ``tensor_meta`` as :class:`DynDim` entries —
     no separate set is passed in.
@@ -1764,6 +1779,7 @@ def build_specialize_context(
         scalar_values=scalar_values,
         scalar_dtypes=scalar_dtypes,
         dep_names=dep_names,
+        auto_scope=auto_scope,
         py_globals=getattr(func, "__globals__", {}),
         orig_file=orig_file,
         orig_start_line=orig_start_line,

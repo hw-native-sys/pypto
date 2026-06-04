@@ -1069,6 +1069,12 @@ class JITFunction:
             ``DistributedCompiledProgram`` that :meth:`__call__` dispatches
             per-rank.
         _level: pl.Level or None.
+        _auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
+            (PTO2_SCOPE) around the body and each for/if body. ``True`` by
+            default; set ``False`` via ``@pl.jit(auto_scope=False)`` /
+            ``@pl.jit.host(auto_scope=False)`` to place scopes by hand with
+            ``with pl.scope()``. Only meaningful for the Orchestration entry
+            and HOST orchestrator — sub-function kinds reject it.
         _dep_graph: Lazily-computed transitive JIT dep graph rooted here —
             ``(deps_topo, callers_by_dep_id, callees_by_func_id,
             call_args_cache)``.  ``None`` until first ``_get_dep_graph()``
@@ -1082,10 +1088,12 @@ class JITFunction:
         func: Any,
         func_type: str | None = None,
         level: Any = None,
+        auto_scope: bool = True,
     ) -> None:
         self._func = func
         self._func_type = func_type or "orchestration"
         self._level = level
+        self._auto_scope = auto_scope
         self._dep_graph: (
             tuple[
                 list[JITFunction],
@@ -1613,6 +1621,7 @@ class JITFunction:
             scalar_values=scalar_values,
             scalar_dtypes=scalar_dtypes,
             dep_names=callees_by_id[id(self._func)],
+            auto_scope=self._auto_scope,
         )
         return dep_contexts + [entry_ctx]
 
@@ -1757,16 +1766,23 @@ class _SubFunctionDecorator:
         orchestration loops and ``pl.at`` scopes).
     """
 
-    def __init__(self, func_type: str, *, allow_level: bool) -> None:
+    def __init__(self, func_type: str, *, allow_level: bool, allow_auto_scope: bool = False) -> None:
         self._func_type = func_type
         self._allow_level = allow_level
+        self._allow_auto_scope = allow_auto_scope
 
-    def __call__(self, func: Any = None, *, level: Any = None) -> Any:
+    def __call__(self, func: Any = None, *, level: Any = None, auto_scope: bool = True) -> Any:
         if level is not None and not self._allow_level:
             raise TypeError(f"@pl.jit.{self._func_type} does not accept a level= argument")
+        if auto_scope is not True and not self._allow_auto_scope:
+            raise TypeError(
+                f"@pl.jit.{self._func_type} does not accept an auto_scope= argument "
+                "(auto_scope is only meaningful for the Orchestration entry and the "
+                "HOST orchestrator)"
+            )
         if func is None:
-            return lambda f: JITFunction(f, func_type=self._func_type, level=level)
-        return JITFunction(func, func_type=self._func_type, level=None)
+            return lambda f: JITFunction(f, func_type=self._func_type, level=level, auto_scope=auto_scope)
+        return JITFunction(func, func_type=self._func_type, level=None, auto_scope=auto_scope)
 
 
 class _JITDecorator:
@@ -1790,14 +1806,22 @@ class _JITDecorator:
     """
 
     def __init__(self) -> None:
-        self.host = _SubFunctionDecorator("host", allow_level=False)
+        self.host = _SubFunctionDecorator("host", allow_level=False, allow_auto_scope=True)
         self.incore = _SubFunctionDecorator("incore", allow_level=True)
         self.inline = _SubFunctionDecorator("inline", allow_level=False)
         self.opaque = _SubFunctionDecorator("opaque", allow_level=False)
 
-    def __call__(self, func: Any) -> JITFunction:
-        """Decorate an entry-point JIT function (Orchestration)."""
-        return JITFunction(func, func_type="orchestration", level=None)
+    def __call__(self, func: Any = None, *, auto_scope: bool = True) -> Any:
+        """Decorate an entry-point JIT function (Orchestration).
+
+        Supports both the bare ``@pl.jit`` form and the parenthesized
+        ``@pl.jit(auto_scope=False)`` form. Setting ``auto_scope=False`` opts
+        out of compiler-inserted AUTO runtime scopes so the body can place
+        them by hand with ``with pl.scope()``.
+        """
+        if func is None:
+            return lambda f: JITFunction(f, func_type="orchestration", level=None, auto_scope=auto_scope)
+        return JITFunction(func, func_type="orchestration", level=None, auto_scope=auto_scope)
 
 
 # Singleton decorator object exposed as ``pl.jit``

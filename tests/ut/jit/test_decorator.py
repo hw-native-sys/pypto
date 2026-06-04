@@ -92,6 +92,32 @@ class TestJitDecoration:
 
         assert isinstance(kernel, JITFunction)
 
+    def test_jit_default_auto_scope_true(self):
+        @jit
+        def entry(a: pl.Tensor):
+            return a
+
+        assert entry._auto_scope is True
+
+    def test_jit_auto_scope_false(self):
+        @jit(auto_scope=False)
+        def entry(a: pl.Tensor):
+            return a
+
+        assert isinstance(entry, JITFunction)
+        assert entry._func_type == "orchestration"
+        assert entry._auto_scope is False
+
+    def test_jit_empty_parens_form(self):
+        """@pl.jit() (bare parens) is equivalent to @pl.jit."""
+
+        @jit()
+        def entry(a: pl.Tensor):
+            return a
+
+        assert isinstance(entry, JITFunction)
+        assert entry._auto_scope is True
+
 
 # ---------------------------------------------------------------------------
 # @pl.jit.host decoration
@@ -138,6 +164,36 @@ class TestJitHostDecoration:
 
         assert isinstance(host_orch, JITFunction)
         assert host_orch._func_type == "host"
+
+    def test_jit_host_accepts_auto_scope_false(self):
+        @jit.host(auto_scope=False)
+        def host_orch(a: pl.Tensor):
+            return a
+
+        assert isinstance(host_orch, JITFunction)
+        assert host_orch._func_type == "host"
+        assert host_orch._auto_scope is False
+
+    def test_jit_incore_rejects_auto_scope_kwarg(self):
+        with pytest.raises(TypeError, match="does not accept an auto_scope= argument"):
+
+            @jit.incore(auto_scope=False)
+            def sub_fn(a: pl.Tensor):
+                return a
+
+    def test_jit_inline_rejects_auto_scope_kwarg(self):
+        with pytest.raises(TypeError, match="does not accept an auto_scope= argument"):
+
+            @jit.inline(auto_scope=False)
+            def sub_fn(a: pl.Tensor):
+                return a
+
+    def test_jit_opaque_rejects_auto_scope_kwarg(self):
+        with pytest.raises(TypeError, match="does not accept an auto_scope= argument"):
+
+            @jit.opaque(auto_scope=False)
+            def sub_fn(a: pl.Tensor):
+                return a
 
 
 class TestHostDiscoversOrchestrationDep:

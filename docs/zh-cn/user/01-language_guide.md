@@ -433,6 +433,26 @@ def host_orch(
 普通的 `@pl.jit` 入口**不会**自动发现其他 `@pl.jit` 入口——只有
 `.host` 会跨越芯片边界，以防两个无关的顶层内核被悄悄折叠成同一个程序。
 
+默认情况下编译器会为你插入 AUTO 运行时 scope（`PTO2_SCOPE`）。
+若要用 `with pl.scope()` 手动放置，传入 `auto_scope=False`：
+
+```python
+@pl.jit(auto_scope=False)              # Orchestration 入口
+def orchestrator(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.scope():
+        out = tile_add(a, b, out)
+    return out
+
+@pl.jit.host(auto_scope=False)         # HOST orchestrator
+def host_orch(...): ...
+```
+
+`auto_scope=False` 仅在 Orchestration 入口（`@pl.jit`）和 HOST
+orchestrator（`@pl.jit.host`）上被接受；子函数类型
+（`.incore` / `.inline` / `.opaque`）会拒绝它。它会 specialize 成
+`@pl.function(..., auto_scope=False)`——具体的 scope 放置语义见
+[MaterializeRuntimeScopes pass](../dev/passes/37-materialize_runtime_scopes.md)。
+
 ### `@pl.inline`
 
 定义一个在每个调用点展开其函数体的函数（程序中不会有单独的函数）：

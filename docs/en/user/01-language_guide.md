@@ -450,6 +450,27 @@ def host_orch(
 `.host` reaches across the chip boundary, to keep two unrelated top-level
 kernels from silently folding into one program.
 
+By default the compiler inserts AUTO runtime scopes (`PTO2_SCOPE`) for you.
+To place them by hand with `with pl.scope()`, pass `auto_scope=False`:
+
+```python
+@pl.jit(auto_scope=False)              # Orchestration entry
+def orchestrator(a: pl.Tensor, b: pl.Tensor, out: pl.Out[pl.Tensor]):
+    with pl.scope():
+        out = tile_add(a, b, out)
+    return out
+
+@pl.jit.host(auto_scope=False)         # HOST orchestrator
+def host_orch(...): ...
+```
+
+`auto_scope=False` is only accepted on the Orchestration entry (`@pl.jit`)
+and the HOST orchestrator (`@pl.jit.host`); the sub-function kinds
+(`.incore` / `.inline` / `.opaque`) reject it. It specializes into
+`@pl.function(..., auto_scope=False)` — see the
+[MaterializeRuntimeScopes pass](../dev/passes/37-materialize_runtime_scopes.md)
+for the resulting scope-placement semantics.
+
 ### `@pl.inline`
 
 Defines a function whose body is expanded at each call site (no separate function in the program):
