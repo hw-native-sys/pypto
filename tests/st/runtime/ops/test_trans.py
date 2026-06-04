@@ -58,16 +58,19 @@ DEINT_RH = DEINT_RD // 2
 SIMPLE_R = 16
 SIMPLE_C = 2
 
-# Standalone 3D transpose constants (#1651): [4, 8, 8] swap axes (1, 2) -> [4, 8, 8].
-# The inner dim of both the input and output tensors is 8 on purpose: ptoas
-# infers an `nz` layout for a 3D ND output tensor whose innermost dim is
-# 16-aligned (e.g. [4, 8, 16]), which then conflicts with the `nd` layout the
-# codegen declares for `pto.make_tensor_view`. Keeping the inner dim at 8 (not
-# 16-aligned) keeps the inferred layout `nd`, isolating the FlattenTileNdTo2D
-# 3D-transpose lowering under test from that separate 3D-output codegen gap.
+# Standalone 3D transpose constants (#1651): [4, 24, 8] swap axes (1, 2) -> [4, 8, 24].
+# Axes 1 and 2 are deliberately different (24 vs 8) so the swap actually changes
+# the shape — a non-degenerate transpose, not the equal-dim case where input and
+# output shapes coincide. Both inner dims (input 8, output 24) are multiples of 8,
+# so each tile row (cols * sizeof(FP32)) is 32-byte aligned, yet neither is
+# 16-aligned: ptoas infers an `nz` layout for a 3D ND tensor whose innermost dim
+# is 16-aligned (e.g. [4, 8, 16]), which conflicts with the `nd` layout the codegen
+# declares for `pto.make_tensor_view`. Keeping both inner dims non-16-aligned keeps
+# the inferred layout `nd`, isolating the FlattenTileNdTo2D 3D-transpose lowering
+# under test from that separate 3D-output codegen gap.
 ND3_B = 4  # leading batch dim (untouched)
-ND3_R = 8  # axis 1
-ND3_C = 8  # axis 2
+ND3_R = 24  # axis 1 (multiple of 8, not 16-aligned)
+ND3_C = 8  # axis 2 (multiple of 8, not 16-aligned)
 
 
 class TransposeSliceAssembleCase(PTOTestCase):
@@ -321,11 +324,12 @@ class Nd3DTransposeCase(PTOTestCase):
     consumer, exercising the ``LowerNdTranspose`` path in ``FlattenTileNdTo2D``
     that lowers a standalone N-D transpose to per-batch 2D transposes.
 
-    The inner dim is deliberately 8 (not 16-aligned) on both the input and
-    output tensors — see the ``ND3_*`` constants. A 16-aligned output inner dim
-    makes ptoas infer an ``nz`` tensor-view layout that conflicts with the
-    ``nd`` the codegen declares; the 8-wide shape keeps that inference ``nd`` so
-    this case isolates the 3D-transpose lowering from that separate codegen gap.
+    Axes 1 and 2 differ (``ND3_R = 24`` vs ``ND3_C = 8``) so the swap actually
+    changes the shape. Both inner dims are multiples of 8 (each tile row is
+    32-byte aligned) yet neither is 16-aligned — see the ``ND3_*`` constants — so
+    the 3D ND tensor-view layout stays ``nd``. A 16-aligned inner dim would make
+    ptoas infer an ``nz`` layout that conflicts with the ``nd`` the codegen
+    declares, a separate 3D-output gap this case avoids.
     """
 
     __test__ = False
@@ -436,12 +440,13 @@ class TestTransposeColumnOperations:
     def test_nd3d_transpose(self, test_runner, platform):
         """Issue #1651: standalone 3D ``pl.transpose`` (direct last-two-axes swap).
 
-        Transposes a ``[4, 8, 8]`` tile over axes ``(1, 2)`` to ``[4, 8, 8]``
+        Transposes a ``[4, 24, 8]`` tile over axes ``(1, 2)`` to ``[4, 8, 24]``
         with no surrounding reshape and no ``batch_matmul`` consumer — exercising
         the ``LowerNdTranspose`` path in ``FlattenTileNdTo2D`` that lowers a
-        standalone >2D transpose to per-batch 2D transposes. The inner dim is 8
-        (not 16-aligned) to keep the 3D output tensor view ``nd`` and avoid the
-        separate 3D-output ``nz`` layout-inference gap.
+        standalone >2D transpose to per-batch 2D transposes. Axes 1 and 2 differ
+        (24 vs 8) so the swap changes the shape; both inner dims are multiples of
+        8 (32-byte-aligned rows) but not 16-aligned, keeping the 3D output tensor
+        view ``nd`` and avoiding the separate 3D-output ``nz`` layout gap.
         """
         result = test_runner.run(Nd3DTransposeCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
