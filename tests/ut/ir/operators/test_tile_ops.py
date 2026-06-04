@@ -1721,8 +1721,12 @@ class TestTileSliceReshapeOps:
         result_type = call.type
         assert isinstance(result_type, ir.TileType)
 
-    def test_tile_transpose_auto_tmp_inserted(self):
-        """tile.transpose auto-inserts a tile.create at args[3] when tmp is omitted."""
+    def test_tile_transpose_no_auto_tmp(self):
+        """tile.transpose emits the 3-arg form (no scratch) when tmp is omitted.
+
+        The pto.ttrans scratch is materialized later by FlattenTileNdTo2D, not here.
+        The optional tmp operand is only for round-tripping that lowered 4-arg form.
+        """
         span = ir.Span.unknown()
 
         dim8 = ir.ConstInt(8, DataType.INT32, span)
@@ -1730,17 +1734,15 @@ class TestTileSliceReshapeOps:
         tile_type = ir.TileType([dim8, dim16], DataType.FP16)
         tile_var = ir.Var("tile", tile_type, span)
 
+        # Omitted tmp -> 3-arg, no auto-created scratch.
         call = tile.transpose(tile_var, 0, 1)
+        assert len(call.args) == 3
 
-        assert len(call.args) == 4
-        tmp_arg = call.args[3]
-        assert isinstance(tmp_arg, ir.Call)
-        assert tmp_arg.op.name == "tile.create"
-
-        tmp_type = tmp_arg.type
-        assert isinstance(tmp_type, ir.TileType)
-        assert tmp_type.dtype == DataType.FP16
-        assert len(tmp_type.shape) == 2
+        # Explicit tmp (as the lowered form carries) -> 4-arg, passed through verbatim.
+        tmp_var = ir.Var("tmp", tile_type, span)
+        call4 = tile.transpose(tile_var, 0, 1, tmp=tmp_var)
+        assert len(call4.args) == 4
+        assert call4.args[3] is tmp_var
 
     def test_tile_set_validshape(self):
         """Test tile.set_validshape with constant valid dimensions."""

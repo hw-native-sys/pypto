@@ -2199,28 +2199,35 @@ def transpose(
     tile: Expr,
     axis1: int | ConstInt,
     axis2: int | ConstInt,
+    tmp: Expr | None = None,
     span: Span | None = None,
 ) -> Call:
     """Transpose tile by swapping two axes.
 
     The ``pto.ttrans`` scratch buffer is a codegen detail, not a semantic operand:
     ``FlattenTileNdTo2D`` materializes it (the codegen-ready 4-arg form) for both 2D and
-    per-page >2D transposes. This builder therefore emits the 3-arg form with no scratch.
+    per-page >2D transposes. High-level callers omit ``tmp`` and get the 3-arg form; the
+    optional ``tmp`` exists only so the lowered 4-arg form round-trips through the
+    printer/parser. It is never auto-created here.
 
     Args:
         tile: Input tile expression (must be TileType).
         axis1: First axis to swap (supports negative indexing).
         axis2: Second axis to swap (supports negative indexing).
+        tmp: Optional pre-allocated scratch tile — compiler-generated lowered IR only.
         span: Optional source span (auto-captured if not provided).
 
     Returns:
-        Call expression for tile transpose (operands: input, axis1, axis2).
+        Call expression for tile transpose (operands: input, axis1, axis2[, tmp]).
     """
     actual_span = _get_span_or_capture(span)
     axis1_expr = _normalize_axis_const(axis1, actual_span, "axis1")
     axis2_expr = _normalize_axis_const(axis2, actual_span, "axis2")
 
-    return _ir_core.create_op_call("tile.transpose", [tile, axis1_expr, axis2_expr], {}, actual_span)
+    args: list[Expr] = [tile, axis1_expr, axis2_expr]
+    if tmp is not None:
+        args.append(tmp)
+    return _ir_core.create_op_call("tile.transpose", args, {}, actual_span)
 
 
 def set_validshape(
