@@ -19,8 +19,11 @@ Orchestrates the full test execution pipeline:
 """
 
 import logging
+import os
 import queue
+import shlex
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -32,8 +35,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 from pypto.backend import BackendType, reset_for_testing, set_backend_type
 from pypto.runtime import compile_program
+from pypto.runtime.execute_artifact import _EXEC_MARKER
 from pypto.runtime.golden_writer import (
     _data_dir_has_files,
     _extract_compute_golden,
@@ -92,6 +97,26 @@ _device_pool: "queue.Queue[int] | None" = None
 _execute_pool: ThreadPoolExecutor | None = None
 _compile_pools: list[ThreadPoolExecutor] = []
 _pipeline_ctx: dict = {}
+
+# Serialises the reprint of borrowed-card subprocess stdout (task-submit mode).
+# Execute tasks run on pool worker threads, so two concurrent submissions could
+# otherwise interleave their multi-line C++ dumps mid-line in the terminal.
+_print_lock = threading.Lock()
+
+# Environment variables forwarded to the borrowed-card subprocess via
+# ``task-submit --env`` (task-submit's daemon runs the command in a clean shell).
+# Only those actually set are forwarded, so task-submit does not warn about
+# undefined ones. PTO_ISA_ROOT/ASCEND_HOME_PATH locate the toolchain;
+# PTO2_RING_* are the runtime ring-buffer knobs the container previously passed
+# via ``-e``; PYTHONPATH covers run-from-source layouts.
+_TASK_SUBMIT_FORWARD_ENV = (
+    "PYTHONPATH",
+    "PTO_ISA_ROOT",
+    "ASCEND_HOME_PATH",
+    "PTO2_RING_HEAP",
+    "PTO2_RING_TASK_WINDOW",
+    "PTO2_RING_DEP_POOL",
+)
 
 # set_backend_type is called once per backend-type group before the thread pool
 # starts.  Only get_program() needs serialisation because the @pl.program
@@ -321,6 +346,143 @@ def _fused_compile_task(
         )
 
 
+def _dfx_to_cli(dfx: _DfxOpts) -> list[str]:
+    """Render *dfx* as ``execute_artifact`` CLI flags (inverse of its parser).
+
+    The two integer-valued toggles emit an explicit value so the round-trip is
+    lossless; the booleans emit a bare flag. Off values are omitted.
+    """
+    argv: list[str] = []
+    if dfx.enable_l2_swimlane:
+        argv.append("--enable-l2-swimlane")
+    if dfx.enable_dump_tensor:
+        argv += ["--dump-tensor", str(dfx.enable_dump_tensor)]
+    if dfx.enable_pmu:
+        argv += ["--enable-pmu", str(dfx.enable_pmu)]
+    if dfx.enable_dep_gen:
+        argv.append("--enable-dep-gen")
+    if dfx.enable_scope_stats:
+        argv.append("--enable-scope-stats")
+    return argv
+
+
+def _parse_exec_marker(stdout: str) -> "tuple[str | None, int | None]":
+    """Return ``(result, device)`` from the last ``__PYPTO_EXEC__`` line.
+
+    Scans *stdout* in reverse so a stale earlier marker (e.g. from interleaved
+    output) cannot mask the real terminal one. Returns ``(None, None)`` when no
+    marker is present (e.g. the subprocess crashed before printing it).
+    """
+    for line in reversed((stdout or "").splitlines()):
+        line = line.strip()
+        if line.startswith(_EXEC_MARKER):
+            result: str | None = None
+            device: int | None = None
+            for token in line.split():
+                if token.startswith("result="):
+                    result = token.split("=", 1)[1]
+                elif token.startswith("device="):
+                    try:
+                        device = int(token.split("=", 1)[1])
+                    except ValueError:
+                        device = None
+            return result, device
+    return None, None
+
+
+def _execute_via_task_submit(
+    name: str,
+    cache_key: str | None,
+    work_dir: Path,
+    resolved_platform: str,
+    dfx: _DfxOpts,
+    start: float,
+) -> RunResult:
+    """Execute *work_dir* on a borrowed NPU via ``task-submit`` and validate.
+
+    Spawns ``task-submit --device auto --run 'python -m
+    pypto.runtime.execute_artifact ...'`` so the card is borrowed only for the
+    device run + golden compare, then released. Pass/fail is taken from the
+    subprocess's ``__PYPTO_EXEC__`` marker (the source of truth regardless of
+    whether ``task-submit`` forwards the inner exit code), falling back to the
+    return code when no marker is present. The real borrowed device id parsed
+    from the marker is recorded in ``_executed_device`` for ``[DEVICE]``
+    reporting.
+
+    Args:
+        name: Test display name (for the RunResult).
+        cache_key: Cache key for device reporting, or ``None`` to skip it.
+        work_dir: Compiled artifact directory on the shared filesystem.
+        resolved_platform: Target platform (caller must exclude ``*sim``).
+        dfx: Runtime DFX toggles to forward.
+        start: ``time.time()`` captured before the call, for execution_time.
+    """
+    inner = [
+        "python",
+        "-m",
+        "pypto.runtime.execute_artifact",
+        "--work-dir",
+        shlex.quote(str(work_dir)),
+        "--platform",
+        shlex.quote(resolved_platform),
+        # Expanded by task-submit's shell on the allocated device — keep unquoted.
+        "--device-id",
+        "$TASK_DEVICE",
+        *_dfx_to_cli(dfx),
+    ]
+    pto_isa_commit = _pipeline_ctx.get("pto_isa_commit")
+    if pto_isa_commit:
+        inner += ["--pto-isa-commit", shlex.quote(pto_isa_commit)]
+    # task-submit's daemon runs --run in a clean shell on the host, so the
+    # borrowed-card subprocess must re-establish the host env (venv / Ascend)
+    # itself. PYPTO_TASK_SUBMIT_SETUP (e.g. "source activate.sh") is run after the
+    # cd and before the python invocation; empty by default (in-container / dev).
+    setup = os.environ.get("PYPTO_TASK_SUBMIT_SETUP", "").strip()
+    cmd_parts = [f"cd {shlex.quote(str(_PROJECT_ROOT))}"]
+    if setup:
+        cmd_parts.append(setup)
+    cmd_parts.append(" ".join(inner))
+    run_str = " && ".join(cmd_parts)
+
+    # Pin to the job's reserved card (DEVICE_ID) to avoid grabbing an unrelated
+    # free card; fall back to auto when unset.
+    device_arg = os.environ.get("DEVICE_ID") or "auto"
+    argv = [
+        "task-submit",
+        "--device",
+        device_arg,
+        "--max-time",
+        str(_pipeline_ctx.get("task_max_time", 600)),
+    ]
+    # Forward only vars that are actually set so task-submit does not warn about
+    # undefined ones; the borrowed-card subprocess inherits them.
+    for var in _TASK_SUBMIT_FORWARD_ENV:
+        if os.environ.get(var):
+            argv += ["--env", var]
+    argv += ["--run", run_str]
+    proc = subprocess.run(argv, capture_output=True, text=True)  # noqa: PLW1510 — rc handled below
+    result, device = _parse_exec_marker(proc.stdout)
+    if cache_key is not None and device is not None:
+        _executed_device[cache_key] = device
+    # Marker is the source of truth; fall back to the return code only when the
+    # subprocess died before emitting it.
+    passed = (result == "PASS") if result is not None else (proc.returncode == 0)
+    if passed:
+        if proc.stdout:
+            with _print_lock:
+                print(proc.stdout, end="")  # surface into pytest's per-item capture
+        return RunResult(passed=True, test_name=name, execution_time=time.time() - start)
+    return RunResult(
+        passed=False,
+        test_name=name,
+        error=(
+            f"task-submit rc={proc.returncode} marker={result}\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+        ),
+        execution_time=time.time() - start,
+    )
+
+
 def _fused_execute_task(
     tc: "PTOTestCase",
     cache_key: str,
@@ -349,6 +511,18 @@ def _fused_execute_task(
             passed=True,
             test_name=name,
             execution_time=time.time() - start,
+        )
+
+    # task-submit mode: borrow a card per execution via the host-root queue
+    # instead of holding one from a local pool.  sim never borrows a card.
+    if _pipeline_ctx.get("execute_mode") == "task-submit" and not artifact.resolved_platform.endswith("sim"):
+        return _execute_via_task_submit(
+            name,
+            cache_key,
+            artifact.work_dir,
+            artifact.resolved_platform,
+            _pipeline_ctx.get("dfx", _DfxOpts()),
+            start,
         )
 
     assert _device_pool is not None, "device pool not initialised"
@@ -409,6 +583,9 @@ def start_pipeline(  # noqa: PLR0913
     pto_isa_commit: str | None,
     compile_workers: int,
     device_pool: "queue.Queue[int]",
+    execute_mode: str = "device-pool",
+    execute_concurrency: int = 8,
+    task_max_time: int = 600,
     enable_l2_swimlane: bool = False,
     enable_dump_tensor: int = 0,
     enable_pmu: int = 0,
@@ -420,7 +597,14 @@ def start_pipeline(  # noqa: PLR0913
     Called from ``pytest_collection_finish``.  Test cases are grouped by
     backend type (``set_backend_type`` is a global one-time setter); within
     each group a compile pool of ``compile_workers`` threads feeds the shared
-    session-wide execute pool sized to the number of devices in ``device_pool``.
+    session-wide execute pool.
+
+    The execute pool is sized to the number of devices in ``device_pool`` in the
+    default ``"device-pool"`` mode.  In ``"task-submit"`` mode there is no local
+    device pool — each execute task borrows a card via ``task-submit`` — so the
+    pool is sized to ``execute_concurrency`` (the number of concurrent
+    submissions, which may exceed the card count; the surplus queues inside
+    ``task-submit``) and ``task_max_time`` bounds each borrowed run.
 
     Only the *non-final* groups block on a barrier before the next
     ``set_backend_type`` call; the last group returns immediately so pytest's
@@ -430,6 +614,20 @@ def start_pipeline(  # noqa: PLR0913
     progress reporting during collection.
     """
     global _device_pool, _execute_pool, _pipeline_ctx  # noqa: PLW0603
+
+    # Bound torch intra-op threads so the compile pool does not oversubscribe
+    # the host.  Golden computation (`_materialize_tensors` + `compute_expected`)
+    # runs inside compile-pool worker *threads*; without a cap each torch op
+    # defaults to ~`nproc` intra-op threads, so `compile_workers` workers each
+    # grabbing the full core count thrash a single process-wide pool.  Capping
+    # to `cores // compile_workers` keeps outer x intra ~= cores.  On a
+    # multi-socket NUMA host a modest intra count also curbs cross-socket
+    # traffic for the bandwidth-bound tensor materialisation.  Env-overridable
+    # via `PYPTO_GOLDEN_THREADS` (e.g. raise it when few heavy goldens dominate
+    # the tail and the suite is otherwise idle).
+    cores = os.cpu_count() or 1
+    intra = int(os.environ.get("PYPTO_GOLDEN_THREADS", max(1, cores // max(1, compile_workers))))
+    torch.set_num_threads(intra)
 
     # Resolve PTO_ISA_ROOT once on the main thread before any compile workers
     # start.  Otherwise concurrent workers race on `git clone` into the same
@@ -449,6 +647,8 @@ def start_pipeline(  # noqa: PLR0913
         "dump_passes": dump_passes,
         "codegen_only": codegen_only,
         "pto_isa_commit": pto_isa_commit,
+        "execute_mode": execute_mode,
+        "task_max_time": task_max_time,
         "dfx": _DfxOpts(
             enable_l2_swimlane=enable_l2_swimlane,
             enable_dump_tensor=enable_dump_tensor,
@@ -457,8 +657,10 @@ def start_pipeline(  # noqa: PLR0913
             enable_scope_stats=enable_scope_stats,
         ),
     }
-    n_devices = device_pool.qsize()
-    _execute_pool = ThreadPoolExecutor(max_workers=max(1, n_devices), thread_name_prefix="pypto-exec")
+    # task-submit mode bounds concurrent submissions (task-submit itself queues
+    # the surplus); device-pool mode bounds parallelism to the card count.
+    n_exec = execute_concurrency if execute_mode == "task-submit" else max(1, device_pool.qsize())
+    _execute_pool = ThreadPoolExecutor(max_workers=n_exec, thread_name_prefix="pypto-exec")
 
     groups: dict[BackendType, list[PTOTestCase]] = {}
     for tc in test_cases:
@@ -642,6 +844,25 @@ class TestRunner:
                     test_name=test_name,
                     execution_time=time.time() - start_time,
                 )
+
+            # task-submit mode: borrow a card via the host-root queue instead of
+            # using self.config.device_id directly (which would bypass coordinated
+            # allocation).  The subprocess rebuilds + executes from work_dir, which
+            # is persistent on the shared mount (task-submit mode requires
+            # --save-kernels/--kernels-dir, so use_temp is False here).  sim never
+            # borrows a card and stays in-process below.
+            if _pipeline_ctx.get("execute_mode") == "task-submit" and not resolved_platform.endswith("sim"):
+                cache_k = _cache_key(test_case, resolved_platform)
+                result = _execute_via_task_submit(
+                    test_name,
+                    cache_k,
+                    work_dir,
+                    resolved_platform,
+                    _DfxOpts.from_run_config(self.config),
+                    start_time,
+                )
+                _last_device["value"] = _executed_device.get(cache_k)
+                return result
 
             from pypto.runtime.device_runner import compile_and_assemble  # noqa: PLC0415
 
