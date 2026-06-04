@@ -16,7 +16,6 @@
 #include <map>
 #include <set>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -80,6 +79,7 @@ class DistributedCodegen : public CodegenBase {
   void VisitStmt_(const ir::ForStmtPtr& op) override;
   void VisitStmt_(const ir::IfStmtPtr& op) override;
   void VisitStmt_(const ir::SeqStmtsPtr& op) override;
+  void VisitStmt_(const ir::CommDomainScopeStmtPtr& op) override;
 
   // Expression visitors
   void VisitExpr_(const ir::CallPtr& op) override;
@@ -158,25 +158,17 @@ class DistributedCodegen : public CodegenBase {
   void CollectHostOrchHoistableAllocs(const ir::FunctionPtr& host_orch);
   void EmitAllocIntermediatesFunction(const ir::FunctionPtr& host_orch);
 
-  // Emit one `with orch.allocate_domain(name=..., workers=..., window_size=...,
-  // buffers=[CommBufferSpec(...), ...]) as __comm_d<idx>:` per CommGroup on
-  // the program, in declaration order. Multi-group programs emit nested
-  // with-blocks; `simpler.Orchestrator.allocate_domain` is a per-call context
-  // manager whose `name=` is only uniqueness-checked against currently-live
-  // handles, so the nested handles coexist without restriction. Increments
-  // emitter_'s indent level once per emitted with-block so the function
-  // body's subsequent emission lands inside; the caller is responsible for
-  // DecreaseIndent() after VisitStmt finishes. Returns the number of
-  // with-blocks emitted (== number of DecreaseIndent calls the caller owes).
-  int EmitCommDomainAllocations();
-
   /// Collect AssignStmt defs from a HOST orchestrator body so comm-slot size
   /// lowering can unwrap CSE/SSA temps (e.g. ``t = pld.system.world_size()``)
-  /// before ``EmitCommDomainAllocations`` runs ahead of the body walk.
+  /// before the body walk reaches ``VisitStmt_(CommDomainScopeStmtPtr)``, which
+  /// emits the ``with orch.allocate_domain(...)`` line ahead of any inner
+  /// AssignStmt — so referenced temps are not yet bound in the emitted Python
+  /// when the scope's ``window_size`` / ``CommBufferSpec`` lines are written.
   void CollectHostOrchVarDefs(const ir::FunctionPtr& func);
 
-  /// Lower a CommGroup slot ``size_`` expression for ``window_size`` /
-  /// ``CommBufferSpec`` emission, unwrapping hoisted scalar temps.
+  /// Lower a comm-domain slot ``size_`` expression for ``window_size`` /
+  /// ``CommBufferSpec`` emission, unwrapping hoisted scalar temps via
+  /// ``host_orch_var_defs_``.
   [[nodiscard]] std::string GetCommSlotSizeAsCode(const ir::ExprPtr& size_expr);
 
   // Scalar-expression Python-emission helpers (see distributed_scalar_expr_codegen.cpp).
@@ -214,24 +206,28 @@ class DistributedCodegen : public CodegenBase {
   /// rank-1 tuples to keep the literal a tuple.
   [[nodiscard]] std::string FormatShapeTuple(const std::vector<ir::ExprPtr>& shape);
 
-  /// Look up the CommGroup index a WindowBuffer belongs to. The reverse
-  /// map is built once per Generate() from program_->comm_groups_.
-  /// Triggers INTERNAL_CHECK if ``wb`` is not a slot of any group — that
-  /// would mean either CollectCommGroups did not run or the IR was
-  /// rewritten after it ran without updating Program.comm_groups_.
-  [[nodiscard]] size_t GroupIdxForWindowBuffer(const ir::WindowBufferPtr& wb) const;
+  /// Look up the innermost open CommDomainScopeStmt whose ``slots_`` contain
+  /// ``wb`` (by shared_ptr identity — ``MaterializeCommDomainScopes`` shares
+  /// the same ``shared_ptr<const WindowBuffer>`` between the scope's slots
+  /// and every consuming ``DistributedTensorType::window_buffer_``).
+  /// Triggers INTERNAL_CHECK if ``wb`` is not a slot of any open scope —
+  /// that indicates either the pass did not run or codegen visited a
+  /// dispatch outside its enclosing comm-domain scope.
+  [[nodiscard]] ir::CommDomainScopeStmtPtr ScopeForWindowBuffer(const ir::WindowBufferPtr& wb) const;
 
   ir::ProgramPtr program_;
   CodeEmitter emitter_;
 
-  // Built once per Generate() from program_->comm_groups_. Maps the
-  // shared_ptr identity of each WindowBuffer slot to the CommGroup it
-  // belongs to. Used by EmitCallToWorker to pick `__comm_d<idx>` for each
-  // DistributedTensor arg — the source WindowBuffer is reachable via
-  // DistributedTensorType::window_buffer_, populated by the N4
-  // CollectCommGroups pass and shared by shared_ptr identity with the
-  // slot stored in Program.comm_groups_[g].slots_.
-  std::unordered_map<const ir::WindowBuffer*, size_t> window_to_group_idx_;
+  // Stack of currently-open ``CommDomainScopeStmt``s, pushed on entry to
+  // ``VisitStmt_(CommDomainScopeStmtPtr)`` and popped on exit. Used by
+  // ``EmitCallToWorker`` to route each ``DistributedTensor`` arg to the
+  // matching ``__<name_hint>`` handle var: scan inner-to-outer for the
+  // first scope whose ``slots_`` contain the arg's
+  // ``DistributedTensorType::window_buffer_``. Nesting depth equals the
+  // number of comm groups in the host_orch (small, bounded), so the
+  // linear scan stays O(depth) per query — well within the O(N log N)
+  // pass-complexity bound.
+  std::vector<ir::CommDomainScopeStmtPtr> comm_domain_stack_;
 
   // Function classification
   std::map<std::string, ir::FunctionPtr> workers_;
