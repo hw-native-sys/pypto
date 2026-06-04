@@ -1471,22 +1471,22 @@ def reshape(tile: Tile, shape: Sequence[IntLike]) -> Tile:
     return Tile(expr=call_expr)
 
 
-def transpose(tile: Tile, axis1: int, axis2: int, tmp_tile: Tile | None = None) -> Tile:
+def transpose(tile: Tile, axis1: int, axis2: int) -> Tile:
     """Transpose tile by swapping two axes.
+
+    The ``pto.ttrans`` scratch buffer is a codegen detail allocated later by
+    ``FlattenTileNdTo2D``, so callers never supply it.
 
     Args:
         tile: Input tile.
         axis1: First axis to swap (supports negative indexing).
         axis2: Second axis to swap (supports negative indexing).
-        tmp_tile: Optional pre-allocated scratch tile (same shape/dtype as ``tile``)
-            required by ``pto.ttrans``. Auto-emitted via ``pl.tile.create`` when omitted.
 
     Returns:
         Tile wrapping the transpose operation.
     """
     tile_expr = tile.unwrap()
-    tmp_expr = tmp_tile.unwrap() if tmp_tile is not None else None
-    call_expr = _ir_ops.transpose(tile_expr, axis1, axis2, tmp=tmp_expr)
+    call_expr = _ir_ops.transpose(tile_expr, axis1, axis2)
     return Tile(expr=call_expr)
 
 

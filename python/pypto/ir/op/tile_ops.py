@@ -2199,34 +2199,28 @@ def transpose(
     tile: Expr,
     axis1: int | ConstInt,
     axis2: int | ConstInt,
-    tmp: Expr | None = None,
     span: Span | None = None,
 ) -> Call:
     """Transpose tile by swapping two axes.
+
+    The ``pto.ttrans`` scratch buffer is a codegen detail, not a semantic operand:
+    ``FlattenTileNdTo2D`` materializes it (the codegen-ready 4-arg form) for both 2D and
+    per-page >2D transposes. This builder therefore emits the 3-arg form with no scratch.
 
     Args:
         tile: Input tile expression (must be TileType).
         axis1: First axis to swap (supports negative indexing).
         axis2: Second axis to swap (supports negative indexing).
-        tmp: Optional pre-allocated scratch tile (same shape/dtype as ``tile``) required
-            by the ``pto.ttrans`` codegen. Auto-emitted via ``tile.create`` when omitted.
         span: Optional source span (auto-captured if not provided).
 
     Returns:
-        Call expression for tile transpose (operands: input, axis1, axis2, tmp).
+        Call expression for tile transpose (operands: input, axis1, axis2).
     """
     actual_span = _get_span_or_capture(span)
     axis1_expr = _normalize_axis_const(axis1, actual_span, "axis1")
     axis2_expr = _normalize_axis_const(axis2, actual_span, "axis2")
 
-    if tmp is None:
-        input_type = tile.type
-        if not isinstance(input_type, _ir_core.TileType):
-            raise TypeError(f"tile.transpose: input must have TileType, got {type(input_type).__name__}")
-        target_memory = input_type.memory_space if input_type.memory_space is not None else MemorySpace.Vec
-        tmp = create(list(input_type.shape), input_type.dtype, target_memory, actual_span)
-
-    return _ir_core.create_op_call("tile.transpose", [tile, axis1_expr, axis2_expr, tmp], {}, actual_span)
+    return _ir_core.create_op_call("tile.transpose", [tile, axis1_expr, axis2_expr], {}, actual_span)
 
 
 def set_validshape(

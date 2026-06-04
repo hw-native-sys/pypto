@@ -81,18 +81,19 @@ InCore、Spmd、Group 函数在本阶段被跳过 —— 它们已在阶段一 /
 
 ## Transpose 下沉
 
-`tensor.transpose` 并非简单的 1:1 重命名为 `tile.transpose`，而是下沉为 **`tile.create` + 4-arg `tile.transpose(input, axis1, axis2, tmp)`**。PTO 后端的 `pto.ttrans` 指令要求一个 scratch 工作 tile（与源 tile 同 shape/同 dtype）；通过显式的 `tile.create` 为它分配，内存分配器才能在后端 codegen 之前给出真实的 UB 硬件地址（在 `--pto-level=level3` 下必需）。tmp 位于操作数列表的末尾，与用户面 DSL 签名 `pl.tile.transpose(tile, axis1, axis2, tmp_tile=None)` 自然对齐。
+`tensor.transpose` 下沉为一个 3-arg 的 **`tile.transpose(input, axis1, axis2)`**。PTO 后端的 `pto.ttrans` 指令需要一个 scratch 工作 tile（与源 tile 同 shape/同 dtype），但该 scratch 纯属 codegen 细节，并非语义操作数。[`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md) 是 scratch 物化的**唯一归属**：它为 2D 以及逐页 >2D 的 transpose 统一产出 codegen-ready 的 4-arg 形态（`tile.create` + `tile.transpose(..., tmp)`），且仍在内存分配器之前（scratch 仍能拿到真实 UB 地址）。把 scratch 从高层 op 中移除后，`tensor.transpose` 与 DSL `pl.tile.transpose(tile, axis1, axis2)` 都与语义操作保持 1:1。
 
 ```python
 # 转换前
 y = tensor.transpose(x, 0, 1)
 
-# 转换后
-transpose_tmp = pl.tile.create(x.shape, x.dtype, target_memory=x.memory_space)
-y_tile = pl.tile.transpose(x_tile, 0, 1, tmp_tile=transpose_tmp)
-```
+# 本 pass 转换后
+y_tile = pl.tile.transpose(x_tile, 0, 1)   # 3-arg，无 scratch
 
-当用户调用 `pl.tile.transpose(tile, axis1, axis2)` 不传 `tmp_tile` 时，Python IR 构造层自动在末尾插入一个 `tile.create` 作为 tmp。
+# 经 FlattenTileNdTo2D 后（scratch 在那里物化）
+transpose_tmp = pl.tile.create(x.shape, x.dtype, target_memory=x.memory_space)
+y_tile = pl.tile.transpose(x_tile, 0, 1, transpose_tmp)
+```
 
 ## Scatter Update 下沉
 

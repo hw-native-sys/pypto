@@ -378,13 +378,15 @@ class TestConvertTensorToTileOps:
         )
         _assert_convert_equal(before, expected)
 
-    def test_transpose_emits_tile_create_plus_transpose(self):
-        """tensor.transpose lowers to tile.create + tile.transpose(input, axis1, axis2, tmp)."""
+    def test_transpose_emits_tile_transpose(self):
+        """tensor.transpose lowers to a 3-arg tile.transpose(input, axis1, axis2).
+
+        The pto.ttrans scratch is materialized later by FlattenTileNdTo2D, not here.
+        """
         in_specs: list[InSpec] = [("x", [32, 64], DataType.FP16)]
 
         def expected_body(ib, tiles):
-            tmp = ib.let("transpose_tmp", tile_ops.create([32, 64], DataType.FP16))
-            return ib.let("y_tile", tile_ops.transpose(tiles[0], 0, 1, tmp=tmp))
+            return ib.let("y_tile", tile_ops.transpose(tiles[0], 0, 1))
 
         before = _make_before(
             in_specs=in_specs,

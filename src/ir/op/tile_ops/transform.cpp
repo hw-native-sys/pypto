@@ -317,29 +317,35 @@ TypePtr DeduceTileReshapeType(const std::vector<ExprPtr>& args,
 
 TypePtr DeduceTileTransposeType(const std::vector<ExprPtr>& args,
                                 const std::vector<std::pair<std::string, std::any>>& kwargs) {
-  // tmp at the tail is a scratch buffer required by pto.ttrans (see MakeTileTransposeCodegenPTO).
-  CHECK(args.size() == 4)
-      << "tile.transpose requires exactly 4 arguments (input, axis1, axis2, tmp), but got " << args.size();
+  // The optional tail `tmp` is a scratch buffer required by the 2D pto.ttrans codegen
+  // (see MakeTileTransposeCodegenPTO). It is NOT a semantic operand: FlattenTileNdTo2D
+  // is the sole owner of scratch materialization, emitting the 4-arg codegen-ready form
+  // for both 2D and per-page >2D transposes. High-level callers (DSL, tensor.transpose
+  // conversion) therefore pass the 3-arg form (input, axis1, axis2) with no scratch.
+  CHECK(args.size() == 3 || args.size() == 4)
+      << "tile.transpose requires 3 or 4 arguments (input, axis1, axis2[, tmp]), but got " << args.size();
 
   auto input_type = As<TileType>(args[0]->GetType());
   CHECK(input_type) << "tile.transpose: first argument (input) must be TileType, but got "
                     << args[0]->GetType()->TypeName();
 
-  auto tmp_type = As<TileType>(args[3]->GetType());
-  CHECK(tmp_type) << "tile.transpose: fourth argument (tmp) must be TileType, but got "
-                  << args[3]->GetType()->TypeName();
-
-  CHECK(input_type->dtype_ == tmp_type->dtype_)
-      << "tile.transpose: tmp dtype must match input dtype, got input=" << input_type->dtype_.ToString()
-      << " tmp=" << tmp_type->dtype_.ToString();
-  CHECK(input_type->shape_.size() == tmp_type->shape_.size())
-      << "tile.transpose: tmp rank must match input rank, got input rank=" << input_type->shape_.size()
-      << " tmp rank=" << tmp_type->shape_.size();
-
   const auto& input_shape = input_type->shape_;
   size_t ndim = input_shape.size();
 
   CHECK(ndim >= 2) << "tile.transpose requires at least 2 dimensions, but got " << ndim;
+
+  if (args.size() == 4) {
+    auto tmp_type = As<TileType>(args[3]->GetType());
+    CHECK(tmp_type) << "tile.transpose: fourth argument (tmp) must be TileType, but got "
+                    << args[3]->GetType()->TypeName();
+
+    CHECK(input_type->dtype_ == tmp_type->dtype_)
+        << "tile.transpose: tmp dtype must match input dtype, got input=" << input_type->dtype_.ToString()
+        << " tmp=" << tmp_type->dtype_.ToString();
+    CHECK(input_type->shape_.size() == tmp_type->shape_.size())
+        << "tile.transpose: tmp rank must match input rank, got input rank=" << input_type->shape_.size()
+        << " tmp rank=" << tmp_type->shape_.size();
+  }
 
   auto axis1_const = As<ConstInt>(args[1]);
   CHECK(axis1_const) << "tile.transpose requires second argument (axis1) to be a ConstInt";
@@ -401,7 +407,9 @@ REGISTER_OP("tile.transpose")
     .add_argument("input", "Input tile (TileType)")
     .add_argument("axis1", "First axis to swap (ConstInt)")
     .add_argument("axis2", "Second axis to swap (ConstInt)")
-    .add_argument("tmp", "Scratch tile (same shape/dtype as input) required by pto.ttrans")
+    .add_argument("tmp",
+                  "Optional scratch tile (same shape/dtype as input) required by the 2D pto.ttrans "
+                  "codegen; materialized by FlattenTileNdTo2D, absent in the high-level 3-arg form")
     .set_output_memory_inherit_input()
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {

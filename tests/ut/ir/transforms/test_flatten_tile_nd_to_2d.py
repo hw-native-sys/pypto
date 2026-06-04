@@ -2410,10 +2410,9 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
     """A standalone >2D ``tile.transpose`` (last-two-axes swap with leading batch
     dims) lowers to per-batch 2D ``tile.transpose`` calls.
 
-    Regression for #1651: previously the pass had no standalone transpose
-    handler, so the generic re-create path left the transpose input at rank 3
-    while its (flattened) scratch ``tmp`` was rank 2, tripping the
-    input-rank == tmp-rank ``CHECK`` in ``DeduceTileTransposeType``.
+    Regression for #1651. High-level transposes arrive in the 3-arg form (no
+    scratch); this pass is the sole owner of pto.ttrans scratch materialization,
+    emitting the codegen-ready 4-arg form for both 2D and per-page >2D transposes.
     """
 
     @staticmethod
@@ -2485,6 +2484,54 @@ class TestFlattenTileNdTo2DStandaloneTranspose:
         assert len(assembles) == 2
         final_out_type = cast(ir.TileType, assembles[-1].type)
         assert final_out_type.shape == [16, 3]
+
+    def test_2d_transpose_materializes_scratch(self):
+        """A 2D ``transpose([3,8], 0, 1) -> [8,3]`` gains its pto.ttrans scratch here.
+
+        Scratch ownership moved into this pass (#1651): the 3-arg high-level
+        transpose becomes a 4-arg codegen-ready form, preceded by a tile.create
+        whose shape matches the SOURCE page [3, 8] (not the transposed output).
+        """
+
+        @pl.program
+        class ProgTwoDTransScratch:
+            @pl.function(type=pl.FunctionType.InCore)
+            def main_incore_0(
+                self,
+                x: pl.Tensor[[3, 8], pl.FP32],
+                out_0: pl.Out[pl.Tensor[[8, 3], pl.FP32]],
+            ) -> pl.Tensor[[8, 3], pl.FP32]:
+                x_tile: pl.Tile[[3, 8], pl.FP32] = pl.tile.load(x, [0, 0], [3, 8])
+                xt_tile: pl.Tile[[8, 3], pl.FP32] = pl.transpose(x_tile, axis1=0, axis2=1)
+                out_0: pl.Tensor[[8, 3], pl.FP32] = pl.tile.store(xt_tile, [0, 0], out_0)
+                return out_0
+
+            @pl.function
+            def main(self, x: pl.Tensor[[3, 8], pl.FP32]) -> pl.Tensor[[8, 3], pl.FP32]:
+                out_0: pl.Tensor[[8, 3], pl.FP32] = pl.create_tensor([8, 3], dtype=pl.FP32)
+                y: pl.Tensor[[8, 3], pl.FP32] = self.main_incore_0(x, out_0)
+                return y
+
+        after = passes.flatten_tile_nd_to_2d()(ProgTwoDTransScratch)
+        after_func = after.get_function("main_incore_0")
+        assert after_func is not None
+        calls = self._all_calls(after_func)
+
+        transposes = [c for c in calls if c.op.name == "tile.transpose"]
+        assert len(transposes) == 1, f"expected 1 transpose, got {len(transposes)}"
+        t = transposes[0]
+        # Codegen-ready 4-arg form with a materialized scratch operand.
+        assert len(t.args) == 4
+        in_type = cast(ir.TileType, t.args[0].type)
+        scratch_type = cast(ir.TileType, t.args[3].type)
+        res_type = cast(ir.TileType, t.type)
+        assert in_type.shape == [3, 8]
+        assert scratch_type.shape == [3, 8]  # scratch matches SOURCE, not output
+        assert res_type.shape == [8, 3]
+
+        # The scratch is a freshly created tile (shape == source page).
+        creates = [c for c in calls if c.op.name == "tile.create"]
+        assert any(cast(ir.TileType, c.type).shape == [3, 8] for c in creates)
 
     def test_batch_axis_transpose_rejected(self):
         """Transposing a batch axis (axes not {ndim-2, ndim-1}) is a clear user error."""

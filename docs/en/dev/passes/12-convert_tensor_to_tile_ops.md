@@ -86,18 +86,19 @@ When `tensor.slice` feeds into `tensor.matmul` or `tensor.matmul_acc`, the slice
 
 ## Transpose Lowering
 
-`tensor.transpose` lowers to **`tile.create` + 4-arg `tile.transpose(input, axis1, axis2, tmp)`** rather than a 1:1 rename. The PTO `pto.ttrans` instruction requires a scratch workspace tile (same shape/dtype as the source) — emitting that scratch via an explicit `tile.create` lets the memory allocator assign it a real UB hardware address before backend codegen, which is mandatory at `--pto-level=level3`. The scratch lives at the **tail** of the operand list so the user-facing DSL signature `pl.tile.transpose(tile, axis1, axis2, tmp_tile=None)` reads naturally.
+`tensor.transpose` lowers to a plain 3-arg **`tile.transpose(input, axis1, axis2)`**. The PTO `pto.ttrans` instruction needs a scratch workspace tile (same shape/dtype as the source), but that scratch is a pure codegen detail — not a semantic operand. [`FlattenTileNdTo2D`](15-flatten_tile_nd_to_2d.md) is the **sole owner** of scratch materialization: it emits the codegen-ready 4-arg form (`tile.create` + `tile.transpose(..., tmp)`) for both 2D and per-page >2D transposes, still before the memory allocator runs (so the scratch gets a real UB address). Keeping scratch out of the high-level op means `tensor.transpose` and the DSL `pl.tile.transpose(tile, axis1, axis2)` stay 1:1 with the semantic operation.
 
 ```python
 # Before
 y = tensor.transpose(x, 0, 1)
 
-# After
-transpose_tmp = pl.tile.create(x.shape, x.dtype, target_memory=x.memory_space)
-y_tile = pl.tile.transpose(x_tile, 0, 1, tmp_tile=transpose_tmp)
-```
+# After (this pass)
+y_tile = pl.tile.transpose(x_tile, 0, 1)   # 3-arg, no scratch
 
-When users call `pl.tile.transpose(tile, axis1, axis2)` without an explicit `tmp_tile`, the Python IR helper auto-inserts a `tile.create` as the trailing operand.
+# After FlattenTileNdTo2D (scratch materialized there)
+transpose_tmp = pl.tile.create(x.shape, x.dtype, target_memory=x.memory_space)
+y_tile = pl.tile.transpose(x_tile, 0, 1, transpose_tmp)
+```
 
 ## Scatter Update Lowering
 

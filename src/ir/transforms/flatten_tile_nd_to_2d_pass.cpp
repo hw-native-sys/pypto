@@ -520,10 +520,11 @@ BatchOperandInfo NormalizeBatchMatmulOperand(const ExprPtr& operand_expr, const 
 
   if (auto transpose_call = ResolveBatchOperandTranspose(base_operand, def_map)) {
     if (transpose_call->op_ && transpose_call->op_->name_ == "tile.transpose") {
-      // batch_matmul lowering peels the transpose off; the tmp at args_[3] becomes dead and is DCE'd.
-      CHECK(transpose_call->args_.size() == 4)
-          << "FlattenTileNdTo2D: tile.transpose inside tile.batch_matmul must have 4 arguments "
-             "(input, axis1, axis2, tmp), got "
+      // batch_matmul lowering peels the transpose off and only reads input + axes; the
+      // scratch tmp (when present) is irrelevant here. High-level transposes are 3-arg.
+      CHECK(transpose_call->args_.size() == 3 || transpose_call->args_.size() == 4)
+          << "FlattenTileNdTo2D: tile.transpose inside tile.batch_matmul must have 3 or 4 arguments "
+             "(input, axis1, axis2[, tmp]), got "
           << transpose_call->args_.size();
 
       auto input_type = As<TileType>(transpose_call->args_[0]->GetType());
@@ -1397,10 +1398,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
   // If conditions, For/While bounds, etc.), not just Call arguments. A Var used
   // anywhere outside a tile.batch_matmul Call prevents it from being skipped.
   std::unordered_set<const Var*> batch_matmul_only_vars;
-  // Dead scratch tmp Vars of standalone N-D tile.transpose ops. Collected inside
-  // the block below so the guard can reuse use_count / stmt_def_map; consumed by
-  // the main rewrite loop to skip their defining tile.create.
-  std::unordered_set<const Var*> nd_transpose_dead_tmp_vars;
   {
     std::unordered_map<const Var*, int> use_count;
     std::vector<const Var*> batch_matmul_operands;  // ordered to avoid nondeterministic iteration
@@ -1509,33 +1506,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       if (batch_matmul_only_vars.insert(input_var.get()).second) {
         reshape_worklist.push_back(input_var.get());
       }
-    }
-
-    // Collect the dead scratch tmp Vars of standalone N-D tile.transpose ops.
-    // LowerNdTranspose allocates its own per-batch scratch and ignores the DSL
-    // auto-emitted whole-tile tmp (call->args_[3]), so that tmp becomes unused.
-    // It is NOT removed by later DCE (tile.create carries an allocation effect),
-    // so its defining tile.create is skipped in the main rewrite loop below —
-    // otherwise it would emit a narrow pto.alloc_tile that PTOAS rejects. Only
-    // elide a tmp that is (a) defined by a tile.create and (b) used exactly once
-    // (by the transpose being lowered), so a hand-built or rewritten IR that
-    // shares one scratch tile across transposes keeps its defining create.
-    for (const auto& s : stmts) {
-      auto a = As<AssignStmt>(s);
-      if (!a) continue;
-      auto c = As<Call>(a->value_);
-      if (!c || !c->op_ || c->op_->name_ != "tile.transpose") continue;
-      if (batch_matmul_only_vars.count(a->var_.get())) continue;  // peeled by matmul lowering
-      if (c->args_.size() < 4) continue;
-      if (!IsNdTile(As<TileType>(c->args_[0]->GetType()))) continue;  // only >2D goes to LowerNdTranspose
-      auto tmp = As<Var>(c->args_[3]);
-      if (!tmp) continue;
-      if (use_count[tmp.get()] != 1) continue;  // shared scratch — keep its create
-      auto def_it = stmt_def_map.find(tmp.get());
-      if (def_it == stmt_def_map.end()) continue;
-      auto def_call = As<Call>(def_it->second->value_);
-      if (!def_call || !def_call->op_ || def_call->op_->name_ != "tile.create") continue;
-      nd_transpose_dead_tmp_vars.insert(tmp.get());
     }
   }
 
@@ -1784,15 +1754,6 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
 
     const auto& op_name = call->op_->name_;
 
-    // Drop the dead auto-emitted scratch tmp of a standalone N-D tile.transpose
-    // (see the nd_transpose_dead_tmp_vars pre-scan): LowerNdTranspose allocates
-    // its own scratch, so this tmp's narrow tile.create would otherwise emit a
-    // PTOAS-rejected alloc_tile.
-    if (op_name == "tile.create" && nd_transpose_dead_tmp_vars.count(assign->var_.get())) {
-      ctx.Insert(assign->var_, assign->var_);
-      continue;
-    }
-
     // ---- tile.load on >2D tile: preserve the original tensor-rank source window,
     //      but flatten the result tile ----
     // Keep the original tensor-rank offsets/shapes on the call for codegen, then
@@ -2007,13 +1968,46 @@ std::vector<StmtPtr> TransformBody(const std::vector<StmtPtr>& stmts, FlattenCon
       continue;
     }
 
-    // ---- standalone >2D tile.transpose: delegate to LowerNdTranspose ----
-    // 2D transposes fall through to the generic re-create path unchanged.
-    if (op_name == "tile.transpose" && IsNdTile(As<TileType>(call->args_[0]->GetType()))) {
-      auto lowering = LowerNdTranspose(assign, call, ctx, op_registry, span);
-      result.insert(result.end(), lowering.stmts.begin(), lowering.stmts.end());
-      ctx.Insert(assign->var_, lowering.output_var);
-      continue;
+    // ---- standalone tile.transpose: this pass solely owns scratch materialization ----
+    // High-level transposes arrive in the 3-arg form (input, axis1, axis2); the
+    // pto.ttrans scratch is emitted here as the codegen-ready 4-arg form.
+    //   >2D  → LowerNdTranspose: per-page 2D transposes, each with sliced scratch.
+    //   2D   → emit one scratch tile.create + a 4-arg tile.transpose.
+    // An already-4-arg 2D transpose (e.g. hand-built IR) falls through to the generic
+    // re-create path unchanged.
+    if (op_name == "tile.transpose" && batch_matmul_only_vars.count(assign->var_.get()) == 0) {
+      if (IsNdTile(As<TileType>(call->args_[0]->GetType()))) {
+        auto lowering = LowerNdTranspose(assign, call, ctx, op_registry, span);
+        result.insert(result.end(), lowering.stmts.begin(), lowering.stmts.end());
+        ctx.Insert(assign->var_, lowering.output_var);
+        continue;
+      }
+      if (call->args_.size() == 3) {
+        auto in = Substitute(call->args_[0], ctx.var_map);
+        auto in_type = As<TileType>(in->GetType());
+        INTERNAL_CHECK_SPAN(in_type, span)
+            << "Internal error: tile.transpose input must be TileType in FlattenTileNdTo2D";
+        // pto.ttrans reuses the SOURCE type for both ins operands, so scratch shape ==
+        // input shape (NOT the transposed output shape), in the input's memory space.
+        MemorySpace scratch_mem =
+            in_type->memory_space_.has_value() ? *in_type->memory_space_ : MemorySpace::Vec;
+        auto scratch_shape = std::make_shared<MakeTuple>(in_type->shape_, span);
+        std::vector<std::pair<std::string, std::any>> scratch_kw = {
+            {"dtype", in_type->dtype_},
+            {"target_memory", scratch_mem},
+        };
+        auto scratch_create = op_registry.Create("tile.create", {scratch_shape}, scratch_kw, span);
+        auto scratch_var = std::make_shared<Var>("transpose_tmp", scratch_create->GetType(), span);
+        result.push_back(std::make_shared<AssignStmt>(scratch_var, scratch_create, span));
+
+        auto t_call =
+            op_registry.Create("tile.transpose", {in, call->args_[1], call->args_[2], scratch_var}, span);
+        auto t_var = std::make_shared<Var>(assign->var_->name_hint_, t_call->GetType(), assign->var_->span_);
+        result.push_back(std::make_shared<AssignStmt>(t_var, t_call, assign->span_));
+        ctx.Insert(assign->var_, t_var);
+        continue;
+      }
+      // 4-arg 2D transpose: fall through to the generic re-create path below.
     }
 
     // ---- tile.reshape feeding only tile.batch_matmul: skip if it is a safe
@@ -2140,6 +2134,18 @@ class TileOps2DVerifier : public IRVisitor {
       diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileOps2D", 0,
                                 "Tile op '" + name + "' in InCore function '" + func_name_ +
                                     "' produces >2D tile (should have been flattened to 2D)",
+                                stmt_span);
+    }
+
+    // Post-pass, every tile.transpose must be the codegen-ready 4-arg form: this pass
+    // materializes the pto.ttrans scratch for both 2D and per-page >2D transposes, so a
+    // surviving 3-arg form means scratch was never allocated.
+    if (name == "tile.transpose" && call->args_.size() != 4) {
+      diagnostics_.emplace_back(DiagnosticSeverity::Error, "TileOps2D", 0,
+                                "tile.transpose in InCore function '" + func_name_ + "' has " +
+                                    std::to_string(call->args_.size()) +
+                                    " arguments (expected 4: input, axis1, axis2, scratch after "
+                                    "FlattenTileNdTo2D)",
                                 stmt_span);
     }
 
