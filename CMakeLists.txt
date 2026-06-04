@@ -270,6 +270,8 @@ set(PYPTO_SOURCES
     src/backend/950/backend_950.cpp
     src/backend/950/backend_950_handler.cpp
     src/backend/950/backend_950_ops.cpp
+    src/backend/superscalar/backend_superscalar_npu.cpp
+    src/backend/superscalar/backend_superscalar_npu_handler.cpp
     src/backend/common/backend.cpp
     src/backend/common/backend_config.cpp
     src/backend/common/backend_registry.cpp

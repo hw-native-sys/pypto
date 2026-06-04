@@ -46,18 +46,38 @@ if (backend::GetBackendType() != backend::BackendType::Ascend910B) { ... }
 
 ## 接口
 
-| 方法 | 用途 | Ascend910B | Ascend950 |
-| ---- | ---- | ---------- | --------- |
-| `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
-| `GetLaunchSpecCoreCountMethod()` | `launch_spec` 上设置核数的运行时 API 名 | `"set_block_num"` | `"set_core_num"` |
-| `GetDefaultSimPlatform()` | 默认仿真平台名 | `"a2a3sim"` | `"a5sim"` |
-| `GetExtraPtoasFlags()` | ptoas 额外参数 | `[]` | `["--pto-arch", "a5"]` |
-| `RequiresGMPipeBuffer()` | `ExpandMixedKernel` 是否注入 GM 槽位缓冲 | `true` | `false` |
-| `RequiresSplitLoadTpopWorkaround()` | `LegalizePtoBufferReuse` 是否做 split-load tpop 危害规避 | `true` | `false` |
-| `RequiresVtoCFractalAdapt()` | AIV 端 V→C tpush 是否需要 fractal 适配 `tile.move` | `false` | `true` |
-| `RequiresRuntimeSubblockBridge()` | 拆分 AIV 包装器是否从 runtime 上下文取 subblock id | `true` | `false` |
-| `RequiresNoSplitDualAivDispatch()` | `no_split` 混合 kernel 是否仍需在两个 AIV lane 上同时下发 | `true` | `false` |
-| `BuildCrossCoreTransferView(dest, view)` | 跨核传输边界处的 tile 视图 | Mat/Left/Right 转 NZ；Vec 保持原样 | Mat/Left/Right 转 NZ（a5 硬件要求边界为 fractal）；Vec 保持原样 |
+| 方法 | 用途 | Ascend910B | Ascend950 | SuperscalarNPU |
+| ---- | ---- | ---------- | --------- | -------------- |
+| `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` | `"superscalar"`（占位，无 codegen） |
+| `GetLaunchSpecCoreCountMethod()` | `launch_spec` 上设置核数的运行时 API 名 | `"set_block_num"` | `"set_core_num"` | `"set_core_num"` |
+| `GetDefaultSimPlatform()` | 默认仿真平台名 | `"a2a3sim"` | `"a5sim"` | `"superscalarsim"` |
+| `GetExtraPtoasFlags()` | ptoas 额外参数 | `[]` | `["--pto-arch", "a5"]` | `[]` |
+| `RequiresGMPipeBuffer()` | `ExpandMixedKernel` 是否注入 GM 槽位缓冲 | `true` | `false` | `false` |
+| `RequiresSplitLoadTpopWorkaround()` | `LegalizePtoBufferReuse` 是否做 split-load tpop 危害规避 | `true` | `false` | `false` |
+| `RequiresVtoCFractalAdapt()` | AIV 端 V→C tpush 是否需要 fractal 适配 `tile.move` | `false` | `true` | `false` |
+| `RequiresRuntimeSubblockBridge()` | 拆分 AIV 包装器是否从 runtime 上下文取 subblock id | `true` | `false` | `false` |
+| `RequiresNoSplitDualAivDispatch()` | `no_split` 混合 kernel 是否仍需在两个 AIV lane 上同时下发 | `true` | `false` | `false` |
+| `BuildCrossCoreTransferView(dest, view)` | 跨核传输边界处的 tile 视图 | Mat/Left/Right 转 NZ；Vec 保持原样 | Mat/Left/Right 转 NZ（a5 硬件要求边界为 fractal）；Vec 保持原样 | 不可达（单核，无跨核） |
+| `GetDefaultOnChipMemorySpace()` | `InferTileMemorySpace` 中无约束 tile 的默认片上空间 | `Vec` | `Vec` | `TREG` |
+
+### SuperscalarNPU 后端
+
+SuperscalarNPU 是寄存器文件后端：内存空间只有 DDR 与 `TREG`——一个由 256 个固定
+4 KB 块（共 1 MB）组成、按块编号寻址的寄存器文件。它没有 cube/vector 核，因此
+`SuperscalarNPU` pass 策略（`OptimizationStrategy.SuperscalarNPU`）将 tensor 算子
+下降为 tile 算子后，在寄存器重命名式 TREG 分配处停止——省略所有 Ascend 的
+cube/vector/跨核 pass，且暂未实现 codegen。
+
+两个机制让共享 pass 无需按 `BackendType` 分支：
+
+- `GetDefaultOnChipMemorySpace()` 让 `InferTileMemorySpace` 为各后端分配各自的
+  片上存储（Ascend 为 `Vec`，此处为 `TREG`）。通用的 `Vec` 算子输入约束同样会被
+  实现为该默认空间，因此不会插入多余的 `tile.move`。
+- `Backend::CreateMemoryAllocatorPolicy()` 返回
+  `SuperscalarNPURegisterAllocatorPolicy`，它在 MemRef 中存储**块编号**
+  （通过 `MemoryAllocatorPolicy::AddressUnitBytes` = 4096），为大于 4 KB 的 tile
+  预留连续块，并在同时存活的块超过 256（`MaxAddressUnits`）时抛出面向用户的
+  错误——即寄存器压力。基于生命周期的合并仍由共享的 `MemoryReuse` pass 完成。
 
 ## 新增后端流程
 

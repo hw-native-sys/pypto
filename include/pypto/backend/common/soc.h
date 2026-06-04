@@ -258,6 +258,18 @@ const SoC& Create910BSoC();
  */
 const SoC& Create950SoC();
 
+/**
+ * @brief Create SuperscalarNPU SoC configuration (singleton)
+ *
+ * Memory model: DDR (off-chip) plus a TREG register file of 256 fixed 4KB
+ * blocks (1MB total), addressed by block index. There are no cube/vector cores
+ * and no L1/L0 buffers. The single compute core is modelled as a VECTOR core
+ * carrying the TREG memory (CoreType has no dedicated SuperscalarNPU value).
+ *
+ * @return Const reference to SuperscalarNPU SoC
+ */
+const SoC& CreateSuperscalarNPUSoC();
+
 }  // namespace backend
 }  // namespace pypto
 

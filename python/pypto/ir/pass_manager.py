@@ -90,6 +90,10 @@ class OptimizationStrategy(Enum):
 
     Default = "Default"  # Full tensor-oriented PTO pipeline
     DebugTileOptimization = "DebugTileOptimization"  # Debug-only PTO tile pipeline
+    # SuperscalarNPU: DDR + TREG register-file backend. Lowers tensor ops to
+    # tile ops and assigns TREG memory with register-renaming allocation,
+    # skipping every Ascend cube/vector/cross-core pass. IR-only (no codegen).
+    SuperscalarNPU = "SuperscalarNPU"
 
 
 class PassManager:
@@ -188,9 +192,36 @@ class PassManager:
             # other transform has to reason about the inserted scope wrappers.
             ("MaterializeRuntimeScopes", lambda: passes.materialize_runtime_scopes()),
         ]
+        # SuperscalarNPU (DDR + TREG register file): lower tensor ops to tile
+        # ops, assign TREG memory space, and allocate via register renaming.
+        # This backend has no cube/vector cores, so every Ascend-specific pass
+        # (L0 matmul tiling, mixed-kernel expansion, GM pipe buffers, cross-core
+        # splits, layout resolution, distributed comm) is omitted. The pipeline
+        # stops after AllocateMemoryAddr — codegen is not implemented yet.
+        superscalar_tensor_passes: list[PassSpec] = [
+            ("SplitChunkedLoops", lambda: passes.split_chunked_loops()),
+            ("InterchangeChunkLoops", lambda: passes.interchange_chunk_loops()),
+            ("OutlineHierarchyScopes", lambda: passes.outline_hierarchy_scopes()),
+            ("OutlineIncoreScopes", lambda: passes.outline_incore_scopes()),
+            ("OutlineClusterScopes", lambda: passes.outline_cluster_scopes()),
+            ("ConvertTensorToTileOps", lambda: passes.convert_tensor_to_tile_ops()),
+            ("OptimizeOrchTensors", lambda: passes.optimize_orch_tensors()),
+        ]
+        superscalar_tile_passes: list[PassSpec] = [
+            ("LowerCompositeOps", lambda: passes.lower_composite_ops()),
+            ("FlattenTileNdTo2D", lambda: passes.flatten_tile_nd_to_2d()),
+            ("InferTileMemorySpace", lambda: passes.infer_tile_memory_space()),
+            ("MaterializeTensorStrides", lambda: passes.materialize_tensor_strides()),
+            ("InitMemRef", lambda: passes.init_mem_ref()),
+            ("MemoryReuse", lambda: passes.memory_reuse()),
+            ("AllocateMemoryAddr", lambda: passes.allocate_memory_addr()),
+        ]
         cls._strategy_passes = {
             OptimizationStrategy.Default: tensor_prefix_passes + tensor_only_passes + tile_pto_passes,
             OptimizationStrategy.DebugTileOptimization: tensor_prefix_passes + tile_pto_passes,
+            OptimizationStrategy.SuperscalarNPU: (
+                tensor_prefix_passes + superscalar_tensor_passes + superscalar_tile_passes
+            ),
         }
 
     @classmethod

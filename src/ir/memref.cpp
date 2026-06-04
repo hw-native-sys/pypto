@@ -45,6 +45,8 @@ std::string MemorySpaceToString(MemorySpace space) {
       return "Bias";
     case MemorySpace::ScalarLocal:
       return "ScalarLocal";
+    case MemorySpace::TREG:
+      return "TREG";
     default:
       return "Unknown";
   }
@@ -59,6 +61,7 @@ MemorySpace StringToMemorySpace(const std::string& str) {
   if (str == "Acc") return MemorySpace::Acc;
   if (str == "Bias") return MemorySpace::Bias;
   if (str == "ScalarLocal") return MemorySpace::ScalarLocal;
+  if (str == "TREG") return MemorySpace::TREG;
   throw pypto::ValueError("Unknown MemorySpace: " + str);
 }
 

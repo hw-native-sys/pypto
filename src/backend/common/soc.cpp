@@ -184,5 +184,31 @@ const SoC& Create950SoC() {
   return soc;
 }
 
+// ========== SuperscalarNPU SoC Factory ==========
+
+const SoC& CreateSuperscalarNPUSoC() {
+  // Singleton instance for the SuperscalarNPU backend.
+  static SoC soc = []() {
+    // Single compute core carrying the TREG register file: 256 fixed 4KB
+    // blocks = 1MB total, 4KB-aligned (one block). There is no cube/vector
+    // distinction on this backend; CoreType only offers CUBE/VECTOR, so VECTOR
+    // is reused as the generic compute core.
+    Core npu_core(ir::CoreType::VECTOR, {
+                                            Mem(ir::MemorySpace::TREG, 256ULL * 4096, 4096),  // 1MB TREG
+                                        });
+
+    Cluster cluster(npu_core, 1);  // 1 core per cluster
+    Die die(cluster, 1);           // 1 cluster per die
+
+    // Memory hierarchy graph: data moves between DDR and TREG only.
+    std::map<ir::MemorySpace, std::vector<ir::MemorySpace>> mem_graph;
+    mem_graph[ir::MemorySpace::DDR] = {ir::MemorySpace::TREG};
+    mem_graph[ir::MemorySpace::TREG] = {ir::MemorySpace::DDR};
+
+    return SoC(die, 1, std::move(mem_graph));
+  }();
+  return soc;
+}
+
 }  // namespace backend
 }  // namespace pypto

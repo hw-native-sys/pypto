@@ -29,6 +29,11 @@ namespace ir {
  * - Acc: Accumulator buffer
  * - Bias: Bias buffer
  * - ScalarLocal: On-core scalar register file / C stack (for ArrayType)
+ * - TREG: SuperscalarNPU register file (256 fixed 4KB blocks, addressed by block index)
+ *
+ * NOTE: New values must be appended at the end — the enum is serialized by its
+ * integer value (see backend serialization), so reordering would break .pto
+ * files and exported backends.
  */
 enum class MemorySpace {
   DDR,          ///< DDR memory (off-chip)
@@ -39,6 +44,7 @@ enum class MemorySpace {
   Acc,          ///< Accumulator buffer
   Bias,         ///< Bias buffer
   ScalarLocal,  ///< On-core scalar register file / C stack (for ArrayType)
+  TREG,         ///< SuperscalarNPU register file (256 fixed 4KB blocks, addressed by block index)
 };
 
 /**

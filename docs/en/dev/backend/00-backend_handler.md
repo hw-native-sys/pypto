@@ -49,18 +49,43 @@ to global state.
 
 ## Interface
 
-| Method | Purpose | Ascend910B | Ascend950 |
-| ------ | ------- | ---------- | --------- |
-| `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` |
-| `GetLaunchSpecCoreCountMethod()` | runtime API name on `launch_spec` | `"set_block_num"` | `"set_core_num"` |
-| `GetDefaultSimPlatform()` | default simulator platform | `"a2a3sim"` | `"a5sim"` |
-| `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` |
-| `RequiresGMPipeBuffer()` | inject GM-backed pipe slot in `ExpandMixedKernel` | `true` | `false` |
-| `RequiresSplitLoadTpopWorkaround()` | split-load tpop hazard fix in `LegalizePtoBufferReuse` | `true` | `false` |
-| `RequiresVtoCFractalAdapt()` | AIV-side V-to-C fractal adapter `tile.move` | `false` | `true` |
-| `RequiresRuntimeSubblockBridge()` | split AIV wrappers source subblock id from runtime | `true` | `false` |
-| `RequiresNoSplitDualAivDispatch()` | `no_split` mixed kernels still dispatch on both AIV lanes | `true` | `false` |
-| `BuildCrossCoreTransferView(dest, view)` | layout at cross-core transfer boundary | NZ for Mat/Left/Right; preserve for Vec | NZ for Mat/Left/Right; preserve for Vec (a5 hardware also requires fractal at the boundary) |
+| Method | Purpose | Ascend910B | Ascend950 | SuperscalarNPU |
+| ------ | ------- | ---------- | --------- | -------------- |
+| `GetPtoTargetArch()` | `module attributes {pto.target_arch = "..."}` | `"a2a3"` | `"a5"` | `"superscalar"` (placeholder; no codegen) |
+| `GetLaunchSpecCoreCountMethod()` | runtime API name on `launch_spec` | `"set_block_num"` | `"set_core_num"` | `"set_core_num"` |
+| `GetDefaultSimPlatform()` | default simulator platform | `"a2a3sim"` | `"a5sim"` | `"superscalarsim"` |
+| `GetExtraPtoasFlags()` | extra ptoas flags | `[]` | `["--pto-arch", "a5"]` | `[]` |
+| `RequiresGMPipeBuffer()` | inject GM-backed pipe slot in `ExpandMixedKernel` | `true` | `false` | `false` |
+| `RequiresSplitLoadTpopWorkaround()` | split-load tpop hazard fix in `LegalizePtoBufferReuse` | `true` | `false` | `false` |
+| `RequiresVtoCFractalAdapt()` | AIV-side V-to-C fractal adapter `tile.move` | `false` | `true` | `false` |
+| `RequiresRuntimeSubblockBridge()` | split AIV wrappers source subblock id from runtime | `true` | `false` | `false` |
+| `RequiresNoSplitDualAivDispatch()` | `no_split` mixed kernels still dispatch on both AIV lanes | `true` | `false` | `false` |
+| `BuildCrossCoreTransferView(dest, view)` | layout at cross-core transfer boundary | NZ for Mat/Left/Right; preserve for Vec | NZ for Mat/Left/Right; preserve for Vec (a5 hardware also requires fractal at the boundary) | unreachable (single core, no cross-core) |
+| `GetDefaultOnChipMemorySpace()` | default on-chip space for unconstrained tiles in `InferTileMemorySpace` | `Vec` | `Vec` | `TREG` |
+
+### SuperscalarNPU backend
+
+SuperscalarNPU is a register-file backend: its only memory spaces are DDR and
+`TREG`, a register file of 256 fixed 4 KB blocks (1 MB) addressed by block
+index. It has no cube/vector cores, so the `SuperscalarNPU` pass strategy
+(`OptimizationStrategy.SuperscalarNPU`) lowers tensor ops to tile ops and stops
+after register-renaming TREG allocation — every Ascend cube/vector/cross-core
+pass is omitted, and codegen is not implemented yet.
+
+Two mechanisms make the shared passes backend-agnostic instead of branching on
+`BackendType`:
+
+- `GetDefaultOnChipMemorySpace()` lets `InferTileMemorySpace` assign each
+  backend's on-chip storage (`Vec` on Ascend, `TREG` here). A generic `Vec`
+  op input-constraint is likewise realized as this default, so no spurious
+  `tile.move` is inserted.
+- `Backend::CreateMemoryAllocatorPolicy()` returns
+  `SuperscalarNPURegisterAllocatorPolicy`, which stores **block indices** in the
+  MemRef (via `MemoryAllocatorPolicy::AddressUnitBytes` = 4096), reserves
+  consecutive blocks for tiles larger than 4 KB, and raises a user-facing error
+  when more than 256 blocks (`MaxAddressUnits`) are simultaneously live —
+  i.e. register pressure. Liveness-based coalescing is still performed by the
+  shared `MemoryReuse` pass.
 
 ## Adding a new backend
 

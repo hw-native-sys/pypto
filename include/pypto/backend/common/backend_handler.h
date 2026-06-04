@@ -235,6 +235,21 @@ class BackendHandler {
    * outer matmul shape is itself smaller than this threshold).
    */
   [[nodiscard]] virtual int GetMinL0TileDim() const { return 16; }
+
+  // ---------------------------------------------------------------------------
+  // Memory-space inference
+  // ---------------------------------------------------------------------------
+
+  /**
+   * @brief Default on-chip memory space for tiles with no specific demand.
+   *
+   * InferTileMemorySpace assigns this space to retargetable producers and tiles
+   * that carry no op-imposed constraint. Ascend backends default to the unified
+   * vector buffer (`Vec`); SuperscalarNPU has a single register file and defaults
+   * to `TREG`. Returning the right value here lets the shared inference pass
+   * target each backend's on-chip storage without branching on BackendType.
+   */
+  [[nodiscard]] virtual ir::MemorySpace GetDefaultOnChipMemorySpace() const { return ir::MemorySpace::Vec; }
 };
 
 }  // namespace backend

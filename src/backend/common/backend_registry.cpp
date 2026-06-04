@@ -69,8 +69,18 @@ bool RegisterBackend950() {
   return true;
 }
 
+bool RegisterBackendSuperscalarNPU() {
+  BackendRegistry::Instance().Register("SuperscalarNPU", [](const std::shared_ptr<const SoC>& /*unused*/) {
+    throw ValueError(
+        "Cannot create BackendSuperscalarNPU via registry - use BackendSuperscalarNPU::Instance()");
+    return std::unique_ptr<Backend>(nullptr);  // Never reached
+  });
+  return true;
+}
+
 static bool backend_910b_registered = RegisterBackend910B();
 static bool backend_950_registered = RegisterBackend950();
+static bool backend_superscalar_npu_registered = RegisterBackendSuperscalarNPU();
 }  // namespace
 
 }  // namespace backend

@@ -298,6 +298,13 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
 
     policy.OrderMemRefs(refs);
 
+    // Address unit for this space: 1 for byte-addressed spaces, the block size
+    // (e.g. 4096) for register-file spaces such as SuperscalarNPU TREG, where
+    // the stored MemRef address is a block index rather than a byte address.
+    const uint64_t addr_unit = policy.AddressUnitBytes(space);
+    const uint64_t max_units = policy.MaxAddressUnits(space);
+    INTERNAL_CHECK(addr_unit >= 1) << "AddressUnitBytes must be >= 1, got " << addr_unit;
+
     // Group MemRefs by base_ Ptr identity.  base_order preserves the policy's
     // sort order via the first MemRef that introduces each base.
     std::map<const Var*, std::vector<MemRefPtr>> base_groups;
@@ -357,8 +364,14 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
         }
         // INT64 dtype is required by the PTOAS dialect's `pto.alloc_tile` addr
         // operand; PTO codegen reads this dtype from the ConstInt 1:1.
-        auto member_addr_expr = std::make_shared<ConstInt>(
-            static_cast<int64_t>(current_addr) + relative_offset, DataType::INT64, Span::unknown());
+        //
+        // For register-file spaces (addr_unit > 1) the stored value is a block
+        // index, obtained by folding the byte address down by the unit. A slot
+        // is always aligned to a unit boundary (see AlignAddress), so the root
+        // member divides exactly; a const view offset is folded the same way.
+        const int64_t byte_addr = static_cast<int64_t>(current_addr) + relative_offset;
+        const int64_t stored_addr = addr_unit > 1 ? byte_addr / static_cast<int64_t>(addr_unit) : byte_addr;
+        auto member_addr_expr = std::make_shared<ConstInt>(stored_addr, DataType::INT64, Span::unknown());
         // NOTE: MemRef is identity-bearing — each result must get a fresh
         // unique_id_, so build it via the explicit constructor (MutableCopy is
         // static_assert-forbidden for Var/MemRef).
@@ -368,6 +381,19 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
       }
 
       current_addr = policy.AlignAddress(current_addr + slot_size, space);
+    }
+
+    // Register-file pressure check: a space with a bounded unit count (e.g.
+    // SuperscalarNPU TREG, 256 blocks) cannot hold more live blocks than it
+    // has. This is a documented user-facing limitation, so report it as a user
+    // error rather than an internal invariant.
+    if (addr_unit > 1 && max_units != UINT64_MAX) {
+      const uint64_t used_units = (current_addr + addr_unit - 1) / addr_unit;
+      CHECK(used_units <= max_units) << "Register pressure exceeded in " << MemorySpaceToString(space)
+                                     << ": kernel needs " << used_units << " register blocks but only "
+                                     << max_units
+                                     << " are available. Reduce the number of simultaneously-live tiles "
+                                        "(shorten lifetimes, reuse buffers, or split the kernel).";
     }
   }
 
@@ -461,7 +487,8 @@ namespace {
  */
 class AllocatedMemoryAddrVerifier : public IRVisitor {
  public:
-  explicit AllocatedMemoryAddrVerifier(std::vector<Diagnostic>& diagnostics) : diagnostics_(diagnostics) {}
+  AllocatedMemoryAddrVerifier(std::vector<Diagnostic>& diagnostics, const MemoryAllocatorPolicy* policy)
+      : diagnostics_(diagnostics), policy_(policy) {}
 
   void VisitVarLike_(const VarPtr& op) override {
     if (!op || !op->GetType()) return;
@@ -480,6 +507,7 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
 
  private:
   std::vector<Diagnostic>& diagnostics_;
+  const MemoryAllocatorPolicy* policy_;
   std::set<const MemRef*> seen_;
   std::unordered_map<MemorySpace, uint64_t> high_water_;
 
@@ -497,7 +525,11 @@ class AllocatedMemoryAddrVerifier : public IRVisitor {
       return;
     }
 
-    uint64_t end = static_cast<uint64_t>(const_offset->value_) + memref->size_;
+    // For register-file spaces the stored address is a block index; scale it
+    // back to bytes by the policy's address unit so the high-water mark (and the
+    // platform-limit comparison) stays in bytes regardless of addressing model.
+    const uint64_t unit = policy_ ? policy_->AddressUnitBytes(memory_space) : 1;
+    uint64_t end = static_cast<uint64_t>(const_offset->value_) * unit + memref->size_;
     auto& hw = high_water_[memory_space];
     if (end > hw) hw = end;
   }
@@ -513,11 +545,12 @@ class AllocatedMemoryAddrPropertyVerifierImpl : public PropertyVerifier {
     if (!program) return;
 
     const backend::Backend* be = backend::BackendConfig::IsConfigured() ? backend::GetBackend() : nullptr;
+    MemoryAllocatorPolicyPtr policy = be ? be->CreateMemoryAllocatorPolicy() : nullptr;
 
     for (const auto& [gv, func] : program->functions_) {
       if (!func || !func->body_) continue;
 
-      AllocatedMemoryAddrVerifier verifier(diagnostics);
+      AllocatedMemoryAddrVerifier verifier(diagnostics, policy.get());
       verifier.VisitStmt(func->body_);
 
       if (!be) continue;

@@ -23,6 +23,7 @@
 
 #include "pypto/backend/common/backend.h"
 #include "pypto/backend/common/backend_config.h"
+#include "pypto/backend/common/backend_handler.h"
 #include "pypto/core/any_cast.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
@@ -68,6 +69,15 @@ const std::vector<std::vector<MemorySpace>>* GetInputConstraints(const std::stri
 // the permissive default, so a specialized demand (Mat, Left, Right, Acc) wins.
 bool ShouldOverrideDemand(MemorySpace existing, MemorySpace incoming) {
   return existing == MemorySpace::Vec && incoming != MemorySpace::Vec;
+}
+
+// Map a registered op input-constraint space onto the backend's on-chip default.
+// Op constraints are written against the generic `Vec` space; a backend whose
+// on-chip storage is not Vec (SuperscalarNPU → TREG) realizes a Vec constraint
+// as its own default so the producer already satisfies it and no spurious
+// cross-space tile.move is inserted. On Ascend (default == Vec) this is a no-op.
+inline MemorySpace MapConstraintSpace(MemorySpace s, MemorySpace default_onchip) {
+  return s == MemorySpace::Vec ? default_onchip : s;
 }
 
 // ============================================================================
@@ -163,8 +173,9 @@ class DemandCollector : public IRVisitor {
 
 class TileMemorySpaceAnalyzer : public IRVisitor {
  public:
-  TileMemorySpaceAnalyzer(const std::vector<VarPtr>& params, const std::map<VarPtr, MemorySpace>& demands)
-      : demands_(demands) {
+  TileMemorySpaceAnalyzer(const std::vector<VarPtr>& params, const std::map<VarPtr, MemorySpace>& demands,
+                          MemorySpace default_onchip)
+      : demands_(demands), default_onchip_(default_onchip) {
     for (const auto& var : params) {
       INTERNAL_CHECK(!As<TileType>(var->GetType()))
           << "InCore function parameter '" << var->name_hint_
@@ -185,8 +196,8 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
       if (op_name.rfind("tile.", 0) == 0) {
         var_memory_[op->var_] = InferFromOp(op_name, call, op->var_);
       } else {
-        // Non-tile ops producing TileType: default to Vec
-        var_memory_[op->var_] = MemorySpace::Vec;
+        // Non-tile ops producing TileType: default to the backend's on-chip space
+        var_memory_[op->var_] = default_onchip_;
       }
     } else if (auto src_var = As<Var>(op->value_)) {
       // Plain SSA alias `y = x`. Inherit x's memory space onto y so later
@@ -251,15 +262,30 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
 
  private:
   const std::map<VarPtr, MemorySpace>& demands_;
+  // Backend's default on-chip space (Vec on Ascend, TREG on SuperscalarNPU) for
+  // tiles with no op-imposed demand.
+  MemorySpace default_onchip_;
   std::map<VarPtr, MemorySpace> var_memory_;
 
   MemorySpace InferFromOp(const std::string& op_name, const CallPtr& call, const VarPtr& out_var) {
+    MemorySpace space = InferFromOpRaw(op_name, call, out_var);
+    // `Vec` is the generic on-chip default baked in by earlier lowering
+    // (ConvertTensorToTileOps emits `target_memory=Vec` for unconstrained
+    // loads). Each backend realizes that default through its own on-chip
+    // storage: Ascend keeps Vec (default_onchip_ == Vec, so this is a no-op),
+    // while SuperscalarNPU has no Vec and realizes it as TREG. Specialized
+    // spaces (Mat/Left/Right/Acc/Bias) are left untouched.
+    if (space == MemorySpace::Vec) return default_onchip_;
+    return space;
+  }
+
+  MemorySpace InferFromOpRaw(const std::string& op_name, const CallPtr& call, const VarPtr& out_var) {
     auto& registry = OpRegistry::GetInstance();
 
     // Handle unregistered ops (backward compat)
     if (!registry.IsRegistered(op_name)) {
       if (kUnregisteredCubeOps.count(op_name) > 0) return MemorySpace::Acc;
-      return MemorySpace::Vec;
+      return default_onchip_;
     }
 
     const auto& entry = registry.GetEntry(op_name);
@@ -271,7 +297,7 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
           return *tile_type->memory_space_;
         }
       }
-      return MemorySpace::Vec;
+      return default_onchip_;
     }
 
     auto result = spec_opt->deduce_output_memory(call->kwargs_);
@@ -289,21 +315,23 @@ class TileMemorySpaceAnalyzer : public IRVisitor {
     // compute op (matmul) cannot be satisfied by a DDR load directly and must
     // still route through Mat with a subsequent tile.move.
     if (spec_opt->output_inherits_input) {
-      return InheritFromInput(call).value_or(MemorySpace::Vec);
+      return InheritFromInput(call).value_or(default_onchip_);
     }
     if (entry.HasRetargetableMemoryKwarg()) {
       auto demand_it = demands_.find(out_var);
       if (demand_it != demands_.end()) {
         MemorySpace demand = demand_it->second;
         // Retargetable DDR-facing producers (tile.load) can only directly
-        // produce {Vec, Mat}; specialized demands (Left/Right/Acc/Bias) from
-        // downstream compute ops (matmul etc.) must be reached via a
-        // tile.move inserted by Phase 2 MoveCollector. Clamping here keeps
-        // the producer's output hardware-valid and preserves the move chain.
-        if (demand == MemorySpace::Vec || demand == MemorySpace::Mat) return demand;
+        // produce {default on-chip space, Mat}; specialized demands
+        // (Left/Right/Acc/Bias) from downstream compute ops (matmul etc.) must
+        // be reached via a tile.move inserted by Phase 2 MoveCollector. Clamping
+        // here keeps the producer's output hardware-valid and preserves the move
+        // chain. On SuperscalarNPU the only on-chip space is TREG (the default),
+        // so this collapses to "keep the demand if it is TREG".
+        if (demand == default_onchip_ || demand == MemorySpace::Mat) return demand;
       }
     }
-    return InheritFromInput(call).value_or(MemorySpace::Vec);
+    return InheritFromInput(call).value_or(default_onchip_);
   }
 
   std::optional<MemorySpace> InheritFromInput(const CallPtr& call) {
@@ -334,7 +362,8 @@ struct MoveKeyLess {
 
 class MoveCollector : public IRVisitor {
  public:
-  explicit MoveCollector(const std::map<VarPtr, MemorySpace>& var_memory) : var_memory_(var_memory) {}
+  MoveCollector(const std::map<VarPtr, MemorySpace>& var_memory, MemorySpace default_onchip)
+      : var_memory_(var_memory), default_onchip_(default_onchip) {}
 
   [[nodiscard]] const std::set<MoveKey, MoveKeyLess>& GetNeededMoves() const { return needed_moves_; }
 
@@ -354,6 +383,7 @@ class MoveCollector : public IRVisitor {
 
  private:
   const std::map<VarPtr, MemorySpace>& var_memory_;
+  MemorySpace default_onchip_;
   std::set<MoveKey, MoveKeyLess> needed_moves_;
 
   void CheckInputConstraints(const CallPtr& call) {
@@ -369,10 +399,14 @@ class MoveCollector : public IRVisitor {
       auto it = var_memory_.find(var);
       if (it == var_memory_.end()) continue;
 
-      bool allowed =
-          std::find(allowed_spaces.begin(), allowed_spaces.end(), it->second) != allowed_spaces.end();
+      // Map each constraint space onto the backend on-chip default so a generic
+      // `Vec` constraint is satisfied by the backend's storage (TREG on
+      // SuperscalarNPU) without a spurious move.
+      bool allowed = std::any_of(allowed_spaces.begin(), allowed_spaces.end(), [&](MemorySpace s) {
+        return MapConstraintSpace(s, default_onchip_) == it->second;
+      });
       if (!allowed) {
-        needed_moves_.insert({var, allowed_spaces[0]});
+        needed_moves_.insert({var, MapConstraintSpace(allowed_spaces[0], default_onchip_)});
       }
     }
   }
@@ -385,8 +419,8 @@ class MoveCollector : public IRVisitor {
 class TileMemorySpaceMutator : public IRMutator {
  public:
   TileMemorySpaceMutator(const std::map<VarPtr, MemorySpace>& var_memory,
-                         const std::set<MoveKey, MoveKeyLess>& needed_moves)
-      : var_memory_(var_memory), needed_moves_(needed_moves) {}
+                         const std::set<MoveKey, MoveKeyLess>& needed_moves, MemorySpace default_onchip)
+      : var_memory_(var_memory), needed_moves_(needed_moves), default_onchip_(default_onchip) {}
 
  protected:
   // When promoting to a new memory_space, refresh the layout pieces (blayout/
@@ -466,7 +500,7 @@ class TileMemorySpaceMutator : public IRMutator {
       bool substituted = false;
       if (constraints && i < constraints->size() && !(*constraints)[i].empty()) {
         if (auto var = As<Var>(op->args_[i])) {
-          MoveKey key = {var, (*constraints)[i][0]};
+          MoveKey key = {var, MapConstraintSpace((*constraints)[i][0], default_onchip_)};
           auto move_it = created_moves_.find(key);
           if (move_it != created_moves_.end()) {
             new_args.push_back(move_it->second);
@@ -594,6 +628,7 @@ class TileMemorySpaceMutator : public IRMutator {
  private:
   const std::map<VarPtr, MemorySpace>& var_memory_;
   const std::set<MoveKey, MoveKeyLess>& needed_moves_;
+  MemorySpace default_onchip_;
   std::map<VarPtr, ExprPtr> var_cache_;
   std::map<MoveKey, ExprPtr, MoveKeyLess> created_moves_;
   // One entry per active SeqStmts scope holding the keys inserted into
@@ -647,7 +682,7 @@ class TileMemorySpaceMutator : public IRMutator {
       auto var = As<Var>(call->args_[i]);
       if (!var) continue;
 
-      MoveKey key = {var, (*constraints)[i][0]};
+      MoveKey key = {var, MapConstraintSpace((*constraints)[i][0], default_onchip_)};
       if (needed_moves_.count(key) == 0 || created_moves_.count(key) > 0) {
         continue;
       }
@@ -737,7 +772,14 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
 
   // Phase 1: Analyze — infer memory space for each tile variable, using Phase-0
   // demand as fallback for retargetable producers whose target_memory is absent.
-  TileMemorySpaceAnalyzer analyzer(func->params_, demand_collector.GetDemands());
+  // The backend's BackendHandler chooses the default on-chip space (Vec on
+  // Ascend, TREG on SuperscalarNPU) so this shared pass targets each backend's
+  // storage without branching on BackendType.
+  MemorySpace default_onchip = MemorySpace::Vec;
+  if (backend::BackendConfig::IsConfigured()) {
+    default_onchip = backend::GetBackend()->GetHandler()->GetDefaultOnChipMemorySpace();
+  }
+  TileMemorySpaceAnalyzer analyzer(func->params_, demand_collector.GetDemands(), default_onchip);
   analyzer.VisitStmt(func->body_);
 
   const auto& var_memory = analyzer.GetVarMemory();
@@ -747,12 +789,12 @@ FunctionPtr TransformInferTileMemorySpace(const FunctionPtr& func) {
 
   // Phase 2: Collect needed tile.move insertions for residual input-constraint
   // mismatches (producer and demand both resolved to different fixed spaces).
-  MoveCollector collector(var_memory);
+  MoveCollector collector(var_memory, default_onchip);
   collector.VisitStmt(func->body_);
 
   // Phase 3: Mutate — set memory_space_ on types, insert moves, substitute args,
   // rewrite target_memory kwargs on retargetable producers to stay consistent.
-  TileMemorySpaceMutator mutator(var_memory, collector.GetNeededMoves());
+  TileMemorySpaceMutator mutator(var_memory, collector.GetNeededMoves(), default_onchip);
   auto new_body = mutator.VisitStmt(func->body_);
 
   auto new_func = MutableCopy(func);

@@ -30,6 +30,7 @@
 #include "pypto/backend/910B/backend_910b.h"
 #include "pypto/backend/950/backend_950.h"
 #include "pypto/backend/common/backend_registry.h"
+#include "pypto/backend/superscalar/backend_superscalar_npu.h"
 #include "pypto/ir/memory_allocator_policy.h"
 
 // clang-format off
@@ -52,8 +53,11 @@ const Backend* GetBackendInstance(BackendType type) {
       return &Backend910B::Instance();
     case BackendType::Ascend950:
       return &Backend950::Instance();
+    case BackendType::SuperscalarNPU:
+      return &BackendSuperscalarNPU::Instance();
     default:
-      CHECK(false) << "GetBackendInstance: unexpected BackendType (must be Ascend910B or Ascend950)";
+      CHECK(false) << "GetBackendInstance: unexpected BackendType (must be Ascend910B, Ascend950, or "
+                      "SuperscalarNPU)";
       return nullptr;  // unreachable
   }
 }
@@ -64,6 +68,8 @@ std::string BackendTypeToString(BackendType type) {
       return "Ascend910B";
     case BackendType::Ascend950:
       return "Ascend950";
+    case BackendType::SuperscalarNPU:
+      return "SuperscalarNPU";
   }
   return "Unknown";
 }
