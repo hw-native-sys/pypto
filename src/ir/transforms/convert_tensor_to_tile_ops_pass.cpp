@@ -749,11 +749,17 @@ ExprPtr GetWriteTargetExpr(const CallPtr& call) {
   if (op_name == "tensor.assemble" && !call->args_.empty()) {
     return call->args_[0];
   }
+  // pld.tile.remote_store(src_tile, target, peer, offsets): the cross-rank write
+  // lands in `target` (args_[1]). Recognising it here lets the enclosing window
+  // param be upgraded from In to Out/InOut so a later reader gets a RAW edge.
+  if (op_name == "pld.tile.remote_store" && call->args_.size() >= 2) {
+    return call->args_[1];
+  }
   return nullptr;
 }
 
 void UpdateTensorAliasOrigin(const VarPtr& var, const ParamOrigins& origins, AliasOriginMap& origin_map) {
-  if (As<TensorType>(var->GetType()) && !origins.empty()) {
+  if (AsTensorTypeLike(var->GetType()) && !origins.empty()) {
     origin_map[var.get()] = origins;
   } else {
     origin_map.erase(var.get());
@@ -854,6 +860,21 @@ void AnalyzeCallAccess(const CallPtr& call, const AliasOriginMap& origin_map, st
     return;
   }
 
+  if (op_name == "pld.tile.remote_store") {
+    // remote_store(src_tile, target, peer, offsets): src_tile/peer/offsets read,
+    // target (args_[1]) written. Mirrors the tile.store handling above.
+    if (!call->args_.empty()) {
+      MarkAccess(CollectReferencedOrigins(call->args_[0], origin_map), has_read);
+    }
+    for (size_t i = 2; i < call->args_.size(); ++i) {
+      MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
+    }
+    if (auto write_target = GetWriteTargetExpr(call)) {
+      MarkAccess(GetAliasOrigins(write_target, origin_map), has_write);
+    }
+    return;
+  }
+
   if (op_name == "tensor.write") {
     for (size_t i = 1; i < call->args_.size(); ++i) {
       MarkAccess(CollectReferencedOrigins(call->args_[i], origin_map), has_read);
@@ -927,7 +948,7 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
       AnalyzeCallAccess(call, origin_map, has_read, has_write);
     }
 
-    if (As<TensorType>(assign->var_->GetType())) {
+    if (AsTensorTypeLike(assign->var_->GetType())) {
       auto origins = GetAliasOrigins(assign->value_, origin_map);
       UpdateTensorAliasOrigin(assign->var_, origins, origin_map);
     }
@@ -1037,7 +1058,7 @@ YieldAliasInfo AnalyzeStmtAliases(const StmtPtr& stmt, AliasOriginMap& origin_ma
       if (origins.empty() && i < init_origins.size()) {
         origins = init_origins[i];
       }
-      if (As<TensorType>(while_stmt->return_vars_[i]->GetType()) && !origins.empty()) {
+      if (AsTensorTypeLike(while_stmt->return_vars_[i]->GetType()) && !origins.empty()) {
         origin_map[while_stmt->return_vars_[i].get()] = origins;
       } else {
         origin_map.erase(while_stmt->return_vars_[i].get());
@@ -1067,7 +1088,9 @@ void UpgradeWrittenTensorParamDirections(const std::vector<StmtPtr>& stmts, cons
   AliasOriginMap origin_map;
 
   for (size_t i = 0; i < params.size() && i < param_directions.size(); ++i) {
-    if (!As<TensorType>(params[i]->GetType())) {
+    // AsTensorTypeLike also seeds DistributedTensorType window params, so a
+    // pld.tile.remote_store into such a param is attributed as a write below.
+    if (!AsTensorTypeLike(params[i]->GetType())) {
       continue;
     }
     origin_map[params[i].get()] = ParamOrigins{i};
