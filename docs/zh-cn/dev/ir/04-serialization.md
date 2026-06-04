@@ -168,7 +168,23 @@ assert len(restored.type.tile_view.valid_shape) == 2
 }
 ```
 
-支持的 kwarg 类型：`int`、`bool`、`double`、`string`
+支持的 kwarg/attr 值类型：标量（`int`、`bool`、`float`、`double`、`string`）；
+枚举与小值类型（`DataType`、`MemorySpace`、`TensorLayout`、`TileLayout`、
+`PadValue`、`LoopOrigin`）；以及索引列表 `std::vector<ArgDirection>` 和
+`std::vector<int32_t>`（后者即 `arg_direction_overrides`，no_dep 参数索引）。
+
+保留的 **IR 节点取值** 的 scope/call attr 通过与普通 IR 节点字段相同的节点引用机制序列化，
+因此能够按对象身份（identity）往返：
+
+- `task_id_var`（`VarPtr`）→ `{"type": "Var", "value": <node-or-ref>}`
+- `manual_dep_edges` / `arg_direction_overrides_vars` / `dump_vars`
+  （均为 `std::vector<VarPtr>`）→ `{"type": "VarList", "value": [<node-or-ref>, ...]}`
+- `device`（`ExprPtr`）→ `{"type": "Expr", "value": <node-or-ref>}`
+
+当某个 attr 引用了较早 scope 的 `task_id_var` 所产出的 Var 时，它会序列化为
+`{"ref": id}`，并在反序列化时解析回 *同一个* `VarPtr`（例如
+`with pl.at(...) as tid:` → `pl.at(..., deps=[tid])` 的 capture/deps 链）。保持同步的不变式：
+序列化器的 attr 类型列表必须覆盖 `structural_equal` 所比较的全部类型。
 
 ## 架构
 

@@ -168,7 +168,25 @@ assert len(restored.type.tile_view.valid_shape) == 2
 }
 ```
 
-Supported kwarg types: `int`, `bool`, `double`, `string`
+Supported kwarg/attr value types: scalars (`int`, `bool`, `float`, `double`,
+`string`); enums and small value types (`DataType`, `MemorySpace`,
+`TensorLayout`, `TileLayout`, `PadValue`, `LoopOrigin`); and the index lists
+`std::vector<ArgDirection>` and `std::vector<int32_t>` (the latter is
+`arg_direction_overrides`, the no_dep arg indices).
+
+Reserved **IR-node-valued** scope/call attrs serialize through the same
+node-reference machinery as ordinary IR-node fields, so they round-trip by identity:
+
+- `task_id_var` (a `VarPtr`) → `{"type": "Var", "value": <node-or-ref>}`
+- `manual_dep_edges` / `arg_direction_overrides_vars` / `dump_vars`
+  (each a `std::vector<VarPtr>`) → `{"type": "VarList", "value": [<node-or-ref>, ...]}`
+- `device` (an `ExprPtr`) → `{"type": "Expr", "value": <node-or-ref>}`
+
+A later attr that references the producer Var emitted by an earlier scope's
+`task_id_var` serializes as a `{"ref": id}` and resolves back to the *same*
+`VarPtr` on deserialization (e.g. the `with pl.at(...) as tid:` →
+`pl.at(..., deps=[tid])` capture/deps chain). The keep-in-sync invariant: the
+serializer's attr type ladder must cover every type `structural_equal` compares.
 
 ## Architecture
 

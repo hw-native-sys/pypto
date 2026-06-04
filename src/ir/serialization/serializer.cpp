@@ -32,6 +32,7 @@
 #include "pypto/core/dtype.h"
 #include "pypto/core/error.h"
 #include "pypto/core/logging.h"
+#include "pypto/ir/core.h"
 #include "pypto/ir/expr.h"
 #include "pypto/ir/function.h"
 #include "pypto/ir/kind_traits.h"
@@ -814,11 +815,57 @@ msgpack::object FieldSerializerVisitor::VisitLeafField(
       dir_map["type"] = msgpack::object("ArgDirectionVector", zone_);
       dir_map["value"] = VisitLeafField(dirs);
       kwargs_msgs.push_back(make_pair(key, msgpack::object(dir_map, zone_)));
+    } else if (value.type() == typeid(VarPtr)) {
+      // Reserved Var-valued scope/call attr (e.g. kAttrTaskIdVar). Serialize the
+      // Var through the node-reference machinery so it round-trips by identity —
+      // a later attr referencing the same Var (kAttrManualDepEdges) emits a
+      // {"ref": id} and resolves back to the same VarPtr on deserialization.
+      const auto& var = AnyCast<VarPtr>(value, "serializing kwarg: " + key);
+      std::map<std::string, msgpack::object> var_map;
+      var_map["type"] = msgpack::object("Var", zone_);
+      var_map["value"] = var ? ctx_.SerializeNode(var, zone_) : msgpack::object();
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(var_map, zone_)));
+    } else if (value.type() == typeid(std::vector<VarPtr>)) {
+      // Reserved Var-list scope/call attrs (kAttrManualDepEdges,
+      // kAttrArgDirOverrideVars, kAttrDumpVars). Each entry serializes through
+      // the same node-reference machinery; a null entry (skipped by codegen)
+      // round-trips as a nil placeholder to preserve list positions.
+      const auto& vars = AnyCast<std::vector<VarPtr>>(value, "serializing kwarg: " + key);
+      std::vector<msgpack::object> var_vec;
+      var_vec.reserve(vars.size());
+      for (const auto& var : vars) {
+        var_vec.push_back(var ? ctx_.SerializeNode(var, zone_) : msgpack::object());
+      }
+      std::map<std::string, msgpack::object> var_list_map;
+      var_list_map["type"] = msgpack::object("VarList", zone_);
+      var_list_map["value"] = msgpack::object(var_vec, zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(var_list_map, zone_)));
+    } else if (value.type() == typeid(std::vector<int32_t>)) {
+      // kAttrArgDirectionOverrides — the no_dep argument-index list the outliner
+      // writes onto a synthesised Call (DeriveCallDirections later flips each
+      // indicated arg slot to NoDep).
+      const auto& idxs = AnyCast<std::vector<int32_t>>(value, "serializing kwarg: " + key);
+      std::vector<msgpack::object> idx_vec;
+      idx_vec.reserve(idxs.size());
+      for (int32_t v : idxs) idx_vec.emplace_back(v, zone_);
+      std::map<std::string, msgpack::object> idx_map;
+      idx_map["type"] = msgpack::object("Int32Vector", zone_);
+      idx_map["value"] = msgpack::object(idx_vec, zone_);
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(idx_map, zone_)));
+    } else if (value.type() == typeid(ExprPtr)) {
+      // Reserved Expr-valued attr (e.g. kAttrDevice, the distributed
+      // device-placement expression). Serialize through the node-reference
+      // machinery, like the Var-valued attrs above.
+      const auto& expr = AnyCast<ExprPtr>(value, "serializing kwarg: " + key);
+      std::map<std::string, msgpack::object> expr_map;
+      expr_map["type"] = msgpack::object("Expr", zone_);
+      expr_map["value"] = expr ? ctx_.SerializeNode(expr, zone_) : msgpack::object();
+      kwargs_msgs.push_back(make_pair(key, msgpack::object(expr_map, zone_)));
     } else {
       throw TypeError("Invalid kwarg type for key: " + key +
                       ", expected int, bool, std::string, double, float, DataType, MemorySpace, "
-                      "TensorLayout, TileLayout, PadValue, LoopOrigin, or "
-                      "std::vector<ArgDirection>, but got " +
+                      "TensorLayout, TileLayout, PadValue, LoopOrigin, std::vector<ArgDirection>, "
+                      "std::vector<int32_t>, VarPtr, std::vector<VarPtr>, or ExprPtr, but got " +
                       DemangleTypeName(value.type().name()));
     }
   }

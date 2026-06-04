@@ -131,7 +131,9 @@ DataType DeserializeDataType(const msgpack::object& fields_obj, const std::strin
 }
 
 std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::object& kwargs_obj,
-                                                                const std::string& field_name) {
+                                                                const std::string& field_name,
+                                                                DeserializerContext& ctx,
+                                                                msgpack::zone& zone) {
   std::vector<std::pair<std::string, std::any>> kwargs;
   if (kwargs_obj.type != msgpack::type::ARRAY) {
     throw TypeError("Invalid kwargs type for field: " + field_name);
@@ -248,6 +250,54 @@ std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::o
           throw TypeError("Missing 'value' field for LoopOrigin kwarg: " + key);
         }
         kwargs.emplace_back(key, StringToLoopOrigin(value_str));
+      } else if (type_name == "Var") {
+        // Reserved Var-valued attr (kAttrTaskIdVar). Resolved through the node
+        // table so it round-trips by identity. A nil inner value is the null
+        // placeholder (the attr was present but held a null VarPtr).
+        if (!has_value_obj || value_obj_inner.type == msgpack::type::NIL) {
+          kwargs.emplace_back(key, VarPtr(nullptr));
+        } else {
+          kwargs.emplace_back(
+              key, std::static_pointer_cast<const Var>(ctx.DeserializeNode(value_obj_inner, zone)));
+        }
+      } else if (type_name == "VarList") {
+        // Reserved Var-list attrs (kAttrManualDepEdges / kAttrArgDirOverrideVars /
+        // kAttrDumpVars). Each entry resolves through the node table; a nil entry
+        // reconstructs a null VarPtr so list positions are preserved.
+        if (!has_value_obj || value_obj_inner.type != msgpack::type::ARRAY) {
+          throw TypeError("VarList kwarg '" + key + "' must have ARRAY value");
+        }
+        std::vector<VarPtr> vars;
+        vars.reserve(value_obj_inner.via.array.size);
+        for (uint32_t j = 0; j < value_obj_inner.via.array.size; ++j) {
+          const msgpack::object& elem = value_obj_inner.via.array.ptr[j];
+          if (elem.type == msgpack::type::NIL) {
+            vars.emplace_back(nullptr);
+          } else {
+            vars.push_back(std::static_pointer_cast<const Var>(ctx.DeserializeNode(elem, zone)));
+          }
+        }
+        kwargs.emplace_back(key, std::move(vars));
+      } else if (type_name == "Int32Vector") {
+        // kAttrArgDirectionOverrides — no_dep argument indices (std::vector<int32_t>).
+        if (!has_value_obj || value_obj_inner.type != msgpack::type::ARRAY) {
+          throw TypeError("Int32Vector kwarg '" + key + "' must have ARRAY value");
+        }
+        std::vector<int32_t> idxs;
+        idxs.reserve(value_obj_inner.via.array.size);
+        for (uint32_t j = 0; j < value_obj_inner.via.array.size; ++j) {
+          idxs.push_back(value_obj_inner.via.array.ptr[j].as<int32_t>());
+        }
+        kwargs.emplace_back(key, std::move(idxs));
+      } else if (type_name == "Expr") {
+        // Reserved Expr-valued attr (kAttrDevice). Resolved through the node table.
+        // A nil inner value is the null placeholder.
+        if (!has_value_obj || value_obj_inner.type == msgpack::type::NIL) {
+          kwargs.emplace_back(key, ExprPtr(nullptr));
+        } else {
+          kwargs.emplace_back(
+              key, std::static_pointer_cast<const Expr>(ctx.DeserializeNode(value_obj_inner, zone)));
+        }
       } else {
         // Try to deserialize as DataType
         try {
@@ -351,7 +401,7 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
   std::vector<std::pair<std::string, std::any>> attrs;
   auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
   if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
-    attrs = DeserializeKwargs(*attrs_opt, "attrs");
+    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
   }
 
   // Backward compatibility: legacy .pir payloads stored arg_directions as a top-level
@@ -381,7 +431,7 @@ static IRNodePtr DeserializeCall(const msgpack::object& fields_obj, msgpack::zon
 
   // Deserialize kwargs (preserve order using vector)
   auto kwargs_obj = GET_FIELD_OBJ("kwargs");
-  std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs");
+  std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs", ctx, zone);
 
   return std::make_shared<Call>(op, args, std::move(kwargs), std::move(attrs), type, span);
 }
@@ -441,11 +491,11 @@ static IRNodePtr DeserializeSubmit(const msgpack::object& fields_obj, msgpack::z
   std::vector<std::pair<std::string, std::any>> attrs;
   auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
   if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
-    attrs = DeserializeKwargs(*attrs_opt, "attrs");
+    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
   }
 
   auto kwargs_obj = GET_FIELD_OBJ("kwargs");
-  std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs");
+  std::vector<std::pair<std::string, std::any>> kwargs = DeserializeKwargs(kwargs_obj, "kwargs", ctx, zone);
 
   return std::make_shared<Submit>(op, args, deps, std::move(kwargs), std::move(attrs), type, span,
                                   std::move(core_num), sync_start);
@@ -638,7 +688,7 @@ static IRNodePtr DeserializeForStmt(const msgpack::object& fields_obj, msgpack::
   std::vector<std::pair<std::string, std::any>> attrs;
   auto attrs_obj = GetOptionalFieldObj(fields_obj, "attrs", ctx);
   if (attrs_obj.has_value() && attrs_obj->type != msgpack::type::NIL) {
-    attrs = DeserializeKwargs(*attrs_obj, "attrs");
+    attrs = DeserializeKwargs(*attrs_obj, "attrs", ctx, zone);
   } else {
     // Legacy backward compat: convert old "loop_origin" field to attrs
     auto loop_origin_obj = GetOptionalFieldObj(fields_obj, "loop_origin", ctx);
@@ -710,6 +760,23 @@ static std::optional<SplitMode> DeserializeScopeSplit(const msgpack::object& fie
   return split;
 }
 
+// Deserialize a ScopeStmt's generic attrs_ map (preserve order; absent ⇒ empty).
+// ScopeStmt serializes attrs_ via reflection, so every scope kind must read it
+// back to survive a round-trip — captured scopes (``with pl.at(...) as tid:`` /
+// ``with pl.spmd(...) as tid:`` / ``deps=[...]``) carry the reserved Var-valued
+// kAttrTaskIdVar / kAttrManualDepEdges here, which DeserializeKwargs resolves
+// through its "Var" / "VarList" branches.
+static std::vector<std::pair<std::string, std::any>> DeserializeScopeAttrs(const msgpack::object& fields_obj,
+                                                                           DeserializerContext& ctx,
+                                                                           msgpack::zone& zone) {
+  std::vector<std::pair<std::string, std::any>> attrs;
+  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
+  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
+    attrs = DeserializeKwargs(*attrs_opt, "attrs", ctx, zone);
+  }
+  return attrs;
+}
+
 // Deserialize InCoreScopeStmt
 static IRNodePtr DeserializeInCoreScopeStmt(const msgpack::object& fields_obj, msgpack::zone& zone,
                                             DeserializerContext& ctx) {
@@ -718,7 +785,8 @@ static IRNodePtr DeserializeInCoreScopeStmt(const msgpack::object& fields_obj, m
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
   return std::make_shared<InCoreScopeStmt>(split, std::move(name_hint), body, span,
-                                           DeserializeLeadingComments(fields_obj));
+                                           DeserializeLeadingComments(fields_obj),
+                                           DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize AutoInCoreScopeStmt
@@ -729,7 +797,8 @@ static IRNodePtr DeserializeAutoInCoreScopeStmt(const msgpack::object& fields_ob
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
   return std::make_shared<AutoInCoreScopeStmt>(split, std::move(name_hint), body, span,
-                                               DeserializeLeadingComments(fields_obj));
+                                               DeserializeLeadingComments(fields_obj),
+                                               DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize ClusterScopeStmt
@@ -739,7 +808,8 @@ static IRNodePtr DeserializeClusterScopeStmt(const msgpack::object& fields_obj, 
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
   return std::make_shared<ClusterScopeStmt>(std::move(name_hint), body, span,
-                                            DeserializeLeadingComments(fields_obj));
+                                            DeserializeLeadingComments(fields_obj),
+                                            DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize HierarchyScopeStmt
@@ -762,7 +832,8 @@ static IRNodePtr DeserializeHierarchyScopeStmt(const msgpack::object& fields_obj
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
   return std::make_shared<HierarchyScopeStmt>(level, role, std::move(name_hint), body, span,
-                                              DeserializeLeadingComments(fields_obj));
+                                              DeserializeLeadingComments(fields_obj),
+                                              DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize SpmdScopeStmt
@@ -786,7 +857,8 @@ static IRNodePtr DeserializeSpmdScopeStmt(const msgpack::object& fields_obj, msg
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
   return std::make_shared<SpmdScopeStmt>(core_num, sync_start, std::move(name_hint), body, span,
-                                         DeserializeLeadingComments(fields_obj));
+                                         DeserializeLeadingComments(fields_obj),
+                                         DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize RuntimeScopeStmt (pl.manual_scope MANUAL wrapper / AUTO PTO2_SCOPE
@@ -808,16 +880,9 @@ static IRNodePtr DeserializeRuntimeScopeStmt(const msgpack::object& fields_obj, 
   auto name_hint = DeserializeScopeNameHint(fields_obj, ctx);
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
-  // ScopeStmt serializes its attrs_ via reflection; preserve them on round-trip
-  // (later passes treat some scope attrs as semantic — see VisitScopeAttrs).
-  std::vector<std::pair<std::string, std::any>> attrs;
-  auto attrs_opt = GetOptionalFieldObj(fields_obj, "attrs", ctx);
-  if (attrs_opt.has_value() && attrs_opt->type != msgpack::type::NIL) {
-    attrs = DeserializeKwargs(*attrs_opt, "attrs");
-  }
-
   return std::make_shared<RuntimeScopeStmt>(manual, std::move(name_hint), body, span,
-                                            DeserializeLeadingComments(fields_obj), std::move(attrs));
+                                            DeserializeLeadingComments(fields_obj),
+                                            DeserializeScopeAttrs(fields_obj, ctx, zone));
 }
 
 // Deserialize SeqStmts
@@ -937,7 +1002,7 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
   std::vector<std::pair<std::string, std::any>> attrs;
   auto attrs_obj = GetOptionalFieldObj(fields_obj, "attrs", ctx);
   if (attrs_obj.has_value() && attrs_obj->type != msgpack::type::NIL) {
-    attrs = DeserializeKwargs(*attrs_obj, "attrs");
+    attrs = DeserializeKwargs(*attrs_obj, "attrs", ctx, zone);
   } else {
     // Legacy backward compat: convert old "split" field to attrs
     auto split_obj = GetOptionalFieldObj(fields_obj, "split", ctx);
