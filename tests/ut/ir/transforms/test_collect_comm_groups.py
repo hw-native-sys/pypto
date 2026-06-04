@@ -90,6 +90,8 @@ def _find_window_calls(func: ir.Function) -> list[ir.AssignStmt]:
                 walk(s)
         if isinstance(stmt, ir.ForStmt):
             walk(stmt.body)
+        if isinstance(stmt, ir.ScopeStmt):
+            walk(stmt.body)
 
     walk(func.body)
     return found

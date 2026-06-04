@@ -398,15 +398,35 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
         << "CollectCommGroups: duplicate allocation name '" << rec->name << "' within the same CommGroup";
     tgt->slots.push_back(rec->wb);
   }
-  for (auto& g : pending) {
-    groups.push_back(std::make_shared<const CommGroup>(g.desc.ToDevices(), std::move(g.slots), g.span));
+  // Construct CommGroup entries (legacy path — read by DistributedCodegen
+  // until Phase C migrates it). Copy slots so Phase 8 below can move them
+  // into the scope-stmt wrapping without invalidating these.
+  for (const auto& g : pending) {
+    groups.push_back(std::make_shared<const CommGroup>(g.desc.ToDevices(), g.slots, g.span));
   }
 
   // Phase 7: rewrite host_orch body so every reference to a pld.tensor.window result
   // Var picks up the type-updated copy. The base IRMutator handles all uses;
   // Substitute is the wrapper that does exactly this transformation.
-  if (view_subst.empty()) return func;
-  auto new_body = transform_utils::Substitute(func->body_, view_subst);
+  StmtPtr new_body = view_subst.empty() ? func->body_ : transform_utils::Substitute(func->body_, view_subst);
+
+  // Phase 8: wrap new_body in nested CommDomainScopeStmts so the scope chain
+  // is materialised in the IR alongside Program::comm_groups_. Outer = first
+  // group, inner = last group — matches the declaration-order nesting today's
+  // DistributedCodegen emits at the top of host_orch (see
+  // src/codegen/distributed/distributed_codegen.cpp:270-339). The name_hint
+  // matches the codegen-derived handle var so Phase C can read it verbatim.
+  //
+  // Build inner-out: start from the substituted body, wrap once per group
+  // in reverse iteration order.
+  for (size_t i = pending.size(); i-- > 0;) {
+    auto& g = pending[i];
+    std::string name_hint = "comm_d" + std::to_string(i);
+    new_body = std::make_shared<const CommDomainScopeStmt>(g.desc.ToDevices(), std::move(g.slots),
+                                                           std::move(name_hint), new_body, g.span);
+  }
+
+  if (new_body.get() == func->body_.get()) return func;
   auto new_func = MutableCopy(func);
   new_func->body_ = new_body;
   return new_func;
