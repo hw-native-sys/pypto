@@ -14,11 +14,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -222,11 +220,11 @@ std::unordered_set<const Var*> CollectLoopLocalTensorAllocs(const ForStmtPtr& lo
   return collector.result();
 }
 
-std::vector<size_t> CollectOutParamIndices(const FunctionPtr& func, bool include_inout = false) {
+std::vector<size_t> CollectOutParamIndices(const FunctionPtr& func) {
   std::vector<size_t> result;
   if (!func) return result;
   for (size_t i = 0; i < func->param_directions_.size() && i < func->params_.size(); ++i) {
-    if (IsOutputDirection(func->param_directions_[i], include_inout)) {
+    if (func->param_directions_[i] == ParamDirection::Out) {
       result.push_back(i);
     }
   }
@@ -325,62 +323,6 @@ std::vector<OutParamReturnMapping> BuildOutParamReturnMappings(const FunctionPtr
   }
 
   return result;
-}
-
-bool IsDirectParamForwardingCall(const FunctionPtr& wrapper, const CallPtr& call, const FunctionPtr& inner) {
-  if (!wrapper || !call || !inner) return false;
-  if (inner->params_.size() != wrapper->params_.size() ||
-      inner->param_directions_.size() != wrapper->param_directions_.size() ||
-      call->args_.size() != wrapper->params_.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < wrapper->params_.size(); ++i) {
-    auto arg = AsVarLike(call->args_[i]);
-    if (!arg || arg.get() != wrapper->params_[i].get()) return false;
-  }
-  return true;
-}
-
-template <typename ResolveArgRoot>
-std::vector<const Var*> BuildCallOutputRoots(const ProgramPtr& program, const CallPtr& call,
-                                             ResolveArgRoot resolve_arg_root) {
-  auto callee = program && call ? program->GetFunction(call->op_->name_) : nullptr;
-  if (!callee) return {};
-
-  std::vector<const Var*> roots(callee->return_types_.size(), nullptr);
-  auto apply_mapping = [&](const FunctionPtr& mapped_func, const CallPtr& mapped_call) {
-    for (const auto& mapping : BuildOutParamReturnMappings(mapped_func, /*include_inout=*/true)) {
-      if (mapping.return_index >= roots.size() || mapping.param_index >= mapped_call->args_.size()) continue;
-      roots[mapping.return_index] = resolve_arg_root(mapped_call->args_[mapping.param_index]);
-    }
-  };
-
-  apply_mapping(callee, call);
-  if (callee->func_type_ != FunctionType::Spmd) return roots;
-
-  auto body_stmts = FlattenToStmts(callee->body_);
-  if (body_stmts.size() != 2) return roots;
-  auto wrapper_assign = As<AssignStmt>(body_stmts[0]);
-  auto wrapper_return = As<ReturnStmt>(body_stmts[1]);
-  auto inner_call = wrapper_assign ? As<Call>(wrapper_assign->value_) : nullptr;
-  if (!wrapper_assign || !wrapper_return || !inner_call || wrapper_return->value_.size() != 1) return roots;
-  auto returned = AsVarLike(wrapper_return->value_[0]);
-  if (!returned || returned.get() != wrapper_assign->var_.get()) return roots;
-  auto inner = program->GetFunction(GetCallFuncName(inner_call));
-  if (!IsDirectParamForwardingCall(callee, inner_call, inner)) return roots;
-
-  std::unordered_map<const Var*, const Var*> wrapper_param_roots;
-  for (size_t i = 0; i < callee->params_.size() && i < call->args_.size(); ++i) {
-    wrapper_param_roots[callee->params_[i].get()] = resolve_arg_root(call->args_[i]);
-  }
-  for (const auto& mapping : BuildOutParamReturnMappings(inner, /*include_inout=*/true)) {
-    if (mapping.return_index >= roots.size() || mapping.param_index >= inner_call->args_.size()) continue;
-    auto wrapper_arg = AsVarLike(inner_call->args_[mapping.param_index]);
-    if (!wrapper_arg) continue;
-    auto root_it = wrapper_param_roots.find(wrapper_arg.get());
-    if (root_it != wrapper_param_roots.end()) roots[mapping.return_index] = root_it->second;
-  }
-  return roots;
 }
 
 // ============================================================================
@@ -1945,7 +1887,6 @@ class OutWindowExternalizer {
   enum class RewriteKind {
     FinalStore,
     AggregateWindowLoop,
-    SpmdRowBlock,
   };
 
   struct OutputRewriteInfo {
@@ -1970,15 +1911,6 @@ class OutWindowExternalizer {
     RewriteKind kind = RewriteKind::FinalStore;
     std::vector<OutputRewriteInfo> outputs;
     std::vector<InputRewriteInfo> inputs;
-    std::optional<int64_t> spmd_core_num;
-    FunctionPtr spmd_inner_func;
-    VarPtr spmd_block_idx_var;
-  };
-
-  struct DirectSpmdCall {
-    FunctionPtr inner_func;
-    CallPtr call;
-    bool returns_value = false;
   };
 
   using AnalysisMap = std::unordered_map<std::string, CalleeRewriteAnalysis>;
@@ -2061,69 +1993,6 @@ class OutWindowExternalizer {
       return IRMutator::VisitExpr_(op);
     }
 
-    StmtPtr VisitStmt_(const IfStmtPtr& op) override {
-      auto new_condition = VisitExpr(op->condition_);
-      auto incoming_remap = result_var_remap_;
-      auto incoming_info = result_var_info_;
-
-      result_var_remap_ = incoming_remap;
-      result_var_info_ = incoming_info;
-      auto new_then_body = VisitStmt(op->then_body_);
-      auto then_info = result_var_info_;
-
-      std::optional<StmtPtr> new_else_body;
-      std::unordered_map<const Var*, const OutputRewriteInfo*> else_info;
-      if (op->else_body_.has_value()) {
-        result_var_remap_ = incoming_remap;
-        result_var_info_ = incoming_info;
-        new_else_body = VisitStmt(op->else_body_.value());
-        else_info = result_var_info_;
-      }
-
-      result_var_remap_ = incoming_remap;
-      result_var_info_ = incoming_info;
-
-      std::vector<VarPtr> new_return_vars = op->return_vars_;
-      bool return_vars_changed = false;
-      auto then_yield = transform_utils::GetLastYieldStmt(new_then_body);
-      auto else_yield =
-          new_else_body.has_value() ? transform_utils::GetLastYieldStmt(*new_else_body) : nullptr;
-      if (then_yield && else_yield && then_yield->value_.size() == op->return_vars_.size() &&
-          else_yield->value_.size() == op->return_vars_.size()) {
-        for (size_t i = 0; i < op->return_vars_.size(); ++i) {
-          auto then_var = AsVarLike(then_yield->value_[i]);
-          auto else_var = AsVarLike(else_yield->value_[i]);
-          if (!then_var || !else_var) continue;
-          auto then_it = then_info.find(then_var.get());
-          auto else_it = else_info.find(else_var.get());
-          if (then_it == then_info.end() || else_it == else_info.end() ||
-              then_it->second != else_it->second) {
-            continue;
-          }
-          auto new_ret = std::make_shared<Var>(op->return_vars_[i]->name_hint_, then_var->GetType(),
-                                               op->return_vars_[i]->span_);
-          result_var_remap_[op->return_vars_[i].get()] = new_ret;
-          result_var_info_[op->return_vars_[i].get()] = then_it->second;
-          result_var_info_[new_ret.get()] = then_it->second;
-          new_return_vars[i] = new_ret;
-          return_vars_changed = true;
-        }
-      }
-
-      if (new_condition.get() != op->condition_.get() || new_then_body.get() != op->then_body_.get() ||
-          (new_else_body.has_value() &&
-           (!op->else_body_.has_value() || new_else_body->get() != op->else_body_->get())) ||
-          return_vars_changed) {
-        auto result = MutableCopy(op);
-        result->condition_ = std::move(new_condition);
-        result->then_body_ = std::move(new_then_body);
-        result->else_body_ = new_else_body;
-        result->return_vars_ = std::move(new_return_vars);
-        return result;
-      }
-      return op;
-    }
-
     StmtPtr VisitStmt_(const AssignStmtPtr& op) override {
       auto visited_value = VisitExpr(op->value_);
       auto assign = MutableCopy(op);
@@ -2158,37 +2027,20 @@ class OutWindowExternalizer {
       }
 
       auto info_it = out_info_by_var_.find(target_var);
-      auto chained_info_it = result_var_info_.find(target_var);
-      if (info_it == out_info_by_var_.end() && chained_info_it == result_var_info_.end()) return assign;
+      if (info_it == out_info_by_var_.end()) return assign;
       if (!offsets) return assign;
-      const auto& output_info =
-          info_it != out_info_by_var_.end() ? info_it->second : *chained_info_it->second;
 
-      auto new_offset_tuple = std::make_shared<MakeTuple>(output_info.local_store_offsets, offsets->span_);
+      auto new_offset_tuple =
+          std::make_shared<MakeTuple>(info_it->second.local_store_offsets, offsets->span_);
       std::vector<ExprPtr> new_args = call->args_;
       new_args[offset_arg_index] = new_offset_tuple;
-      ExprPtr new_target;
-      auto new_target_it = new_out_vars_.find(target_var);
-      if (new_target_it != new_out_vars_.end()) {
-        new_target = new_target_it->second;
-      } else {
-        auto remap_it = result_var_remap_.find(target_var);
-        if (remap_it != result_var_remap_.end()) new_target = remap_it->second;
-      }
-      if (!new_target && chained_info_it != result_var_info_.end()) {
-        new_target = rewritten_target_expr;
-      }
-      if (!new_target) return assign;
-      new_args[target_arg_index] = new_target;
-      auto new_type_it = new_store_types_.find(target_var);
-      auto new_type = new_type_it != new_store_types_.end() ? new_type_it->second : new_target->GetType();
+      new_args[target_arg_index] = new_out_vars_.at(target_var);
+      auto new_type = new_store_types_.at(target_var);
       auto new_call =
           std::make_shared<Call>(call->op_, new_args, call->kwargs_, call->attrs_, new_type, call->span_);
 
       auto new_result_var = std::make_shared<Var>(assign->var_->name_hint_, new_type, assign->var_->span_);
       result_var_remap_[assign->var_.get()] = new_result_var;
-      result_var_info_[assign->var_.get()] = &output_info;
-      result_var_info_[new_result_var.get()] = &output_info;
       assign->var_ = new_result_var;
       assign->value_ = new_call;
       return assign;
@@ -2199,7 +2051,6 @@ class OutWindowExternalizer {
     const std::unordered_map<const Var*, ExprPtr>& new_out_vars_;
     const std::unordered_map<const Var*, TypePtr>& new_store_types_;
     std::unordered_map<const Var*, VarPtr> result_var_remap_;
-    std::unordered_map<const Var*, const OutputRewriteInfo*> result_var_info_;
   };
 
   class WindowReadLocalizer : public IRMutator {
@@ -2338,11 +2189,6 @@ class OutWindowExternalizer {
 
         auto call_assign = As<AssignStmt>(stmt);
         auto bundle = call_assign ? TryRewriteCall(call_assign) : std::nullopt;
-        if (!bundle.has_value()) {
-          if (auto eval = As<EvalStmt>(stmt)) {
-            bundle = TryRewriteEvalCall(eval);
-          }
-        }
         if (bundle.has_value()) {
           changed = true;
           for (const auto& new_stmt : bundle->stmts) {
@@ -2476,9 +2322,14 @@ class OutWindowExternalizer {
     }
 
     void AddCallOutputRoots(const AssignStmtPtr& assign, const CallPtr& call) {
-      auto roots =
-          BuildCallOutputRoots(program_, call, [this](const ExprPtr& arg) { return ResolveBufferRoot(arg); });
-      if (roots.empty()) return;
+      auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+      if (!callee) return;
+
+      std::vector<const Var*> roots(callee->return_types_.size(), nullptr);
+      for (const auto& mapping : BuildOutParamReturnMappings(callee, /*include_inout=*/true)) {
+        if (mapping.return_index >= roots.size() || mapping.param_index >= call->args_.size()) continue;
+        roots[mapping.return_index] = ResolveBufferRoot(call->args_[mapping.param_index]);
+      }
 
       if (As<TupleType>(call->GetType())) {
         tuple_output_roots_[assign->var_.get()] = std::move(roots);
@@ -2621,7 +2472,7 @@ class OutWindowExternalizer {
       if (!original_func) return std::nullopt;
 
       const auto& analysis = analysis_it->second;
-      if (analysis.outputs.empty()) return std::nullopt;
+      if (analysis.outputs.empty() && analysis.inputs.empty()) return std::nullopt;
       for (const auto& input : analysis.inputs) {
         if (input.in_param_index >= call->args_.size()) return std::nullopt;
         if (!AsVarLike(call->args_[input.in_param_index])) return std::nullopt;
@@ -2641,47 +2492,12 @@ class OutWindowExternalizer {
       return RewriteCallsiteCandidate{submit, call, original_func, &analysis, clone_it->second};
     }
 
-    std::optional<RewriteCallsiteCandidate> GetRewriteCallsiteCandidate(const EvalStmtPtr& eval) const {
-      if (!eval) return std::nullopt;
-      auto call = As<Call>(eval->expr_);
-      if (!call) return std::nullopt;
-
-      auto callee_name = GetCallFuncName(call);
-      auto analysis_it = analyses_.find(callee_name);
-      if (analysis_it == analyses_.end()) return std::nullopt;
-      auto clone_it = cloned_funcs_.find(callee_name);
-      if (clone_it == cloned_funcs_.end()) return std::nullopt;
-      auto original_func = program_ ? program_->GetFunction(callee_name) : nullptr;
-      if (!original_func) return std::nullopt;
-
-      const auto& analysis = analysis_it->second;
-      if (analysis.kind != RewriteKind::SpmdRowBlock || analysis.outputs.empty() ||
-          !clone_it->second->return_types_.empty()) {
-        return std::nullopt;
-      }
-      for (const auto& input : analysis.inputs) {
-        if (input.in_param_index >= call->args_.size()) return std::nullopt;
-        if (!AsVarLike(call->args_[input.in_param_index])) return std::nullopt;
-        if (!IsWritableRootExpr(call->args_[input.in_param_index])) return std::nullopt;
-      }
-      for (const auto& output : analysis.outputs) {
-        if (output.out_param_index >= call->args_.size()) return std::nullopt;
-        if (!AsVarLike(call->args_[output.out_param_index])) return std::nullopt;
-      }
-      return RewriteCallsiteCandidate{nullptr, call, original_func, &analysis, clone_it->second};
-    }
-
     bool CanSkipFullRootReadForWindowedCallsite(const AssignStmtPtr& call_assign,
                                                 const RootSet& reads) const {
       auto candidate = GetRewriteCallsiteCandidate(call_assign);
       if (!candidate.has_value()) return false;
-      return !HasLaterFullParentReadOfRewrittenOutput(candidate->call, *candidate->analysis, reads);
-    }
-
-    bool CanSkipFullRootReadForWindowedCallsite(const EvalStmtPtr& eval, const RootSet& reads) const {
-      auto candidate = GetRewriteCallsiteCandidate(eval);
-      if (!candidate.has_value()) return false;
-      return !HasLaterFullParentReadOfRewrittenOutput(candidate->call, *candidate->analysis, reads);
+      return CanRewriteInputWindowsForCallsite(*candidate) ||
+             !HasLaterFullParentReadOfRewrittenOutput(candidate->call, *candidate->analysis, reads);
     }
 
     void AddFullRootReadsFromCall(const AssignStmtPtr& call_assign, const CallPtr& call,
@@ -2709,44 +2525,15 @@ class OutWindowExternalizer {
       }
     }
 
-    void AddFullRootReadsFromEval(const EvalStmtPtr& eval, RootSet& reads,
-                                  bool allow_windowed_call_skip) const {
-      if (!eval) return;
-      auto call = As<Call>(eval->expr_);
-      if (!call) {
-        if (auto submit = As<Submit>(eval->expr_)) {
-          AddFullRootReadsFromCall(nullptr, SubmitToCallView(submit), reads);
-        }
-        return;
-      }
-      if (!call || !program_ || codegen::IsBuiltinOp(call->op_->name_)) return;
-      auto callee_name = call->op_->name_;
-      auto callee = program_->GetFunction(callee_name);
-      if (!callee) return;
-      auto analysis_it = analyses_.find(callee_name);
-      const CalleeRewriteAnalysis* analysis =
-          analysis_it == analyses_.end() || !cloned_funcs_.count(callee_name) ? nullptr
-                                                                              : &analysis_it->second;
-      const bool can_skip_windowed_reads =
-          allow_windowed_call_skip && analysis && CanSkipFullRootReadForWindowedCallsite(eval, reads);
-      for (size_t i = 0; i < callee->param_directions_.size() && i < call->args_.size(); ++i) {
-        if (!IsReadDirection(callee->param_directions_[i])) continue;
-        if (can_skip_windowed_reads && HasAnalyzedInputWindow(*analysis, i) &&
-            IsWritableRootExpr(call->args_[i])) {
-          continue;
-        }
-        if (!IsFullRootExpr(call->args_[i])) continue;
-        if (const Var* root = ResolveBufferRoot(call->args_[i])) {
-          reads.insert(root);
-        }
-      }
-    }
-
     static bool HasAnalyzedInputWindow(const CalleeRewriteAnalysis& analysis, size_t param_index) {
       const auto& inputs = analysis.inputs;
       return std::any_of(inputs.begin(), inputs.end(), [param_index](const InputRewriteInfo& input) {
         return input.in_param_index == param_index;
       });
+    }
+
+    static bool HasAnyAnalyzedInputWindow(const CalleeRewriteAnalysis& analysis) {
+      return !analysis.inputs.empty();
     }
 
     // A later reader can be a Call OR a Submit (pl.submit in a manual_scope).
@@ -2772,7 +2559,7 @@ class OutWindowExternalizer {
                                    reads);
         }
       } else if (auto eval = As<EvalStmt>(stmt)) {
-        AddFullRootReadsFromEval(eval, reads, allow_windowed_call_skip);
+        AddFullRootReadsFromCallLike(eval->expr_, reads);
       } else if (auto seq = As<SeqStmts>(stmt)) {
         for (auto it = seq->stmts_.rbegin(); it != seq->stmts_.rend(); ++it) {
           AddFullRootReadsFromStmt(*it, reads, allow_windowed_call_skip);
@@ -2844,9 +2631,9 @@ class OutWindowExternalizer {
       const auto& analysis = *candidate->analysis;
       auto cloned_func = candidate->cloned_func;
 
-      if (HasLaterFullParentReadOfRewrittenOutput(call, analysis)) return std::nullopt;
-      if (analysis.kind == RewriteKind::SpmdRowBlock) {
-        return TryRewriteSpmdRowBlock(call_assign, *candidate);
+      if (HasLaterFullParentReadOfRewrittenOutput(call, analysis) &&
+          !CanRewriteInputWindowsForCallsite(*candidate)) {
+        return std::nullopt;
       }
 
       std::unordered_map<const Var*, ExprPtr> callsite_subst;
@@ -2965,6 +2752,12 @@ class OutWindowExternalizer {
         new_call = std::make_shared<Call>(cloned_gvar, new_args, call->kwargs_, new_attrs, new_return_type,
                                           call->span_);
       }
+      if (analysis.outputs.empty()) {
+        stmts.push_back(std::make_shared<AssignStmt>(call_assign->var_, new_call, call_assign->span_));
+        RewriteBundle bundle;
+        bundle.stmts = std::move(stmts);
+        return bundle;
+      }
       auto tmp_result_var = std::make_shared<Var>(call_assign->var_->name_hint_ + "__windowed",
                                                   new_return_type, call_assign->var_->span_);
       stmts.push_back(std::make_shared<AssignStmt>(tmp_result_var, new_call, call_assign->span_));
@@ -3029,322 +2822,11 @@ class OutWindowExternalizer {
       return bundle;
     }
 
-    std::optional<RewriteBundle> TryRewriteEvalCall(const EvalStmtPtr& eval) {
-      auto candidate = GetRewriteCallsiteCandidate(eval);
-      if (!candidate.has_value()) return std::nullopt;
-      return TryRewriteSpmdRowBlockEval(eval, *candidate);
-    }
-
-    std::optional<RewriteBundle> TryRewriteSpmdRowBlock(const AssignStmtPtr& call_assign,
-                                                        const RewriteCallsiteCandidate& candidate) {
-      auto call = candidate.call;
-      const auto& analysis = *candidate.analysis;
-      auto cloned_func = candidate.cloned_func;
-      if (!call_assign || !call || candidate.submit || !cloned_func || !analysis.spmd_core_num.has_value()) {
-        return std::nullopt;
-      }
-      if (analysis.outputs.empty() || cloned_func->return_types_.empty()) return std::nullopt;
-      if (!SpmdRewriteCoversAllReturns(analysis, cloned_func->return_types_.size())) return std::nullopt;
-
-      std::unordered_map<const Var*, ExprPtr> outer_subst;
-      for (size_t i = 0; i < candidate.original_func->params_.size() && i < call->args_.size(); ++i) {
-        outer_subst[candidate.original_func->params_[i].get()] = call->args_[i];
-      }
-
-      auto loop_var = std::make_shared<Var>("spmd_idx", std::make_shared<ScalarType>(DataType::INDEX),
-                                            call_assign->span_);
-      auto start = std::make_shared<ConstInt>(0, DataType::INDEX, call_assign->span_);
-      auto stop = std::make_shared<ConstInt>(*analysis.spmd_core_num, DataType::INDEX, call_assign->span_);
-      auto step = std::make_shared<ConstInt>(1, DataType::INDEX, call_assign->span_);
-
-      std::vector<IterArgPtr> iter_args;
-      std::vector<VarPtr> return_vars;
-      std::unordered_map<size_t, VarPtr> output_iters;
-      std::unordered_map<size_t, SliceBundle> slices_by_out_index;
-      for (const auto& output : analysis.outputs) {
-        if (output.out_param_index >= call->args_.size()) return std::nullopt;
-        auto out_arg = AsVarLike(call->args_[output.out_param_index]);
-        if (!out_arg) return std::nullopt;
-        auto iter_arg =
-            std::make_shared<IterArg>(out_arg->name_hint_ + "_iter", out_arg->GetType(),
-                                      VisitExpr(call->args_[output.out_param_index]), out_arg->span_);
-        auto return_var =
-            std::make_shared<Var>(out_arg->name_hint_ + "_rv", out_arg->GetType(), out_arg->span_);
-        output_iters.emplace(output.out_param_index, iter_arg);
-        iter_args.push_back(iter_arg);
-        return_vars.push_back(return_var);
-      }
-
-      std::unordered_map<const Var*, ExprPtr> callsite_subst = outer_subst;
-      if (analysis.spmd_block_idx_var) callsite_subst[analysis.spmd_block_idx_var.get()] = loop_var;
-
-      std::vector<StmtPtr> loop_stmts;
-      loop_stmts.reserve((analysis.outputs.size() + analysis.inputs.size()) * 3 + 4);
-
-      std::unordered_map<size_t, VarPtr> slices_by_in_index;
-      for (const auto& input : analysis.inputs) {
-        if (input.in_param_index >= call->args_.size()) return std::nullopt;
-        auto in_arg = AsVarLike(call->args_[input.in_param_index]);
-        if (!in_arg) return std::nullopt;
-        if (!IsWritableRootExpr(call->args_[input.in_param_index])) return std::nullopt;
-
-        std::vector<ExprPtr> shape_exprs;
-        shape_exprs.reserve(input.window_shape.size());
-        for (const auto& dim : input.window_shape) {
-          shape_exprs.push_back(transform_utils::Substitute(dim, callsite_subst));
-        }
-        auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, call_assign->span_);
-
-        std::vector<ExprPtr> offset_exprs;
-        offset_exprs.reserve(input.callsite_offsets.size());
-        for (const auto& offset : input.callsite_offsets) {
-          offset_exprs.push_back(
-              arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
-        }
-        auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
-
-        auto slice_call = OpRegistry::GetInstance().Create(
-            "tensor.slice", {VisitExpr(call->args_[input.in_param_index]), shape_tuple, offset_tuple},
-            call_assign->span_);
-        auto slice_var =
-            std::make_shared<Var>(in_arg->name_hint_ + "__window", slice_call->GetType(), in_arg->span_);
-        loop_stmts.push_back(std::make_shared<AssignStmt>(slice_var, slice_call, call_assign->span_));
-        slices_by_in_index.emplace(input.in_param_index, slice_var);
-      }
-
-      for (const auto& output : analysis.outputs) {
-        auto out_iter_it = output_iters.find(output.out_param_index);
-        if (out_iter_it == output_iters.end()) return std::nullopt;
-        std::vector<ExprPtr> shape_exprs;
-        shape_exprs.reserve(output.window_shape.size());
-        for (const auto& dim : output.window_shape) {
-          shape_exprs.push_back(transform_utils::Substitute(dim, callsite_subst));
-        }
-        auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, call_assign->span_);
-
-        std::vector<ExprPtr> offset_exprs;
-        offset_exprs.reserve(output.callsite_offsets.size());
-        for (const auto& offset : output.callsite_offsets) {
-          offset_exprs.push_back(
-              arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
-        }
-        auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
-
-        auto slice_call = OpRegistry::GetInstance().Create(
-            "tensor.slice", {ExprPtr(out_iter_it->second), shape_tuple, offset_tuple}, call_assign->span_);
-        auto slice_var = std::make_shared<Var>(out_iter_it->second->name_hint_ + "__window",
-                                               slice_call->GetType(), out_iter_it->second->span_);
-        loop_stmts.push_back(std::make_shared<AssignStmt>(slice_var, slice_call, call_assign->span_));
-        slices_by_out_index.emplace(output.out_param_index,
-                                    SliceBundle{slice_var, out_iter_it->second, offset_tuple});
-      }
-
-      std::vector<ExprPtr> new_args;
-      new_args.reserve(call->args_.size() + 1);
-      new_args.push_back(loop_var);
-      for (size_t i = 0; i < call->args_.size(); ++i) {
-        auto input_slice_it = slices_by_in_index.find(i);
-        if (input_slice_it != slices_by_in_index.end()) {
-          new_args.push_back(input_slice_it->second);
-          continue;
-        }
-        auto output_slice_it = slices_by_out_index.find(i);
-        if (output_slice_it != slices_by_out_index.end()) {
-          new_args.push_back(output_slice_it->second.slice_var);
-        } else {
-          new_args.push_back(VisitExpr(call->args_[i]));
-        }
-      }
-
-      auto cloned_gvar = std::make_shared<GlobalVar>(cloned_func->name_);
-      TypePtr new_return_type = cloned_func->return_types_.size() == 1
-                                    ? cloned_func->return_types_[0]
-                                    : std::make_shared<TupleType>(cloned_func->return_types_);
-      auto new_call = std::make_shared<Call>(cloned_gvar, std::move(new_args), call->kwargs_,
-                                             RewriteCallAttrs(call, analysis, slices_by_out_index),
-                                             new_return_type, call->span_);
-      auto tmp_result_var = std::make_shared<Var>(call_assign->var_->name_hint_ + "__windowed",
-                                                  new_return_type, call_assign->var_->span_);
-      loop_stmts.push_back(std::make_shared<AssignStmt>(tmp_result_var, new_call, call_assign->span_));
-
-      std::vector<ExprPtr> yield_values;
-      yield_values.reserve(iter_args.size());
-      for (size_t i = 0; i < analysis.outputs.size(); ++i) {
-        const auto& output = analysis.outputs[i];
-        if (output.return_index >= cloned_func->return_types_.size()) return std::nullopt;
-        const auto& slice_bundle = slices_by_out_index.at(output.out_param_index);
-        ExprPtr source_expr = tmp_result_var;
-        if (cloned_func->return_types_.size() != 1) {
-          auto get_item = std::make_shared<TupleGetItemExpr>(
-              tmp_result_var, static_cast<int>(output.return_index), call_assign->span_);
-          auto item_var = std::make_shared<Var>(
-              call_assign->var_->name_hint_ + "__windowed_" + std::to_string(output.return_index),
-              cloned_func->return_types_[output.return_index], call_assign->var_->span_);
-          loop_stmts.push_back(std::make_shared<AssignStmt>(item_var, get_item, call_assign->span_));
-          source_expr = item_var;
-        }
-        auto assemble_call = OpRegistry::GetInstance().Create(
-            "tensor.assemble", {slice_bundle.parent_expr, source_expr, slice_bundle.offset_tuple},
-            call_assign->span_);
-        auto assembled_var =
-            std::make_shared<Var>(call_assign->var_->name_hint_ + "__assembled_" + std::to_string(i),
-                                  slice_bundle.parent_expr->GetType(), call_assign->var_->span_);
-        loop_stmts.push_back(std::make_shared<AssignStmt>(assembled_var, assemble_call, call_assign->span_));
-        yield_values.push_back(assembled_var);
-      }
-      loop_stmts.push_back(std::make_shared<YieldStmt>(yield_values, call_assign->span_));
-
-      auto loop_body = SeqStmts::Flatten(std::move(loop_stmts), call_assign->span_);
-      auto loop_stmt = std::make_shared<ForStmt>(loop_var, start, stop, step, iter_args, loop_body,
-                                                 return_vars, call_assign->span_, ForKind::Sequential);
-
-      RewriteBundle bundle;
-      bundle.stmts.push_back(loop_stmt);
-      if (return_vars.size() == 1) {
-        bundle.stmts.push_back(
-            std::make_shared<AssignStmt>(call_assign->var_, return_vars[0], call_assign->span_));
-      } else {
-        std::vector<ExprPtr> tuple_values(return_vars.begin(), return_vars.end());
-        auto tuple = std::make_shared<MakeTuple>(std::move(tuple_values), call_assign->span_);
-        bundle.stmts.push_back(std::make_shared<AssignStmt>(call_assign->var_, tuple, call_assign->span_));
-      }
-      return bundle;
-    }
-
-    std::optional<RewriteBundle> TryRewriteSpmdRowBlockEval(const EvalStmtPtr& eval,
-                                                            const RewriteCallsiteCandidate& candidate) {
-      auto call = candidate.call;
-      const auto& analysis = *candidate.analysis;
-      auto cloned_func = candidate.cloned_func;
-      if (!eval || !call || !cloned_func || !analysis.spmd_core_num.has_value() ||
-          !cloned_func->return_types_.empty()) {
-        return std::nullopt;
-      }
-
-      std::unordered_map<const Var*, ExprPtr> outer_subst;
-      for (size_t i = 0; i < candidate.original_func->params_.size() && i < call->args_.size(); ++i) {
-        outer_subst[candidate.original_func->params_[i].get()] = call->args_[i];
-      }
-
-      auto loop_var =
-          std::make_shared<Var>("spmd_idx", std::make_shared<ScalarType>(DataType::INDEX), eval->span_);
-      auto start = std::make_shared<ConstInt>(0, DataType::INDEX, eval->span_);
-      auto stop = std::make_shared<ConstInt>(*analysis.spmd_core_num, DataType::INDEX, eval->span_);
-      auto step = std::make_shared<ConstInt>(1, DataType::INDEX, eval->span_);
-
-      std::unordered_map<const Var*, ExprPtr> callsite_subst = outer_subst;
-      if (analysis.spmd_block_idx_var) callsite_subst[analysis.spmd_block_idx_var.get()] = loop_var;
-
-      std::vector<StmtPtr> loop_stmts;
-      loop_stmts.reserve((analysis.outputs.size() + analysis.inputs.size()) * 2 + 1);
-
-      std::unordered_map<size_t, VarPtr> slices_by_in_index;
-      for (const auto& input : analysis.inputs) {
-        if (input.in_param_index >= call->args_.size()) return std::nullopt;
-        auto in_arg = AsVarLike(call->args_[input.in_param_index]);
-        if (!in_arg || !IsWritableRootExpr(call->args_[input.in_param_index])) return std::nullopt;
-
-        std::vector<ExprPtr> shape_exprs;
-        shape_exprs.reserve(input.window_shape.size());
-        for (const auto& dim : input.window_shape) {
-          shape_exprs.push_back(transform_utils::Substitute(dim, callsite_subst));
-        }
-        auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, eval->span_);
-
-        std::vector<ExprPtr> offset_exprs;
-        offset_exprs.reserve(input.callsite_offsets.size());
-        for (const auto& offset : input.callsite_offsets) {
-          offset_exprs.push_back(
-              arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
-        }
-        auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, eval->span_);
-
-        auto slice_call = OpRegistry::GetInstance().Create(
-            "tensor.slice", {VisitExpr(call->args_[input.in_param_index]), shape_tuple, offset_tuple},
-            eval->span_);
-        auto slice_var =
-            std::make_shared<Var>(in_arg->name_hint_ + "__window", slice_call->GetType(), in_arg->span_);
-        loop_stmts.push_back(std::make_shared<AssignStmt>(slice_var, slice_call, eval->span_));
-        slices_by_in_index.emplace(input.in_param_index, slice_var);
-      }
-
-      std::unordered_map<size_t, SliceBundle> slices_by_out_index;
-      for (const auto& output : analysis.outputs) {
-        if (output.out_param_index >= call->args_.size()) return std::nullopt;
-        auto out_arg = AsVarLike(call->args_[output.out_param_index]);
-        if (!out_arg) return std::nullopt;
-
-        std::vector<ExprPtr> shape_exprs;
-        shape_exprs.reserve(output.window_shape.size());
-        for (const auto& dim : output.window_shape) {
-          shape_exprs.push_back(transform_utils::Substitute(dim, callsite_subst));
-        }
-        auto shape_tuple = std::make_shared<MakeTuple>(shape_exprs, eval->span_);
-
-        std::vector<ExprPtr> offset_exprs;
-        offset_exprs.reserve(output.callsite_offsets.size());
-        for (const auto& offset : output.callsite_offsets) {
-          offset_exprs.push_back(
-              arith::Analyzer().Simplify(transform_utils::Substitute(offset, callsite_subst)));
-        }
-        auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, eval->span_);
-
-        auto parent_expr = VisitExpr(call->args_[output.out_param_index]);
-        auto slice_call = OpRegistry::GetInstance().Create(
-            "tensor.slice", {parent_expr, shape_tuple, offset_tuple}, eval->span_);
-        auto slice_var =
-            std::make_shared<Var>(out_arg->name_hint_ + "__window", slice_call->GetType(), out_arg->span_);
-        loop_stmts.push_back(std::make_shared<AssignStmt>(slice_var, slice_call, eval->span_));
-        slices_by_out_index.emplace(output.out_param_index,
-                                    SliceBundle{slice_var, parent_expr, offset_tuple});
-      }
-
-      std::vector<ExprPtr> new_args;
-      new_args.reserve(call->args_.size() + 1);
-      new_args.push_back(loop_var);
-      for (size_t i = 0; i < call->args_.size(); ++i) {
-        auto input_slice_it = slices_by_in_index.find(i);
-        if (input_slice_it != slices_by_in_index.end()) {
-          new_args.push_back(input_slice_it->second);
-          continue;
-        }
-        auto output_slice_it = slices_by_out_index.find(i);
-        if (output_slice_it != slices_by_out_index.end()) {
-          new_args.push_back(output_slice_it->second.slice_var);
-        } else {
-          new_args.push_back(VisitExpr(call->args_[i]));
-        }
-      }
-
-      auto cloned_gvar = std::make_shared<GlobalVar>(cloned_func->name_);
-      auto new_call = std::make_shared<Call>(cloned_gvar, std::move(new_args), call->kwargs_,
-                                             RewriteCallAttrs(call, analysis, slices_by_out_index),
-                                             call->GetType(), call->span_);
-      loop_stmts.push_back(std::make_shared<EvalStmt>(new_call, eval->span_));
-
-      auto loop_body = SeqStmts::Flatten(std::move(loop_stmts), eval->span_);
-      auto loop = std::make_shared<ForStmt>(loop_var, start, stop, step, std::vector<IterArgPtr>{}, loop_body,
-                                            std::vector<VarPtr>{}, eval->span_, ForKind::Sequential);
-      RewriteBundle bundle;
-      bundle.stmts.push_back(loop);
-      return bundle;
-    }
-
     static bool IsSubmitCall(const CallPtr& call) {
       auto tuple_ty = As<TupleType>(call->GetType());
       if (!tuple_ty || tuple_ty->types_.empty()) return false;
       auto last = As<ScalarType>(tuple_ty->types_.back());
       return last != nullptr && last->dtype_ == DataType::TASK_ID;
-    }
-
-    static bool SpmdRewriteCoversAllReturns(const CalleeRewriteAnalysis& analysis, size_t return_count) {
-      std::vector<bool> covered(return_count, false);
-      for (const auto& output : analysis.outputs) {
-        if (output.return_index == SIZE_MAX) continue;
-        if (output.return_index >= return_count) return false;
-        covered[output.return_index] = true;
-      }
-      return std::all_of(covered.begin(), covered.end(), [](bool is_covered) { return is_covered; });
     }
 
     std::vector<std::pair<std::string, std::any>> RewriteCallAttrs(
@@ -3382,6 +2864,10 @@ class OutWindowExternalizer {
         break;
       }
       return attrs;
+    }
+
+    static bool CanRewriteInputWindowsForCallsite(const RewriteCallsiteCandidate& candidate) {
+      return candidate.analysis && HasAnyAnalyzedInputWindow(*candidate.analysis) && candidate.cloned_func;
     }
 
     bool ProveCallsiteDisjointness(const AssignStmtPtr& call_assign, const CallPtr& call,
@@ -3644,48 +3130,26 @@ class OutWindowExternalizer {
 
     size_t total_out_refs = CountVarRefsInStmt(func->body_, func->params_[out_param_index].get());
     std::optional<FinalStoreInfo> result;
-    auto parse_store = [](const AssignStmtPtr& assign)
-        -> std::optional<std::tuple<const Var*, std::vector<ExprPtr>, std::vector<ExprPtr>>> {
-      auto store_call = assign ? As<Call>(assign->value_) : nullptr;
-      if (!store_call) return std::nullopt;
-      if (store_call->op_->name_ == "tile.store" && store_call->args_.size() >= 3) {
-        auto out_target = AsVarLike(store_call->args_[2]);
-        auto offset_tuple = As<MakeTuple>(store_call->args_[1]);
-        auto tile_type = As<TileType>(store_call->args_[0]->GetType());
-        if (!out_target || !offset_tuple || !tile_type) return std::nullopt;
-        return std::make_tuple(out_target.get(), tile_type->shape_, offset_tuple->elements_);
-      }
-      if (store_call->op_->name_ == "tensor.assemble" && store_call->args_.size() >= 3) {
-        auto out_target = AsVarLike(store_call->args_[0]);
-        auto offset_tuple = As<MakeTuple>(store_call->args_[2]);
-        auto tensor_type = As<TensorType>(store_call->args_[1]->GetType());
-        if (!out_target || !offset_tuple || !tensor_type) return std::nullopt;
-        return std::make_tuple(out_target.get(), tensor_type->shape_, offset_tuple->elements_);
-      }
-      return std::nullopt;
-    };
-
+    size_t matched_refs = 0;
     for (size_t ret_i = 0; ret_i < ret_stmt->value_.size(); ++ret_i) {
       auto ret_var = AsVarLike(ret_stmt->value_[ret_i]);
       if (!ret_var) continue;
-      std::unordered_set<const Var*> seen;
-      const Var* current = ret_var.get();
-      while (current && seen.insert(current).second) {
-        auto def_it = var_defs.find(current);
-        if (def_it == var_defs.end()) break;
-        auto parsed = parse_store(def_it->second);
-        if (!parsed.has_value()) break;
+      auto def_it = var_defs.find(ret_var.get());
+      if (def_it == var_defs.end()) continue;
+      auto store_call = As<Call>(def_it->second->value_);
+      if (!store_call || store_call->op_->name_ != "tile.store" || store_call->args_.size() < 3) continue;
 
-        auto [out_target, window_shape, offsets] = *parsed;
-        if (out_target == func->params_[out_param_index].get()) {
-          size_t matched_refs = CountVarRefsInStmt(def_it->second, func->params_[out_param_index].get());
-          if (total_out_refs != matched_refs) return std::nullopt;
-          result = FinalStoreInfo{ret_i, std::move(window_shape), std::move(offsets)};
-          break;
-        }
-        current = out_target;
-      }
-      if (result.has_value()) break;
+      auto out_target = AsVarLike(store_call->args_[2]);
+      if (!out_target || out_target.get() != func->params_[out_param_index].get()) continue;
+      auto offset_tuple = As<MakeTuple>(store_call->args_[1]);
+      auto tile_type = As<TileType>(store_call->args_[0]->GetType());
+      if (!offset_tuple || !tile_type) return std::nullopt;
+
+      matched_refs = CountVarRefsInStmt(def_it->second, func->params_[out_param_index].get());
+      if (total_out_refs != matched_refs) return std::nullopt;
+
+      result = FinalStoreInfo{ret_i, tile_type->shape_, offset_tuple->elements_};
+      break;
     }
     return result;
   }
@@ -3693,7 +3157,7 @@ class OutWindowExternalizer {
   static std::vector<InputRewriteInfo> AnalyzeInputWindows(const FunctionPtr& func,
                                                            const std::vector<OutputRewriteInfo>& outputs) {
     std::vector<InputRewriteInfo> inputs;
-    if (!func || outputs.empty()) return inputs;
+    if (!func) return inputs;
 
     auto body_stmts = FlattenToStmts(func->body_);
     std::unordered_set<const Var*> output_params;
@@ -3811,6 +3275,184 @@ class OutWindowExternalizer {
       return lhs.in_param_index < rhs.in_param_index;
     });
     return inputs;
+  }
+
+  static std::vector<InputRewriteInfo> AnalyzeAggregateInputWindows(
+      const FunctionPtr& func, const ForStmtPtr& loop, const std::vector<OutputRewriteInfo>& outputs,
+      const std::unordered_map<const Var*, ExprPtr>& scalar_defs,
+      const std::unordered_set<const Var*>& extra_allowed_vars = {}) {
+    std::vector<InputRewriteInfo> inputs;
+    if (!func || !loop || outputs.empty()) return inputs;
+
+    auto trip_count = GetKnownPositiveTripCount(loop);
+    if (!trip_count.has_value() || *trip_count <= 0) return inputs;
+    auto first_loop_value = GetLoopValueAtTrip(loop, 0);
+    auto last_loop_value = GetLoopValueAtTrip(loop, *trip_count - 1);
+    if (!first_loop_value.has_value() || !last_loop_value.has_value()) return inputs;
+
+    std::unordered_set<const Var*> output_params;
+    for (const auto& output : outputs) {
+      if (output.out_param_index < func->params_.size())
+        output_params.insert(func->params_[output.out_param_index].get());
+    }
+
+    std::unordered_set<const Var*> allowed;
+    for (const auto& param : func->params_) allowed.insert(param.get());
+    allowed.insert(loop->loop_var_.get());
+    allowed.insert(extra_allowed_vars.begin(), extra_allowed_vars.end());
+
+    struct AggregateRead {
+      size_t param_index;
+      std::vector<ExprPtr> parent_shape;
+      std::vector<ExprPtr> window_shape;
+      std::vector<ExprPtr> callsite_offsets;
+      std::vector<ExprPtr> local_offsets;
+      size_t refs = 0;
+    };
+
+    std::unordered_map<size_t, AggregateRead> by_index;
+    std::unordered_map<size_t, size_t> matched_refs_by_index;
+    std::unordered_set<size_t> conflicted;
+    auto total_refs_by_var = CountAllVarRefsInStmt(func->body_);
+
+    for (const auto& stmt : FlattenToStmts(loop->body_)) {
+      auto assign = As<AssignStmt>(stmt);
+      auto call = assign ? As<Call>(assign->value_) : nullptr;
+      if (!call) continue;
+
+      size_t shape_arg_index = SIZE_MAX;
+      size_t offset_arg_index = SIZE_MAX;
+      if (call->op_->name_ == "tensor.slice" && call->args_.size() >= 3) {
+        shape_arg_index = 1;
+        offset_arg_index = 2;
+      } else if (call->op_->name_ == "tile.load" && call->args_.size() >= 3) {
+        offset_arg_index = 1;
+        shape_arg_index = 2;
+      } else {
+        continue;
+      }
+
+      auto parent = AsVarLike(call->args_[0]);
+      auto shape_tuple = As<MakeTuple>(call->args_[shape_arg_index]);
+      auto offset_tuple = As<MakeTuple>(call->args_[offset_arg_index]);
+      if (!parent || !shape_tuple || !offset_tuple) continue;
+
+      size_t param_index = SIZE_MAX;
+      for (size_t i = 0; i < func->params_.size() && i < func->param_directions_.size(); ++i) {
+        if (func->params_[i].get() == parent.get()) {
+          param_index = i;
+          break;
+        }
+      }
+      if (param_index == SIZE_MAX) continue;
+      if (func->param_directions_[param_index] != ParamDirection::In) continue;
+      if (output_params.count(parent.get()) > 0) continue;
+
+      auto tensor_type = As<TensorType>(func->params_[param_index]->GetType());
+      if (!tensor_type) continue;
+      if (shape_tuple->elements_.size() != offset_tuple->elements_.size() ||
+          shape_tuple->elements_.size() != tensor_type->shape_.size()) {
+        conflicted.insert(param_index);
+        by_index.erase(param_index);
+        matched_refs_by_index.erase(param_index);
+        continue;
+      }
+
+      bool exprs_ok = true;
+      std::vector<ExprPtr> base_offsets;
+      std::vector<ExprPtr> local_offsets;
+      std::vector<ExprPtr> window_shape;
+      base_offsets.reserve(offset_tuple->elements_.size());
+      local_offsets.reserve(offset_tuple->elements_.size());
+      window_shape.reserve(offset_tuple->elements_.size());
+      for (size_t i = 0; i < offset_tuple->elements_.size(); ++i) {
+        auto expanded = ExpandLoopLocalExpr(offset_tuple->elements_[i], scalar_defs);
+        if (!expanded.has_value() || !ExprReferencesOnlyVarsIn(*expanded, allowed)) {
+          exprs_ok = false;
+          break;
+        }
+
+        auto ordered_offsets = GetOrderedLoopOffsets(*expanded, loop, *first_loop_value, *last_loop_value);
+        if (!ordered_offsets.has_value()) {
+          exprs_ok = false;
+          break;
+        }
+
+        auto span_expr = arith::Analyzer().Simplify(
+            MakeAdd(MakeSub(ordered_offsets->max, ordered_offsets->min, func->span_),
+                    shape_tuple->elements_[i], func->span_));
+        auto span_ci = As<ConstInt>(span_expr);
+        if (!span_ci || span_ci->value_ <= 0) {
+          exprs_ok = false;
+          break;
+        }
+
+        base_offsets.push_back(ordered_offsets->min);
+        local_offsets.push_back(arith::Analyzer().Simplify(
+            MakeSub(offset_tuple->elements_[i], ordered_offsets->min, offset_tuple->elements_[i]->span_)));
+        window_shape.push_back(std::make_shared<ConstInt>(span_ci->value_, DataType::INDEX, func->span_));
+      }
+      if (!exprs_ok) {
+        conflicted.insert(param_index);
+        by_index.erase(param_index);
+        matched_refs_by_index.erase(param_index);
+        continue;
+      }
+
+      AggregateRead read{param_index,
+                         tensor_type->shape_,
+                         std::move(window_shape),
+                         std::move(base_offsets),
+                         std::move(local_offsets),
+                         CountVarRefsInStmt(stmt, parent.get())};
+      auto existing = by_index.find(param_index);
+      if (existing == by_index.end()) {
+        matched_refs_by_index[param_index] = read.refs;
+        by_index.emplace(param_index, std::move(read));
+        continue;
+      }
+      if (!AreExprVectorsEqual(existing->second.window_shape, read.window_shape) ||
+          !AreExprVectorsEqual(existing->second.callsite_offsets, read.callsite_offsets) ||
+          !AreExprVectorsEqual(existing->second.local_offsets, read.local_offsets)) {
+        conflicted.insert(param_index);
+        by_index.erase(param_index);
+        matched_refs_by_index.erase(param_index);
+        continue;
+      }
+      matched_refs_by_index[param_index] += read.refs;
+    }
+
+    inputs.reserve(by_index.size());
+    for (auto& [param_index, read] : by_index) {
+      if (conflicted.count(param_index) != 0 || param_index >= func->params_.size()) continue;
+      auto total_refs_it = total_refs_by_var.find(func->params_[param_index].get());
+      auto total_refs = total_refs_it == total_refs_by_var.end() ? 0 : total_refs_it->second;
+      auto matched_it = matched_refs_by_index.find(param_index);
+      auto matched_refs = matched_it == matched_refs_by_index.end() ? 0 : matched_it->second;
+      if (total_refs != matched_refs) continue;
+
+      inputs.push_back(InputRewriteInfo{read.param_index, std::move(read.parent_shape),
+                                        std::move(read.window_shape), std::move(read.callsite_offsets),
+                                        std::move(read.local_offsets)});
+    }
+    std::sort(inputs.begin(), inputs.end(), [](const InputRewriteInfo& lhs, const InputRewriteInfo& rhs) {
+      return lhs.in_param_index < rhs.in_param_index;
+    });
+    return inputs;
+  }
+
+  static void MergeInputWindows(std::vector<InputRewriteInfo>* inputs, std::vector<InputRewriteInfo> extra) {
+    if (!inputs || extra.empty()) return;
+    std::unordered_set<size_t> existing_indices;
+    for (const auto& input : *inputs) existing_indices.insert(input.in_param_index);
+    for (auto& input : extra) {
+      if (existing_indices.insert(input.in_param_index).second) {
+        inputs->push_back(std::move(input));
+      }
+    }
+    std::sort(inputs->begin(), inputs->end(), [](const InputRewriteInfo& lhs, const InputRewriteInfo& rhs) {
+      return lhs.in_param_index < rhs.in_param_index;
+    });
   }
 
   class InputWindowCallsiteFilter {
@@ -3990,9 +3632,14 @@ class OutWindowExternalizer {
     }
 
     void AddCallOutputRoots(const AssignStmtPtr& assign, const CallPtr& call) {
-      auto roots =
-          BuildCallOutputRoots(program_, call, [this](const ExprPtr& arg) { return ResolveBufferRoot(arg); });
-      if (roots.empty()) return;
+      auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
+      if (!callee) return;
+
+      std::vector<const Var*> roots(callee->return_types_.size(), nullptr);
+      for (const auto& mapping : BuildOutParamReturnMappings(callee, /*include_inout=*/true)) {
+        if (mapping.return_index >= roots.size() || mapping.param_index >= call->args_.size()) continue;
+        roots[mapping.return_index] = ResolveBufferRoot(call->args_[mapping.param_index]);
+      }
 
       if (As<TupleType>(call->GetType())) {
         tuple_output_roots_[assign->var_.get()] = std::move(roots);
@@ -4063,9 +3710,7 @@ class OutWindowExternalizer {
   }
 
   static std::optional<CalleeRewriteAnalysis> AnalyzeAggregateWindowLoop(
-      const FunctionPtr& func, const std::vector<size_t>& out_indices,
-      std::unordered_map<const Var*, ExprPtr> scalar_defs = {},
-      std::unordered_set<const Var*> extra_allowed_vars = {}) {
+      const FunctionPtr& func, const std::vector<size_t>& out_indices) {
     if (!func || out_indices.empty()) return std::nullopt;
 
     auto body_stmts = FlattenToStmts(func->body_);
@@ -4097,27 +3742,21 @@ class OutWindowExternalizer {
         }
 
         bool matched_output = false;
-        for (size_t i = 0; i < candidate->iter_args_.size(); ++i) {
+        for (size_t i = 0; i < candidate->iter_args_.size() && i < candidate->return_vars_.size(); ++i) {
           auto init_var = AsVarLike(candidate->iter_args_[i]->initValue_);
           if (!init_var || init_var.get() != func->params_[out_param_index].get()) continue;
 
           std::optional<size_t> return_index = direct_return_index;
-          if (i < candidate->return_vars_.size() && direct_returned &&
-              direct_returned.get() != candidate->return_vars_[i].get()) {
+          if (direct_returned && direct_returned.get() != candidate->return_vars_[i].get()) {
             return_index = std::nullopt;
           }
-          if (i < candidate->return_vars_.size()) {
-            for (size_t ret_i = 0; ret_i < ret_stmt->value_.size(); ++ret_i) {
-              if (return_index.has_value()) break;
-              auto returned = AsVarLike(ret_stmt->value_[ret_i]);
-              if (returned && returned.get() == candidate->return_vars_[i].get()) {
-                return_index = ret_i;
-                break;
-              }
+          for (size_t ret_i = 0; ret_i < ret_stmt->value_.size(); ++ret_i) {
+            if (return_index.has_value()) break;
+            auto returned = AsVarLike(ret_stmt->value_[ret_i]);
+            if (returned && returned.get() == candidate->return_vars_[i].get()) {
+              return_index = ret_i;
+              break;
             }
-          }
-          if (!return_index.has_value() && ret_stmt->value_.empty()) {
-            return_index = SIZE_MAX;
           }
           if (!return_index.has_value()) continue;
 
@@ -4133,12 +3772,10 @@ class OutWindowExternalizer {
       }
 
       if (!matches_all_outputs) continue;
-      for (size_t i = 0; i < candidate->iter_args_.size(); ++i) {
-        if (matched_iter_arg_indices.count(i) == 0 && AsTensorTypeLike(candidate->iter_args_[i]->GetType())) {
-          return std::nullopt;
-        }
+      if (candidate->iter_args_.size() != candidate_matches.size() ||
+          candidate->return_vars_.size() != candidate_matches.size()) {
+        return std::nullopt;
       }
-      if (candidate->return_vars_.size() > candidate->iter_args_.size()) return std::nullopt;
 
       if (loop) return std::nullopt;
       loop = candidate;
@@ -4167,129 +3804,59 @@ class OutWindowExternalizer {
       AssignStmtPtr assign;
       std::vector<ExprPtr> window_shape;
       std::vector<ExprPtr> offsets;
-      size_t iter_arg_refs = 0;
     };
 
     std::unordered_map<size_t, AggregateUpdate> updates_by_iter_arg_index;
-    std::unordered_map<const Var*, size_t> store_result_to_iter_arg_index;
-    std::unordered_map<const Var*, size_t> store_result_to_iter_arg_refs;
-    const bool has_seeded_scalar_defs = !scalar_defs.empty();
-    auto resolve_update_index = [&](const Var* updated_iter_arg) -> std::optional<size_t> {
-      if (!updated_iter_arg) return std::nullopt;
-      for (const auto& match : loop_matches) {
-        if (updated_iter_arg == loop->iter_args_[match.iter_arg_index].get()) {
-          return match.iter_arg_index;
-        }
-      }
-      auto chained_it = store_result_to_iter_arg_index.find(updated_iter_arg);
-      if (chained_it != store_result_to_iter_arg_index.end()) return chained_it->second;
-      return std::nullopt;
-    };
-    auto process_update_assign = [&](const AssignStmtPtr& assign) -> bool {
-      auto call = assign ? As<Call>(assign->value_) : nullptr;
-      if (!call) return false;
-
-      const Var* updated_iter_arg = nullptr;
-      std::vector<ExprPtr> window_shape;
-      std::vector<ExprPtr> offsets;
-      if (call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
-        auto out_arg = AsVarLike(call->args_[2]);
-        auto offset_tuple = As<MakeTuple>(call->args_[1]);
-        auto tile_type = As<TileType>(call->args_[0]->GetType());
-        if (out_arg && offset_tuple && tile_type) {
-          updated_iter_arg = out_arg.get();
-          window_shape = tile_type->shape_;
-          offsets = offset_tuple->elements_;
-        }
-      } else if (call->op_->name_ == "tensor.assemble" && call->args_.size() >= 3) {
-        auto parent_arg = AsVarLike(call->args_[0]);
-        auto offset_tuple = As<MakeTuple>(call->args_[2]);
-        auto source_type = As<TensorType>(call->args_[1]->GetType());
-        if (parent_arg && offset_tuple && source_type) {
-          updated_iter_arg = parent_arg.get();
-          window_shape = source_type->shape_;
-          offsets = offset_tuple->elements_;
-        }
-      }
-
-      auto updated_iter_arg_index = resolve_update_index(updated_iter_arg);
-      if (!updated_iter_arg_index.has_value()) return false;
-
-      auto iter_arg = loop->iter_args_[*updated_iter_arg_index].get();
-      const bool direct_iter_update = updated_iter_arg == iter_arg;
-      size_t iter_refs = CountVarRefsInStmt(assign, iter_arg);
-      auto chained_refs_it = store_result_to_iter_arg_refs.find(updated_iter_arg);
-      if (chained_refs_it != store_result_to_iter_arg_refs.end()) {
-        iter_refs += chained_refs_it->second;
-      }
-      if (direct_iter_update ||
-          updates_by_iter_arg_index.find(*updated_iter_arg_index) == updates_by_iter_arg_index.end()) {
-        updates_by_iter_arg_index[*updated_iter_arg_index] =
-            AggregateUpdate{assign, std::move(window_shape), std::move(offsets), iter_refs};
-      }
-      store_result_to_iter_arg_index[assign->var_.get()] = *updated_iter_arg_index;
-      store_result_to_iter_arg_refs[assign->var_.get()] = iter_refs;
-      return true;
-    };
-    std::function<void(const StmtPtr&)> visit_nested_control_flow;
-    visit_nested_control_flow = [&](const StmtPtr& stmt) {
-      if (!stmt) return;
-      if (auto seq = As<SeqStmts>(stmt)) {
-        for (const auto& child : seq->stmts_) visit_nested_control_flow(child);
-        return;
-      }
-      if (auto assign = As<AssignStmt>(stmt)) {
-        process_update_assign(assign);
-        return;
-      }
-      if (auto if_stmt = As<IfStmt>(stmt)) {
-        visit_nested_control_flow(if_stmt->then_body_);
-        if (if_stmt->else_body_.has_value()) visit_nested_control_flow(if_stmt->else_body_.value());
-        auto then_yield = transform_utils::GetLastYieldStmt(if_stmt->then_body_);
-        auto else_yield = if_stmt->else_body_.has_value()
-                              ? transform_utils::GetLastYieldStmt(if_stmt->else_body_.value())
-                              : nullptr;
-        if (!then_yield || !else_yield || then_yield->value_.size() != if_stmt->return_vars_.size() ||
-            else_yield->value_.size() != if_stmt->return_vars_.size()) {
-          return;
-        }
-        for (size_t i = 0; i < if_stmt->return_vars_.size(); ++i) {
-          auto then_var = AsVarLike(then_yield->value_[i]);
-          auto else_var = AsVarLike(else_yield->value_[i]);
-          if (!then_var || !else_var) continue;
-          auto then_index = resolve_update_index(then_var.get());
-          auto else_index = resolve_update_index(else_var.get());
-          if (!then_index.has_value() || !else_index.has_value() || *then_index != *else_index) continue;
-          store_result_to_iter_arg_index[if_stmt->return_vars_[i].get()] = *then_index;
-          auto then_refs_it = store_result_to_iter_arg_refs.find(then_var.get());
-          auto else_refs_it = store_result_to_iter_arg_refs.find(else_var.get());
-          size_t refs = 0;
-          if (then_refs_it != store_result_to_iter_arg_refs.end())
-            refs = std::max(refs, then_refs_it->second);
-          if (else_refs_it != store_result_to_iter_arg_refs.end())
-            refs = std::max(refs, else_refs_it->second);
-          store_result_to_iter_arg_refs[if_stmt->return_vars_[i].get()] = refs;
-        }
-      }
-    };
+    std::unordered_map<const Var*, ExprPtr> scalar_defs;
     for (const auto& stmt : loop_body_stmts) {
       if (auto assign = As<AssignStmt>(stmt)) {
-        if (process_update_assign(assign)) continue;
-        if (As<ScalarType>(assign->var_->GetType())) {
-          auto value = assign->value_;
-          if (has_seeded_scalar_defs) {
-            value = arith::Analyzer().Simplify(transform_utils::Substitute(value, scalar_defs));
+        auto call = As<Call>(assign->value_);
+        if (call) {
+          const Var* updated_iter_arg = nullptr;
+          std::vector<ExprPtr> window_shape;
+          std::vector<ExprPtr> offsets;
+          if (call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
+            auto out_arg = AsVarLike(call->args_[2]);
+            auto offset_tuple = As<MakeTuple>(call->args_[1]);
+            auto tile_type = As<TileType>(call->args_[0]->GetType());
+            if (out_arg && offset_tuple && tile_type) {
+              updated_iter_arg = out_arg.get();
+              window_shape = tile_type->shape_;
+              offsets = offset_tuple->elements_;
+            }
+          } else if (call->op_->name_ == "tensor.assemble" && call->args_.size() >= 3) {
+            auto parent_arg = AsVarLike(call->args_[0]);
+            auto offset_tuple = As<MakeTuple>(call->args_[2]);
+            auto source_type = As<TensorType>(call->args_[1]->GetType());
+            if (parent_arg && offset_tuple && source_type) {
+              updated_iter_arg = parent_arg.get();
+              window_shape = source_type->shape_;
+              offsets = offset_tuple->elements_;
+            }
           }
-          scalar_defs[assign->var_.get()] = value;
+
+          bool matched_update = false;
+          if (updated_iter_arg) {
+            for (const auto& match : loop_matches) {
+              if (updated_iter_arg != loop->iter_args_[match.iter_arg_index].get()) continue;
+              if (updates_by_iter_arg_index.count(match.iter_arg_index)) return std::nullopt;
+              updates_by_iter_arg_index.emplace(
+                  match.iter_arg_index, AggregateUpdate{assign, std::move(window_shape), std::move(offsets)});
+              matched_update = true;
+              break;
+            }
+          }
+          if (matched_update) continue;
+        }
+        if (As<ScalarType>(assign->var_->GetType())) {
+          scalar_defs[assign->var_.get()] = assign->value_;
         }
         continue;
       }
       if (auto yield = As<YieldStmt>(stmt)) {
         if (yield_stmt || yield->value_.size() != loop->return_vars_.size()) return std::nullopt;
         yield_stmt = yield;
-        continue;
       }
-      visit_nested_control_flow(stmt);
     }
 
     if (!yield_stmt || updates_by_iter_arg_index.size() != loop_matches.size()) return std::nullopt;
@@ -4297,7 +3864,6 @@ class OutWindowExternalizer {
     std::unordered_set<const Var*> allowed;
     for (const auto& param : func->params_) allowed.insert(param.get());
     allowed.insert(loop->loop_var_.get());
-    allowed.insert(extra_allowed_vars.begin(), extra_allowed_vars.end());
 
     CalleeRewriteAnalysis analysis;
     analysis.kind = RewriteKind::AggregateWindowLoop;
@@ -4309,21 +3875,10 @@ class OutWindowExternalizer {
       auto store_assign = update.assign;
 
       auto yielded = AsVarLike(yield_stmt->value_[match.iter_arg_index]);
-      if (!yielded) return std::nullopt;
-      if (yielded.get() != store_assign->var_.get()) {
-        auto yielded_it = store_result_to_iter_arg_index.find(yielded.get());
-        if (yielded_it == store_result_to_iter_arg_index.end() ||
-            yielded_it->second != match.iter_arg_index) {
-          return std::nullopt;
-        }
-      }
+      if (!yielded || yielded.get() != store_assign->var_.get()) return std::nullopt;
 
-      if (!As<TensorType>(loop->iter_args_[match.iter_arg_index]->GetType())) {
-        return std::nullopt;
-      }
-      if (match.return_index != SIZE_MAX &&
-          (match.iter_arg_index >= loop->return_vars_.size() ||
-           !As<TensorType>(loop->return_vars_[match.iter_arg_index]->GetType()))) {
+      if (!As<TensorType>(loop->iter_args_[match.iter_arg_index]->GetType()) ||
+          !As<TensorType>(loop->return_vars_[match.iter_arg_index]->GetType())) {
         return std::nullopt;
       }
 
@@ -4332,7 +3887,8 @@ class OutWindowExternalizer {
       if (total_out_refs != store_out_refs + 1) return std::nullopt;
 
       size_t total_iter_refs = CountVarRefsInStmt(loop->body_, loop->iter_args_[match.iter_arg_index].get());
-      if (total_iter_refs != update.iter_arg_refs) return std::nullopt;
+      size_t store_iter_refs = CountVarRefsInStmt(store_assign, loop->iter_args_[match.iter_arg_index].get());
+      if (total_iter_refs != store_iter_refs) return std::nullopt;
 
       auto out_tensor_type = As<TensorType>(func->params_[match.out_param_index]->GetType());
       if (!out_tensor_type) return std::nullopt;
@@ -4373,814 +3929,10 @@ class OutWindowExternalizer {
           std::move(base_offsets), std::move(local_offsets), match.iter_arg_index});
     }
 
+    analysis.inputs = AnalyzeInputWindows(func, analysis.outputs);
+    MergeInputWindows(&analysis.inputs,
+                      AnalyzeAggregateInputWindows(func, loop, analysis.outputs, scalar_defs));
     return analysis;
-  }
-
-  static std::optional<int64_t> GetFunctionCoreNum(const FunctionPtr& func) {
-    if (!func) return std::nullopt;
-    auto core_num_expr = func->GetAttr<ExprPtr>("core_num", nullptr);
-    if (auto core_num_ci = As<ConstInt>(core_num_expr)) {
-      if (core_num_ci->value_ > 0) return core_num_ci->value_;
-    }
-    auto core_num = func->GetAttr<int64_t>("core_num", 0);
-    if (core_num <= 0) {
-      core_num = static_cast<int64_t>(func->GetAttr<int>("core_num", 0));
-    }
-    if (core_num <= 0) return std::nullopt;
-    return core_num;
-  }
-
-  static std::optional<DirectSpmdCall> GetDirectSpmdInnerCall(const ProgramPtr& program,
-                                                              const FunctionPtr& spmd_func) {
-    if (!program || !spmd_func || spmd_func->func_type_ != FunctionType::Spmd) return std::nullopt;
-    auto body_stmts = FlattenToStmts(spmd_func->body_);
-    CallPtr call;
-    bool returns_value = false;
-    if (body_stmts.size() >= 2) {
-      auto call_assign = As<AssignStmt>(body_stmts[0]);
-      auto ret_stmt = As<ReturnStmt>(body_stmts.back());
-      call = call_assign ? As<Call>(call_assign->value_) : nullptr;
-      if (!call || !ret_stmt || ret_stmt->value_.empty()) return std::nullopt;
-      if (ret_stmt->value_.size() == 1) {
-        auto ret_var = AsVarLike(ret_stmt->value_[0]);
-        if (!ret_var || ret_var.get() != call_assign->var_.get()) return std::nullopt;
-      } else {
-        std::unordered_map<const Var*, int> tuple_item_indices;
-        for (size_t i = 1; i + 1 < body_stmts.size(); ++i) {
-          auto item_assign = As<AssignStmt>(body_stmts[i]);
-          auto tuple_get = item_assign ? As<TupleGetItemExpr>(item_assign->value_) : nullptr;
-          auto tuple_var = tuple_get ? AsVarLike(tuple_get->tuple_) : nullptr;
-          if (!item_assign || !tuple_get || !tuple_var || tuple_var.get() != call_assign->var_.get()) {
-            return std::nullopt;
-          }
-          tuple_item_indices[item_assign->var_.get()] = tuple_get->index_;
-        }
-        for (size_t i = 0; i < ret_stmt->value_.size(); ++i) {
-          auto ret_var = AsVarLike(ret_stmt->value_[i]);
-          if (!ret_var) return std::nullopt;
-          auto item_it = tuple_item_indices.find(ret_var.get());
-          if (item_it == tuple_item_indices.end() || item_it->second != static_cast<int>(i)) {
-            return std::nullopt;
-          }
-        }
-      }
-      returns_value = true;
-    } else if (body_stmts.size() == 1) {
-      auto eval = As<EvalStmt>(body_stmts[0]);
-      call = eval ? As<Call>(eval->expr_) : nullptr;
-      if (!call) return std::nullopt;
-    } else {
-      return std::nullopt;
-    }
-
-    auto inner = program->GetFunction(GetCallFuncName(call));
-    if (!inner || inner->func_type_ == FunctionType::Spmd ||
-        inner->func_type_ == FunctionType::Orchestration || inner->func_type_ == FunctionType::Inline) {
-      return std::nullopt;
-    }
-    if (!IsDirectParamForwardingCall(spmd_func, call, inner)) {
-      return std::nullopt;
-    }
-    return DirectSpmdCall{inner, call, returns_value};
-  }
-
-  static std::optional<FunctionPtr> GetDirectSpmdInnerFunction(const ProgramPtr& program,
-                                                               const FunctionPtr& spmd_func) {
-    auto inner_call = GetDirectSpmdInnerCall(program, spmd_func);
-    if (!inner_call.has_value()) return std::nullopt;
-    return inner_call->inner_func;
-  }
-
-  static std::optional<VarPtr> FindSingleBlockIdxVar(const FunctionPtr& func) {
-    if (!func) return std::nullopt;
-    VarPtr block_idx;
-    auto body_stmts = FlattenToStmts(func->body_);
-    for (const auto& stmt : body_stmts) {
-      auto assign = As<AssignStmt>(stmt);
-      auto call = assign ? As<Call>(assign->value_) : nullptr;
-      if (!call || call->op_->name_ != "tile.get_block_idx") continue;
-      if (block_idx) return std::nullopt;
-      block_idx = assign->var_;
-    }
-    if (!block_idx) return std::nullopt;
-    return block_idx;
-  }
-
-  static std::optional<ExprPtr> TryRemoveBaseOffset(const ExprPtr& expr, const ExprPtr& base) {
-    if (!expr || !base) return std::nullopt;
-    auto local = arith::Analyzer().Simplify(MakeSub(expr, base, expr->span_));
-    if (!local || local.get() == expr.get()) return std::nullopt;
-    return local;
-  }
-
-  static std::unordered_map<const Var*, ExprPtr> CollectTopLevelScalarDefsBeforeLoop(
-      const FunctionPtr& func, const ForStmtPtr& loop,
-      const std::unordered_set<const Var*>& preserved_vars = {}) {
-    std::unordered_map<const Var*, ExprPtr> defs;
-    if (!func || !loop) return defs;
-    for (const auto& stmt : FlattenToStmts(func->body_)) {
-      if (stmt.get() == loop.get()) break;
-      auto assign = As<AssignStmt>(stmt);
-      if (!assign || !As<ScalarType>(assign->var_->GetType())) continue;
-      if (preserved_vars.count(assign->var_.get()) != 0) continue;
-      defs[assign->var_.get()] =
-          arith::Analyzer().Simplify(transform_utils::Substitute(assign->value_, defs));
-    }
-    return defs;
-  }
-
-  static std::optional<ForStmtPtr> FindSingleTopLevelAggregateLoop(const FunctionPtr& func) {
-    if (!func) return std::nullopt;
-    ForStmtPtr result;
-    for (const auto& stmt : FlattenToStmts(func->body_)) {
-      auto loop = As<ForStmt>(stmt);
-      if (!loop) continue;
-      if (result) return std::nullopt;
-      result = loop;
-    }
-    if (!result) return std::nullopt;
-    return result;
-  }
-
-  static std::optional<InputRewriteInfo> AnalyzeSpmdInputWindow(const FunctionPtr& func, size_t param_index,
-                                                                const Var* block_idx_var,
-                                                                const ExprPtr& base_row_offset,
-                                                                const ExprPtr& row_block_shape) {
-    if (!func || param_index >= func->params_.size() || !block_idx_var || !base_row_offset ||
-        !row_block_shape) {
-      return std::nullopt;
-    }
-    if (param_index >= func->param_directions_.size() ||
-        func->param_directions_[param_index] != ParamDirection::In) {
-      return std::nullopt;
-    }
-    auto tensor_type = As<TensorType>(func->params_[param_index]->GetType());
-    if (!tensor_type || tensor_type->shape_.size() != 2) return std::nullopt;
-
-    auto total_refs_by_var = CountAllVarRefsInStmt(func->body_);
-    auto total_refs_it = total_refs_by_var.find(func->params_[param_index].get());
-    const size_t total_refs = total_refs_it == total_refs_by_var.end() ? 0 : total_refs_it->second;
-
-    std::optional<InputRewriteInfo> result;
-    size_t matched_refs = 0;
-    auto aggregate_loop = FindSingleTopLevelAggregateLoop(func);
-    if (!aggregate_loop.has_value()) return std::nullopt;
-    auto scalar_defs = CollectTopLevelScalarDefsBeforeLoop(func, *aggregate_loop, {block_idx_var});
-    bool invalid = false;
-    std::function<void(const StmtPtr&, std::unordered_map<const Var*, ExprPtr>&)> scan_stmt;
-    scan_stmt = [&](const StmtPtr& stmt, std::unordered_map<const Var*, ExprPtr>& defs) {
-      if (!stmt || invalid) return;
-      if (auto seq = As<SeqStmts>(stmt)) {
-        for (const auto& child : seq->stmts_) scan_stmt(child, defs);
-        return;
-      }
-      if (auto if_stmt = As<IfStmt>(stmt)) {
-        auto then_defs = defs;
-        scan_stmt(if_stmt->then_body_, then_defs);
-        if (if_stmt->else_body_.has_value()) {
-          auto else_defs = defs;
-          scan_stmt(if_stmt->else_body_.value(), else_defs);
-        }
-        return;
-      }
-      if (auto loop_stmt = As<ForStmt>(stmt)) {
-        scan_stmt(loop_stmt->body_, defs);
-        return;
-      }
-      if (auto loop_stmt = As<WhileStmt>(stmt)) {
-        scan_stmt(loop_stmt->body_, defs);
-        return;
-      }
-      auto assign = As<AssignStmt>(stmt);
-      auto call = assign ? As<Call>(assign->value_) : nullptr;
-      if (assign && As<ScalarType>(assign->var_->GetType())) {
-        defs[assign->var_.get()] =
-            arith::Analyzer().Simplify(transform_utils::Substitute(assign->value_, defs));
-      }
-      if (!call || call->op_->name_ != "tile.load" || call->args_.size() < 3) return;
-
-      auto parent = AsVarLike(call->args_[0]);
-      auto offset_tuple = As<MakeTuple>(call->args_[1]);
-      auto shape_tuple = As<MakeTuple>(call->args_[2]);
-      if (!parent || parent.get() != func->params_[param_index].get() || !offset_tuple || !shape_tuple) {
-        return;
-      }
-      if (offset_tuple->elements_.size() != 2 || shape_tuple->elements_.size() != 2) {
-        invalid = true;
-        return;
-      }
-      if (!AreExprVectorsEqual(
-              shape_tuple->elements_,
-              {std::make_shared<ConstInt>(1, DataType::INDEX, func->span_), tensor_type->shape_[1]}) ||
-          !IsConstValue(offset_tuple->elements_[1], 0)) {
-        invalid = true;
-        return;
-      }
-
-      auto expanded_row_offset =
-          arith::Analyzer().Simplify(transform_utils::Substitute(offset_tuple->elements_[0], defs));
-      auto local_row = TryRemoveBaseOffset(expanded_row_offset, base_row_offset);
-      if (!local_row.has_value()) {
-        invalid = true;
-        return;
-      }
-
-      std::vector<ExprPtr> window_shape{row_block_shape, tensor_type->shape_[1]};
-      std::vector<ExprPtr> callsite_offsets{base_row_offset,
-                                            std::make_shared<ConstInt>(0, DataType::INDEX, func->span_)};
-      std::vector<ExprPtr> local_offsets{*local_row,
-                                         std::make_shared<ConstInt>(0, DataType::INDEX, func->span_)};
-      InputRewriteInfo info{param_index, tensor_type->shape_, std::move(window_shape),
-                            std::move(callsite_offsets), std::move(local_offsets)};
-      if (result.has_value() && (!AreExprVectorsEqual(result->window_shape, info.window_shape) ||
-                                 !AreExprVectorsEqual(result->callsite_offsets, info.callsite_offsets))) {
-        invalid = true;
-        return;
-      }
-      result = std::move(info);
-      matched_refs += CountVarRefsInStmt(stmt, parent.get());
-    };
-    scan_stmt((*aggregate_loop)->body_, scalar_defs);
-    if (invalid) return std::nullopt;
-    if (!result.has_value() || total_refs != matched_refs) return std::nullopt;
-    return result;
-  }
-
-  static std::optional<InputRewriteInfo> AnalyzeDirectSpmdInputWindow(const FunctionPtr& func,
-                                                                      size_t param_index,
-                                                                      const Var* block_idx_var) {
-    if (!func || param_index >= func->params_.size() || !block_idx_var) return std::nullopt;
-    if (param_index >= func->param_directions_.size() ||
-        func->param_directions_[param_index] != ParamDirection::In) {
-      return std::nullopt;
-    }
-
-    auto tensor_type = As<TensorType>(func->params_[param_index]->GetType());
-    if (!tensor_type) return std::nullopt;
-
-    auto total_refs_by_var = CountAllVarRefsInStmt(func->body_);
-    auto total_refs_it = total_refs_by_var.find(func->params_[param_index].get());
-    const size_t total_refs = total_refs_it == total_refs_by_var.end() ? 0 : total_refs_it->second;
-
-    auto body_stmts = FlattenToStmts(func->body_);
-    std::unordered_map<const Var*, ExprPtr> scalar_defs;
-    std::optional<InputRewriteInfo> result;
-    size_t matched_refs = 0;
-    std::unordered_set<const Var*> allowed;
-    for (const auto& param : func->params_) allowed.insert(param.get());
-    allowed.insert(block_idx_var);
-
-    for (const auto& stmt : body_stmts) {
-      auto assign = As<AssignStmt>(stmt);
-      if (assign && As<ScalarType>(assign->var_->GetType()) && assign->var_.get() != block_idx_var) {
-        scalar_defs[assign->var_.get()] =
-            arith::Analyzer().Simplify(transform_utils::Substitute(assign->value_, scalar_defs));
-      }
-
-      auto call = assign ? As<Call>(assign->value_) : nullptr;
-      if (!call) continue;
-
-      size_t shape_arg_index = SIZE_MAX;
-      size_t offset_arg_index = SIZE_MAX;
-      if (call->op_->name_ == "tensor.slice" && call->args_.size() >= 3) {
-        shape_arg_index = 1;
-        offset_arg_index = 2;
-      } else if (call->op_->name_ == "tile.load" && call->args_.size() >= 3) {
-        offset_arg_index = 1;
-        shape_arg_index = 2;
-      } else {
-        continue;
-      }
-
-      auto parent = AsVarLike(call->args_[0]);
-      if (!parent || parent.get() != func->params_[param_index].get()) continue;
-
-      auto shape_tuple = As<MakeTuple>(call->args_[shape_arg_index]);
-      auto offset_tuple = As<MakeTuple>(call->args_[offset_arg_index]);
-      if (!shape_tuple || !offset_tuple || shape_tuple->elements_.size() != tensor_type->shape_.size() ||
-          offset_tuple->elements_.size() != tensor_type->shape_.size()) {
-        return std::nullopt;
-      }
-
-      std::vector<ExprPtr> window_shape;
-      window_shape.reserve(shape_tuple->elements_.size());
-      for (const auto& dim : shape_tuple->elements_) {
-        auto expanded = arith::Analyzer().Simplify(transform_utils::Substitute(dim, scalar_defs));
-        if (!ExprReferencesOnlyVarsIn(expanded, allowed)) return std::nullopt;
-        window_shape.push_back(std::move(expanded));
-      }
-
-      std::vector<ExprPtr> callsite_offsets;
-      callsite_offsets.reserve(offset_tuple->elements_.size());
-      std::vector<ExprPtr> local_zero_offsets;
-      local_zero_offsets.reserve(offset_tuple->elements_.size());
-      for (const auto& offset : offset_tuple->elements_) {
-        auto expanded = arith::Analyzer().Simplify(transform_utils::Substitute(offset, scalar_defs));
-        if (!ExprReferencesOnlyVarsIn(expanded, allowed)) return std::nullopt;
-        callsite_offsets.push_back(std::move(expanded));
-        local_zero_offsets.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, func->span_));
-      }
-
-      if (AreExprVectorsEqual(window_shape, tensor_type->shape_) && IsAllZeroOffsets(callsite_offsets)) {
-        return std::nullopt;
-      }
-
-      InputRewriteInfo info{param_index, tensor_type->shape_, std::move(window_shape),
-                            std::move(callsite_offsets), std::move(local_zero_offsets)};
-      if (result.has_value() && (!AreExprVectorsEqual(result->window_shape, info.window_shape) ||
-                                 !AreExprVectorsEqual(result->callsite_offsets, info.callsite_offsets))) {
-        return std::nullopt;
-      }
-      result = std::move(info);
-      matched_refs += CountVarRefsInStmt(stmt, parent.get());
-    }
-
-    if (!result.has_value() || total_refs != matched_refs) return std::nullopt;
-    return result;
-  }
-
-  static std::optional<CalleeRewriteAnalysis> AnalyzeSpmdOutputs(const FunctionPtr& inner_func,
-                                                                 const std::vector<size_t>& out_indices,
-                                                                 const Var* block_idx_var) {
-    if (!inner_func || out_indices.empty() || !block_idx_var) return std::nullopt;
-
-    auto aggregate_loop = FindSingleTopLevelAggregateLoop(inner_func);
-    if (aggregate_loop.has_value()) {
-      auto scalar_defs = CollectTopLevelScalarDefsBeforeLoop(inner_func, *aggregate_loop, {block_idx_var});
-      auto analysis =
-          AnalyzeAggregateWindowLoop(inner_func, out_indices, std::move(scalar_defs), {block_idx_var});
-      if (analysis.has_value() && !analysis->outputs.empty()) return analysis;
-    }
-
-    CalleeRewriteAnalysis analysis;
-    analysis.kind = RewriteKind::SpmdRowBlock;
-    bool matched_any = false;
-    std::unordered_map<const Var*, ExprPtr> scalar_defs;
-    for (const auto& stmt : FlattenToStmts(inner_func->body_)) {
-      auto assign = As<AssignStmt>(stmt);
-      if (!assign || !As<ScalarType>(assign->var_->GetType()) || assign->var_.get() == block_idx_var) {
-        continue;
-      }
-      scalar_defs[assign->var_.get()] =
-          arith::Analyzer().Simplify(transform_utils::Substitute(assign->value_, scalar_defs));
-    }
-    for (const auto& out_index : out_indices) {
-      auto info = AnalyzeFinalStore(inner_func, out_index);
-      if (!info.has_value()) return std::nullopt;
-      auto out_tensor_type = As<TensorType>(inner_func->params_[out_index]->GetType());
-      if (!out_tensor_type) return std::nullopt;
-      if (AreExprVectorsEqual(info->window_shape, out_tensor_type->shape_) &&
-          IsAllZeroOffsets(info->offsets)) {
-        return std::nullopt;
-      }
-
-      std::unordered_set<const Var*> allowed;
-      for (const auto& param : inner_func->params_) allowed.insert(param.get());
-      allowed.insert(block_idx_var);
-      std::vector<ExprPtr> window_shape;
-      window_shape.reserve(info->window_shape.size());
-      for (const auto& expr : info->window_shape) {
-        auto expanded = arith::Analyzer().Simplify(transform_utils::Substitute(expr, scalar_defs));
-        if (!ExprReferencesOnlyVarsIn(expanded, allowed)) return std::nullopt;
-        window_shape.push_back(std::move(expanded));
-      }
-      std::vector<ExprPtr> offsets;
-      offsets.reserve(info->offsets.size());
-      for (const auto& expr : info->offsets) {
-        auto expanded = arith::Analyzer().Simplify(transform_utils::Substitute(expr, scalar_defs));
-        if (!ExprReferencesOnlyVarsIn(expanded, allowed)) return std::nullopt;
-        offsets.push_back(std::move(expanded));
-      }
-
-      std::vector<ExprPtr> local_zero_offsets;
-      local_zero_offsets.reserve(offsets.size());
-      for (size_t i = 0; i < offsets.size(); ++i) {
-        local_zero_offsets.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, inner_func->span_));
-      }
-      analysis.outputs.push_back(OutputRewriteInfo{out_index, info->return_index, out_tensor_type->shape_,
-                                                   std::move(window_shape), std::move(offsets),
-                                                   std::move(local_zero_offsets), SIZE_MAX});
-      matched_any = true;
-    }
-    if (!matched_any) return std::nullopt;
-    return analysis;
-  }
-
-  struct NestedStoreAccess {
-    size_t out_param_index;
-    std::vector<ExprPtr> window_shape;
-    std::vector<ExprPtr> offsets;
-    std::vector<ForStmtPtr> loops;
-  };
-
-  static std::optional<std::pair<std::vector<ExprPtr>, std::vector<ExprPtr>>> ParseWindowStore(
-      const AssignStmtPtr& assign) {
-    auto call = assign ? As<Call>(assign->value_) : nullptr;
-    if (!call) return std::nullopt;
-    if (call->op_->name_ == "tile.store" && call->args_.size() >= 3) {
-      auto shape = As<TileType>(call->args_[0]->GetType());
-      auto offsets = As<MakeTuple>(call->args_[1]);
-      if (!shape || !offsets) return std::nullopt;
-      return std::make_pair(shape->shape_, offsets->elements_);
-    }
-    if (call->op_->name_ == "tensor.assemble" && call->args_.size() >= 3) {
-      auto shape = As<TensorType>(call->args_[1]->GetType());
-      auto offsets = As<MakeTuple>(call->args_[2]);
-      if (!shape || !offsets) return std::nullopt;
-      return std::make_pair(shape->shape_, offsets->elements_);
-    }
-    return std::nullopt;
-  }
-
-  static ExprPtr GetWindowStoreTarget(const AssignStmtPtr& assign) {
-    auto call = assign ? As<Call>(assign->value_) : nullptr;
-    if (!call) return nullptr;
-    if (call->op_->name_ == "tile.store" && call->args_.size() >= 3) return call->args_[2];
-    if (call->op_->name_ == "tensor.assemble" && call->args_.size() >= 3) return call->args_[0];
-    return nullptr;
-  }
-
-  static bool IsRootedExpr(const ExprPtr& expr, const std::unordered_set<const Var*>& roots) {
-    auto var = AsVarLike(expr);
-    return var && roots.count(var.get()) != 0;
-  }
-
-  static std::optional<CalleeRewriteAnalysis> AnalyzeNestedSpmdOutputWindows(
-      const FunctionPtr& inner_func, const std::vector<size_t>& out_indices, const Var* block_idx_var) {
-    if (!inner_func || out_indices.empty() || !block_idx_var) return std::nullopt;
-
-    std::unordered_map<const Var*, size_t> root_to_out_index;
-    std::unordered_set<const Var*> roots;
-    for (auto out_index : out_indices) {
-      if (out_index >= inner_func->params_.size()) return std::nullopt;
-      root_to_out_index[inner_func->params_[out_index].get()] = out_index;
-      roots.insert(inner_func->params_[out_index].get());
-    }
-
-    std::vector<NestedStoreAccess> accesses;
-    std::function<void(const StmtPtr&, std::unordered_set<const Var*>&,
-                       std::unordered_map<const Var*, ExprPtr>&, std::vector<ForStmtPtr>&)>
-        scan_stmt;
-    scan_stmt = [&](const StmtPtr& stmt, std::unordered_set<const Var*>& active_roots,
-                    std::unordered_map<const Var*, ExprPtr>& scalar_defs,
-                    std::vector<ForStmtPtr>& active_loops) {
-      if (!stmt) return;
-      if (auto seq = As<SeqStmts>(stmt)) {
-        for (const auto& child : seq->stmts_) scan_stmt(child, active_roots, scalar_defs, active_loops);
-        return;
-      }
-      if (auto loop = As<ForStmt>(stmt)) {
-        auto loop_roots = active_roots;
-        auto loop_defs = scalar_defs;
-        for (const auto& iter_arg : loop->iter_args_) {
-          if (iter_arg && IsRootedExpr(iter_arg->initValue_, active_roots)) {
-            loop_roots.insert(iter_arg.get());
-          }
-        }
-        active_loops.push_back(loop);
-        scan_stmt(loop->body_, loop_roots, loop_defs, active_loops);
-        active_loops.pop_back();
-
-        auto yield = transform_utils::GetLastYieldStmt(loop->body_);
-        for (size_t i = 0; i < loop->return_vars_.size(); ++i) {
-          if (yield && i < yield->value_.size() && IsRootedExpr(yield->value_[i], loop_roots)) {
-            active_roots.insert(loop->return_vars_[i].get());
-          }
-        }
-        return;
-      }
-      if (auto if_stmt = As<IfStmt>(stmt)) {
-        auto then_roots = active_roots;
-        auto then_defs = scalar_defs;
-        scan_stmt(if_stmt->then_body_, then_roots, then_defs, active_loops);
-        if (if_stmt->else_body_.has_value()) {
-          auto else_roots = active_roots;
-          auto else_defs = scalar_defs;
-          scan_stmt(if_stmt->else_body_.value(), else_roots, else_defs, active_loops);
-          for (const auto* root : else_roots) {
-            if (then_roots.count(root) != 0) active_roots.insert(root);
-          }
-        } else {
-          active_roots.insert(then_roots.begin(), then_roots.end());
-        }
-        return;
-      }
-      auto assign = As<AssignStmt>(stmt);
-      if (!assign) return;
-      if (As<ScalarType>(assign->var_->GetType()) && assign->var_.get() != block_idx_var) {
-        scalar_defs[assign->var_.get()] =
-            arith::Analyzer().Simplify(transform_utils::Substitute(assign->value_, scalar_defs));
-      }
-
-      auto target = GetWindowStoreTarget(assign);
-      auto target_var = AsVarLike(target);
-      if (!target_var || active_roots.count(target_var.get()) == 0) return;
-
-      auto parsed = ParseWindowStore(assign);
-      if (!parsed.has_value()) return;
-      auto root_it = root_to_out_index.find(target_var.get());
-      size_t out_index = SIZE_MAX;
-      if (root_it != root_to_out_index.end()) {
-        out_index = root_it->second;
-      } else {
-        for (const auto& [root, candidate_out_index] : root_to_out_index) {
-          if (active_roots.count(root) != 0) {
-            out_index = candidate_out_index;
-            break;
-          }
-        }
-      }
-      if (out_index == SIZE_MAX) return;
-
-      std::vector<ExprPtr> offsets;
-      offsets.reserve(parsed->second.size());
-      for (const auto& offset : parsed->second) {
-        offsets.push_back(arith::Analyzer().Simplify(transform_utils::Substitute(offset, scalar_defs)));
-      }
-      accesses.push_back(NestedStoreAccess{out_index, parsed->first, std::move(offsets), active_loops});
-      active_roots.insert(assign->var_.get());
-      root_to_out_index[assign->var_.get()] = out_index;
-    };
-
-    std::unordered_map<const Var*, ExprPtr> scalar_defs;
-    std::vector<ForStmtPtr> active_loops;
-    scan_stmt(inner_func->body_, roots, scalar_defs, active_loops);
-    if (accesses.empty()) return std::nullopt;
-
-    ReturnStmtPtr ret_stmt;
-    for (const auto& stmt : FlattenToStmts(inner_func->body_)) {
-      if (auto ret = As<ReturnStmt>(stmt)) {
-        ret_stmt = ret;
-        break;
-      }
-    }
-    if (!ret_stmt) return std::nullopt;
-
-    CalleeRewriteAnalysis analysis;
-    analysis.kind = RewriteKind::SpmdRowBlock;
-    for (auto out_index : out_indices) {
-      auto out_tensor_type = As<TensorType>(inner_func->params_[out_index]->GetType());
-      if (!out_tensor_type) return std::nullopt;
-
-      std::vector<const NestedStoreAccess*> output_accesses;
-      for (const auto& access : accesses) {
-        if (access.out_param_index == out_index) output_accesses.push_back(&access);
-      }
-      if (output_accesses.empty()) return std::nullopt;
-
-      std::vector<ExprPtr> base_offsets;
-      std::vector<ExprPtr> local_offsets;
-      std::vector<ExprPtr> window_shape;
-      for (size_t dim = 0; dim < out_tensor_type->shape_.size(); ++dim) {
-        bool full_dim = false;
-        ExprPtr dim_min;
-        ExprPtr dim_max;
-        ExprPtr store_shape;
-        for (const auto* access : output_accesses) {
-          if (dim >= access->offsets.size() || dim >= access->window_shape.size()) return std::nullopt;
-          auto cur_min = access->offsets[dim];
-          auto cur_max = access->offsets[dim];
-          for (const auto& loop : access->loops) {
-            auto trip_count = GetKnownPositiveTripCount(loop);
-            if (!trip_count.has_value() || *trip_count <= 0) continue;
-            auto first = GetLoopValueAtTrip(loop, 0);
-            auto last = GetLoopValueAtTrip(loop, *trip_count - 1);
-            if (!first.has_value() || !last.has_value()) continue;
-            auto min_offsets = GetOrderedLoopOffsets(cur_min, loop, *first, *last);
-            auto max_offsets = GetOrderedLoopOffsets(cur_max, loop, *first, *last);
-            if (!min_offsets.has_value() || !max_offsets.has_value()) continue;
-            cur_min = min_offsets->min;
-            cur_max = max_offsets->max;
-          }
-
-          std::unordered_set<const Var*> allowed{block_idx_var};
-          if (!ExprReferencesOnlyVarsIn(cur_min, allowed) || !ExprReferencesOnlyVarsIn(cur_max, allowed)) {
-            full_dim = true;
-            break;
-          }
-          if (!dim_min) {
-            dim_min = cur_min;
-            dim_max = cur_max;
-            store_shape = access->window_shape[dim];
-          } else if (!AreExprVectorsEqual({dim_min}, {cur_min}) ||
-                     !AreExprVectorsEqual({dim_max}, {cur_max}) ||
-                     !AreExprVectorsEqual({store_shape}, {access->window_shape[dim]})) {
-            full_dim = true;
-            break;
-          }
-        }
-
-        if (full_dim) {
-          base_offsets.push_back(std::make_shared<ConstInt>(0, DataType::INDEX, inner_func->span_));
-          local_offsets.push_back(output_accesses.front()->offsets[dim]);
-          window_shape.push_back(out_tensor_type->shape_[dim]);
-          continue;
-        }
-        if (!dim_min || !dim_max || !store_shape) return std::nullopt;
-        base_offsets.push_back(dim_min);
-        local_offsets.push_back(arith::Analyzer().Simplify(MakeSub(
-            output_accesses.front()->offsets[dim], dim_min, output_accesses.front()->offsets[dim]->span_)));
-        window_shape.push_back(arith::Analyzer().Simplify(
-            MakeAdd(MakeSub(dim_max, dim_min, inner_func->span_), store_shape, inner_func->span_)));
-      }
-
-      if (AreExprVectorsEqual(window_shape, out_tensor_type->shape_) && IsAllZeroOffsets(base_offsets)) {
-        return std::nullopt;
-      }
-      std::optional<size_t> return_index;
-      for (const auto& mapping : BuildOutParamReturnMappings(inner_func, /*include_inout=*/true)) {
-        if (mapping.param_index == out_index) {
-          return_index = mapping.return_index;
-          break;
-        }
-      }
-      if (!return_index.has_value()) return std::nullopt;
-      analysis.outputs.push_back(OutputRewriteInfo{out_index, *return_index, out_tensor_type->shape_,
-                                                   std::move(window_shape), std::move(base_offsets),
-                                                   std::move(local_offsets), SIZE_MAX});
-    }
-    return analysis;
-  }
-
-  static std::optional<CalleeRewriteAnalysis> AnalyzeSpmdRowBlock(const ProgramPtr& program,
-                                                                  const FunctionPtr& spmd_func,
-                                                                  const std::vector<size_t>& out_indices) {
-    auto core_num = GetFunctionCoreNum(spmd_func);
-    auto inner_func = GetDirectSpmdInnerFunction(program, spmd_func);
-    if (!core_num.has_value() || !inner_func.has_value() || out_indices.empty()) return std::nullopt;
-
-    auto block_idx = FindSingleBlockIdxVar(*inner_func);
-    if (!block_idx.has_value()) return std::nullopt;
-
-    auto analysis = AnalyzeSpmdOutputs(*inner_func, out_indices, block_idx->get());
-    if (!analysis.has_value()) {
-      analysis = AnalyzeNestedSpmdOutputWindows(*inner_func, out_indices, block_idx->get());
-    }
-    if (!analysis.has_value() || analysis->outputs.empty()) return std::nullopt;
-
-    std::optional<ExprPtr> base_row_offset;
-    std::optional<ExprPtr> row_block_shape;
-    bool can_try_row_block_inputs = true;
-    for (const auto& output : analysis->outputs) {
-      if (output.window_shape.size() != output.callsite_offsets.size() ||
-          output.window_shape.size() != output.local_store_offsets.size()) {
-        return std::nullopt;
-      }
-      if (!ExprReferencesOnlyVarsIn(output.callsite_offsets[0], {block_idx->get()})) return std::nullopt;
-
-      auto tensor_type = As<TensorType>((*inner_func)->params_[output.out_param_index]->GetType());
-      if (!tensor_type || tensor_type->shape_.size() != output.window_shape.size()) {
-        return std::nullopt;
-      }
-      const bool row_block_like =
-          output.window_shape.size() == 2 && output.callsite_offsets.size() == 2 &&
-          output.local_store_offsets.size() == 2 && IsConstValue(output.callsite_offsets[1], 0) &&
-          IsConstValue(output.local_store_offsets[1], 0) &&
-          AreExprVectorsEqual(output.window_shape, {output.window_shape[0], tensor_type->shape_[1]});
-      if (!row_block_like) {
-        can_try_row_block_inputs = false;
-        continue;
-      }
-      if (!base_row_offset.has_value()) {
-        base_row_offset = output.callsite_offsets[0];
-        row_block_shape = output.window_shape[0];
-      } else if (!AreExprVectorsEqual({*base_row_offset}, {output.callsite_offsets[0]}) ||
-                 !AreExprVectorsEqual({*row_block_shape}, {output.window_shape[0]})) {
-        can_try_row_block_inputs = false;
-      }
-    }
-
-    analysis->kind = RewriteKind::SpmdRowBlock;
-    analysis->spmd_core_num = *core_num;
-    analysis->spmd_inner_func = *inner_func;
-    analysis->spmd_block_idx_var = *block_idx;
-    analysis->inputs.clear();
-    for (size_t i = 0; i < (*inner_func)->params_.size() && i < (*inner_func)->param_directions_.size();
-         ++i) {
-      std::optional<InputRewriteInfo> input;
-      if (can_try_row_block_inputs && base_row_offset.has_value() && row_block_shape.has_value()) {
-        input = AnalyzeSpmdInputWindow(*inner_func, i, block_idx->get(), *base_row_offset, *row_block_shape);
-      }
-      if (!input.has_value()) {
-        input = AnalyzeDirectSpmdInputWindow(*inner_func, i, block_idx->get());
-      }
-      if (input.has_value()) analysis->inputs.push_back(std::move(*input));
-    }
-    return analysis;
-  }
-
-  static FunctionPtr GetCalleeRewriteSource(const FunctionPtr& func, const CalleeRewriteAnalysis& analysis) {
-    if (analysis.kind == RewriteKind::SpmdRowBlock) return analysis.spmd_inner_func;
-    return func;
-  }
-
-  static std::optional<StmtPtr> RemoveBlockIdxDefinition(const StmtPtr& body, const Var* block_idx_var) {
-    if (!body || !block_idx_var) return std::nullopt;
-    auto stmts = FlattenToStmts(body);
-    std::vector<StmtPtr> filtered;
-    filtered.reserve(stmts.size());
-    bool removed = false;
-    for (const auto& stmt : stmts) {
-      auto assign = As<AssignStmt>(stmt);
-      auto call = assign ? As<Call>(assign->value_) : nullptr;
-      if (assign && assign->var_.get() == block_idx_var && call && call->op_->name_ == "tile.get_block_idx") {
-        if (removed) return std::nullopt;
-        removed = true;
-        continue;
-      }
-      filtered.push_back(stmt);
-    }
-    if (!removed) return std::nullopt;
-    return SeqStmts::Flatten(std::move(filtered), body->span_);
-  }
-
-  static ForStmtPtr FindAggregateLoopInBody(const StmtPtr& body,
-                                            const std::vector<OutputRewriteInfo>& outputs,
-                                            const std::vector<VarPtr>& new_params,
-                                            size_t param_index_offset = 0) {
-    auto body_stmts = FlattenToStmts(body);
-    auto ret_stmt = body_stmts.empty() ? nullptr : As<ReturnStmt>(body_stmts.back());
-    if (!ret_stmt) return nullptr;
-
-    ForStmtPtr matched_loop;
-    for (const auto& stmt : body_stmts) {
-      auto candidate = As<ForStmt>(stmt);
-      if (!candidate) continue;
-
-      bool matches_outputs = true;
-      for (const auto& output : outputs) {
-        size_t new_out_param_index = output.out_param_index + param_index_offset;
-        if (output.iter_arg_index >= candidate->iter_args_.size() ||
-            new_out_param_index >= new_params.size()) {
-          matches_outputs = false;
-          break;
-        }
-        auto init_var = AsVarLike(candidate->iter_args_[output.iter_arg_index]->initValue_);
-        if (!init_var) {
-          matches_outputs = false;
-          break;
-        }
-        if (init_var.get() != new_params[new_out_param_index].get()) {
-          matches_outputs = false;
-          break;
-        }
-        if (output.return_index != SIZE_MAX) {
-          if (output.iter_arg_index >= candidate->return_vars_.size() ||
-              output.return_index >= ret_stmt->value_.size()) {
-            matches_outputs = false;
-            break;
-          }
-          auto returned = AsVarLike(ret_stmt->value_[output.return_index]);
-          if (!returned || returned.get() != candidate->return_vars_[output.iter_arg_index].get()) {
-            matches_outputs = false;
-            break;
-          }
-        }
-      }
-      if (!matches_outputs) continue;
-      if (matched_loop) return nullptr;
-      matched_loop = candidate;
-    }
-    return matched_loop;
-  }
-
-  static StmtPtr LocalizeAggregateLoopTypes(
-      const StmtPtr& body, const std::unordered_map<const Var*, TypePtr>& narrowed_return_vars) {
-    class AggregateLoopTypeLocalizer : public IRMutator {
-     public:
-      explicit AggregateLoopTypeLocalizer(const std::unordered_map<const Var*, TypePtr>& narrowed_return_vars)
-          : narrowed_return_vars_(narrowed_return_vars) {}
-
-     protected:
-      StmtPtr VisitStmt_(const ForStmtPtr& op) override {
-        std::vector<const Var*> old_iter_args_to_erase;
-        bool changed = false;
-        for (size_t i = 0; i < op->return_vars_.size() && i < op->iter_args_.size(); ++i) {
-          auto it = narrowed_return_vars_.find(op->return_vars_[i].get());
-          if (it == narrowed_return_vars_.end()) continue;
-          auto old_iter = op->iter_args_[i];
-          auto old_ret = op->return_vars_[i];
-          auto new_iter = std::make_shared<IterArg>(old_iter->name_hint_, it->second, old_iter->initValue_,
-                                                    old_iter->span_);
-          auto new_ret = std::make_shared<Var>(old_ret->name_hint_, it->second, old_ret->span_);
-          var_remap_[old_iter.get()] = new_iter;
-          var_remap_[old_ret.get()] = new_ret;
-          old_iter_args_to_erase.push_back(old_iter.get());
-          changed = true;
-        }
-        auto new_stmt = IRMutator::VisitStmt_(op);
-        for (const auto* old_iter : old_iter_args_to_erase) {
-          var_remap_.erase(old_iter);
-        }
-        return changed ? new_stmt : op;
-      }
-
-     private:
-      const std::unordered_map<const Var*, TypePtr>& narrowed_return_vars_;
-    };
-
-    AggregateLoopTypeLocalizer type_localizer(narrowed_return_vars);
-    return type_localizer.VisitStmt(body);
   }
 
   AnalysisMap Analyze(const ProgramPtr& program) {
@@ -5188,16 +3940,6 @@ class OutWindowExternalizer {
     for (const auto& [gvar, func] : program->functions_) {
       if (!func || pypto::codegen::IsBuiltinOp(func->name_) ||
           func->func_type_ == FunctionType::Orchestration || func->func_type_ == FunctionType::Inline) {
-        continue;
-      }
-
-      if (func->func_type_ == FunctionType::Spmd) {
-        auto out_indices = CollectOutParamIndices(func, /*include_inout=*/true);
-        if (out_indices.empty()) continue;
-        auto spmd_analysis = AnalyzeSpmdRowBlock(program, func, out_indices);
-        if (spmd_analysis.has_value() && !spmd_analysis->outputs.empty()) {
-          analyses.emplace(func->name_, std::move(*spmd_analysis));
-        }
         continue;
       }
 
@@ -5262,8 +4004,14 @@ class OutWindowExternalizer {
 
       auto aggregate_analysis = AnalyzeAggregateWindowLoop(func, out_indices);
       if (aggregate_analysis.has_value() && !aggregate_analysis->outputs.empty()) {
-        aggregate_analysis->inputs = AnalyzeInputWindows(func, aggregate_analysis->outputs);
         analyses.emplace(func->name_, std::move(*aggregate_analysis));
+        continue;
+      }
+
+      CalleeRewriteAnalysis input_only_analysis;
+      input_only_analysis.inputs = AnalyzeInputWindows(func, {});
+      if (!input_only_analysis.inputs.empty()) {
+        analyses.emplace(func->name_, std::move(input_only_analysis));
       }
     }
     FilterInputWindowsByCallsites(program, &analyses);
@@ -5272,31 +4020,21 @@ class OutWindowExternalizer {
 
   FunctionPtr RewriteCallee(const ProgramPtr& program, const FunctionPtr& func,
                             const CalleeRewriteAnalysis& analysis) {
-    auto source_func = GetCalleeRewriteSource(func, analysis);
-    if (!source_func) return nullptr;
+    if (!func) return nullptr;
 
     std::vector<VarPtr> new_params;
-    new_params.reserve(source_func->params_.size() + (analysis.kind == RewriteKind::SpmdRowBlock ? 1 : 0));
-    std::vector<TypePtr> new_return_types = source_func->return_types_;
-    auto new_param_directions = source_func->param_directions_;
+    new_params.reserve(func->params_.size());
+    std::vector<TypePtr> new_return_types = func->return_types_;
+    auto new_param_directions = func->param_directions_;
 
     std::unordered_map<const Var*, ExprPtr> seed;
-    const size_t param_index_offset = analysis.kind == RewriteKind::SpmdRowBlock ? 1 : 0;
-    if (analysis.kind == RewriteKind::SpmdRowBlock) {
-      if (!analysis.spmd_block_idx_var) return nullptr;
-      auto block_idx_param = std::make_shared<Var>("block_idx", analysis.spmd_block_idx_var->GetType(),
-                                                   analysis.spmd_block_idx_var->span_);
-      new_params.push_back(block_idx_param);
-      new_param_directions.insert(new_param_directions.begin(), ParamDirection::In);
-      seed[analysis.spmd_block_idx_var.get()] = block_idx_param;
-    }
-    for (size_t i = 0; i < source_func->params_.size(); ++i) {
-      auto param_type = source_func->params_[i]->GetType();
+    for (size_t i = 0; i < func->params_.size(); ++i) {
+      auto param_type = func->params_[i]->GetType();
       auto rewrite_it =
           std::find_if(analysis.outputs.begin(), analysis.outputs.end(),
                        [i](const OutputRewriteInfo& info) { return info.out_param_index == i; });
       if (rewrite_it != analysis.outputs.end()) {
-        auto out_tensor_type = As<TensorType>(source_func->params_[i]->GetType());
+        auto out_tensor_type = As<TensorType>(func->params_[i]->GetType());
         if (!out_tensor_type) return nullptr;
 
         std::optional<TensorView> new_view = std::nullopt;
@@ -5318,16 +4056,13 @@ class OutWindowExternalizer {
 
         param_type = std::make_shared<TensorType>(rewrite_it->window_shape, out_tensor_type->dtype_,
                                                   out_tensor_type->memref_, new_view);
-        if (rewrite_it->return_index != SIZE_MAX) {
-          if (rewrite_it->return_index >= new_return_types.size()) return nullptr;
-          new_return_types[rewrite_it->return_index] = param_type;
-        }
+        new_return_types[rewrite_it->return_index] = param_type;
       }
       auto input_rewrite_it =
           std::find_if(analysis.inputs.begin(), analysis.inputs.end(),
                        [i](const InputRewriteInfo& info) { return info.in_param_index == i; });
       if (input_rewrite_it != analysis.inputs.end()) {
-        auto in_tensor_type = As<TensorType>(source_func->params_[i]->GetType());
+        auto in_tensor_type = As<TensorType>(func->params_[i]->GetType());
         if (!in_tensor_type) return nullptr;
 
         std::optional<TensorView> new_view = std::nullopt;
@@ -5351,14 +4086,14 @@ class OutWindowExternalizer {
                                                   in_tensor_type->memref_, new_view);
       }
 
-      auto new_param = std::make_shared<Var>(source_func->params_[i]->name_hint_, param_type,
-                                             source_func->params_[i]->span_);
+      auto new_param =
+          std::make_shared<Var>(func->params_[i]->name_hint_, param_type, func->params_[i]->span_);
       new_params.push_back(new_param);
-      seed[source_func->params_[i].get()] = new_param;
+      seed[func->params_[i].get()] = new_param;
     }
 
     auto cloned_name = MakeUniqueFunctionName(program, func->name_ + "__windowed");
-    auto cloned = DeepClone(source_func->body_, seed);
+    auto cloned = DeepClone(func->body_, seed);
     std::unordered_map<const Var*, ExprPtr> body_subst = seed;
     for (const auto& [old_var, new_var] : cloned.var_map) {
       body_subst[old_var] = new_var;
@@ -5377,56 +4112,107 @@ class OutWindowExternalizer {
 
     std::unordered_map<const Var*, InputRewriteInfo> in_info_by_var;
     for (auto input : analysis.inputs) {
-      if (input.in_param_index >= source_func->params_.size()) return nullptr;
-      size_t new_param_index = input.in_param_index + param_index_offset;
-      if (new_param_index >= new_params.size()) return nullptr;
+      if (input.in_param_index >= func->params_.size()) return nullptr;
+      if (input.in_param_index >= new_params.size()) return nullptr;
       for (auto& offset : input.callsite_offsets) {
         offset = transform_utils::Substitute(offset, body_subst);
       }
       for (auto& offset : input.local_slice_offsets) {
         offset = transform_utils::Substitute(offset, body_subst);
       }
-      in_info_by_var.emplace(new_params[new_param_index].get(), std::move(input));
+      in_info_by_var.emplace(new_params[input.in_param_index].get(), std::move(input));
     }
     if (!in_info_by_var.empty()) {
       WindowReadLocalizer read_localizer(in_info_by_var);
       new_body = read_localizer.VisitStmt(new_body);
     }
 
-    if (analysis.kind == RewriteKind::SpmdRowBlock) {
-      if (!analysis.spmd_block_idx_var) return nullptr;
-      auto cloned_block_idx = AsVarLike(transform_utils::Substitute(analysis.spmd_block_idx_var, body_subst));
-      if (!cloned_block_idx) return nullptr;
-      auto stripped_body = RemoveBlockIdxDefinition(new_body, cloned_block_idx.get());
-      if (!stripped_body.has_value()) return nullptr;
-      new_body = *stripped_body;
-    }
+    if (analysis.kind == RewriteKind::AggregateWindowLoop) {
+      auto find_aggregate_loop = [&](const StmtPtr& body) -> ForStmtPtr {
+        auto body_stmts = FlattenToStmts(body);
+        auto ret_stmt = body_stmts.empty() ? nullptr : As<ReturnStmt>(body_stmts.back());
+        if (!ret_stmt) return nullptr;
 
-    const bool uses_aggregate_loop =
-        std::any_of(analysis.outputs.begin(), analysis.outputs.end(),
-                    [](const OutputRewriteInfo& output) { return output.iter_arg_index != SIZE_MAX; });
-    if (analysis.kind == RewriteKind::AggregateWindowLoop || uses_aggregate_loop) {
-      auto cloned_loop = FindAggregateLoopInBody(new_body, analysis.outputs, new_params, param_index_offset);
+        ForStmtPtr matched_loop;
+        for (const auto& stmt : body_stmts) {
+          auto candidate = As<ForStmt>(stmt);
+          if (!candidate) continue;
+
+          bool matches_outputs = true;
+          for (const auto& output : analysis.outputs) {
+            if (output.iter_arg_index >= candidate->iter_args_.size() ||
+                output.iter_arg_index >= candidate->return_vars_.size() ||
+                output.return_index >= ret_stmt->value_.size()) {
+              matches_outputs = false;
+              break;
+            }
+            auto init_var = AsVarLike(candidate->iter_args_[output.iter_arg_index]->initValue_);
+            auto returned = AsVarLike(ret_stmt->value_[output.return_index]);
+            if (!init_var || !returned) {
+              matches_outputs = false;
+              break;
+            }
+            if (init_var.get() != new_params[output.out_param_index].get() ||
+                returned.get() != candidate->return_vars_[output.iter_arg_index].get()) {
+              matches_outputs = false;
+              break;
+            }
+          }
+          if (!matches_outputs) continue;
+          if (matched_loop) return nullptr;
+          matched_loop = candidate;
+        }
+        return matched_loop;
+      };
+
+      auto cloned_loop = find_aggregate_loop(new_body);
       if (!cloned_loop) return nullptr;
 
       std::unordered_map<const Var*, TypePtr> narrowed_return_vars;
       for (const auto& output : analysis.outputs) {
         if (output.iter_arg_index >= cloned_loop->return_vars_.size()) return nullptr;
-        TypePtr narrowed_type;
-        if (output.return_index == SIZE_MAX) {
-          auto param_index = output.out_param_index + param_index_offset;
-          if (param_index >= new_params.size()) return nullptr;
-          narrowed_type = new_params[param_index]->GetType();
-        } else {
-          if (output.return_index >= new_return_types.size()) return nullptr;
-          narrowed_type = new_return_types[output.return_index];
-        }
-        narrowed_return_vars.emplace(cloned_loop->return_vars_[output.iter_arg_index].get(), narrowed_type);
+        narrowed_return_vars.emplace(cloned_loop->return_vars_[output.iter_arg_index].get(),
+                                     new_return_types[output.return_index]);
       }
 
-      new_body = LocalizeAggregateLoopTypes(new_body, narrowed_return_vars);
+      class AggregateLoopTypeLocalizer : public IRMutator {
+       public:
+        explicit AggregateLoopTypeLocalizer(
+            const std::unordered_map<const Var*, TypePtr>& narrowed_return_vars)
+            : narrowed_return_vars_(narrowed_return_vars) {}
 
-      auto typed_loop = FindAggregateLoopInBody(new_body, analysis.outputs, new_params, param_index_offset);
+       protected:
+        StmtPtr VisitStmt_(const ForStmtPtr& op) override {
+          std::vector<const Var*> old_iter_args_to_erase;
+          bool changed = false;
+          for (size_t i = 0; i < op->return_vars_.size() && i < op->iter_args_.size(); ++i) {
+            auto it = narrowed_return_vars_.find(op->return_vars_[i].get());
+            if (it == narrowed_return_vars_.end()) continue;
+            auto old_iter = op->iter_args_[i];
+            auto old_ret = op->return_vars_[i];
+            auto new_iter = std::make_shared<IterArg>(old_iter->name_hint_, it->second, old_iter->initValue_,
+                                                      old_iter->span_);
+            auto new_ret = std::make_shared<Var>(old_ret->name_hint_, it->second, old_ret->span_);
+            var_remap_[old_iter.get()] = new_iter;
+            var_remap_[old_ret.get()] = new_ret;
+            old_iter_args_to_erase.push_back(old_iter.get());
+            changed = true;
+          }
+          auto new_stmt = IRMutator::VisitStmt_(op);
+          for (const auto* old_iter : old_iter_args_to_erase) {
+            var_remap_.erase(old_iter);
+          }
+          return changed ? new_stmt : op;
+        }
+
+       private:
+        const std::unordered_map<const Var*, TypePtr>& narrowed_return_vars_;
+      };
+
+      AggregateLoopTypeLocalizer type_localizer(narrowed_return_vars);
+      new_body = type_localizer.VisitStmt(new_body);
+
+      auto typed_loop = find_aggregate_loop(new_body);
       if (!typed_loop) return nullptr;
 
       std::unordered_map<const Var*, OutputRewriteInfo> out_info_by_var;
@@ -5437,12 +4223,7 @@ class OutWindowExternalizer {
         auto iter_arg = typed_loop->iter_args_[output.iter_arg_index];
         out_info_by_var.emplace(iter_arg.get(), output);
         new_out_vars.emplace(iter_arg.get(), iter_arg);
-        TypePtr store_type = iter_arg->GetType();
-        if (output.return_index != SIZE_MAX) {
-          if (output.return_index >= new_return_types.size()) return nullptr;
-          store_type = new_return_types[output.return_index];
-        }
-        new_store_types.emplace(iter_arg.get(), store_type);
+        new_store_types.emplace(iter_arg.get(), new_return_types[output.return_index]);
       }
 
       WindowWriteLocalizer localizer(out_info_by_var, new_out_vars, new_store_types);
@@ -5452,7 +4233,7 @@ class OutWindowExternalizer {
       std::unordered_map<const Var*, TypePtr> new_store_types;
       std::unordered_map<const Var*, ExprPtr> new_out_vars;
       for (const auto& output : localized_outputs) {
-        auto new_out = new_params[output.out_param_index + param_index_offset];
+        auto new_out = new_params[output.out_param_index];
         out_info_by_var.emplace(new_out.get(), output);
         new_store_types.emplace(new_out.get(), new_out->GetType());
         new_out_vars.emplace(new_out.get(), new_out);
@@ -5462,8 +4243,8 @@ class OutWindowExternalizer {
     }
 
     return std::make_shared<Function>(cloned_name, new_params, new_param_directions, new_return_types,
-                                      new_body, source_func->span_, source_func->func_type_,
-                                      source_func->level_, source_func->role_, source_func->attrs_);
+                                      new_body, func->span_, func->func_type_, func->level_, func->role_,
+                                      func->attrs_);
   }
 };
 

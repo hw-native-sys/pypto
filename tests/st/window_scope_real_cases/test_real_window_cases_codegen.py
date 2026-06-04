@@ -141,11 +141,8 @@ _CASES = (
         entry_name="indexer_test",
         specs_builder=_deepseek_specs,
         expectations=(
-            _not_contains("// Group score_spmd:", "original_score_spmd_group"),
-            _contains("score_spmd__windowed", "windowed_score_spmd_group"),
-            _has_window_arg("inout", r"score_flat_inline\d+", "score_flat"),
-            _no_full_arg("input", r"score_flat_inline\d+(?:__rv_v\d+)?", "score_flat"),
-            _has_window_arg("input", r"score_flat_inline\d+", "score_flat"),
+            _not_contains("score_spmd__windowed", "spmd_score_not_rewritten"),
+            _not_contains("topk_spmd__windowed", "spmd_topk_not_rewritten"),
         ),
     ),
     _Case(
@@ -155,7 +152,6 @@ _CASES = (
         entry_name="indexer_test",
         specs_builder=_deepseek_specs,
         expectations=(
-            _no_full_arg("output", r"score_flat_inline\d+(?:__rv_v\d+)?", "score_flat"),
             _no_full_arg("input", r"score_flat_inline\d+(?:__rv_v\d+)?", "score_flat"),
             _has_window_arg("output", r"score_flat_inline\d+", "score_flat"),
             _has_window_arg("input", r"score_flat_inline\d+", "score_flat"),
@@ -167,14 +163,7 @@ _CASES = (
         support_dir=_CASE_DIR / "support" / "qwen3_14b" / _QWEN_SPMD_SHA,
         entry_name="test_decode_layer_no_lm_head",
         specs_builder=_qwen_specs,
-        expectations=(
-            _no_full_arg("inout", r"q_proj(?!\w*__window)\w*(?:__rv_v\d+)?", "q_proj"),
-            _has_window_arg("inout", r"q_proj\w*", "q_proj"),
-            _has_window_arg("input", r"q_proj\w*", "q_proj"),
-            _no_full_arg("inout", r"k_proj(?!\w*__window)\w*(?:__rv_v\d+)?", "k_proj"),
-            _has_window_arg("inout", r"k_proj\w*", "k_proj"),
-            _has_window_arg("input", r"k_proj\w*", "k_proj"),
-        ),
+        expectations=(),
     ),
     _Case(
         id=f"qwen3_14b_decode_layer_legacy_{_QWEN_LEGACY_SHA}",
@@ -182,11 +171,16 @@ _CASES = (
         support_dir=_CASE_DIR / "support" / "qwen3_14b" / _QWEN_LEGACY_SHA,
         entry_name="test_decode_layer_no_lm_head",
         specs_builder=_qwen_specs,
-        # Legacy Qwen keeps qk_norm as one task that loops over all heads and
-        # reads the full q/k bridge tensors.  This snapshot still guards that
-        # the real model keeps generating orchestration C++; precise q/k task
-        # dependency assertions are covered by the SPMD snapshot above.
-        expectations=(),
+        expectations=(
+            _no_full_arg("output", r"q_proj_inline\d+(?:__rv_v\d+)?", "q_proj"),
+            _has_window_arg("output", r"q_proj_inline\d+", "q_proj"),
+            _no_full_arg("output", r"k_proj_inline\d+(?:__rv_v\d+)?", "k_proj"),
+            _has_window_arg("output", r"k_proj_inline\d+", "k_proj"),
+            _no_full_arg("input", r"q_proj_inline\d+(?:__rv_v\d+)?", "q_proj"),
+            _has_window_arg("input", r"q_proj_inline\d+", "q_proj"),
+            _no_full_arg("input", r"k_proj_inline\d+(?:__rv_v\d+)?", "k_proj"),
+            _has_window_arg("input", r"k_proj_inline\d+", "k_proj"),
+        ),
     ),
 )
 

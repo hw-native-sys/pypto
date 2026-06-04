@@ -83,16 +83,6 @@ def _generate_orch_result(program) -> "codegen.OrchestrationResult":
     raise ValueError("No orchestration function found in program")
 
 
-def _run_passes_through(program, stop_pass_name: str):
-    pm = PassManager.get_strategy(OptimizationStrategy.Default)
-    result = program
-    for pass_name, pass_obj in zip(pm.pass_names, pm.passes, strict=True):
-        result = pass_obj(result)
-        if pass_name == stop_pass_name:
-            return result
-    raise AssertionError(f"Default pipeline did not run {stop_pass_name}")
-
-
 class TestOrchestration:
     """Test orchestration codegen format."""
 
@@ -2937,50 +2927,6 @@ class TestTensorReadWriteOffsetCodegen:
         assert "params_t1.add_input(score_rv)" in code, code
         assert "params_t0.add_inout(score_flat)" not in code, code
         assert "params_t1.add_input(score_flat)" not in code, code
-
-    def test_spmd_row_block_window_reader_uses_precise_input_window(self):
-        """DeepSeek-like SPMD score -> topk dependencies use row-block args."""
-
-        backend.reset_for_testing()
-        backend.set_backend_type(BackendType.Ascend910B)
-
-        program = pl.parse_program(
-            """
-import pypto.language as pl
-
-@pl.program
-class SpmdRowBlockProgram:
-    @pl.function(type=pl.FunctionType.Orchestration)
-    def main(
-        self,
-        x: pl.Tensor[[8, 16], pl.FP32],
-        score: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
-        probe: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
-    ):
-        score_flat: pl.Tensor[[8, 16], pl.FP32] = pl.reshape(score, [8, 16])
-        for bg in pl.spmd(4, name_hint="score"):
-            tb = bg * 2
-            for s in pl.range(2):
-                r = tb + s
-                score_flat[r : r + 1, :] = x[r : r + 1, :]
-        for idx in pl.spmd(4, name_hint="topk"):
-            t0 = idx * 2
-            for ti in pl.range(2):
-                t = t0 + ti
-                row = score_flat[t : t + 1, :]
-                probe[t : t + 1, :] = row
-        return score_flat, probe
-"""
-        )
-
-        transformed = _run_passes_through(program, "ExpandMixedKernel")
-        code = _generate_orch_code(transformed)
-
-        assert "score_spmd__windowed" in code, code
-        assert "topk_spmd__windowed" in code, code
-        assert "Tensor score_flat__rv_v2__window = score_flat__rv_v2.view(" in code, code
-        assert "params_t1.add_input(score_flat__rv_v2__window)" in code, code
-        assert "params_t1.add_input(score_flat__rv_v2)" not in code, code
 
     def test_group_submit_uses_both_aiv_slots_for_split_vector_kernel(self):
         """Cross-core split inferred from pipe ops should reuse one AIV kernel across both slots."""
