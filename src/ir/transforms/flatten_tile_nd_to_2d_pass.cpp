@@ -1302,17 +1302,6 @@ NdTransposeResult LowerNdTranspose(const AssignStmtPtr& assign, const CallPtr& c
     operand_type = As<TileType>(operand->GetType());
   }
 
-  // pto.alloc_tile rejects row-major Vec tiles whose physical row byte size
-  // (cols * sizeof(dtype)) is not 32-byte aligned. Padding a narrow trailing dim
-  // B up to a 32-byte multiple is out of scope for this lowering and tracked as a
-  // separate issue. Reject a misaligned trailing dim here with a clear user-facing
-  // error instead of emitting a per-page tile that PTOAS later rejects.
-  int64_t dtype_bytes = static_cast<int64_t>((operand_type->dtype_.GetBit() + 7) / 8);
-  CHECK_SPAN(dtype_bytes > 0 && (b * dtype_bytes) % 32 == 0, span)
-      << "FlattenTileNdTo2D: standalone N-D tile.transpose requires the trailing "
-      << "dimension's row to be 32-byte aligned (got " << b << " * " << dtype_bytes << " = "
-      << (b * dtype_bytes) << " bytes); narrow-column padding is not yet supported.";
-
   // Pre-create the flat output tile [batch_count*B, A].
   auto out_shape = std::make_shared<MakeTuple>(Make2DShapeExprs(batch_count * b, a, span), span);
   std::vector<std::pair<std::string, std::any>> create_kw = {
