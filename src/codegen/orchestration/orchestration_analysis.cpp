@@ -53,6 +53,13 @@ bool IsTensorOp(const std::string& op_name) { return op_name.find("tensor.") == 
 
 bool IsArrayOp(const std::string& op_name) { return op_name.find("array.") == 0; }
 
+// See orchestration_analysis.h for the contract.
+CallPtr AsCallOrSubmitView(const ExprPtr& expr) {
+  if (auto call = As<Call>(expr)) return call;
+  if (auto submit = As<Submit>(expr)) return SubmitToCallView(submit);
+  return nullptr;
+}
+
 std::string FormatConstIntValue(const ConstIntPtr& c, const std::string& cpp_type) {
   int64_t v = c->value_;
   if (cpp_type != "int64_t") {
@@ -82,12 +89,15 @@ int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* 
 // ---------------------------------------------------------------------------
 
 void OrchestrationInfoCollector::VisitStmt_(const AssignStmtPtr& assign) {
-  if (auto call = As<Call>(assign->value_)) {
+  // The tuple key is registered against the *binding Var* (stable identity),
+  // never the call pointer — a SubmitToCallView is transient, so keying on it
+  // would desynchronise this analysis from the codegen lookup (which now also
+  // keys on the binding Var).
+  if (auto call = AsCallOrSubmitView(assign->value_)) {
     if (!IsBuiltinOp(call->op_->name_) && call->op_->name_ != "tensor.create") {
       if (As<TupleType>(call->GetType())) {
         std::string unique_key = "_tc_" + std::to_string(tuple_call_counter_++);
         tuple_var_to_key[assign->var_.get()] = unique_key;
-        call_to_tuple_key[call.get()] = unique_key;
       }
     }
   } else if (As<MakeTuple>(assign->value_)) {
@@ -145,7 +155,11 @@ void BufferRootCollector::VisitStmt_(const WhileStmtPtr& while_stmt) {
 }
 
 void BufferRootCollector::VisitStmt_(const AssignStmtPtr& assign) {
-  if (auto call = As<Call>(assign->value_)) {
+  // Submit funnels through the Call-shaped view so a kernel launch's Out/InOut
+  // roots are tracked identically to a plain Call (results keyed on the stable
+  // binding Var). Builtin tensor.* ops are never Submits, so the early
+  // op-name branches below are unaffected.
+  if (auto call = AsCallOrSubmitView(assign->value_)) {
     const std::string& op_name = call->op_->name_;
     if (op_name == "tensor.create" || op_name == "tensor.slice") {
       buffer_roots[assign->var_.get()] = assign->var_.get();
@@ -264,7 +278,7 @@ void VarLineageCollector::VisitStmt_(const AssignStmtPtr& assign) {
     if (param) {
       var_to_param[assign->var_.get()] = param;
     }
-  } else if (auto call = As<Call>(assign->value_)) {
+  } else if (auto call = AsCallOrSubmitView(assign->value_)) {
     // Propagate lineage through function calls: the result inherits lineage
     // from the Out/InOut argument. This covers sequential SPMD submissions
     // like: out = self.kernel(a, b, out) where `out` is the output buffer.

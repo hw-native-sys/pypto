@@ -291,8 +291,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
   }
 
-  void SetCallToTupleKey(const std::map<const Call*, std::string>& mapping) { call_to_tuple_key_ = mapping; }
-
   void SetTupleVarToKey(std::map<const Var*, std::string> mapping) { tuple_var_to_key_ = std::move(mapping); }
 
   void SetInitialIndent(int indent) { indent_ = indent; }
@@ -442,7 +440,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
             if (tuple_var) {
               auto it = var_to_assign.find(tuple_var.get());
               if (it != var_to_assign.end()) {
-                auto tcall = As<Call>(it->second->value_);
+                // The tuple producer may be a Submit (pl.submit / `as tid`);
+                // view it as a Call so its output args alias identically.
+                auto tcall = AsCallOrSubmitView(it->second->value_);
                 if (tcall) {
                   auto tdirs = tcall->GetArgDirections();
                   if (tdirs.size() == tcall->args_.size()) {
@@ -473,7 +473,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
             }
             continue;
           }
-          auto call = As<Call>(assign->value_);
+          auto call = AsCallOrSubmitView(assign->value_);
           if (!call) continue;
           // (a) tensor.assemble: result var aliases its first arg (the target).
           if (call->op_->name_ == "tensor.assemble" && !call->args_.empty()) {
@@ -908,13 +908,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Funnel Submit through the existing Call codepath via the synthetic
     // SubmitToCallView adapter (deps_ → attrs[manual_dep_edges]). The IR
     // still has Submit as the canonical form; only this view is consumed
-    // by the Call-shaped codegen logic.
-    CallPtr call = As<Call>(assign->value_);
-    if (!call) {
-      if (auto submit = As<Submit>(assign->value_)) {
-        call = SubmitToCallView(submit);
-      }
-    }
+    // by the Call-shaped codegen logic. Tuple keys are looked up by the
+    // binding Var (stable), never this transient view's pointer.
+    CallPtr call = AsCallOrSubmitView(assign->value_);
     if (call) {
       const std::string& op_name = call->op_->name_;
 
@@ -997,8 +993,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
       } else if (!IsBuiltinOp(op_name)) {
         std::string result_key;
         if (As<TupleType>(call->GetType())) {
-          auto it = call_to_tuple_key_.find(call.get());
-          result_key = (it != call_to_tuple_key_.end()) ? it->second : var_name;
+          // Key on the binding Var (stable for both Call and the Submit view).
+          auto it = tuple_var_to_key_.find(assign->var_.get());
+          result_key = (it != tuple_var_to_key_.end()) ? it->second : var_name;
         } else {
           result_key = var_name;
         }
@@ -1016,9 +1013,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
             GenerateSingleReturnAlias(call, var_name);
           }
         } else if (IsSubmitCall(call)) {
-          GenerateSubmitReturnAliases(call, task_idx_before);
+          GenerateSubmitReturnAliases(call, task_idx_before, assign->var_.get());
         } else {
-          GenerateTupleReturnAliases(call);
+          GenerateTupleReturnAliases(call, assign->var_.get());
         }
       } else {
         INTERNAL_CHECK_SPAN(false, assign->span_)
@@ -1153,7 +1150,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const EvalStmtPtr& eval) override {
-    if (auto call = As<Call>(eval->expr_)) {
+    // A fire-and-forget ``pl.submit(...)`` statement (no result binding) is a
+    // Submit; view it as a Call so the dispatch is still emitted.
+    if (auto call = AsCallOrSubmitView(eval->expr_)) {
       const std::string& op_name = call->op_->name_;
       if (IsTensorOp(op_name) || IsArrayOp(op_name)) {
         GenerateTensorOpCode(call, "", nullptr);
@@ -1906,11 +1905,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         break;
       }
 
+      // The consumer may be a Submit (e.g. pl.spmd_submit of a mixed kernel
+      // that receives the injected gm_pipe_buffer create); view it as a Call.
       CallPtr call;
       if (assign) {
-        call = As<Call>(assign->value_);
+        call = AsCallOrSubmitView(assign->value_);
       } else if (auto eval = As<EvalStmt>(stmts[i])) {
-        call = As<Call>(eval->expr_);
+        call = AsCallOrSubmitView(eval->expr_);
       }
       if (!call) continue;
 
@@ -2363,9 +2364,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
     EmitTensorAlias(var_name, call, param_idx);
   }
 
-  void GenerateTupleReturnAliases(const CallPtr& call) {
-    auto tuple_key_it = call_to_tuple_key_.find(call.get());
-    if (tuple_key_it == call_to_tuple_key_.end()) return;
+  void GenerateTupleReturnAliases(const CallPtr& call, const Var* result_var) {
+    auto tuple_key_it = tuple_var_to_key_.find(result_var);
+    if (tuple_key_it == tuple_var_to_key_.end()) return;
     auto elements_it = tuple_var_to_elements_.find(tuple_key_it->second);
     if (elements_it == tuple_var_to_elements_.end()) return;
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
@@ -2475,9 +2476,9 @@ class OrchestrationStmtCodegen : public CodegenBase {
   ///     ``runtime_out_pos = param_idx - args_.size()`` because
   ///     ``BuildTaskParams`` appends one synth ``add_output`` per callee Out
   ///     in the tail, in callee param order.
-  void GenerateSubmitReturnAliases(const CallPtr& call, int task_idx) {
-    auto tuple_key_it = call_to_tuple_key_.find(call.get());
-    if (tuple_key_it == call_to_tuple_key_.end()) return;
+  void GenerateSubmitReturnAliases(const CallPtr& call, int task_idx, const Var* result_var) {
+    auto tuple_key_it = tuple_var_to_key_.find(result_var);
+    if (tuple_key_it == tuple_var_to_key_.end()) return;
     auto elements_it = tuple_var_to_elements_.find(tuple_key_it->second);
     if (elements_it == tuple_var_to_elements_.end()) return;
 
@@ -2843,7 +2844,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// just ``loop_var`` when start=0 and step=1.
   std::vector<std::string> current_loop_slot_exprs_;
   std::map<std::string, std::vector<TupleElement>> tuple_var_to_elements_;
-  std::map<const Call*, std::string> call_to_tuple_key_;
   std::map<const Var*, std::string> tuple_var_to_key_;
   std::unordered_set<const Var*> declared_var_ptrs_;
   std::unordered_set<const Stmt*> batched_create_stmts_;
@@ -2932,7 +2932,6 @@ OrchestrationResult GenerateOrchestration(const ir::ProgramPtr& program, const i
                                         &func_name_to_signature, &next_func_id, std::move(emit_name_map),
                                         std::move(param_name_set), std::move(param_name_to_orch_index));
   stmt_codegen.SetCallTupleElements(info_collector.call_tuple_elements);
-  stmt_codegen.SetCallToTupleKey(info_collector.call_to_tuple_key);
   stmt_codegen.SetTupleVarToKey(info_collector.tuple_var_to_key);
   stmt_codegen.SetEffectiveUses(std::move(use_collector.var_uses));
   // MaterializeRuntimeScopes wraps the whole body in an AUTO RuntimeScopeStmt,

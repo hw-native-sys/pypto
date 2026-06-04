@@ -25,7 +25,6 @@ the function ``level`` / ``role`` before the pass runs.
 import pypto.language as pl
 import pytest
 from pypto import DataType, ir, passes
-from pypto.ir import directions as _directions
 from pypto.pypto_core import passes as _core_passes
 
 
@@ -1193,30 +1192,19 @@ def _t64():
 class TestDeriveSubmit:
     """Before/After coverage for the dedicated Submit handler.
 
-    The pass lowers ``Submit`` -> ``Call`` (via SubmitToCallView). For a
-    Submit whose args are a strict prefix of the callee signature
-    (runtime-allocated tail Out) or that carries ``deps=``, the resulting
-    plain ``Call`` cannot be re-parsed: the parser requires full positional
-    args for a bare ``self.kernel(...)`` and rejects ``deps=`` on a plain
-    Call (it demands ``pl.submit``). The default ``PassContext`` roundtrip
-    instrument (print -> parse -> structural_equal, enabled by the repo
-    conftest at ``PYPTO_VERIFY_LEVEL=roundtrip``) therefore fails on this
-    *intentionally non-round-trippable* lowered form — the same class of
-    printer/parser limitation already documented for
-    ``arg_direction_overrides`` in ``TestNoDepOverride``. The
-    ``assert_structural_equal(After, Expected)`` comparison itself is exact;
-    only the print/parse round-trip is suppressed. We fall back to
-    ``BEFORE_AND_AFTER`` property verification, which still runs the
-    ``CallDirectionsResolved`` checks on the pass output.
+    The pass derives ``arg_directions`` for a ``Submit`` but PRESERVES the
+    Submit kind (pass-submit-awareness.md rule 3): a plain ``Call`` must carry
+    its callee's declared return type, whereas a Submit's type is the
+    TASK_ID-augmented ``Tuple[<outputs>..., Scalar[TASK_ID]]``. Lowering
+    Submit -> Call here used to leave a malformed plain Call carrying that
+    Tuple type, which could not survive print -> reparse. Keeping the Submit
+    makes the printer emit ``pl.submit(...)`` — which round-trips — so these
+    tests run under the default ``PassContext`` (the repo conftest's
+    ``PYPTO_VERIFY_LEVEL=roundtrip`` print -> parse -> structural_equal
+    instrument is exercised, not suppressed). ``deps_`` stays a typed field on
+    the rewritten Submit; downstream consumers funnel through
+    ``SubmitToCallView`` where they need the Call-shaped view.
     """
-
-    @pytest.fixture(autouse=True)
-    def _no_roundtrip(self):
-        instruments: list[_core_passes.PassInstrument] = [
-            _core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)
-        ]
-        with _core_passes.PassContext(instruments):
-            yield
 
     def test_submit_runtime_allocated_tail_out(self):
         """A ``pl.submit`` whose only declared-Out callee param is a
@@ -1225,11 +1213,11 @@ class TestDeriveSubmit:
         Callee ``stage1(x: In, scratch: Out)`` is submitted with a single
         positional arg ``a`` — ``scratch`` is NOT passed (it is the
         runtime-allocated tail Out, materialised as a return-tuple element).
-        The pass lowers the Submit to a Call and derives directions only for
-        the prefix args: ``x`` is callee In + tensor -> ``Input``. ``scratch``
-        gets no slot in the vector, so ``arg_directions == [Input]`` (length 1,
-        matching ``args``), not length 2. This is the args-side dual of the
-        Submit return-type asymmetry — the canonical FOCUS scenario.
+        The pass KEEPS the Submit and derives directions only for the prefix
+        args: ``x`` is callee In + tensor -> ``Input``. ``scratch`` gets no slot
+        in the vector, so ``arg_directions == [Input]`` (length 1, matching
+        ``args``), not length 2. This is the args-side dual of the Submit
+        return-type asymmetry — the canonical FOCUS scenario.
         """
         span = _SUBMIT_SPAN
 
@@ -1262,27 +1250,39 @@ class TestDeriveSubmit:
         )
         Before = ir.Program([build_stage1(), before_main], "submit_runtime_out", span)
 
-        # --- Expected: lowered Call with arg_directions=[Input] (prefix only) ---
+        # --- Expected: Submit preserved, arg_directions=[Input] (prefix only) ---
         a2 = ir.Var("a", _t256(), span)
         res2 = ir.Var("res", submit_ret, span)
-        call = _directions.make_call(
+        submit_after = ir.Submit(
             ir.GlobalVar("stage1"),
             [a2],
-            directions=[ir.ArgDirection.Input],
-            type=submit_ret,
-            span=span,
+            [],
+            {},
+            {"arg_directions": [ir.ArgDirection.Input]},
+            submit_ret,
+            span,
         )
         exp_main = ir.Function(
             "main",
             [(a2, ir.ParamDirection.In)],
             [submit_ret],
-            ir.SeqStmts([ir.AssignStmt(res2, call, span), ir.ReturnStmt([res2], span)], span),
+            ir.SeqStmts([ir.AssignStmt(res2, submit_after, span), ir.ReturnStmt([res2], span)], span),
             span,
             ir.FunctionType.Orchestration,
         )
         Expected = ir.Program([build_stage1(), exp_main], "submit_runtime_out", span)
 
-        After = passes.derive_call_directions()(Before)
+        # A prefix-args Submit (runtime-allocated tail Out) hits a SEPARATE,
+        # pre-existing parser limitation: ``pl.submit(self.stage1, a)`` cannot
+        # reparse because the callee declares more params than the Submit passes
+        # (the tail Out is runtime-allocated, materialised as a return-tuple
+        # element). This is independent of the TASK_ID-Tuple bug fixed by
+        # preserving Submit-ness — suppress only the print->parse roundtrip and
+        # still assert the exact Submit structure via structural_equal.
+        with _core_passes.PassContext(
+            [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+        ):
+            After = passes.derive_call_directions()(Before)
         ir.assert_structural_equal(After, Expected)
 
     def test_submit_caller_allocated_out_plus_runtime_tail_out(self):
@@ -1337,42 +1337,51 @@ class TestDeriveSubmit:
         )
         Before = ir.Program([build_stage1(), before_main], "submit_caller_runtime_out", span)
 
-        # --- Expected: lowered Call, arg_directions=[Input, OutputExisting] ---
+        # --- Expected: Submit preserved, arg_directions=[Input, OutputExisting] ---
         a2 = ir.Var("a", _t256(), span)
         dst2 = ir.Var("dst", _t256(), span)
         res2 = ir.Var("res", submit_ret, span)
-        call = _directions.make_call(
+        submit_after = ir.Submit(
             ir.GlobalVar("stage1"),
             [a2, dst2],
-            directions=[ir.ArgDirection.Input, ir.ArgDirection.OutputExisting],
-            type=submit_ret,
-            span=span,
+            [],
+            {},
+            {"arg_directions": [ir.ArgDirection.Input, ir.ArgDirection.OutputExisting]},
+            submit_ret,
+            span,
         )
         exp_main = ir.Function(
             "main",
             [(a2, ir.ParamDirection.In), (dst2, ir.ParamDirection.Out)],
             [submit_ret],
-            ir.SeqStmts([ir.AssignStmt(res2, call, span), ir.ReturnStmt([res2], span)], span),
+            ir.SeqStmts([ir.AssignStmt(res2, submit_after, span), ir.ReturnStmt([res2], span)], span),
             span,
             ir.FunctionType.Orchestration,
         )
         Expected = ir.Program([build_stage1(), exp_main], "submit_caller_runtime_out", span)
 
-        After = passes.derive_call_directions()(Before)
+        # Prefix-args Submit (runtime-allocated tail Out) — see
+        # test_submit_runtime_allocated_tail_out for why the print->parse
+        # roundtrip is suppressed (separate parser limitation); structural_equal
+        # still verifies the Submit is preserved with the derived directions.
+        with _core_passes.PassContext(
+            [_core_passes.VerificationInstrument(_core_passes.VerificationMode.BEFORE_AND_AFTER)]
+        ):
+            After = passes.derive_call_directions()(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_submit_with_deps_lowers_to_call_with_manual_dep_edges(self):
-        """A ``pl.submit(..., deps=[t])`` keeps its dep edge through lowering
-        while ALSO getting ``arg_directions`` derived.
+    def test_submit_with_deps_preserves_submit_with_arg_directions(self):
+        """A ``pl.submit(..., deps=[t])`` keeps its dep edge AND the Submit kind
+        while getting ``arg_directions`` derived.
 
         Callee ``consumer(x: In)`` returns its input. The Submit carries one
         TaskId dep ``t``. The handler (pass-submit-awareness rule items 2-3):
-          * lowers Submit -> Call, re-encoding ``deps_=[t]`` as the Call
-            ``manual_dep_edges`` attr (SubmitToCallView), preserving the dep as
-            a real SSA use rather than dropping it; and
+          * preserves Submit-ness, keeping ``deps_=[t]`` as the typed field
+            (rule 3) rather than re-encoding it as a ``manual_dep_edges`` Call
+            attr; and
           * derives ``arg_directions=[Input]`` for the single In tensor arg.
-        The lowered Call's attr insertion order is ``[manual_dep_edges,
-        arg_directions]`` (deps re-added first, directions appended second).
+        The rewritten Submit round-trips as ``pl.submit(self.consumer, a,
+        deps=[t], attrs={"arg_directions": [...]})``.
         """
         span = _SUBMIT_SPAN
 
@@ -1404,15 +1413,16 @@ class TestDeriveSubmit:
         )
         Before = ir.Program([build_consumer(), before_main], "submit_with_deps", span)
 
-        # --- Expected: lowered Call with manual_dep_edges=[t] then arg_directions=[Input] ---
+        # --- Expected: Submit preserved with deps=[t] and arg_directions=[Input] ---
         a2 = ir.Var("a", _t64(), span)
         t2 = ir.Var("t", ir.ScalarType(DataType.TASK_ID), span)
         res2 = ir.Var("res", submit_ret, span)
-        call = ir.Call(
+        submit_after = ir.Submit(
             ir.GlobalVar("consumer"),
             [a2],
+            [t2],
             {},
-            {"manual_dep_edges": [t2], "arg_directions": [ir.ArgDirection.Input]},
+            {"arg_directions": [ir.ArgDirection.Input]},
             submit_ret,
             span,
         )
@@ -1420,11 +1430,103 @@ class TestDeriveSubmit:
             "main",
             [(a2, ir.ParamDirection.In), (t2, ir.ParamDirection.In)],
             [submit_ret],
-            ir.SeqStmts([ir.AssignStmt(res2, call, span), ir.ReturnStmt([res2], span)], span),
+            ir.SeqStmts([ir.AssignStmt(res2, submit_after, span), ir.ReturnStmt([res2], span)], span),
             span,
             ir.FunctionType.Orchestration,
         )
         Expected = ir.Program([build_consumer(), exp_main], "submit_with_deps", span)
+
+        After = passes.derive_call_directions()(Before)
+        ir.assert_structural_equal(After, Expected)
+
+
+# ---------------------------------------------------------------------------
+# pl.spmd_submit: Submit + launch spec preserved through DeriveCallDirections
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveSpmdSubmit:
+    """Before/Expected coverage for the explicit ``pl.spmd_submit(...)`` form.
+
+    A ``pl.spmd_submit(self.kernel, ..., core_num=N, sync_start=...)`` is an
+    ``ir.Submit`` carrying an SPMD launch spec (``core_num`` / ``sync_start``).
+    DeriveCallDirections derives ``arg_directions`` for it but MUST keep the
+    node a Submit (pass-submit-awareness.md rule 3) — preserving the launch
+    spec, the typed ``deps_`` field, and the TASK_ID-augmented Tuple return.
+    Lowering to a plain Call would fold the launch spec into attrs and leave a
+    Tuple-annotated plain call that cannot survive print -> reparse. Runs under
+    the repo conftest's default roundtrip instrument, so ``pl.spmd_submit(...)``
+    also round-trips after the pass (sibling roundtrip-asymmetry tests in
+    ``TestDeriveSubmit`` cover the prefix-args case that does not).
+    """
+
+    def test_spmd_submit_launch_spec_and_deps_survive_with_derived_directions(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                r: pl.Tile[[64], pl.FP32] = pl.add(t, t)
+                o: pl.Tensor[[64], pl.FP32] = pl.store(r, [0], out)
+                return o
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Out[pl.Tensor[[64], pl.FP32]],
+                z: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    o1, t1 = pl.spmd_submit(self.kernel, x, y, core_num=8, sync_start=True)
+                    o2, t2 = pl.spmd_submit(self.kernel, x, z, core_num=8, deps=[t1])
+                return z
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                t: pl.Tile[[64], pl.FP32] = pl.load(x, [0], [64])
+                r: pl.Tile[[64], pl.FP32] = pl.add(t, t)
+                o: pl.Tensor[[64], pl.FP32] = pl.store(r, [0], out)
+                return o
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[64], pl.FP32],
+                y: pl.Out[pl.Tensor[[64], pl.FP32]],
+                z: pl.Out[pl.Tensor[[64], pl.FP32]],
+            ) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    # Submit kind, launch spec (core_num / sync_start) and deps_
+                    # are preserved; only arg_directions=[Input, OutputExisting]
+                    # is added (x -> In tensor, y/z -> first-writer Out).
+                    o1, t1 = pl.spmd_submit(
+                        self.kernel,
+                        x,
+                        y,
+                        core_num=8,
+                        sync_start=True,
+                        attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]},
+                    )
+                    o2, t2 = pl.spmd_submit(
+                        self.kernel,
+                        x,
+                        z,
+                        core_num=8,
+                        deps=[t1],
+                        attrs={"arg_directions": [pl.adir.input, pl.adir.output_existing]},
+                    )
+                return z
 
         After = passes.derive_call_directions()(Before)
         ir.assert_structural_equal(After, Expected)

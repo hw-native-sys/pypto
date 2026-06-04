@@ -92,6 +92,54 @@ def test_profitable_parallel_array_dep_inserts_dummy_and_rewrites_consumers():
     _assert_expands(Before, Expected)
 
 
+def test_profitable_parallel_submit_dep_inserts_dummy_and_rewrites_submits():
+    """The Submit path: ``pl.submit(..., deps=[tids])`` consumers in a parallel
+    loop get a phase-fence barrier, and the rewritten consumers STAY Submits
+    (the barrier lands in the typed ``deps_`` field, not a ``manual_dep_edges``
+    attr). This is the real post-DeriveCallDirections shape now that the pass
+    preserves Submit-ness (pass-submit-awareness.md rule 3). Unlike the
+    plain-Call fixtures, the Submit form round-trips, so this runs under the
+    default verification — no ``VerificationLevel.NONE`` bypass.
+    """
+
+    @pl.program
+    class Before:
+        @pl.function
+        def kernel(self) -> pl.Scalar[pl.TASK_ID]:
+            return pl.system.task_invalid()
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self) -> pl.Scalar[pl.TASK_ID]:
+            with pl.manual_scope():
+                tids = pl.array.create(4, pl.TASK_ID)
+                for p in pl.parallel(4):
+                    a, atid = pl.submit(self.kernel, deps=[tids])
+                    b, btid = pl.submit(self.kernel, deps=[tids])
+            return pl.system.task_invalid()
+
+    @pl.program
+    class Expected:
+        @pl.function
+        def kernel(self) -> pl.Scalar[pl.TASK_ID]:
+            return pl.system.task_invalid()
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def main(self) -> pl.Scalar[pl.TASK_ID]:
+            with pl.manual_scope():
+                tids = pl.array.create(4, pl.TASK_ID)
+                phase_fence_barrier_0_tid = pl.system.task_dummy(deps=[tids])
+                for p in pl.parallel(4):
+                    a, atid = pl.submit(self.kernel, deps=[phase_fence_barrier_0_tid])
+                    b, btid = pl.submit(self.kernel, deps=[phase_fence_barrier_0_tid])
+            return pl.system.task_invalid()
+
+    # No NONE wrapper: the Submit form round-trips through print -> parse and a
+    # 0-arg submit carries no arg_directions to verify, so the pass runs under
+    # the conftest's default verification (roundtrip + property checks).
+    after = passes.expand_manual_phase_fence()(Before)
+    ir.assert_structural_equal(after, Expected)
+
+
 def test_parallel_iter_arg_dep_falls_back_even_with_visible_init_value():
     @pl.program
     class Before:

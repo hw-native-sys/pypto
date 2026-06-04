@@ -331,32 +331,44 @@ class CallDirectionMutator : public IRMutator {
     // Call path: args_[i] ↔ params_[i] (identity mapping). Submit takes a
     // separate visitor below, since its args_ excludes declared-Out callee
     // params (those materialise as return-tuple elements).
-    return DeriveDirectionsForCallLike(call, op.get(), /*is_submit=*/false);
+    auto dirs = DeriveDirectionsForCallLike(call, op.get(), /*is_submit=*/false);
+    if (!dirs) return call;
+    auto new_attrs = WithArgDirectionsAttr(call->attrs_, std::move(*dirs));
+    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
+                                        call->GetType(), call->span_);
   }
 
   ExprPtr VisitExpr_(const SubmitPtr& op) override {
-    // DeriveCallDirections is the natural lowering point for Submit → Call.
-    // Earlier passes see Submit so users get a clear `pl.submit(...)` print
-    // form, and post-DeriveCallDirections consumers (codegen, verifiers) stay
-    // on the existing Call codepath with deps_ folded into
-    // attrs[manual_dep_edges] via SubmitToCallView.
+    // DeriveCallDirections derives arg_directions for a Submit but MUST keep
+    // the node a Submit (pass-submit-awareness.md rule 3). A plain Call's
+    // declared type must equal its callee's return, whereas a Submit's type is
+    // the TASK_ID-augmented Tuple[<outputs>..., Scalar[TASK_ID]]. Lowering
+    // Submit → Call here used to leave a malformed plain Call carrying that
+    // Tuple type, which could not survive print → reparse (the binding
+    // annotation is a Tuple but the reparsed plain call infers the callee's
+    // scalar return). Keeping the Submit makes the printer emit `pl.submit(...)`
+    // — which round-trips — and post-DeriveCallDirections consumers funnel
+    // through SubmitToCallView wherever they need the Call-shaped view.
     //
-    // We deliberately split this from VisitExpr_(CallPtr): Submit's args_
-    // doesn't positionally line up with the callee's full param list (Out
-    // callee params are excluded), so derivation must thread the
-    // SubmitArgParamIndices mapping through to the per-arg loop. Routing
-    // through the Call visitor via a synthesised view used to mask this
-    // asymmetry and trip the size-equality guard, silently leaving
-    // arg_directions empty.
+    // Submit's args_ doesn't positionally line up with the callee's full param
+    // list (declared-Out callee params are excluded), so derivation threads the
+    // prefix coverage rule through DeriveDirectionsForCallLike via is_submit.
     auto base = IRMutator::VisitExpr_(op);
     auto submit = std::static_pointer_cast<const Submit>(base);
-    // SubmitToCallView is the *lowering* step (Submit deps_ → Call
-    // attrs[manual_dep_edges]); it is not a direction-derivation device.
-    auto lowered = SubmitToCallView(submit);
+    // SubmitToCallView yields the Call-shaped view used *only* to inspect args
+    // for direction derivation; the derived directions are re-attached to a
+    // fresh Submit so the typed deps_ field and the TASK_ID return shape are
+    // preserved.
+    auto view = SubmitToCallView(submit);
     // Pass the ORIGINAL Submit's pointer as the identity key so
     // first_writer_roots_ — populated by AnalyzeCall against the Submit —
     // actually matches.
-    return DeriveDirectionsForCallLike(lowered, op.get(), /*is_submit=*/true);
+    auto dirs = DeriveDirectionsForCallLike(view, op.get(), /*is_submit=*/true);
+    if (!dirs) return submit;
+    auto new_attrs = WithArgDirectionsAttr(submit->attrs_, std::move(*dirs));
+    return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                          std::move(new_attrs), submit->GetType(), submit->span_,
+                                          submit->core_num_, submit->sync_start_);
   }
 
   /// Shared core that derives the ArgDirection vector for a Call-shaped node.
@@ -371,15 +383,21 @@ class CallDirectionMutator : public IRMutator {
   /// Submit::get()) used to look up first_writer_roots_; we don't key off the
   /// `call` argument here because the Submit path passes a SubmitToCallView
   /// whose pointer is transient and was never registered by AnalyzeCall.
-  ExprPtr DeriveDirectionsForCallLike(const CallPtr& call, const Expr* identity_key, bool is_submit) {
+  /// Returns the derived ``arg_directions`` to attach to the call-like node, or
+  /// ``std::nullopt`` to leave the node unchanged. The caller rebuilds the node
+  /// in its own kind (Call → Call, Submit → Submit) so Submit-ness is preserved
+  /// across the rewrite.
+  std::optional<std::vector<ArgDirection>> DeriveDirectionsForCallLike(const CallPtr& call,
+                                                                       const Expr* identity_key,
+                                                                       bool is_submit) {
     if (IsBuiltinOp(call->op_->name_)) {
-      return call;
+      return std::nullopt;
     }
 
     auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
     if (!callee) {
       // Unknown op (e.g. Opaque function not in program). Leave directions empty.
-      return call;
+      return std::nullopt;
     }
 
     auto effective = ResolveCalleeDirections(program_, call, callee);
@@ -389,7 +407,7 @@ class CallDirectionMutator : public IRMutator {
         is_submit ? (call->args_.size() <= effective.size()) : (call->args_.size() == effective.size());
     if (!size_ok) {
       // Safety: leave directions empty so the verify pass surfaces it clearly.
-      return call;
+      return std::nullopt;
     }
 
     // Respect explicit call-site directions. The Call constructor's
@@ -397,7 +415,7 @@ class CallDirectionMutator : public IRMutator {
     // some directions (e.g. NoDep) are not derivable here, so a populated
     // attrs['arg_directions'] is treated as authoritative and left as-is.
     if (call->HasArgDirections()) {
-      return call;
+      return std::nullopt;
     }
 
     auto fw_it = first_writer_roots_.find(identity_key);
@@ -477,12 +495,10 @@ class CallDirectionMutator : public IRMutator {
 
     // Skip rewriting if directions are unchanged.
     if (call->GetArgDirections() == dirs) {
-      return call;
+      return std::nullopt;
     }
 
-    auto new_attrs = WithArgDirectionsAttr(call->attrs_, std::move(dirs));
-    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
-                                        call->GetType(), call->span_);
+    return dirs;
   }
 
  private:

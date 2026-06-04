@@ -29,31 +29,27 @@ class TestSpmdScopeTaskIdCodegen:
 
     @staticmethod
     def _mixed_spmd_pipeline(program):
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            return passes.expand_mixed_kernel()(
-                passes.infer_tile_memory_space()(
-                    passes.outline_cluster_scopes()(passes.convert_to_ssa()(program))
-                )
+        return passes.expand_mixed_kernel()(
+            passes.infer_tile_memory_space()(
+                passes.outline_cluster_scopes()(passes.convert_to_ssa()(program))
             )
+        )
 
     @staticmethod
     def _codegen(program):
         """Run DeriveCallDirections + MaterializeRuntimeScopes + orchestration codegen.
 
-        Pinned to VerificationLevel.NONE: an outlined auto-scope ``as tid`` dispatch
-        is lowered Submit -> Call (with a TASK_ID-augmented Tuple return) by
-        DeriveCallDirections, and that Call form does not survive a print -> reparse
-        roundtrip (the printed Tuple-annotated plain call reparses to the callee's
-        scalar return). That is a pre-existing limitation shared by the
-        ``pl.at(...) as tid:`` rail and is orthogonal to this test, which exercises
-        the codegen output itself — the contract under test.
+        Runs under the repo conftest's default ``PYPTO_VERIFY_LEVEL=roundtrip``
+        instrument (print -> parse -> structural_equal after each pass):
+        DeriveCallDirections now PRESERVES the captured ``as tid`` dispatch as a
+        Submit (printed as ``pl.submit(...)``), so it round-trips — no
+        VerificationLevel.NONE bypass is needed.
         """
-        with passes.PassContext([], passes.VerificationLevel.NONE):
-            program = passes.derive_call_directions()(program)
-            program = passes.materialize_runtime_scopes()(program)
-            for func in program.functions.values():
-                if func.func_type == ir.FunctionType.Orchestration:
-                    return codegen.generate_orchestration(program, func).code
+        program = passes.derive_call_directions()(program)
+        program = passes.materialize_runtime_scopes()(program)
+        for func in program.functions.values():
+            if func.func_type == ir.FunctionType.Orchestration:
+                return codegen.generate_orchestration(program, func).code
         raise ValueError("No orchestration function found in program")
 
     def test_as_tid_launch_spec_via_function_attr_fallback(self):

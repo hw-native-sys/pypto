@@ -13,7 +13,9 @@ PyPTO 采用**两层方向模型**（在 commit `c53dac0d` 引入）：
 
 `DeriveCallDirections` 就是连接两层的 pass。它遍历每个 `Function` body 中的所有非 builtin `Call`，并将解析后的每参数向量写入 `Call.attrs["arg_directions"]`（保留键 `kAttrArgDirections`，值类型为 `std::vector<ArgDirection>`）。下游消费者——orchestration 代码生成和运行时任务提交层——直接读取 `Call.attrs["arg_directions"]`，而不是从原始参数方向重新计算。
 
-**Manual scope 的依赖边属于独立层。** 在 `with pl.manual_scope():` 区域内，用户声明的 `pl.submit(..., deps=[...])` 边由 **parser 直接**写入 `Call.attrs["manual_dep_edges"]`（一个 `vector<VarPtr>`，元素为 `Scalar[TASK_ID]` 变量或 `Array[N, TASK_ID]` carry）。`DeriveCallDirections` 只读写 `arg_directions`；后续 `ExpandManualPhaseFence` pass 可能把选中的 `manual_dep_edges` 从完整 TaskId 数组改写为 dummy-barrier TaskId。
+**Submit 被保留，而非降级。** 任务发射——`pl.manual_scope` 内的 `pl.submit(...)`，或被捕获的 auto-scope 派发（`with pl.at(...) as tid:` / `with pl.spmd(...) as tid:`）——是 `ir.Submit`，与 `Call` 同级的一种 kind。`DeriveCallDirections` 为该 `Submit` 推导 `arg_directions`（通过仅用于检查实参的临时 `SubmitToCallView`），并把结果重新附加到一个**全新的 `Submit`** 上，保留其类型化的 `deps_` 字段以及 TASK_ID 增广的 `Tuple[<outputs>..., Scalar[TASK_ID]]` 返回形状（pass-submit-awareness.md 规则 3）。若在此把 `Submit → Call` 降级，会得到一个携带其 callee 从未声明的 Tuple 类型的普通 `Call`——一个无法通过 print → reparse 的非法节点。下游消费者（orchestration codegen、`ExpandManualPhaseFence`、`CollectCommGroups`、`CallDirectionsResolved` verifier）在需要 Call 形态视图时通过 `SubmitToCallView` 转接。
+
+**Manual scope 的依赖边属于独立层。** 一个 `Submit` 在其一等的 `deps_` 字段中携带 `deps=[...]` 边。旧的 attrs 编码——`Call.attrs["manual_dep_edges"]`（一个 `vector<VarPtr>`，元素为 `Scalar[TASK_ID]` / `Array[N, TASK_ID]`）——是 `SubmitToCallView` 为早于 Submit kind 的消费者从 `deps_` 合成的形状，也是手工构造的 post-derive 测试夹具所用的形状。`DeriveCallDirections` 只读写 `arg_directions`；后续 `ExpandManualPhaseFence` pass 可能把某个消费者的完整 TaskId 数组依赖改写为 dummy-barrier TaskId（并保留消费者的 kind：`Submit` 仍是 `Submit`）。
 
 **何时使用**：在 tile pipeline 稳定后运行（要求 `SplitIncoreOrch`），并在任何观察 `Call.attrs["arg_directions"]` 的消费者之前。在 `Default` 策略中它位于 `FuseCreateAssembleToSlice` 与最后一次 `Simplify` 之间。
 
@@ -79,7 +81,7 @@ program_with_dirs = derive_pass(program)
 
 **R-seq** 在顺序循环内保持跨迭代的 write-after-write 链：只要被调用方的 `Out` 处于任意顺序祖先之下，就**无条件**提升为 `InOut`。早期曾有一个"变 offset store 视为不相交"的例外——当被调用方的 `tile.store` offset 依赖某个参数时，把这类调用保留为 `OutputExisting`——该例外已被移除：要 sound 地证明跨迭代写入互不相交，需要一套真正的依赖分析（仿射 offset 抽取、步长与 tile extent 对比、offset 单射性、跨过程组合），而它当时用的廉价语法检查可能悄悄丢掉真实的 WAW 边。**R-prior** 在同一作用域内某个更早的 writer 单元已触碰过同一根时，保持跨兄弟的 WAW 依赖。**R-enclosing** 当实参根植的外层函数参数被显式声明为 `pl.InOut` 时，遵从该声明。
 
-预填充的 `Call.attrs["arg_directions"]` 被视作权威并保持不动（某些方向如 `NoDep` 无法从结构上推导）。`Call` 构造函数的 `ValidateArgDirectionsAttr` 仅在向量非空时强制 arity；空向量仍可附加，并会在之后被 `CallDirectionsResolved` verifier 拒绝。
+预填充的 `Call.attrs["arg_directions"]` 被视作权威并保持不动（某些方向如 `NoDep` 无法从结构上推导）。`Call` / `Submit` 构造函数的 `ValidateArgDirectionsAttr` 仅在向量非空时强制 arity。`CallDirectionsResolved` verifier 要求**带实参**的每个 call-like 节点都有已填充的 `arg_directions` 向量；零实参的派发（例如 callee 不接收任何位置 tensor 实参的 `pl.submit(self.kernel)`）的空向量是合法的，会被接受。
 
 **幂等性**：mutator 跳过任何已带 `attrs["arg_directions"]`（`HasArgDirections()`）的 call，因此第二次运行不会改动已解析的 call。两次运行该 pass 因而产生结构上完全相同的 IR（由 `TestDeriveIdempotent::test_idempotent` 回归测试）。
 

@@ -46,13 +46,15 @@ struct BarrierDecision {
   VarPtr source_var;
   VarPtr barrier_var;
   StmtPtr barrier_stmt;
-  std::unordered_set<const Call*> consumers;
+  // Consumers are keyed on the Expr base pointer so both Call and Submit
+  // (manual-scope task launches) dispatch through the same map.
+  std::unordered_set<const Expr*> consumers;
 };
 
 struct DepArrayInfo {
   VarPtr source_var;
   int64_t consumer_count = 0;
-  std::unordered_set<const Call*> consumers;
+  std::unordered_set<const Expr*> consumers;
 };
 
 struct LoopBodyDepIndex {
@@ -91,7 +93,17 @@ static bool IsTaskIdArrayVar(const VarPtr& var) {
   return array_ty && array_ty->dtype_ == DataType::TASK_ID;
 }
 
-static std::optional<VarPtr> GetSingleManualDepArray(const CallPtr& call) {
+// Returns the single manual dependency array of a call-like node, or nullopt
+// when it carries zero / more than one dep. Submit (the canonical task-launch
+// kind) holds its deps in the typed ``deps_`` field; a plain Call (e.g. a
+// hand-built post-lowering test fixture) carries them in the legacy
+// ``manual_dep_edges`` attr.
+static std::optional<VarPtr> GetSingleManualDepArray(const ExprPtr& node) {
+  if (auto submit = As<Submit>(node)) {
+    if (submit->deps_.size() != 1 || !submit->deps_[0]) return std::nullopt;
+    return AsVarLike(submit->deps_[0]);
+  }
+  auto call = As<Call>(node);
   if (!call) return std::nullopt;
   if (call->GetAttr<bool>(kAttrDummyTask, false)) return std::nullopt;
   for (const auto& [k, v] : call->attrs_) {
@@ -103,8 +115,8 @@ static std::optional<VarPtr> GetSingleManualDepArray(const CallPtr& call) {
   return std::nullopt;
 }
 
-static std::optional<VarPtr> GetSingleManualDepTaskIdArray(const CallPtr& call) {
-  auto dep = GetSingleManualDepArray(call);
+static std::optional<VarPtr> GetSingleManualDepTaskIdArray(const ExprPtr& node) {
+  auto dep = GetSingleManualDepArray(node);
   if (!dep.has_value() || !IsTaskIdArrayVar(*dep)) return std::nullopt;
   return dep;
 }
@@ -177,8 +189,8 @@ static LoopBodyDepIndex BuildLoopBodyDepIndex(const StmtPtr& body, const ArrayAl
       }
     }
 
-    void RecordDepConsumer(const CallPtr& call) {
-      auto dep = GetSingleManualDepTaskIdArray(call);
+    void RecordDepConsumer(const ExprPtr& node) {
+      auto dep = GetSingleManualDepTaskIdArray(node);
       if (!dep.has_value()) return;
       const Var* key = dep->get();
       auto [it, inserted] = index.dep_arrays.emplace(key, DepArrayInfo{});
@@ -187,7 +199,7 @@ static LoopBodyDepIndex BuildLoopBodyDepIndex(const StmtPtr& body, const ArrayAl
         it->second.source_var = *dep;
       }
       it->second.consumer_count += consumer_multiplier_;
-      it->second.consumers.insert(call.get());
+      it->second.consumers.insert(node.get());
     }
 
     void VisitStmt_(const AssignStmtPtr& assign) override {
@@ -218,6 +230,11 @@ static LoopBodyDepIndex BuildLoopBodyDepIndex(const StmtPtr& body, const ArrayAl
       IRVisitor::VisitExpr_(call);
     }
 
+    void VisitExpr_(const SubmitPtr& submit) override {
+      RecordDepConsumer(submit);
+      IRVisitor::VisitExpr_(submit);
+    }
+
    private:
     const ArrayAliasMap& aliases_;
     const NestedLoopSummaryCollector& collect_nested_loop_summary_;
@@ -237,7 +254,16 @@ static int64_t GetArrayProducerCount(const VarPtr& array_var) {
   return 0;
 }
 
-static CallPtr RewriteManualDepsToBarrier(const CallPtr& call, const VarPtr& barrier_var) {
+// Replace a consumer's manual dep array with the single barrier TaskId,
+// preserving the node kind: a Submit re-emits a Submit (barrier in the typed
+// deps_ field), a Call re-emits a Call (barrier in manual_dep_edges).
+static ExprPtr RewriteManualDepsToBarrier(const ExprPtr& node, const VarPtr& barrier_var) {
+  if (auto submit = As<Submit>(node)) {
+    return std::make_shared<Submit>(submit->op_, submit->args_, std::vector<ExprPtr>{barrier_var},
+                                    submit->kwargs_, submit->attrs_, submit->GetType(), submit->span_,
+                                    submit->core_num_, submit->sync_start_);
+  }
+  auto call = As<Call>(node);
   return std::make_shared<Call>(call->op_, call->args_, call->kwargs_,
                                 WithManualDepEdgesAttr(call->attrs_, {barrier_var}), call->GetType(),
                                 call->span_);
@@ -277,9 +303,9 @@ class ManualPhaseFenceMutator : public IRMutator {
       decisions = BuildDecisions(op, op->body_);
     }
 
-    std::unordered_map<const Call*, VarPtr> consumer_to_barrier;
+    std::unordered_map<const Expr*, VarPtr> consumer_to_barrier;
     for (const auto& decision : decisions) {
-      for (const Call* consumer : decision.consumers) {
+      for (const Expr* consumer : decision.consumers) {
         consumer_to_barrier[consumer] = decision.barrier_var;
       }
     }
@@ -389,7 +415,7 @@ class ManualPhaseFenceMutator : public IRMutator {
         for_stmt->kind_ == ForKind::Sequential);
 
     auto try_add = [&](const VarPtr& match_var, const VarPtr& barrier_source_var, int64_t consumer_count,
-                       const std::unordered_set<const Call*>& consumers) {
+                       const std::unordered_set<const Expr*>& consumers) {
       if (!match_var || !barrier_source_var || !already_decided.insert(match_var.get()).second) return;
       const int64_t producer_count = GetArrayProducerCount(match_var);
       if (!ShouldEmitPhaseFenceBarrier(producer_count, consumer_count)) return;
@@ -430,10 +456,10 @@ class ManualPhaseFenceMutator : public IRMutator {
   }
 
   StmtPtr RewriteCoveredConsumers(const StmtPtr& body,
-                                  const std::unordered_map<const Call*, VarPtr>& consumer_to_barrier) {
+                                  const std::unordered_map<const Expr*, VarPtr>& consumer_to_barrier) {
     class Rewriter : public IRMutator {
      public:
-      explicit Rewriter(const std::unordered_map<const Call*, VarPtr>& consumer_to_barrier)
+      explicit Rewriter(const std::unordered_map<const Expr*, VarPtr>& consumer_to_barrier)
           : consumer_to_barrier_(consumer_to_barrier) {}
 
       ExprPtr VisitExpr_(const CallPtr& call) override {
@@ -444,8 +470,16 @@ class ManualPhaseFenceMutator : public IRMutator {
         return IRMutator::VisitExpr_(call);
       }
 
+      ExprPtr VisitExpr_(const SubmitPtr& submit) override {
+        auto it = consumer_to_barrier_.find(submit.get());
+        if (it != consumer_to_barrier_.end()) {
+          return RewriteManualDepsToBarrier(submit, it->second);
+        }
+        return IRMutator::VisitExpr_(submit);
+      }
+
      private:
-      const std::unordered_map<const Call*, VarPtr>& consumer_to_barrier_;
+      const std::unordered_map<const Expr*, VarPtr>& consumer_to_barrier_;
     };
 
     if (consumer_to_barrier.empty()) return body;

@@ -190,28 +190,39 @@ def test_jit_spmd_with_form_as_tid_captures_and_wires_deps():
     )
     spmd_fn_names = {f.name for f in spmd_fns}
 
-    # Inspect the lowered orchestration IR: the full pipeline lowers the captured
-    # Submits to Calls of the outlined Spmd functions (DeriveCallDirections), and the
-    # surviving deps=[tid0] edge rides as the consumer Call's manual_dep_edges attr.
-    # Exactly one of the two dispatches must carry a single dep edge — proving the
-    # specializer neither dropped nor duplicated the JIT-specific dependency wiring.
+    # Inspect the lowered orchestration IR: the full pipeline now KEEPS the
+    # captured dispatches as Submits of the outlined Spmd functions
+    # (DeriveCallDirections preserves Submit-ness), and the surviving deps=[tid0]
+    # edge rides as the consumer Submit's typed ``deps_`` field. Exactly one of
+    # the two dispatches must carry a single dep edge — proving the specializer
+    # neither dropped nor duplicated the JIT-specific dependency wiring.
     orch = next(f for f in post.functions.values() if f.func_type == ir.FunctionType.Orchestration)
     assert orch.name == "entry"
-    spmd_calls = []
+    spmd_dispatches = []
 
     def _walk(node):
         if isinstance(node, ir.SeqStmts):
             for s in node.stmts:
                 _walk(s)
         elif isinstance(node, ir.AssignStmt):
-            if isinstance(node.value, ir.Call) and node.value.op.name in spmd_fn_names:
-                spmd_calls.append(node.value)
+            if isinstance(node.value, (ir.Call, ir.Submit)) and node.value.op.name in spmd_fn_names:
+                spmd_dispatches.append(node.value)
         elif hasattr(node, "body") and node.body is not None:
             _walk(node.body)
 
     _walk(orch.body)
-    assert len(spmd_calls) == 2, f"expected two spmd dispatch calls, got {[c.op.name for c in spmd_calls]}"
-    dep_counts = sorted(len(c.attrs.get("manual_dep_edges", [])) for c in spmd_calls)
+    assert len(spmd_dispatches) == 2, (
+        f"expected two spmd dispatches, got {[c.op.name for c in spmd_dispatches]}"
+    )
+
+    def _dep_count(disp):
+        # Submit carries deps in the typed deps_ field; a plain Call (legacy)
+        # would carry them as the manual_dep_edges attr.
+        if isinstance(disp, ir.Submit):
+            return len(disp.deps)
+        return len(disp.attrs.get("manual_dep_edges", []))
+
+    dep_counts = sorted(_dep_count(c) for c in spmd_dispatches)
     assert dep_counts == [0, 1], (
         f"expected the deps=[tid0] edge to survive as exactly one dep on the consumer "
         f"dispatch, got per-dispatch dep counts {dep_counts}"

@@ -52,10 +52,29 @@ class CallDirectionChecker : public IRVisitor {
  protected:
   void VisitExpr_(const CallPtr& call) override {
     IRVisitor::VisitExpr_(call);
+    CheckCallLike(call);
+  }
+
+  // A Submit (task launch) carries arg_directions in the same attr as a Call.
+  // Validate it through the Call-shaped view so CallDirectionsResolved covers
+  // submits too (pass-submit-awareness.md rule 6).
+  void VisitExpr_(const SubmitPtr& submit) override {
+    IRVisitor::VisitExpr_(submit);
+    CheckCallLike(SubmitToCallView(submit));
+  }
+
+ private:
+  void CheckCallLike(const CallPtr& call) {
     if (IsBuiltinOp(call->op_->name_)) return;
 
     auto callee = program_ ? program_->GetFunction(call->op_->name_) : nullptr;
     if (!callee) return;  // Opaque / not in program — skip.
+
+    // A 0-arg call/submit has no per-arg directions to verify. DeriveCallDirections
+    // derives an empty direction vector for it, which is correct — not "missing"
+    // or "empty as a failure". (A bare ``pl.submit(self.kernel)`` whose callee
+    // takes no positional tensor args is legal.)
+    if (call->args_.empty()) return;
 
     if (!call->HasArgDirections()) {
       Fail(call, "Call attrs['arg_directions'] is missing after DeriveCallDirections");
@@ -152,7 +171,6 @@ class CallDirectionChecker : public IRVisitor {
     }
   }
 
- private:
   void Fail(const CallPtr& call, const std::string& msg) {
     std::ostringstream oss;
     oss << "in function '" << func_name_ << "', call to '" << call->op_->name_ << "': " << msg;

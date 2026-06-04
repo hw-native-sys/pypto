@@ -42,6 +42,13 @@ bool IsTensorOp(const std::string& op_name);
 /// ArrayType ops are handled by the orchestration codegen similarly to tensor ops,
 /// but emit C-stack array operations instead of GM/DDR pointer operations.
 bool IsArrayOp(const std::string& op_name);
+
+/// Returns a Call-shaped view of ``expr`` when it is a Call or a Submit, else
+/// null. Submit (a task launch) is the canonical IR form after
+/// DeriveCallDirections; orchestration analysis and codegen funnel it through
+/// ``SubmitToCallView`` so the Call-based logic applies unchanged. Maps keyed
+/// on node identity must use the binding Var, never this transient view.
+ir::CallPtr AsCallOrSubmitView(const ir::ExprPtr& expr);
 std::string FormatConstIntValue(const ir::ConstIntPtr& c, const std::string& cpp_type);
 std::string FormatConstFloatValue(const ir::ConstFloatPtr& c, const std::string& cpp_type);
 int GetOrCreateFuncId(const std::string& func_name, std::map<std::string, int>* func_name_to_id,
@@ -69,7 +76,9 @@ struct TupleElement {
 class OrchestrationInfoCollector : public ir::IRVisitor {
  public:
   std::map<std::string, std::vector<TupleElement>> call_tuple_elements;
-  std::map<const ir::Call*, std::string> call_to_tuple_key;
+  // Tuple-returning call/submit results are keyed on the *binding Var* (stable),
+  // not the call pointer: a Submit is viewed as a Call via a transient
+  // SubmitToCallView, so a call-pointer key would not survive to codegen.
   std::map<const ir::Var*, std::string> tuple_var_to_key;
 
  protected:

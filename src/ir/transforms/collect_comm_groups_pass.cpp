@@ -241,28 +241,37 @@ class DispatchAnalyzer : public IRVisitor {
     for_stack_.pop_back();
   }
 
-  void VisitExpr_(const CallPtr& op) override {
-    if (IsChipOrchDispatch(op, chip_orchs_)) {
-      ExprPtr device;
-      for (const auto& [k, v] : op->attrs_) {
-        if (k == kAttrDevice) {
-          // attrs["device"] is stored as ExprPtr by N3 parser.
-          if (const auto* p = std::any_cast<ExprPtr>(&v)) device = *p;
-          break;
-        }
-      }
-      if (device) {
-        DeviceDescriptor desc = ResolveDeviceDescriptor(device, for_stack_, var_defs_, op->span_);
-        for (const auto& arg : op->args_) {
-          auto arg_var = As<Var>(arg);
-          if (!arg_var) continue;
-          auto it = view_to_window_.find(arg_var.get());
-          if (it != view_to_window_.end()) {
-            it->second.alloc->seen.push_back(desc);
-          }
-        }
+  void AnalyzeDispatch(const CallPtr& op) {
+    if (!IsChipOrchDispatch(op, chip_orchs_)) return;
+    ExprPtr device;
+    for (const auto& [k, v] : op->attrs_) {
+      if (k == kAttrDevice) {
+        // attrs["device"] is stored as ExprPtr by N3 parser.
+        if (const auto* p = std::any_cast<ExprPtr>(&v)) device = *p;
+        break;
       }
     }
+    if (!device) return;
+    DeviceDescriptor desc = ResolveDeviceDescriptor(device, for_stack_, var_defs_, op->span_);
+    for (const auto& arg : op->args_) {
+      auto arg_var = As<Var>(arg);
+      if (!arg_var) continue;
+      auto it = view_to_window_.find(arg_var.get());
+      if (it != view_to_window_.end()) {
+        it->second.alloc->seen.push_back(desc);
+      }
+    }
+  }
+
+  void VisitExpr_(const CallPtr& op) override {
+    AnalyzeDispatch(op);
+    IRVisitor::VisitExpr_(op);
+  }
+
+  // A captured (`as tid`) chip-orch dispatch is a Submit; the ``device=`` attr
+  // it carries is analysed identically through the Call-shaped view.
+  void VisitExpr_(const SubmitPtr& op) override {
+    AnalyzeDispatch(SubmitToCallView(op));
     IRVisitor::VisitExpr_(op);
   }
 
