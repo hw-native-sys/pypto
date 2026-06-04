@@ -3694,18 +3694,25 @@ class OutWindowExternalizer {
   static void FilterInputWindowsByCallsites(const ProgramPtr& program, AnalysisMap* analyses) {
     if (!program || !analyses) return;
     auto eligible = InputWindowCallsiteFilter(program, *analyses).Run();
-    for (auto& [func_name, analysis] : *analyses) {
+    for (auto it = analyses->begin(); it != analyses->end();) {
+      auto& func_name = it->first;
+      auto& analysis = it->second;
       auto eligible_it = eligible.find(func_name);
       if (eligible_it == eligible.end()) {
         analysis.inputs.clear();
-        continue;
+      } else {
+        const auto& eligible_indices = eligible_it->second;
+        analysis.inputs.erase(std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
+                                             [&eligible_indices](const InputRewriteInfo& input) {
+                                               return eligible_indices.count(input.in_param_index) == 0;
+                                             }),
+                              analysis.inputs.end());
       }
-      const auto& eligible_indices = eligible_it->second;
-      analysis.inputs.erase(std::remove_if(analysis.inputs.begin(), analysis.inputs.end(),
-                                           [&eligible_indices](const InputRewriteInfo& input) {
-                                             return eligible_indices.count(input.in_param_index) == 0;
-                                           }),
-                            analysis.inputs.end());
+      if (analysis.outputs.empty() && analysis.inputs.empty()) {
+        it = analyses->erase(it);
+      } else {
+        ++it;
+      }
     }
   }
 
