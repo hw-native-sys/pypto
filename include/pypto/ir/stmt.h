@@ -163,7 +163,8 @@ enum class ScopeKind : uint8_t {
   Cluster = 2,     ///< Cluster scope for co-scheduled AIC + AIV groups
   Hierarchy = 3,   ///< Distributed hierarchy scope (uses level_/role_ on ScopeStmt)
   Spmd = 4,        ///< SPMD dispatch scope (core_num/sync_start on ScopeStmt)
-  Runtime = 5      ///< Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)
+  Runtime = 5,     ///< Runtime orchestration scope (PTO2_SCOPE wrapper, manual on/off)
+  CommDomain = 6   ///< CommDomain scope (with orch.allocate_domain(...) wrapper)
 };
 
 /**
@@ -257,7 +258,8 @@ inline ForKind StringToForKind(const std::string& str) {
 /**
  * @brief Convert ScopeKind to string
  * @param kind The scope kind
- * @return String representation ("InCore", "AutoInCore", "Cluster", "Hierarchy", "Spmd", or "Runtime")
+ * @return String representation ("InCore", "AutoInCore", "Cluster", "Hierarchy", "Spmd", "Runtime",
+ *         or "CommDomain")
  */
 inline std::string ScopeKindToString(ScopeKind kind) {
   switch (kind) {
@@ -273,6 +275,8 @@ inline std::string ScopeKindToString(ScopeKind kind) {
       return "Spmd";
     case ScopeKind::Runtime:
       return "Runtime";
+    case ScopeKind::CommDomain:
+      return "CommDomain";
   }
   throw pypto::TypeError("Unknown ScopeKind");
 }
@@ -970,6 +974,56 @@ class RuntimeScopeStmt : public ScopeStmt {
 };
 
 using RuntimeScopeStmtPtr = std::shared_ptr<const RuntimeScopeStmt>;
+
+/**
+ * @brief CommDomain scope: an HCCL window-buffer allocation region.
+ *
+ * Wraps the use sites of a set of ``pld.alloc_window_buffer`` slots that share
+ * a dispatch device-coverage descriptor. Codegen lowers each instance to a
+ * ``with orch.allocate_domain(name=..., workers=..., window_size=...,
+ * buffers=[CommBufferSpec(...)]) as __comm_d<n>:`` block at the top of the
+ * host orchestration function, then emits ``body_`` inside that block.
+ *
+ * ``devices_`` is the ascending-sorted set of worker indices into
+ * ``DistributedConfig.device_ids`` covered by the scope. An empty vector
+ * means "all devices" (resolved at runtime to ``*range(world_size)``).
+ *
+ * ``slots_`` is the ordered list of ``WindowBuffer`` allocations the scope
+ * carves out of its window. WindowBuffer identity is preserved end-to-end:
+ * the same ``shared_ptr<const WindowBuffer>`` stays threaded through every
+ * ``DistributedTensorType::window_buffer_`` so that codegen can resolve a
+ * dispatch's distributed tensor argument back to the enclosing scope.
+ *
+ * Synthesized by the ``MaterializeCommDomainScopes`` pass (formerly
+ * ``CollectCommGroups``). The Python printer is transparent over this stmt
+ * (descends into ``body_`` without emitting a ``with`` wrapper) — see the
+ * pass doc for the round-trip contract.
+ */
+class CommDomainScopeStmt : public ScopeStmt {
+ public:
+  std::vector<int64_t> devices_;        ///< Covered worker indices (ascending); empty = all devices
+  std::vector<WindowBufferPtr> slots_;  ///< Allocation slots in this scope (alloc-order)
+
+  CommDomainScopeStmt(std::vector<int64_t> devices, std::vector<WindowBufferPtr> slots, std::string name_hint,
+                      StmtPtr body, Span span, std::vector<std::string> leading_comments = {},
+                      std::vector<std::pair<std::string, std::any>> attrs = {})
+      : ScopeStmt(std::move(name_hint), std::move(body), std::move(span), std::move(leading_comments),
+                  std::move(attrs)),
+        devices_(std::move(devices)),
+        slots_(std::move(slots)) {}
+
+  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::CommDomainScopeStmt; }
+  [[nodiscard]] ScopeKind GetScopeKind() const override { return ScopeKind::CommDomain; }
+  [[nodiscard]] std::string TypeName() const override { return "CommDomainScopeStmt"; }
+
+  static constexpr auto GetFieldDescriptors() {
+    return std::tuple_cat(ScopeStmt::GetFieldDescriptors(),
+                          std::make_tuple(reflection::UsualField(&CommDomainScopeStmt::devices_, "devices"),
+                                          reflection::UsualField(&CommDomainScopeStmt::slots_, "slots")));
+  }
+};
+
+using CommDomainScopeStmtPtr = std::shared_ptr<const CommDomainScopeStmt>;
 
 /**
  * @brief Sequence of statements

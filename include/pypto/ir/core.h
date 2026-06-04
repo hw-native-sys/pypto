@@ -97,6 +97,7 @@ enum class ObjectKind {
   HierarchyScopeStmt,
   SpmdScopeStmt,
   RuntimeScopeStmt,
+  CommDomainScopeStmt,
   SeqStmts,
   EvalStmt,
   BreakStmt,

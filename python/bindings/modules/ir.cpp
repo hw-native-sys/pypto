@@ -1442,6 +1442,27 @@ void BindIR(nb::module_& m) {
       },
       scope_attrs_doc);
 
+  // CommDomainScopeStmt
+  auto comm_domain_scope_stmt_class = nb::class_<CommDomainScopeStmt, ScopeStmt>(
+      ir, "CommDomainScopeStmt",
+      "CommDomain scope: wraps host_orch use sites of a CommGroup's WindowBuffers. "
+      "Codegen lowers to `with orch.allocate_domain(name=..., workers=..., window_size=..., "
+      "buffers=[...]) as __comm_d<n>:`. Synthesized by MaterializeCommDomainScopes pass; no user DSL "
+      "surface.");
+  comm_domain_scope_stmt_class.def(
+      nb::init<std::vector<int64_t>, std::vector<WindowBufferPtr>, std::string, const StmtPtr&,
+               const Span&>(),
+      nb::arg("devices"), nb::arg("slots"), nb::arg("name_hint") = "", nb::arg("body"), nb::arg("span"),
+      "Create a CommDomain scope statement. ``devices`` empty = all devices (resolved to "
+      "*range(world_size) at codegen).");
+  BindFields<CommDomainScopeStmt>(comm_domain_scope_stmt_class);
+  comm_domain_scope_stmt_class.def_prop_ro(
+      "attrs",
+      [kwargs_to_pydict](const std::shared_ptr<const CommDomainScopeStmt>& self) {
+        return kwargs_to_pydict(self->attrs_);
+      },
+      scope_attrs_doc);
+
   // SeqStmts - const shared_ptr
   auto seq_stmts_class =
       nb::class_<SeqStmts, Stmt>(ir, "SeqStmts", "Sequence of statements: a sequence of statements");

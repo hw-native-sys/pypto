@@ -251,6 +251,7 @@ class IRPythonPrinter : public IRVisitor {
   void VisitStmt_(const HierarchyScopeStmtPtr& op) override;
   void VisitStmt_(const SpmdScopeStmtPtr& op) override;
   void VisitStmt_(const RuntimeScopeStmtPtr& op) override;
+  void VisitStmt_(const CommDomainScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;
@@ -1732,6 +1733,40 @@ void IRPythonPrinter::VisitStmt_(const RuntimeScopeStmtPtr& op) {
   IncreaseIndent();
   PrintStmtBlock(op->body_);
   DecreaseIndent();
+}
+
+void IRPythonPrinter::VisitStmt_(const CommDomainScopeStmtPtr& op) {
+  // CommDomainScopeStmt is synthesized by MaterializeCommDomainScopes — it
+  // has no user DSL surface, so the printer does NOT emit a `with` wrapper
+  // (a wrapper would have no matching parser path). Reparse of the printed
+  // text produces pre-pass IR; re-running the pass pipeline reconstructs
+  // the scope.
+  //
+  // To keep dumps informative (since the Python printer is the only
+  // round-trip surface for IR), we emit a single leading comment that
+  // surfaces the scope's identity — covered devices and slot names — then
+  // descend into the body at the SAME indent (no IncreaseIndent: the body
+  // is structurally at the same level the comment occupies in the parent
+  // statement stream).
+  stream_ << "# pld.comm_domain: devices=";
+  if (op->devices_.empty()) {
+    stream_ << "all";
+  } else {
+    stream_ << "[";
+    for (size_t i = 0; i < op->devices_.size(); ++i) {
+      if (i > 0) stream_ << ", ";
+      stream_ << op->devices_[i];
+    }
+    stream_ << "]";
+  }
+  stream_ << ", slots=[";
+  for (size_t i = 0; i < op->slots_.size(); ++i) {
+    if (i > 0) stream_ << ", ";
+    INTERNAL_CHECK_SPAN(op->slots_[i], op->span_) << "CommDomainScopeStmt has null slot at index " << i;
+    stream_ << op->slots_[i]->name_hint_;
+  }
+  stream_ << "]\n";
+  PrintStmtBlock(op->body_);
 }
 
 void IRPythonPrinter::VisitStmt_(const EvalStmtPtr& op) {

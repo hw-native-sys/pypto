@@ -118,6 +118,7 @@ class IRMutator : public ExprFunctor<ExprPtr>, public StmtFunctor<StmtPtr> {
       const std::vector<std::pair<std::string, std::any>>& attrs);
   StmtPtr VisitStmt_(const SpmdScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const RuntimeScopeStmtPtr& op) override;
+  StmtPtr VisitStmt_(const CommDomainScopeStmtPtr& op) override;
   StmtPtr VisitStmt_(const SeqStmtsPtr& op) override;
   StmtPtr VisitStmt_(const EvalStmtPtr& op) override;
   StmtPtr VisitStmt_(const BreakStmtPtr& op) override;

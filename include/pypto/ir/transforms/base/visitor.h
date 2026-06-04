@@ -113,6 +113,7 @@ class IRVisitor : public IRFunctor<void> {
   void VisitScopeAttrs(const ScopeStmtPtr& op);
   void VisitStmt_(const SpmdScopeStmtPtr& op) override;
   void VisitStmt_(const RuntimeScopeStmtPtr& op) override;
+  void VisitStmt_(const CommDomainScopeStmtPtr& op) override;
   void VisitStmt_(const SeqStmtsPtr& op) override;
   void VisitStmt_(const EvalStmtPtr& op) override;
   void VisitStmt_(const BreakStmtPtr& op) override;

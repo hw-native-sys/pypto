@@ -475,7 +475,8 @@ class SSAConverter {
     if (kind == ObjectKind::EvalStmt) return ConvertEval(As<EvalStmt>(s));
     if (kind == ObjectKind::InCoreScopeStmt || kind == ObjectKind::AutoInCoreScopeStmt ||
         kind == ObjectKind::ClusterScopeStmt || kind == ObjectKind::HierarchyScopeStmt ||
-        kind == ObjectKind::SpmdScopeStmt || kind == ObjectKind::RuntimeScopeStmt) {
+        kind == ObjectKind::SpmdScopeStmt || kind == ObjectKind::RuntimeScopeStmt ||
+        kind == ObjectKind::CommDomainScopeStmt) {
       return ConvertScope(As<ScopeStmt>(s));
     }
     return s;

@@ -95,6 +95,7 @@ DEFINE_KIND_TRAIT(ClusterScopeStmt, ObjectKind::ClusterScopeStmt)
 DEFINE_KIND_TRAIT(HierarchyScopeStmt, ObjectKind::HierarchyScopeStmt)
 DEFINE_KIND_TRAIT(SpmdScopeStmt, ObjectKind::SpmdScopeStmt)
 DEFINE_KIND_TRAIT(RuntimeScopeStmt, ObjectKind::RuntimeScopeStmt)
+DEFINE_KIND_TRAIT(CommDomainScopeStmt, ObjectKind::CommDomainScopeStmt)
 DEFINE_KIND_TRAIT(SeqStmts, ObjectKind::SeqStmts)
 DEFINE_KIND_TRAIT(EvalStmt, ObjectKind::EvalStmt)
 DEFINE_KIND_TRAIT(BreakStmt, ObjectKind::BreakStmt)
@@ -136,24 +137,34 @@ DEFINE_KIND_TRAIT(GlobalVar, ObjectKind::GlobalVar)
 // Stmt base class - matches any statement kind
 template <>
 struct KindTrait<Stmt> {
-  static constexpr ObjectKind kinds[] = {ObjectKind::AssignStmt,       ObjectKind::IfStmt,
-                                         ObjectKind::YieldStmt,        ObjectKind::ReturnStmt,
-                                         ObjectKind::ForStmt,          ObjectKind::WhileStmt,
-                                         ObjectKind::InCoreScopeStmt,  ObjectKind::AutoInCoreScopeStmt,
-                                         ObjectKind::ClusterScopeStmt, ObjectKind::HierarchyScopeStmt,
-                                         ObjectKind::SpmdScopeStmt,    ObjectKind::RuntimeScopeStmt,
-                                         ObjectKind::SeqStmts,         ObjectKind::EvalStmt,
-                                         ObjectKind::BreakStmt,        ObjectKind::ContinueStmt,
+  static constexpr ObjectKind kinds[] = {ObjectKind::AssignStmt,
+                                         ObjectKind::IfStmt,
+                                         ObjectKind::YieldStmt,
+                                         ObjectKind::ReturnStmt,
+                                         ObjectKind::ForStmt,
+                                         ObjectKind::WhileStmt,
+                                         ObjectKind::InCoreScopeStmt,
+                                         ObjectKind::AutoInCoreScopeStmt,
+                                         ObjectKind::ClusterScopeStmt,
+                                         ObjectKind::HierarchyScopeStmt,
+                                         ObjectKind::SpmdScopeStmt,
+                                         ObjectKind::RuntimeScopeStmt,
+                                         ObjectKind::CommDomainScopeStmt,
+                                         ObjectKind::SeqStmts,
+                                         ObjectKind::EvalStmt,
+                                         ObjectKind::BreakStmt,
+                                         ObjectKind::ContinueStmt,
                                          ObjectKind::InlineStmt};
-  static constexpr size_t count = 17;
+  static constexpr size_t count = 18;
 };
 
-// ScopeStmt base class - matches any scope kind (6 derived classes)
+// ScopeStmt base class - matches any scope kind (7 derived classes)
 template <>
 struct KindTrait<ScopeStmt> {
-  static constexpr ObjectKind kinds[] = {ObjectKind::InCoreScopeStmt,  ObjectKind::AutoInCoreScopeStmt,
-                                         ObjectKind::ClusterScopeStmt, ObjectKind::HierarchyScopeStmt,
-                                         ObjectKind::SpmdScopeStmt,    ObjectKind::RuntimeScopeStmt};
+  static constexpr ObjectKind kinds[] = {ObjectKind::InCoreScopeStmt,    ObjectKind::AutoInCoreScopeStmt,
+                                         ObjectKind::ClusterScopeStmt,   ObjectKind::HierarchyScopeStmt,
+                                         ObjectKind::SpmdScopeStmt,      ObjectKind::RuntimeScopeStmt,
+                                         ObjectKind::CommDomainScopeStmt};
   static constexpr size_t count = sizeof(kinds) / sizeof(ObjectKind);
 };
 

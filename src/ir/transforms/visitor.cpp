@@ -321,6 +321,11 @@ void IRVisitor::VisitStmt_(const RuntimeScopeStmtPtr& op) {
   VisitStmt(op->body_);
 }
 
+void IRVisitor::VisitStmt_(const CommDomainScopeStmtPtr& op) {
+  INTERNAL_CHECK_SPAN(op->body_, op->span_) << "CommDomainScopeStmt has null body";
+  VisitStmt(op->body_);
+}
+
 void IRVisitor::VisitStmt_(const SeqStmtsPtr& op) {
   for (size_t i = 0; i < op->stmts_.size(); ++i) {
     INTERNAL_CHECK_SPAN(op->stmts_[i], op->span_) << "SeqStmts has null statement at index " << i;

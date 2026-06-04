@@ -2362,6 +2362,46 @@ class RuntimeScopeStmt(ScopeStmt):
     ) -> None:
         """Create a Runtime scope statement."""
 
+class CommDomainScopeStmt(ScopeStmt):
+    """CommDomain scope: wraps host_orch use sites of a CommGroup's WindowBuffers.
+
+    Codegen lowers each instance to a
+    ``with orch.allocate_domain(name=..., workers=..., window_size=...,
+    buffers=[CommBufferSpec(...)]) as __comm_d<n>:`` block at the top of the
+    host orchestration function, then emits ``body`` inside that block.
+
+    Synthesized by the ``MaterializeCommDomainScopes`` pass (formerly
+    ``CollectCommGroups``); no user DSL surface. The Python printer is
+    transparent over this stmt — reparse + re-run the pass pipeline restores
+    the scope. ``.pto`` binary round-trip is lossless via reflection.
+    """
+
+    devices: Final[list[int]]
+    """Covered worker indices (ascending). Empty list = all devices
+    (resolved at codegen to ``*range(world_size)``)."""
+
+    slots: Final[list[WindowBuffer]]
+    """WindowBuffer allocations carved out of this scope's window (alloc-order)."""
+
+    def __init__(
+        self,
+        devices: list[int],
+        slots: list[WindowBuffer],
+        name_hint: str = "",
+        *,
+        body: Stmt,
+        span: Span,
+    ) -> None:
+        """Create a CommDomain scope statement.
+
+        Args:
+            devices: Covered worker indices (ascending). Empty = all devices.
+            slots: WindowBuffer allocations (alloc-order).
+            name_hint: Handle name hint (codegen derives ``__comm_d<n>``).
+            body: Inner statement block.
+            span: Source location.
+        """
+
 class SeqStmts(Stmt):
     """Sequence of statements: a sequence of statements."""
 
@@ -3801,6 +3841,7 @@ class IRVisitor:
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> None: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> None: ...
     def visit_runtime_scope_stmt(self, op: RuntimeScopeStmt) -> None: ...
+    def visit_comm_domain_scope_stmt(self, op: CommDomainScopeStmt) -> None: ...
     def visit_seq_stmts(self, op: SeqStmts) -> None: ...
     def visit_yield_stmt(self, op: YieldStmt) -> None: ...
     def visit_return_stmt(self, op: ReturnStmt) -> None: ...
@@ -3881,6 +3922,7 @@ class IRMutator:
     def visit_hierarchy_scope_stmt(self, op: HierarchyScopeStmt) -> Stmt: ...
     def visit_spmd_scope_stmt(self, op: SpmdScopeStmt) -> Stmt: ...
     def visit_runtime_scope_stmt(self, op: RuntimeScopeStmt) -> Stmt: ...
+    def visit_comm_domain_scope_stmt(self, op: CommDomainScopeStmt) -> Stmt: ...
     def visit_seq_stmts(self, op: SeqStmts) -> Stmt: ...
     def visit_yield_stmt(self, op: YieldStmt) -> Stmt: ...
     def visit_return_stmt(self, op: ReturnStmt) -> Stmt: ...

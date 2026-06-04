@@ -365,6 +365,13 @@ StmtPtr IRBuilder::EndScope(const Span& end_span) {
       scope_stmt = std::make_shared<const RuntimeScopeStmt>(
           *manual, std::move(name_hint), body, combined_span, std::vector<std::string>{}, std::move(attrs));
       break;
+    case ScopeKind::CommDomain:
+      // CommDomainScopeStmt is synthesized by MaterializeCommDomainScopes (no
+      // user DSL surface) and constructed directly by the pass — the IR builder
+      // never receives this ScopeKind from the parser.
+      throw pypto::RuntimeError(
+          "ScopeKind::CommDomain has no DSL surface and cannot be built via IRBuilder::EndScope; "
+          "it is synthesized by the MaterializeCommDomainScopes pass.");
   }
   // Safety net: every ScopeKind value above must populate scope_stmt. The switch has
   // no default so adding a new ScopeKind without a case here will trip -Wswitch-enum;
