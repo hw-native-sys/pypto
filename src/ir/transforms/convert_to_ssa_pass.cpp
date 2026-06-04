@@ -385,7 +385,7 @@ class SSAConverter {
 
   TypePtr SubstType(const TypePtr& type) {
     if (!type) return type;
-    if (auto t = As<TensorType>(type)) {
+    if (auto t = AsTensorTypeLike(type)) {
       auto [shape, changed] = SubstExprVec(t->shape_);
       std::optional<TensorView> new_tv = t->tensor_view_;
       if (t->tensor_view_.has_value()) {
@@ -397,10 +397,12 @@ class SSAConverter {
           new_tv = TensorView(std::move(st), tv.layout, std::move(vs), tv.pad);
         }
       }
-      if (changed) {
-        return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, std::move(new_tv));
+      if (!changed) return type;
+      if (auto dt = As<DistributedTensorType>(type)) {
+        return std::make_shared<DistributedTensorType>(std::move(shape), t->dtype_, t->memref_,
+                                                       std::move(new_tv), dt->window_buffer_);
       }
-      return type;
+      return std::make_shared<TensorType>(std::move(shape), t->dtype_, t->memref_, std::move(new_tv));
     }
     if (auto t = As<TileType>(type)) {
       if (!t->tile_view_.has_value()) return type;

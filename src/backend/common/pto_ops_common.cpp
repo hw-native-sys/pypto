@@ -1328,6 +1328,11 @@ static std::string MakeTileStoreCodegenPTO(const CallPtr& op, codegen::CodegenBa
     codegen.RegisterTensorView(result_var, tensor_view);
     codegen.RegisterVarToMlir(result_var, tensor_view);
     codegen.RegisterBasePtr(result_var, codegen.GetTensorBasePtr(output_tensor));
+    // SSA-capture form ``data = pl.store(local, [0, 0], data)`` rebinds the
+    // DistributedTensor LHS to a fresh Var; mirror the base-ptr alias so
+    // ``pld.tile.remote_load`` etc. on the rebound name resolve the same
+    // CommContext as the original source.
+    codegen.RegisterCommCtxFor(result_var, codegen.GetCommCtxSSAFor(output_tensor.get()));
   }
 
   return "";
@@ -1401,12 +1406,14 @@ static std::string MakeTileMscatterCodegenPTO(const CallPtr& op, codegen::Codege
   mscatter_line << ") outs(" << partition_view << " : " << partition_type << ")";
   codegen.Emit(mscatter_line.str());
 
-  // Propagate tensor_view to the result var so downstream ops see the updated tensor
+  // Propagate tensor_view, base-ptr, and CommContext aliases to the result var
+  // so downstream ops on an SSA-rebound DistributedTensor LHS still resolve.
   auto result_var = codegen.GetCurrentResultVar();
   if (result_var != nullptr) {
     codegen.RegisterTensorView(result_var, tensor_view);
     codegen.RegisterVarToMlir(result_var, tensor_view);
     codegen.RegisterBasePtr(result_var, codegen.GetTensorBasePtr(output_tensor));
+    codegen.RegisterCommCtxFor(result_var, codegen.GetCommCtxSSAFor(output_tensor.get()));
   }
 
   return "";
@@ -1600,6 +1607,7 @@ static std::string MakeTensorWriteCodegenPTO(const CallPtr& op, codegen::Codegen
     codegen.RegisterTensorView(result_var, tensor);
     codegen.RegisterVarToMlir(result_var, tensor);
     codegen.RegisterBasePtr(result_var, tensor);
+    codegen.RegisterCommCtxFor(result_var, codegen.GetCommCtxSSAFor(AsVarLike(op->args_[0]).get()));
   }
   return "";
 }
@@ -2199,7 +2207,14 @@ DistTensorBinding ResolveDistTensorBinding(const ExprPtr& arg, codegen::PTOCodeg
              << arg->TypeName();
   auto dist_type = As<ir::DistributedTensorType>(var->GetType());
   CHECK(dist_type) << op_name << " expects DistributedTensorType, got " << var->GetType()->TypeName();
-  std::string local_ptr = codegen.GetVarName(var);
+  // Resolve via the base-ptr alias mechanism rather than the raw ``var_to_mlir``
+  // binding. For a function parameter both return ``%argN`` (the ``!pto.ptr``);
+  // for an SSA-rebound Var (``data = pl.store(local, [0, 0], data)``) the
+  // store codegen rewrites ``var_to_mlir`` to the tensor-view alias but
+  // propagates the underlying base pointer via ``RegisterBasePtr`` —
+  // ``GetTensorBasePtr`` follows that alias and returns the original
+  // ``!pto.ptr`` SSA, which is what ``pto.addptr`` expects below.
+  std::string local_ptr = codegen.GetTensorBasePtr(var);
   std::string ctx_ssa = codegen.GetCommCtxSSAFor(var.get());
   CHECK(!ctx_ssa.empty()) << op_name << " requires a CommContext pointer arg threaded for DistributedTensor '"
                           << var->name_hint_ << "', but none was found in the function signature";

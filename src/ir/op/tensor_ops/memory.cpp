@@ -157,9 +157,14 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
       << "tensor.slice requires 3-5 arguments (input, shape, offset[, valid_shape[, drop_dims]]), but got "
       << args.size();
 
-  // First argument must be TensorType
-  auto tensor_type = As<TensorType>(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.slice requires first argument to be a TensorType, but got "
+  // First argument must be tensor-shaped. ``AsTensorTypeLike`` accepts both
+  // ``TensorType`` and ``DistributedTensorType`` — a slice of a window-buffer
+  // tensor is still a view into the same comm-group allocation, so the result
+  // type keeps the ``DistributedTensorType`` kind and propagates the original
+  // ``window_buffer_`` reference (see end of this function).
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.slice requires first argument to be a TensorType or DistributedTensorType, "
+                        "but got "
                      << args[0]->GetType()->TypeName();
 
   // Second argument must be TupleType (shape)
@@ -250,18 +255,21 @@ TypePtr DeduceTensorSliceType(const std::vector<ExprPtr>& args,
   }
 
   // View preserves dtype but has new shape (which can have different rank than input).
-  // If valid_shape is provided or pad_value is set, build a TensorView.
+  // If valid_shape is provided or pad_value is set, build a TensorView. When the
+  // source is a DistributedTensorType, the result keeps that kind and carries
+  // the same window_buffer_ — a slice is still a view into the same comm-group
+  // allocation.
+  std::optional<TensorView> result_tv;
   if (has_valid_shape) {
-    TensorView tensor_view({}, TensorLayout::ND, valid_shape, pad_value);
-    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
-                                        std::make_optional(std::move(tensor_view)));
+    result_tv = TensorView({}, TensorLayout::ND, valid_shape, pad_value);
+  } else if (pad_value != PadValue::null) {
+    result_tv = TensorView(std::vector<ExprPtr>{}, TensorLayout::ND, std::vector<ExprPtr>{}, pad_value);
   }
-  if (pad_value != PadValue::null) {
-    TensorView tensor_view(std::vector<ExprPtr>{}, TensorLayout::ND, std::vector<ExprPtr>{}, pad_value);
-    return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt,
-                                        std::make_optional(std::move(tensor_view)));
+  if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
+    return std::make_shared<DistributedTensorType>(new_shape, tensor_type->dtype_, std::nullopt,
+                                                   std::move(result_tv), dt->window_buffer_);
   }
-  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_);
+  return std::make_shared<TensorType>(new_shape, tensor_type->dtype_, std::nullopt, std::move(result_tv));
 }
 
 TypePtr DeduceTensorFillpadType(const std::vector<ExprPtr>& args,
@@ -295,15 +303,20 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 3) << "tensor.assemble requires exactly 3 arguments (target, source, offset), but got "
                           << args.size();
 
-  // First argument (target) must be TensorType
-  auto target_type = As<TensorType>(args[0]->GetType());
-  CHECK(target_type) << "tensor.assemble requires first argument to be a TensorType, but got "
-                     << args[0]->GetType()->TypeName();
+  // First argument (target) must be tensor-shaped. ``AsTensorTypeLike`` accepts
+  // both ``TensorType`` and ``DistributedTensorType``; the latter is preserved
+  // (with its ``window_buffer_``) on the result so that assembling into a
+  // window-buffer view keeps the comm-group binding for downstream passes.
+  auto target_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(target_type)
+      << "tensor.assemble requires first argument to be a TensorType or DistributedTensorType, but got "
+      << args[0]->GetType()->TypeName();
 
-  // Second argument (source) must be TensorType
-  auto source_type = As<TensorType>(args[1]->GetType());
-  CHECK(source_type) << "tensor.assemble requires second argument to be a TensorType, but got "
-                     << args[1]->GetType()->TypeName();
+  // Second argument (source) may also be a DistributedTensorType view.
+  auto source_type = AsTensorTypeLike(args[1]->GetType());
+  CHECK(source_type)
+      << "tensor.assemble requires second argument to be a TensorType or DistributedTensorType, but got "
+      << args[1]->GetType()->TypeName();
 
   // Third argument must be TupleType (offset)
   auto offset_tuple_type = As<TupleType>(args[2]->GetType());
@@ -340,8 +353,14 @@ TypePtr DeduceTensorAssembleType(const std::vector<ExprPtr>& args,
         << dt.ToString();
   }
 
-  // Assemble returns a new TensorType with the same shape and dtype as target
-  // We need to create a new type object to avoid sharing type instances
+  // Assemble returns a new tensor type with the same shape and dtype as target.
+  // When the target is a DistributedTensorType, the result preserves that kind
+  // along with its window_buffer_ — the assembled result is still a view into
+  // the same comm-group allocation. A fresh shared_ptr avoids type aliasing.
+  if (auto dt = As<DistributedTensorType>(args[0]->GetType())) {
+    return std::make_shared<DistributedTensorType>(target_type->shape_, target_type->dtype_, std::nullopt,
+                                                   std::nullopt, dt->window_buffer_);
+  }
   return std::make_shared<TensorType>(target_type->shape_, target_type->dtype_);
 }
 

@@ -84,7 +84,7 @@ def _build_ring_put_program():
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             # Phase 1: stage-in — local input → this rank's own src window slice.
             local = pl.load(inp, [0, 0], [1, SIZE])
-            _ = pl.store(local, [0, 0], src)
+            src = pl.store(local, [0, 0], src)
 
             # Phase 2: push our src into the peer's dst slice (synchronous TPUT,
             # plain overwrite). After this returns, the peer's dst holds our input.
@@ -167,7 +167,7 @@ def _build_atomic_add_program():
         ) -> pl.Tensor[[16, 16], pl.INT32]:
             # Phase 1: stage our contribution into our own src cell.
             local = pl.load(inp, [0, 0], [16, 16])
-            _ = pl.store(local, [0, 0], src)
+            src = pl.store(local, [0, 0], src)
 
             # Phase 2: atomically add our contribution into the root rank's acc
             # cell. All ranks target the same peer (root) concurrently — the
@@ -323,7 +323,7 @@ def _build_row_put_program():
             peer: pl.Scalar[pl.INT32],
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             local = pl.load(inp, [0, 0], [2, SIZE])
-            _ = pl.store(local, [0, 0], src)
+            src = pl.store(local, [0, 0], src)
 
             pld.tensor.put(
                 dst,

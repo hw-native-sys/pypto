@@ -63,7 +63,7 @@ def _build_allreduce_program():
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             # Phase 1: stage-in — local input → this rank's window slice.
             local = pl.load(inp, [0, 0], [1, SIZE])
-            _ = pl.store(local, [0, 0], data)
+            data = pl.store(local, [0, 0], data)
 
             # Phase 2: barrier — AtomicAdd the peer's signal cell, then
             # wait for ours to be bumped by the rank that targets us.

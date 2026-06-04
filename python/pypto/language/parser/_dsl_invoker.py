@@ -32,6 +32,7 @@ from typing import Any
 
 from pypto.ir.utils import use_parser_span
 from pypto.language.distributed.typing import CommCtx
+from pypto.language.distributed.typing.distributed_tensor import DistributedTensor
 from pypto.language.typing import Array, Ptr, Scalar, Tensor, Tile
 from pypto.pypto_core import ir
 
@@ -67,6 +68,13 @@ def _wrap_arg(arg: Any) -> Any:
     if isinstance(arg, (ir.ConstInt, ir.ConstFloat)):
         return arg
     t = arg.type
+    # ``DistributedTensorType`` must be checked before ``TensorType``: pybind
+    # registers it as a Python subclass of ``TensorType``, so the plain
+    # ``TensorType`` branch would otherwise swallow distributed tensors and
+    # downgrade them to plain ``Tensor`` wrappers (breaking wrapper-class
+    # polymorphism downstream).
+    if isinstance(t, ir.DistributedTensorType):
+        return DistributedTensor(expr=arg)
     if isinstance(t, ir.TensorType):
         return Tensor(expr=arg)
     if isinstance(t, ir.TileType):

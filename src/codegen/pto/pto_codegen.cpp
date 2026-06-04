@@ -1227,6 +1227,11 @@ std::string PTOCodegen::GetCommCtxSSAFor(const ir::Var* dist_var) const {
   return it->second;
 }
 
+void PTOCodegen::RegisterCommCtxFor(const ir::VarPtr& dist_var, const std::string& ctx_ssa) {
+  if (!dist_var || ctx_ssa.empty()) return;
+  fs_.dist_tensor_to_ctx[GetVarKey(dist_var)] = ctx_ssa;
+}
+
 std::string PTOCodegen::GetGMSlotBufferSSAForPipe(int pipe_id, int dir_mask) {
   if (fs_.gm_slot_buffer_ssa.empty()) {
     return "";

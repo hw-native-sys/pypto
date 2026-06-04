@@ -17,7 +17,7 @@ Accessed as ``pl.tile.*``
 
 import warnings
 from collections.abc import Sequence
-from typing import Any, overload
+from typing import Any, TypeVar, overload
 
 __all__ = [
     "MemRefType",
@@ -147,6 +147,14 @@ from .system_ops import (  # noqa: F401
     tpush_to_aic,
     tpush_to_aiv,
 )
+
+# Bound TypeVar lets store / mscatter propagate the caller's concrete tensor
+# class (Tensor or its DistributedTensor subclass) through to the return type,
+# so ``data = pl.store(local, [0, 0], data)`` type-checks when ``data`` is a
+# DistributedTensor. The runtime polymorphism comes from
+# ``output_tensor.__class__(expr=call_expr)``; no DistributedTensor import is
+# needed here (which avoids a circular dependency on ``..distributed``).
+_TensorT = TypeVar("_TensorT", bound=Tensor)
 
 
 class MemRefType:
@@ -366,11 +374,11 @@ def load(
 def store(
     tile: Tile,
     offsets: Sequence[IntLike],
-    output_tensor: Tensor,
+    output_tensor: _TensorT,
     shapes: Sequence[IntLike] | None = None,
     *,
     atomic: AtomicType = AtomicType.None_,
-) -> Tensor:
+) -> _TensorT:
     """Copy data from tile back to tensor.
 
     Args:
@@ -404,7 +412,7 @@ def store(
     call_expr = _ir_ops.store(
         tile.unwrap(), normalized_offsets, output_tensor.unwrap(), normalized_shapes, atomic=int(atomic)
     )
-    return Tensor(expr=call_expr)
+    return output_tensor.__class__(expr=call_expr)
 
 
 def assemble(target: Tile, source: Tile, offset: Sequence[IntLike]) -> Tile:
@@ -2097,7 +2105,7 @@ def scatter_mask(dst: Tile, src: Tile, mask_pattern: int) -> Tile:
     return Tile(expr=call_expr)
 
 
-def mscatter(src: Tile, idx: Tile, output_tensor: Tensor) -> Tensor:
+def mscatter(src: Tile, idx: Tile, output_tensor: _TensorT) -> _TensorT:
     """Scatter-store tile elements into a tensor at per-element indices.
 
     Semantics: ``output_tensor[idx[i, j]] = src[i, j]``
@@ -2116,7 +2124,7 @@ def mscatter(src: Tile, idx: Tile, output_tensor: Tensor) -> Tensor:
         >>> result = pl.tile.mscatter(src_tile, idx_tile, out_tensor)
     """
     call_expr = _ir_ops.mscatter(src.unwrap(), idx.unwrap(), output_tensor.unwrap())
-    return Tensor(expr=call_expr)
+    return output_tensor.__class__(expr=call_expr)
 
 
 @overload

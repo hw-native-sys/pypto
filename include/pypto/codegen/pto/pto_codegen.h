@@ -419,6 +419,23 @@ class PTOCodegen : public CodegenBase {
   [[nodiscard]] std::string GetCommCtxSSAFor(const ir::Var* dist_var) const;
 
   /**
+   * @brief Alias a DistributedTensor LHS Var to an existing CommContext SSA.
+   *
+   * Mirrors the ``RegisterBasePtr`` alias mechanism that ``tile.store`` /
+   * ``tensor.write`` etc. use to thread a parameter's base pointer through
+   * an SSA-rebound write (``data = pl.store(local, [0, 0], data)``). The
+   * CommContext binding follows the same path: an op codegen that propagates
+   * the base ptr from its source DistributedTensor arg should also propagate
+   * the CommContext, so subsequent cross-rank ops on the rebound Var
+   * (``pld.tile.remote_load`` etc.) resolve to the same ctx pointer.
+   *
+   * @param dist_var SSA-rebound DistributedTensor Var (a Call's LHS).
+   * @param ctx_ssa  CommContext SSA name from ``GetCommCtxSSAFor(source)``.
+   *                 No-op if @p dist_var is null or @p ctx_ssa is empty.
+   */
+  void RegisterCommCtxFor(const ir::VarPtr& dist_var, const std::string& ctx_ssa);
+
+  /**
    * @brief Set the current expression's SSA result.
    *
    * Op codegen lambdas that produce a value without emitting an MLIR line

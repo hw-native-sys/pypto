@@ -738,9 +738,12 @@ TypePtr DeduceTileMscatterType(const std::vector<ExprPtr>& args,
     }
   }
 
-  // Third arg: output tensor (same dtype as src, must not be scalar)
-  auto tensor_type = As<TensorType>(args[2]->GetType());
-  CHECK(tensor_type) << "The operator " << op_name << " requires third argument to be a TensorType, but got "
+  // Third arg: output tensor (same dtype as src, must not be scalar).
+  // AsTensorTypeLike accepts both TensorType and DistributedTensorType — the
+  // latter is needed when scattering into a per-rank window-buffer slice.
+  auto tensor_type = AsTensorTypeLike(args[2]->GetType());
+  CHECK(tensor_type) << "The operator " << op_name
+                     << " requires third argument to be a TensorType or DistributedTensorType, but got "
                      << args[2]->GetType()->TypeName();
   CHECK(!tensor_type->shape_.empty())
       << "The operator " << op_name
@@ -749,8 +752,10 @@ TypePtr DeduceTileMscatterType(const std::vector<ExprPtr>& args,
       << "The operator " << op_name << " requires output_tensor dtype (" << tensor_type->dtype_.ToString()
       << ") to match src dtype (" << src_type->dtype_.ToString() << ")";
 
-  // mscatter returns the output tensor (same type)
-  return tensor_type;
+  // mscatter returns the output tensor's type unchanged. Returning the original
+  // GetType() (rather than the AsTensorTypeLike upcast) keeps the ObjectKind
+  // and DistributedTensorType::window_buffer_ intact for downstream passes.
+  return args[2]->GetType();
 }
 
 REGISTER_OP("tile.mscatter")

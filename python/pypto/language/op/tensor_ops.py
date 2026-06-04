@@ -15,7 +15,7 @@ that accept and return Tensor types instead of raw Expr/Call objects.
 
 import warnings
 from collections.abc import Sequence
-from typing import Any, overload
+from typing import Any, TypeVar, overload
 
 __all__ = [
     "create_tensor",
@@ -95,6 +95,12 @@ from pypto.pypto_core import ir as _ir_core
 from pypto.pypto_core.ir import AtomicType, Expr, MemorySpace, PadValue, PtrType, TensorLayout
 
 from ..typing import IntLike, Scalar, Tensor
+
+# Bound TypeVar lets slice / assemble propagate the caller's concrete tensor
+# class (Tensor or its DistributedTensor subclass) through to the return type.
+# Runtime polymorphism comes from ``tensor.__class__(expr=call_expr)``; no
+# DistributedTensor import is needed here.
+_TensorT = TypeVar("_TensorT", bound=Tensor)
 
 
 def _unwrap_rhs(rhs: int | float | Expr | Tensor | Scalar) -> int | float | Expr:
@@ -351,13 +357,13 @@ def dim(tensor: Tensor, axis: int | _ir_core.ConstInt) -> Scalar:
 
 
 def slice(
-    tensor: Tensor,
+    tensor: _TensorT,
     shape: Sequence[IntLike],
     offset: Sequence[IntLike],
     valid_shape: Sequence[IntLike] | None = None,
     drop_dims: Sequence[int | Expr] | None = None,
     pad_value: PadValue | int | float | None = None,
-) -> Tensor:
+) -> _TensorT:
     """Create a slice of a tensor with new shape and optional valid shape.
 
     Args:
@@ -399,7 +405,7 @@ def slice(
         drop_dims,
         pad_value=pad_value,
     )
-    return Tensor(expr=call_expr)
+    return tensor.__class__(expr=call_expr)
 
 
 def fillpad(tensor: Tensor, pad_value: PadValue | int | float = PadValue.zero) -> Tensor:
@@ -1152,12 +1158,12 @@ def cast(
 
 
 def assemble(
-    target: Tensor,
+    target: _TensorT,
     source: Tensor,
     offset: Sequence[IntLike],
     *,
     atomic: AtomicType = AtomicType.None_,
-) -> Tensor:
+) -> _TensorT:
     """Write/update tensor values at specified offset.
 
     Args:
@@ -1182,7 +1188,7 @@ def assemble(
     target_expr = target.unwrap()
     source_expr = source.unwrap()
     call_expr = _ir_ops.assemble(target_expr, source_expr, _normalize_intlike(offset), atomic=int(atomic))
-    return Tensor(expr=call_expr)
+    return target.__class__(expr=call_expr)
 
 
 def concat(src0: Tensor, src1: Tensor) -> Tensor:

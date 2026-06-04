@@ -65,7 +65,7 @@ def _build_ring_get_program():
         ) -> pl.Tensor[[1, SIZE], pl.FP32]:
             # Phase 1: stage-in — local input -> this rank's own src window slice.
             local = pl.load(inp, [0, 0], [1, SIZE])
-            _ = pl.store(local, [0, 0], src)
+            src = pl.store(local, [0, 0], src)
 
             # Phase 2: signal the peer that our src slice has been staged, then
             # wait until our own signal cell has been written by the rank that
