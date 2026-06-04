@@ -1588,9 +1588,14 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Second hop for the Spmd-wrapped Group case (see WrapperBridge): map each
     // Spmd-wrapper param Var to its position, which is positionally 1:1 with
     // ``outer_call->args_`` (because ``outer_call`` invokes the Spmd wrapper).
-    const bool has_bridge = static_cast<bool>(bridge.bridge_func);
+    const bool has_bridge = (bridge.bridge_func != nullptr);
     std::unordered_map<const Var*, size_t> outer_param_to_arg_idx;
     if (has_bridge) {
+      // A non-null bridge_func always pairs with a non-null bridge_call (the
+      // Group call inside it); guard here so resolve_outer_arg can safely read
+      // bridge.bridge_call->span_ below.
+      INTERNAL_CHECK(bridge.bridge_call != nullptr)
+          << "Internal error: WrapperBridge has a non-null bridge_func but a null bridge_call.";
       for (size_t i = 0; i < bridge.bridge_func->params_.size(); ++i) {
         outer_param_to_arg_idx[bridge.bridge_func->params_[i].get()] = i;
       }
@@ -2222,10 +2227,11 @@ class OrchestrationStmtCodegen : public CodegenBase {
     if (info.inner_callee->func_type_ == FunctionType::Group) {
       // The Group is dispatched THROUGH this Spmd wrapper: ``call`` invokes
       // ``spmd_func``, not the Group. Pass the Group call inside the wrapper
-      // (``info.inner_call``, args 1:1 with ``spmd_func`` params) as the bridge
-      // so BuildWrapperReorderedParams maps Group params -> Spmd-wrapper params
-      // -> outer args even when an aliased-arg dedup shrank the wrapper's
-      // param count below the Group's.
+      // (``info.inner_call``) as the bridge: its args are positionally 1:1 with
+      // the Group's params, and each arg references a ``spmd_func`` param (or a
+      // constant) — so BuildWrapperReorderedParams can map Group params ->
+      // Spmd-wrapper params -> outer args even when an aliased-arg dedup shrank
+      // the wrapper's param count below the Group's.
       GenerateGroupCallCode(call, info.inner_callee, spmd_func, WrapperBridge{info.inner_call, spmd_func});
       return;
     }

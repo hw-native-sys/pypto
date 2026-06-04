@@ -172,8 +172,9 @@ class TestSpmdScopeTaskIdCodegen:
         outliner deduplicates the repeated ``out`` arg, so ``main_spmd_0`` has 3
         params while the Group keeps 4. Before the bridge fix, codegen indexed
         ``outer_call->args_[3]`` (a Group-param index) on the 3-arg Spmd-wrapper
-        call → ``std::vector::operator[]`` UB → SIGSEGV / InternalError at
-        orchestration_codegen.cpp:1643. No captured ``as tid`` / TupleGetItem is
+        call → ``std::vector::operator[]`` UB → SIGSEGV, or the
+        ``BuildWrapperReorderedParams`` "neither a variable nor a recognized
+        constant literal" InternalError. No captured ``as tid`` / TupleGetItem is
         involved — a single dispatch reproduces it.
         """
         backend.reset_for_testing()
