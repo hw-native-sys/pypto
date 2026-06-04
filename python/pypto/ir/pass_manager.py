@@ -179,7 +179,7 @@ class PassManager:
             # so the alloc/view/dispatch sites are still discoverable. Runs
             # before the final Simplify so any constant folding it does on the
             # collected sizes is applied uniformly.
-            ("CollectCommGroups", lambda: passes.collect_comm_groups()),
+            ("MaterializeCommDomainScopes", lambda: passes.materialize_comm_domain_scopes()),
             ("Simplify", lambda: passes.simplify()),
             # Insert explicit AUTO RuntimeScopeStmt nodes (function body + for/if
             # bodies) into Orchestration functions so codegen emits PTO2_SCOPE

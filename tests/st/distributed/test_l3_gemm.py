@@ -25,7 +25,7 @@ Program layers:
 * **HOST** — ``host_orch`` loops ``r in pld.world_size()``, calls
   ``chip_orch(..., device=r)`` so each rank runs on its NPU.
   ``pld.alloc_window_buffer`` → ``pld.window`` → dispatch with a
-  ``DistributedTensor`` satisfies ``CollectCommGroups`` comm-group metadata.
+  ``DistributedTensor`` satisfies ``MaterializeCommDomainScopes`` comm-group metadata.
 * **Orchestration** — ``chip_orch`` sequences InCore kernels on each chip.
 * **InCore** — ``gemm``: ``pl.load`` / ``pl.move`` / ``pl.matmul`` / ``pl.store``.
 * **Comm window anchor** — ``anchor_comm_window`` stores into ``scratch`` on the
@@ -72,7 +72,7 @@ def _build_gemm_program():
             self,
             scratch: pl.InOut[pld.DistributedTensor[[1, COMM_ANCHOR_COLS], pl.INT32]],
         ) -> pl.Tensor[[1, COMM_ANCHOR_COLS], pl.INT32]:
-            """Local store into this rank's comm window (CollectCommGroups / InOut)."""
+            """Local store into this rank's comm window (MaterializeCommDomainScopes / InOut)."""
             tile = pl.tile.full([1, COMM_ANCHOR_COLS], dtype=pl.INT32, value=0)
             return pl.store(tile, [0, 0], scratch)
 

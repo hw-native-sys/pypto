@@ -28,7 +28,7 @@ namespace pass {
 
 inline const PassProperties kInlineFunctionsProperties{.produced = {IRProperty::InlineFunctionsEliminated}};
 
-// -- CollectCommGroups pass (runs at the end of the pipeline, just before -----
+// -- MaterializeCommDomainScopes pass (runs at the end of the pipeline, just before -----
 //    the final Simplify). Nothing between InlineFunctions and here touches
 //    the host_orch alloc/window/dispatch chain (host_orch is never tile-
 //    lowered), so the alloc/view/dispatch sites are still discoverable.
@@ -37,7 +37,7 @@ inline const PassProperties kInlineFunctionsProperties{.produced = {IRProperty::
 //    and wraps the host_orch body in nested CommDomainScopeStmts (one per
 //    inferred comm domain).
 
-inline const PassProperties kCollectCommGroupsProperties{
+inline const PassProperties kMaterializeCommDomainScopesProperties{
     .produced = {IRProperty::CommDomainScopesMaterialized}};
 
 // -- MaterializeRuntimeScopes pass (runs last, after the final Simplify) ------

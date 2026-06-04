@@ -366,7 +366,7 @@ PropertyVerifierPtr CreateTensorViewCanonicalPropertyVerifier(bool require_mater
  * scope program-wide. ``DistributedCodegen`` relies on this shared_ptr-identity
  * uniqueness to route each Submit's per-arg ``device_ctx`` handle to the
  * correct domain; a duplicate slot would misroute communication traffic at
- * runtime. The ``CollectCommGroups`` pass enforces this invariant by
+ * runtime. The ``MaterializeCommDomainScopes`` pass enforces this invariant by
  * construction; the verifier independently checks it.
  *
  * @return Shared pointer to CommDomainScopesMaterialized PropertyVerifier

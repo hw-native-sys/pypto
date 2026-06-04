@@ -100,7 +100,7 @@ TypePtr DeduceWindowType(const std::vector<ExprPtr>& args,
   auto dtype = GetKwarg<DataType>(kwargs, "dtype", "pld.tensor.window");
 
   // Shape & dtype enter the type system here. window_buffer_ stays nullopt
-  // until CollectCommGroups (N4) wires it to the originating WindowBuffer.
+  // until MaterializeCommDomainScopes (N4) wires it to the originating WindowBuffer.
   return std::make_shared<DistributedTensorType>(shape_tuple->elements_, dtype);
 }
 

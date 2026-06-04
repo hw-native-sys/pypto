@@ -11,7 +11,7 @@
 
 Provides cross-rank concepts that complement the single-device DSL in
 ``pypto.language``. Communication-domain metadata (``ir.CommGroup`` /
-``ir.WindowBuffer``) is **inferred** by the ``CollectCommGroups`` pass from
+``ir.WindowBuffer``) is **inferred** by the ``MaterializeCommDomainScopes`` pass from
 ``pld.tensor.alloc_window_buffer`` calls in the host orchestrator and the
 ``device=`` kwarg on dispatch sites; users do not declare ``CommGroup``
 manually.

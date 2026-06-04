@@ -563,7 +563,7 @@ def inline_functions() -> Pass:
 def normalize_stmt_structure() -> Pass:
     """Create a pass that normalizes statement structure."""
 
-def collect_comm_groups() -> Pass:
+def materialize_comm_domain_scopes() -> Pass:
     """Collect comm domains and materialise them as scope statements.
 
     For each ``@pl.program`` host_orch function, traces

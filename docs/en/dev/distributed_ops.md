@@ -223,7 +223,7 @@ The local-vs-remote split is intentional: a *local* operand (e.g. `get`'s
 ## Pipeline integration
 
 Window buffers and comm groups are collected by the
-[`CollectCommGroups`](passes/36-collect_comm_groups.md) pass, which populates
+[`MaterializeCommDomainScopes`](passes/36-materialize_comm_domain_scopes.md) pass, which populates
 `Program.comm_groups_` and the per-window `WindowBuffer` records the runtime
 binds physical buffers to.
 

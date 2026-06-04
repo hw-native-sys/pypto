@@ -220,7 +220,7 @@ def test_world_size_rejects_kwargs():
 def _make_distributed_tensor_var(name: str, shape: list[int], dtype: DataType, span: ir.Span) -> ir.Var:
     """Build a DistributedTensor-typed Var, mimicking the parser-level binding
     produced by a ``pld.DistributedTensor[[...], dtype]`` parameter annotation
-    (``window_buffer`` back-reference left None until CollectCommGroups runs)."""
+    (``window_buffer`` back-reference left None until MaterializeCommDomainScopes runs)."""
     shape_exprs: list[ir.Expr] = [ir.ConstInt(v, DataType.INT64, span) for v in shape]
     return ir.Var(name, ir.DistributedTensorType(shape_exprs, dtype), span)
 

@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------------------------------------
 # ruff: noqa: F722, F821
 
-"""Tests for the ``CollectCommGroups`` pass.
+"""Tests for the ``MaterializeCommDomainScopes`` pass.
 
 The pass walks each ``host_orch`` function, traces
 ``pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r)``
@@ -22,7 +22,7 @@ chains, and:
   (outer = first declared domain, inner = last).
 
 The tests below run the pass directly on a parsed program (via
-``passes.collect_comm_groups()(program)``). The pass's output products have
+``passes.materialize_comm_domain_scopes()(program)``). The pass's output products have
 no full *print/parse* surface syntax — the printer emits a comment-only
 descriptor of each comm-domain scope, and the parser doesn't reconstruct the
 scope at all — so a whole-``@pl.program`` ``Expected`` parsed from Python
@@ -34,7 +34,7 @@ the granularity of the pass's structurally-comparable output products: the
 ``devices`` list and ``slots`` vector of each emitted
 :class:`ir.CommDomainScopeStmt`. Slot ``WindowBuffer``s are hand-built from
 the pass's documented semantics (device-descriptor table + slot/alloc-order
-rules in ``docs/en/dev/passes/36-collect_comm_groups.md``) and compared with
+rules in ``docs/en/dev/passes/36-materialize_comm_domain_scopes.md``) and compared with
 ``enable_auto_mapping=True`` so freshly-constructed Vars match the
 pass-produced ones by structural isomorphism rather than identity.
 
@@ -122,7 +122,7 @@ def _get_comm_domain_scopes(func: ir.Function) -> list[ir.CommDomainScopeStmt]:
 
 
 def _apply(program: ir.Program) -> ir.Program:
-    return passes.collect_comm_groups()(program)
+    return passes.materialize_comm_domain_scopes()(program)
 
 
 def _expected_slot(name: str, size_bytes: int) -> ir.WindowBuffer:

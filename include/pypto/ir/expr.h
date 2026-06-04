@@ -823,7 +823,7 @@ inline std::vector<std::pair<std::string, std::any>> WithDumpVarsAttr(
  * Value type: ``ExprPtr`` — either a ``ConstInt`` (fixed device) or a ``Var``
  * referring to the induction variable of an enclosing ``pl.range`` loop.
  * Written by the parser when the user writes ``self.chip_orch(..., device=r)``;
- * consumed by ``CollectCommGroups`` to derive per-CommGroup device subsets and
+ * consumed by ``MaterializeCommDomainScopes`` to derive per-CommGroup device subsets and
  * by distributed codegen to emit ``submit_next_level(..., worker=<r>)``.
  *
  * SSA passes MUST substitute ``Var`` references inside this attr's value the

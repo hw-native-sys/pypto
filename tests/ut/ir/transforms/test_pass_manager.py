@@ -57,7 +57,7 @@ TENSOR_OPTIMIZATION_PASSES = [
     "FuseCreateAssembleToSlice",
     "DeriveCallDirections",
     "ExpandManualPhaseFence",
-    "CollectCommGroups",
+    "MaterializeCommDomainScopes",
     "Simplify",
     "MaterializeRuntimeScopes",
 ]
@@ -92,7 +92,7 @@ DEBUG_TILE_OPTIMIZATION_PASSES = [
     "FuseCreateAssembleToSlice",
     "DeriveCallDirections",
     "ExpandManualPhaseFence",
-    "CollectCommGroups",
+    "MaterializeCommDomainScopes",
     "Simplify",
     "MaterializeRuntimeScopes",
 ]

@@ -1,8 +1,8 @@
-# CollectCommGroups Pass
+# MaterializeCommDomainScopes Pass
 
 ## Overview
 
-`CollectCommGroups` walks each host-orchestration function and assembles the
+`MaterializeCommDomainScopes` walks each host-orchestration function and assembles the
 host-side metadata that the distributed runtime needs in order to size and
 populate per-rank communication windows. It is the structural analogue of
 [`InitMemRef`](28-init_memref.md): it traces an allocation through to its
@@ -15,14 +15,14 @@ the IR types so downstream codegen has O(1) access.
 | Assignment LHS at parse time | `Var(PtrType)` | `Var(PtrType)` (same singleton) |
 | Wrapper Var subclass | `MemRef` | `WindowBuffer` |
 | Wrapper's SSA-edge type | `MemRefType` (singleton) | `WindowBufferType` (singleton) |
-| Built by | `InitMemRef` | **`CollectCommGroups`** (this pass) |
+| Built by | `InitMemRef` | **`MaterializeCommDomainScopes`** (this pass) |
 | Threaded back onto | `TensorType.memref_` | `DistributedTensorType.window_buffer_` |
 | Program-level registry | `Program.functions_` (alloc stmts) | `Program.comm_groups_` |
 
 ## Position in the pipeline
 
 ```text
-…  →  DeriveCallDirections  →  CollectCommGroups  →  Simplify (final)
+…  →  DeriveCallDirections  →  MaterializeCommDomainScopes  →  Simplify (final)
 ```
 
 The pass runs at the very end of the default pipeline, immediately before the
@@ -118,7 +118,7 @@ After the pass:
 
 ## Reference
 
-- Source: [src/ir/transforms/collect_comm_groups_pass.cpp](../../../../src/ir/transforms/collect_comm_groups_pass.cpp)
+- Source: [src/ir/transforms/materialize_comm_domain_scopes_pass.cpp](../../../../src/ir/transforms/materialize_comm_domain_scopes_pass.cpp)
 - Header: [include/pypto/ir/transforms/passes.h](../../../../include/pypto/ir/transforms/passes.h)
 - Schema: [include/pypto/ir/program.h](../../../../include/pypto/ir/program.h)
   defines `WindowBuffer` and `CommGroup`.

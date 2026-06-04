@@ -704,7 +704,7 @@ void IRPythonPrinter::VisitExpr_(const CallPtr& op) {
 
       // Surface ``attrs["device"]`` (set by N3 parser on host_orch → chip_orch
       // dispatches) as a ``device=<expr>`` kwarg so it round-trips through
-      // reparse and remains observable by the CollectCommGroups pass.
+      // reparse and remains observable by the MaterializeCommDomainScopes pass.
       for (const auto& [k, v] : op->attrs_) {
         if (k != kAttrDevice) continue;
         if (const auto* p = std::any_cast<ExprPtr>(&v)) {

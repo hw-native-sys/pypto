@@ -17,7 +17,7 @@ fall through and raise ``TypeError("Unknown expression type")``.
 
 These tests construct a ``WindowBuffer`` directly and drive it through the
 base ``IRVisitor`` and ``IRMutator`` to confirm the wire-up is in place
-before the ``CollectCommGroups`` pass (which materialises ``WindowBuffer``
+before the ``MaterializeCommDomainScopes`` pass (which materialises ``WindowBuffer``
 instances during normal compilation) lands.
 """
 

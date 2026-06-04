@@ -1886,7 +1886,7 @@ class TestCallAttrSubstitution:
     Regression: ``Call.attrs["device"]`` (an ``ExprPtr`` written by the N3
     parser on host_orch → chip_orch dispatches) used to be left untouched by
     ConvertToSSA, leaving a dead reference to the pre-SSA loop induction var.
-    CollectCommGroups then failed identity-matching the dead Var against any
+    MaterializeCommDomainScopes then failed identity-matching the dead Var against any
     enclosing ForStmt's versioned ``loop_var_``.
     """
 

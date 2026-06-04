@@ -487,7 +487,7 @@ void BindPass(nb::module_& m) {
              "Detects cycles in the Inline → Inline call graph and raises ValueError.\n"
              "Supports multi-return inline (emits MakeTuple at call site) and nested\n"
              "Inline-calls-Inline (iterates to fixpoint).");
-  passes.def("collect_comm_groups", &pass::CollectCommGroups,
+  passes.def("materialize_comm_domain_scopes", &pass::MaterializeCommDomainScopes,
              "Trace pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r) "
              "chains in each\n"
              "host_orch function, materialise WindowBuffer instances back-referenced from\n"

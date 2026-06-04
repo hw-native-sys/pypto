@@ -35,7 +35,7 @@ using ir::MakeTuple;
 // ============================================================================
 // pld.tensor.alloc_window_buffer — host-side marker, no runtime emission.
 //
-// The alloc op is consumed at compile time by ``CollectCommGroups``; the
+// The alloc op is consumed at compile time by ``MaterializeCommDomainScopes``; the
 // resulting ``WindowBuffer`` metadata is emitted by ``EmitCommDomainAllocations``
 // as part of the ``orch.allocate_domain(buffers=[CommBufferSpec(...), ...])``
 // spec list wrapping the host_orch body. The host_orch.py module never needs
@@ -53,7 +53,7 @@ REGISTER_DISTRIBUTED_OP(pld_tensor_alloc_window_buffer, "pld.tensor.alloc_window
 // pld.tensor.window — host-side marker, no runtime emission.
 //
 // ``pld.tensor.window`` materialises a window-bound view at IR construction
-// time; ``CollectCommGroups`` rewires every dispatch site so the per-rank
+// time; ``MaterializeCommDomainScopes`` rewires every dispatch site so the per-rank
 // device pointer is read from ``__comm_d0[r].buffer_ptrs["<name>"]`` at
 // chip-arg emission time. The host_orch.py module never calls back into
 // the IR window op.

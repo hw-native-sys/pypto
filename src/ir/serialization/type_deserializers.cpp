@@ -1076,7 +1076,7 @@ static IRNodePtr DeserializeProgram(const msgpack::object& fields_obj, msgpack::
 
   // Older serialized programs may still carry a top-level ``comm_groups``
   // field; the materialised IR now embeds comm-domain scopes inside each
-  // function body, so the field is silently dropped (CollectCommGroups will
+  // function body, so the field is silently dropped (MaterializeCommDomainScopes will
   // re-derive the equivalent scope chain on the next pass run).
 
   return std::make_shared<Program>(std::move(functions), name, span);

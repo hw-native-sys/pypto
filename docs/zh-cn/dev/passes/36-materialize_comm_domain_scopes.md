@@ -1,8 +1,8 @@
-# CollectCommGroups Pass
+# MaterializeCommDomainScopes Pass
 
 ## 概览
 
-`CollectCommGroups` 扫描每个 host-orchestration 函数，组装出分布式 runtime
+`MaterializeCommDomainScopes` 扫描每个 host-orchestration 函数，组装出分布式 runtime
 为分配 / 填充 per-rank 通信窗口所需要的 host 侧元数据。它与
 [`InitMemRef`](28-init_memref.md) 在结构上完全同构：追溯一次分配到所有
 消费点，构造反向引用对象，再把该对象挂到 IR 类型上，让下游 codegen 能 O(1)
@@ -14,14 +14,14 @@
 | Parse 时赋值语句 LHS | `Var(PtrType)` | `Var(PtrType)`（同一个 singleton） |
 | 包装 Var 子类 | `MemRef` | `WindowBuffer` |
 | 包装类的 SSA-edge 类型 | `MemRefType`（singleton） | `WindowBufferType`（singleton） |
-| 构造者 | `InitMemRef` | **`CollectCommGroups`**（本 pass） |
+| 构造者 | `InitMemRef` | **`MaterializeCommDomainScopes`**（本 pass） |
 | 回填到 | `TensorType.memref_` | `DistributedTensorType.window_buffer_` |
 | Program 级注册表 | `Program.functions_`（alloc 语句） | `Program.comm_groups_` |
 
 ## 流水线位置
 
 ```text
-…  →  DeriveCallDirections  →  CollectCommGroups  →  Simplify（最末）
+…  →  DeriveCallDirections  →  MaterializeCommDomainScopes  →  Simplify（最末）
 ```
 
 本 pass 跑在默认 pipeline 的最末尾、最后一次 `Simplify` 之前。从
@@ -109,7 +109,7 @@ pass 运行之后：
 
 ## 参考
 
-- 实现：[src/ir/transforms/collect_comm_groups_pass.cpp](../../../../src/ir/transforms/collect_comm_groups_pass.cpp)
+- 实现：[src/ir/transforms/materialize_comm_domain_scopes_pass.cpp](../../../../src/ir/transforms/materialize_comm_domain_scopes_pass.cpp)
 - 头文件：[include/pypto/ir/transforms/passes.h](../../../../include/pypto/ir/transforms/passes.h)
 - Schema：[include/pypto/ir/program.h](../../../../include/pypto/ir/program.h)
   定义了 `WindowBuffer` 与 `CommGroup`。

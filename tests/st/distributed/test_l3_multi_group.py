@@ -9,7 +9,7 @@
 
 """L3 distributed st: 3-device, two-OVERLAPPING-CommGroup peer-swap.
 
-End-to-end exercise of the multi-CommGroup codegen. The N4 ``CollectCommGroups``
+End-to-end exercise of the multi-CommGroup codegen. The N4 ``MaterializeCommDomainScopes``
 pass clusters allocs by their dispatch device subset; this test produces two
 distinct (and intentionally *overlapping*) ``CommGroup``s and validates that:
 
@@ -120,7 +120,7 @@ def _build_two_group_swap_program():
             outputs_b: pl.Out[pl.Tensor[[3, 1, SIZE], pl.FP32]],
         ) -> pl.Tensor[[3, 1, SIZE], pl.FP32]:
             # Per-group window buffers land in distinct CommGroups because
-            # CollectCommGroups clusters by dispatch device subset.
+            # MaterializeCommDomainScopes clusters by dispatch device subset.
             scratch_a_buf = pld.alloc_window_buffer(SIZE * 4)
             signal_a_buf = pld.alloc_window_buffer(4)
             scratch_b_buf = pld.alloc_window_buffer(SIZE * 4)

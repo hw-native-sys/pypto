@@ -213,7 +213,7 @@ Pass InterchangeChunkLoops();
 Pass InlineFunctions();
 
 /**
- * @brief Collect CommGroups for distributed window-buffer allocations.
+ * @brief Materialise comm-domain scope statements for distributed window-buffer allocations.
  *
  * Runs at the end of the pipeline, just before the final Simplify. None of
  * the intervening passes touches the host_orch alloc/window/dispatch chain
@@ -247,7 +247,7 @@ Pass InlineFunctions();
  *  - Allocation names are unique within a group (parser-enforced globally;
  *    re-asserted here).
  */
-Pass CollectCommGroups();
+Pass MaterializeCommDomainScopes();
 
 /**
  * @brief Create a loop unrolling pass

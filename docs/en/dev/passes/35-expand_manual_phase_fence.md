@@ -31,7 +31,7 @@ are represented as calls with `manual_dep_edges`.
 ## Position in the pipeline
 
 ```text
-... -> DeriveCallDirections -> ExpandManualPhaseFence -> CollectCommGroups -> Simplify (final)
+... -> DeriveCallDirections -> ExpandManualPhaseFence -> MaterializeCommDomainScopes -> Simplify (final)
 ```
 
 `DeriveCallDirections` must run first so calls carry resolved

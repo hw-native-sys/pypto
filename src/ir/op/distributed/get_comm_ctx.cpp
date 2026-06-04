@@ -27,7 +27,7 @@
  *
  * Codegen recovers the originating :class:`CommGroup` from the
  * ``DistributedTensorType`` (via its ``window_buffer_`` back-reference,
- * filled in by ``CollectCommGroups`` in N4) when lowering these ops to
+ * filled in by ``MaterializeCommDomainScopes`` in N4) when lowering these ops to
  * scalar loads from the runtime ``CommContext`` struct.
  */
 

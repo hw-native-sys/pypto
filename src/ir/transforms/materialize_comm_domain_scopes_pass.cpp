@@ -108,12 +108,12 @@ class AllocAndWindowCollector : public IRVisitor {
       const auto& op_name = call->op_->name_;
       if (op_name == "pld.tensor.alloc_window_buffer") {
         INTERNAL_CHECK_SPAN(call->args_.size() == 1, call->span_)
-            << "CollectCommGroups: pld.tensor.alloc_window_buffer expects exactly one arg (size)";
+            << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer expects exactly one arg (size)";
         // The parser injects ``name`` as a kwarg derived from the assignment
         // LHS — not as an ``attrs`` entry — so use GetKwarg here.
         auto name = call->GetKwarg<std::string>("name");
         INTERNAL_CHECK_SPAN(!name.empty(), call->span_)
-            << "CollectCommGroups: pld.tensor.alloc_window_buffer missing 'name' kwarg";
+            << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer missing 'name' kwarg";
         auto rec = std::make_unique<AllocRecord>(call, var, call->args_[0], name, call->span_);
         ptr_to_alloc[var.get()] = rec.get();
         allocs.push_back(std::move(rec));
@@ -184,7 +184,7 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
   DeviceDescriptor desc;
   if (auto ci = As<ConstInt>(device)) {
     INTERNAL_CHECK_SPAN(ci->value_ >= 0, dispatch_span)
-        << "CollectCommGroups: device= ConstInt must be non-negative, got " << ci->value_;
+        << "MaterializeCommDomainScopes: device= ConstInt must be non-negative, got " << ci->value_;
     desc.subset.insert(ci->value_);
     return desc;
   }
@@ -205,29 +205,31 @@ DeviceDescriptor ResolveDeviceDescriptor(const ExprPtr& device, const std::vecto
         if (auto stop_ci = As<ConstInt>(stop)) {
           auto start_ci = As<ConstInt>(UnwrapStopExpr(fs->start_, var_defs));
           INTERNAL_CHECK_SPAN(start_ci, dispatch_span)
-              << "CollectCommGroups: device=r loop start must unwrap to ConstInt";
+              << "MaterializeCommDomainScopes: device=r loop start must unwrap to ConstInt";
           int64_t start = start_ci->value_;
           auto step_ci = As<ConstInt>(UnwrapStopExpr(fs->step_, var_defs));
           INTERNAL_CHECK_SPAN(step_ci, dispatch_span)
-              << "CollectCommGroups: device=r loop step must unwrap to ConstInt";
+              << "MaterializeCommDomainScopes: device=r loop step must unwrap to ConstInt";
           int64_t step = step_ci->value_;
           INTERNAL_CHECK_SPAN(step == 1, dispatch_span)
-              << "CollectCommGroups: device=r over a non-unit-step loop is not supported (step=" << step
-              << ")";
+              << "MaterializeCommDomainScopes: device=r over a non-unit-step loop is not supported (step="
+              << step << ")";
           INTERNAL_CHECK_SPAN(start >= 0 && stop_ci->value_ >= start, dispatch_span)
-              << "CollectCommGroups: device=r loop range must be [0, N) with N>=0";
+              << "MaterializeCommDomainScopes: device=r loop range must be [0, N) with N>=0";
           for (int64_t i = start; i < stop_ci->value_; ++i) desc.subset.insert(i);
           return desc;
         }
         throw pypto::ValueError(
-            "CollectCommGroups: device=r loop bound must be ConstInt or pld.system.world_size()");
+            "MaterializeCommDomainScopes: device=r loop bound must be ConstInt or pld.system.world_size()");
       }
     }
     throw pypto::ValueError(
-        "CollectCommGroups: device= Var is not the induction variable of any enclosing pl.range loop");
+        "MaterializeCommDomainScopes: device= Var is not the induction variable of any enclosing pl.range "
+        "loop");
   }
   throw pypto::ValueError(
-      "CollectCommGroups: device= expression must be ConstInt or the induction var of pl.range; got "
+      "MaterializeCommDomainScopes: device= expression must be ConstInt or the induction var of pl.range; "
+      "got "
       "an unsupported expression at " +
       dispatch_span.to_string());
 }
@@ -312,7 +314,7 @@ class DispatchAnalyzer : public IRVisitor {
 [[nodiscard]] VarPtr MintViewVar(const VarPtr& old_var, const WindowBufferPtr& wb) {
   auto dt = As<DistributedTensorType>(old_var->GetType());
   INTERNAL_CHECK_SPAN(dt, old_var->span_)
-      << "CollectCommGroups: pld.tensor.window result Var should have DistributedTensorType";
+      << "MaterializeCommDomainScopes: pld.tensor.window result Var should have DistributedTensorType";
   // Preserve every field (shape / dtype / memref / tensor_view) and set
   // window_buffer to the freshly-built ``wb``. ``pld.tensor.window`` outputs never
   // carry memref / tensor_view today (parser-fresh views), but the full-fields
@@ -357,10 +359,10 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   }
   for (const auto& rec : collector.allocs) {
     INTERNAL_CHECK(!allocs_with_windows[rec->ptr_var.get()].empty())
-        << "CollectCommGroups: pld.tensor.alloc_window_buffer '" << rec->name
+        << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer '" << rec->name
         << "' has no pld.tensor.window materialisation (dead allocation) at " << rec->span.to_string();
     INTERNAL_CHECK(!rec->seen.empty())
-        << "CollectCommGroups: pld.tensor.alloc_window_buffer '" << rec->name
+        << "MaterializeCommDomainScopes: pld.tensor.alloc_window_buffer '" << rec->name
         << "' is not consumed by any chip_orch dispatch at " << rec->span.to_string();
   }
 
@@ -404,7 +406,8 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
       tgt = &pending.back();
     }
     INTERNAL_CHECK_SPAN(tgt->names.insert(rec->name).second, rec->span)
-        << "CollectCommGroups: duplicate allocation name '" << rec->name << "' within the same comm domain";
+        << "MaterializeCommDomainScopes: duplicate allocation name '" << rec->name
+        << "' within the same comm domain";
     tgt->slots.push_back(rec->wb);
   }
 
@@ -436,7 +439,7 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
 
 namespace pass {
 
-Pass CollectCommGroups() {
+Pass MaterializeCommDomainScopes() {
   auto pass_func = [](const ProgramPtr& program) -> ProgramPtr {
     // Index chip-level Orchestration functions by name so the dispatch
     // analyzer can recognise host → chip Calls.
@@ -462,7 +465,7 @@ Pass CollectCommGroups() {
     return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
   };
 
-  return CreateProgramPass(pass_func, "CollectCommGroups", kCollectCommGroupsProperties);
+  return CreateProgramPass(pass_func, "MaterializeCommDomainScopes", kMaterializeCommDomainScopesProperties);
 }
 
 }  // namespace pass
