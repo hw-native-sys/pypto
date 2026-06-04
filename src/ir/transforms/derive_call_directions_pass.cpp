@@ -334,8 +334,8 @@ class CallDirectionMutator : public IRMutator {
     auto dirs = DeriveDirectionsForCallLike(call, op.get(), /*is_submit=*/false);
     if (!dirs) return call;
     auto new_attrs = WithArgDirectionsAttr(call->attrs_, std::move(*dirs));
-    return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
-                                        call->GetType(), call->span_);
+    return std::make_shared<Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
+                                  call->GetType(), call->span_);
   }
 
   ExprPtr VisitExpr_(const SubmitPtr& op) override {
@@ -366,9 +366,9 @@ class CallDirectionMutator : public IRMutator {
     auto dirs = DeriveDirectionsForCallLike(view, op.get(), /*is_submit=*/true);
     if (!dirs) return submit;
     auto new_attrs = WithArgDirectionsAttr(submit->attrs_, std::move(*dirs));
-    return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
-                                          std::move(new_attrs), submit->GetType(), submit->span_,
-                                          submit->core_num_, submit->sync_start_);
+    return std::make_shared<Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                    std::move(new_attrs), submit->GetType(), submit->span_, submit->core_num_,
+                                    submit->sync_start_);
   }
 
   /// Shared core that derives the ArgDirection vector for a Call-shaped node.
