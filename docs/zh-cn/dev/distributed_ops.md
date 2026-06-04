@@ -207,7 +207,7 @@ Verifier：`signal` 必须是 `DistributedTensorType`；`expected` 必须是
 
 窗口缓冲和 comm group 由
 [`MaterializeCommDomainScopes`](passes/36-materialize_comm_domain_scopes.md) pass 收集,该 pass 填充
-`Program.comm_groups_` 以及运行时据以绑定物理缓冲的按窗口 `WindowBuffer` 记录。
+`CommDomainScopeStmt wrappers in each host_orch body` 以及运行时据以绑定物理缓冲的按窗口 `WindowBuffer` 记录。
 
 ## 测试
 

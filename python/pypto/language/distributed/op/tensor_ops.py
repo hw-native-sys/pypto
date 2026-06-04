@@ -47,7 +47,7 @@ from ._utils import _normalize_intlike, _unwrap
 
 
 def alloc_window_buffer(size: IntLike, *, name: str = "") -> Ptr:
-    """Declare a per-rank CommGroup window-buffer slot of ``size`` bytes.
+    """Declare a per-rank HCCL window-buffer in a comm-domain scope slot of ``size`` bytes.
 
     Mirrors ``tile.alloc(memory_space, size)``: pure allocation semantics, no
     shape / dtype concept on the buffer itself. The result is the

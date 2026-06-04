@@ -18,7 +18,7 @@ After the MemRef-mirror redesign, the alloc op is a pure-allocation primitive
 * The op returns the singleton :class:`PtrType`; the parser binds the LHS as
   a plain :class:`ir.Var` of type :class:`ir.PtrType`. The
   comm-collection pass later wraps the Ptr in an :class:`ir.WindowBuffer` Var
-  subclass and registers it on ``Program.comm_groups``.
+  subclass and registers it on ``CommDomainScopeStmt wrappers in each host_orch body``.
 * The LHS variable name flows through ``Var.name_hint`` (and is also injected
   as the op's ``name`` kwarg so the comm-collection pass can find it).
 """

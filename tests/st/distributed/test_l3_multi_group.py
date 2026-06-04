@@ -7,11 +7,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""L3 distributed st: 3-device, two-OVERLAPPING-CommGroup peer-swap.
+"""L3 distributed st: 3-device, two-OVERLAPPING-comm-domain peer-swap.
 
-End-to-end exercise of the multi-CommGroup codegen. The N4 ``MaterializeCommDomainScopes``
+End-to-end exercise of the multi-comm-domain codegen. The N4 ``MaterializeCommDomainScopes``
 pass clusters allocs by their dispatch device subset; this test produces two
-distinct (and intentionally *overlapping*) ``CommGroup``s and validates that:
+distinct (and intentionally *overlapping*) comm domains and validates that:
 
 * Host_orch python emits two nested ``with orch.allocate_domain(...)`` blocks
   (one per group; verified at codegen-text level by

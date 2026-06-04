@@ -224,7 +224,7 @@ The local-vs-remote split is intentional: a *local* operand (e.g. `get`'s
 
 Window buffers and comm groups are collected by the
 [`MaterializeCommDomainScopes`](passes/36-materialize_comm_domain_scopes.md) pass, which populates
-`Program.comm_groups_` and the per-window `WindowBuffer` records the runtime
+`CommDomainScopeStmt wrappers in each host_orch body` and the per-window `WindowBuffer` records the runtime
 binds physical buffers to.
 
 ## Testing

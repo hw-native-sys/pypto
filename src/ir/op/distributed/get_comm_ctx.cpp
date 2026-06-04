@@ -25,7 +25,7 @@
  * unified shim (``pld.world_size(...)``, ``pld.rank(ctx)``, ...) re-exports the
  * same builders so the short form resolves to identical IR.
  *
- * Codegen recovers the originating :class:`CommGroup` from the
+ * Codegen recovers the originating :class:`CommDomainScopeStmt` from the
  * ``DistributedTensorType`` (via its ``window_buffer_`` back-reference,
  * filled in by ``MaterializeCommDomainScopes`` in N4) when lowering these ops to
  * scalar loads from the runtime ``CommContext`` struct.
@@ -94,7 +94,7 @@ REGISTER_OP("pld.system.get_comm_ctx")
     .set_description(
         "Return the communication-context handle (CommCtxType) of a window-bound "
         "DistributedTensor. The result is the input to pld.system.rank / "
-        "pld.system.nranks; codegen recovers the originating CommGroup from "
+        "pld.system.nranks; codegen recovers the enclosing CommDomainScopeStmt from "
         "the DistributedTensor's window_buffer back-reference.")
     .set_op_category("DistributedOp")
     .add_argument("dist_tensor", "A window-bound DistributedTensor (DistributedTensorType)")

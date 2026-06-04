@@ -533,7 +533,7 @@ class TensorType(ShapedType):
         """
 
 class DistributedTensorType(TensorType):
-    """Tensor backed by a per-rank slice of a CommGroup HCCL window buffer.
+    """Tensor backed by a per-rank slice of a HCCL window buffer carved by a CommDomainScopeStmt.
 
     Subclass of :class:`TensorType` distinguished only by ``ObjectKind`` so
     that verifiers for cross-rank ops can reject plain :class:`TensorType`
@@ -1084,7 +1084,7 @@ class CommCtxType(Type):
     """Singleton marker type for ``pld.system.get_comm_ctx`` outputs.
 
     Carries no per-instance fields; the back-reference to the originating
-    :class:`CommGroup` is recovered from the producing op's
+    :class:`CommDomainScopeStmt` is recovered from the producing op's
     :class:`DistributedTensorType` argument (via its ``window_buffer_``
     back-reference). Consumed by ``pld.system.rank`` /
     ``pld.system.nranks`` to read scalar fields of the runtime
@@ -2363,7 +2363,7 @@ class RuntimeScopeStmt(ScopeStmt):
         """Create a Runtime scope statement."""
 
 class CommDomainScopeStmt(ScopeStmt):
-    """CommDomain scope: wraps host_orch use sites of a CommGroup's WindowBuffers.
+    """CommDomain scope: wraps host_orch use sites of a comm-domain's WindowBuffers.
 
     Codegen lowers each instance to a
     ``with orch.allocate_domain(name=..., workers=..., window_size=...,
@@ -2661,7 +2661,7 @@ class Program(IRNode):
         """
 
 class WindowBuffer(Var):
-    """Per-rank CommGroup HCCL window-buffer allocation, modelled as a specialised Var.
+    """Per-rank HCCL window-buffer allocation carved by a CommDomainScopeStmt, modelled as a specialised Var.
 
     Mirrors :class:`MemRef`: its SSA-edge type is the singleton
     :class:`WindowBufferType`; allocation metadata (the underlying Ptr Var,

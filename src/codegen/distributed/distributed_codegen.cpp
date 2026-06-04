@@ -205,7 +205,7 @@ void DistributedCodegen::EmitImports() {
   // formal emission (host_orch wraps per-rank window-bound regions via
   // ``ContinuousTensor.make(..., child_memory=True)``).
   // ``CommBufferSpec`` is the spec list passed to ``orch.allocate_domain``
-  // inside host_orch when the program declares at least one CommGroup;
+  // inside host_orch when the program declares at least one comm domain;
   // harmless to import for comm-less L3 programs.
   emitter_.EmitLine(
       "from simpler.task_interface import "

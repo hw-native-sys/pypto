@@ -452,7 +452,8 @@ void BindIR(nb::module_& m) {
   // plain Tensors. Otherwise mirrors TensorType's ctor overloads — memref /
   // tensor_view variants are equally valid on the distributed flavour.
   auto dist_tensor_type_class = nb::class_<DistributedTensorType, TensorType>(
-      ir, "DistributedTensorType", "Tensor backed by a per-rank slice of a CommGroup HCCL window buffer");
+      ir, "DistributedTensorType",
+      "Tensor backed by a per-rank slice of a HCCL window buffer carved by a CommDomainScopeStmt");
   dist_tensor_type_class.def(nb::init<const std::vector<ExprPtr>&, DataType>(), nb::arg("shape"),
                              nb::arg("dtype"), "Create a distributed tensor type");
   dist_tensor_type_class.def(nb::init<const std::vector<int64_t>&, DataType>(), nb::arg("shape"),
@@ -542,7 +543,7 @@ void BindIR(nb::module_& m) {
   BindFields<WindowBufferType>(window_buffer_type_class);
 
   // CommCtxType - singleton marker type for pld.get_comm_ctx outputs. The
-  // back-reference to the originating CommGroup lives on the producing op's
+  // back-reference to the enclosing CommDomainScopeStmt lives on the producing op's
   // DistributedTensor argument (via its WindowBuffer back-reference), so the
   // type itself carries no per-instance fields.
   auto comm_ctx_type_class =
@@ -1445,7 +1446,7 @@ void BindIR(nb::module_& m) {
   // CommDomainScopeStmt
   auto comm_domain_scope_stmt_class = nb::class_<CommDomainScopeStmt, ScopeStmt>(
       ir, "CommDomainScopeStmt",
-      "CommDomain scope: wraps host_orch use sites of a CommGroup's WindowBuffers. "
+      "CommDomain scope: wraps host_orch use sites of a comm-domain's WindowBuffers. "
       "Codegen lowers to `with orch.allocate_domain(name=..., workers=..., window_size=..., "
       "buffers=[...]) as __comm_d<n>:`. Synthesized by MaterializeCommDomainScopes pass; no user DSL "
       "surface.");

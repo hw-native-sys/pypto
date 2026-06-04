@@ -10,7 +10,7 @@
 """``pld.DistributedTensor`` — DSL annotation for window-bound tensors.
 
 Function-signature type annotation for chip_orch / InCore parameters that
-slice a CommGroup HCCL window buffer. Behaves identically to :class:`pl.Tensor`
+slice a HCCL window buffer carved by a CommDomainScopeStmt. Behaves identically to :class:`pl.Tensor`
 at the DSL surface (same ``[shape, dtype, layout|memref|view]`` subscript
 forms); the only difference is the IR-level ``ObjectKind``
 (:class:`ir.DistributedTensorType`), which lets cross-rank op verifiers
@@ -42,7 +42,7 @@ class DistributedTensorMeta(TensorMeta):
 
 
 class DistributedTensor(Tensor, metaclass=DistributedTensorMeta):
-    """Tensor backed by a per-rank slice of a CommGroup HCCL window buffer.
+    """Tensor backed by a per-rank slice of a HCCL window buffer carved by a CommDomainScopeStmt.
 
     Same DSL surface as :class:`pl.Tensor` — supports memref / layout /
     tensor_view in the third (and fourth) subscript slot. The IR-level type

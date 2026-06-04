@@ -44,7 +44,7 @@ size, and id; memory space is not stored on `MemRef` itself.
 
 `DistributedTensorType` is a precise-`ObjectKind` subclass of `TensorType`
 used as the function-signature type for chip orchestrator / InCore parameters
-that slice a CommGroup HCCL window buffer. It exists so cross-rank op
+that slice a HCCL window buffer carved by a CommDomainScopeStmt. It exists so cross-rank op
 verifiers (introduced in later milestones) can reject plain `Tensor`
 arguments — `As<TensorType>` does NOT match a `DistributedTensorType`
 (precise `ObjectKind` semantics; see

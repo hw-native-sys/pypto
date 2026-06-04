@@ -10,10 +10,10 @@
 """PyPTO distributed DSL — namespace ``pypto.language.distributed`` (alias ``pld``).
 
 Provides cross-rank concepts that complement the single-device DSL in
-``pypto.language``. Communication-domain metadata (``ir.CommGroup`` /
+``pypto.language``. Communication-domain metadata (``ir.CommDomainScopeStmt`` /
 ``ir.WindowBuffer``) is **inferred** by the ``MaterializeCommDomainScopes`` pass from
 ``pld.tensor.alloc_window_buffer`` calls in the host orchestrator and the
-``device=`` kwarg on dispatch sites; users do not declare ``CommGroup``
+``device=`` kwarg on dispatch sites; users do not declare comm-domain scope
 manually.
 
 Package layout mirrors :mod:`pypto.language` (3-segment ``pld.<category>.<op>``

@@ -490,7 +490,7 @@ class TensorType : public ShapedType {
 using TensorTypePtr = std::shared_ptr<const TensorType>;
 
 /**
- * @brief Distributed tensor type — a per-rank slice of a CommGroup HCCL window buffer.
+ * @brief Distributed tensor type — a per-rank slice of a HCCL window buffer carved by a CommDomainScopeStmt.
  *
  * Subclass of :class:`TensorType` distinguished only by ``ObjectKind`` so that
  * verifiers can reject plain ``TensorType`` arguments to cross-rank ops
@@ -509,7 +509,7 @@ class DistributedTensorType : public TensorType {
   /// ``pld.DistributedTensor[[shape], dtype]``. Two DistributedTensorTypes with
   /// the same shape / dtype but different ``window_buffer_`` values are
   /// structurally distinct, so passes can tell apart slices of different
-  /// CommGroup window buffers.
+  /// HCCL window buffer carved by a CommDomainScopeStmts.
   std::optional<WindowBufferPtr> window_buffer_;
 
   DistributedTensorType(std::vector<ExprPtr> shape, DataType dtype)
@@ -776,7 +776,7 @@ inline WindowBufferTypePtr GetWindowBufferType() {
  * which scalar fields like ``rank`` / ``nranks`` are read.
  *
  * Carries no per-instance fields; the back-reference to the originating
- * :class:`WindowBuffer` / :class:`CommGroup` is recovered at codegen time
+ * :class:`WindowBuffer` / :class:`CommDomainScopeStmt` is recovered at codegen time
  * from the producing ``pld.system.get_comm_ctx`` argument's type. Cross-rank op
  * verifiers dispatch on this marker (``As<CommCtxType>``) to reject
  * non-CommCtx arguments to ``pld.system.rank`` / ``pld.system.nranks``.

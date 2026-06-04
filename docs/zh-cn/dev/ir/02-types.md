@@ -43,7 +43,7 @@ id；内存空间不再存储在 `MemRef` 本身上。
 ### DistributedTensorType
 
 `DistributedTensorType` 是 `TensorType` 的精确 `ObjectKind` 子类，作为 chip
-orchestrator / InCore 形参的类型注解，用来切片 CommGroup HCCL window buffer。
+orchestrator / InCore 形参的类型注解，用来切片 HCCL window buffer carved by a CommDomainScopeStmt。
 它的存在让跨 rank op 的 verifier（后续 milestone 引入）可以静态拒绝普通的
 `Tensor` 实参 —— `As<TensorType>` **不会**匹配 `DistributedTensorType`
 （精确 `ObjectKind` 匹配语义，见

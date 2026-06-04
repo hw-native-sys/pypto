@@ -29,7 +29,7 @@ namespace pypto {
 namespace ir {
 
 /**
- * @brief Per-rank CommGroup HCCL window-buffer allocation, modelled as a Var.
+ * @brief Per-rank HCCL window-buffer allocation carved by a CommDomainScopeStmt, modelled as a Var.
  *
  * A specialised :class:`Var` subclass whose SSA-edge type is the singleton
  * :class:`WindowBufferType`. The buffer's runtime-unique identifier flows

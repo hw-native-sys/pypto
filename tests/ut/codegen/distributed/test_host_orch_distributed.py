@@ -11,7 +11,7 @@
 
 Covers four orthogonal pieces of the host_orch emit:
 
-1. Programs with at least one CommGroup wrap the body in
+1. Programs with at least one comm domain wrap the body in
    ``with orch.allocate_domain(name=..., workers=..., window_size=...,
    buffers=[CommBufferSpec(...)]) as __comm_d0:``.
 2. DistributedTensor formal → ``add_tensor(ContinuousTensor.make(data=__comm_d0[<r>]
@@ -219,7 +219,7 @@ def test_comm_group_program_emits_allocate_domain_with_block():
     # The with-block opens with the literal spec list and binds the handle.
     assert re.search(r"with orch\.allocate_domain\(", code), code
     assert re.search(r'name="comm_d0",', code), code
-    # Empty CommGroup.devices_ (this program declares no explicit subset on
+    # Empty CommDomainScopeStmt.devices_ (this program declares no explicit subset on
     # the alloc) lowers to `workers=[*range(world_size)]` — resolved at
     # orch_fn time against the runner-bound `world_size` kwarg.
     assert re.search(r"workers=\[\*range\(world_size\)\],", code), code
@@ -348,7 +348,7 @@ def test_hoisted_world_size_temp_in_alloc_size_lowers_to_kwarg():
 
 
 # ---------------------------------------------------------------------------
-# Multi-CommGroup: two allocs dispatched to disjoint device subsets emit
+# Multi-comm-domain: two allocs dispatched to disjoint device subsets emit
 # nested ``with orch.allocate_domain(...)`` blocks and route each
 # DistributedTensor through its own ``__comm_d<idx>`` handle.
 # Mirrors the IR-level test
