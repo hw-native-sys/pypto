@@ -3956,7 +3956,14 @@ class OutWindowExternalizer {
       }
 
       auto out_indices = CollectOutParamIndices(func);
-      if (out_indices.empty()) continue;
+      if (out_indices.empty()) {
+        CalleeRewriteAnalysis input_only_analysis;
+        input_only_analysis.inputs = AnalyzeInputWindows(func, {});
+        if (!input_only_analysis.inputs.empty()) {
+          analyses.emplace(func->name_, std::move(input_only_analysis));
+        }
+        continue;
+      }
 
       CalleeRewriteAnalysis analysis;
       bool all_final = true;

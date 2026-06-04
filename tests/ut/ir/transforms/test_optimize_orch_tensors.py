@@ -1358,6 +1358,62 @@ class TestOutWindowExternalizer:
         After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
+    def test_pure_consumer_uses_input_window(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                score: pl.Tensor[[64, 128], pl.FP32],
+                r0: pl.Scalar[pl.INDEX],
+                c0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tile[[32, 64], pl.FP32]:
+                block: pl.Tile[[32, 64], pl.FP32] = pl.tile.load(
+                    score, [r0, c0], [32, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                return pl.tile.add(block, block)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(self) -> pl.Tile[[32, 64], pl.FP32]:
+                score: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.full([64, 128], dtype=pl.FP32, value=1.0)
+                result: pl.Tile[[32, 64], pl.FP32] = self.consume(score, 0, 0)
+                return result
+
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume(
+                score: pl.Tensor[[64, 128], pl.FP32],
+                r0: pl.Scalar[pl.INDEX],
+                c0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tile[[32, 64], pl.FP32]:
+                block: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    score, [r0, c0], [32, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                return pl.tile.add(block, block)
+
+            @pl.function(type=pl.FunctionType.InCore, level=pl.Level.CHIP_DIE, role=pl.Role.SubWorker)
+            def consume__windowed(
+                score: pl.Tensor[
+                    [32, 64], pl.FP32, pl.TensorView(stride=[128, 1], layout=pl.TensorLayout.ND)
+                ],
+                r0: pl.Scalar[pl.INDEX],
+                c0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tile[[32, 64], pl.FP32]:
+                block: pl.Tile[[32, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    score, [0, 0], [32, 64], [32, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                return pl.tile.add(block, block)
+
+            @pl.function(type=pl.FunctionType.Orchestration, level=pl.Level.CHIP, role=pl.Role.Orchestrator)
+            def main(self) -> pl.Tile[[32, 64], pl.FP32]:
+                score: pl.Tensor[[64, 128], pl.FP32] = pl.tensor.full([64, 128], dtype=pl.FP32, value=1.0)
+                score__window: pl.Tensor[[32, 64], pl.FP32] = pl.tensor.slice(score, [32, 64], [0, 0])
+                result: pl.Tile[[32, 64], pl.FP32] = self.consume__windowed(score__window, 0, 0)
+                return result
+
+        After = passes.optimize_orch_tensors()(Before)
+        ir.assert_structural_equal(After, Expected)
+
     def test_local_allocation_input_root_is_windowed(self):
         @pl.program
         class Before:
