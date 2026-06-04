@@ -132,47 +132,26 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: 16
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
-      CCACHE_DIR: /root/.cache/ccache
+      CCACHE_DIR: /home/ci-runner/.cache/ccache
       CCACHE_MAXSIZE: 5G
-      PIP_CACHE_DIR: /root/.cache/pip
-    container:
-      image: localhost:5000/ci-device-py310:latest
-      options: >-
-        --privileged
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
-        -v /usr/local/Ascend:/usr/local/Ascend:ro
-        -v /dev:/dev
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/pip:/root/.cache/pip
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ccache:/root/.cache/ccache
-        -v /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas:/opt/ptoas-cache
-        -e ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
-        -e DEVICE_ID
-        -e DEVICE_RANGE
-        -e PTO2_RING_HEAP
-        -e PTO2_RING_TASK_WINDOW
-        -e PTO2_RING_DEP_POOL
+      PIP_CACHE_DIR: /home/ci-runner/.cache/pip
+    # De-containerized (mirrors dist-system-tests): --execute-via-task-submit
+    # borrows cards via the host task-daemon, which runs the execution in a clean
+    # host shell — so the compile/runtime env must live on the host (conda py310 +
+    # per-job venv), not in a container the daemon can't see. The job still
+    # reserves npu-1-device for the non-task-submit steps below (multi-orch L2 /
+    # swimlane / dump-tensor) and for DEVICE_ID/DEVICE_RANGE from the runner env.
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
 
       - name: Check NPU
-        run: |
-          npu-smi info
-
-      - name: Show ccache stats (before)
-        run: ccache -s || true
-
-      - name: Install project and dependencies
-        run: |
-          python -m pip install --upgrade pip
-          rm -rf ./build ./_skbuild
-          test ! -e ./build && test ! -e ./_skbuild && echo "OK: pypto build removed"
-          pip install --no-build-isolation .[dev]
+        run: npu-smi info
 
       - name: Install ptoas (local cache)
         env:
-          PTOAS_CACHE_DIR: /opt/ptoas-cache
+          PTOAS_CACHE_DIR: /home/ci-runner/hw-native-sys-pypto/ci-cache/ptoas
         run: |
           CACHE_ARCHIVE="$PTOAS_CACHE_DIR/ptoas-aarch64-${PTOAS_VERSION}-${PTOAS_SHA256}.tar.gz"
           if [ ! -f "$CACHE_ARCHIVE" ]; then
@@ -186,40 +165,70 @@ jobs:
           else
             echo "Cache hit — using $CACHE_ARCHIVE"
           fi
-          mkdir -p "$GITHUB_WORKSPACE/ptoas-bin"
-          tar -xzf "$CACHE_ARCHIVE" -C "$GITHUB_WORKSPACE/ptoas-bin"
-          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/ptoas"
-          chmod +x "$GITHUB_WORKSPACE/ptoas-bin/bin/ptoas"
-
-      - name: Add Ascend tools to PATH
-        run: echo "/usr/local/Ascend/cann-9.0.0/bin" >> $GITHUB_PATH
+          mkdir -p "$PTOAS_ROOT"
+          tar -xzf "$CACHE_ARCHIVE" -C "$PTOAS_ROOT"
+          chmod +x "$PTOAS_ROOT/ptoas"
+          chmod +x "$PTOAS_ROOT/bin/ptoas"
 
       - name: Clone pto-isa
         run: |
-          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git $GITHUB_WORKSPACE/pto-isa \
-            || { rm -rf $GITHUB_WORKSPACE/pto-isa; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git $GITHUB_WORKSPACE/pto-isa; }
-          cd $GITHUB_WORKSPACE/pto-isa
+          rm -rf "$PTO_ISA_ROOT"
+          timeout 60 git clone https://github.com/hw-native-sys/pto-isa.git "$PTO_ISA_ROOT" \
+            || { rm -rf "$PTO_ISA_ROOT"; timeout 300 git clone https://gitcode.com/luohuan40/pto-isa.git "$PTO_ISA_ROOT"; }
+          cd "$PTO_ISA_ROOT"
           git checkout 016396b57e2c17093f1194e6acd89bb112b0ab24
 
-      - name: Install simpler
+      - name: Bootstrap conda + per-job venv + write activate.sh
+        # activate.sh bakes ABSOLUTE paths (unquoted heredoc expands $GITHUB_WORKSPACE
+        # now; runtime vars are escaped) so it is self-contained when the task-submit
+        # daemon sources it in a clean host shell that has no GITHUB_WORKSPACE.
         run: |
-          rm -rf ./runtime/build
-          ls -la ./runtime/ | grep -q "^d.*build$" && echo "FAIL: build still exists" && exit 1 || echo "OK: build removed"
-          pip install --no-build-isolation ./runtime
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          python -m venv venv --system-site-packages
+          cat > activate.sh <<EOF
+          source /home/ci-runner/miniconda3/etc/profile.d/conda.sh
+          conda activate py310
+          source "$GITHUB_WORKSPACE/venv/bin/activate"
+          source /usr/local/Ascend/cann-9.0.0/set_env.sh
+          export LD_LIBRARY_PATH="\$CONDA_PREFIX/lib:\$LD_LIBRARY_PATH"
+          export ASCEND_HOME_PATH=/usr/local/Ascend/cann-9.0.0
+          export PTOAS_ROOT="$GITHUB_WORKSPACE/ptoas-bin"
+          export PTO_ISA_ROOT="$GITHUB_WORKSPACE/pto-isa"
+          EOF
 
-      - name: Show ccache stats (after)
-        run: ccache -s || true
+      - name: Install project and dependencies
+        run: |
+          source activate.sh
+          rm -rf ./build ./_skbuild ./runtime/build ./runtime/_skbuild
+          python -m pip install --upgrade pip
+          pip install scikit-build-core nanobind cmake ninja
+          pip install --no-build-isolation .[dev]
+          pip install --no-build-isolation ./runtime
 
       - name: Test system tests
         timeout-minutes: 15
         # tests/st/codegen is device-free and runs in the separate CPU
-        # codegen-tests job (--codegen-only). On-board execution tests
-        # (incl. the paged-attention pipelines) live under tests/st/runtime.
-        # test_torch_codegen_paged_attention is passed explicitly so it still
-        # runs here despite the tests/st/codegen ignore: its numeric golden
-        # compare is unstable on the CPU container's torch/BLAS build (see the
-        # codegen-tests job), so it needs this environment.
-        run: pytest tests/st tests/st/codegen/torch/test_torch_codegen_paged_attention.py -v --device="$DEVICE_RANGE" --precompile-workers=128 --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 --ignore=tests/st/distributed --ignore=tests/st/codegen
+        # codegen-tests job (--codegen-only). test_torch_codegen_paged_attention
+        # runs here (not in codegen-tests) because its numeric golden compare is
+        # unstable on the CPU container's torch/BLAS build.
+        # Compile card-free; borrow a card per test via task-submit only for the
+        # device run + golden compare. --save-kernels/--kernels-dir keep artifacts
+        # on a host path the borrowed-card subprocess can read. The other steps
+        # below still use the reserved card directly; fully dropping the
+        # npu-1-device reservation is a follow-up to coordinate with CI.
+        env:
+          # task-submit runs the borrowed-card execution via the host daemon in a
+          # clean shell; PYPTO_TASK_SUBMIT_SETUP makes that subprocess re-activate
+          # the host env (conda + venv + Ascend) before importing pypto.
+          PYPTO_TASK_SUBMIT_SETUP: source ${{ github.workspace }}/activate.sh
+        run: |
+          source activate.sh
+          pytest tests/st/runtime/ops/test_gather.py tests/st/codegen/torch/test_torch_codegen_paged_attention.py \
+            -v --precompile-workers=128 --execute-via-task-submit --execute-concurrency=16 \
+            --task-max-time=600 --save-kernels --kernels-dir="$GITHUB_WORKSPACE/build_output/st_artifacts" \
+            --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24 \
+            --ignore=tests/st/distributed --ignore=tests/st/codegen
 
       - name: Test multi-orch L2 (isolated pytest invocation)
         # A ``Worker(level=2)`` device session currently leaves runtime
@@ -228,15 +237,19 @@ jobs:
         # isolation bug). Running this file in its own pytest process
         # keeps the L2 leak from poisoning ``test_l3_distributed``.
         timeout-minutes: 3
-        run: pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
+        run: |
+          source activate.sh
+          pytest tests/st/distributed/test_l2_multi_orch.py -v --device="$DEVICE_RANGE" --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
 
       - name: Test swimlane output
         run: |
+          source activate.sh
           pytest tests/st/runtime/framework_and_models/test_perf_swimlane.py \
             -v --device="$DEVICE_ID" --platform=a2a3 --enable-l2-swimlane --forked --pto-isa-commit=016396b57e2c17093f1194e6acd89bb112b0ab24
 
       - name: Test dump-tensor output
         run: |
+          source activate.sh
           pytest tests/st/runtime/framework_and_models/test_dump_tag.py \
             -v --device="$DEVICE_ID" --platform=a2a3 --dump-tensor --pto-isa-commit=2c607938 --forked
 

@@ -175,6 +175,35 @@ def pytest_addoption(parser):
         default=None,
         help="Pin the pto-isa clone to a specific git commit (hash or tag). Default: use latest remote HEAD.",
     )
+    # ── task-submit execution mode ────────────────────────────────────────
+    # Decouple on-device execution from the CI job: compile card-free, then
+    # borrow a card per test via the host-root ``task-submit`` queue only for
+    # the device run + golden compare.  Requires --precompile-workers (so the
+    # pipeline context is populated) and --save-kernels (so the artifact dir is
+    # on a shared mount the borrowed-card subprocess can read).
+    parser.addoption(
+        "--execute-via-task-submit",
+        action="store_true",
+        default=False,
+        help="Execute each on-board test on a card borrowed via 'task-submit --device auto' "
+        "instead of from a local --device pool (default: False).",
+    )
+    parser.addoption(
+        "--execute-concurrency",
+        action="store",
+        default=8,
+        type=int,
+        help="Max concurrent task-submit submissions in --execute-via-task-submit mode "
+        "(may exceed the card count; task-submit queues the surplus). Default: 8.",
+    )
+    parser.addoption(
+        "--task-max-time",
+        action="store",
+        default=600,
+        type=int,
+        help="Per-task --max-time (seconds) passed to task-submit in "
+        "--execute-via-task-submit mode (default: 600).",
+    )
     # ── DFX (Design For X) toggles ────────────────────────────────────────
     # Each maps 1:1 to the same-named field on ``RunConfig`` and to the
     # corresponding ``CallConfig`` member on the runtime side. Names match
@@ -480,6 +509,27 @@ def pytest_configure(config):
 
             configure_log(runtime_level)  # ValueError propagates: invalid CLI value must fail fast
 
+    # task-submit mode prerequisites — validate here (before collection) so a
+    # misconfiguration fails loud at startup rather than silently falling back to
+    # local inline execution when no test case is discovered.
+    try:
+        execute_via_task_submit = config.getoption("--execute-via-task-submit")
+    except (ValueError, KeyError):
+        return  # option not yet registered (e.g. during --co --help)
+    if execute_via_task_submit:
+        if config.getoption("--precompile-workers") is None:
+            raise pytest.UsageError(
+                "--execute-via-task-submit requires --precompile-workers (the task-submit "
+                "execution path runs inside the precompile pipeline)."
+            )
+        if not config.getoption("--save-kernels"):
+            raise pytest.UsageError(
+                "--execute-via-task-submit requires --save-kernels so the compiled artifact "
+                "directory lands on a shared mount the borrowed-card subprocess can read "
+                "(optionally add --kernels-dir <shared-path>). A private /tmp dir is "
+                "unreachable from the host task-submit context."
+            )
+
 
 def pytest_collection_modifyitems(config, items):
     """Deselect items that fall outside the active platform allowlist.
@@ -605,6 +655,10 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         return
 
     max_workers: int | None = session.config.getoption("--precompile-workers")
+    # Validated in pytest_configure: --execute-via-task-submit implies
+    # --precompile-workers and --save-kernels.
+    execute_via_task_submit: bool = session.config.getoption("--execute-via-task-submit")
+
     # Without --precompile-workers the pipeline is skipped entirely; each
     # test compiles + executes inline inside TestRunner._run_inline().
     if max_workers is None:
@@ -638,17 +692,24 @@ def pytest_collection_finish(session: pytest.Session) -> None:
     platform_filter = _parse_platform_filter(session.config.getoption("--platform"))
     session_platform: str = platform_filter[0] if platform_filter else "a2a3"
 
-    # Build the device pool from --device.  N parallel executes max.
+    # Build the device pool from --device.  N parallel executes max in
+    # device-pool mode; ignored in task-submit mode (task-submit allocates).
     devices = _parse_device_option(session.config.getoption("--device"))
     device_pool: queue.Queue[int] = queue.Queue()
     for d in devices:
         device_pool.put(d)
 
+    execute_mode = "task-submit" if execute_via_task_submit else "device-pool"
+    execute_concurrency: int = session.config.getoption("--execute-concurrency")
+    task_max_time: int = session.config.getoption("--task-max-time")
+
     test_cases = list(seen.values())
-    print(
-        f"\n[PyPTO] Pipeline: {len(test_cases)} test case(s); "
-        f"compile_workers={max_workers}, devices={devices}"
+    exec_desc = (
+        f"task-submit (concurrency={execute_concurrency})"
+        if execute_via_task_submit
+        else f"devices={devices}"
     )
+    print(f"\n[PyPTO] Pipeline: {len(test_cases)} test case(s); compile_workers={max_workers}, {exec_desc}")
     start_pipeline(
         test_cases=test_cases,
         cache_dir=cache_dir,
@@ -658,6 +719,9 @@ def pytest_collection_finish(session: pytest.Session) -> None:
         pto_isa_commit=pto_isa_commit,
         compile_workers=max_workers,
         device_pool=device_pool,
+        execute_mode=execute_mode,
+        execute_concurrency=execute_concurrency,
+        task_max_time=task_max_time,
         enable_l2_swimlane=enable_l2_swimlane,
         enable_dump_tensor=enable_dump_tensor,
         enable_pmu=enable_pmu,
