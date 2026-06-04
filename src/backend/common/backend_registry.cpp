@@ -37,7 +37,7 @@ std::unique_ptr<Backend> BackendRegistry::Create(const std::string& type_name,
                                                  const std::shared_ptr<const SoC>& soc) {
   throw ValueError(
       "Cannot create backend instances via registry - backends are singletons. "
-      "Use Backend910B::Instance() or Backend950::Instance() instead.");
+      "Use Backend910B::Instance(), Backend950::Instance(), or BackendSuperscalarNPU::Instance() instead.");
 }
 
 bool BackendRegistry::IsRegistered(const std::string& type_name) const {
@@ -48,7 +48,7 @@ std::unique_ptr<Backend> CreateBackendFromRegistry(const std::string& type_name,
                                                    const std::shared_ptr<const SoC>& soc) {
   throw ValueError(
       "Cannot create backend instances via registry - backends are singletons. "
-      "Use Backend910B::Instance() or Backend950::Instance() instead.");
+      "Use Backend910B::Instance(), Backend950::Instance(), or BackendSuperscalarNPU::Instance() instead.");
 }
 
 // Auto-register Backend910B and Backend950

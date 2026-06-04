@@ -18,10 +18,9 @@ passes and inspect the printed IR.
 
 import pypto.language as pl
 import pytest
+from pypto import backend, passes
 from pypto.ir.pass_manager import OptimizationStrategy, PassManager
 from pypto.ir.printer import python_print
-
-from pypto import backend, passes
 
 # 128x128 FP32 tile = 64 KiB = 16 TREG blocks (4 KiB each).
 _TILE_BYTES = 128 * 128 * 4

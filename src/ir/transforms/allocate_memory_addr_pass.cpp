@@ -370,6 +370,15 @@ std::vector<std::pair<const MemRef*, MemRefPtr>> AllocateMemoryAddresses(
         // is always aligned to a unit boundary (see AlignAddress), so the root
         // member divides exactly; a const view offset is folded the same way.
         const int64_t byte_addr = static_cast<int64_t>(current_addr) + relative_offset;
+        // For register-file spaces the byte address must land on a unit
+        // boundary; otherwise integer division would silently truncate the
+        // offset and alias distinct addresses to the same block index. Slot
+        // bases are unit-aligned (AlignAddress) and const view offsets are
+        // folded above, so a non-aligned address here indicates a compiler bug.
+        INTERNAL_CHECK_SPAN(addr_unit == 1 || byte_addr % static_cast<int64_t>(addr_unit) == 0,
+                            old_memref->span_)
+            << "AllocateMemoryAddr: byte address " << byte_addr << " for MemRef '" << old_memref->name_hint_
+            << "' in " << MemorySpaceToString(space) << " is not aligned to the address unit " << addr_unit;
         const int64_t stored_addr = addr_unit > 1 ? byte_addr / static_cast<int64_t>(addr_unit) : byte_addr;
         auto member_addr_expr = std::make_shared<ConstInt>(stored_addr, DataType::INT64, Span::unknown());
         // NOTE: MemRef is identity-bearing — each result must get a fresh

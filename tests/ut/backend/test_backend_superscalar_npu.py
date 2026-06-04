@@ -10,9 +10,8 @@
 """Tests for the SuperscalarNPU backend (DDR + TREG register file)."""
 
 import pytest
-from pypto.backend import BackendSuperscalarNPU, BackendType
-
 from pypto import ir
+from pypto.backend import BackendSuperscalarNPU, BackendType
 
 
 class TestConstruction:
