@@ -81,8 +81,8 @@ std::string IRPropertyToString(IRProperty prop) {
       return "TensorViewCanonical";
     case IRProperty::ArrayNotEscaped:
       return "ArrayNotEscaped";
-    case IRProperty::CommGroupsCollected:
-      return "CommGroupsCollected";
+    case IRProperty::CommDomainScopesMaterialized:
+      return "CommDomainScopesMaterialized";
     case IRProperty::RuntimeScopesMaterialized:
       return "RuntimeScopesMaterialized";
     case IRProperty::AssignTypeSymmetry:

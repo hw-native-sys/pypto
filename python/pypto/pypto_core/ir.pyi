@@ -2597,11 +2597,6 @@ class Program(IRNode):
     functions: Final[dict[GlobalVar, Function]]
     """Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name."""
 
-    comm_groups: Final[list[CommGroup]]
-    """CommGroups declared on the program. Participates in structural
-    equality / hashing through reflection."""
-
-    @overload
     def __init__(
         self,
         functions: list[Function],
@@ -2617,16 +2612,6 @@ class Program(IRNode):
             name: Program name (optional)
             span: Source location
         """
-
-    @overload
-    def __init__(
-        self,
-        functions: list[Function],
-        comm_groups: list[CommGroup],
-        name: str,
-        span: Span,
-    ) -> None:
-        """Create a program from a list of functions and CommGroup metadata."""
 
     def get_function(self, name: str) -> Function | None:
         """Get a function by name.
@@ -2715,31 +2700,6 @@ class WindowBuffer(Var):
         span: Span = ...,
     ) -> None:
         """Create a WindowBuffer wrapping the given Ptr ``base`` Var."""
-
-class CommGroup(IRNode):
-    """A communication group inferred for a ``@pl.program``.
-
-    The ``CollectCommGroups`` pass (added in N4) populates
-    ``program.comm_groups`` from ``pld.alloc_window_buffer`` ops and their
-    dispatch coverage. Participates in structural equality / hashing via
-    reflection.
-    """
-
-    devices: Final[list[int]]
-    """Ascending-sorted physical device-id list. **Empty list means "all
-    devices"** (every entry of ``DistributedConfig.device_ids``, resolved by
-    the driver at submit-time)."""
-
-    slots: Final[list[WindowBuffer]]
-    """Allocation slots shared by every rank in the group (alloc-order)."""
-
-    def __init__(
-        self,
-        devices: list[int],
-        slots: list[WindowBuffer],
-        span: Span = ...,
-    ) -> None:
-        """Create a CommGroup. Pass an empty ``devices`` list for "all devices"."""
 
 @overload
 def structural_hash(node: IRNode, enable_auto_mapping: bool = False) -> int: ...

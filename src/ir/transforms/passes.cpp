@@ -142,10 +142,7 @@ class FunctionPassImpl : public PassImpl {
       transformed_functions.push_back(transformed_func);
     }
 
-    // Thread ``comm_groups_`` through — otherwise every FunctionPass that
-    // runs after CollectCommGroups would silently drop it.
-    return std::make_shared<const Program>(transformed_functions, program->comm_groups_, program->name_,
-                                           program->span_);
+    return std::make_shared<const Program>(transformed_functions, program->name_, program->span_);
   }
 
   [[nodiscard]] std::string GetName() const override { return name_.empty() ? "FunctionPass" : name_; }

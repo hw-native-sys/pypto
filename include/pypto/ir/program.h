@@ -79,39 +79,6 @@ class WindowBuffer : public Var {
 using WindowBufferPtr = std::shared_ptr<const WindowBuffer>;
 
 /**
- * @brief A communication group inferred for a ``@pl.program``.
- *
- * The ``CollectCommGroups`` pass (N4) builds these from
- * ``pld.tensor.alloc_window_buffer`` ops and their dispatch coverage. The
- * distributed codegen reads them in ``EmitCommDomainAllocations`` and emits
- * one ``with orch.allocate_domain(name=..., workers=..., window_size=...,
- * buffers=[...])`` block per group at the top of host_orch.
- *
- * ``devices_`` is the ascending-sorted set of worker indices into
- * ``DistributedConfig.device_ids`` covered by the group. **An empty vector
- * means "all devices"** (every entry of ``DistributedConfig.device_ids``).
- */
-class CommGroup : public IRNode {
- public:
-  std::vector<int64_t> devices_;        ///< Covered worker indices (ascending); empty = all devices
-  std::vector<WindowBufferPtr> slots_;  ///< Allocation slots in this group (alloc-order)
-
-  CommGroup(std::vector<int64_t> devices, std::vector<WindowBufferPtr> slots, Span span = Span::unknown())
-      : IRNode(std::move(span)), devices_(std::move(devices)), slots_(std::move(slots)) {}
-
-  [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::CommGroup; }
-  [[nodiscard]] std::string TypeName() const override { return "CommGroup"; }
-
-  static constexpr auto GetFieldDescriptors() {
-    return std::tuple_cat(IRNode::GetFieldDescriptors(),
-                          std::make_tuple(reflection::UsualField(&CommGroup::devices_, "devices"),
-                                          reflection::UsualField(&CommGroup::slots_, "slots")));
-  }
-};
-
-using CommGroupPtr = std::shared_ptr<const CommGroup>;
-
-/**
  * @brief Program definition
  *
  * Represents a complete program with functions mapped by GlobalVar references.
@@ -136,16 +103,6 @@ class Program : public IRNode {
       : IRNode(std::move(span)), functions_(std::move(functions)), name_(std::move(name)) {}
 
   /**
-   * @brief Map-based ctor with CommGroup metadata (used by the deserializer).
-   */
-  Program(std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions,
-          std::vector<CommGroupPtr> comm_groups, std::string name, Span span)
-      : IRNode(std::move(span)),
-        functions_(std::move(functions)),
-        name_(std::move(name)),
-        comm_groups_(std::move(comm_groups)) {}
-
-  /**
    * @brief Create a program from a list of functions
    *
    * Convenience constructor that creates GlobalVar references for each function
@@ -156,17 +113,6 @@ class Program : public IRNode {
    * @param span Source location
    */
   Program(const std::vector<FunctionPtr>& functions, std::string name, Span span);
-
-  /**
-   * @brief Create a program from a list of functions and CommGroup metadata.
-   *
-   * @param functions List of functions
-   * @param comm_groups List of CommGroups declared on the program
-   * @param name Program name (optional)
-   * @param span Source location
-   */
-  Program(const std::vector<FunctionPtr>& functions, std::vector<CommGroupPtr> comm_groups, std::string name,
-          Span span);
 
   [[nodiscard]] ObjectKind GetKind() const override { return ObjectKind::Program; }
   [[nodiscard]] std::string TypeName() const override { return "Program"; }
@@ -189,22 +135,16 @@ class Program : public IRNode {
 
   /**
    * @brief Get field descriptors for reflection-based visitation.
-   *
-   * ``comm_groups_`` participates in structural equality / hashing via
-   * ``UsualField``: two programs declaring the same CommGroups (same names,
-   * sizes, dtypes, host-staging flags) are structurally equivalent.
    */
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(IRNode::GetFieldDescriptors(),
                           std::make_tuple(reflection::IgnoreField(&Program::name_, "name"),
-                                          reflection::UsualField(&Program::functions_, "functions"),
-                                          reflection::UsualField(&Program::comm_groups_, "comm_groups")));
+                                          reflection::UsualField(&Program::functions_, "functions")));
   }
 
  public:
   std::string name_;                                                 // Program name
   std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> functions_;  // Map of GlobalVars to Functions
-  std::vector<CommGroupPtr> comm_groups_;                            // CommGroups (host-side metadata)
 };
 
 using ProgramPtr = std::shared_ptr<const Program>;

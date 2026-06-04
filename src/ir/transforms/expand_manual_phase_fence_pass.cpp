@@ -509,8 +509,7 @@ ProgramPtr TransformExpandManualPhaseFence(const ProgramPtr& program) {
     changed = true;
   }
   if (!changed) return program;
-  return std::make_shared<Program>(std::move(new_functions), program->comm_groups_, program->name_,
-                                   program->span_);
+  return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
 }
 
 }  // namespace

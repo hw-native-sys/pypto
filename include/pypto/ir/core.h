@@ -122,7 +122,6 @@ enum class ObjectKind {
   Function,
   Program,
   WindowBuffer,
-  CommGroup,
 
   // Op kinds
   Op,

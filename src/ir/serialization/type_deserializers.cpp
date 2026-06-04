@@ -1074,22 +1074,12 @@ static IRNodePtr DeserializeProgram(const msgpack::object& fields_obj, msgpack::
     }
   }
 
-  std::vector<CommGroupPtr> comm_groups;
-  // ``comm_groups`` is optional — older serialized programs do not contain it.
-  if (ctx.HasField(fields_obj, "comm_groups")) {
-    auto comm_groups_obj = GET_FIELD_OBJ("comm_groups");
-    if (comm_groups_obj.type == msgpack::type::ARRAY) {
-      for (uint32_t i = 0; i < comm_groups_obj.via.array.size; ++i) {
-        comm_groups.push_back(std::static_pointer_cast<const CommGroup>(
-            ctx.DeserializeNode(comm_groups_obj.via.array.ptr[i], zone)));
-      }
-    }
-  }
+  // Older serialized programs may still carry a top-level ``comm_groups``
+  // field; the materialised IR now embeds comm-domain scopes inside each
+  // function body, so the field is silently dropped (CollectCommGroups will
+  // re-derive the equivalent scope chain on the next pass run).
 
-  if (comm_groups.empty()) {
-    return std::make_shared<Program>(std::move(functions), name, span);
-  }
-  return std::make_shared<Program>(std::move(functions), std::move(comm_groups), name, span);
+  return std::make_shared<Program>(std::move(functions), name, span);
 }
 
 // Deserialize WindowBuffer
@@ -1104,33 +1094,6 @@ static IRNodePtr DeserializeWindowBuffer(const msgpack::object& fields_obj, msgp
   bool load_from_host = GET_FIELD(bool, "load_from_host");
   bool store_to_host = GET_FIELD(bool, "store_to_host");
   return std::make_shared<WindowBuffer>(base, size, load_from_host, store_to_host, span);
-}
-
-// Deserialize CommGroup
-static IRNodePtr DeserializeCommGroup(const msgpack::object& fields_obj, msgpack::zone& zone,
-                                      DeserializerContext& ctx) {
-  auto span = ctx.DeserializeSpan(GET_FIELD_OBJ("span"));
-
-  std::vector<int64_t> devices;
-  auto devices_obj = GET_FIELD_OBJ("devices");
-  if (devices_obj.type == msgpack::type::ARRAY) {
-    devices.reserve(devices_obj.via.array.size);
-    for (uint32_t i = 0; i < devices_obj.via.array.size; ++i) {
-      int64_t v = 0;
-      devices_obj.via.array.ptr[i].convert(v);
-      devices.push_back(v);
-    }
-  }
-
-  std::vector<WindowBufferPtr> slots;
-  auto slots_obj = GET_FIELD_OBJ("slots");
-  if (slots_obj.type == msgpack::type::ARRAY) {
-    for (uint32_t i = 0; i < slots_obj.via.array.size; ++i) {
-      slots.push_back(std::static_pointer_cast<const WindowBuffer>(
-          ctx.DeserializeNode(slots_obj.via.array.ptr[i], zone)));
-    }
-  }
-  return std::make_shared<CommGroup>(std::move(devices), std::move(slots), span);
 }
 
 // Deserialize MakeTuple
@@ -1218,7 +1181,6 @@ static TypeRegistrar _inline_stmt_registrar("InlineStmt", DeserializeInlineStmt)
 static TypeRegistrar _function_registrar("Function", DeserializeFunction);
 static TypeRegistrar _program_registrar("Program", DeserializeProgram);
 static TypeRegistrar _window_buffer_registrar("WindowBuffer", DeserializeWindowBuffer);
-static TypeRegistrar _comm_group_registrar("CommGroup", DeserializeCommGroup);
 
 static TypeRegistrar _make_tuple_registrar("MakeTuple", DeserializeMakeTuple);
 static TypeRegistrar _tuple_get_item_expr_registrar("TupleGetItemExpr", DeserializeTupleGetItemExpr);

@@ -47,7 +47,7 @@ class IRProperty(Enum):
     OrchestrationReferencesResolved = ...
     TensorViewCanonical = ...
     ArrayNotEscaped = ...
-    CommGroupsCollected = ...
+    CommDomainScopesMaterialized = ...
     RuntimeScopesMaterialized = ...
     AssignTypeSymmetry = ...
 
@@ -564,13 +564,15 @@ def normalize_stmt_structure() -> Pass:
     """Create a pass that normalizes statement structure."""
 
 def collect_comm_groups() -> Pass:
-    """Collect CommGroups for distributed window-buffer allocations.
+    """Collect comm domains and materialise them as scope statements.
 
     For each ``@pl.program`` host_orch function, traces
     ``pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r)``
     chains, constructs a :class:`WindowBuffer` per alloc, back-fills the
     ``DistributedTensorType.window_buffer_`` field on every ``pld.tensor.window``
-    result Var, and writes :attr:`Program.comm_groups`.
+    result Var, and wraps the host_orch body in nested
+    :class:`CommDomainScopeStmt` nodes (one per inferred comm domain,
+    outer = first declared, inner = last).
 
     Runs immediately after :func:`inline_functions` — L2 orchestrations are
     never inlined into L3, so the dispatch chain survives inlining.

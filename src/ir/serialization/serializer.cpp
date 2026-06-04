@@ -239,7 +239,6 @@ class IRSerializer::Impl {
     SERIALIZE_FIELDS(Function);
     SERIALIZE_FIELDS(Program);
     SERIALIZE_FIELDS(WindowBuffer);
-    SERIALIZE_FIELDS(CommGroup);
 
 #undef SERIALIZE_FIELDS
 #undef SERIALIZE_FIELDS_BASE

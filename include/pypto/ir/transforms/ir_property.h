@@ -61,8 +61,9 @@ enum class IRProperty : uint64_t {
   TensorViewCanonical,              ///< TensorView canonicality verified (weak: stride.empty() ok; strict:
                                     ///< requires materialization, RFC #1300 §2.2)
   ArrayNotEscaped,                  ///< ArrayType never appears as a function parameter or return type
-  CommGroupsCollected,              ///< Program.comm_groups_ populated and pld.tensor.window result types
-                                    ///< carry DistributedTensorType.window_buffer_ back-references
+  CommDomainScopesMaterialized,     ///< Host_orch bodies are wrapped in CommDomainScopeStmts (one per
+                                    ///< inferred comm domain) and pld.tensor.window result types carry
+                                    ///< DistributedTensorType.window_buffer_ back-references
   RuntimeScopesMaterialized,        ///< Orchestration functions carry explicit RuntimeScopeStmt nodes for the
                                     ///< function body and for/if bodies; codegen no longer emits implicit
                                     ///< PTO2_SCOPE() wrappers

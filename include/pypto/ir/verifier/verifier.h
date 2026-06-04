@@ -357,18 +357,21 @@ PropertyVerifierPtr CreateOrchestrationReferencesResolvedPropertyVerifier();
 PropertyVerifierPtr CreateTensorViewCanonicalPropertyVerifier(bool require_materialized = false);
 
 /**
- * @brief Factory function for creating CommGroupsCollected property verifier
+ * @brief Factory function for creating CommDomainScopesMaterialized property verifier
  *
- * Verifies that every ``WindowBuffer`` slot in ``Program.comm_groups_`` appears
- * in exactly one ``CommGroup``. ``DistributedCodegen`` relies on this
- * shared_ptr-identity uniqueness to route each Submit's per-arg ``device_ctx``
- * handle to the correct domain; a duplicate slot would misroute communication
- * traffic at runtime. The ``CollectCommGroups`` pass enforces this invariant
- * by construction; the verifier independently checks it.
+ * Walks each function body for ``CommDomainScopeStmt`` nodes and verifies:
+ * (a) every scope's ``slots_`` is non-empty (an empty domain would emit
+ * ``window_size=0`` and the runtime would reject it); (b) every slot is
+ * non-null; (c) each ``WindowBuffer`` appears as a slot in at most one
+ * scope program-wide. ``DistributedCodegen`` relies on this shared_ptr-identity
+ * uniqueness to route each Submit's per-arg ``device_ctx`` handle to the
+ * correct domain; a duplicate slot would misroute communication traffic at
+ * runtime. The ``CollectCommGroups`` pass enforces this invariant by
+ * construction; the verifier independently checks it.
  *
- * @return Shared pointer to CommGroupsCollected PropertyVerifier
+ * @return Shared pointer to CommDomainScopesMaterialized PropertyVerifier
  */
-PropertyVerifierPtr CreateCommGroupsCollectedPropertyVerifier();
+PropertyVerifierPtr CreateCommDomainScopesMaterializedPropertyVerifier();
 
 /**
  * @brief Factory function for creating AssignTypeSymmetry property verifier

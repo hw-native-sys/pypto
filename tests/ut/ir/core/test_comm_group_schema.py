@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""IR-level tests for the v2 ``WindowBuffer`` / ``CommGroup`` schema.
+"""IR-level tests for the v2 ``WindowBuffer`` / ``CommDomainScopeStmt`` schema.
 
 Post-redesign, ``WindowBuffer`` is a :class:`Var` subclass that mirrors
 :class:`MemRef` exactly:
@@ -17,19 +17,37 @@ Post-redesign, ``WindowBuffer`` is a :class:`Var` subclass that mirrors
 * Carries ``size`` (per-rank bytes), ``load_from_host`` / ``store_to_host``
   flags. **No** dtype, **no** name field — the runtime-unique identifier
   comes from the inherited ``Var.name_hint`` (taken from ``base.name_hint``).
+
+``CommDomainScopeStmt`` wraps host_orch use sites of one comm domain's
+slots; it carries a ``devices`` list (empty = "all devices") and an
+ordered ``slots`` vector of :class:`WindowBuffer`s. Structural equality
+follows the field descriptors of :class:`ScopeStmt` (``body``,
+``name_hint``, ``attrs``) plus ``devices`` and ``slots``.
 """
 
 import pytest
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import (
-    CommGroup,
+    CommDomainScopeStmt,
     ConstInt,
     PtrType,
+    SeqStmts,
     Span,
     Var,
     WindowBuffer,
     structural_equal,
 )
+
+
+def _empty_body() -> SeqStmts:
+    return SeqStmts([], Span.unknown())
+
+
+def _scope(devices: list[int], slots: list[WindowBuffer]) -> CommDomainScopeStmt:
+    """Build a minimal CommDomainScopeStmt with an empty body — the body
+    field is required for ScopeStmt structural equality but is orthogonal
+    to the devices/slots semantics under test here."""
+    return CommDomainScopeStmt(devices, slots, "", body=_empty_body(), span=Span.unknown())
 
 
 def _const(value: int) -> ConstInt:
@@ -75,83 +93,82 @@ def test_window_buffer_is_var_subclass():
 
 
 # ---------------------------------------------------------------------------
-# CommGroup structural equality
+# CommDomainScopeStmt structural equality
 # ---------------------------------------------------------------------------
 
 
-def test_comm_group_empty_devices_means_all():
+def test_comm_domain_scope_empty_devices_means_all():
     """``devices == []`` is the convention for "covers all DistributedConfig.device_ids"."""
-    g = CommGroup([], [WindowBuffer(_ptr("data"), _const(64))])
-    assert list(g.devices) == []
+    s = _scope([], [WindowBuffer(_ptr("data"), _const(64))])
+    assert list(s.devices) == []
 
 
-def test_comm_group_explicit_device_subset():
-    g = CommGroup([0, 1, 2], [WindowBuffer(_ptr("data"), _const(64))])
-    assert list(g.devices) == [0, 1, 2]
+def test_comm_domain_scope_explicit_device_subset():
+    s = _scope([0, 1, 2], [WindowBuffer(_ptr("data"), _const(64))])
+    assert list(s.devices) == [0, 1, 2]
 
 
-def test_comm_group_structural_equal_when_slot_var_is_shared():
-    """Two CommGroups whose ``slots`` contain the **same** WindowBuffer Var
-    instances compare structurally equal.
+def test_comm_domain_scope_structural_equal_when_slot_var_is_shared():
+    """Two CommDomainScopeStmts whose ``slots`` contain the **same**
+    WindowBuffer Var instances compare structurally equal.
 
     Mirrors :class:`MemRef` semantics: independently-constructed Var
     instances each have a unique identity, so structural equality requires
     sharing the underlying Var (same ``shared_ptr``). This is the form the
-    comm-collection pass produces — slots in ``Program.comm_groups`` and
-    the ``DistributedTensorType.window_buffer`` references both alias the
-    same WindowBuffer.
+    comm-collection pass produces — slots in the synthesised scope and the
+    ``DistributedTensorType.window_buffer`` references on every consuming
+    view both alias the same WindowBuffer.
     """
     wb = WindowBuffer(_ptr("data"), _const(256))
-    g1 = CommGroup([], [wb])
-    g2 = CommGroup([], [wb])
-    assert structural_equal(g1, g2)
+    s1 = _scope([], [wb])
+    s2 = _scope([], [wb])
+    assert structural_equal(s1, s2)
 
 
-def test_comm_group_structural_equal_for_independent_slot_vars_under_auto_mapping():
-    """Two CommGroups whose ``slots`` are *separately constructed* compare
-    structurally equal under ``enable_auto_mapping=True`` — corresponding
-    Vars are matched by their position in the structure, so distinct
-    UniqueIds don't break equality when the surrounding shape, base
-    ``name_hint``, ``size``, and host-staging flags all match.
+def test_comm_domain_scope_structural_equal_for_independent_slot_vars_under_auto_mapping():
+    """Two CommDomainScopeStmts whose ``slots`` are *separately constructed*
+    compare structurally equal under ``enable_auto_mapping=True`` —
+    corresponding Vars are matched by their position in the structure, so
+    distinct UniqueIds don't break equality when the surrounding shape,
+    base ``name_hint``, ``size``, and host-staging flags all match.
 
     Mirrors :class:`MemRef`'s auto-mapping semantics: the default identity
-    path requires shared Var instances (see
-    :func:`test_comm_group_structural_equal_when_slot_var_is_shared`); the
-    auto-mapping path is the structural-isomorphism check used when
-    comparing IR produced by independent runs.
+    path requires shared Var instances; the auto-mapping path is the
+    structural-isomorphism check used when comparing IR produced by
+    independent runs.
     """
-    g1 = CommGroup([], [WindowBuffer(_ptr("data"), _const(256))])
-    g2 = CommGroup([], [WindowBuffer(_ptr("data"), _const(256))])
-    assert structural_equal(g1, g2, enable_auto_mapping=True)
+    s1 = _scope([], [WindowBuffer(_ptr("data"), _const(256))])
+    s2 = _scope([], [WindowBuffer(_ptr("data"), _const(256))])
+    assert structural_equal(s1, s2, enable_auto_mapping=True)
 
 
-def test_comm_group_structural_not_equal_when_devices_differ():
+def test_comm_domain_scope_structural_not_equal_when_devices_differ():
     """Sharing the slot Var isolates the ``devices``-only difference."""
     wb = WindowBuffer(_ptr("data"), _const(64))
-    g_all = CommGroup([], [wb])
-    g_subset = CommGroup([0, 1], [wb])
-    assert not structural_equal(g_all, g_subset)
+    s_all = _scope([], [wb])
+    s_subset = _scope([0, 1], [wb])
+    assert not structural_equal(s_all, s_subset)
 
 
-def test_comm_group_structural_not_equal_when_subsets_differ():
+def test_comm_domain_scope_structural_not_equal_when_subsets_differ():
     wb = WindowBuffer(_ptr("data"), _const(64))
-    a = CommGroup([0, 1], [wb])
-    b = CommGroup([2, 3], [wb])
+    a = _scope([0, 1], [wb])
+    b = _scope([2, 3], [wb])
     assert not structural_equal(a, b)
 
 
-def test_comm_group_structural_not_equal_when_slots_differ():
-    """Same base Var but different ``size`` → distinct slot Vars → distinct groups."""
+def test_comm_domain_scope_structural_not_equal_when_slots_differ():
+    """Same base Var but different ``size`` → distinct slot Vars → distinct scopes."""
     base = _ptr("data")
-    a = CommGroup([], [WindowBuffer(base, _const(64))])
-    b = CommGroup([], [WindowBuffer(base, _const(128))])
+    a = _scope([], [WindowBuffer(base, _const(64))])
+    b = _scope([], [WindowBuffer(base, _const(128))])
     assert not structural_equal(a, b)
 
 
-def test_comm_group_structural_not_equal_when_load_flag_differs():
+def test_comm_domain_scope_structural_not_equal_when_load_flag_differs():
     base = _ptr("data")
-    a = CommGroup([], [WindowBuffer(base, _const(64), load_from_host=False)])
-    b = CommGroup([], [WindowBuffer(base, _const(64), load_from_host=True)])
+    a = _scope([], [WindowBuffer(base, _const(64), load_from_host=False)])
+    b = _scope([], [WindowBuffer(base, _const(64), load_from_host=True)])
     assert not structural_equal(a, b)
 
 

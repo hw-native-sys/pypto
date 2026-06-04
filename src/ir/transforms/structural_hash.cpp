@@ -595,7 +595,6 @@ StructuralHasher::result_type StructuralHasher::HashNode(const IRNodePtr& node) 
   HASH_DISPATCH(Function)
   HASH_DISPATCH(Program)
   HASH_DISPATCH(WindowBuffer)
-  HASH_DISPATCH(CommGroup)
 
   // Free Var types (including MemRef and IterArg) that may be mapped to other free vars.
   // These have already been dispatched above for field hashing;

@@ -1671,11 +1671,6 @@ void BindIR(nb::module_& m) {
                     nb::arg("functions"), nb::arg("name"), nb::arg("span"),
                     "Create a program from a list of functions. "
                     "GlobalVar references are created automatically from function names.");
-  program_class.def(
-      nb::init<const std::vector<FunctionPtr>&, std::vector<CommGroupPtr>, const std::string&, const Span&>(),
-      nb::arg("functions"), nb::arg("comm_groups"), nb::arg("name"), nb::arg("span"),
-      "Create a program from a list of functions and CommGroup metadata. "
-      "GlobalVar references are created automatically from function names.");
   program_class.def("get_function", &Program::GetFunction, nb::arg("name"),
                     "Get a function by name, returns None if not found");
   program_class.def("get_global_var", &Program::GetGlobalVar, nb::arg("name"),
@@ -1699,16 +1694,13 @@ void BindIR(nb::module_& m) {
       "Map of GlobalVar references to their corresponding functions, sorted by GlobalVar name");
   program_class.def_ro("name", &Program::name_, "Program name");
   program_class.def_ro("span", &Program::span_, "Source location");
-  program_class.def_ro("comm_groups", &Program::comm_groups_,
-                       "List of CommGroups declared on the program. CommGroups participate "
-                       "in structural equality / hashing through reflection.");
 
-  // WindowBuffer — a specialised Var subclass that carries CommGroup window-buffer
+  // WindowBuffer — a specialised Var subclass that carries window-buffer
   // allocation metadata. Mirrors MemRef's Var-subclass shape; the inherited
   // ``name_hint`` is mirrored from ``name_`` (UsualField, unique-id role).
   auto window_buffer_class = nb::class_<WindowBuffer, Var>(
       ir, "WindowBuffer",
-      "Per-rank CommGroup window-buffer allocation, modelled as a specialised Var. "
+      "Per-rank window-buffer allocation, modelled as a specialised Var. "
       "Its SSA-edge type is the singleton WindowBufferType; the allocation metadata "
       "(name, size, dtype, host-staging flags) lives on the Var subclass directly — "
       "the exact mirror of how MemRef carries (base, byte_offset, size) under MemRefType. "
@@ -1721,16 +1713,6 @@ void BindIR(nb::module_& m) {
                           "runtime-unique identifier flows through the inherited "
                           "Var.name_hint (taken from base.name_hint).");
   BindFields<WindowBuffer>(window_buffer_class);
-
-  auto comm_group_class =
-      nb::class_<CommGroup, IRNode>(ir, "CommGroup",
-                                    "A communication group inferred from pld.alloc_window_buffer ops: a "
-                                    "device-id list (empty = all devices) and a list of WindowBuffer slots "
-                                    "shared by every rank in the group.");
-  comm_group_class.def(nb::init<std::vector<int64_t>, std::vector<WindowBufferPtr>, Span>(),
-                       nb::arg("devices"), nb::arg("slots"), nb::arg("span") = Span::unknown(),
-                       "Create a CommGroup. ``devices`` empty = all devices.");
-  BindFields<CommGroup>(comm_group_class);
 
   // Python-style printer function - unified API for IRNode
   ir.def(

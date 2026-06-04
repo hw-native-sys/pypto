@@ -90,9 +90,9 @@ void BindPass(nb::module_& m) {
              "Every TensorType.tensor_view_ is canonical per RFC #1300 §2.2")
       .value("ArrayNotEscaped", IRProperty::ArrayNotEscaped,
              "ArrayType never appears as a function parameter or return type")
-      .value("CommGroupsCollected", IRProperty::CommGroupsCollected,
-             "Program.comm_groups_ populated and pld.tensor.window result types carry "
-             "DistributedTensorType.window_buffer_ back-references")
+      .value("CommDomainScopesMaterialized", IRProperty::CommDomainScopesMaterialized,
+             "Host_orch bodies are wrapped in CommDomainScopeStmts (one per inferred comm domain) and "
+             "pld.tensor.window result types carry DistributedTensorType.window_buffer_ back-references")
       .value("RuntimeScopesMaterialized", IRProperty::RuntimeScopesMaterialized,
              "Orchestration functions carry explicit RuntimeScopeStmt nodes for the function body and "
              "for/if bodies; codegen no longer emits implicit PTO2_SCOPE() wrappers")
@@ -491,9 +491,9 @@ void BindPass(nb::module_& m) {
              "Trace pld.tensor.alloc_window_buffer → pld.tensor.window → dispatch(device=r) "
              "chains in each\n"
              "host_orch function, materialise WindowBuffer instances back-referenced from\n"
-             "DistributedTensorType.window_buffer_ on view Vars, and populate\n"
-             "Program.comm_groups_ with the inferred coverage. Runs immediately after\n"
-             "InlineFunctions (L2 orch is never inlined into L3).");
+             "DistributedTensorType.window_buffer_ on view Vars, and wrap the host_orch\n"
+             "body in nested CommDomainScopeStmts (one per inferred comm domain). Runs\n"
+             "immediately after InlineFunctions (L2 orch is never inlined into L3).");
   passes.def("materialize_runtime_scopes", &pass::MaterializeRuntimeScopes,
              "Materialize implicit orchestration scopes as explicit RuntimeScopeStmt nodes.\n\n"
              "For every Orchestration function, inserts AUTO RuntimeScopeStmt (manual_=false)\n"

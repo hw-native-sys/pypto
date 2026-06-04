@@ -324,9 +324,18 @@ class DispatchAnalyzer : public IRVisitor {
 
 /// Process one host_orch function: identify allocs/windows/dispatches,
 /// construct WindowBuffer instances, rewrite the body to substitute view Vars
-/// with type-updated copies. Appends newly-built CommGroups to ``groups``.
-FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string, FunctionPtr>& chip_orchs,
-                            std::vector<CommGroupPtr>& groups) {
+/// with type-updated copies, and wrap the body in a chain of
+/// ``CommDomainScopeStmt`` (one per inferred comm domain, outer = first
+/// declared, inner = last declared).
+FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string, FunctionPtr>& chip_orchs) {
+  // Idempotence: if this function's body is already wrapped in a
+  // CommDomainScopeStmt, the pass has run on it before — skip to avoid
+  // double-wrapping the body and minting a fresh set of WindowBuffer
+  // instances that would shadow the existing ones on every view.
+  if (func->body_ && As<CommDomainScopeStmt>(func->body_)) {
+    return func;
+  }
+
   AllocAndWindowCollector collector;
   collector.VisitStmt(func->body_);
 
@@ -369,21 +378,21 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
     view_subst[w.old_view_var.get()] = MintViewVar(w.old_view_var, w.alloc->wb);
   }
 
-  // Phase 6: cluster allocs into CommGroups by merged descriptor (alloc-order
-  // within a group). Use a vector for deterministic group order: scan
-  // collector.allocs in source order and append to the first matching group
+  // Phase 6: cluster allocs into pending domain entries by merged descriptor
+  // (alloc-order within a domain). Use a vector for deterministic order: scan
+  // collector.allocs in source order and append to the first matching entry
   // or create a new one.
-  struct PendingGroup {
+  struct PendingDomain {
     DeviceDescriptor desc;
     std::vector<WindowBufferPtr> slots;
     std::set<std::string> names;  // sanity check
     Span span;
   };
-  std::vector<PendingGroup> pending;
+  std::vector<PendingDomain> pending;
   for (const auto& rec : collector.allocs) {
     DeviceDescriptor merged;
     for (const auto& d : rec->seen) merged.Merge(d);
-    PendingGroup* tgt = nullptr;
+    PendingDomain* tgt = nullptr;
     for (auto& g : pending) {
       if (g.desc == merged) {
         tgt = &g;
@@ -395,14 +404,8 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
       tgt = &pending.back();
     }
     INTERNAL_CHECK_SPAN(tgt->names.insert(rec->name).second, rec->span)
-        << "CollectCommGroups: duplicate allocation name '" << rec->name << "' within the same CommGroup";
+        << "CollectCommGroups: duplicate allocation name '" << rec->name << "' within the same comm domain";
     tgt->slots.push_back(rec->wb);
-  }
-  // Construct CommGroup entries (legacy path — read by DistributedCodegen
-  // until Phase C migrates it). Copy slots so Phase 8 below can move them
-  // into the scope-stmt wrapping without invalidating these.
-  for (const auto& g : pending) {
-    groups.push_back(std::make_shared<const CommGroup>(g.desc.ToDevices(), g.slots, g.span));
   }
 
   // Phase 7: rewrite host_orch body so every reference to a pld.tensor.window result
@@ -410,12 +413,9 @@ FunctionPtr ProcessHostOrch(const FunctionPtr& func, const std::map<std::string,
   // Substitute is the wrapper that does exactly this transformation.
   StmtPtr new_body = view_subst.empty() ? func->body_ : transform_utils::Substitute(func->body_, view_subst);
 
-  // Phase 8: wrap new_body in nested CommDomainScopeStmts so the scope chain
-  // is materialised in the IR alongside Program::comm_groups_. Outer = first
-  // group, inner = last group — matches the declaration-order nesting today's
-  // DistributedCodegen emits at the top of host_orch (see
-  // src/codegen/distributed/distributed_codegen.cpp:270-339). The name_hint
-  // matches the codegen-derived handle var so Phase C can read it verbatim.
+  // Phase 8: wrap new_body in nested CommDomainScopeStmts. Outer = first
+  // declared domain, inner = last. ``name_hint_`` is ``"comm_d<n>"`` so
+  // DistributedCodegen emits the matching ``__comm_d<n>`` handle var.
   //
   // Build inner-out: start from the substituted body, wrap once per group
   // in reverse iteration order.
@@ -445,7 +445,6 @@ Pass CollectCommGroups() {
       if (IsChipOrch(func)) chip_orchs[func->name_] = func;
     }
 
-    std::vector<CommGroupPtr> all_groups;
     std::map<GlobalVarPtr, FunctionPtr, GlobalVarPtrLess> new_functions;
     bool modified = false;
 
@@ -454,14 +453,13 @@ Pass CollectCommGroups() {
         new_functions[gvar] = func;
         continue;
       }
-      auto new_func = ProcessHostOrch(func, chip_orchs, all_groups);
+      auto new_func = ProcessHostOrch(func, chip_orchs);
       new_functions[gvar] = new_func;
       if (new_func.get() != func.get()) modified = true;
     }
 
-    if (!modified && all_groups.empty()) return program;
-    return std::make_shared<Program>(std::move(new_functions), std::move(all_groups), program->name_,
-                                     program->span_);
+    if (!modified) return program;
+    return std::make_shared<Program>(std::move(new_functions), program->name_, program->span_);
   };
 
   return CreateProgramPass(pass_func, "CollectCommGroups", kCollectCommGroupsProperties);
@@ -470,36 +468,62 @@ Pass CollectCommGroups() {
 }  // namespace pass
 
 // ============================================================================
-// CommGroupsCollected property verifier
+// CommDomainScopesMaterialized property verifier
+//
+// Walks each host_orch function body looking for ``CommDomainScopeStmt``s and
+// asserts: (a) ``slots_`` is non-empty (an empty domain would emit
+// ``window_size=0`` and the runtime would reject it); (b) every slot is
+// non-null; (c) each ``WindowBuffer`` appears as a slot in at most one
+// scope program-wide (cross-scope identity uniqueness).
 // ============================================================================
 
-class CommGroupsCollectedPropertyVerifierImpl : public PropertyVerifier {
+class CommDomainScopeCollector : public IRVisitor {
  public:
-  [[nodiscard]] std::string GetName() const override { return "CommGroupsCollected"; }
+  std::vector<CommDomainScopeStmtPtr> scopes;
+  void VisitStmt_(const CommDomainScopeStmtPtr& op) override {
+    scopes.push_back(op);
+    if (op->body_) VisitStmt(op->body_);
+  }
+};
+
+class CommDomainScopesMaterializedPropertyVerifierImpl : public PropertyVerifier {
+ public:
+  [[nodiscard]] std::string GetName() const override { return "CommDomainScopesMaterialized"; }
 
   void Verify(const ProgramPtr& program, std::vector<Diagnostic>& diagnostics) override {
     if (!program) return;
-    std::unordered_map<const WindowBuffer*, size_t> first_seen_group;
-    for (size_t gi = 0; gi < program->comm_groups_.size(); ++gi) {
-      const auto& group = program->comm_groups_[gi];
-      if (!group) {
-        diagnostics.emplace_back(DiagnosticSeverity::Error, "CommGroupsCollected", 0,
-                                 "CommGroup at index " + std::to_string(gi) + " is null", Span::unknown());
+    CommDomainScopeCollector collector;
+    for (const auto& [gvar, func] : program->functions_) {
+      if (func && func->body_) collector.VisitStmt(func->body_);
+    }
+    std::unordered_map<const WindowBuffer*, const CommDomainScopeStmt*> first_seen;
+    for (const auto& scope : collector.scopes) {
+      if (!scope) {
+        diagnostics.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0,
+                                 "null CommDomainScopeStmt in IR", Span::unknown());
         continue;
       }
-      for (const auto& slot : group->slots_) {
+      if (scope->slots_.empty()) {
+        diagnostics.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0,
+                                 "CommDomainScopeStmt '" + scope->name_hint_ +
+                                     "' has no slots — every comm-domain scope must carry at least one "
+                                     "WindowBuffer",
+                                 scope->span_);
+        continue;
+      }
+      for (const auto& slot : scope->slots_) {
         if (!slot) {
-          diagnostics.emplace_back(DiagnosticSeverity::Error, "CommGroupsCollected", 0,
-                                   "CommGroup at index " + std::to_string(gi) + " has a null slot",
-                                   group->span_);
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0,
+                                   "CommDomainScopeStmt '" + scope->name_hint_ + "' has a null slot",
+                                   scope->span_);
           continue;
         }
-        auto [it, inserted] = first_seen_group.emplace(slot.get(), gi);
+        auto [it, inserted] = first_seen.emplace(slot.get(), scope.get());
         if (!inserted) {
-          diagnostics.emplace_back(DiagnosticSeverity::Error, "CommGroupsCollected", 0,
+          diagnostics.emplace_back(DiagnosticSeverity::Error, "CommDomainScopesMaterialized", 0,
                                    "WindowBuffer '" + slot->name_hint_ +
-                                       "' appears in multiple CommGroups (" + std::to_string(it->second) +
-                                       " and " + std::to_string(gi) + ")",
+                                       "' appears in multiple CommDomainScopeStmts ('" +
+                                       it->second->name_hint_ + "' and '" + scope->name_hint_ + "')",
                                    slot->span_);
         }
       }
@@ -507,8 +531,8 @@ class CommGroupsCollectedPropertyVerifierImpl : public PropertyVerifier {
   }
 };
 
-PropertyVerifierPtr CreateCommGroupsCollectedPropertyVerifier() {
-  return std::make_shared<CommGroupsCollectedPropertyVerifierImpl>();
+PropertyVerifierPtr CreateCommDomainScopesMaterializedPropertyVerifier() {
+  return std::make_shared<CommDomainScopesMaterializedPropertyVerifierImpl>();
 }
 
 }  // namespace ir

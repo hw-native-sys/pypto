@@ -17,34 +17,29 @@ chains, and:
 * constructs one :class:`ir.WindowBuffer` per alloc,
 * rewrites every ``pld.tensor.window`` result Var so its
   :class:`ir.DistributedTensorType` carries a ``window_buffer`` back-reference,
-* clusters allocs with the same device descriptor into a single
-  :class:`ir.CommGroup` and writes them to ``Program.comm_groups``.
+* clusters allocs with the same device descriptor into a single comm domain and
+  wraps the host_orch body in nested :class:`ir.CommDomainScopeStmt` nodes
+  (outer = first declared domain, inner = last).
 
 The tests below run the pass directly on a parsed program (via
-``passes.collect_comm_groups()(program)``). The pass's two output products have
-no *print/parse* surface syntax — so a whole-``@pl.program`` ``Expected`` built
-by parsing Python source would always carry an empty ``comm_groups`` and
-``window_buffer``-less view types, mismatching the pass output:
-
-* ``Program.comm_groups`` — a ``UsualField`` compared by ``structural_equal``,
-  but the printer emits no ``comm_groups`` syntax and the parser parses none.
-* ``DistributedTensorType.window_buffer_`` — a ``UsualField`` back-reference
-  on each view Var, also compared by ``structural_equal`` but not printed.
+``passes.collect_comm_groups()(program)``). The pass's output products have
+no full *print/parse* surface syntax — the printer emits a comment-only
+descriptor of each comm-domain scope, and the parser doesn't reconstruct the
+scope at all — so a whole-``@pl.program`` ``Expected`` parsed from Python
+source would always carry no scope-stmt wrapping and ``window_buffer``-less
+view types, mismatching the pass output.
 
 The Before/Expected ``assert_structural_equal`` pattern is therefore applied at
-the granularity of the pass's structurally-comparable output product — the
-produced :class:`ir.CommGroup` — rather than the whole program. Each
-``Expected`` ``CommGroup`` is **hand-built from the pass's documented
-semantics** (device-descriptor table + slot/alloc-order rules in
-``docs/en/dev/passes/36-collect_comm_groups.md``) and compared with
-``enable_auto_mapping=True`` so freshly-constructed ``WindowBuffer`` slot Vars
-match the pass-produced ones by structural isomorphism rather than identity
-(see ``tests/ut/ir/core/test_comm_group_schema.py`` for that contract). The
-comparison is load-bearing: a wrong ``devices`` list or slot ``size`` makes
-``structural_equal`` return ``False``.
+the granularity of the pass's structurally-comparable output products: the
+``devices`` list and ``slots`` vector of each emitted
+:class:`ir.CommDomainScopeStmt`. Slot ``WindowBuffer``s are hand-built from
+the pass's documented semantics (device-descriptor table + slot/alloc-order
+rules in ``docs/en/dev/passes/36-collect_comm_groups.md``) and compared with
+``enable_auto_mapping=True`` so freshly-constructed Vars match the
+pass-produced ones by structural isomorphism rather than identity.
 
 ``test_no_alloc_window_buffer_no_op`` is the whole-program exception: it
-produces neither ``comm_groups`` nor rewritten view types, so it uses
+produces no scope wrapping and no rewritten view types, so it uses
 ``assert_structural_equal`` on the entire program. Error-branch tests assert via
 ``pytest.raises`` — the malformed-input "after" is a ``pypto::ValueError``.
 """
@@ -60,9 +55,9 @@ def _basic_verification_context():
     """Override the ``ut/conftest.py`` autouse fixture to run with
     BEFORE_AND_AFTER property verification but no print/parse roundtrip.
 
-    The pass's output materialises ``Program.comm_groups`` and
+    The pass's output materialises ``CommDomainScopeStmt`` wrappers and
     ``DistributedTensorType.window_buffer_`` back-references on view Vars,
-    but the printer / parser pair has no surface syntax for either — so the
+    but the printer / parser pair does not roundtrip either — so the
     roundtrip-symmetric check would fail every iteration despite the
     in-memory IR being correct. Property verification still runs.
     """
@@ -106,6 +101,26 @@ def _view_var_types(func: ir.Function) -> list[ir.DistributedTensorType]:
     ]
 
 
+def _get_comm_domain_scopes(func: ir.Function) -> list[ir.CommDomainScopeStmt]:
+    """Walk ``func.body`` and return every ``CommDomainScopeStmt`` it carries,
+    in nesting order (outermost first, innermost last)."""
+    scopes: list[ir.CommDomainScopeStmt] = []
+
+    def walk(stmt: ir.Stmt) -> None:
+        if isinstance(stmt, ir.CommDomainScopeStmt):
+            scopes.append(stmt)
+        if isinstance(stmt, ir.SeqStmts):
+            for s in stmt.stmts:
+                walk(s)
+        if isinstance(stmt, ir.ForStmt):
+            walk(stmt.body)
+        if isinstance(stmt, ir.ScopeStmt):
+            walk(stmt.body)
+
+    walk(func.body)
+    return scopes
+
+
 def _apply(program: ir.Program) -> ir.Program:
     return passes.collect_comm_groups()(program)
 
@@ -113,8 +128,7 @@ def _apply(program: ir.Program) -> ir.Program:
 def _expected_slot(name: str, size_bytes: int) -> ir.WindowBuffer:
     """Hand-build the WindowBuffer the pass should mint for one alloc.
 
-    Per the pass's Phase-5 rule (``docs/.../36-collect_comm_groups.md`` step 5),
-    each ``pld.alloc_window_buffer(size, *, name)`` materialises
+    Each ``pld.alloc_window_buffer(size, *, name)`` materialises
     ``WindowBuffer(base=Var(name, PtrType), size=size, load_from_host=False,
     store_to_host=False)`` with ``name_hint`` inherited from the base Ptr Var.
     The literal ``size`` is the alloc's first arg passed through unchanged —
@@ -125,14 +139,21 @@ def _expected_slot(name: str, size_bytes: int) -> ir.WindowBuffer:
     return ir.WindowBuffer(base, size)
 
 
-def _assert_group_equal(actual: ir.CommGroup, expected: ir.CommGroup) -> None:
-    """Compare a produced CommGroup against a hand-derived Expected.
+def _assert_scope_fields(
+    actual: ir.CommDomainScopeStmt,
+    expected_devices: list[int],
+    expected_slots: list[ir.WindowBuffer],
+) -> None:
+    """Compare a produced ``CommDomainScopeStmt`` against hand-derived fields.
 
     ``enable_auto_mapping=True`` lets the freshly-built slot Vars in
-    ``expected`` match the pass-produced ones by structural isomorphism
+    ``expected_slots`` match the pass-produced ones by structural isomorphism
     (name_hint + size + flags) rather than by ``shared_ptr`` identity.
     """
-    ir.assert_structural_equal(actual, expected, enable_auto_mapping=True)
+    assert list(actual.devices) == expected_devices
+    assert len(actual.slots) == len(expected_slots)
+    for actual_slot, expected_slot in zip(actual.slots, expected_slots, strict=True):
+        ir.assert_structural_equal(actual_slot, expected_slot, enable_auto_mapping=True)
 
 
 # ---------------------------------------------------------------------------
@@ -158,19 +179,19 @@ def test_single_alloc_all_devices_world_size_loop():
             return 0
 
     result = _apply(P)
+    host = _get_func(result, "host_orch")
 
     # The world_size loop bound resolves the device descriptor to kAll, encoded
     # on the wire as an empty ``devices`` list, with a single slot for ``buf``.
-    assert len(result.comm_groups) == 1
-    expected = ir.CommGroup([], [_expected_slot("buf", 1024)])
-    _assert_group_equal(result.comm_groups[0], expected)
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    _assert_scope_fields(scopes[0], [], [_expected_slot("buf", 1024)])
 
     # The view's window_buffer back-reference now points to the (same) slot.
-    # Pointer-identity between the group's slot and the view type's
-    # window_buffer is a load-bearing invariant (doc "Output invariants") that
-    # structural comparison alone cannot express.
-    wb = result.comm_groups[0].slots[0]
-    host = _get_func(result, "host_orch")
+    # Pointer-identity between the scope's slot and the view type's
+    # window_buffer is a load-bearing invariant that structural comparison
+    # alone cannot express.
+    wb = scopes[0].slots[0]
     view_types = _view_var_types(host)
     assert len(view_types) == 1
     assert view_types[0].window_buffer is wb
@@ -199,11 +220,12 @@ def test_single_alloc_subset_const_int_devices():
             return 0
 
     result = _apply(P)
+    host = _get_func(result, "host_orch")
     # Two ConstInt dispatches contribute {0} and {1}; merged into subset {0,1}
     # over a single ``buf`` slot.
-    assert len(result.comm_groups) == 1
-    expected = ir.CommGroup([0, 1], [_expected_slot("buf", 1024)])
-    _assert_group_equal(result.comm_groups[0], expected)
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    _assert_scope_fields(scopes[0], [0, 1], [_expected_slot("buf", 1024)])
 
 
 # ---------------------------------------------------------------------------
@@ -229,14 +251,15 @@ def test_single_alloc_bounded_loop_devices():
             return 0
 
     result = _apply(P)
+    host = _get_func(result, "host_orch")
     # ``pl.range(2)`` expands the induction-var descriptor to subset {0, 1}.
-    assert len(result.comm_groups) == 1
-    expected = ir.CommGroup([0, 1], [_expected_slot("buf", 1024)])
-    _assert_group_equal(result.comm_groups[0], expected)
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    _assert_scope_fields(scopes[0], [0, 1], [_expected_slot("buf", 1024)])
 
 
 # ---------------------------------------------------------------------------
-# Two allocs / same descriptor → one group, two slots in alloc order
+# Two allocs / same descriptor → one scope, two slots in alloc order
 # ---------------------------------------------------------------------------
 
 
@@ -262,19 +285,21 @@ def test_two_allocs_same_descriptor_one_group():
             return 0
 
     result = _apply(P)
+    host = _get_func(result, "host_orch")
     # Both allocs are dispatched over the same world_size loop ⇒ identical kAll
-    # descriptor ⇒ a single group whose slots follow source/alloc order
-    # (buf_data, then buf_signal) per Phase-7 clustering.
-    assert len(result.comm_groups) == 1
-    expected = ir.CommGroup(
+    # descriptor ⇒ a single scope whose slots follow source/alloc order
+    # (buf_data, then buf_signal) per Phase-6 clustering.
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    _assert_scope_fields(
+        scopes[0],
         [],  # kAll
         [_expected_slot("buf_data", 1024), _expected_slot("buf_signal", 32)],
     )
-    _assert_group_equal(result.comm_groups[0], expected)
 
 
 # ---------------------------------------------------------------------------
-# Two allocs / different descriptors → two groups
+# Two allocs / different descriptors → two nested scopes
 # ---------------------------------------------------------------------------
 
 
@@ -302,12 +327,15 @@ def test_two_allocs_different_descriptors_two_groups():
             return 0
 
     result = _apply(P)
+    host = _get_func(result, "host_orch")
     # buf_a is dispatched to {0,1}; buf_b to {2,3}. Distinct descriptors ⇒ two
-    # groups. Phase-7 walks allocs in source order and opens a group on first
-    # descriptor mismatch, so group order follows alloc order: buf_a then buf_b.
-    assert len(result.comm_groups) == 2
-    _assert_group_equal(result.comm_groups[0], ir.CommGroup([0, 1], [_expected_slot("buf_a", 1024)]))
-    _assert_group_equal(result.comm_groups[1], ir.CommGroup([2, 3], [_expected_slot("buf_b", 1024)]))
+    # nested scopes. The pass walks allocs in source order and opens a domain
+    # on first descriptor mismatch, so scope order follows alloc order:
+    # outermost = buf_a, innermost = buf_b.
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 2
+    _assert_scope_fields(scopes[0], [0, 1], [_expected_slot("buf_a", 1024)])
+    _assert_scope_fields(scopes[1], [2, 3], [_expected_slot("buf_b", 1024)])
 
 
 # ---------------------------------------------------------------------------
@@ -344,10 +372,11 @@ def test_multi_view_per_alloc_shares_wb_instance():
     assert wb_a is not None and wb_b is not None
     # Both views materialise the same alloc → identical WindowBuffer shared_ptr.
     assert wb_a is wb_b
-    # And that same WindowBuffer is the (single) slot of the (single) group.
-    assert len(result.comm_groups) == 1
-    assert len(result.comm_groups[0].slots) == 1
-    assert result.comm_groups[0].slots[0] is wb_a
+    # And that same WindowBuffer is the (single) slot of the (single) scope.
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    assert len(scopes[0].slots) == 1
+    assert scopes[0].slots[0] is wb_a
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +419,7 @@ def test_dead_alloc_no_window_materialisation_raises():
 
     Phase-3 sanity check (source ``CHECK(!allocs_with_windows[...].empty())``,
     doc "Sanity checks" bullet 1): downstream codegen would have nothing to
-    point a CommDomain buffer slot at, so the pass rejects it. This is a
+    point a comm-domain buffer slot at, so the pass rejects it. This is a
     distinct branch from ``test_dead_alloc_no_dispatch_raises`` (which has a
     view but no consuming dispatch).
     """
@@ -478,11 +507,15 @@ def test_idempotent():
 
     first = _apply(P)
     second = _apply(first)
-    assert len(first.comm_groups) == 1
-    assert len(second.comm_groups) == 1
+    first_host = _get_func(first, "host_orch")
+    second_host = _get_func(second, "host_orch")
+    first_scopes = _get_comm_domain_scopes(first_host)
+    second_scopes = _get_comm_domain_scopes(second_host)
+    assert len(first_scopes) == 1
+    assert len(second_scopes) == 1
     # Same device coverage; same number of slots.
-    assert list(first.comm_groups[0].devices) == list(second.comm_groups[0].devices)
-    assert len(first.comm_groups[0].slots) == len(second.comm_groups[0].slots)
+    assert list(first_scopes[0].devices) == list(second_scopes[0].devices)
+    assert len(first_scopes[0].slots) == len(second_scopes[0].slots)
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +531,7 @@ def test_no_alloc_window_buffer_no_op():
             return x
 
     After = _apply(Before)
-    # No alloc_window_buffer chains ⇒ the pass produces no CommGroups and
+    # No alloc_window_buffer chains ⇒ the pass emits no scope wrapping and
     # rewrites nothing, so the program is unchanged.
     ir.assert_structural_equal(After, Before)
 
@@ -533,9 +566,10 @@ def test_loop_bound_via_assigned_temp_world_size():
             return 0
 
     result = _apply(P)
-    assert len(result.comm_groups) == 1
-    g = result.comm_groups[0]
-    assert list(g.devices) == [], "world_size loop bound must resolve to kAll"
+    host = _get_func(result, "host_orch")
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    assert list(scopes[0].devices) == [], "world_size loop bound must resolve to kAll"
 
 
 def test_loop_bound_via_assigned_temp_const_int():
@@ -562,18 +596,19 @@ def test_loop_bound_via_assigned_temp_const_int():
             return 0
 
     result = _apply(P)
-    assert len(result.comm_groups) == 1
-    g = result.comm_groups[0]
-    assert list(g.devices) == [0, 1]
+    host = _get_func(result, "host_orch")
+    scopes = _get_comm_domain_scopes(host)
+    assert len(scopes) == 1
+    assert list(scopes[0].devices) == [0, 1]
 
 
 # ---------------------------------------------------------------------------
-# CommGroupsCollected property verifier
+# CommDomainScopesMaterialized property verifier
 # ---------------------------------------------------------------------------
 
 
 def _build_pass_output_with_two_groups() -> ir.Program:
-    """Run the pass on a 2-group program; return its (uniqueness-correct) output."""
+    """Run the pass on a 2-domain program; return its (uniqueness-correct) output."""
 
     @pl.program
     class P:
@@ -598,32 +633,58 @@ def _build_pass_output_with_two_groups() -> ir.Program:
 def test_verifier_passes_on_pass_output():
     """Verifier emits no errors on the pass's own output (slot-uniqueness holds)."""
     program = _build_pass_output_with_two_groups()
-    assert len(program.comm_groups) == 2
+    host = _get_func(program, "host_orch")
+    assert len(_get_comm_domain_scopes(host)) == 2
 
     props = passes.IRPropertySet()
-    props.insert(passes.IRProperty.CommGroupsCollected)
+    props.insert(passes.IRProperty.CommDomainScopesMaterialized)
     diagnostics = passes.PropertyVerifierRegistry.verify(props, program)
     errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
     assert errors == []
 
 
-def test_verifier_flags_duplicate_slot_across_groups():
-    """A WindowBuffer reused across two CommGroups is rejected with a clear error."""
+def test_verifier_flags_duplicate_slot_across_scopes():
+    """A WindowBuffer reused across two CommDomainScopeStmts is rejected with a clear error."""
     program = _build_pass_output_with_two_groups()
-    cg0, cg1 = program.comm_groups[0], program.comm_groups[1]
+    host = _get_func(program, "host_orch")
+    outer, inner = _get_comm_domain_scopes(host)
 
-    # Inject a duplicate: build a new CommGroup that reuses cg0's first slot
-    # while cg0 still owns it. The verifier must flag the cross-group reuse.
-    duplicated = ir.CommGroup(list(cg1.devices), [cg0.slots[0]], cg1.span)
-    bad_program = ir.Program(list(program.functions.values()), [cg0, duplicated], program.name, program.span)
+    # Build a sibling scope that reuses the outer scope's slot while the outer
+    # still owns it. The body is the original (substituted) body lifted out
+    # from under ``inner`` — it's only present to satisfy the ScopeStmt ctor;
+    # the verifier only inspects ``slots_``.
+    duplicated = ir.CommDomainScopeStmt(
+        list(outer.devices),
+        [outer.slots[0]],
+        "comm_d_dup",
+        body=inner.body,
+        span=outer.span,
+    )
+
+    # Splice the duplicate into the function body in place of the original
+    # scope chain so the IR carries both ``outer`` (with the slot) and
+    # ``duplicated`` (reusing it).
+    bad_body = ir.SeqStmts([outer, duplicated], outer.span)
+    bad_host_func = ir.Function(
+        host.name,
+        list(host.params),
+        list(host.return_types),
+        bad_body,
+        host.span,
+        type=host.func_type,
+        level=host.level,
+        role=host.role,
+    )
+    new_functions = [bad_host_func if f.name == host.name else f for f in program.functions.values()]
+    bad_program = ir.Program(new_functions, program.name, program.span)
 
     props = passes.IRPropertySet()
-    props.insert(passes.IRProperty.CommGroupsCollected)
+    props.insert(passes.IRProperty.CommDomainScopesMaterialized)
     diagnostics = passes.PropertyVerifierRegistry.verify(props, bad_program)
     errors = [d for d in diagnostics if d.severity == passes.DiagnosticSeverity.Error]
     assert len(errors) == 1
-    assert "appears in multiple CommGroups" in errors[0].message
-    assert errors[0].rule_name == "CommGroupsCollected"
+    assert "appears in multiple CommDomainScopeStmts" in errors[0].message
+    assert errors[0].rule_name == "CommDomainScopesMaterialized"
 
 
 if __name__ == "__main__":

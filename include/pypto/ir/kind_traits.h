@@ -123,7 +123,6 @@ DEFINE_KIND_TRAIT(CommCtxType, ObjectKind::CommCtxType)
 DEFINE_KIND_TRAIT(Function, ObjectKind::Function)
 DEFINE_KIND_TRAIT(Program, ObjectKind::Program)
 DEFINE_KIND_TRAIT(WindowBuffer, ObjectKind::WindowBuffer)
-DEFINE_KIND_TRAIT(CommGroup, ObjectKind::CommGroup)
 
 // Op kinds
 DEFINE_KIND_TRAIT(Op, ObjectKind::Op)

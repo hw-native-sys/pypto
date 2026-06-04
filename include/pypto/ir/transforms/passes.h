@@ -236,9 +236,10 @@ Pass InlineFunctions();
  *     so ``DistributedTensorType.window_buffer_`` points to the new
  *     ``WindowBuffer`` (host_orch only — chip_orch / InCore param types
  *     remain ``nullopt``).
- *  5. Cluster ``WindowBuffer`` s by ``DeviceDescriptor`` into ``CommGroup`` s
- *     (same descriptor → one group, slots in alloc-source order) and write
- *     ``Program.comm_groups_``.
+ *  5. Cluster ``WindowBuffer`` s by ``DeviceDescriptor`` (same descriptor →
+ *     one comm domain, slots in alloc-source order) and wrap the host_orch
+ *     body in nested ``CommDomainScopeStmt`` nodes (outer = first declared
+ *     domain, inner = last).
  *
  * Sanity-checks (``pypto::ValueError`` on failure):
  *  - Every alloc must have at least one ``pld.tensor.window`` materialisation and
