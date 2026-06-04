@@ -195,6 +195,16 @@ class TestJitHostDecoration:
             def sub_fn(a: pl.Tensor):
                 return a
 
+    def test_jit_incore_rejects_auto_scope_true(self):
+        """Sub-decorators reject auto_scope= even when explicitly True — the
+        kwarg is not part of their API surface, so passing any value is an
+        error, not just a non-True value."""
+        with pytest.raises(TypeError, match="does not accept an auto_scope= argument"):
+
+            @jit.incore(auto_scope=True)
+            def sub_fn(a: pl.Tensor):
+                return a
+
 
 class TestHostDiscoversOrchestrationDep:
     """Host entries discover chip-level orchestrators as deps; other entries don't."""
@@ -243,6 +253,28 @@ class TestHostDiscoversOrchestrationDep:
         deps = host_orch._get_deps()
         assert len(deps) == 1
         assert deps[0]._func_type == "incore"
+
+    def test_host_forwards_dep_auto_scope(self):
+        """An @pl.jit(auto_scope=False) chip orchestrator discovered as a dep of
+        an @pl.jit.host entry keeps its auto_scope=False when its
+        SpecializeContext is built — the flag must be forwarded to the dep
+        context, not defaulted to True."""
+        torch = pytest.importorskip("torch")
+
+        @jit(auto_scope=False)
+        def chip_orch(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return c
+
+        @jit.host
+        def host_orch(a: pl.Tensor, c: pl.Out[pl.Tensor]):
+            return chip_orch(a, c)
+
+        a = torch.empty(128, 128)
+        c = torch.empty(128, 128)
+        _, _, tensor_meta, scalar_values, scalar_dtypes, per_func_dyn = host_orch._bind_args((a, c), {})
+        contexts = host_orch._build_contexts(tensor_meta, scalar_values, scalar_dtypes, per_func_dyn)
+        dep_ctx = next(ctx for ctx in contexts if ctx.func_name == "chip_orch")
+        assert dep_ctx.auto_scope is False
 
 
 # ---------------------------------------------------------------------------

@@ -1608,6 +1608,7 @@ class JITFunction:
                     scalar_values=dep_sv,
                     scalar_dtypes=dep_sd,
                     dep_names=callees_by_id[id(dep._func)],
+                    auto_scope=dep._auto_scope,
                 )
             )
         dep_contexts.reverse()
@@ -1749,6 +1750,11 @@ def _discover_deps(func: Any, caller_func_type: str = "orchestration") -> list[J
 # _JITDecorator — supports @jit, @jit.incore, @jit.incore(level=...)
 # ---------------------------------------------------------------------------
 
+# Sentinel distinguishing "auto_scope= was not passed" from an explicit value.
+# Lets sub-decorators that don't support the kwarg reject ANY explicit
+# auto_scope= (including auto_scope=True), not just non-True values.
+_AUTO_SCOPE_UNSET: Any = object()
+
 
 class _SubFunctionDecorator:
     """Sub-decorator factory for ``@jit.<kind>`` (host / incore / inline / opaque).
@@ -1771,18 +1777,21 @@ class _SubFunctionDecorator:
         self._allow_level = allow_level
         self._allow_auto_scope = allow_auto_scope
 
-    def __call__(self, func: Any = None, *, level: Any = None, auto_scope: bool = True) -> Any:
+    def __call__(self, func: Any = None, *, level: Any = None, auto_scope: Any = _AUTO_SCOPE_UNSET) -> Any:
         if level is not None and not self._allow_level:
             raise TypeError(f"@pl.jit.{self._func_type} does not accept a level= argument")
-        if auto_scope is not True and not self._allow_auto_scope:
+        if auto_scope is not _AUTO_SCOPE_UNSET and not self._allow_auto_scope:
             raise TypeError(
                 f"@pl.jit.{self._func_type} does not accept an auto_scope= argument "
                 "(auto_scope is only meaningful for the Orchestration entry and the "
                 "HOST orchestrator)"
             )
+        resolved_auto_scope = True if auto_scope is _AUTO_SCOPE_UNSET else auto_scope
         if func is None:
-            return lambda f: JITFunction(f, func_type=self._func_type, level=level, auto_scope=auto_scope)
-        return JITFunction(func, func_type=self._func_type, level=None, auto_scope=auto_scope)
+            return lambda f: JITFunction(
+                f, func_type=self._func_type, level=level, auto_scope=resolved_auto_scope
+            )
+        return JITFunction(func, func_type=self._func_type, level=None, auto_scope=resolved_auto_scope)
 
 
 class _JITDecorator:

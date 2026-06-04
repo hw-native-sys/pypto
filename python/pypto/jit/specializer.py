@@ -112,11 +112,6 @@ class SpecializeContext:
         scalar_values: Concrete value per scalar param name.
         scalar_dtypes: DataType annotation per scalar param name.
         dep_names: Names of dep functions called from this function.
-        auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
-            (PTO2_SCOPE). ``True`` by default; ``False`` emits
-            ``@pl.function(..., auto_scope=False)`` so the body places scopes
-            by hand. Only honored for the Orchestration entry and HOST
-            orchestrator decorators (see :meth:`Specializer._build_decorator`).
         py_globals: The originating function's ``__globals__``. The specializer
             uses this to resolve module-level int/float/bool constants (e.g.
             ``BATCH``, ``HIDDEN`` imported from a config module) by inlining
@@ -129,6 +124,11 @@ class SpecializeContext:
             starts at. Anchors the generated→original line remap.
         orig_col_offset: Indentation (in columns) stripped by ``textwrap.dedent``
             from the original source — added back to recover original columns.
+        auto_scope: Whether the compiler auto-inserts AUTO runtime scopes
+            (PTO2_SCOPE). ``True`` by default; ``False`` emits
+            ``@pl.function(..., auto_scope=False)`` so the body places scopes
+            by hand. Only honored for the Orchestration entry and HOST
+            orchestrator decorators (see :meth:`Specializer._build_decorator`).
     """
 
     func_name: str
@@ -140,11 +140,13 @@ class SpecializeContext:
     scalar_values: dict[str, int | float | bool]
     scalar_dtypes: dict[str, DataType]
     dep_names: list[str] = field(default_factory=list)
-    auto_scope: bool = True
     py_globals: dict[str, Any] = field(default_factory=dict)
     orig_file: str | None = None
     orig_start_line: int = 1
     orig_col_offset: int = 0
+    # Appended at the tail to preserve positional construction of this exported
+    # dataclass for external callers (auto_scope is keyword-only in practice).
+    auto_scope: bool = True
 
     @property
     def dynamic_dims(self) -> set[tuple[str, int]]:
