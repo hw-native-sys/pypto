@@ -11,13 +11,11 @@
 """Parser tests for ``pld.tensor.get`` — the synchronous cross-rank bulk read (TGET).
 
 ``get`` is a tensor-level op: both ``dst`` and ``src`` are window-bound
-:class:`pld.DistributedTensor` (GM) views and the VEC staging tile is
-synthesised at codegen, so it lives in the ``pld.tensor`` namespace next to
-``alloc_window_buffer`` / ``window`` rather than the tile-producing
-``pld.tile.remote_load``. The op is called explicitly (3-segment form only —
-no unified short form). Verifier-level negatives (plain ``pl.Tensor`` into
-``dst`` / ``src``, dtype / shape mismatch) come from the C++ op definition in
-:file:`src/ir/op/distributed/get.cpp` and are exercised in
+:class:`pld.DistributedTensor` (GM) views. ``ConvertTensorToTileOps`` lowers it
+to ``tile.create`` + the internal ``pld.tile.get`` staging form, matching
+``pld.tensor.put``. Verifier-level negatives (plain ``pl.Tensor`` into ``dst``
+/ ``src``, dtype / shape mismatch, subregion bounds) come from the C++ op
+definition in :file:`src/ir/op/distributed/get.cpp` and are exercised in
 :file:`tests/ut/ir/test_distributed_ops.py`.
 """
 
@@ -75,6 +73,44 @@ def test_get_parses_to_side_effect_op():
     assert call.kwargs == {}
 
 
+def test_get_subregion_parses_to_six_arg_op():
+    """``pld.tensor.get`` subregion form parses offsets/shape as positional IR args."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[8, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.get(
+                dst,
+                peer=peer,
+                src=src,
+                dst_offsets=[3, 0],
+                src_offsets=[1, 0],
+                shape=[1, 64],
+            )
+
+    func = _get_func(P, "kernel")
+    get_calls = [
+        stmt.expr
+        for stmt in _iter_stmts(func.body)
+        if isinstance(stmt, ir.EvalStmt)
+        and isinstance(stmt.expr, ir.Call)
+        and stmt.expr.op.name == "pld.tensor.get"
+    ]
+
+    assert len(get_calls) == 1
+    call = get_calls[0]
+    assert isinstance(call.type, ir.UnknownType)
+    assert len(call.args) == 6
+    assert all(isinstance(arg, ir.MakeTuple) for arg in call.args[3:])
+    assert call.kwargs == {}
+
+
 def test_get_round_trips_through_printer_and_parser():
     """Printed ``pld.tensor.get`` IR re-parses to a structurally-equal program."""
 
@@ -88,6 +124,32 @@ def test_get_round_trips_through_printer_and_parser():
             peer: pl.Scalar[pl.INT32],
         ):
             pld.tensor.get(dst, peer=peer, src=src)
+
+    reparsed = pl.parse_program(str(P))
+
+    ir.assert_structural_equal(P, reparsed)
+
+
+def test_get_subregion_round_trips_through_printer_and_parser():
+    """Printed subregion ``pld.tensor.get`` IR re-parses to a structurally-equal program."""
+
+    @pl.program
+    class P:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            dst: pld.DistributedTensor[[16, 64], pl.FP16],
+            src: pld.DistributedTensor[[8, 64], pl.FP16],
+            peer: pl.Scalar[pl.INT32],
+        ):
+            pld.tensor.get(
+                dst,
+                peer=peer,
+                src=src,
+                dst_offsets=[3, 0],
+                src_offsets=[1, 0],
+                shape=[1, 64],
+            )
 
     reparsed = pl.parse_program(str(P))
 

@@ -32,6 +32,14 @@ def _make_shape_tuple(values: list[int], span: ir.Span) -> ir.MakeTuple:
     return ir.MakeTuple([ir.ConstInt(v, DataType.INT64, span) for v in values], span)
 
 
+def _make_tile_var(name: str, shape: list[int], dtype: DataType, span: ir.Span) -> ir.Var:
+    return ir.Var(
+        name,
+        ir.TileType([ir.ConstInt(v, DataType.INT64, span) for v in shape], dtype),
+        span,
+    )
+
+
 # ---------------------------------------------------------------------------
 # WindowBufferType singleton
 # ---------------------------------------------------------------------------
@@ -715,6 +723,18 @@ def test_tile_put_ir_builder_accepts_positional_atomic_compat():
     assert call.kwargs["atomic"] == int(ir.AtomicType.Add)
 
 
+def test_tile_put_rejects_non_2d_stage():
+    """Negative: post-conversion put stage must be the flattened [rows, cols] tile."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [1, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [1, 64], DataType.FP16, span)
+    stage = _make_tile_var("stage", [1, 1, 64], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="stage must be a 2D VEC staging tile"):
+        dist_tile_ops.put(dst, peer, src, stage, atomic=ir.AtomicType.None_, span=span)
+
+
 def test_put_rejects_plain_tensor_dst():
     """Negative: a plain pl.Tensor dst is refused — must be window-bound."""
     span = ir.Span.unknown()
@@ -892,6 +912,98 @@ def test_get_returns_unknown_type():
     assert isinstance(call.type, ir.UnknownType)
 
 
+def test_get_subregion_returns_unknown_type():
+    """Positive: offset get reads matching subregions and is side-effect-only."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [8, 64], DataType.FP16, span)
+    dst_offsets = _make_shape_tuple([3, 0], span)
+    src_offsets = _make_shape_tuple([1, 0], span)
+    shape = _make_shape_tuple([1, 64], span)
+
+    call = ir.create_op_call(
+        "pld.tensor.get",
+        [dst, peer, src, dst_offsets, src_offsets, shape],
+        {},
+        span,
+    )
+    assert isinstance(call.type, ir.UnknownType)
+
+
+def test_tile_get_returns_unknown_type():
+    """Positive: tile get is the post-conversion form with an explicit stage tile."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    stage = _make_tile_var("stage", [16, 64], DataType.FP16, span)
+
+    call = dist_tile_ops.get(dst, peer, src, stage, span=span)
+
+    assert isinstance(call.type, ir.UnknownType)
+    assert call.kwargs == {}
+
+
+def test_tile_get_subregion_returns_unknown_type():
+    """Positive: tile get subregions validate the explicit stage against transfer shape."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [8, 64], DataType.FP16, span)
+    stage = _make_tile_var("stage", [1, 64], DataType.FP16, span)
+
+    call = dist_tile_ops.get(
+        dst,
+        peer,
+        src,
+        stage,
+        dst_offsets=[3, 0],
+        src_offsets=[1, 0],
+        shape=[1, 64],
+        span=span,
+    )
+
+    assert isinstance(call.type, ir.UnknownType)
+    assert len(call.args) == 7
+
+
+def test_tile_get_rejects_stage_dtype_mismatch():
+    """Negative: post-conversion get stage dtype must match dst/src dtype."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    stage = _make_tile_var("stage", [16, 64], DataType.FP32, span)
+
+    with pytest.raises(Exception, match="stage dtype must match dst dtype"):
+        dist_tile_ops.get(dst, peer, src, stage, span=span)
+
+
+def test_tile_get_rejects_stage_element_count_mismatch():
+    """Negative: post-conversion get stage elements must match the transfer shape."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    stage = _make_tile_var("stage", [8, 64], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="stage holds"):
+        dist_tile_ops.get(dst, peer, src, stage, span=span)
+
+
+def test_tile_get_rejects_non_2d_stage():
+    """Negative: post-conversion get stage must be the flattened [rows, cols] tile."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [1, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [1, 64], DataType.FP16, span)
+    stage = _make_tile_var("stage", [1, 1, 64], DataType.FP16, span)
+
+    with pytest.raises(Exception, match="stage must be a 2D VEC staging tile"):
+        dist_tile_ops.get(dst, peer, src, stage, span=span)
+
+
 def test_get_rejects_unexpected_kwargs():
     """Negative: get does not accept keyword attributes."""
     span = ir.Span.unknown()
@@ -967,6 +1079,82 @@ def test_get_rejects_shape_mismatch():
         ir.create_op_call(
             "pld.tensor.get",
             [dst, peer, src],
+            {},
+            span,
+        )
+
+
+def test_get_subregion_rejects_mismatched_offsets_rank():
+    """Negative: subregion offsets and shape must match tensor rank."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    bad_dst_offsets = _make_shape_tuple([0], span)
+    src_offsets = _make_shape_tuple([0, 0], span)
+    shape = _make_shape_tuple([1, 64], span)
+
+    with pytest.raises(Exception, match="dst_offsets rank"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src, bad_dst_offsets, src_offsets, shape],
+            {},
+            span,
+        )
+
+
+def test_get_subregion_rejects_negative_offsets():
+    """Negative: static subregion offsets must be non-negative."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    dst_offsets = _make_shape_tuple([-1, 0], span)
+    src_offsets = _make_shape_tuple([0, 0], span)
+    shape = _make_shape_tuple([1, 64], span)
+
+    with pytest.raises(Exception, match="dst_offsets dimension 0 must be non-negative"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src, dst_offsets, src_offsets, shape],
+            {},
+            span,
+        )
+
+
+def test_get_subregion_rejects_out_of_bounds_dst():
+    """Negative: static dst offset + shape must stay within dst shape."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    dst_offsets = _make_shape_tuple([15, 0], span)
+    src_offsets = _make_shape_tuple([0, 0], span)
+    shape = _make_shape_tuple([2, 64], span)
+
+    with pytest.raises(Exception, match="dst subregion dimension 0 exceeds dst shape"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src, dst_offsets, src_offsets, shape],
+            {},
+            span,
+        )
+
+
+def test_get_subregion_rejects_out_of_bounds_src():
+    """Negative: static src offset + shape must stay within src shape."""
+    span = ir.Span.unknown()
+    dst = _make_distributed_tensor_var("dst", [16, 64], DataType.FP16, span)
+    peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
+    src = _make_distributed_tensor_var("src", [16, 64], DataType.FP16, span)
+    dst_offsets = _make_shape_tuple([0, 0], span)
+    src_offsets = _make_shape_tuple([15, 0], span)
+    shape = _make_shape_tuple([2, 64], span)
+
+    with pytest.raises(Exception, match="src subregion dimension 0 exceeds src shape"):
+        ir.create_op_call(
+            "pld.tensor.get",
+            [dst, peer, src, dst_offsets, src_offsets, shape],
             {},
             span,
         )

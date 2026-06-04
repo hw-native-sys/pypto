@@ -118,6 +118,9 @@ def get(
     peer: int | Expr,
     src: Expr,
     *,
+    dst_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    src_offsets: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
+    shape: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
 ) -> Call:
     """Build a ``pld.tensor.get(dst, peer, src)`` Call.
@@ -125,12 +128,32 @@ def get(
     Cross-rank get: synchronously read ``peer``'s slice of the window-bound
     DistributedTensor ``src`` into the local window-bound DistributedTensor
     ``dst``. Side-effect only - the result is an ``UnknownType`` Call. PTO
-    codegen lowers this to a peer-addressed source view, local destination
-    view, synthesised VEC staging tile, and TGET.
+    emission consumes the explicit VEC staging tile produced by
+    ``ConvertTensorToTileOps`` as ``tile.create`` + ``pld.tile.get``, matching
+    ``pld.tensor.put``. With no offsets/shape this reads the full peer source
+    slice into the full local destination slice. When offsets and shape are
+    provided it reads
+    ``src[src_offsets:src_offsets+shape]`` from the peer rank into local
+    ``dst[dst_offsets:dst_offsets+shape]``.
     """
     actual_span = _get_span_or_capture(span, frame_offset=1)
     peer_expr = _normalize_expr(peer, actual_span, int_dtype=DataType.INT32)
-    return _ir_core.create_op_call("pld.tensor.get", [dst, peer_expr, src], {}, actual_span)
+    args: list[Expr] = [dst, peer_expr, src]
+    has_region = dst_offsets is not None or src_offsets is not None or shape is not None
+    if has_region and (dst_offsets is None or src_offsets is None or shape is None):
+        raise ValueError("pld.tensor.get dst_offsets, src_offsets, and shape must be provided together")
+    if has_region:
+        assert dst_offsets is not None
+        assert src_offsets is not None
+        assert shape is not None
+        args.extend(
+            [
+                _to_make_tuple(dst_offsets, actual_span),
+                _to_make_tuple(src_offsets, actual_span),
+                _to_make_tuple(shape, actual_span),
+            ]
+        )
+    return _ir_core.create_op_call("pld.tensor.get", args, {}, actual_span)
 
 
 __all__ = ["alloc_window_buffer", "get", "put", "window"]

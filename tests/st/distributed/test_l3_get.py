@@ -24,10 +24,8 @@ Scenario:
 
 Golden: ``outputs[r] == inputs[(r + 1) % nranks]``.
 
-The test is currently skipped for the same host-side reasons as
-``test_l3_remote_load.py`` and PR #1442's ``test_l3_put.py``: the InCore PTO
-codegen for the N6 op is present, but the host/runtime distributed glue is not
-complete yet.
+These tests are enabled once the distributed host/runtime glue is available;
+they exercise both full-slice and row-offset TGET end-to-end contracts.
 """
 
 import sys
@@ -123,15 +121,71 @@ def _build_ring_get_program():
     return RingGet
 
 
-@pytest.mark.skip(
-    reason=(
-        "pld.tensor.get end-to-end requires: (a) tile.store accepting "
-        "DistributedTensor destinations (Phase-1 stage-in), (b) N7 host_orch "
-        "python codegen emitting add_scalar(ctx) per DistributedTensor, "
-        "(c) N8 driver wiring CommGroup window buffers. The InCore PTO codegen "
-        "(N6 P1) is in place — drop this skip once (a)-(c) land."
-    )
-)
+def _build_row_get_program():
+    """Build a row-offset get program."""
+
+    @pl.program
+    class RowGet:
+        @pl.function(type=pl.FunctionType.InCore)
+        def row_step(
+            self,
+            inp: pl.Tensor[[2, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            src: pld.DistributedTensor[[2, SIZE], pl.FP32],
+            dst: pld.DistributedTensor[[2, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            local = pl.load(inp, [0, 0], [2, SIZE])
+            _ = pl.store(local, [0, 0], src)
+
+            pld.system.notify(signal, peer=peer, offsets=[0, 0], value=1, op=pld.NotifyOp.AtomicAdd)
+            pld.system.wait(signal=signal, offsets=[0, 0], expected=1, cmp=pld.WaitCmp.Ge)
+
+            pld.tensor.get(
+                dst,
+                peer=peer,
+                src=src,
+                dst_offsets=[1, 0],
+                src_offsets=[0, 0],
+                shape=[1, SIZE],
+            )
+
+            recv = pl.load(dst, [1, 0], [1, SIZE])
+            return pl.store(recv, [0, 0], out)
+
+        @pl.function(type=pl.FunctionType.Orchestration)
+        def chip_orch(
+            self,
+            inp: pl.Tensor[[2, SIZE], pl.FP32],
+            out: pl.Out[pl.Tensor[[1, SIZE], pl.FP32]],
+            src: pld.DistributedTensor[[2, SIZE], pl.FP32],
+            dst: pld.DistributedTensor[[2, SIZE], pl.FP32],
+            signal: pld.DistributedTensor[[1, 1], pl.INT32],
+            peer: pl.Scalar[pl.INT32],
+        ) -> pl.Tensor[[1, SIZE], pl.FP32]:
+            return self.row_step(inp, out, src, dst, signal, peer)
+
+        @pl.function(level=pl.Level.HOST, role=pl.Role.Orchestrator)
+        def host_orch(
+            self,
+            inputs: pl.Tensor[[2, 2, SIZE], pl.FP32],
+            outputs: pl.Out[pl.Tensor[[2, 1, SIZE], pl.FP32]],
+        ) -> pl.Tensor[[2, 1, SIZE], pl.FP32]:
+            src_buf = pld.alloc_window_buffer(2 * SIZE * 4)
+            dst_buf = pld.alloc_window_buffer(2 * SIZE * 4)
+            signal_buf = pld.alloc_window_buffer(4)
+
+            for r in pl.range(pld.world_size()):
+                src = pld.window(src_buf, [2, SIZE], dtype=pl.FP32)
+                dst = pld.window(dst_buf, [2, SIZE], dtype=pl.FP32)
+                signal = pld.window(signal_buf, [1, 1], dtype=pl.INT32)
+                self.chip_orch(inputs[r], outputs[r], src, dst, signal, (r + 1) % pld.world_size(), device=r)
+            return outputs
+
+    return RowGet
+
+
 class TestL3Get:
     """L3 distributed runtime: cross-rank read via pld.tensor.get."""
 
@@ -163,6 +217,49 @@ class TestL3Get:
         expected = torch.stack([inputs[1], inputs[0]])
         assert torch.allclose(outputs, expected), (
             f"ring get mismatch: max diff = {(outputs - expected).abs().max().item()}"
+        )
+
+
+class TestL3GetSubregion:
+    """L3 distributed runtime: row-offset cross-rank read via pld.tensor.get."""
+
+    def test_row_get(self, test_config, device_ids):
+        if len(device_ids) < 2:
+            pytest.skip(f"row get needs 2 devices, got {device_ids}")
+
+        program = _build_row_get_program()
+        compiled = ir.compile(
+            program,
+            platform=test_config.platform,
+            distributed_config=DistributedConfig(
+                device_ids=device_ids[:2],
+                num_sub_workers=0,
+            ),
+        )
+
+        inputs = torch.stack(
+            [
+                torch.stack(
+                    [
+                        torch.arange(SIZE, dtype=torch.float32),
+                        torch.full((SIZE,), -1.0, dtype=torch.float32),
+                    ]
+                ),
+                torch.stack(
+                    [
+                        torch.arange(100.0, 100.0 + SIZE, dtype=torch.float32),
+                        torch.full((SIZE,), -2.0, dtype=torch.float32),
+                    ]
+                ),
+            ]
+        )
+        outputs = torch.zeros((2, 1, SIZE), dtype=torch.float32)
+
+        compiled(inputs, outputs)
+
+        expected = torch.stack([inputs[1, 0].reshape(1, SIZE), inputs[0, 0].reshape(1, SIZE)])
+        assert torch.allclose(outputs, expected), (
+            f"row get mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
 

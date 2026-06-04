@@ -210,6 +210,8 @@ TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
   CHECK(stage_type->dtype_ == dst_type->dtype_)
       << "pld.tile.put stage dtype must match dst dtype, got stage=" << stage_type->dtype_.ToString()
       << " dst=" << dst_type->dtype_.ToString();
+  CHECK(stage_type->shape_.size() == 2)
+      << "pld.tile.put stage must be a 2D VEC staging tile, got rank " << stage_type->shape_.size();
 
   auto src_type = As<DistributedTensorType>(args[2]->GetType());
   std::vector<ExprPtr> transfer_shape = dst_type->shape_;

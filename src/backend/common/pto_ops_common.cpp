@@ -2694,68 +2694,90 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
 //   src_view = pto.make_tensor_view src_ptr, shape=..., strides=...
 //   src_pv   = pto.partition_view src_view,  offsets=[0,..], sizes=<shape>
 //   dst_pv   = pto.partition_view <dst_local_view>, offsets=[0,..], sizes=<shape>
-//   %stage   = pto.alloc_tile : !pto.tile_buf<loc=vec, ...>
 //   pto.comm.tget(dst_pv, src_pv, buf(%stage) : <ptype>, <ptype>, <stage_type>)
 //
-// The VEC staging tile is synthesised here (the user never sees it): TGET
-// copies GM->GM through a VEC bounce buffer, so codegen sizes one ping tile to
-// the (2-D flattened) transfer extent.
-static constexpr uint64_t kTgetVecStagingFractal = 512;
+// ConvertTensorToTileOps materializes tile.create + pld.tile.get so the
+// allocator can assign the VEC staging tile a real UB address before PTO
+// emission, matching the pld.tensor.put -> pld.tile.put path.
 
 static std::string MakeGetCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
-  CHECK(op->args_.size() == 3) << "pld.tensor.get requires 3 arguments (dst, peer, src), got "
-                               << op->args_.size();
+  CHECK(op->args_.size() == 4 || op->args_.size() == 7)
+      << "pld.tile.get requires 4 arguments (dst, peer, src, stage) or 7 arguments "
+         "(dst, peer, src, stage, dst_offsets, src_offsets, shape), got "
+      << op->args_.size();
 
   // dst: local DistributedTensor destination — reuses the local tensor_view
   // created by EmitMakeTensorViews (no peer arithmetic, like wait's signal).
   auto dst_var = AsVarLike(op->args_[0]);
-  CHECK(dst_var) << "pld.tensor.get dst must be a Var-like expression";
+  CHECK(dst_var) << "pld.tile.get dst must be a Var-like expression";
   auto dst_dist = As<ir::DistributedTensorType>(dst_var->GetType());
-  CHECK(dst_dist) << "pld.tensor.get dst must be DistributedTensorType, got "
-                  << dst_var->GetType()->TypeName();
+  CHECK(dst_dist) << "pld.tile.get dst must be DistributedTensorType, got " << dst_var->GetType()->TypeName();
 
   // src: remote (peer-addressed) DistributedTensor source.
-  auto src_binding = ResolveDistTensorBinding(op->args_[2], codegen, "pld.tensor.get");
+  auto src_binding = ResolveDistTensorBinding(op->args_[2], codegen, "pld.tile.get");
   auto peer_scalar = As<ir::ScalarType>(op->args_[1]->GetType());
-  CHECK(peer_scalar) << "pld.tensor.get peer must be ScalarType at codegen, got "
+  CHECK(peer_scalar) << "pld.tile.get peer must be ScalarType at codegen, got "
                      << op->args_[1]->GetType()->TypeName();
 
-  const auto& shape = dst_dist->shape_;
-  const size_t rank = shape.size();
+  const auto& dst_shape = dst_dist->shape_;
+  const size_t rank = dst_shape.size();
   const std::string dtype_str = codegen.GetTypeString(dst_dist->dtype_);
 
-  // Full-slice partition views: offsets all-zero, sizes = full shape. dst and
-  // src share the same partition_tensor_view type (same dtype + static shape).
-  std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
-  std::vector<std::string> zero_offsets(rank, c0);
-  std::vector<std::string> size_ssa = GetSizeCodes(shape, codegen);
-  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(shape), dtype_str);
+  std::vector<std::string> dst_offsets;
+  std::vector<std::string> src_offsets;
+  std::vector<std::string> size_ssa;
+  std::vector<ExprPtr> transfer_shape;
+
+  if (op->args_.size() == 4) {
+    std::string c0 = codegen.GetOrEmitConstant(static_cast<int64_t>(0), DataType::INDEX);
+    dst_offsets.assign(rank, c0);
+    src_offsets.assign(rank, c0);
+    transfer_shape = dst_shape;
+    size_ssa = GetSizeCodes(transfer_shape, codegen);
+  } else {
+    auto dst_offsets_tuple = As<ir::MakeTuple>(op->args_[4]);
+    auto src_offsets_tuple = As<ir::MakeTuple>(op->args_[5]);
+    auto shape_tuple = As<ir::MakeTuple>(op->args_[6]);
+    INTERNAL_CHECK_SPAN(dst_offsets_tuple, op->span_) << op->op_->name_ << " dst_offsets must be MakeTuple";
+    INTERNAL_CHECK_SPAN(src_offsets_tuple, op->span_) << op->op_->name_ << " src_offsets must be MakeTuple";
+    INTERNAL_CHECK_SPAN(shape_tuple, op->span_) << op->op_->name_ << " shape must be MakeTuple";
+    INTERNAL_CHECK_SPAN(dst_offsets_tuple->elements_.size() == rank, op->span_)
+        << op->op_->name_ << " dst_offsets rank must match tensor rank";
+    INTERNAL_CHECK_SPAN(src_offsets_tuple->elements_.size() == rank, op->span_)
+        << op->op_->name_ << " src_offsets rank must match tensor rank";
+    INTERNAL_CHECK_SPAN(shape_tuple->elements_.size() == rank, op->span_)
+        << op->op_->name_ << " shape rank must match tensor rank";
+    dst_offsets = GetIndexOffsetCodes(dst_offsets_tuple->elements_, codegen);
+    src_offsets = GetIndexOffsetCodes(src_offsets_tuple->elements_, codegen);
+    transfer_shape = shape_tuple->elements_;
+    size_ssa = GetSizeCodes(transfer_shape, codegen);
+  }
+
+  std::string partition_type = MakePartitionTensorViewType(GetDimStrings(transfer_shape), dtype_str);
 
   // dst: local tensor_view + full-slice partition_view.
   std::string dst_local_view = codegen.GetOrCreateTensorView(dst_var);
   std::string dst_view_type = codegen.GetTensorViewTypeString(dst_dist.get());
   std::string dst_pview = EmitPartitionViewPTO(dst_var->name_hint_ + "_local", dst_local_view, dst_view_type,
-                                               partition_type, zero_offsets, size_ssa, codegen);
+                                               partition_type, dst_offsets, size_ssa, codegen);
 
   // src: CommRemoteOffset + addptr + make_tensor_view at the call site, then
   // a full-slice partition_view.
   auto src_peer_view = EmitCommRemoteView(src_binding, op->args_[1], codegen);
   std::string src_pview =
       EmitPartitionViewPTO(src_binding.var->name_hint_ + "_peer", src_peer_view.ssa,
-                           src_peer_view.view_type_str, partition_type, zero_offsets, size_ssa, codegen);
+                           src_peer_view.view_type_str, partition_type, src_offsets, size_ssa, codegen);
 
-  // Synthesise a VEC staging tile_buf sized to the 2-D-flattened transfer:
-  // rows = product of leading dims, cols = innermost dim (rank-1 -> 1xN).
-  int64_t cols = codegen.GetConstIntValue(shape[rank - 1]);
-  int64_t rows = 1;
-  for (size_t i = 0; i + 1 < rank; ++i) {
-    rows *= codegen.GetConstIntValue(shape[i]);
-  }
-  std::string stage_type = codegen::FormatTileBufTypeString(
-      "vec", dtype_str, rows, cols, ir::TileLayout::row_major, ir::TileLayout::none_box,
-      kTgetVecStagingFractal, ir::PadValue::null, /*v_row=*/rows, /*v_col=*/cols);
-  std::string stage = codegen.AllocNewTileBuf(stage_type, "tget_stage");
+  std::string stage = codegen.GetExprAsCode(op->args_[3]);
+  std::string stage_type = codegen.GetExprTypeAnnotation(op->args_[3]);
+  INTERNAL_CHECK_SPAN(!stage_type.empty(), op->span_)
+      << "Internal error: pld.tile.get stage tile " << stage << " has no tile_buf type annotation";
+
+  // Mirror TPUT's ordering guard. TGET may read a peer source that was just
+  // populated from a local TSTORE before the cross-rank handshake; keep the
+  // local store visible before the peer-side TGET source read.
+  codegen.Emit("pto.barrier <PIPE_ALL>");
 
   std::ostringstream tget;
   tget << "pto.comm.tget(" << dst_pview << ", " << src_pview << ", buf(" << stage << ") : " << partition_type
@@ -3153,7 +3175,7 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
     cg.SetCurrentExprValue(rn);
     return "";
   });
-  reg("pld.tensor.get",
+  reg("pld.tile.get",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakeGetCodegenPTO(op, codegen); });
   reg("pld.tile.put",
       [](const ir::CallPtr& op, codegen::CodegenBase& codegen) { return MakePutCodegenPTO(op, codegen); });

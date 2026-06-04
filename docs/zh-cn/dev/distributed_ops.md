@@ -32,13 +32,15 @@ SSA 值而存在。
 - **`pld.tile.remote_store`** 消费一个 *tile*（`remote_load` 的对称写伴生算子），
   因此是 `tile.store` 的兄弟,同样归入 `pld.tile`。
 - **`pld.tensor.get`** 读写 *tensor*（GM）操作数 —— `dst` 和 `src` 都是窗口绑定的
-  `DistributedTensor` 视图,TGET 中转用的 VEC staging tile 在 codegen 阶段合成,
-  不出现在 DSL 表面。因此它是 `pld.tensor.alloc_window_buffer` /
-  `pld.tensor.window` 的兄弟,而**不是**产出 tile 的 `remote_load` 的兄弟。
+  `DistributedTensor` 视图。TGET 中转用的 VEC staging tile 由
+  `ConvertTensorToTileOps` 物化为内部 `pld.tile.get`,不出现在 DSL 表面。
+  因此它是 `pld.tensor.alloc_window_buffer` / `pld.tensor.window` 的兄弟,
+  而**不是**产出 tile 的 `remote_load` 的兄弟。
 - **`pld.tensor.put`** 读写 *tensor*（GM）操作数 —— `dst` 和 `src` 都是窗口绑定的
-  `DistributedTensor` 视图,TPUT 中转用的 VEC staging tile 在 codegen 阶段合成,
-  不出现在 DSL 表面。因此它是 `pld.tensor.alloc_window_buffer` /
-  `pld.tensor.window` 的兄弟,而**不是**产出 tile 的 `remote_load` 的兄弟。
+  `DistributedTensor` 视图。TPUT 中转用的 VEC staging tile 由
+  `ConvertTensorToTileOps` 物化为内部 `pld.tile.put`,不出现在 DSL 表面。
+  因此它是 `pld.tensor.alloc_window_buffer` / `pld.tensor.window` 的兄弟,
+  而**不是**产出 tile 的 `remote_load` 的兄弟。
 - **`pld.system.notify` / `pld.system.wait`** 驱动按 rank 的信号槽位 —— 纯控制面
   同步,无数据操作数 —— 因此归入 `pld.system`。
 
@@ -118,32 +120,44 @@ DSL（`python/pypto/language/distributed/op/tile_ops.py`）把 `target` / `peer`
 
 ```text
 pld.tensor.put(dst, peer, src, *, atomic: int) -> Unknown
+pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape, *, atomic: int) -> Unknown
 ```
 
 同步地把本地窗口绑定的 `src` 写入 `peer` rank 的窗口绑定 `dst` 切片。两个操作数
-都是 GM 层级的 `DistributedTensor` 视图；VEC staging tile 在 codegen 时合成
-（`src/backend/common/pto_ops_common.cpp` 中的 `MakePutCodegenPTO`）,不出现在
-DSL 表面。
+都是 GM 层级的 `DistributedTensor` 视图；VEC staging tile 由
+`ConvertTensorToTileOps` 物化为内部 `tile.create + pld.tile.put`,因此会经过
+PyPTO 的内存分配器,但不出现在 DSL 表面。
+
+不提供 offsets/shape 时,该操作把完整的本地 `src` 切片写入完整的 peer `dst`
+切片。提供 `dst_offsets`、`src_offsets` 和 `shape` 时,传输会缩小到匹配的
+subregion；三者必须一起提供。
 
 Verifier：`dst` / `src` 必须都是 `DistributedTensorType`；`peer` 必须是
-`ScalarType`；`dst` 与 `src` 必须 element type 相同且形状为相同的**正的静态
-（positive static）**形状（staging VEC 缓冲需要编译期范围）。`atomic` 选择覆盖
+`ScalarType`；`dst` 与 `src` 必须 element type 相同、rank 相同,且各维都是
+**正的静态（positive static）**维度。full-slice `put` 要求形状完全相同；
+subregion `put` 允许完整切片尺寸不同,只要显式传输区域不越界。`atomic` 选择覆盖
 还是原子加（见 `AtomicType`）。
 
 ### `pld.tensor.get`（TGET）
 
 ```text
 pld.tensor.get(dst, peer, src) -> Unknown
+pld.tensor.get(dst, peer, src, dst_offsets, src_offsets, shape) -> Unknown
 ```
 
 同步地把 `peer` rank 的窗口绑定 `src` 切片读入本地窗口绑定 `dst`。两个操作数
-都是 GM 层级的 `DistributedTensor` 视图；VEC staging tile 在 codegen 时合成
-（`src/backend/common/pto_ops_common.cpp` 中的 `MakeGetCodegenPTO`）,不出现在
-DSL 表面。
+都是 GM 层级的 `DistributedTensor` 视图；VEC staging tile 由
+`ConvertTensorToTileOps` 物化为内部 `tile.create + pld.tile.get`,因此会经过
+PyPTO 的内存分配器,但不出现在 DSL 表面。
+
+不提供 offsets/shape 时,该操作把完整的 peer `src` 切片读入完整的本地 `dst`
+切片。提供 `dst_offsets`、`src_offsets` 和 `shape` 时,传输会缩小到匹配的
+subregion；三者必须一起提供。
 
 Verifier：`dst` / `src` 必须都是 `DistributedTensorType`；`peer` 必须是
-`ScalarType`；`dst` 与 `src` 必须 element type 相同且形状为相同的**正的静态
-（positive static）**形状（staging VEC 缓冲需要编译期范围）。`get` 不接受
+`ScalarType`；`dst` 与 `src` 必须 element type 相同、rank 相同,且各维都是
+**正的静态（positive static）**维度。full-slice `get` 要求形状完全相同；
+subregion `get` 允许完整切片尺寸不同,只要显式传输区域不越界。`get` 不接受
 keyword attributes。
 
 ### `pld.system.notify`（TNOTIFY）

@@ -28,25 +28,9 @@ Both use the ``pld.system.notify`` / ``pld.system.wait`` handshake as the
 barrier that orders the synchronous put against the local read-back (see
 :file:`test_l3_notify_wait.py` for the handshake contract in isolation).
 
-The tests are currently **skipped** — the InCore PTO codegen for
-``pld.tensor.put`` (plus notify/wait) is in place (N6 P1), but the host-side
-glue still has open work, identical to the gap blocking
-:file:`test_l3_remote_load.py` / :file:`test_l3_notify_wait.py`:
-
-* ``tile.store(tile, offsets, dst)`` verifier must accept a
-  ``DistributedTensorType`` ``dst`` so the Phase-1 stage-in works.
-* **N7** distributed_codegen.cpp must emit one
-  ``chip_args.add_scalar(ctx.device_ctx[group_idx])`` per
-  ``DistributedTensor`` formal parameter (in IR-parameter order), plus the
-  ``ContinuousTensor.make(..., child_memory=True)`` wrapper for each
-  ``DistributedTensor`` arg.
-* **N8** distributed_codegen must thread ``HostBufferStaging`` onto the
-  ``orch.allocate_domain(...)`` block for the inferred CommGroup so the
-  runtime knows which physical buffer to bind to each rank's window slot.
-
-Drop ``pytest.mark.skip`` (and inline the ``@pl.program`` decorator at module
-top-level) once the above land — the programs below and the golden checks are
-the canonical e2e contract for ``pld.tensor.put``.
+The non-atomic full-slice and row-offset scenarios are enabled as the canonical
+e2e contract for ``pld.tensor.put``. The atomic-add scenario remains skipped
+until the current runtime/PTOAS stack can execute it reliably.
 """
 
 import sys
@@ -228,14 +212,6 @@ def _build_atomic_add_program():
     return AtomicAddReduce
 
 
-@pytest.mark.skip(
-    reason=(
-        "PTOAS drops the synchronisation between the stage-in tile.store and the "
-        "subsequent pld.tensor.put -- the put can issue before the local window "
-        "slice has been written, so the peer reads stale data. Re-enable once "
-        "PTOAS treats the store -> put pair as an ordered dependency."
-    )
-)
 class TestL3Put:
     """L3 distributed runtime: cross-rank write via pld.tensor.put."""
 
@@ -272,6 +248,7 @@ class TestL3Put:
             f"ring put mismatch: max diff = {(outputs - expected).abs().max().item()}"
         )
 
+    @pytest.mark.skip(reason="atomic-add put still fails on the current runtime/PTOAS stack")
     def test_atomic_add_accumulate(self, test_config, device_ids):
         """Atomic add: all ranks accumulate into root rank 0's single cell."""
         if len(device_ids) < 2:
@@ -372,14 +349,6 @@ def _build_row_put_program():
     return RowPut
 
 
-@pytest.mark.skip(
-    reason=(
-        "PTOAS drops the synchronisation between the stage-in tile.store and the "
-        "subsequent pld.tensor.put -- the put can issue before the local window "
-        "slice has been written, so the peer reads stale data. Re-enable once "
-        "PTOAS treats the store -> put pair as an ordered dependency."
-    )
-)
 class TestL3PutSubregion:
     """L3 distributed runtime: row-offset cross-rank write via pld.tensor.put."""
 

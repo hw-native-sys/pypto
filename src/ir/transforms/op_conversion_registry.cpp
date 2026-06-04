@@ -1878,6 +1878,67 @@ void OpConversionRegistry::RegisterDistributedOps() {
         auto put_call = op_reg.Create("pld.tile.put", put_args, kwargs, span);
         return ConversionResult{std::move(prologue), put_call};
       });
+
+  // pld.tensor.get -> tile.create(stage) + pld.tile.get(dst, peer, src, stage).
+  // Mirror pld.tensor.put so the TGET VEC bounce buffer is allocated by the IR
+  // memory pipeline instead of being synthesized as an unaddressed codegen-only
+  // tile. Subregion get uses the explicit transfer shape.
+  RegisterCustom(
+      "pld.tensor.get",
+      [](const std::vector<ExprPtr>& args, const std::vector<std::pair<std::string, std::any>>& kwargs,
+         const Span& span) -> ConversionResult {
+        INTERNAL_CHECK_SPAN(args.size() == 3 || args.size() == 6, span)
+            << "pld.tensor.get conversion expects 3 args (dst, peer, src) or 6 "
+               "(dst, peer, src, dst_offsets, src_offsets, shape), got "
+            << args.size();
+        INTERNAL_CHECK_SPAN(kwargs.empty(), span) << "pld.tensor.get conversion expects no kwargs";
+        auto& op_reg = OpRegistry::GetInstance();
+
+        auto dst_type = As<DistributedTensorType>(args[0]->GetType());
+        INTERNAL_CHECK_SPAN(dst_type, span)
+            << "pld.tensor.get conversion: dst must be DistributedTensorType, got "
+            << args[0]->GetType()->TypeName();
+        std::vector<ExprPtr> transfer_shape = dst_type->shape_;
+        if (args.size() == 6) {
+          auto shape_tuple_arg = As<MakeTuple>(args[5]);
+          INTERNAL_CHECK_SPAN(shape_tuple_arg, span) << "pld.tensor.get conversion: shape must be MakeTuple";
+          transfer_shape = shape_tuple_arg->elements_;
+        }
+        INTERNAL_CHECK_SPAN(!transfer_shape.empty(), span)
+            << "pld.tensor.get conversion: transfer shape requires rank >= 1";
+
+        int64_t cols_val = 0;
+        {
+          auto last = As<ConstInt>(transfer_shape.back());
+          INTERNAL_CHECK_SPAN(last, span)
+              << "pld.tensor.get conversion: transfer innermost dimension must be ConstInt";
+          cols_val = last->value_;
+        }
+        int64_t rows_val = 1;
+        for (size_t i = 0; i + 1 < transfer_shape.size(); ++i) {
+          auto d = As<ConstInt>(transfer_shape[i]);
+          INTERNAL_CHECK_SPAN(d, span)
+              << "pld.tensor.get conversion: transfer dimension " << i << " must be ConstInt";
+          rows_val *= d->value_;
+        }
+        auto rows_expr = std::make_shared<ConstInt>(rows_val, DataType::INDEX, span);
+        auto cols_expr = std::make_shared<ConstInt>(cols_val, DataType::INDEX, span);
+        auto shape_tuple = std::make_shared<MakeTuple>(std::vector<ExprPtr>{rows_expr, cols_expr}, span);
+
+        std::vector<std::pair<std::string, std::any>> create_kwargs = {{"dtype", dst_type->dtype_},
+                                                                       {"target_memory", MemorySpace::Vec}};
+        auto create_call = op_reg.Create("tile.create", {shape_tuple}, create_kwargs, span);
+        auto stage_var = std::make_shared<Var>("tget_stage", create_call->GetType(), span);
+        std::vector<StmtPtr> prologue;
+        prologue.push_back(std::make_shared<AssignStmt>(stage_var, create_call, span));
+
+        std::vector<ExprPtr> get_args{args[0], args[1], args[2], stage_var};
+        if (args.size() == 6) {
+          get_args.insert(get_args.end(), args.begin() + 3, args.end());
+        }
+        auto get_call = op_reg.Create("pld.tile.get", get_args, span);
+        return ConversionResult{std::move(prologue), get_call};
+      });
 }
 
 void OpConversionRegistry::RegisterSimple(const std::string& from_op, const std::string& to_op,
