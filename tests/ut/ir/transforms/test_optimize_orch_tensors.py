@@ -3133,11 +3133,8 @@ class TestOutWindowSubmitCall:
             def consume(
                 self,
                 src: pl.Tensor[[256, 64], pl.FP32],
-                sink: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
-            ) -> pl.Tensor[[64, 64], pl.FP32]:
-                t: pl.Tile[[64, 64], pl.FP32] = pl.load(src, [0, 0], [64, 64])
-                r: pl.Tensor[[64, 64], pl.FP32] = pl.store(t, [0, 0], sink)
-                return r
+            ) -> pl.Tensor[[256, 64], pl.FP32]:
+                return src
 
             @pl.function(type=pl.FunctionType.Orchestration)
             def main(
@@ -3148,9 +3145,8 @@ class TestOutWindowSubmitCall:
                 with pl.manual_scope():
                     row: pl.Scalar[pl.INDEX] = 64
                     out_next, tid = pl.submit(self.kernel_stripe, data, row, out)
-                    sink: pl.Tensor[[64, 64], pl.FP32] = pl.create_tensor([64, 64], dtype=pl.FP32)
                     # Later submit reads the FULL `out` (In direction).
-                    _consumed, _tid2 = pl.submit(self.consume, out, sink, deps=[tid])
+                    _consumed, _tid2 = pl.submit(self.consume, out, deps=[tid])
                 return out_next
 
         After = passes.optimize_orch_tensors()(Before)
