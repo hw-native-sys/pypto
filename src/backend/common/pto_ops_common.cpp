@@ -131,18 +131,7 @@ static std::string MakePartitionTensorViewType(const std::vector<std::string>& d
   return oss.str();
 }
 
-// Convert expressions to MLIR operand strings.
-static std::vector<std::string> GetExprCodes(const std::vector<ir::ExprPtr>& exprs,
-                                             codegen::PTOCodegen& codegen) {
-  std::vector<std::string> codes;
-  codes.reserve(exprs.size());
-  for (const auto& expr : exprs) {
-    codes.push_back(codegen.GetExprAsCode(expr));
-  }
-  return codes;
-}
-
-// Like GetExprCodes, but coerces each offset operand to `index`. A
+// Coerce each offset operand to `index`. A
 // pto.partition_view offset MUST be `index`; a bare i32 offset (e.g. a
 // data-dependent row from a scalar param or pl.read) would otherwise reach
 // PTOAS as i32 and fail type unification ('index' vs 'i32'). ConstInts are
