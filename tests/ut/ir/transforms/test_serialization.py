@@ -274,7 +274,7 @@ class TestExtendedAttrSerialization:
             ir.Span.unknown(),
         )
 
-        restored = cast("ir.Call", ir.deserialize(ir.serialize(call)))
+        restored = cast(ir.Call, ir.deserialize(ir.serialize(call)))
         ir.assert_structural_equal(call, restored, enable_auto_mapping=True)
         assert restored.attrs["arg_direction_overrides"] == [0, 1]
 

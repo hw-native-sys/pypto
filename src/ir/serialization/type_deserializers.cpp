@@ -130,10 +130,10 @@ DataType DeserializeDataType(const msgpack::object& fields_obj, const std::strin
   }
 }
 
-std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::object& kwargs_obj,
-                                                                const std::string& field_name,
-                                                                DeserializerContext& ctx,
-                                                                msgpack::zone& zone) {
+static std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::object& kwargs_obj,
+                                                                       const std::string& field_name,
+                                                                       DeserializerContext& ctx,
+                                                                       msgpack::zone& zone) {
   std::vector<std::pair<std::string, std::any>> kwargs;
   if (kwargs_obj.type != msgpack::type::ARRAY) {
     throw TypeError("Invalid kwargs type for field: " + field_name);
@@ -252,9 +252,13 @@ std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::o
         kwargs.emplace_back(key, StringToLoopOrigin(value_str));
       } else if (type_name == "Var") {
         // Reserved Var-valued attr (kAttrTaskIdVar). Resolved through the node
-        // table so it round-trips by identity. A nil inner value is the null
-        // placeholder (the attr was present but held a null VarPtr).
-        if (!has_value_obj || value_obj_inner.type == msgpack::type::NIL) {
+        // table so it round-trips by identity. A missing 'value' field is a
+        // malformed envelope (fail fast, like VarList/Int32Vector); an explicit
+        // nil value is the null placeholder (the attr held a null VarPtr).
+        if (!has_value_obj) {
+          throw TypeError("Var kwarg '" + key + "' must have a 'value' field");
+        }
+        if (value_obj_inner.type == msgpack::type::NIL) {
           kwargs.emplace_back(key, VarPtr(nullptr));
         } else {
           kwargs.emplace_back(
@@ -291,8 +295,12 @@ std::vector<std::pair<std::string, std::any>> DeserializeKwargs(const msgpack::o
         kwargs.emplace_back(key, std::move(idxs));
       } else if (type_name == "Expr") {
         // Reserved Expr-valued attr (kAttrDevice). Resolved through the node table.
-        // A nil inner value is the null placeholder.
-        if (!has_value_obj || value_obj_inner.type == msgpack::type::NIL) {
+        // A missing 'value' field is a malformed envelope (fail fast); an
+        // explicit nil value is the null placeholder.
+        if (!has_value_obj) {
+          throw TypeError("Expr kwarg '" + key + "' must have a 'value' field");
+        }
+        if (value_obj_inner.type == msgpack::type::NIL) {
           kwargs.emplace_back(key, ExprPtr(nullptr));
         } else {
           kwargs.emplace_back(
