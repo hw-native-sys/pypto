@@ -756,6 +756,13 @@ def _annotated_slice_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
     return out
 
 
+def _reshape_body(src: pl.Tensor, out: pl.Out[pl.Tensor]) -> pl.Tensor:
+    """Plain function for _extract_local_tensor_metas unit test: reshape tracking."""
+    x_flat = pl.reshape(src, [128, 128])  # noqa: F841 — tracked by JIT AST metadata extraction
+    out_flat = pl.reshape(out, [128, 128])
+    return out_flat
+
+
 class TestSliceAndDepReturnMetadata:
     """Regression tests: the JIT specializer must track tensor metadata for
     ``pl.slice`` views and ``@pl.jit.incore`` return values when they flow into
@@ -982,6 +989,17 @@ class TestSliceAndDepReturnMetadata:
         with pytest.raises(ValueError, match="missing inferred tensor metadata"):
             bad_entry.compile_for_test(cfg, out)
 
+    def test_extract_local_tensor_metas_reshape(self):
+        """``_extract_local_tensor_metas`` infers metas for pl.reshape results."""
+        seed = {
+            "src": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
+            "out": TensorMeta(shape=(2, 64, 128), dtype=DataType.BF16),
+        }
+        metas = _extract_local_tensor_metas(_reshape_body, seed_meta=seed)
+        # reshape changes rank but keeps element count; dtype inherited from src.
+        assert metas["x_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+        assert metas["out_flat"] == TensorMeta(shape=(128, 128), dtype=DataType.BF16)
+
 
 # Module-level dynvar + constant for TestDynamicLocalTensorMetadata.
 # Module-level so the generated @pl.program source sees them in the
@@ -1146,6 +1164,27 @@ class TestDynamicLocalTensorMetadata:
         # Should not raise — previously failed with
         # "missing inferred tensor metadata for parameter 'hidden_states'".
         fwd_1524.compile_for_test(hidden, out)
+
+    def test_reshape_propagates_dyndim_via_dim_alias(self):
+        """pl.reshape with a dim-aliased DynDim in shape propagates the DynDim.
+
+        ``tokens = pl.tensor.dim(x, 2)`` extracts the 3rd dim's DynDim; using
+        it in ``pl.reshape(x, [128, tokens])`` propagates the DynDim to the
+        result's 2nd dim.
+        """
+        from pypto.jit.specializer import DynDim  # noqa: PLC0415
+
+        t_dim = DynDim(name="T", literal="T", static_bound=128)
+        seed = {"x": TensorMeta(shape=(2, 64, t_dim), dtype=DataType.BF16)}
+
+        def body(x):
+            tokens = pl.tensor.dim(x, 2)  # aliases x's dim 2 → DynDim
+            flat = pl.reshape(x, [128, tokens])
+            return flat
+
+        metas = _extract_local_tensor_metas(body, seed_meta=seed)
+        assert metas["flat"].shape == (128, t_dim)
+        assert metas["flat"].dtype == DataType.BF16
 
 
 # ---------------------------------------------------------------------------
@@ -1704,6 +1743,43 @@ class TestInlineFuncIntegration:
         func_names = [f.name for f in post_pass.functions.values()]
         assert "two_returns_no_out" not in func_names
         assert "entry" in func_names
+
+    def test_inline_with_reshape_compiles(self):
+        """Regression: @pl.jit.inline + pl.reshape in caller compiles.
+
+        Previously failed because ``_extract_local_tensor_metas`` did not track
+        ``pl.reshape``, so the specializer couldn't find metadata for the
+        reshaped tensor passed to the inline dep.
+        """
+        torch = pytest.importorskip("torch")
+
+        @jit.inline
+        def copy_inline(
+            x: pl.Tensor[[128, 128], pl.BF16],
+            y: pl.Out[pl.Tensor[[128, 128], pl.BF16]],
+        ):
+            with pl.at(level=pl.Level.CORE_GROUP):
+                tile = pl.load(x, [0, 0], [128, 128])
+                pl.store(tile, [0, 0], y)
+            return y
+
+        @jit
+        def reshape_caller(
+            x: pl.Tensor[[2, 64, 128], pl.BF16],
+            y: pl.Out[pl.Tensor[[2, 64, 128], pl.BF16]],
+        ) -> pl.Tensor[[2, 64, 128], pl.BF16]:
+            x_flat = pl.reshape(x, [128, 128])
+            y = pl.reshape(y, [128, 128])
+            y = copy_inline(x_flat, y)
+            y = pl.reshape(y, [2, 64, 128])
+            return y
+
+        x = torch.randn(2, 64, 128, dtype=torch.bfloat16)
+        y = torch.empty(2, 64, 128, dtype=torch.bfloat16)
+        post_pass = reshape_caller.compile_for_test(x, y)
+        func_names = [f.name for f in post_pass.functions.values()]
+        assert "copy_inline" not in func_names, f"Inline should be spliced, got {func_names}"
+        assert "reshape_caller" in func_names
 
 
 class TestOpaqueFuncIntegration:
