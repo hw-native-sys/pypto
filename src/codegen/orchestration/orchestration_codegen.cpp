@@ -1524,6 +1524,29 @@ class OrchestrationStmtCodegen : public CodegenBase {
     FunctionPtr inner_callee;
   };
 
+  /// Bridges the two-level nesting that arises when a ``Group`` is dispatched
+  /// *through* a ``Spmd`` wrapper (``GenerateSpmdCallCode`` ->
+  /// ``GenerateGroupCallCode``). In that case the function ``outer_call``
+  /// actually invokes is the Spmd wrapper, NOT the Group that
+  /// ``BuildWrapperReorderedParams`` receives as ``wrapper_func``. The two can
+  /// have different param counts: the Spmd outliner deduplicates an aliased
+  /// arg (the same buffer passed as both an input and the output, e.g.
+  /// ``self.kernel(out, b, bias, out)``) into a single wrapper param, while the
+  /// Group keeps every kernel param. Without the bridge, codegen would index
+  /// ``outer_call->args_[<group_param_idx>]`` out of bounds.
+  ///
+  /// ``bridge_call`` is the Group call inside the Spmd-wrapper body
+  /// (``FindFirstInnerCall(spmd_func).inner_call``); its args are positionally
+  /// 1:1 with the Group's params and reference the Spmd-wrapper params (or
+  /// constants). ``bridge_func`` is the Spmd wrapper, whose params are
+  /// positionally 1:1 with ``outer_call->args_``. An empty ``bridge_func``
+  /// means "no bridge" (plain-Spmd / direct-Group): ``wrapper_func`` IS the
+  /// function ``outer_call`` invokes, and the legacy 1-hop lookup is correct.
+  struct WrapperBridge {
+    CallPtr bridge_call;
+    FunctionPtr bridge_func;
+  };
+
   WrapperCallInfo FindWrapperInnerCall(const FunctionPtr& wrapper_func) {
     auto info = ir::FindFirstInnerCall(wrapper_func, program_);
     return {std::move(info.inner_call), std::move(info.inner_callee)};
@@ -1546,7 +1569,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
   std::vector<ParamEntry> BuildWrapperReorderedParams(const CallPtr& outer_call,
                                                       const FunctionPtr& wrapper_func,
                                                       const CallPtr& inner_call,
-                                                      const FunctionPtr& inner_callee) {
+                                                      const FunctionPtr& inner_callee,
+                                                      const WrapperBridge& bridge = {}) {
     std::unordered_map<const Var*, size_t> wrapper_param_to_outer_idx;
     for (size_t i = 0; i < wrapper_func->params_.size(); ++i) {
       wrapper_param_to_outer_idx[wrapper_func->params_[i].get()] = i;
@@ -1560,6 +1584,60 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Outer call to wrapper '" << wrapper_func->name_ << "' has arg_directions size "
         << outer_arg_directions.size() << " but args size " << outer_call->args_.size()
         << ". DeriveCallDirections must run before orchestration codegen.";
+
+    // Second hop for the Spmd-wrapped Group case (see WrapperBridge): map each
+    // Spmd-wrapper param Var to its position, which is positionally 1:1 with
+    // ``outer_call->args_`` (because ``outer_call`` invokes the Spmd wrapper).
+    const bool has_bridge = static_cast<bool>(bridge.bridge_func);
+    std::unordered_map<const Var*, size_t> outer_param_to_arg_idx;
+    if (has_bridge) {
+      for (size_t i = 0; i < bridge.bridge_func->params_.size(); ++i) {
+        outer_param_to_arg_idx[bridge.bridge_func->params_[i].get()] = i;
+      }
+    }
+
+    // Resolve a ``wrapper_func`` (Group/Spmd) param position to the concrete
+    // orchestration-level arg Expr, and report which ``outer_arg_directions``
+    // slot governs it (``*dir_idx``). ``*dir_idx == kNoDir`` means the resolved
+    // Expr is a constant baked into the Spmd-wrapper body (no outer direction);
+    // the caller's const branches emit it inline as a Scalar.
+    //
+    // No bridge (plain-Spmd / direct-Group): ``wrapper_func`` IS the called
+    // function, so the wrapper param index is the outer arg index directly.
+    //
+    // With bridge (Spmd-wrapped Group): ``wrapper_idx`` is a Group param index.
+    // The Group call inside the Spmd wrapper (``bridge.bridge_call``) passes one
+    // expr per Group param at the same position; that expr is a Spmd-wrapper
+    // param (resolved to its outer arg) or a constant.
+    constexpr size_t kNoDir = static_cast<size_t>(-1);
+    auto resolve_outer_arg = [&](size_t wrapper_idx, size_t* dir_idx) -> ExprPtr {
+      if (!has_bridge) {
+        INTERNAL_CHECK_SPAN(wrapper_idx < outer_call->args_.size(), outer_call->span_)
+            << "Internal error: wrapper param index " << wrapper_idx << " out of range for call to '"
+            << wrapper_func->name_ << "' (" << outer_call->args_.size() << " args).";
+        *dir_idx = wrapper_idx;
+        return outer_call->args_[wrapper_idx];
+      }
+      INTERNAL_CHECK_SPAN(wrapper_idx < bridge.bridge_call->args_.size(), bridge.bridge_call->span_)
+          << "Internal error: Group param index " << wrapper_idx << " out of range for bridge call to '"
+          << wrapper_func->name_ << "' (" << bridge.bridge_call->args_.size() << " args).";
+      const auto& bridge_arg = bridge.bridge_call->args_[wrapper_idx];
+      auto bridge_var = AsVarLike(bridge_arg);
+      if (!bridge_var) {
+        *dir_idx = kNoDir;  // constant in the Spmd-wrapper body -> emit inline
+        return bridge_arg;
+      }
+      auto oit = outer_param_to_arg_idx.find(bridge_var.get());
+      INTERNAL_CHECK_SPAN(oit != outer_param_to_arg_idx.end(), bridge.bridge_call->span_)
+          << "Internal error: Spmd-wrapper arg for Group '" << wrapper_func->name_ << "' param "
+          << wrapper_idx << " does not map to any Spmd-wrapper parameter (deduped/aliased arg tracking "
+          << "is inconsistent).";
+      INTERNAL_CHECK_SPAN(oit->second < outer_call->args_.size(), outer_call->span_)
+          << "Internal error: outer arg index " << oit->second << " out of range ("
+          << outer_call->args_.size() << " args).";
+      *dir_idx = oit->second;
+      return outer_call->args_[oit->second];
+    };
 
     // Per-call selective dump rides on the outer Call's ``kAttrDumpVars``
     // (e.g. a parent ``pl.dump_tag`` transferred onto the wrapper call by
@@ -1609,7 +1687,8 @@ class OrchestrationStmtCodegen : public CodegenBase {
       }
 
       size_t outer_idx = it->second;
-      const auto& outer_arg = outer_call->args_[outer_idx];
+      size_t dir_idx = kNoDir;
+      ExprPtr outer_arg = resolve_outer_arg(outer_idx, &dir_idx);
       std::string var_name = TryGetVarName(outer_arg);
 
       if (!var_name.empty()) {
@@ -1628,7 +1707,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
         if (!is_dump && !inner_dump_var_set.empty()) {
           is_dump = inner_dump_var_set.count(inner_arg_var.get()) > 0;
         }
-        params.push_back({outer_arg_directions[outer_idx], ext_name, is_dump});
+        // A tensor arg always resolves to a real outer Var (never a baked-in
+        // constant), so ``dir_idx`` is a valid ``outer_arg_directions`` slot.
+        INTERNAL_CHECK_SPAN(dir_idx < outer_arg_directions.size(), outer_call->span_)
+            << "Internal error: resolved direction index " << dir_idx << " out of range for tensor arg of '"
+            << wrapper_func->name_ << "' (" << outer_arg_directions.size() << " directions).";
+        params.push_back({outer_arg_directions[dir_idx], ext_name, is_dump});
       } else if (auto const_int = As<ConstInt>(outer_arg)) {
         std::string cpp_type = const_int->dtype().ToCTypeString();
         std::string value = FormatConstIntValue(const_int, cpp_type);
@@ -2136,7 +2220,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
         << "Internal error: no inner call found in Spmd function '" << spmd_func->name_ << "'";
 
     if (info.inner_callee->func_type_ == FunctionType::Group) {
-      GenerateGroupCallCode(call, info.inner_callee, spmd_func);
+      // The Group is dispatched THROUGH this Spmd wrapper: ``call`` invokes
+      // ``spmd_func``, not the Group. Pass the Group call inside the wrapper
+      // (``info.inner_call``, args 1:1 with ``spmd_func`` params) as the bridge
+      // so BuildWrapperReorderedParams maps Group params -> Spmd-wrapper params
+      // -> outer args even when an aliased-arg dedup shrank the wrapper's
+      // param count below the Group's.
+      GenerateGroupCallCode(call, info.inner_callee, spmd_func, WrapperBridge{info.inner_call, spmd_func});
       return;
     }
 
@@ -2167,7 +2257,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void GenerateGroupCallCode(const CallPtr& call, const FunctionPtr& group_func,
-                             const FunctionPtr& launch_func) {
+                             const FunctionPtr& launch_func, const WrapperBridge& bridge = {}) {
     std::string group_name = group_func->name_;
 
     auto info = FindGroupCallees(group_func);
@@ -2187,7 +2277,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
       // Reorder params from wrapper param order to inner kernel arg order.
       INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
           << "Internal error: no inner call found in AIV-only Group '" << group_name << "'";
-      auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee);
+      auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
       RecordKernelSignature(info.aiv_name, params);
 
       std::string ind = Indent();
@@ -2228,7 +2318,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // Reorder params from wrapper param order to inner kernel arg order.
     INTERNAL_CHECK(info.inner_call != nullptr && info.inner_callee != nullptr)
         << "Internal error: no inner call found in MixedKernels Group '" << group_name << "'";
-    auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee);
+    auto params = BuildWrapperReorderedParams(call, group_func, info.inner_call, info.inner_callee, bridge);
     RecordKernelSignature(info.aic_name, params);
     RecordKernelSignature(info.aiv_name, params);
 

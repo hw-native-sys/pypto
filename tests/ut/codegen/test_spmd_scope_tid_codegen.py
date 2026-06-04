@@ -163,6 +163,195 @@ class TestSpmdScopeTaskIdCodegen:
             f"expected set_dependencies({deps_arr}, ...) tying the dep to {alias!r}\n{code}"
         )
 
+    def test_mixed_spmd_in_equals_out_aliases_shared_buffer(self):
+        """A MIXED (split=) ``pl.spmd`` dispatch passing one buffer as both an
+        input AND the output must codegen — and both lanes of the aliased buffer
+        must resolve to the SAME external tensor.
+
+        Regression for the OOB read in ``BuildWrapperReorderedParams``: the Spmd
+        outliner deduplicates the repeated ``out`` arg, so ``main_spmd_0`` has 3
+        params while the Group keeps 4. Before the bridge fix, codegen indexed
+        ``outer_call->args_[3]`` (a Group-param index) on the 3-arg Spmd-wrapper
+        call → ``std::vector::operator[]`` UB → SIGSEGV / InternalError at
+        orchestration_codegen.cpp:1643. No captured ``as tid`` / TupleGetItem is
+        involved — a single dispatch reproduces it.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_out = pl.add(tile_mm, pl.load(bias, [0, 0], [64, 64]))
+                return pl.store(tile_out, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    # `out` is BOTH the input (param a) and the output (param out)
+                    out = self.kernel(out, b, bias, out)
+                return out
+
+        transformed = self._mixed_spmd_pipeline(P)
+        # The Spmd wrapper deduplicated the aliased `out` to one fewer param than
+        # the Group it wraps — the precondition for the original crash.
+        spmd_func = transformed.get_function("main_spmd_0")
+        group_func = transformed.get_function("kernel")
+        assert spmd_func is not None and group_func is not None
+        assert len(spmd_func.params) < len(group_func.params)
+
+        code = self._codegen(transformed)  # must not raise
+        assert "rt_submit_task(mixed_0, params_t0);" in code, code
+        # Both the input lane (Group param 0 = `a` ← out) and the output lane
+        # (Group param 3 = `out`) of the deduped buffer resolve to the SAME
+        # external tensor — proof that Group param 3 maps to outer arg 0, not OOB.
+        shared = re.findall(r"params_t0\.add_\w+\(ext_out\);", code)
+        assert len(shared) == 2, f"aliased buffer must appear on both lanes\n{code}"
+        # The other (distinct) args are each emitted exactly once, unaffected.
+        assert code.count("params_t0.add_input(ext_b);") == 1, code
+        assert code.count("params_t0.add_input(ext_bias);") == 1, code
+
+    def test_mixed_spmd_distinct_args_codegen_unchanged(self):
+        """Control / no-regression: a MIXED ``pl.spmd`` dispatch with all-distinct
+        args (no dedup) emits the same correct param block as before the fix.
+
+        Here the Spmd wrapper and the Group have equal param counts, so the new
+        bridge path collapses to the identity mapping — emitted text must be the
+        canonical 4-arg mixed dispatch.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_out = pl.add(tile_mm, pl.load(bias, [0, 0], [64, 64]))
+                return pl.store(tile_out, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4):
+                    out = self.kernel(a, b, bias, out)
+                return out
+
+        transformed = self._mixed_spmd_pipeline(P)
+        # Distinct args => no dedup => equal param counts.
+        spmd_func = transformed.get_function("main_spmd_0")
+        group_func = transformed.get_function("kernel")
+        assert spmd_func is not None and group_func is not None
+        assert len(spmd_func.params) == len(group_func.params)
+
+        code = self._codegen(transformed)
+        for line in (
+            "params_t0.add_input(ext_a);",
+            "params_t0.add_input(ext_b);",
+            "params_t0.add_input(ext_bias);",
+            "params_t0.add_output(ext_out);",
+            "rt_submit_task(mixed_0, params_t0);",
+        ):
+            assert line in code, f"missing {line!r}\n{code}"
+
+    def test_captured_dispatch_mixed_consumer_in_equals_out(self):
+        """The original KNOWN_ISSUES repro: a captured ``as tid`` MIXED dispatch
+        whose tensor output feeds a downstream MIXED dispatch that also reuses it
+        as its own output. The consumer's Spmd wrapper deduplicates to fewer
+        params than its Group (same root cause), so it crashed at codegen.
+
+        After the fix the consumer must (a) not crash, (b) alias both lanes of
+        its deduped buffer to the producer's tuple output, and (c) wire
+        ``deps=[tid0]`` from the captured producer TaskId.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class P:
+            @pl.function(type=pl.FunctionType.InCore, attrs={"split": pl.SplitMode.UP_DOWN})
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                tile_a_l1 = pl.load(a, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_b_l1 = pl.load(b, [0, 0], [64, 64], target_memory=pl.MemorySpace.Mat)
+                tile_a_l0a = pl.move(tile_a_l1, target_memory=pl.MemorySpace.Left)
+                tile_b_l0b = pl.move(tile_b_l1, target_memory=pl.MemorySpace.Right)
+                tile_mm = pl.matmul(tile_a_l0a, tile_b_l0b)
+                tile_out = pl.add(tile_mm, pl.load(bias, [0, 0], [64, 64]))
+                return pl.store(tile_out, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                b: pl.Tensor[[64, 64], pl.FP32],
+                bias: pl.Tensor[[64, 64], pl.FP32],
+                out: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                with pl.spmd(4, sync_start=True) as tid0:
+                    out = self.kernel(a, b, bias, out)
+                with pl.spmd(4, deps=[tid0]) as tid1:
+                    out = self.kernel(out, b, bias, out)
+                return out
+
+        transformed = self._mixed_spmd_pipeline(P)
+        code = self._codegen(transformed)  # must not raise
+
+        # Producer (task 0) captures its task output handle + producer TaskId.
+        assert "TaskOutputTensors task_0_outs = rt_submit_task(mixed_0, params_t0);" in code, code
+        m = re.search(r"PTO2TaskId (\w+) = task_0_outs\.task_id\(\);", code)
+        assert m is not None, f"producer TaskId not captured\n{code}"
+        tid = m.group(1)
+
+        # Consumer (task 1) is a SECOND mixed dispatch — previously the crash site.
+        assert "rt_submit_task(mixed_1, params_t1);" in code, code
+        consumer_args = re.findall(r"params_t1\.add_\w+\((\w+)\);", code)
+        assert len(consumer_args) == 4, f"{consumer_args}\n{code}"
+        # Exactly one buffer is aliased on both lanes (the producer's tensor
+        # output, reused as the consumer's in-place output).
+        aliased = [n for n in set(consumer_args) if consumer_args.count(n) == 2]
+        assert len(aliased) == 1, f"expected one buffer aliased twice, got {consumer_args}\n{code}"
+        # And the deps edge is wired from the captured producer TaskId.
+        assert re.search(rf"if \({re.escape(tid)}\.is_valid\(\)\)", code) is not None, code
+        assert re.search(r"params_t1\.set_dependencies\(", code) is not None, code
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
