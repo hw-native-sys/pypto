@@ -431,7 +431,14 @@ class ChipWorker(Worker):
     # Internal hook for the runner reuse path
     # ------------------------------------------------------------------
 
-    def _run_chip(self, chip_callable: Any, orch_args: Any, cfg: Any) -> None:
+    def _run_chip(self, chip_callable: Any, orch_args: Any, cfg: Any) -> Any:
+        """Dispatch *chip_callable* and return the simpler ``RunTiming``.
+
+        Returns the ``RunTiming`` produced by the underlying simpler
+        ``Worker.run`` (host + device wall). :meth:`run` ignores it — it
+        returns tensor outputs instead — but :func:`execute_on_device`
+        surfaces it on the ChipWorker-reuse path.
+        """
         if not self._initialized:
             raise RuntimeError("ChipWorker is not initialized; call init() or use `with chipworker:`")
         key = id(chip_callable)
@@ -439,7 +446,7 @@ class ChipWorker(Worker):
         if cid is None:
             cid = self._impl.register(chip_callable)
             self._cid_cache[key] = cid
-        self._impl.run(cid, orch_args, cfg)
+        return self._impl.run(cid, orch_args, cfg)
 
     # ------------------------------------------------------------------
     # Context manager — publishes ``self`` on the active stack

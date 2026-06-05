@@ -50,6 +50,11 @@ if TYPE_CHECKING:
     # time. The field is plumbed through to ``ir.compile()`` lazily anyway.
     from pypto.ir.distributed_compiled_program import DistributedConfig
 
+    # ``RunTiming`` is a simpler nanobind type re-exported via
+    # ``task_interface``. Under TYPE_CHECKING only so importing ``runner`` does
+    # not pull in the optional ``simpler`` package at import time.
+    from .task_interface import RunTiming  # pyright: ignore[reportAttributeAccessIssue]
+
 
 def _load_golden_from_data_dir(out_dir: Path, output_names: set[str]) -> dict[str, torch.Tensor] | None:
     """Load pre-computed golden outputs from ``data/out/{name}.pt`` files.
@@ -798,7 +803,7 @@ def execute_compiled(  # noqa: PLR0913
     level: int = 2,
     block_dim: int | None = None,
     aicpu_thread_num: int | None = None,
-) -> None:
+) -> "RunTiming | None":
     """Execute a pre-compiled program with user-provided tensors and scalars.
 
     Reuses :func:`device_runner.compile_and_assemble` for binary compilation
@@ -832,6 +837,12 @@ def execute_compiled(  # noqa: PLR0913
             precedence over ``RUNTIME_CONFIG``.
         aicpu_thread_num: Optional override of the AICPU thread count;
             same precedence rules as ``block_dim``.
+
+    Returns:
+        The :class:`RunTiming` from :func:`execute_on_device` (``host_wall_us``
+        plus ``device_wall_us``; ``device_wall_us`` is the real on-NPU wall for
+        L2 single-task runs and ``0`` for L3+ DAG runs). ``None`` if dispatch
+        produced no timing. Callers that do not need timing can ignore it.
     """
     work_dir = Path(work_dir)
 
@@ -861,7 +872,7 @@ def execute_compiled(  # noqa: PLR0913
         dfx_dir = work_dir / "dfx_outputs"
         dfx_dir.mkdir(parents=True, exist_ok=True)
 
-    execute_on_device(
+    timing = execute_on_device(
         chip_callable,
         orch_args,
         platform,
@@ -881,3 +892,5 @@ def execute_compiled(  # noqa: PLR0913
     # Collect DFX artefacts after execution (no-op when dfx_dir is None)
     if dfx_dir is not None:
         _collect_dfx_artifacts(dfx_dir, platform, dfx)
+
+    return timing

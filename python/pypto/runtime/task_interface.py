@@ -21,6 +21,7 @@ from simpler.task_interface import (  # pyright: ignore[reportMissingImports]
     ContinuousTensor,
     CoreCallable,
     DataType,
+    RunTiming,
     scalar_to_uint64,
 )
 from simpler.worker import Worker  # pyright: ignore[reportMissingImports]
@@ -54,6 +55,7 @@ __all__ = [
     "ContinuousTensor",
     "CoreCallable",
     "DataType",
+    "RunTiming",
     "Worker",
     "device_tensor_to_continuous",
     "make_tensor_arg",

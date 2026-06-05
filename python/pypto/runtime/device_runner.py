@@ -51,6 +51,7 @@ from .task_interface import (
     ChipCallable,  # pyright: ignore[reportAttributeAccessIssue]
     ChipStorageTaskArgs,  # pyright: ignore[reportAttributeAccessIssue]
     CoreCallable,  # pyright: ignore[reportAttributeAccessIssue]
+    RunTiming,  # pyright: ignore[reportAttributeAccessIssue]
     Worker,  # pyright: ignore[reportAttributeAccessIssue]
     make_tensor_arg,  # pyright: ignore[reportAttributeAccessIssue]
     scalar_to_uint64,  # pyright: ignore[reportAttributeAccessIssue]
@@ -508,7 +509,7 @@ def execute_on_device(  # noqa: PLR0913
     enable_dep_gen: bool = False,
     enable_scope_stats: bool = False,
     runtime_env: dict[str, str] | None = None,
-) -> None:
+) -> RunTiming:
     """Execute *chip_callable* on device via Simpler's unified ``Worker``.
 
     If a :class:`pypto.runtime.ChipWorker` is currently active (the call site is
@@ -571,6 +572,14 @@ def execute_on_device(  # noqa: PLR0913
             initialization will not take effect on the reuse path — pass
             those at ``ChipWorker(...)`` construction instead.
 
+    Returns:
+        The :class:`RunTiming` produced by the underlying simpler ``Worker``
+        run — ``host_wall_us`` plus ``device_wall_us``. For L2 single-task
+        runs ``device_wall_us`` is the real on-NPU orchestrator wall time;
+        for L3+ DAG runs it is ``0`` (per-task device cycles are not
+        aggregated in the ring scheduler — see ``simpler.worker.Worker.run``).
+        Callers that do not need timing can simply ignore the return value.
+
     Raises:
         ValueError: If ``level != 2`` (L3 not yet exposed), or any DFX flag
             is enabled without a corresponding ``output_prefix``.
@@ -615,16 +624,16 @@ def execute_on_device(  # noqa: PLR0913
     active = _PyptoWorker.current(level=level, platform=platform, device_id=device_id, runtime=runtime_name)
     with _temporary_env(env):
         if active is not None:
-            active._run_chip(chip_callable, orch_args, cfg)
-            return
+            return active._run_chip(chip_callable, orch_args, cfg)
         worker = Worker(level=level, device_id=device_id, platform=platform, runtime=runtime_name)
         worker.init()
         # Simpler's L2 ABI now dispatches by callable id (see runtime PR #710);
         # register the callable, run it, then close — close() runs finalize()
         # so explicit unregister is unnecessary here.
         cid = worker.register(chip_callable)
-        worker.run(cid, orch_args, cfg)
+        timing = worker.run(cid, orch_args, cfg)
         worker.close()
+        return timing
 
 
 # ---------------------------------------------------------------------------
