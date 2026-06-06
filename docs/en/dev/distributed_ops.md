@@ -221,8 +221,9 @@ binds physical buffers to.
   in `tests/ut/ir/test_distributed_ops.py`.
 - **Codegen**: `tests/ut/codegen/distributed/test_distributed_pto_codegen.py`.
 - **End-to-end (ST)**: `tests/st/distributed/test_l3_allreduce.py` (mesh
-  allreduce; **P=2** default, **P=4** on any four devices (e.g.
-  `--device=0,1,2,3` or `--device=0-3`)), `test_l3_allgather.py`,
+  allreduce with dynamic rank dim `NR = pl.dynamic("NR")`; **P=2** default,
+  **P=4** on any four devices (e.g. `--device=0,1,2,3` or `--device=0-3`)),
+  `test_l3_allgather.py`,
   `test_l3_reduce_scatter.py`, `test_l3_broadcast.py`, `test_l3_gemm.py`,
   `test_l3_ep_dispatch_combine.py`, `test_l3_notify_wait.py`, and related L3 STs
   under `tests/st/distributed/`. `test_l3_put.py` and `test_l3_get.py` are

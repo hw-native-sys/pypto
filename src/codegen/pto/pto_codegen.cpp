@@ -176,7 +176,7 @@ std::vector<VarPtr> CollectTensorShapeDynVars(const FunctionPtr& func) {
   std::vector<VarPtr> dyn_vars;
   std::set<const ir::Var*> seen;
   for (const auto& param : func->params_) {
-    if (auto tensor_type = As<TensorType>(param->GetType())) {
+    if (auto tensor_type = ir::AsTensorTypeLike(param->GetType())) {
       for (const auto& dim : tensor_type->shape_) {
         CollectVarsFromShapeExprImpl(dim, seen, dyn_vars);
       }

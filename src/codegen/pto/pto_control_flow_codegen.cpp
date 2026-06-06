@@ -300,17 +300,22 @@ void PTOCodegen::VisitStmt_(const ForStmtPtr& op) {
                 "should have demoted it to Sequential. Generating sequential loop as fallback.";
   }
 
-  // Evaluate loop bounds
+  // Evaluate loop bounds and ensure they are index-typed for scf.for.
+  // EmitCastToIndex is a no-op when the bound is already DataType::INDEX
+  // (e.g. ConstInt literals from pl.range(8)); for i32 runtime values such as
+  // pld.nranks(ctx) or pld.rank(ctx) it emits arith.index_cast, consistent
+  // with how every other integer-at-MLIR-boundary site (tensor views, array
+  // offsets) is handled in this codegen.
   VisitExpr(op->start_);
-  std::string start = fs_.current_expr_value;
+  std::string start = EmitCastToIndex(op->start_, fs_.current_expr_value);
   fs_.current_expr_value = "";
 
   VisitExpr(op->stop_);
-  std::string stop = fs_.current_expr_value;
+  std::string stop = EmitCastToIndex(op->stop_, fs_.current_expr_value);
   fs_.current_expr_value = "";
 
   VisitExpr(op->step_);
-  std::string step = fs_.current_expr_value;
+  std::string step = EmitCastToIndex(op->step_, fs_.current_expr_value);
   fs_.current_expr_value = "";
 
   // Register loop variable
