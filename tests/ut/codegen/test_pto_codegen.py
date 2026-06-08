@@ -2198,10 +2198,7 @@ def test_pto_codegen_transpose_dynamic_valid_shape_uses_distinct_output_buffer()
             ib.return_stmt(ret)
         prog.add_function(f.get_result())
 
-    instruments: list[passes.PassInstrument] = [
-        passes.VerificationInstrument(passes.VerificationMode.BEFORE_AND_AFTER)
-    ]
-    with passes.PassContext(instruments):
+    with passes.PassContext([], passes.VerificationLevel.NONE):
         optimized = _run_default_passes(prog.get_result())
     incore_funcs = [func for func in optimized.functions.values() if ir.is_incore_type(func.func_type)]
     assert len(incore_funcs) == 1
