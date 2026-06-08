@@ -951,17 +951,17 @@ class TestBroadcastOpsCodegen:
                 return pl.row_expand_mul(src, row_16x1)
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.ttrans" in mlir, (
-            f"tensor reshape [1,K] -> [K,1] feeding row_expand_mul must materialize data; got:\n{mlir}"
+        assert "pto.treshape" in mlir, (
+            "tensor reshape [1,K] -> [K,1] feeding row_expand_mul must materialize data "
+            f"without transpose; got:\n{mlir}"
         )
         treshape_lines = [line for line in mlir.splitlines() if "pto.treshape" in line]
-        ttrans_lines = [line for line in mlir.splitlines() if "pto.ttrans" in line]
         assert not any("rows=2, cols=8" in line for line in treshape_lines), (
             "tensor reshape [1,K] -> [K,1] feeding row_expand_mul must not repack through "
             "32-byte scalar-ND rows; got:\n"
             f"{mlir}"
         )
-        assert any("rows=16, cols=1" in line and "blayout=col_major" in line for line in ttrans_lines), (
+        assert any("rows=16, cols=1" in line and "blayout=col_major" in line for line in treshape_lines), (
             f"final reshape result must carry a [K,1] column-vector output type; got:\n{mlir}"
         )
         assert "pto.trowexpandmul" in mlir, f"row_expand_mul should generate pto.trowexpandmul, got:\n{mlir}"
@@ -979,8 +979,8 @@ class TestBroadcastOpsCodegen:
                 return pl.row_expand_mul(src, row_64x1)
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.ttrans" in mlir, (
-            "K=64 row arange feeding row_expand_mul must not rely on view-only TRESHAPE; "
+        assert "pto.treshape" in mlir, (
+            "K=64 row arange feeding row_expand_mul must materialize the layout change; "
             f"fresh L2 direct-row dump showed rows 57-63 can be corrupt. Got:\n{mlir}"
         )
         treshape_lines = [line for line in mlir.splitlines() if "pto.treshape" in line]
@@ -1005,7 +1005,7 @@ class TestBroadcastOpsCodegen:
                 return row_64x1
 
         mlir = self._generate_mlir(Prog)
-        assert "pto.ttrans" in mlir, (
+        assert "pto.treshape" in mlir, (
             f"direct out_row store must materialize [1,64] -> [64,1] before TCVT/TSTORE; got:\n{mlir}"
         )
         assert "pto.tstore" in mlir, f"direct row repro should store out_row, got:\n{mlir}"
