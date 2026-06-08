@@ -210,31 +210,6 @@ void OpConversionRegistry::RegisterBroadcastAndTransformOps() {
                                                 {tile_var, valid_shape->first, valid_shape->second}, span)};
         };
 
-        auto input_tile_type = As<TileType>(args[0]->GetType());
-        auto shape_tuple = As<MakeTuple>(args[1]);
-        if (input_tile_type && shape_tuple && input_tile_type->shape_.size() == 2 &&
-            shape_tuple->elements_.size() == 2) {
-          auto src_rows = As<ConstInt>(input_tile_type->shape_[0]);
-          auto src_cols = As<ConstInt>(input_tile_type->shape_[1]);
-          auto dst_rows = As<ConstInt>(shape_tuple->elements_[0]);
-          auto dst_cols = As<ConstInt>(shape_tuple->elements_[1]);
-          if (src_rows && src_cols && dst_rows && dst_cols && src_rows->value_ == 1 && src_cols->value_ > 1 &&
-              dst_rows->value_ == src_cols->value_ && dst_cols->value_ == 1) {
-            auto axis0 = std::make_shared<ConstInt>(0, DataType::INDEX, span);
-            auto axis1 = std::make_shared<ConstInt>(1, DataType::INDEX, span);
-            std::vector<std::pair<std::string, std::any>> transpose_kwargs;
-            if (auto valid_shape = get_valid_shape_2d(); valid_shape.has_value()) {
-              transpose_kwargs = {
-                  {"valid_rows", valid_shape->first},
-                  {"valid_cols", valid_shape->second},
-              };
-            }
-            auto transpose_call =
-                op_reg.Create("tile.transpose", {args[0], axis0, axis1}, transpose_kwargs, span);
-            return ConversionResult{transpose_call};
-          }
-        }
-
         auto reshape_call = op_reg.Create("tile.reshape", {args[0], args[1]}, kwargs, span);
         return finish_reshape_with_valid_shape(reshape_call);
       });

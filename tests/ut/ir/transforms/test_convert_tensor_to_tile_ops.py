@@ -400,8 +400,7 @@ class TestConvertTensorToTileOps:
         _assert_convert_equal(before, expected)
 
     def test_row_vector_reshape_preserves_valid_shape(self):
-        """3-arg tensor.reshape keeps valid_shape when lowered through tile.transpose."""
-        span = ir.Span.unknown()
+        """3-arg row-vector tensor.reshape keeps valid_shape without transposing data."""
         in_specs: list[InSpec] = [("x", [1, 16], DataType.FP32)]
         extra_specs: list[ExtraSpec] = [("valid_rows", ir.ScalarType(DataType.INDEX))]
 
@@ -409,14 +408,10 @@ class TestConvertTensorToTileOps:
             return ib.let("y", tensor_ops.reshape(ins[0], [16, 1], [extras[0], 1]))
 
         def expected_body(ib, tiles, extras):
+            reshaped = ib.let("reshape_tile", tile_ops.reshape(tiles[0], [16, 1]))
             return ib.let(
                 "y_tile",
-                ir.create_op_call(
-                    "tile.transpose",
-                    [tiles[0], ir.ConstInt(0, DataType.INDEX, span), ir.ConstInt(1, DataType.INDEX, span)],
-                    {"valid_rows": extras[0], "valid_cols": ir.ConstInt(1, DataType.INDEX, span)},
-                    span,
-                ),
+                tile_ops.set_validshape(reshaped, extras[0], 1),
             )
 
         before = _make_before(
