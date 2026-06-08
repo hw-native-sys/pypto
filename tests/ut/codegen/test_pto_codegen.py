@@ -36,7 +36,6 @@ from pypto.backend.pto_backend import (
 )
 from pypto.ir import OptimizationStrategy, PassManager
 from pypto.ir.builder import IRBuilder
-from pypto.ir.op import tensor as tensor_ops
 from pypto.ir.op import tile
 
 PTOCodegen = codegen.PTOCodegen
@@ -2184,23 +2183,19 @@ def test_pto_codegen_transpose_dynamic_valid_shape_uses_distinct_output_buffer()
     in_type = ir.TensorType([8, 16], DataType.FP32)
     out_type = ir.TensorType([16, 1], DataType.FP32)
     ib = IRBuilder()
-    with ib.program("row_vector_reshape") as prog:
-        kernel_gvar = prog.declare_function("kernel")
-        prog.declare_function("main")
+    with ib.program("transpose_subview_scratch") as prog:
+        prog.declare_function("kernel")
         with ib.function("kernel", type=ir.FunctionType.InCore) as f:
             src = f.param("src", in_type)
+            out = f.param("out", out_type, direction=ir.ParamDirection.Out)
             valid_rows = f.param("valid_rows", ir.ScalarType(idx))
             f.return_type(out_type)
-            row = ib.let("row", tensor_ops.slice(src, [1, 16], [0, 0]))
-            col = ib.let("col", tensor_ops.reshape(row, [16, 1], [valid_rows, 1]))
-            ib.return_stmt(col)
-        prog.add_function(f.get_result())
-        with ib.function("main") as f:
-            src = f.param("src", in_type)
-            valid_rows = f.param("valid_rows", ir.ScalarType(idx))
-            f.return_type(out_type)
-            y = ib.let("y", ir.Call(kernel_gvar, [src, valid_rows], span))
-            ib.return_stmt(y)
+            full = ib.let("full", tile.load(src, [0, 0], [8, 16]))
+            row = ib.let("row", tile.slice(full, [1, 16], [0, 0]))
+            tmp = ib.let("tmp", tile.create([1, 16], DataType.FP32))
+            col = ib.let("col", tile.transpose(row, 0, 1, tmp, valid_rows=valid_rows, valid_cols=1))
+            ret = ib.let("ret", tile.store(col, [0, 0], out))
+            ib.return_stmt(ret)
         prog.add_function(f.get_result())
 
     instruments: list[passes.PassInstrument] = [
