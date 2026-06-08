@@ -378,6 +378,28 @@ class ScatterMaskChainProgram:
         return output
 
 
+@pl.program
+class ScatterAliasMaskP0101Program:
+    """Same as ``ScatterMaskP0101Program`` but invoked via the ``pl.scatter``
+    top-level alias instead of ``pl.tensor.scatter``.
+
+    Pins that ``pl.scatter`` resolves to the identical tensor-level op, lowering
+    and running the same as the fully-qualified ``pl.tensor.scatter`` form.
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        inp: pl.Tensor[[8, 8], pl.FP32],
+        dst: pl.Tensor[[8, 16], pl.FP32],
+        output: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+    ) -> pl.Tensor[[8, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.scatter(inp, mask_pattern=pl.tile.MaskPattern.P0101, dst=dst)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
 # --- Test cases ---
 
 
@@ -559,6 +581,21 @@ class ScatterMaskChainTestCase(_ScatterMaskBaseTestCase):
         tensors["output"][:] = out
 
 
+class ScatterAliasMaskP0101TestCase(_ScatterMaskBaseTestCase):
+    """``pl.scatter`` alias on the runnable mask-form path (P0101 → even cols)."""
+
+    _start = 0  # P0101 selects even columns
+
+    def get_name(self) -> str:
+        return "scatter_alias_mask_p0101"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_mask_specs(8, 8, 2, DataType.FP32, torch.float32)
+
+    def get_program(self) -> Any:
+        return ScatterAliasMaskP0101Program
+
+
 # --- Tests ---
 
 
@@ -625,6 +662,12 @@ class TestScatterMaskForm:
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_scatter_mask_chain(self, test_runner, platform):
         result = test_runner.run(ScatterMaskChainTestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_alias_mask_p0101(self, test_runner, platform):
+        # `pl.scatter` top-level alias resolves to `pl.tensor.scatter`.
+        result = test_runner.run(ScatterAliasMaskP0101TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
 
