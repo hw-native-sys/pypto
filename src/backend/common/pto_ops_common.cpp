@@ -516,7 +516,7 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
         << "Internal error: tile.transpose source must be TileType when adapting scratch type";
     auto src_type_info =
         codegen::ExtractTileTypeInfo(*source_tile_type, codegen.GetTypeString(source_tile_type->dtype_));
-    std::string zero = codegen.GetOrEmitConstant(0, DataType::INDEX);
+    std::string zero = codegen.GetOrEmitConstant(int64_t{0}, DataType::INDEX);
     std::string tmp_view = codegen.NewNamedTemp("transpose_tmp_view");
     std::ostringstream tmp_view_oss;
     tmp_view_oss << tmp_view << " = pto.subview " << tmp_ssa << "[" << zero << ", " << zero << "] sizes ["
