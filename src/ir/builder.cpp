@@ -39,15 +39,16 @@ IRBuilder::IRBuilder() = default;
 
 void IRBuilder::BeginFunction(const std::string& name, const Span& span, FunctionType type,
                               std::optional<Level> level, std::optional<Role> role,
-                              std::vector<std::pair<std::string, std::any>> attrs) {
+                              std::vector<std::pair<std::string, std::any>> attrs,
+                              bool requires_runtime_binding) {
   if (InFunction()) {
     throw pypto::RuntimeError("Cannot begin function '" + name + "': already inside function '" +
                               static_cast<FunctionContext*>(CurrentContext())->GetName() + "' at " +
                               CurrentContext()->GetBeginSpan().to_string());
   }
 
-  context_stack_.push_back(
-      std::make_unique<FunctionContext>(name, span, type, level, role, std::move(attrs)));
+  context_stack_.push_back(std::make_unique<FunctionContext>(name, span, type, level, role, std::move(attrs),
+                                                             requires_runtime_binding));
 }
 
 VarPtr IRBuilder::FuncArg(const std::string& name, const TypePtr& type, const Span& span,
@@ -79,10 +80,10 @@ FunctionPtr IRBuilder::EndFunction(const Span& end_span) {
                      end_span.begin_line_, end_span.begin_column_);
 
   // Create function
-  auto func =
-      std::make_shared<Function>(func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(),
-                                 func_ctx->GetReturnTypes(), body, combined_span, func_ctx->GetFuncType(),
-                                 func_ctx->GetLevel(), func_ctx->GetRole(), func_ctx->GetAttrs());
+  auto func = std::make_shared<Function>(
+      func_ctx->GetName(), func_ctx->GetParams(), func_ctx->GetParamDirections(), func_ctx->GetReturnTypes(),
+      body, combined_span, func_ctx->GetFuncType(), func_ctx->GetLevel(), func_ctx->GetRole(),
+      func_ctx->GetAttrs(), func_ctx->GetRequiresRuntimeBinding());
 
   // Pop context
   context_stack_.pop_back();

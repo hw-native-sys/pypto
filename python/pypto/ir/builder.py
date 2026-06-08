@@ -63,6 +63,7 @@ class IRBuilder:
         level: ir.Level | None = None,
         role: ir.Role | None = None,
         attrs: dict[str, Any] | None = None,
+        requires_runtime_binding: bool = False,
     ) -> Iterator["FunctionBuilder"]:
         """Context manager for building functions.
 
@@ -73,6 +74,8 @@ class IRBuilder:
             level: Hierarchy level (default: None)
             role: Function role (default: None)
             attrs: Function-level attributes dict (default: None)
+            requires_runtime_binding: True for abstract SubWorkers (``...`` body)
+                whose implementation is bound at runtime (default: False)
 
         Yields:
             FunctionBuilder: Helper object for building the function
@@ -90,7 +93,9 @@ class IRBuilder:
         self._ctx_counter += 1
         self._begin_spans[ctx_id] = begin_span
 
-        self._builder.begin_function(name, begin_span, type, level, role, attrs or {})
+        self._builder.begin_function(
+            name, begin_span, type, level, role, attrs or {}, requires_runtime_binding
+        )
         builder_obj = FunctionBuilder(self)
         try:
             yield builder_obj

@@ -431,6 +431,32 @@ func_orch = ir.Function("orchestrator", params, return_types, body, span, ir.Fun
 时，Python 打印器会在 `@pl.function(...)` 装饰器上输出 `level=` / `role=`
 关键字。
 
+#### 抽象（运行时绑定）SubWorker
+
+HOST 层的 `SubWorker` 是运行在 fork 出来的 orchestrator 进程中的纯 Python
+回调（其函数体作为 `InlineStmt` 原样捕获，不按 DSL 解析）。有些回调无法在
+编译期写出——例如需要 live 模型状态的采样闭包。将函数体声明为 `...` 即把该
+SubWorker 标记为**抽象的运行时绑定回调点（runtime-bound callback point）**：
+
+```python
+@pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
+def sample(logits: pl.Tensor[[B, V], pl.FP32]) -> pl.Tensor[[B], pl.INT32]:
+    ...   # 实现由运行时提供，而非此处
+```
+
+这会设置 `Function.requires_runtime_binding_ = true`（一个反射字段，因此可
+通过 `.pto` 序列化与 Python 打印器往返——打印器会重新输出 `...` 函数体）。
+裸 `pass` 函数体**不是**抽象的，它是一个具体的空操作 SubWorker。
+
+影响：
+
+- **Codegen** 为该 SubWorker 模块生成一个 guard 桩：若在未绑定时被派发会抛
+  异常（而不是静默空操作），并额外产出 `sub_workers/__required__.json`
+  清单列出所有抽象名称。
+- **运行时**要求通过 `compiled.prepare(callbacks={"sample": fn})` 提供实现。
+  缺少绑定时在 `prepare()` 阶段抛出 `ValueError`，而非派发时。
+  （`sub_worker_overrides=` 是 `callbacks=` 的已弃用别名。）
+
 ### ParamDirection 枚举
 
 | 值 | 说明 |

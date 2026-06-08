@@ -2483,6 +2483,9 @@ class Function(IRNode):
     attrs: Final[dict[str, Any]]
     """Function-level attributes (key-value metadata)."""
 
+    requires_runtime_binding: Final[bool]
+    """True for an abstract SubWorker (``...`` body) bound at runtime via callbacks."""
+
     split: Final[SplitMode | None]
     """Split mode for cross-core transfer (convenience accessor into attrs)."""
 
@@ -2509,6 +2512,7 @@ class Function(IRNode):
         level: Level | None = None,
         role: Role | None = None,
         attrs: dict[str, Any] | None = None,
+        requires_runtime_binding: bool = False,
     ) -> None:
         """Create a function definition.
 
@@ -2522,6 +2526,8 @@ class Function(IRNode):
             level: Hierarchy level (default: None — unspecified)
             role: Function role (default: None — unspecified)
             attrs: Function-level attributes dict (default: None)
+            requires_runtime_binding: True for an abstract SubWorker (``...``
+                body) whose implementation is bound at runtime (default: False)
         """
 
     def __str__(self) -> str:
@@ -3048,6 +3054,7 @@ class IRBuilder:
         level: Level | None = None,
         role: Role | None = None,
         attrs: dict[str, Any] | None = None,
+        requires_runtime_binding: bool = False,
     ) -> None:
         """Begin building a function.
 
@@ -3058,6 +3065,7 @@ class IRBuilder:
             level: Hierarchy level (default: None)
             role: Function role (default: None)
             attrs: Function-level attributes dict (default: None)
+            requires_runtime_binding: True for abstract SubWorkers bound at runtime (default: False)
         """
 
     def func_arg(

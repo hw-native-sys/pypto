@@ -58,6 +58,7 @@ def patched_setup():
         patch(f"{mod}._assemble_chip_callables", return_value=chip_callables) as assemble,
         patch(f"{mod}._load_orch_entry", return_value=(MagicMock(name="entry_fn"), None)) as load_entry,
         patch(f"{mod}._load_sub_worker_fns", return_value={}) as load_subs,
+        patch(f"{mod}._load_required_callbacks", return_value=set()) as load_required,
         patch(f"{mod}._construct_worker", return_value=worker) as construct,
         patch(f"{mod}._register_callables", return_value=({}, {"chip_orch": 0})) as register,
         patch(f"{mod}._make_call_config", return_value=MagicMock(name="CallConfig")),
@@ -68,6 +69,7 @@ def patched_setup():
             "assemble": assemble,
             "load_entry": load_entry,
             "load_subs": load_subs,
+            "load_required": load_required,
             "construct": construct,
             "register": register,
             "dispatch": dispatch,
@@ -220,21 +222,25 @@ class TestLifecycle:
             rt(DeviceTensor(0x1000, (16, 16), torch.float32))
 
 
-class TestSubWorkerOverrides:
-    def test_override_reaches_register(self, patched_setup):
+class TestCallbacks:
+    def test_callback_reaches_register(self, patched_setup):
         m = patched_setup
-        placeholder, real = object(), MagicMock()
+        placeholder = object()
+
+        def real(args):
+            return None
+
         m["load_subs"].return_value = {"sample_and_prepare": placeholder}
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
-        rt = DistributedWorker(compiled, sub_worker_overrides={"sample_and_prepare": real})
+        rt = DistributedWorker(compiled, callbacks={"sample_and_prepare": real})
 
-        # _register_callables(w, sub_worker_fns, chip_callables): arg[1] is the merged set.
+        # _register_callables(w, sub_worker_fns, chip_callables): arg[1] is the bound set.
         passed = m["register"].call_args.args[1]
         assert passed == {"sample_and_prepare": real}
         rt.close()
 
-    def test_no_override_passes_loaded_unchanged(self, patched_setup):
+    def test_no_callback_passes_loaded_unchanged(self, patched_setup):
         m = patched_setup
         loaded = {"sample_and_prepare": object()}
         m["load_subs"].return_value = loaded
@@ -245,36 +251,76 @@ class TestSubWorkerOverrides:
         assert m["register"].call_args.args[1] == loaded
         rt.close()
 
-    def test_override_unknown_name_raises(self, patched_setup):
+    def test_callback_unknown_name_raises(self, patched_setup):
         m = patched_setup
         m["load_subs"].return_value = {"sample_and_prepare": object()}
         compiled = _fake_compiled([_param("a", [8, 8])], [])
 
         with pytest.raises(ValueError, match="not sub-workers"):
-            DistributedWorker(compiled, sub_worker_overrides={"typo": MagicMock()})
+            DistributedWorker(compiled, callbacks={"typo": lambda args: None})
+
+    def test_missing_required_callback_raises(self, patched_setup):
+        m = patched_setup
+        m["load_subs"].return_value = {"sample": object()}
+        m["load_required"].return_value = {"sample"}
+        compiled = _fake_compiled([_param("a", [8, 8])], [])
+
+        with pytest.raises(ValueError, match="runtime-bound callbacks"):
+            DistributedWorker(compiled)  # abstract SubWorker not supplied
+
+    def test_deprecated_alias_warns_and_binds(self, patched_setup):
+        m = patched_setup
+
+        def real(args):
+            return None
+
+        m["load_subs"].return_value = {"sample_and_prepare": object()}
+        compiled = _fake_compiled([_param("a", [8, 8])], [])
+
+        with pytest.warns(DeprecationWarning, match="sub_worker_overrides is deprecated"):
+            rt = DistributedWorker(compiled, sub_worker_overrides={"sample_and_prepare": real})
+
+        assert m["register"].call_args.args[1] == {"sample_and_prepare": real}
+        rt.close()
 
 
-class TestMergeSubWorkerOverrides:
-    def test_none_overrides_returns_loaded_identity(self):
-        from pypto.runtime.distributed_runner import _merge_sub_worker_overrides  # noqa: PLC0415
+class TestBindSubWorkers:
+    def test_none_callbacks_returns_equal_set(self):
+        from pypto.runtime.distributed_runner import _bind_sub_workers  # noqa: PLC0415
 
         loaded = {"a": object()}
-        assert _merge_sub_worker_overrides(loaded, None) is loaded
-        assert _merge_sub_worker_overrides(loaded, {}) is loaded
+        assert _bind_sub_workers(loaded, None, set()) == loaded
+        assert _bind_sub_workers(loaded, {}, set()) == loaded
 
-    def test_valid_override_replaces(self):
-        from pypto.runtime.distributed_runner import _merge_sub_worker_overrides  # noqa: PLC0415
+    def test_valid_callback_replaces(self):
+        from pypto.runtime.distributed_runner import _bind_sub_workers  # noqa: PLC0415
 
-        placeholder, real, other = object(), MagicMock(), object()
+        placeholder, other = object(), object()
+
+        def real(args):
+            return None
+
         loaded = {"a": placeholder, "b": other}
-        merged = _merge_sub_worker_overrides(loaded, {"a": real})
-        assert merged == {"a": real, "b": other}
+        bound = _bind_sub_workers(loaded, {"a": real}, set())
+        assert bound == {"a": real, "b": other}
 
     def test_unknown_name_raises_listing_available(self):
-        from pypto.runtime.distributed_runner import _merge_sub_worker_overrides  # noqa: PLC0415
+        from pypto.runtime.distributed_runner import _bind_sub_workers  # noqa: PLC0415
 
         with pytest.raises(ValueError, match=r"not sub-workers.*Available sub-workers"):
-            _merge_sub_worker_overrides({"a": object()}, {"b": MagicMock()})
+            _bind_sub_workers({"a": object()}, {"b": lambda args: None}, set())
+
+    def test_missing_required_raises(self):
+        from pypto.runtime.distributed_runner import _bind_sub_workers  # noqa: PLC0415
+
+        with pytest.raises(ValueError, match="runtime-bound callbacks"):
+            _bind_sub_workers({"sample": object()}, None, {"sample"})
+
+    def test_bad_arity_callback_rejected(self):
+        from pypto.runtime.distributed_runner import _bind_sub_workers  # noqa: PLC0415
+
+        with pytest.raises(TypeError, match="single positional"):
+            _bind_sub_workers({"a": object()}, {"a": lambda: None}, set())
 
 
 class TestOneShotRegression:

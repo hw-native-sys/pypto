@@ -377,11 +377,15 @@ class Function : public IRNode {
    * @param level Hierarchy level (default: nullopt — unspecified)
    * @param role Function role (default: nullopt)
    * @param attrs Function-level attributes (default: empty)
+   * @param requires_runtime_binding True for SubWorkers declared with an
+   *        abstract (`...`) body — the implementation is supplied at runtime
+   *        rather than captured at compile time (default: false)
    */
   Function(std::string name, std::vector<VarPtr> params, std::vector<ParamDirection> param_directions,
            std::vector<TypePtr> return_types, StmtPtr body, Span span,
            FunctionType type = FunctionType::Opaque, std::optional<Level> level = std::nullopt,
-           std::optional<Role> role = std::nullopt, std::vector<std::pair<std::string, std::any>> attrs = {})
+           std::optional<Role> role = std::nullopt, std::vector<std::pair<std::string, std::any>> attrs = {},
+           bool requires_runtime_binding = false)
       : IRNode(std::move(span)),
         name_(std::move(name)),
         params_(std::move(params)),
@@ -391,7 +395,8 @@ class Function : public IRNode {
         func_type_(type),
         level_(level),
         role_(role),
-        attrs_(std::move(attrs)) {
+        attrs_(std::move(attrs)),
+        requires_runtime_binding_(requires_runtime_binding) {
     CHECK(params_.size() == param_directions_.size())
         << "params and param_directions must have same size, got " << params_.size() << " vs "
         << param_directions_.size();
@@ -430,15 +435,17 @@ class Function : public IRNode {
   static constexpr auto GetFieldDescriptors() {
     return std::tuple_cat(
         IRNode::GetFieldDescriptors(),
-        std::make_tuple(reflection::DefField(&Function::params_, "params"),
-                        reflection::UsualField(&Function::param_directions_, "param_directions"),
-                        reflection::UsualField(&Function::func_type_, "func_type"),
-                        reflection::UsualField(&Function::level_, "level"),
-                        reflection::UsualField(&Function::role_, "role"),
-                        reflection::UsualField(&Function::attrs_, "attrs"),
-                        reflection::UsualField(&Function::return_types_, "return_types"),
-                        reflection::UsualField(&Function::body_, "body"),
-                        reflection::IgnoreField(&Function::name_, "name")));
+        std::make_tuple(
+            reflection::DefField(&Function::params_, "params"),
+            reflection::UsualField(&Function::param_directions_, "param_directions"),
+            reflection::UsualField(&Function::func_type_, "func_type"),
+            reflection::UsualField(&Function::level_, "level"),
+            reflection::UsualField(&Function::role_, "role"),
+            reflection::UsualField(&Function::attrs_, "attrs"),
+            reflection::UsualField(&Function::requires_runtime_binding_, "requires_runtime_binding"),
+            reflection::UsualField(&Function::return_types_, "return_types"),
+            reflection::UsualField(&Function::body_, "body"),
+            reflection::IgnoreField(&Function::name_, "name")));
   }
 
  public:
@@ -447,10 +454,11 @@ class Function : public IRNode {
   std::optional<Level> level_;  // Hierarchy level (nullopt = infer from func_type)
   std::optional<Role> role_;    // Function role (nullopt = default per level)
   std::vector<std::pair<std::string, std::any>> attrs_;  // Function-level attributes (key-value metadata)
-  std::vector<VarPtr> params_;                           // Parameter variables
-  std::vector<ParamDirection> param_directions_;         // Parameter directions (same length as params_)
-  std::vector<TypePtr> return_types_;                    // Return types
-  StmtPtr body_;                                         // Function body statement
+  bool requires_runtime_binding_ = false;  // SubWorker with abstract (`...`) body: impl bound at runtime
+  std::vector<VarPtr> params_;             // Parameter variables
+  std::vector<ParamDirection> param_directions_;  // Parameter directions (same length as params_)
+  std::vector<TypePtr> return_types_;             // Return types
+  StmtPtr body_;                                  // Function body statement
 
   /**
    * @brief Get a typed attribute value

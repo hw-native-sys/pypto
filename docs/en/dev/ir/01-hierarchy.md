@@ -503,6 +503,35 @@ remain `nullopt` unless set by the caller. The Python printer emits the
 `level=` / `role=` keywords on the `@pl.function(...)` decorator whenever they
 are present.
 
+#### Abstract (runtime-bound) SubWorkers
+
+A HOST-level `SubWorker` is a pure-Python callback that runs in the forked
+orchestrator process (its body is captured verbatim as an `InlineStmt`, not
+parsed as DSL). Some callbacks cannot be written at compile time — e.g. a
+sampling closure that needs live model state. Declaring the body as `...`
+marks the SubWorker as an **abstract, runtime-bound callback point**:
+
+```python
+@pl.function(level=pl.Level.HOST, role=pl.Role.SubWorker)
+def sample(logits: pl.Tensor[[B, V], pl.FP32]) -> pl.Tensor[[B], pl.INT32]:
+    ...   # implementation supplied at runtime, NOT here
+```
+
+This sets `Function.requires_runtime_binding_ = true` (a reflected field, so it
+round-trips through `.pto` serialization and the Python printer, which re-emits
+the `...` body). A bare `pass` body is **not** abstract — it is a concrete
+no-op SubWorker.
+
+Consequences:
+
+- **Codegen** emits a guard stub for the SubWorker module that raises if
+  dispatched without a binding (instead of silently no-op'ing), plus a
+  `sub_workers/__required__.json` manifest listing the abstract names.
+- **Runtime** requires the implementation via
+  `compiled.prepare(callbacks={"sample": fn})`. A missing binding raises
+  `ValueError` at `prepare()` time, not at dispatch. (`sub_worker_overrides=`
+  is a deprecated alias for `callbacks=`.)
+
 ### ParamDirection Enum
 
 | Value | Description |

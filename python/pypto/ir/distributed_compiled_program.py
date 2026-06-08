@@ -250,6 +250,7 @@ class DistributedCompiledProgram:
         self,
         config: Any = None,
         *,
+        callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
     ) -> "DistributedWorker":
         """Prepare a reusable L3 execution handle (setup once, dispatch many).
@@ -272,11 +273,14 @@ class DistributedCompiledProgram:
 
         Args:
             config: Optional run configuration (reserved; currently unused).
-            sub_worker_overrides: Replace a generated sub-worker placeholder
-                (matched by name) with your own callable — e.g. a real sampling
-                closure in place of the codegen stub. Each name must be a
-                sub-worker the program declares; an unknown name raises
-                ``ValueError``.
+            callbacks: Bind a callable to a SubWorker by name — e.g. a real
+                sampling closure. Abstract SubWorkers (declared with a ``...``
+                body) are runtime-bound callback points and MUST be supplied
+                here; a missing binding raises ``ValueError``. A callback may
+                also replace a concrete SubWorker's generated body. Each name
+                must be a sub-worker the program declares; an unknown name
+                raises ``ValueError``.
+            sub_worker_overrides: Deprecated alias for ``callbacks``.
 
         Returns:
             A :class:`DistributedWorker`; use it as a context manager or call
@@ -284,7 +288,7 @@ class DistributedCompiledProgram:
         """
         from pypto.runtime.distributed_runner import DistributedWorker  # noqa: PLC0415
 
-        return DistributedWorker(self, config, sub_worker_overrides=sub_worker_overrides)
+        return DistributedWorker(self, config, callbacks=callbacks, sub_worker_overrides=sub_worker_overrides)
 
     @staticmethod
     def _build_full_args(input_args, param_infos, output_indices):

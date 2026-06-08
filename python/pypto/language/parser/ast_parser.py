@@ -590,6 +590,7 @@ class ASTParser:
         func_role: ir.Role | None = None,
         func_attrs: dict[str, Any] | None = None,
         inline_body: str | None = None,
+        requires_runtime_binding: bool = False,
     ) -> ir.Function:
         """Parse function definition and build IR.
 
@@ -602,6 +603,9 @@ class ASTParser:
             inline_body: If provided, the function body is replaced by a single
                 ``InlineStmt`` carrying this verbatim Python source instead of
                 parsing the AST body as DSL.
+            requires_runtime_binding: True for an abstract SubWorker (``...``
+                body) whose implementation is supplied at runtime. The function
+                carries an empty ``InlineStmt`` body and this flag set.
 
         Returns:
             IR Function object
@@ -632,7 +636,13 @@ class ASTParser:
 
         # Begin building function
         with self.builder.function(
-            func_name, func_span, type=func_type, level=func_level, role=func_role, attrs=func_attrs
+            func_name,
+            func_span,
+            type=func_type,
+            level=func_level,
+            role=func_role,
+            attrs=func_attrs,
+            requires_runtime_binding=requires_runtime_binding,
         ) as f:
             # Parse parameters (skip 'self' if it's the first parameter without annotation)
             for arg in func_def.args.args:

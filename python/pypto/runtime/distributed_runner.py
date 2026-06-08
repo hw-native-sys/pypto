@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import ctypes
 import importlib.util
+import inspect
+import json
 import sys
 import types
+import warnings
 import weakref
 from collections.abc import Callable
 from pathlib import Path
@@ -191,6 +194,18 @@ def _load_sub_worker_fns(output_dir: Path) -> dict[str, Any]:
     return sub_worker_fns
 
 
+def _load_required_callbacks(output_dir: Path) -> set[str]:
+    """Names of abstract SubWorkers that MUST be bound via ``callbacks={...}``.
+
+    Read from the ``sub_workers/__required__.json`` manifest emitted by codegen
+    for ``...``-body SubWorkers. Missing manifest ⇒ no required callbacks.
+    """
+    manifest = output_dir / "sub_workers" / "__required__.json"
+    if not manifest.exists():
+        return set()
+    return set(json.loads(manifest.read_text()))
+
+
 def _construct_worker(
     dc: DistributedConfig,
     platform: str,
@@ -225,25 +240,80 @@ def _register_callables(
     return sub_ids, chip_cids
 
 
-def _merge_sub_worker_overrides(
-    loaded: dict[str, Any], overrides: dict[str, Callable[..., Any]] | None
-) -> dict[str, Any]:
-    """Merge user sub-worker overrides onto the codegen-loaded set (by name).
+def _check_callback_arity(name: str, fn: Callable[..., Any]) -> None:
+    """Validate that a user callback can be invoked as ``fn(args)``.
 
-    Each override replaces the generated placeholder for an existing sub-worker.
-    Overriding a name the program does not declare is rejected: it would register
-    an unused callable while the generated orchestrator kept calling the
-    placeholder (a silent no-op the caller almost never intends — usually a typo).
+    SubWorker callables receive a single ``TaskArgs`` positional argument. A
+    callback that cannot accept exactly one positional arg is almost certainly
+    the wrong function — reject it with a clear error instead of failing deep
+    inside dispatch with an opaque ``TypeError``.
     """
-    if not overrides:
-        return loaded
-    unknown = sorted(set(overrides) - set(loaded))
+    if not callable(fn):
+        raise TypeError(f"callback for SubWorker '{name}' is not callable: {fn!r}")
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return  # builtins / C callables expose no signature — skip the check
+    try:
+        sig.bind(object())  # one positional arg, like the runtime's fn(args)
+    except TypeError as exc:
+        raise TypeError(
+            f"callback for SubWorker '{name}' must accept a single positional "
+            f"argument fn(args: TaskArgs); got signature {sig}."
+        ) from exc
+
+
+def _coalesce_callbacks(
+    callbacks: dict[str, Callable[..., Any]] | None,
+    sub_worker_overrides: dict[str, Callable[..., Any]] | None,
+) -> dict[str, Callable[..., Any]] | None:
+    """Merge the deprecated ``sub_worker_overrides`` alias into ``callbacks``.
+
+    ``callbacks`` takes precedence on name collisions. Returns ``None`` when both
+    are empty so downstream ``or {}`` handling stays simple.
+    """
+    if sub_worker_overrides is None:
+        return callbacks
+    warnings.warn(
+        "sub_worker_overrides is deprecated; use callbacks= instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    return {**sub_worker_overrides, **(callbacks or {})}
+
+
+def _bind_sub_workers(
+    loaded: dict[str, Any],
+    callbacks: dict[str, Callable[..., Any]] | None,
+    required: set[str],
+) -> dict[str, Any]:
+    """Bind user callbacks onto the codegen-loaded SubWorker set (by name).
+
+    Each callback replaces the generated module for an existing SubWorker.
+
+    - Unknown names are rejected: binding a name the program does not declare
+      would register an unused callable while the orchestrator kept calling the
+      generated module (a silent no-op, usually a typo).
+    - Abstract SubWorkers (``...`` body, listed in *required*) MUST be bound —
+      their generated module only raises. A missing binding is reported here, at
+      prepare time, rather than at dispatch.
+    """
+    callbacks = callbacks or {}
+    unknown = sorted(set(callbacks) - set(loaded))
     if unknown:
         raise ValueError(
-            f"sub_worker_overrides names {unknown} are not sub-workers of this "
-            f"program. Available sub-workers: {sorted(loaded)}."
+            f"callbacks names {unknown} are not sub-workers of this program. "
+            f"Available sub-workers: {sorted(loaded)}."
         )
-    return {**loaded, **overrides}
+    missing = sorted(required - set(callbacks))
+    if missing:
+        raise ValueError(
+            f"SubWorkers {missing} are runtime-bound callbacks (declared with a "
+            f"`...` body) and must be supplied via callbacks={{...}}."
+        )
+    for name, fn in callbacks.items():
+        _check_callback_arity(name, fn)
+    return {**loaded, **callbacks}
 
 
 def _make_call_config(dc: DistributedConfig) -> Any:
@@ -349,6 +419,10 @@ def execute_distributed(
         alloc_fn(tensors)
 
     sub_worker_fns = _load_sub_worker_fns(output_dir)
+    # The one-shot path cannot supply callbacks; if the program declares any
+    # runtime-bound (`...`-body) SubWorker, fail early with a clear message
+    # pointing at prepare(callbacks={...}).
+    sub_worker_fns = _bind_sub_workers(sub_worker_fns, None, _load_required_callbacks(output_dir))
 
     num_sub = max(dc.num_sub_workers, len(sub_worker_fns))
 
@@ -389,10 +463,13 @@ class DistributedWorker(Worker):
     (its ``init`` source must likewise be a pre-``prepare`` shared tensor) and
     mixed in. This mirrors the runtime's ``child_memory`` example.
 
-    ``sub_worker_overrides`` replaces a generated sub-worker placeholder (matched
-    by name) with a caller-supplied callable — e.g. a real sampling closure in
-    place of the codegen stub. Each name must be a sub-worker the program
-    declares; an unknown name raises ``ValueError``.
+    ``callbacks`` binds a caller-supplied callable to a SubWorker by name — e.g.
+    a real sampling closure. Abstract SubWorkers (declared with a ``...`` body)
+    are runtime-bound callback points and MUST be supplied here; a missing
+    binding raises ``ValueError`` at prepare time. A callback may also replace a
+    concrete SubWorker's generated body. Each name must be a sub-worker the
+    program declares; an unknown name raises ``ValueError``.
+    (``sub_worker_overrides`` is a deprecated alias for ``callbacks``.)
 
     Obtain via :meth:`DistributedCompiledProgram.prepare`. Use as a context
     manager (recommended) or call :meth:`close` when done::
@@ -416,10 +493,12 @@ class DistributedWorker(Worker):
         compiled: DistributedCompiledProgram,
         config: Any = None,
         *,
+        callbacks: dict[str, Callable[..., Any]] | None = None,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
         del config  # reserved for future per-runtime overrides
+        callbacks = _coalesce_callbacks(callbacks, sub_worker_overrides)
         self.dc = compiled._distributed_config
         self._compiled = compiled  # held for run/register
 
@@ -432,7 +511,9 @@ class DistributedWorker(Worker):
             self._chip_callables, runtime_name = _assemble_chip_callables(compiled)
             self._entry_fn, alloc_fn = _load_orch_entry(compiled.output_dir)
             sub_worker_fns = _load_sub_worker_fns(compiled.output_dir)
-            sub_worker_fns = _merge_sub_worker_overrides(sub_worker_fns, sub_worker_overrides)
+            sub_worker_fns = _bind_sub_workers(
+                sub_worker_fns, callbacks, _load_required_callbacks(compiled.output_dir)
+            )
 
             num_sub = max(self.dc.num_sub_workers, len(sub_worker_fns))
             self._w = _construct_worker(self.dc, compiled.platform, runtime_name, num_sub)

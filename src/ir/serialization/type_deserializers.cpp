@@ -1022,10 +1022,18 @@ static IRNodePtr DeserializeFunction(const msgpack::object& fields_obj, msgpack:
     }
   }
 
+  // Deserialize requires_runtime_binding (default false for backward compat with
+  // blobs written before abstract SubWorkers existed).
+  bool requires_runtime_binding = false;
+  auto rrb_obj = GetOptionalFieldObj(fields_obj, "requires_runtime_binding", ctx);
+  if (rrb_obj.has_value() && rrb_obj->type != msgpack::type::NIL) {
+    requires_runtime_binding = rrb_obj->via.boolean;
+  }
+
   auto body = std::static_pointer_cast<const Stmt>(ctx.DeserializeNode(GET_FIELD_OBJ("body"), zone));
 
   return std::make_shared<Function>(name, params, param_directions, return_types, body, span, func_type,
-                                    level, role, std::move(attrs));
+                                    level, role, std::move(attrs), requires_runtime_binding);
 }
 
 // Deserialize Program

@@ -89,7 +89,8 @@ class IRBuilder {
    */
   void BeginFunction(const std::string& name, const Span& span, FunctionType type = FunctionType::Opaque,
                      std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt,
-                     std::vector<std::pair<std::string, std::any>> attrs = {});
+                     std::vector<std::pair<std::string, std::any>> attrs = {},
+                     bool requires_runtime_binding = false);
 
   /**
    * @brief Add a function parameter
@@ -587,13 +588,15 @@ class FunctionContext : public BuildContext {
  public:
   FunctionContext(std::string name, Span span, FunctionType func_type = FunctionType::Opaque,
                   std::optional<Level> level = std::nullopt, std::optional<Role> role = std::nullopt,
-                  std::vector<std::pair<std::string, std::any>> attrs = {})
+                  std::vector<std::pair<std::string, std::any>> attrs = {},
+                  bool requires_runtime_binding = false)
       : BuildContext(Type::FUNCTION, std::move(span)),
         name_(std::move(name)),
         func_type_(func_type),
         level_(level),
         role_(role),
-        attrs_(std::move(attrs)) {}
+        attrs_(std::move(attrs)),
+        requires_runtime_binding_(requires_runtime_binding) {}
 
   void AddParam(const VarPtr& param, ParamDirection direction = ParamDirection::In) {
     params_.push_back(param);
@@ -610,6 +613,7 @@ class FunctionContext : public BuildContext {
   [[nodiscard]] std::optional<Level> GetLevel() const { return level_; }
   [[nodiscard]] std::optional<Role> GetRole() const { return role_; }
   [[nodiscard]] const std::vector<std::pair<std::string, std::any>>& GetAttrs() const { return attrs_; }
+  [[nodiscard]] bool GetRequiresRuntimeBinding() const { return requires_runtime_binding_; }
 
  private:
   std::string name_;
@@ -617,6 +621,7 @@ class FunctionContext : public BuildContext {
   std::optional<Level> level_;
   std::optional<Role> role_;
   std::vector<std::pair<std::string, std::any>> attrs_;
+  bool requires_runtime_binding_ = false;
   std::vector<VarPtr> params_;
   std::vector<ParamDirection> param_directions_;
   std::vector<TypePtr> return_types_;

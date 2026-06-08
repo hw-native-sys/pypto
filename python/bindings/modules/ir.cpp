@@ -1569,7 +1569,8 @@ void BindIR(nb::module_& m) {
       "__init__",
       [](Function* self, const std::string& name, const nb::list& params,
          const std::vector<TypePtr>& return_types, const StmtPtr& body, const Span& span, FunctionType type,
-         std::optional<Level> level, std::optional<Role> role, const nb::object& attrs_or_none) {
+         std::optional<Level> level, std::optional<Role> role, const nb::object& attrs_or_none,
+         bool requires_runtime_binding) {
         std::vector<VarPtr> param_vars;
         std::vector<ParamDirection> param_dirs;
         param_vars.reserve(nb::len(params));
@@ -1590,11 +1591,12 @@ void BindIR(nb::module_& m) {
         }
         auto attrs = ConvertAttrsFromPython(attrs_or_none);
         new (self) Function(name, std::move(param_vars), std::move(param_dirs), return_types, body, span,
-                            type, level, role, std::move(attrs));
+                            type, level, role, std::move(attrs), requires_runtime_binding);
       },
       nb::arg("name"), nb::arg("params"), nb::arg("return_types"), nb::arg("body"), nb::arg("span"),
       nb::arg("type") = FunctionType::Opaque, nb::arg("level") = nb::none(), nb::arg("role") = nb::none(),
-      nb::arg("attrs") = nb::none(), "Create a function definition");
+      nb::arg("attrs") = nb::none(), nb::arg("requires_runtime_binding") = false,
+      "Create a function definition");
   BindFields<Function>(function_class);
   // Custom attrs property: convert vector<pair<string, any>> to Python dict
   function_class.def_prop_ro(

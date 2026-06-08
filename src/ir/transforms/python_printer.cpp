@@ -2051,7 +2051,11 @@ void IRPythonPrinter::VisitFunction(const FunctionPtr& func) {
 
   // Print body - convert yield to return in function context
   IncreaseIndent();
-  if (func->body_) {
+  if (func->requires_runtime_binding_) {
+    // Abstract SubWorker: runtime-bound callback. Round-trips as `...`, which
+    // the parser re-detects (see `_is_abstract_subworker_body`).
+    stream_ << GetIndent() << "...";
+  } else if (func->body_) {
     if (auto seq_stmts = As<SeqStmts>(func->body_)) {
       if (seq_stmts->stmts_.empty()) {
         stream_ << GetIndent() << "pass";

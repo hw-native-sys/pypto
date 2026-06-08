@@ -27,6 +27,31 @@ from .diagnostics import ParserError, ParserSyntaxError, concise_error_message
 from .enum_utils import FUNCTION_TYPE_MAP, LEVEL_MAP, ROLE_MAP, SPLIT_MODE_MAP, extract_enum_value
 
 
+def _is_abstract_subworker_body(func_def: ast.FunctionDef) -> bool:
+    """True if the SubWorker body is an abstract ``...`` declaration.
+
+    An abstract SubWorker declares only ``...`` (optionally preceded by a
+    docstring) and carries no implementation — it is a runtime-bound callback
+    point that must be supplied via ``prepare(callbacks={...})``. A bare ``pass``
+    is *not* abstract: it is a valid no-op SubWorker with a concrete body.
+    """
+    non_doc = [
+        stmt
+        for stmt in func_def.body
+        if not (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        )
+    ]
+    return (
+        len(non_doc) == 1
+        and isinstance(non_doc[0], ast.Expr)
+        and isinstance(non_doc[0].value, ast.Constant)
+        and non_doc[0].value.value is ...
+    )
+
+
 def _capture_subworker_source(func_def: ast.FunctionDef) -> str:
     """Return the SubWorker function *body* as plain Python source text.
 
@@ -1004,8 +1029,18 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                     and func_role == ir.Role.SubWorker
                 )
 
+                # An abstract SubWorker (`...` body) is a runtime-bound callback:
+                # carry an empty InlineStmt body and set requires_runtime_binding
+                # so codegen emits a guard stub and the runtime enforces binding.
+                requires_runtime_binding = False
                 if is_sub_worker:
-                    inline_body = _capture_subworker_source(func_def)
+                    if _is_abstract_subworker_body(func_def):
+                        # `_capture_subworker_source` still runs to reject `self`.
+                        _capture_subworker_source(func_def)
+                        inline_body = ""
+                        requires_runtime_binding = True
+                    else:
+                        inline_body = _capture_subworker_source(func_def)
                     func_def_to_parse = func_def
                 else:
                     inline_body = None
@@ -1038,6 +1073,7 @@ def program(cls: type | None = None, *, strict_ssa: bool = False) -> ir.Program 
                         func_role=func_role,
                         func_attrs=func_attrs or None,
                         inline_body=inline_body,
+                        requires_runtime_binding=requires_runtime_binding,
                     )
                 except SyntaxError as e:
                     raise ParserSyntaxError(
