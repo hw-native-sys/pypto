@@ -1319,7 +1319,7 @@ def scatter_update(
         raise TypeError("scatter_update requires input, dim, index, and src")
 
     actual_span = _get_span_or_capture(span)
-    if isinstance(dim, ConstInt):
+    if isinstance(dim, _ir_core.ConstInt):
         dim_val = int(dim.value)
     elif isinstance(dim, int):
         dim_val = dim
@@ -1556,7 +1556,7 @@ def gather(  # noqa: PLR0913
         raise ValueError("gather() index form requires both dim and index")
     if output_dtype is not None:
         raise ValueError("gather() output_dtype is only valid for the mask form; use mask_pattern=<int>")
-    if isinstance(dim, ConstInt):
+    if isinstance(dim, _ir_core.ConstInt):
         dim_val = int(dim.value)
     elif isinstance(dim, int):
         dim_val = dim
