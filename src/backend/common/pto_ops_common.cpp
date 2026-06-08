@@ -497,6 +497,15 @@ static std::string MakeTileTransposeCodegenPTO(const CallPtr& op, codegen::Codeg
   if (src_type.empty()) {
     src_type = codegen.GetExprTypeAnnotation(op->args_[0]);
   }
+  std::string original_src_ssa = src_ssa;
+  src_ssa = MaterializeSubviewOperandIfNeeded(op->args_[0], codegen, "transpose_src");
+  if (src_ssa != original_src_ssa) {
+    if (auto* mat = codegen.GetSubviewMaterialization(original_src_ssa)) {
+      src_type = mat->materialize_target_type;
+    } else {
+      src_type = codegen.GetSSATileBufType(src_ssa);
+    }
+  }
   std::string tmp_ssa = codegen.GetExprAsCode(op->args_[3]);
   std::string tmp_type = codegen.GetSSATileBufType(tmp_ssa);
   if (tmp_type.empty()) {
