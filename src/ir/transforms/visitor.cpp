@@ -111,13 +111,13 @@ void IRVisitor::VisitExpr_(const SubmitPtr& op) {
     INTERNAL_CHECK_SPAN(*op->core_num_, op->span_) << "Submit core_num is null";
     VisitExpr(*op->core_num_);
   }
-  // Var-typed attrs ``arg_direction_overrides_vars`` / ``dump_vars`` reference
-  // Vars defined elsewhere in the IR. IRMutator::VisitExpr_(SubmitPtr) already
-  // rewrites those Vars on substitution; the visitor must walk them too so
-  // unused-var / def-use / SSA-liveness analyses do not silently drop a Var
-  // that is referenced only through these attrs.
+  // Var-typed attrs reference Vars defined elsewhere in the IR.
+  // IRMutator::VisitExpr_(SubmitPtr) already rewrites those Vars on
+  // substitution; the visitor must walk them too so unused-var / def-use /
+  // SSA-liveness analyses do not silently drop a Var that is referenced only
+  // through these attrs.
   for (const auto& [k, v] : op->attrs_) {
-    if (k != kAttrArgDirOverrideVars && k != kAttrDumpVars) continue;
+    if (k != kAttrArgDirOverrideVars && k != kAttrCompilerManualDepEdges && k != kAttrDumpVars) continue;
     const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
     if (!edges) continue;
     for (const auto& e : *edges) {

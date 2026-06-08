@@ -456,7 +456,7 @@ ExprPtr IRMutator::VisitExpr_(const SubmitPtr& op) {
   bool attrs_changed = false;
   new_attrs.reserve(op->attrs_.size());
   for (const auto& [k, v] : op->attrs_) {
-    if (k == kAttrArgDirOverrideVars || k == kAttrDumpVars) {
+    if (k == kAttrArgDirOverrideVars || k == kAttrCompilerManualDepEdges || k == kAttrDumpVars) {
       const auto* edges = std::any_cast<std::vector<VarPtr>>(&v);
       if (edges) {
         std::vector<VarPtr> new_edges;

@@ -230,12 +230,16 @@ StorageLocation SliceLocation(const StorageLocation& parent, const ExprPtr& shap
   return sliced;
 }
 
-bool HasTaskIdTail(const CallPtr& call) {
-  auto tuple_ty = As<TupleType>(call ? call->GetType() : TypePtr{});
+bool HasTaskIdTail(const TypePtr& type) {
+  auto tuple_ty = As<TupleType>(type);
   if (!tuple_ty || tuple_ty->types_.empty()) return false;
   auto scalar_ty = As<ScalarType>(tuple_ty->types_.back());
   return scalar_ty && scalar_ty->dtype_ == DataType::TASK_ID;
 }
+
+bool HasTaskIdTail(const CallPtr& call) { return HasTaskIdTail(call ? call->GetType() : TypePtr{}); }
+
+bool HasTaskIdTail(const SubmitPtr& submit) { return HasTaskIdTail(submit ? submit->GetType() : TypePtr{}); }
 
 std::vector<ParamDirection> ResolveCalleeDirections(const ProgramPtr& program, const CallPtr& call,
                                                     const FunctionPtr& callee) {
@@ -338,6 +342,14 @@ std::vector<std::pair<std::string, std::any>> StripCompilerManualDepEdges(
     }
   }
   return stripped;
+}
+
+bool HasCompilerManualDepEdgesAttr(const std::vector<std::pair<std::string, std::any>>& attrs) {
+  for (const auto& [k, v] : attrs) {
+    (void)v;
+    if (k == kAttrCompilerManualDepEdges) return true;
+  }
+  return false;
 }
 
 bool HasHazard(AccessKind current, AccessKind prior) {
@@ -498,6 +510,12 @@ class StorageRootAnalysis : public IRVisitor {
         IRVisitor::VisitStmt_(op);
         return;
       }
+    } else if (auto submit = As<Submit>(op->value_)) {
+      if (As<TupleType>(submit->GetType()) && !IsBuiltinOp(submit->op_->name_)) {
+        tuple_locations_[op->var_.get()] = CollectCallOutputLocations(SubmitToCallView(submit));
+        IRVisitor::VisitStmt_(op);
+        return;
+      }
     }
 
     if (!op->var_ || !IsTensorType(op->var_->GetType())) {
@@ -528,6 +546,15 @@ class StorageRootAnalysis : public IRVisitor {
       } else if (!IsBuiltinOp(op_name)) {
         auto out_locations = CollectCallOutputLocations(call);
         if (As<TupleType>(call->GetType())) {
+          tuple_locations_[op->var_.get()] = std::move(out_locations);
+        } else if (!out_locations.empty() && HasLocation(out_locations[0])) {
+          RegisterVarLocation(op->var_, std::move(out_locations[0]));
+        }
+      }
+    } else if (auto submit = As<Submit>(op->value_)) {
+      if (!IsBuiltinOp(submit->op_->name_)) {
+        auto out_locations = CollectCallOutputLocations(SubmitToCallView(submit));
+        if (As<TupleType>(submit->GetType())) {
           tuple_locations_[op->var_.get()] = std::move(out_locations);
         } else if (!out_locations.empty() && HasLocation(out_locations[0])) {
           RegisterVarLocation(op->var_, std::move(out_locations[0]));
@@ -655,12 +682,12 @@ class SubmitTaskIdCollector : public IRVisitor {
     if (auto tuple_get = As<TupleGetItemExpr>(op->value_)) {
       if (auto tuple_var = AsVarLike(tuple_get->tuple_)) {
         tuple_get_by_tuple_[tuple_var.get()][tuple_get->index_] = op->var_;
-        auto call_it = call_by_tuple_.find(tuple_var.get());
-        if (call_it != call_by_tuple_.end()) {
-          auto tuple_ty = As<TupleType>(call_it->second->GetType());
+        auto expr_it = task_expr_by_tuple_.find(tuple_var.get());
+        if (expr_it != task_expr_by_tuple_.end()) {
+          auto tuple_ty = As<TupleType>(expr_it->second->GetType());
           const int task_id_index = static_cast<int>(tuple_ty->types_.size()) - 1;
           if (tuple_get->index_ == task_id_index) {
-            task_id_by_call_[call_it->second.get()] = op->var_;
+            task_id_by_expr_[expr_it->second.get()] = op->var_;
             for (const auto& [index, var] : tuple_get_by_tuple_[tuple_var.get()]) {
               if (index != task_id_index) {
                 task_id_by_var_id_[var->UniqueId()] = op->var_;
@@ -677,18 +704,9 @@ class SubmitTaskIdCollector : public IRVisitor {
     }
 
     if (auto call = As<Call>(op->value_)) {
-      if (HasTaskIdTail(call)) {
-        call_by_tuple_[op->var_.get()] = call;
-        auto tuple_ty = As<TupleType>(call->GetType());
-        const int task_id_index = static_cast<int>(tuple_ty->types_.size()) - 1;
-        auto it = tuple_get_by_tuple_.find(op->var_.get());
-        if (it != tuple_get_by_tuple_.end()) {
-          auto elem_it = it->second.find(task_id_index);
-          if (elem_it != it->second.end()) {
-            task_id_by_call_[call.get()] = elem_it->second;
-          }
-        }
-      }
+      RecordTaskTupleProducer(op->var_, call);
+    } else if (auto submit = As<Submit>(op->value_)) {
+      RecordTaskTupleProducer(op->var_, submit);
     }
 
     IRVisitor::VisitStmt_(op);
@@ -704,7 +722,21 @@ class SubmitTaskIdCollector : public IRVisitor {
     PropagateLoopCarriedTaskIds(op->iter_args_, op->return_vars_, op->body_);
   }
 
-  const std::unordered_map<const Call*, VarPtr>& task_id_by_call() const { return task_id_by_call_; }
+  void RecordTaskTupleProducer(const VarPtr& tuple_var, const ExprPtr& expr) {
+    if (!tuple_var || !HasTaskIdTail(expr ? expr->GetType() : TypePtr{})) return;
+    task_expr_by_tuple_[tuple_var.get()] = expr;
+    auto tuple_ty = As<TupleType>(expr->GetType());
+    const int task_id_index = static_cast<int>(tuple_ty->types_.size()) - 1;
+    auto it = tuple_get_by_tuple_.find(tuple_var.get());
+    if (it != tuple_get_by_tuple_.end()) {
+      auto elem_it = it->second.find(task_id_index);
+      if (elem_it != it->second.end()) {
+        task_id_by_expr_[expr.get()] = elem_it->second;
+      }
+    }
+  }
+
+  const std::unordered_map<const Expr*, VarPtr>& task_id_by_expr() const { return task_id_by_expr_; }
   const std::unordered_map<uint64_t, VarPtr>& task_id_by_var_id() const { return task_id_by_var_id_; }
 
  private:
@@ -738,21 +770,21 @@ class SubmitTaskIdCollector : public IRVisitor {
     }
   }
 
-  std::unordered_map<const Var*, CallPtr> call_by_tuple_;
+  std::unordered_map<const Var*, ExprPtr> task_expr_by_tuple_;
   std::unordered_map<const Var*, std::unordered_map<int, VarPtr>> tuple_get_by_tuple_;
-  std::unordered_map<const Call*, VarPtr> task_id_by_call_;
+  std::unordered_map<const Expr*, VarPtr> task_id_by_expr_;
   std::unordered_map<uint64_t, VarPtr> task_id_by_var_id_;
 };
 
 class AutoDepMutator : public IRMutator {
  public:
   AutoDepMutator(ProgramPtr program, const StorageRootAnalysis* storage,
-                 const std::unordered_map<const Call*, VarPtr>* task_id_by_call,
+                 const std::unordered_map<const Expr*, VarPtr>* task_id_by_expr,
                  const std::unordered_map<uint64_t, VarPtr>* task_id_by_var_id, bool analyze_auto_scopes,
                  bool analyze_whole_body_as_auto_scope)
       : program_(std::move(program)),
         storage_(storage),
-        task_id_by_call_(task_id_by_call),
+        task_id_by_expr_(task_id_by_expr),
         task_id_by_var_id_(task_id_by_var_id),
         analyze_auto_scopes_(analyze_auto_scopes),
         analyze_whole_body_as_auto_scope_(analyze_whole_body_as_auto_scope) {}
@@ -811,12 +843,14 @@ class AutoDepMutator : public IRMutator {
              " virtual_whole_body=" + (is_virtual_whole_body ? std::string("true") : std::string("false")) +
              " loop_depth=" + std::to_string(loop_depth_));
     prior_stack_.emplace_back();
+    scope_manual_stack_.push_back(manual);
     fallback_stack_.push_back(false);
     INTERNAL_CHECK_SPAN(body, span) << "RuntimeScopeStmt has null body";
     auto new_body = VisitStmt(body);
     INTERNAL_CHECK_SPAN(new_body, span) << "RuntimeScopeStmt body mutated to null";
     const bool fallback = fallback_stack_.back();
     fallback_stack_.pop_back();
+    scope_manual_stack_.pop_back();
     prior_stack_.pop_back();
     if (fallback) {
       DebugLog("fallback_runtime_scope name_hint=" + name_hint);
@@ -838,17 +872,38 @@ class AutoDepMutator : public IRMutator {
   ExprPtr VisitExpr_(const CallPtr& op) override {
     auto base = IRMutator::VisitExpr_(op);
     auto call = As<Call>(base);
-    if (!call || prior_stack_.empty()) return base;
+    if (!call) return base;
+    return AnalyzeCallLike(call, op.get(), call->attrs_);
+  }
+
+  ExprPtr VisitExpr_(const SubmitPtr& op) override {
+    auto base = IRMutator::VisitExpr_(op);
+    auto submit = As<Submit>(base);
+    if (!submit) return base;
+    auto rewritten = AnalyzeCallLike(SubmitToCallView(submit), op.get(), submit->attrs_);
+    auto rewritten_call = As<Call>(rewritten);
+    if (!rewritten_call || !HasCompilerManualDepEdgesAttr(rewritten_call->attrs_)) return submit;
+    return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                          rewritten_call->attrs_, submit->GetType(), submit->span_,
+                                          submit->core_num_, submit->sync_start_);
+  }
+
+  ExprPtr AnalyzeCallLike(const CallPtr& call, const Expr* identity_key,
+                          const std::vector<std::pair<std::string, std::any>>& output_attrs) {
+    if (prior_stack_.empty()) return call;
     if (IsBuiltinOp(call->op_->name_)) return call;
 
-    VarPtr task_id = LookupTaskId(op.get());
+    VarPtr task_id = LookupTaskId(identity_key);
     if (!task_id) {
-      task_id = current_assign_lhs_;
+      const bool in_manual_scope = !scope_manual_stack_.empty() && scope_manual_stack_.back();
+      if (!in_manual_scope || IsTaskIdVar(current_assign_lhs_)) {
+        task_id = current_assign_lhs_;
+      }
     }
     bool needs_fallback = false;
     auto user_edges = CanonicalizeTaskIds(GetDepAttr(call, kAttrManualDepEdges));
     const bool debug_loop_carry = AutoDepsLoopCarryDebugEnabled();
-    auto summary = SummarizeAccesses(call, op, user_edges, &needs_fallback);
+    auto summary = SummarizeAccesses(call, user_edges, &needs_fallback);
     if (debug_loop_carry) {
       DebugLog("call=" + call->op_->name_ + " loop_depth=" + std::to_string(loop_depth_) +
                " task_id=" + DebugVar(task_id) + " user_edges=" + DebugVarList(user_edges) +
@@ -879,6 +934,14 @@ class AutoDepMutator : public IRMutator {
                    " current_task_id=" + DebugVar(task_id));
         }
         if (covered_by_user_edge) continue;
+        if (prior.dynamic_producer) {
+          if (debug_loop_carry) {
+            DebugLog("fallback_reason=dynamic_prior_producer_requires_scope_lift call=" + call->op_->name_ +
+                     " prior_task_id=" + DebugVar(prior.task_id_var));
+          }
+          fallback_stack_.back() = true;
+          return call;
+        }
         if (!prior.task_id_var) {
           if (debug_loop_carry) {
             DebugLog("fallback_reason=" +
@@ -903,7 +966,7 @@ class AutoDepMutator : public IRMutator {
       return call;
     }
 
-    auto new_attrs = WithCompilerManualDepEdgesAttr(call->attrs_, std::move(compiler_edges));
+    auto new_attrs = WithCompilerManualDepEdgesAttr(output_attrs, std::move(compiler_edges));
     return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(new_attrs),
                                         call->GetType(), call->span_);
   }
@@ -921,6 +984,18 @@ class AutoDepMutator : public IRMutator {
       return std::make_shared<const Call>(call->op_, call->args_, call->kwargs_, std::move(stripped_attrs),
                                           call->GetType(), call->span_);
     }
+
+    ExprPtr VisitExpr_(const SubmitPtr& op) override {
+      auto base = IRMutator::VisitExpr_(op);
+      auto submit = As<Submit>(base);
+      if (!submit) return base;
+
+      auto stripped_attrs = StripCompilerManualDepEdges(submit->attrs_);
+      if (stripped_attrs.size() == submit->attrs_.size()) return submit;
+      return std::make_shared<const Submit>(submit->op_, submit->args_, submit->deps_, submit->kwargs_,
+                                            std::move(stripped_attrs), submit->GetType(), submit->span_,
+                                            submit->core_num_, submit->sync_start_);
+    }
   };
 
   static StmtPtr StripCompilerDeps(const StmtPtr& stmt) {
@@ -928,10 +1003,10 @@ class AutoDepMutator : public IRMutator {
     return stripper.VisitStmt(stmt);
   }
 
-  VarPtr LookupTaskId(const Call* call) const {
-    if (!task_id_by_call_) return nullptr;
-    auto it = task_id_by_call_->find(call);
-    return it != task_id_by_call_->end() ? it->second : nullptr;
+  VarPtr LookupTaskId(const Expr* expr) const {
+    if (!task_id_by_expr_) return nullptr;
+    auto it = task_id_by_expr_->find(expr);
+    return it != task_id_by_expr_->end() ? it->second : nullptr;
   }
 
   VarPtr LookupTaskIdForVar(const ExprPtr& expr) const {
@@ -957,8 +1032,8 @@ class AutoDepMutator : public IRMutator {
     return canonical;
   }
 
-  AccessSummary SummarizeAccesses(const CallPtr& call, const CallPtr& original_call,
-                                  const std::vector<VarPtr>& user_edges, bool* needs_fallback) const {
+  AccessSummary SummarizeAccesses(const CallPtr& call, const std::vector<VarPtr>& user_edges,
+                                  bool* needs_fallback) const {
     AccessSummary out;
     auto dirs = call->GetArgDirections();
     if (dirs.size() != call->args_.size()) return out;
@@ -989,16 +1064,12 @@ class AutoDepMutator : public IRMutator {
       if (kind.has_value()) {
         auto resolved = storage_ ? storage_->ResolveExprStatus(call->args_[i]) : ResolvedLocation{};
         if (debug_loop_carry) {
-          const auto& original_arg =
-              i < original_call->args_.size() ? original_call->args_[i] : call->args_[i];
           DebugLog("summarize_access_arg call=" + call->op_->name_ + " index=" + std::to_string(i) +
                    " status=" + DebugLocationStatus(resolved.status) +
-                   " original_task_id=" + DebugVar(LookupTaskIdForVar(original_arg)));
+                   " original_task_id=" + DebugVar(LookupTaskIdForVar(call->args_[i])));
         }
         if (resolved.status != LocationStatus::Known) {
-          const auto& original_arg =
-              i < original_call->args_.size() ? original_call->args_[i] : call->args_[i];
-          const VarPtr original_task_id = LookupTaskIdForVar(original_arg);
+          const VarPtr original_task_id = LookupTaskIdForVar(call->args_[i]);
           const bool covered_by_user_edge =
               kind == AccessKind::Read && ContainsVar(user_edges, original_task_id);
           if (debug_loop_carry) {
@@ -1026,11 +1097,12 @@ class AutoDepMutator : public IRMutator {
 
   ProgramPtr program_;
   const StorageRootAnalysis* storage_;
-  const std::unordered_map<const Call*, VarPtr>* task_id_by_call_;
+  const std::unordered_map<const Expr*, VarPtr>* task_id_by_expr_;
   const std::unordered_map<uint64_t, VarPtr>* task_id_by_var_id_;
   bool analyze_auto_scopes_ = false;
   bool analyze_whole_body_as_auto_scope_ = false;
   std::vector<std::vector<StorageAccess>> prior_stack_;
+  std::vector<bool> scope_manual_stack_;
   std::vector<bool> fallback_stack_;
   VarPtr current_assign_lhs_;
   size_t loop_depth_ = 0;
@@ -1061,7 +1133,7 @@ Pass AutoDeriveTaskDependencies(bool analyze_auto_scopes) {
       const bool analyze_whole_body_as_auto_scope = analyze_auto_scopes &&
                                                     func->func_type_ == FunctionType::Orchestration &&
                                                     func->GetAttr<bool>("auto_scope", true);
-      AutoDepMutator mutator(program, &storage, &task_ids.task_id_by_call(), &task_ids.task_id_by_var_id(),
+      AutoDepMutator mutator(program, &storage, &task_ids.task_id_by_expr(), &task_ids.task_id_by_var_id(),
                              analyze_auto_scopes, analyze_whole_body_as_auto_scope);
       auto new_body = mutator.AnalyzeBody(func->body_);
       if (new_body.get() == func->body_.get()) continue;

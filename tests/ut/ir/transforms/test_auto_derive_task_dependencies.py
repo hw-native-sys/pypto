@@ -9,6 +9,8 @@
 
 """Unit tests for AutoDeriveTaskDependencies."""
 
+from typing import cast
+
 import pypto.language as pl
 import pytest
 from pypto import ir, passes
@@ -25,31 +27,46 @@ def pass_verification_context():
         yield
 
 
-class _UserCallCollector(ir.IRVisitor):
-    def __init__(self):
-        super().__init__()
-        self.calls: list[ir.Call] = []
+def _user_calls(program: ir.Program, name: str) -> list[ir.Call | ir.Submit]:
+    calls: list[ir.Call | ir.Submit] = []
 
-    def visit_call(self, op):
-        name = op.op.name
-        if not (
-            name.startswith("tile.")
-            or name.startswith("tensor.")
-            or name.startswith("system.")
-            or name.startswith("array.")
-        ):
-            self.calls.append(op)
-        super().visit_call(op)
+    def collect_stmt(stmt: ir.Stmt):
+        if isinstance(stmt, ir.AssignStmt):
+            value = stmt.value
+            if isinstance(value, ir.Call | ir.Submit):
+                op_name = value.op.name
+                if not (
+                    op_name.startswith("tile.")
+                    or op_name.startswith("tensor.")
+                    or op_name.startswith("system.")
+                    or op_name.startswith("array.")
+                ):
+                    calls.append(value)
+        if isinstance(stmt, ir.SeqStmts):
+            for child in stmt.stmts:
+                collect_stmt(child)
+        elif isinstance(stmt, ir.RuntimeScopeStmt):
+            collect_stmt(stmt.body)
+        elif isinstance(stmt, ir.IfStmt):
+            collect_stmt(stmt.then_body)
+            if stmt.else_body is not None:
+                collect_stmt(stmt.else_body)
+        elif isinstance(stmt, ir.ForStmt | ir.WhileStmt):
+            collect_stmt(stmt.body)
+
+    for func in program.functions.values():
+        collect_stmt(func.body)
+    return [call for call in calls if call.op.name == name]
 
 
-def _user_calls(program: ir.Program, name: str) -> list[ir.Call]:
-    collector = _UserCallCollector()
-    collector.visit_program(program)
-    return [call for call in collector.calls if call.op.name == name]
-
-
-def _compiler_edges(call: ir.Call) -> list[ir.Var]:
+def _compiler_edges(call: ir.Call | ir.Submit) -> list[ir.Var]:
     return list(call.attrs.get("compiler_manual_dep_edges", []))
+
+
+def _user_edges(call: ir.Call | ir.Submit) -> list[ir.Var]:
+    if isinstance(call, ir.Submit):
+        return cast(list[ir.Var], list(call.deps))
+    return list(call.attrs.get("manual_dep_edges", []))
 
 
 def _printed(program: ir.Program) -> str:
@@ -257,7 +274,7 @@ class TestAutoDeriveTaskDependencies:
         printed = _printed(out)
         assert '"compiler_manual_dep_edges": [produced]' in printed
 
-    def test_auto_runtime_scope_unencodable_hazard_falls_back_without_stale_edges(self):
+    def test_auto_runtime_scope_dynamic_hazard_falls_back_without_stale_edges(self):
         @pl.program
         class Prog:
             @pl.function(type=pl.FunctionType.InCore)
@@ -272,11 +289,17 @@ class TestAutoDeriveTaskDependencies:
                 return x
 
             @pl.function(type=pl.FunctionType.Orchestration, auto_scope=False)
-            def main(self, scratch: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+            def main(
+                self,
+                scratch: pl.Tensor[[64], pl.FP32],
+                src: pl.Tensor[[4, 16], pl.FP32],
+                index: pl.Tensor[[4, 8], pl.INT32],
+            ) -> pl.Tensor[[4, 8], pl.FP32]:
                 with pl.scope(mode=pl.ScopeMode.AUTO):
                     produced, _producer_tid = pl.submit(self.fill, scratch)
                     produced = self.fill(produced)
-                    out, _ = pl.submit(self.consume, produced)
+                    gathered = pl.tensor.gather(src, -1, index)
+                    out, _ = pl.submit(self.consume, gathered)
                 return out
 
         out = _run_auto_deps(Prog, analyze_auto_scopes=True)
@@ -318,7 +341,7 @@ class TestAutoDeriveTaskDependencies:
 
         out = _run_auto_deps(Prog)
         consume_call = _user_calls(out, "consume")[0]
-        user_edges = list(consume_call.attrs.get("manual_dep_edges", []))
+        user_edges = _user_edges(consume_call)
         compiler_edges = _compiler_edges(consume_call)
         assert [edge.name_hint for edge in user_edges] == ["user_tid"]
         assert [edge.name_hint for edge in compiler_edges] == ["producer_tid"]
@@ -751,7 +774,7 @@ class TestAutoDeriveTaskDependencies:
         assert scopes[0].manual is True
 
         consume_call = _user_calls(out, "consume")[0]
-        user_edges = list(consume_call.attrs.get("manual_dep_edges", []))
+        user_edges = _user_edges(consume_call)
         assert [edge.name_hint for edge in user_edges] == ["producer_tid"]
         assert _compiler_edges(consume_call) == []
 
@@ -790,7 +813,7 @@ class TestAutoDeriveTaskDependencies:
         assert scopes[0].manual is True
 
         consume_call = _user_calls(out, "consume")[0]
-        user_edges = list(consume_call.attrs.get("manual_dep_edges", []))
+        user_edges = _user_edges(consume_call)
         assert [edge.name_hint for edge in user_edges] == ["last_tid"]
         assert _compiler_edges(consume_call) == []
 

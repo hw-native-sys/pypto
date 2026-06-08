@@ -1912,7 +1912,18 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
      protected:
       void VisitExpr_(const CallPtr& call) override {
-        for (const auto& [key, value] : call->attrs_) {
+        CollectFromAttrs(call->attrs_);
+        IRVisitor::VisitExpr_(call);
+      }
+
+      void VisitExpr_(const SubmitPtr& submit) override {
+        CollectFromAttrs(submit->attrs_);
+        IRVisitor::VisitExpr_(submit);
+      }
+
+     private:
+      void CollectFromAttrs(const std::vector<std::pair<std::string, std::any>>& attrs) {
+        for (const auto& [key, value] : attrs) {
           if (key != kAttrCompilerManualDepEdges) continue;
           const auto* edges = std::any_cast<std::vector<VarPtr>>(&value);
           if (!edges) continue;
@@ -1920,7 +1931,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
             if (edge) vars.insert(edge.get());
           }
         }
-        IRVisitor::VisitExpr_(call);
       }
     };
 
