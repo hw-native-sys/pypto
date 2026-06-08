@@ -2181,7 +2181,7 @@ def test_pto_codegen_transpose_dynamic_valid_shape_uses_distinct_output_buffer()
 
     span = ir.Span.unknown()
     idx = DataType.INDEX
-    in_type = ir.TensorType([1, 16], DataType.FP32)
+    in_type = ir.TensorType([8, 16], DataType.FP32)
     out_type = ir.TensorType([16, 1], DataType.FP32)
     ib = IRBuilder()
     with ib.program("row_vector_reshape") as prog:
@@ -2191,7 +2191,8 @@ def test_pto_codegen_transpose_dynamic_valid_shape_uses_distinct_output_buffer()
             src = f.param("src", in_type)
             valid_rows = f.param("valid_rows", ir.ScalarType(idx))
             f.return_type(out_type)
-            col = ib.let("col", tensor_ops.reshape(src, [16, 1], [valid_rows, 1]))
+            row = ib.let("row", tensor_ops.slice(src, [1, 16], [0, 0]))
+            col = ib.let("col", tensor_ops.reshape(row, [16, 1], [valid_rows, 1]))
             ib.return_stmt(col)
         prog.add_function(f.get_result())
         with ib.function("main") as f:
@@ -2220,7 +2221,9 @@ def test_pto_codegen_transpose_dynamic_valid_shape_uses_distinct_output_buffer()
     assert match, f"Could not parse pto.ttrans operands: {line}"
     src_ssa, tmp_ssa, dst_ssa = match.groups()
     assert src_ssa != dst_ssa, f"pto.ttrans must not reuse input SSA as dynamic-valid output: {line}"
-    assert "valid=?" in line, f"transpose output should carry dynamic valid_shape: {line}"
+    assert "v_row=?" in line and "v_col=?" in line, (
+        f"transpose output should carry dynamic valid_shape: {line}"
+    )
     tmp_subview_lines = [
         subview_line.strip()
         for subview_line in mlir_code.splitlines()
