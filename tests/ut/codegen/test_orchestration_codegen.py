@@ -83,6 +83,37 @@ def _generate_orch_result(program) -> "codegen.OrchestrationResult":
     raise ValueError("No orchestration function found in program")
 
 
+def _out_of_scope_tensor_refs(code: str) -> list[str]:
+    """Return tensor identifiers passed to ``add_input/output/inout/no_dep`` that
+    are not declared at the current or an enclosing C++ brace level.
+
+    A lightweight stand-in for ``g++`` that catches the
+    ``'<name>' was not declared in this scope`` class of orchestration codegen
+    bugs (issue #1697) without invoking a real C++ compiler: it walks brace
+    scopes, records the tensor identifiers declared in each, and flags any
+    ``add_*`` argument that references a name only visible in a sibling/closed
+    block.
+    """
+    decl_re = re.compile(r"\b(?:const\s+Tensor\s*&|Tensor|TaskOutputTensors|Arg)\s+(\w+)")
+    use_re = re.compile(r"\badd_(?:input|output|inout|no_dep)\(\s*(\w+)\s*\)")
+    scopes: list[set[str]] = [set()]
+    bad: list[str] = []
+    for raw in code.splitlines():
+        line = raw.strip()
+        for m in decl_re.finditer(line):
+            scopes[-1].add(m.group(1))
+        for m in use_re.finditer(line):
+            name = m.group(1)
+            if not any(name in s for s in scopes):
+                bad.append(name)
+        for _ in range(line.count("{")):
+            scopes.append(set())
+        for _ in range(line.count("}")):
+            if len(scopes) > 1:
+                scopes.pop()
+    return bad
+
+
 class TestOrchestration:
     """Test orchestration codegen format."""
 
@@ -824,6 +855,105 @@ class TestOrchestration:
         assert "const Tensor& o1 = ext_inout_t;" not in code
         assert "const Tensor& o2 = ext_ta;" not in code
         assert "const Tensor& o3 = ext_tb;" not in code
+
+    @staticmethod
+    def _manual_cross_scope_code(create_inside: bool) -> str:
+        """Orchestration code for a tensor written inside a ``pl.manual_scope``
+        and read by a task placed after it, with the ``pl.create_tensor`` placed
+        either before or inside the scope (issue #1697)."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class CrossScopeProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def producer(
+                self,
+                x: pl.Tensor[[16, 256], pl.FP32],
+                buf: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                t: pl.Tile[[16, 256], pl.FP32] = pl.load(x, [0, 0], [16, 256])
+                out: pl.Tensor[[16, 256], pl.FP32] = pl.store(t, [0, 0], buf)
+                return out
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consumer(
+                self,
+                buf: pl.Tensor[[16, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                t: pl.Tile[[16, 256], pl.FP32] = pl.load(buf, [0, 0], [16, 256])
+                r: pl.Tensor[[16, 256], pl.FP32] = pl.store(t, [0, 0], out)
+                return r
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main_before(
+                self,
+                x: pl.Tensor[[16, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                buf: pl.Tensor[[16, 256], pl.FP32] = pl.create_tensor([16, 256], dtype=pl.FP32)
+                with pl.manual_scope():
+                    buf, _ptid = pl.submit(self.producer, x, buf)
+                out = self.consumer(buf, out)
+                return out
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main_inside(
+                self,
+                x: pl.Tensor[[16, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                with pl.manual_scope():
+                    buf: pl.Tensor[[16, 256], pl.FP32] = pl.create_tensor([16, 256], dtype=pl.FP32)
+                    buf, _ptid = pl.submit(self.producer, x, buf)
+                out = self.consumer(buf, out)
+                return out
+
+        which = "main_inside" if create_inside else "main_before"
+        program = passes.materialize_runtime_scopes()(
+            passes.derive_call_directions()(
+                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(CrossScopeProgram)
+            )
+        )
+        for func in program.functions.values():
+            if func.func_type == ir.FunctionType.Orchestration and func.name == which:
+                return codegen.generate_orchestration(program, func).code
+        raise AssertionError(f"orchestration function {which} not found")
+
+    @staticmethod
+    def _assert_cross_scope_resolves(code: str) -> None:
+        """A tensor written inside a manual_scope and read after it must resolve:
+        no add_* may name an out-of-scope identifier, the buffer is declared in
+        the enclosing scope, and the after-scope reader references it directly
+        (issue #1697 — remap to the canonical name, not a per-SSA alias)."""
+        assert _out_of_scope_tensor_refs(code) == [], code
+        manual_open = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
+        manual_close = code.index("}", manual_open)
+        # The buffer is declared in the enclosing scope, ahead of the block.
+        decl = code.index("const Tensor& buf = ")
+        assert decl < manual_open, code
+        # The after-scope consumer reads ``buf`` directly — no const-ref alias
+        # is minted for the producer's SSA output.
+        assert "add_input(buf)" in code[manual_close:], code
+        assert "const Tensor& buf__" not in code, code
+
+    def test_manual_scope_tensor_created_before_read_after(self):
+        """Regression for #1697: a tensor created BEFORE a ``pl.manual_scope``,
+        written by a submit inside it, and read by a task after it. The output
+        previously minted ``const Tensor& buf__ssa_v1 = buf;`` at the deep block
+        indent; the after-scope ``add_input(buf__ssa_v1)`` then named an
+        out-of-scope identifier and the orchestration ``.cpp`` failed to compile.
+        The output is now remapped to read ``buf`` directly."""
+        self._assert_cross_scope_resolves(self._manual_cross_scope_code(create_inside=False))
+
+    def test_manual_scope_tensor_created_inside_read_after(self):
+        """Companion to #1697: the same after-scope read when the
+        ``pl.create_tensor`` is INSIDE the manual scope. Its ``alloc_tensors``
+        declaration (a storage reservation with no scheduling dependency) is
+        hoisted to the enclosing scope, so the after-scope reader still resolves
+        ``buf``."""
+        self._assert_cross_scope_resolves(self._manual_cross_scope_code(create_inside=True))
 
     def test_tensor_create(self):
         """Test tensor.create generates TensorCreateInfo with shape/dtype."""

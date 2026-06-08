@@ -455,6 +455,35 @@ leak to an enclosing scope where its identifier would be out of C++ scope. Loop
 / branch carries are declared *before* their body's `PTO2_SCOPE`, so they
 correctly survive the block.
 
+**Cross-scope tensors and `manual_scope`.** A `manual_scope` is a *scheduling*
+region, not a storage/value scope: a tensor it touches flows transparently to
+tasks placed *after* the `PTO2_SCOPE(MANUAL) { ... }` block. So nothing an
+after-scope reader names may be a manual-scope-local C++ identifier — otherwise
+it dies at the closing brace and the reader's `add_input(...)` references an
+out-of-scope name (the `.cpp` then fails to C++-compile, issue #1697). Two
+mechanisms enforce this, both gated on whether a name is *enclosing-scope-valid*
+(reserved before the block, or a hoisted in-scope buffer — i.e. not scope-local):
+
+- **Output remap.** A caller-allocated kernel/submit output that aliases an
+  enclosing-scope source is *not* given its own `const Tensor&` decl — its emit
+  name is remapped to the source, so every reference (in-scope and after-scope)
+  resolves to the enclosing name directly. This is the strategy `tensor.assemble`
+  already uses, and since the output is the same physical tensor as its source
+  (an in-place write), a shared name is exactly correct. A phi/loop-carry
+  reassignment is excluded — it rebinds an lvalue the enclosing `if`/loop owns.
+
+- **Allocation hoisting.** A buffer *created* inside the block
+  (`pl.create_tensor` → `alloc_tensors`) is a storage reservation with no
+  scheduling dependency, so its declaration is hoisted to the enclosing scope.
+  Codegen buffers each `PTO2_SCOPE(MANUAL)` body and flushes the hoisted
+  `alloc_tensors` decls ahead of the block header. The batch is enclosing-scope-
+  valid by construction (a create whose shape references a scope-local value is
+  excluded and stays put).
+
+Together these make a tensor created before *or* inside the scope and read after
+it resolve to a single enclosing-scope `const Tensor& buf = ...;` — the
+after-scope task simply does `add_input(buf)`, with no per-SSA-version alias.
+
 ### Array carry for `pl.parallel` TaskId iter_args
 
 A `pl.parallel(N)` ForStmt whose iter_arg threads a TaskId companion is

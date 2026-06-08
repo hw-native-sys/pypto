@@ -790,9 +790,6 @@ class OrchestrationStmtCodegen : public CodegenBase {
   }
 
   void VisitStmt_(const RuntimeScopeStmtPtr& scope) override {
-    code_ << Indent() << "PTO2_SCOPE(" << (scope->manual_ ? "PTO2ScopeMode::MANUAL" : "") << ") {\n";
-    indent_ += 4;
-    PushCppScope();
     // Snapshot the TaskId / array-carry bindings on entry to EVERY generated
     // PTO2_SCOPE (AUTO or MANUAL); restore on exit. A binding added inside the
     // block names a C++ local (e.g. ``PTO2TaskId tid = ...``, ``PTO2TaskId prev
@@ -806,18 +803,70 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // this frame), so they correctly survive the block.
     auto saved_map = manual_task_id_map_;
     auto saved_array_carry = array_carry_vars_;
-    if (scope->manual_) {
-      ++in_manual_scope_depth_;
+
+    if (!scope->manual_) {
+      // AUTO scope: emit inline. No alias hoisting needed — the outermost AUTO
+      // wrapper has nothing placed after it, and for/if bodies escape values
+      // through phis / iter_args rather than raw const-ref aliases.
+      code_ << Indent() << "PTO2_SCOPE() {\n";
+      indent_ += 4;
+      PushCppScope();
+      VisitStmt(scope->body_);
+      PopCppScope();
+      indent_ -= 4;
+      code_ << Indent() << "}\n";
+      manual_task_id_map_ = std::move(saved_map);
+      array_carry_vars_ = std::move(saved_array_carry);
+      return;
     }
+
+    // MANUAL scope (issue #1697). A manual_scope is a scheduling region, not a
+    // storage scope: a tensor it touches may be read by a task placed AFTER the
+    // block, so nothing the after-scope reader names may be a manual-scope-local
+    // C++ identifier. Two mechanisms keep that invariant:
+    //   * Outputs that alias an enclosing-scope source are remapped to the
+    //     source name (EmitTensorAlias) — no manual-scope-internal alias is
+    //     minted, so there is nothing to fall out of scope.
+    //   * A buffer *created* inside the block (``alloc_tensors``) has no
+    //     scheduling dependency, so its declaration is hoisted to the enclosing
+    //     scope (EmitBatchedAllocTensors flushes it into ``scope_hoist_sink_``).
+    // We buffer the block body so the hoisted allocation decls can be flushed
+    // ahead of the ``PTO2_SCOPE(MANUAL) {`` header, where they are in scope both
+    // inside the block and at after-scope readers.
+    const std::string parent_indent = Indent();
+    std::vector<std::string>* saved_sink = scope_hoist_sink_;
+    std::string saved_hoist_indent = std::move(scope_hoist_indent_);
+    std::set<std::string>* saved_local_names = manual_local_names_;
+    std::vector<std::string> hoisted;
+    std::set<std::string> local_names;
+    scope_hoist_sink_ = &hoisted;
+    scope_hoist_indent_ = parent_indent;
+    manual_local_names_ = &local_names;
+
+    std::ostringstream body_buf;
+    code_.swap(body_buf);  // redirect block-body emission into body_buf
+    indent_ += 4;
+    PushCppScope();
+    ++in_manual_scope_depth_;
     VisitStmt(scope->body_);
-    if (scope->manual_) {
-      --in_manual_scope_depth_;
-    }
-    manual_task_id_map_ = std::move(saved_map);
-    array_carry_vars_ = std::move(saved_array_carry);
+    --in_manual_scope_depth_;
     PopCppScope();
     indent_ -= 4;
-    code_ << Indent() << "}\n";
+    code_.swap(body_buf);  // restore: code_ holds prior output, body_buf the block
+
+    scope_hoist_sink_ = saved_sink;
+    scope_hoist_indent_ = std::move(saved_hoist_indent);
+    manual_local_names_ = saved_local_names;
+
+    for (const auto& line : hoisted) {
+      code_ << line;
+    }
+    code_ << parent_indent << "PTO2_SCOPE(PTO2ScopeMode::MANUAL) {\n";
+    code_ << body_buf.str();
+    code_ << parent_indent << "}\n";
+
+    manual_task_id_map_ = std::move(saved_map);
+    array_carry_vars_ = std::move(saved_array_carry);
   }
 
   void VisitStmt_(const IfStmtPtr& if_stmt) override {
@@ -1010,7 +1059,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
         if (!As<TupleType>(call->GetType())) {
           if (effective_uses_.count(assign->var_.get())) {
-            GenerateSingleReturnAlias(call, var_name);
+            GenerateSingleReturnAlias(assign->var_.get(), call, var_name);
           }
         } else if (IsSubmitCall(call)) {
           GenerateSubmitReturnAliases(call, task_idx_before, assign->var_.get());
@@ -2144,6 +2193,29 @@ class OrchestrationStmtCodegen : public CodegenBase {
     }
     const auto& tensor_create_handler = *handler;
 
+    // Manual-scope allocation hoisting (issue #1697). When this SeqStmts is the
+    // direct body of a ``pl.manual_scope``, the alloc batch is declared in the
+    // enclosing scope (routed into ``scope_hoist_sink_``) rather than at the
+    // deep block indent — so a buffer created inside the scope but read by a
+    // task placed AFTER it stays in C++ scope. A manual_scope is a scheduling
+    // region, not a storage scope: an ``alloc_tensors`` has no scheduling
+    // dependency, so emitting it one level out is semantically inert. The batch
+    // is enclosing-scope-valid by construction — ShapeDependsOnLocalVars already
+    // excluded any create whose shape references a scope-local value (those fall
+    // to the per-op path and stay put). The ``+ 4`` guard restricts this to the
+    // scope's own body, so a create nested in a for/if *within* the manual scope
+    // is left in place. Erasing the hoisted names from ``manual_local_names_``
+    // then lets a kernel output that aliases such a buffer remap to it
+    // (EmitTensorAlias / IsEnclosingScopeValid).
+    const bool hoist_batch =
+        scope_hoist_sink_ != nullptr && static_cast<size_t>(indent_) == scope_hoist_indent_.size() + 4;
+    std::ostringstream batch_buf;
+    const int saved_indent = indent_;
+    if (hoist_batch) {
+      code_.swap(batch_buf);  // capture the batch separately
+      indent_ -= 4;           // render at the enclosing (parent) indent
+    }
+
     for (size_t batch_start = 0; batch_start < creates.size(); batch_start += kMaxAllocTensorsArgs) {
       size_t batch_end = std::min(batch_start + kMaxAllocTensorsArgs, creates.size());
 
@@ -2164,6 +2236,17 @@ class OrchestrationStmtCodegen : public CodegenBase {
         batch_names.push_back(creates[i].emit_name);
       }
       EmitAllocBatch(batch_names);
+    }
+
+    if (hoist_batch) {
+      indent_ = saved_indent;
+      code_.swap(batch_buf);  // restore the in-block output
+      scope_hoist_sink_->push_back(batch_buf.str());
+      // The hoisted buffers now live in the enclosing scope, so a const-ref
+      // alias later built on one of them is enclosing-scope-valid too.
+      for (const auto& c : creates) {
+        manual_local_names_->erase(c.emit_name);
+      }
     }
   }
 
@@ -2414,16 +2497,56 @@ class OrchestrationStmtCodegen : public CodegenBase {
     return true;
   }
 
-  void EmitTensorAlias(const std::string& alias_name, const CallPtr& call, size_t arg_idx) {
+  void EmitTensorAlias(const Var* result_var, const std::string& alias_name, const CallPtr& call,
+                       size_t arg_idx) {
     std::string out_arg = TryGetVarName(call->args_[arg_idx]);
-    if (!out_arg.empty() && alias_name != out_arg) {
-      std::string out_name = GetExternalTensorName(out_arg);
-      if (IsMutableTensorNameInCurrentScope(alias_name)) {
-        code_ << Indent() << alias_name << " = " << out_name << ";\n";
-      } else {
-        code_ << Indent() << "const Tensor& " << alias_name << " = " << out_name << ";\n";
-      }
+    if (out_arg.empty() || alias_name == out_arg) {
+      return;
     }
+    std::string out_name = GetExternalTensorName(out_arg);
+    const bool mutable_alias = IsMutableTensorNameInCurrentScope(alias_name);
+
+    // Inside a ``pl.manual_scope``, a caller-allocated output that aliases an
+    // enclosing-scope-valid source is NOT given its own ``const Tensor&`` decl.
+    // Instead we remap the result Var's emit name to the source, so every
+    // reference — including a task placed AFTER the scope — resolves directly to
+    // the enclosing-scope source name (issue #1697). This is the strategy
+    // ``tensor.assemble`` already uses (HandleTensorAssembleAssign), and it
+    // sidesteps the dead-alias problem at its root: there is no
+    // manual-scope-internal identifier that can fall out of C++ scope at the
+    // closing brace. The result is the same physical tensor as its source (an
+    // in-place write), so a shared name is exactly correct.
+    //
+    // Two cases are intentionally excluded:
+    //   * A phi reassignment (``mutable_alias``) rebinds an lvalue the enclosing
+    //     if/loop owns — remapping it would erase the merge point, breaking loop
+    //     carries. It keeps its ``<name> = <src>;`` reassignment.
+    //   * A source first reserved *inside* the block that was not hoisted out
+    //     (``IsEnclosingScopeValid`` false) — a manual-scope-local create whose
+    //     allocation could not be hoisted, or a runtime-allocated submit output
+    //     bound to ``task_<n>_outs.get_ref(...)``. Remapping to it would not
+    //     help an after-scope reader. It keeps the decl path.
+    if (result_var != nullptr && !mutable_alias && IsEnclosingScopeValid(out_arg)) {
+      emit_name_map_[result_var] = out_name;
+      return;
+    }
+
+    if (mutable_alias) {
+      code_ << Indent() << alias_name << " = " << out_name << ";\n";
+    } else {
+      code_ << Indent() << "const Tensor& " << alias_name << " = " << out_name << ";\n";
+    }
+  }
+
+  /// True when ``name`` (a tensor emit name) is valid in the C++ scope that
+  /// encloses the active manual scope — i.e. a manual-scope output may safely
+  /// remap to it / a hoisted decl may reference it. A name is scope-local iff it
+  /// was first reserved *inside* the block and not subsequently hoisted out of
+  /// it (EmitBatchedAllocTensors erases hoisted ``alloc_tensors`` names from
+  /// ``manual_local_names_``); anything else — a function param, a parent-scope
+  /// tensor, or a hoisted in-scope buffer — is enclosing-scope-valid.
+  bool IsEnclosingScopeValid(const std::string& name) const {
+    return manual_local_names_ != nullptr && manual_local_names_->count(name) == 0;
   }
 
   void RegisterMutableTensorName(const std::string& cpp_type, const std::string& emit_name) {
@@ -2443,7 +2566,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     mutable_tensor_name_scopes_.pop_back();
   }
 
-  void GenerateSingleReturnAlias(const CallPtr& call, const std::string& var_name) {
+  void GenerateSingleReturnAlias(const Var* result_var, const CallPtr& call, const std::string& var_name) {
     FunctionPtr callee = program_->GetFunction(call->op_->name_);
     if (!callee) return;
     auto out_indices = CollectOutIndices(callee);
@@ -2457,7 +2580,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
     // when the return cannot be traced back to a Param.
     auto returned_idx = FindReturnedParamIndex(callee, program_);
     size_t param_idx = returned_idx.value_or(out_indices[0]);
-    EmitTensorAlias(var_name, call, param_idx);
+    EmitTensorAlias(result_var, var_name, call, param_idx);
   }
 
   void GenerateTupleReturnAliases(const CallPtr& call, const Var* result_var) {
@@ -2535,7 +2658,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         continue;
       }
       std::string elem_name = ReserveVarEmitName(elem.var);
-      EmitTensorAlias(elem_name, call, param_idx);
+      EmitTensorAlias(elem.var, elem_name, call, param_idx);
     }
   }
 
@@ -2657,7 +2780,7 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // Caller-allocated: the param was passed positionally as an arg.
         // Alias to the arg's emit name — runtime tracks producer via the
         // submitted task, but TaskOutputTensors does NOT contain this slot.
-        EmitTensorAlias(elem_name, call, param_idx);
+        EmitTensorAlias(elem.var, elem_name, call, param_idx);
       } else {
         // Runtime-allocated: BuildTaskParams synthesised an add_output for
         // this param at runtime output position (param_idx - args_.size()).
@@ -2773,11 +2896,25 @@ class OrchestrationStmtCodegen : public CodegenBase {
 
     std::string emit_name = auto_name::ReserveUniqueName(base_name, declared_var_names_);
     emit_name_map_[var] = emit_name;
+    // Record names first reserved inside an active manual scope so
+    // IsEnclosingScopeValid can tell a scope-local tensor (not hoistable) from
+    // an enclosing-scope one (issue #1697).
+    if (manual_local_names_ != nullptr) {
+      manual_local_names_->insert(emit_name);
+    }
     return emit_name;
   }
 
   std::string ReserveSyntheticEmitName(const std::string& base_name) {
-    return auto_name::ReserveUniqueName(base_name, declared_var_names_);
+    std::string emit_name = auto_name::ReserveUniqueName(base_name, declared_var_names_);
+    // A name first reserved inside an active manual scope is scope-local; record
+    // it so IsEnclosingScopeValid never treats it as hoistable (issue #1697).
+    // Mirrors ReserveVarEmitName so the gating does not depend on every
+    // synthetic-named tensor happening to be mutable / non-tensor.
+    if (manual_local_names_ != nullptr) {
+      manual_local_names_->insert(emit_name);
+    }
+    return emit_name;
   }
 
   /// Register ``var`` as backed by ``array_name[size]``; also populates the
@@ -2933,6 +3070,20 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// C++ shadowing is valid and sometimes required to avoid rebinding an outer
   /// loop-carried Tensor too early.
   std::vector<std::unordered_set<std::string>> mutable_tensor_name_scopes_{{}};
+  /// Manual-scope cross-scope tensor handling (issue #1697). While a
+  /// ``pl.manual_scope`` block body is being buffered, EmitBatchedAllocTensors
+  /// routes a hoisted ``alloc_tensors`` declaration (rendered at
+  /// ``scope_hoist_indent_``, the parent indent) into ``scope_hoist_sink_``
+  /// instead of the deep block indent; the scope handler flushes the sink ahead
+  /// of the ``PTO2_SCOPE(MANUAL) {`` header. ``manual_local_names_`` holds the
+  /// tensor emit names that are scope-local — first reserved inside the block
+  /// and not (yet) hoisted out of it — so ``IsEnclosingScopeValid`` (which gates
+  /// both the alloc hoist and the EmitTensorAlias remap) is a single membership
+  /// test. All three are null / empty outside a manual scope and saved/restored
+  /// around nesting.
+  std::vector<std::string>* scope_hoist_sink_ = nullptr;
+  std::string scope_hoist_indent_;
+  std::set<std::string>* manual_local_names_ = nullptr;
   /// Stack of 0-based slot expressions for the enclosing ForStmts. Pushed
   /// when entering a ForStmt body and popped on exit. Used by ``YieldStmt``
   /// to emit ``arr[<slot>] = value`` for Parallel inner array writes. The
