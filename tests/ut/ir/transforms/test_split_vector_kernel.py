@@ -1022,6 +1022,83 @@ class TestSplitVectorKernelNoSplitA2A3:
             printed,
         )
 
+    def test_no_split_dual_dispatch_rewrites_lane1_tile_slice_to_create(self):
+        """Lane1 replay rewrites a producer ``tile.slice`` into ``tile.create``.
+
+        A ``tile.slice`` is a pure view with no cross-core sync, so the replay
+        lane only needs an empty tile of the slice's result shape. Forcing the
+        slice's explicit ``valid_shape`` to a static 0 would emit a
+        ``v_row=0, v_col=0`` subview that pto-isa cannot compile (no
+        ``GetValidRow`` overload for a static mask of 0); the rewrite to
+        ``tile.create`` yields a dynamic-valid empty tile instead (gh#1649).
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        span = ir.Span.unknown()
+        zero = ir.ConstInt(0, pl.INDEX, span)
+        dim = ir.ConstInt(16, pl.INDEX, span)
+        sub = ir.ConstInt(8, pl.INDEX, span)
+        offsets = ir.MakeTuple([zero, zero], span)
+        shapes = ir.MakeTuple([dim, dim], span)
+        slice_shape = ir.MakeTuple([dim, sub], span)
+
+        data = ir.Var("data", ir.TensorType([16, 16], pl.FP32), span)
+        out = ir.Var("out", ir.TensorType([16, 8], pl.FP32), span)
+
+        load_type = ir.TileType(
+            [16, 16], pl.FP32, None, ir.TileView(valid_shape=[dim, dim]), ir.MemorySpace.Vec
+        )
+        loaded = ir.Var("loaded", load_type, span)
+        load_call = ir.Call(
+            ir.Op("tile.load"),
+            [data, offsets, shapes],
+            {"target_memory": ir.MemorySpace.Vec},
+            load_type,
+            span,
+        )
+
+        slice_type = ir.TileType(
+            [16, 8], pl.FP32, None, ir.TileView(valid_shape=[dim, sub]), ir.MemorySpace.Vec
+        )
+        sliced = ir.Var("sliced", slice_type, span)
+        slice_call = ir.Call(ir.Op("tile.slice"), [loaded, slice_shape, offsets], {}, slice_type, span)
+
+        tpush_call = ir.Call(ir.Op("tile.tpush_to_aic"), [sliced], {"split": 0}, ir.UnknownType(), span)
+        body = ir.SeqStmts(
+            [
+                ir.AssignStmt(loaded, load_call, span),
+                ir.AssignStmt(sliced, slice_call, span),
+                ir.EvalStmt(tpush_call, span),
+                ir.ReturnStmt([out], span),
+            ],
+            span,
+        )
+        func = ir.Function(
+            "main_aiv",
+            [(data, ir.ParamDirection.In), (out, ir.ParamDirection.Out)],
+            [out.type],
+            body,
+            span,
+            ir.FunctionType.AIV,
+            attrs={"dual_aiv_dispatch": True},
+        )
+
+        actual = _run_split_vector_kernel(ir.Program([func], "tile_slice_program", span))
+        printed = python_print(actual)
+
+        assert "if subblock_idx == 0:" in printed
+        # Lane0 keeps the real slice; lane1 replaces it (and the load) with create.
+        assert printed.count("pl.tile.slice(") == 1
+        assert printed.count("pl.tile.create(") == 2
+        # The lane1 slice result is a dynamic-valid empty [16, 8] tile, never a
+        # static v_row=0/v_col=0 subview.
+        assert re.search(
+            r"sliced__ssa_v0_\d+: pl.Tile\[\[16, 8\], pl.FP32, pl.Mem.Vec, "
+            r"pl.TileView\(valid_shape=\[0, 0\]\)\] = pl.tile.create",
+            printed,
+        )
+
     def test_no_split_dual_dispatch_hoists_import_peer_buffer_and_pipe_init(self):
         backend.reset_for_testing()
         backend.set_backend_type(BackendType.Ascend910B)

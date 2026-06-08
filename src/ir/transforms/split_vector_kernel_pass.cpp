@@ -209,22 +209,6 @@ ExprPtr MakeIndexConst(int64_t value, const Span& span) {
   return std::make_shared<ConstInt>(value, DataType::INDEX, span);
 }
 
-ExprPtr MakeZeroTuple(size_t rank, const Span& span) {
-  std::vector<ExprPtr> elements;
-  elements.reserve(rank);
-  for (size_t i = 0; i < rank; ++i) {
-    elements.push_back(MakeIndexConst(0, span));
-  }
-  return std::make_shared<MakeTuple>(std::move(elements), span);
-}
-
-ExprPtr MakeZeroTupleLike(const ExprPtr& tuple_expr, const Span& span) {
-  if (auto tuple = std::dynamic_pointer_cast<const MakeTuple>(tuple_expr)) {
-    return MakeZeroTuple(tuple->elements_.size(), span);
-  }
-  return tuple_expr;
-}
-
 TypePtr WithZeroValidShape(const TypePtr& type, const Span& span) {
   auto tt = std::dynamic_pointer_cast<const TileType>(type);
   if (!tt) return type;
@@ -777,13 +761,29 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[2]}, std::move(kwargs), new_type,
                                   call->span_);
   } else if (op_name == "tile.slice" && new_args.size() >= 3) {
-    auto zero_valid_shape = MakeZeroTupleLike(new_args[1], call->span_);
-    if (new_args.size() >= 4) {
-      new_args[3] = zero_valid_shape;
-    } else {
-      new_args.push_back(zero_valid_shape);
+    // tile.slice is a pure view with no cross-core sync side effect, so in the
+    // replay lane we only need an empty tile of the slice's result shape for the
+    // downstream consumer to run as a no-op. Materialize it as tile.create (like
+    // the tile.load case above) rather than a zero-valid subview: forcing the
+    // slice's explicit valid_shape to a ConstInt 0 yields a *static* v_row=0,
+    // v_col=0 subview. PTOAS accepts that, but pto-isa's Tile::GetValidRow /
+    // GetValidCol have overloads only for a static mask > 0 or DYNAMIC — never
+    // 0 — so ccec cannot compile the static-zero subview (gh#1649). A
+    // tile.create renders with dynamic valid (runtime 0) and compiles cleanly,
+    // matching how the sibling non-subview replay tiles behave.
+    auto new_type = WithZeroValidShape(call->GetType(), call->span_);
+    auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
+    if (!tile_type) return call;
+
+    std::vector<std::pair<std::string, std::any>> kwargs;
+    kwargs.emplace_back("dtype", tile_type->dtype_);
+    if (const auto& memory_space = tile_type->memory_space_) {
+      kwargs.emplace_back("target_memory", *memory_space);
     }
-    args_changed = true;
+
+    auto create_op = OpRegistry::GetInstance().GetOp("tile.create");
+    return std::make_shared<Call>(create_op, std::vector<ExprPtr>{new_args[1]}, std::move(kwargs), new_type,
+                                  call->span_);
   } else if (op_name == "tile.set_validshape" && new_args.size() == 3) {
     new_args[1] = MakeIndexConst(0, call->span_);
     new_args[2] = MakeIndexConst(0, call->span_);
