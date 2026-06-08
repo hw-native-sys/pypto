@@ -1084,7 +1084,13 @@ class TestSplitVectorKernelNoSplitA2A3:
             attrs={"dual_aiv_dispatch": True},
         )
 
-        actual = _run_split_vector_kernel(ir.Program([func], "tile_slice_program", span))
+        # Verification is disabled here for the same reason as the 3-arg
+        # tile.load case above: the hand-built body uses a non-canonical 3-arg
+        # tile.load whose printer form (and a 4-arg form with valid==shape) is
+        # canonicalized on reparse, so the roundtrip structural-equality check
+        # fails at convert_to_ssa independent of the slice rewrite under test.
+        with passes.PassContext([], passes.VerificationLevel.NONE):
+            actual = _run_split_vector_kernel(ir.Program([func], "tile_slice_program", span))
         printed = python_print(actual)
 
         assert "if subblock_idx == 0:" in printed

@@ -773,7 +773,9 @@ CallPtr RebuildLane1CallWithZeroValidShape(const CallPtr& call, const ExprReplac
     // matching how the sibling non-subview replay tiles behave.
     auto new_type = WithZeroValidShape(call->GetType(), call->span_);
     auto tile_type = std::dynamic_pointer_cast<const TileType>(new_type);
-    if (!tile_type) return call;
+    INTERNAL_CHECK_SPAN(tile_type != nullptr, call->span_)
+        << "Internal error: tile.slice must produce a TileType, but got "
+        << (new_type ? new_type->TypeName() : "null");
 
     std::vector<std::pair<std::string, std::any>> kwargs;
     kwargs.emplace_back("dtype", tile_type->dtype_);
