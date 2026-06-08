@@ -379,6 +379,29 @@ class ScatterMaskChainProgram:
 
 
 @pl.program
+class ScatterAliasFP32Program:
+    """Same as ``ScatterFP32Program`` (index form) but invoked via the
+    ``pl.scatter`` top-level alias instead of ``pl.tensor.scatter``.
+
+    Pins that the alias resolves to the identical tensor-level op on the
+    index-form path too (not just the mask form).
+    """
+
+    @pl.function(type=pl.FunctionType.Opaque)
+    def main(
+        self,
+        base: pl.Tensor[[8, 16], pl.FP32],
+        idx: pl.Tensor[[8, 8], pl.INT32],
+        val: pl.Tensor[[8, 8], pl.FP32],
+        output: pl.Out[pl.Tensor[[8, 16], pl.FP32]],
+    ) -> pl.Tensor[[8, 16], pl.FP32]:
+        with pl.at(level=pl.Level.CORE_GROUP):
+            out = pl.scatter(base, dim=-1, index=idx, src=val)
+            output = pl.assemble(output, out, [0, 0])
+        return output
+
+
+@pl.program
 class ScatterAliasMaskP0101Program:
     """Same as ``ScatterMaskP0101Program`` but invoked via the ``pl.scatter``
     top-level alias instead of ``pl.tensor.scatter``.
@@ -428,6 +451,19 @@ class ScatterFP32TestCase(_ScatterBaseTestCase):
 
     def get_program(self) -> Any:
         return ScatterFP32Program
+
+
+class ScatterAliasFP32TestCase(_ScatterBaseTestCase):
+    """``pl.scatter`` alias on the index-form path (FP32 + INT32 indexes)."""
+
+    def get_name(self) -> str:
+        return "scatter_alias_fp32"
+
+    def define_tensors(self) -> list[TensorSpec]:
+        return _scatter_specs(8, 16, 8, DataType.FP32, torch.float32, DataType.INT32, torch.int32)
+
+    def get_program(self) -> Any:
+        return ScatterAliasFP32Program
 
 
 class ScatterINT32TestCase(_ScatterBaseTestCase):
@@ -599,13 +635,18 @@ class ScatterAliasMaskP0101TestCase(_ScatterMaskBaseTestCase):
 # --- Tests ---
 
 
-@pytest.mark.skip(reason="PTOAS bug: https://github.com/hw-native-sys/PTOAS/issues/735")
 class TestScatterIndexForm:
     """Index-form column scatter across the dst/src + indexes dtype matrix."""
 
     @pytest.mark.parametrize("platform", PLATFORMS)
     def test_scatter_fp32(self, test_runner, platform):
         result = test_runner.run(ScatterFP32TestCase(platform=platform))
+        assert result.passed, f"Test failed: {result.error}"
+
+    @pytest.mark.parametrize("platform", PLATFORMS)
+    def test_scatter_alias_fp32(self, test_runner, platform):
+        # `pl.scatter` top-level alias resolves to `pl.tensor.scatter` (index form).
+        result = test_runner.run(ScatterAliasFP32TestCase(platform=platform))
         assert result.passed, f"Test failed: {result.error}"
 
     @pytest.mark.parametrize("platform", PLATFORMS)
