@@ -16,7 +16,7 @@ import importlib.util
 import sys
 import types
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -413,15 +413,24 @@ class DistributedWorker(Worker):
 
     def __init__(
         self,
-        compiled: DistributedCompiledProgram,
+        compiled: DistributedCompiledProgram | Sequence[DistributedCompiledProgram],
         config: Any = None,
         *,
         sub_worker_overrides: dict[str, Callable[..., Any]] | None = None,
     ) -> None:
         super().__init__()  # initialize Worker ABC state (_owned_tensors)
         del config  # reserved for future per-runtime overrides
-        self.dc = compiled._distributed_config
-        self._compiled = compiled  # held for run/register
+        if isinstance(compiled, Sequence):
+            compiled_programs = list(compiled)
+        else:
+            compiled_programs = [compiled]
+        if not compiled_programs:
+            raise ValueError("DistributedWorker requires at least one compiled program")
+
+        first = compiled_programs[0]
+        self.dc = first._distributed_config
+        self._compiled = first  # held for __call__ compatibility
+        self._states: dict[int, dict[str, Any]] = {}
 
         # Wrap setup so a failure at any step still releases the worker and the
         # comm rootinfo temp file. ``self.close()`` can't be used here — it reads
@@ -429,23 +438,79 @@ class DistributedWorker(Worker):
         # inlined and guarded against the partially-constructed state.
         self._w: Any = None
         try:
-            self._chip_callables, runtime_name = _assemble_chip_callables(compiled)
-            self._entry_fn, alloc_fn = _load_orch_entry(compiled.output_dir)
-            sub_worker_fns = _load_sub_worker_fns(compiled.output_dir)
-            sub_worker_fns = _merge_sub_worker_overrides(sub_worker_fns, sub_worker_overrides)
+            runtime_name: str | None = None
+            max_sub_workers = 0
+            setups: list[
+                tuple[
+                    Any,
+                    dict[str, Any],
+                    dict[str, Any],
+                    Any,
+                    Any,
+                    dict[str, Any],
+                    tuple[Any, ...],
+                ]
+            ] = []
 
-            num_sub = max(self.dc.num_sub_workers, len(sub_worker_fns))
-            self._w = _construct_worker(self.dc, compiled.platform, runtime_name, num_sub)
-            self._sub_ids, self._chip_cids = _register_callables(
-                self._w, sub_worker_fns, self._chip_callables
-            )
+            for prog in compiled_programs:
+                dc = prog._distributed_config
+                if prog.platform != first.platform:
+                    raise ValueError("DistributedWorker multi-program mode requires the same platform")
+                if list(dc.device_ids) != list(self.dc.device_ids):
+                    raise ValueError("DistributedWorker multi-program mode requires the same device_ids")
 
-            # Allocate HOST-level intermediate scratch tensors ONCE, before init()
-            # forks. They are reused (by name) across every dispatch; per-call
-            # inputs are merged on top in __call__.
-            self._base_tensors: dict[str, Any] = {}
-            if alloc_fn is not None:
-                alloc_fn(self._base_tensors)
+                chip_callables, prog_runtime_name = _assemble_chip_callables(prog)
+                if runtime_name is None:
+                    runtime_name = prog_runtime_name
+                elif runtime_name != prog_runtime_name:
+                    raise ValueError(
+                        "DistributedWorker multi-program mode requires the same runtime: "
+                        f"{runtime_name!r} != {prog_runtime_name!r}"
+                    )
+                entry_fn, alloc_fn = _load_orch_entry(prog.output_dir)
+                sub_worker_fns = _load_sub_worker_fns(prog.output_dir)
+                sub_worker_fns = _merge_sub_worker_overrides(sub_worker_fns, sub_worker_overrides)
+                max_sub_workers = max(max_sub_workers, dc.num_sub_workers, len(sub_worker_fns))
+                base_tensors: dict[str, Any] = {}
+                if alloc_fn is not None:
+                    alloc_fn(base_tensors)
+                param_infos, _, _ = prog._get_metadata()
+                setups.append(
+                    (
+                        prog,
+                        chip_callables,
+                        sub_worker_fns,
+                        entry_fn,
+                        dc,
+                        base_tensors,
+                        tuple(param_infos),
+                    )
+                )
+
+            if runtime_name is None:
+                raise RuntimeError("failed to resolve distributed runtime")
+
+            self._w = _construct_worker(self.dc, first.platform, runtime_name, max_sub_workers)
+            for prog, chip_callables, sub_worker_fns, entry_fn, dc, base_tensors, param_infos in setups:
+                sub_ids, chip_cids = _register_callables(self._w, sub_worker_fns, chip_callables)
+                state = {
+                    "entry_fn": entry_fn,
+                    "base_tensors": base_tensors,
+                    "sub_ids": sub_ids,
+                    "chip_cids": chip_cids,
+                    "call_config": _make_call_config(dc),
+                    "param_infos": param_infos,
+                    "device_nums": len(dc.device_ids),
+                }
+                self._states[id(prog)] = state
+                if prog is first:
+                    self._chip_callables = chip_callables
+                    self._entry_fn = entry_fn
+                    self._sub_ids = sub_ids
+                    self._chip_cids = chip_cids
+                    self._base_tensors = base_tensors
+                    self._call_config = state["call_config"]
+                    self._param_infos = param_infos
 
             self._w.init()
 
@@ -466,10 +531,6 @@ class DistributedWorker(Worker):
                     pass
             raise
 
-        self._call_config = _make_call_config(self.dc)
-        # Cache param metadata once: the dispatch contract is "setup once, run
-        # many", so re-extracting it on every __call__ would be wasted work.
-        self._param_infos, _, _ = compiled._get_metadata()
         self._closed = False
         # Live RegistrationHandles so close() can mark them closed. WeakSet
         # so handles that drop out of scope first don't pin DistributedWorker.
@@ -547,7 +608,11 @@ class DistributedWorker(Worker):
     # ------------------------------------------------------------------
 
     def __call__(self, *args: Any, config: Any = None) -> None:
-        """Dispatch one run on the held Worker, reusing all setup.
+        """Dispatch one run on the primary compiled program, reusing all setup."""
+        return self._run_compiled(self._compiled, *args, config=config)
+
+    def _run_compiled(self, compiled: DistributedCompiledProgram, *args: Any, config: Any = None) -> None:
+        """Dispatch one run on *compiled*, reusing all setup.
 
         Pass one argument per program parameter (in-place). Each argument is
         either:
@@ -564,10 +629,17 @@ class DistributedWorker(Worker):
         fork is invisible to the chip worker.
         """
         del config  # reserved for future per-call overrides
-        self._require_open("__call__")
+        self._require_open("run")
         from pypto.ir.compiled_program import _validate_device_tensor  # noqa: PLC0415
 
-        param_infos = self._param_infos
+        state = self._states.get(id(compiled))
+        if state is None:
+            raise ValueError(
+                "DistributedWorker.run(compiled, ...) requires a DistributedCompiledProgram "
+                "registered when this worker was constructed."
+            )
+
+        param_infos = state["param_infos"]
         n_params = len(param_infos)
         if len(args) != n_params:
             raise TypeError(
@@ -575,8 +647,11 @@ class DistributedWorker(Worker):
                 f"got {len(args)}. Parameters: {[p.name for p in param_infos]}"
             )
 
-        tensors: dict[str, Any] = dict(self._base_tensors)
+        tensors: dict[str, Any] = dict(state["base_tensors"])
         for info, arg in zip(param_infos, args, strict=True):
+            if info.shape is None:
+                tensors[info.name] = arg
+                continue
             if isinstance(arg, DeviceTensor):
                 _validate_device_tensor(arg, info)
             elif isinstance(arg, torch.Tensor):
@@ -596,12 +671,12 @@ class DistributedWorker(Worker):
 
         _dispatch(
             self._w,
-            self._entry_fn,
+            state["entry_fn"],
             tensors,
-            self._chip_cids,
-            self._sub_ids,
-            self._call_config,
-            len(self.dc.device_ids),
+            state["chip_cids"],
+            state["sub_ids"],
+            state["call_config"],
+            state["device_nums"],
         )
 
     # ------------------------------------------------------------------
@@ -656,13 +731,7 @@ class DistributedWorker(Worker):
         runtime was prepared from; passing a different one raises
         ``ValueError``.
         """
-        if compiled is not self._compiled:
-            raise ValueError(
-                "DistributedWorker.run(compiled, ...) requires the same "
-                "DistributedCompiledProgram this runtime was prepared from. "
-                "Construct a new DistributedWorker via the other compiled.prepare()."
-            )
-        return self(*args, config=config)
+        return self._run_compiled(compiled, *args, config=config)
 
     def register(self, compiled: DistributedCompiledProgram) -> RegistrationHandle:
         """Pre-register *compiled* on this DistributedWorker.
@@ -682,10 +751,10 @@ class DistributedWorker(Worker):
                 from.
         """
         self._require_open("register")
-        if compiled is not self._compiled:
+        if id(compiled) not in self._states:
             raise ValueError(
-                "DistributedWorker.register(compiled) requires the same "
-                "DistributedCompiledProgram this runtime was prepared from."
+                "DistributedWorker.register(compiled) requires a DistributedCompiledProgram "
+                "registered when this worker was constructed."
             )
         # Avoid a hard cycle: distributed_runner imports from worker only
         # for RegistrationHandle; worker never imports from distributed_runner.

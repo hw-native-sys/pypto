@@ -25,6 +25,7 @@ Example::
 """
 
 from .device_tensor import DeviceTensor
+from .distributed_runner import DistributedWorker
 from .log_config import _ensure_configured as _ensure_log_configured
 from .log_config import configure_log
 from .log_config import current_level as log_level
@@ -44,6 +45,7 @@ __all__ = [
     "log_level",
     "ChipWorker",
     "DeviceTensor",
+    "DistributedWorker",
     "RegistrationHandle",
     "RunConfig",
     "RunResult",
