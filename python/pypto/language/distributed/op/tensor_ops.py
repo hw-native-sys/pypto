@@ -38,6 +38,7 @@ from collections.abc import Sequence
 
 from pypto.ir.op.distributed import tensor_ops as _ir_tensor
 from pypto.language.typing import IntLike, Ptr
+from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import DataType
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr
@@ -123,7 +124,7 @@ def window(
 def put(
     dst: DistributedTensor,
     peer: IntLike,
-    src: DistributedTensor,
+    src: DistributedTensor | Tensor,
     dst_offsets: Sequence[IntLike] | None = None,
     src_offsets: Sequence[IntLike] | None = None,
     shape: Sequence[IntLike] | None = None,
@@ -156,8 +157,10 @@ def put(
         dst: Window-bound :class:`pld.DistributedTensor` destination (the peer
             rank's slice). The C++ verifier refuses a plain :class:`pl.Tensor`.
         peer: Peer rank index.
-        src: Window-bound :class:`pld.DistributedTensor` source (the local
-            rank's slice); must share element type with ``dst``.
+        src: Local source — either a :class:`pld.DistributedTensor` (window-
+            bound) or a plain :class:`pl.Tensor`. Must share element type with
+            ``dst``. Window membership is not required on the source side;
+            TPUT only needs a readable local GM region.
         dst_offsets: Optional offsets into the peer ``dst`` slice.
         src_offsets: Optional offsets into the local ``src`` slice.
         shape: Optional static transfer shape. Required when either offset
@@ -168,10 +171,14 @@ def put(
     """
     dst_expr = _unwrap(dst)
     src_expr = _unwrap(src)
-    for role, expr in (("dst", dst_expr), ("src", src_expr)):
-        if not isinstance(expr, Expr) or not isinstance(expr.type, _ir.DistributedTensorType):
-            got = _ir.python_print_type(expr.type) if isinstance(expr, Expr) else type(expr).__name__
-            raise TypeError(f"pld.tensor.put expects a DistributedTensor {role} (window-bound); got {got}")
+    if not isinstance(dst_expr, Expr) or not isinstance(dst_expr.type, _ir.DistributedTensorType):
+        got = _ir.python_print_type(dst_expr.type) if isinstance(dst_expr, Expr) else type(dst_expr).__name__
+        raise TypeError(f"pld.tensor.put expects a DistributedTensor dst (window-bound); got {got}")
+    if not isinstance(src_expr, Expr) or not isinstance(
+        src_expr.type, (_ir.TensorType, _ir.DistributedTensorType)
+    ):
+        got = _ir.python_print_type(src_expr.type) if isinstance(src_expr, Expr) else type(src_expr).__name__
+        raise TypeError(f"pld.tensor.put expects a Tensor or DistributedTensor src; got {got}")
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tensor.put dst_offsets, src_offsets, and shape must be provided together")

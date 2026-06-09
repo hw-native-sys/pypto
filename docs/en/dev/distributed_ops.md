@@ -40,12 +40,14 @@ The namespace encodes the IR level the op lives at, not an arbitrary grouping:
   internal `pld.tile.get`, never on the DSL surface. It is therefore a sibling
   of `pld.tensor.alloc_window_buffer` / `pld.tensor.window`, **not** of the
   tile-producing `remote_load`.
-- **`pld.tensor.put`** reads and writes *tensor* (GM) operands — both `dst` and
-  `src` are window-bound `DistributedTensor` views. The VEC staging tile that
-  TPUT bounces through is materialised by `ConvertTensorToTileOps` as an
-  internal `pld.tile.put`, never on the DSL surface. It is therefore a sibling
-  of `pld.tensor.alloc_window_buffer` / `pld.tensor.window`, **not** of the
-  tile-producing `remote_load`.
+- **`pld.tensor.put`** reads and writes *tensor* (GM) operands — `dst` is a
+  window-bound `DistributedTensor` (the peer needs a window slot to receive
+  into) while `src` accepts either a window-bound `DistributedTensor` or a
+  plain `Tensor` (TPUT only needs a readable local GM region on the source
+  side). The VEC staging tile that TPUT bounces through is materialised by
+  `ConvertTensorToTileOps` as an internal `pld.tile.put`, never on the DSL
+  surface. It is therefore a sibling of `pld.tensor.alloc_window_buffer` /
+  `pld.tensor.window`, **not** of the tile-producing `remote_load`.
 - **`pld.system.notify` / `pld.system.wait`** drive the per-rank signal slot —
   pure control-plane synchronisation with no data operand — so they live in
   `pld.system`.
@@ -135,21 +137,26 @@ pld.tensor.put(dst, peer, src, *, atomic: int) -> Unknown
 pld.tensor.put(dst, peer, src, dst_offsets, src_offsets, shape, *, atomic: int) -> Unknown
 ```
 
-Synchronously writes the local window-bound `src` into the `peer` rank's slice
-of the window-bound `dst`. Both operands are GM-level `DistributedTensor`
-views; the VEC staging tile is materialised by `ConvertTensorToTileOps` as an
-internal `tile.create + pld.tile.put`, so it flows through PyPTO's memory
-allocator and never appears on the DSL surface.
+Synchronously writes local `src` data into the `peer` rank's slice of the
+window-bound `dst`. `dst` is a GM-level `DistributedTensor` view; `src` may be
+either a `DistributedTensor` view *or* a plain `Tensor` — TPUT only requires a
+readable local GM region on the source side, so kernels can push directly from
+host-backed inputs without first staging through a window buffer. The VEC
+staging tile is materialised by `ConvertTensorToTileOps` as an internal
+`tile.create + pld.tile.put`, so it flows through PyPTO's memory allocator and
+never appears on the DSL surface.
 
 With no offsets/shape this writes the full local `src` slice to the full peer
 `dst` slice. Supplying `dst_offsets`, `src_offsets`, and `shape` narrows the
 transfer to matching subregions; all three must be provided together.
 
-Verifier: `dst` / `src` must both be `DistributedTensorType`; `peer` must be a
-`ScalarType`; `dst` and `src` must share element type, rank, and **positive
-static** dimensions. Full-slice `put` requires identical shape; subregion `put`
-allows different full slice extents as long as the explicit transfer region is
-in bounds. `atomic` selects overwrite vs atomic-add (see `AtomicType`).
+Verifier: `dst` must be `DistributedTensorType`; `src` must be either
+`TensorType` or `DistributedTensorType` (matched via `AsTensorTypeLike`);
+`peer` must be a `ScalarType`; `dst` and `src` must share element type, rank,
+and **positive static** dimensions. Full-slice `put` requires identical shape;
+subregion `put` allows different full slice extents as long as the explicit
+transfer region is in bounds. `atomic` selects overwrite vs atomic-add (see
+`AtomicType`).
 
 ### `pld.tensor.get` (TGET)
 

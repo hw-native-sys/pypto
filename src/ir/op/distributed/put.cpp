@@ -40,12 +40,16 @@
  * the op produces :class:`UnknownType`, mirroring ``pld.system.notify`` /
  * ``pld.system.wait``.
  *
- * Verifier (strict per kind-trait rules - ``As<DistributedTensorType>`` does
- * NOT match a plain :class:`TensorType`):
+ * Verifier:
  *
- * * ``dst`` / ``src`` must have :class:`DistributedTensorType` - refuse plain
- *   :class:`TensorType` so a non-window-bound tensor cannot be fed into a
- *   cross-rank write.
+ * * ``dst`` must have :class:`DistributedTensorType` - the destination of a
+ *   cross-rank write must be window-bound (the remote peer needs a window slot
+ *   to receive into).
+ * * ``src`` accepts either :class:`DistributedTensorType` *or* plain
+ *   :class:`TensorType` (matched via :func:`AsTensorTypeLike`). The TPUT
+ *   primitive only requires src to be a readable local GM region; it does not
+ *   need a window. This lets kernels TPUT directly from host-backed inputs
+ *   without first staging through a window buffer.
  * * ``peer`` must be a :class:`ScalarType` expression (integer rank index).
  * * ``dst`` and ``src`` must share element type, rank, and positive static
  *   dimensions.
@@ -90,8 +94,10 @@ void ValidatePutContract(const ExprPtr& dst, const ExprPtr& peer, const ExprPtr&
   CHECK(IsA<ScalarType>(peer->GetType()))
       << op_name << " peer must be a scalar (rank index), got " << peer->GetType()->TypeName();
 
-  auto src_type = As<DistributedTensorType>(src->GetType());
-  CHECK(src_type) << op_name << " src must be a DistributedTensor (window-bound), got "
+  // src accepts either DistributedTensor or plain Tensor: TPUT only needs a
+  // readable local GM region for the source, no window membership required.
+  auto src_type = AsTensorTypeLike(src->GetType());
+  CHECK(src_type) << op_name << " src must be a Tensor or DistributedTensor, got "
                   << src->GetType()->TypeName();
 
   // TPUT contract: dst and src always describe same-rank window slices with
@@ -186,7 +192,7 @@ TypePtr DeducePutType(const std::vector<ExprPtr>& args,
   ValidatePutContract(args[0], args[1], args[2], kwargs, "pld.tensor.put", args.size() == 3);
   if (args.size() == 6) {
     auto dst_type = As<DistributedTensorType>(args[0]->GetType());
-    auto src_type = As<DistributedTensorType>(args[2]->GetType());
+    auto src_type = AsTensorTypeLike(args[2]->GetType());
     ValidatePutRegionArgs(args, 3, dst_type->shape_, src_type->shape_, "pld.tensor.put");
   }
   // Side-effect-only: no SSA result for downstream consumers.
@@ -213,7 +219,7 @@ TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
   CHECK(stage_type->shape_.size() == 2)
       << "pld.tile.put stage must be a 2D VEC staging tile, got rank " << stage_type->shape_.size();
 
-  auto src_type = As<DistributedTensorType>(args[2]->GetType());
+  auto src_type = AsTensorTypeLike(args[2]->GetType());
   std::vector<ExprPtr> transfer_shape = dst_type->shape_;
   if (args.size() == 7) {
     transfer_shape = ValidatePutRegionArgs(args, 4, dst_type->shape_, src_type->shape_, "pld.tile.put");
@@ -260,7 +266,8 @@ REGISTER_OP("pld.tensor.put")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")
-    .add_argument("src", "Local window-bound DistributedTensor source (same dtype as dst)")
+    .add_argument("src",
+                  "Local source — DistributedTensor (window-bound) or plain Tensor (same dtype as dst)")
     .set_attr<int>("atomic")
     .no_memory_spec()
     .f_deduce_type(DeducePutType);
@@ -276,7 +283,8 @@ REGISTER_OP("pld.tile.put")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")
-    .add_argument("src", "Local window-bound DistributedTensor source (same dtype as dst)")
+    .add_argument("src",
+                  "Local source — DistributedTensor (window-bound) or plain Tensor (same dtype as dst)")
     .add_argument("stage", "VEC staging TileType (rows x cols == prod(transfer shape))")
     .set_attr<int>("atomic")
     .no_memory_spec()

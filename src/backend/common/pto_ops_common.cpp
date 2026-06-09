@@ -2590,12 +2590,15 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   // dst: remote (peer-addressed) DistributedTensor destination.
   auto dst_binding = ResolveDistTensorBinding(op->args_[0], codegen, "pld.tile.put");
 
-  // src: local DistributedTensor source — reuses the local tensor_view created
-  // by EmitMakeTensorViews (no peer arithmetic, like wait's signal).
+  // src: local source — DistributedTensor (window-bound) or plain Tensor.
+  // Both reuse the local tensor_view created by EmitMakeTensorViews (no peer
+  // arithmetic, like wait's signal). TPUT only requires src to be a readable
+  // local GM region; window membership is not needed on the source side.
   auto src_var = AsVarLike(op->args_[2]);
   CHECK(src_var) << "pld.tile.put src must be a Var-like expression";
-  auto src_dist = As<ir::DistributedTensorType>(src_var->GetType());
-  CHECK(src_dist) << "pld.tile.put src must be DistributedTensorType, got " << src_var->GetType()->TypeName();
+  auto src_tt = AsTensorTypeLike(src_var->GetType());
+  CHECK(src_tt) << "pld.tile.put src must be a Tensor or DistributedTensor, got "
+                << src_var->GetType()->TypeName();
 
   const int atomic_int = op->GetKwarg<int>("atomic", 0);
   CHECK(atomic_int == static_cast<int>(ir::AtomicType::kNone) ||
@@ -2659,7 +2662,7 @@ static std::string MakePutCodegenPTO(const CallPtr& op, codegen::CodegenBase& co
   // and every other tensor-view op in this file); a hand-rolled static-shape
   // string would mismatch that SSA's type.
   std::string src_local_view = codegen.GetOrCreateTensorView(src_var);
-  std::string src_view_type = codegen.GetTensorViewTypeString(src_dist.get());
+  std::string src_view_type = codegen.GetTensorViewTypeString(src_tt.get());
   std::string src_pview = EmitPartitionViewPTO(src_var->name_hint_ + "_local", src_local_view, src_view_type,
                                                partition_type, src_offsets, size_ssa, codegen);
 

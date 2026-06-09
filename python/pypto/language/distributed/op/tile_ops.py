@@ -17,6 +17,7 @@ from collections.abc import Sequence
 
 from pypto.ir.op.distributed import tile_ops as _ir_tile
 from pypto.language.typing import IntLike, Tile
+from pypto.language.typing.tensor import Tensor
 from pypto.pypto_core import ir as _ir
 from pypto.pypto_core.ir import AtomicType, Call, Expr
 
@@ -114,7 +115,7 @@ def remote_store(
 def put(
     dst: DistributedTensor,
     peer: IntLike,
-    src: DistributedTensor,
+    src: DistributedTensor | Tensor,
     stage: Tile,
     dst_offsets: Sequence[IntLike] | None = None,
     src_offsets: Sequence[IntLike] | None = None,
@@ -126,14 +127,21 @@ def put(
 
     Emitted by ``ConvertTensorToTileOps``; defined here only so the printer's
     output roundtrips through the parser. User code calls :func:`pld.tensor.put`.
+
+    ``src`` accepts either a :class:`pld.DistributedTensor` or a plain
+    :class:`pl.Tensor`; see :func:`pld.tensor.put` for the rationale.
     """
     dst_expr = _unwrap(dst)
     src_expr = _unwrap(src)
     stage_expr = _unwrap(stage)
-    for role, expr in (("dst", dst_expr), ("src", src_expr)):
-        if not isinstance(expr, Expr) or not isinstance(expr.type, _ir.DistributedTensorType):
-            got = _ir.python_print_type(expr.type) if isinstance(expr, Expr) else type(expr).__name__
-            raise TypeError(f"pld.tile.put expects a DistributedTensor {role} (window-bound); got {got}")
+    if not isinstance(dst_expr, Expr) or not isinstance(dst_expr.type, _ir.DistributedTensorType):
+        got = _ir.python_print_type(dst_expr.type) if isinstance(dst_expr, Expr) else type(dst_expr).__name__
+        raise TypeError(f"pld.tile.put expects a DistributedTensor dst (window-bound); got {got}")
+    if not isinstance(src_expr, Expr) or not isinstance(
+        src_expr.type, (_ir.TensorType, _ir.DistributedTensorType)
+    ):
+        got = _ir.python_print_type(src_expr.type) if isinstance(src_expr, Expr) else type(src_expr).__name__
+        raise TypeError(f"pld.tile.put expects a Tensor or DistributedTensor src; got {got}")
     has_region = dst_offsets is not None or src_offsets is not None or shape is not None
     if has_region and (dst_offsets is None or src_offsets is None or shape is None):
         raise ValueError("pld.tile.put dst_offsets, src_offsets, and shape must be provided together")
