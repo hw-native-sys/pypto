@@ -774,7 +774,14 @@ def _generate_config_file(
 
 
 class _CallCollector(_ir_core.IRVisitor):
-    """Collect all GlobalVar callee names reachable from a function body."""
+    """Collect all GlobalVar callee names reachable from a function body.
+
+    Both ``Call`` (plain function call) and ``Submit`` (task launch from
+    ``pl.submit`` inside a ``pl.manual_scope``) reference a callee through a
+    ``GlobalVar`` op. Next-level program extraction must follow both kinds, or
+    helper kernels that orchestration only reaches via ``Submit`` get dropped
+    from the generated chip program (see ``pass-submit-awareness.md``).
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -784,6 +791,14 @@ class _CallCollector(_ir_core.IRVisitor):
         if isinstance(op.op, _ir_core.GlobalVar):
             self.callee_names.append(op.op.name)
         super().visit_call(op)
+
+    def visit_expr(self, expr: _ir_core.Expr) -> None:
+        # ``Submit`` has no dedicated Python visitor hook, so collect its callee
+        # here on the generic expr dispatch before delegating. ``super()`` routes
+        # ``Call`` nodes on to ``visit_call`` and recurses into children.
+        if isinstance(expr, _ir_core.Submit) and isinstance(expr.op, _ir_core.GlobalVar):
+            self.callee_names.append(expr.op.name)
+        super().visit_expr(expr)
 
 
 def _extract_group_member_names(

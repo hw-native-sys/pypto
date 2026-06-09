@@ -710,5 +710,38 @@ class TestSubWorkerSourceGeneration:
         assert "import torch" in source
 
 
+class TestChipTaskCollection:
+    """Next-level program extraction must follow Submit callees, not just Call."""
+
+    def test_collect_chip_funcs_includes_submit_callee(self):
+        """Regression for issue #1707: a kernel reached only via ``pl.submit``.
+
+        Orchestration submits ``down_seed`` through ``pl.submit`` inside a
+        ``pl.manual_scope``. The submitted InCore callee must appear in the
+        collected chip program, or distributed codegen drops it and fails with
+        ``function 'down_seed' not found after validation``.
+        """
+        from pypto.backend.pto_backend import _collect_chip_task_functions  # noqa: PLC0415
+
+        @pl.program
+        class Input:
+            @pl.function(type=pl.FunctionType.InCore)
+            def down_seed(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                y: pl.Tensor[[64], pl.FP32] = pl.add(x, x)
+                return y
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def decode_fwd(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
+                with pl.manual_scope():
+                    a, _a_tid = pl.submit(self.down_seed, x)
+                return a
+
+        orch = Input.get_function("decode_fwd")
+        assert orch is not None
+        chip_funcs = _collect_chip_task_functions(orch, Input)
+        names = {f.name for f in chip_funcs}
+        assert "down_seed" in names, names
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
