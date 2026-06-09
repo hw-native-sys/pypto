@@ -726,31 +726,12 @@ class OrchestrationStmtCodegen : public CodegenBase {
         // declared names.
         std::string carry_name = ReserveSyntheticEmitName(return_var->name_hint_);
         const std::string cpp_type = GetCppType(return_var->GetType());
-        // When the loop sits directly in a ``pl.manual_scope`` body, hoist the
-        // carry's ``Tensor carry = init;`` decl out to the enclosing scope
-        // (issue #1713). A manual_scope is a scheduling region, not a storage
-        // scope; the decl is a one-time pre-loop copy of an enclosing-scope value
-        // (``init`` is enclosing-scope-valid by the guard), so emitting it one
-        // level out is ordering-inert — but it keeps ``carry`` in C++ scope for a
-        // task or method-receiver placed AFTER the block (the loop result escapes
-        // via ``emit_name_map_[return_var]``). Mirrors EmitBatchedAllocTensors'
-        // alloc hoist. ``Tensor`` has no public default ctor, so we hoist the
-        // whole decl (not a bare forward declaration); the in-loop ``carry = ...;``
-        // reassignments stay inside the block and resolve through the enclosing
-        // frame. Registering the carry mutable in the *enclosing* frame also lets
-        // a post-loop ``X = carry`` rebind collapse onto it (see the Var-RHS
-        // catch-all in VisitStmt_(AssignStmt)).
-        const bool hoist_carry = cpp_type == "Tensor" && scope_hoist_sink_ != nullptr &&
-                                 IsAtManualScopeBodyIndent() && IsEnclosingScopeValid(init_var_name);
-        if (hoist_carry) {
-          scope_hoist_sink_->push_back(scope_hoist_indent_ + cpp_type + " " + carry_name + " = " +
-                                       init_var_name + ";\n");
-          RegisterMutableTensorNameInEnclosingScope(carry_name);
-          hoisted_carry_names_.insert(carry_name);
-          if (manual_local_names_ != nullptr) manual_local_names_->erase(carry_name);
-          if (enclosing_manual_local_names_ != nullptr) {
-            enclosing_manual_local_names_->insert(carry_name);
-          }
+        // A Tensor loop carry directly in a ``pl.manual_scope`` body is hoisted to
+        // the enclosing scope so a task / method-receiver placed AFTER the block
+        // resolves it (issue #1713; see EmitMutableTensorCarryDecl). Non-Tensor
+        // (e.g. Sequential TaskId scalar) carries keep their in-block decl.
+        if (cpp_type == "Tensor") {
+          EmitMutableTensorCarryDecl(carry_name, init_var_name);
         } else {
           code_ << Indent() << cpp_type << " " << carry_name << " = " << init_var_name << ";\n";
           RegisterMutableTensorName(cpp_type, carry_name);
@@ -967,9 +948,13 @@ class OrchestrationStmtCodegen : public CodegenBase {
             << "phi placeholder (``Tensor`` has a private default ctor). "
             << "Expected either a function parameter or a branch yield value "
             << "to resolve to a Var already declared at if-entry.";
-        // Phi placeholder init — overwritten by branch yields.
-        code_ << Indent() << cpp_type << " " << emit_name << " = " << tensor_phi_init << ";\n";
-        RegisterMutableTensorName(cpp_type, emit_name);
+        // Phi placeholder init — overwritten by branch yields. When the IfStmt is
+        // directly in a ``pl.manual_scope`` body, the decl is hoisted to the
+        // enclosing scope so a reader placed AFTER the block resolves the phi
+        // (issue #1713 — same shape as a loop carry; the branch ``phi = ...;``
+        // merges stay in-block). The phi init (a param or a pre-if Var) must be
+        // enclosing-scope-valid, or the decl stays in place (EmitMutableTensorCarryDecl).
+        EmitMutableTensorCarryDecl(emit_name, tensor_phi_init);
       } else {
         code_ << Indent() << cpp_type << " " << emit_name << ";\n";
       }
@@ -2673,6 +2658,34 @@ class OrchestrationStmtCodegen : public CodegenBase {
     INTERNAL_CHECK(mutable_tensor_name_scopes_.size() >= 2)
         << "Internal error: enclosing-scope carry hoist requires an enclosing C++ frame";
     mutable_tensor_name_scopes_[mutable_tensor_name_scopes_.size() - 2].insert(emit_name);
+  }
+
+  /// Emit a mutable ``Tensor <name> = <init>;`` decl for a loop carry or an
+  /// IfStmt phi placeholder, hoisting it out of a ``pl.manual_scope`` body into
+  /// the enclosing scope when the construct sits directly in that body
+  /// (``IsAtManualScopeBodyIndent``) and ``init`` is enclosing-scope-valid
+  /// (issue #1713). The hoisted decl keeps ``<name>`` visible to a task or
+  /// method-receiver placed AFTER the ``PTO2_SCOPE(MANUAL)`` block; the in-block
+  /// ``<name> = ...;`` reassignments (loop yields / branch merges) stay put and
+  /// resolve through the enclosing frame. ``init`` is an enclosing-scope value
+  /// that does not change between the hoist point and the block, so moving the
+  /// decl one level out is ordering-inert; ``Tensor`` has no public default ctor,
+  /// so the whole decl (init included) is hoisted, not a bare forward
+  /// declaration. Registering ``<name>`` mutable in the *enclosing* frame and
+  /// tracking it in ``hoisted_carry_names_`` also lets a post-block ``X = <name>``
+  /// rebind collapse onto it (see the Var-RHS catch-all in VisitStmt_(AssignStmt)).
+  /// Caller guarantees the decl type is ``Tensor``.
+  void EmitMutableTensorCarryDecl(const std::string& name, const std::string& init_expr) {
+    if (scope_hoist_sink_ != nullptr && IsAtManualScopeBodyIndent() && IsEnclosingScopeValid(init_expr)) {
+      scope_hoist_sink_->push_back(scope_hoist_indent_ + "Tensor " + name + " = " + init_expr + ";\n");
+      RegisterMutableTensorNameInEnclosingScope(name);
+      hoisted_carry_names_.insert(name);
+      if (manual_local_names_ != nullptr) manual_local_names_->erase(name);
+      if (enclosing_manual_local_names_ != nullptr) enclosing_manual_local_names_->insert(name);
+    } else {
+      code_ << Indent() << "Tensor " << name << " = " << init_expr << ";\n";
+      RegisterMutableTensorName("Tensor", name);
+    }
   }
 
   bool IsMutableTensorNameInCurrentScope(const std::string& emit_name) const {

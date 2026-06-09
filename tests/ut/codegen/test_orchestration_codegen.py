@@ -1356,6 +1356,78 @@ class TestOrchestration:
         assert re.search(r"^\s*Tensor\s+snap\s*=\s*\w+;", code, flags=re.MULTILINE), code
         assert "add_input(snap)" in code, code
 
+    def test_manual_scope_ifstmt_phi_read_after(self):
+        """Regression for #1713 (IfStmt phi sibling of the loop-carry hoist): an
+        ``if`` inside a ``pl.manual_scope`` that conditionally rewrites a tensor
+        produces a phi placeholder ``Tensor <buf>__phi_v<N> = <init>;`` at the
+        block indent (reassigned in each branch); a task after the scope reading
+        the phi then named an out-of-scope identifier.
+
+        The phi decl is now hoisted to the enclosing scope (its init is the
+        enclosing param/buffer), so the after-scope reader resolves it."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        N, M = 16, 256
+
+        @pl.program
+        class IfPhiProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def producer(
+                self,
+                x: pl.Tensor[[N, M], pl.FP32],
+                buf: pl.Out[pl.Tensor[[N, M], pl.FP32]],
+            ) -> pl.Tensor[[N, M], pl.FP32]:
+                t: pl.Tile[[N, M], pl.FP32] = pl.load(x, [0, 0], [N, M])
+                return pl.store(t, [0, 0], buf)
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consumer(
+                self,
+                buf: pl.Tensor[[N, M], pl.FP32],
+                out: pl.Out[pl.Tensor[[N, M], pl.FP32]],
+            ) -> pl.Tensor[[N, M], pl.FP32]:
+                t: pl.Tile[[N, M], pl.FP32] = pl.load(buf, [0, 0], [N, M])
+                return pl.store(t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                x: pl.Tensor[[N, M], pl.FP32],
+                flag: pl.Scalar[pl.INDEX],
+                out: pl.Out[pl.Tensor[[N, M], pl.FP32]],
+            ) -> pl.Tensor[[N, M], pl.FP32]:
+                buf: pl.Tensor[[N, M], pl.FP32] = pl.create_tensor([N, M], dtype=pl.FP32)
+                with pl.manual_scope():
+                    if flag > 0:
+                        buf, _t = pl.submit(self.producer, x, buf)
+                out = self.consumer(buf, out)
+                return out
+
+        program = passes.materialize_runtime_scopes()(
+            passes.derive_call_directions()(
+                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(IfPhiProgram)
+            )
+        )
+        code = next(
+            codegen.generate_orchestration(program, f).code
+            for f in program.functions.values()
+            if f.func_type == ir.FunctionType.Orchestration and f.name == "main"
+        )
+        # The IfStmt actually produced a Tensor phi placeholder (exercises the path).
+        assert re.search(r"Tensor\s+\w+__phi_v\d+\s*=", code), code
+        # No identifier names an out-of-scope name (including the after-scope read).
+        assert _out_of_scope_tensor_refs(code) == [], code
+        # The phi decl is hoisted AHEAD of the manual block header; the branch
+        # ``<phi> = ...;`` merges stay inside the block (resolving through the
+        # enclosing frame).
+        manual_open = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
+        phi_decl = re.search(r"^\s*Tensor\s+(\w+__phi_v\d+)\s*=", code[:manual_open], flags=re.MULTILINE)
+        assert phi_decl, code[:manual_open]
+        phi_name = phi_decl.group(1)
+        # The after-scope consumer reads the hoisted phi directly (in scope).
+        assert f"add_input({phi_name})" in code, code
+
     def test_tensor_create(self):
         """Test tensor.create generates TensorCreateInfo with shape/dtype."""
         backend.reset_for_testing()
