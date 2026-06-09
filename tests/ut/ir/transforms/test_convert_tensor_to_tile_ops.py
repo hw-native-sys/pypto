@@ -3155,5 +3155,189 @@ class TestSpmdBlockIdentityConversion:
         ir.assert_structural_equal(After, Expected)
 
 
+class TestWindowSliceIncoreConversion:
+    """Issue #1694: a ``pld.DistributedTensor`` (window) slice / slice-assign
+    inside an InCore scope must lower like a plain ``Tensor`` slice.
+
+    #1685/#1672 made ``tensor.slice`` / ``tensor.assemble`` accept a window at
+    the type/op-verification level, but ``ConvertTensorToTileOps`` still gated
+    its lowering lambdas on the exact ``As<TensorType>()`` kind — so a window
+    (its own ``ObjectKind::DistributedTensorType``) was rejected:
+
+        pypto.InternalError: tensor.slice conversion: unexpected input type:
+            DistributedTensorType
+
+    Inside ``pl.at(CORE_GROUP)`` a window is just this rank's local GM, so its
+    slice/assemble must lower to ``tile.load`` / ``tile.store`` exactly like a
+    plain tensor. These tests reproduce the crash (before the fix they raise the
+    InternalError above) and lock in the lowering afterwards.
+
+    The slice is authored as its own statement — the already-flat shape this
+    pass sees in a real compile, where ``FlattenCallExpr`` (pipeline position 6)
+    hoists nested ``tensor.slice`` out of the slice-assign expression before
+    ``ConvertTensorToTileOps`` (position 12) runs.
+    """
+
+    def test_window_source_slice_into_plain_tensor(self):
+        """dispatch_ep idiom: read a window slice into a plain output.
+
+        The window slice (``tensor.slice`` on a DistributedTensor) is the exact
+        op that crashes at op_conversion_registry.cpp:307. It must lower to a
+        ``tile.load`` from the local window, and the slice-assign into the plain
+        output to a ``tile.store`` — no ``tensor.slice`` / ``tensor.assemble``
+        may survive in the InCore body.
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                recv_scale: pl.InOut[pld.DistributedTensor[[16, 8], pl.FP32]],
+                out: pl.InOut[pl.Tensor[[16, 1], pl.FP32]],
+            ):
+                sub = pl.tensor.slice(recv_scale, [16, 1], [0, 0])  # window column 0
+                out[0:16, 0:1] = sub
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+
+        # The window slice must lower to tile.load; the slice-assign to tile.store.
+        assert _find_first_call_to(kernel, "tile.load") is not None, (
+            "window slice must lower to tile.load from local GM"
+        )
+        assert _find_first_call_to(kernel, "tile.store") is not None, (
+            "slice-assign into the plain output must lower to tile.store"
+        )
+        # No tensor-level slice/assemble may survive the conversion.
+        assert _find_first_call_to(kernel, "tensor.slice") is None, (
+            "tensor.slice on a window must be lowered, not left unconverted"
+        )
+        assert _find_first_call_to(kernel, "tensor.assemble") is None, (
+            "tensor.assemble into the output must be lowered, not left unconverted"
+        )
+
+    def test_plain_source_slice_assign_into_window_target(self):
+        """combine_ep staging idiom: stage a plain slice into a window target.
+
+        Reverse direction — the assemble *target* is the window. Exercises the
+        ``tensor.assemble`` lowering gate (op_conversion_registry.cpp:326),
+        which must accept a DistributedTensorType target and emit ``tile.store``
+        into the local window (the store result keeps the window's kind).
+        """
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                src: pl.Tensor[[16, 8], pl.FP32],
+                win: pl.InOut[pld.DistributedTensor[[16, 8], pl.FP32]],
+            ):
+                sub = pl.tensor.slice(src, [16, 8], [0, 0])
+                win[0:16, 0:8] = sub
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+
+        store_call = _find_first_call_to(kernel, "tile.store")
+        assert store_call is not None, "slice-assign into a window target must lower to tile.store"
+        # The tile.store into a window keeps the DistributedTensorType kind.
+        assert isinstance(store_call.type, ir.DistributedTensorType), (
+            f"tile.store into a window must stay DistributedTensorType, got {type(store_call.type).__name__}"
+        )
+        assert _find_first_call_to(kernel, "tensor.assemble") is None, (
+            "tensor.assemble with a window target must be lowered, not left unconverted"
+        )
+
+    def test_direct_window_slice_then_store(self):
+        """Minimal isolation of the crash: ``pl.tensor.slice`` directly on a
+        window, staged into a local tile and stored — the only DTT-sensitive op
+        is the ``tensor.slice`` itself."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                data: pl.InOut[pld.DistributedTensor[[16, 8], pl.FP32]],
+                out: pl.InOut[pl.Tensor[[16, 8], pl.FP32]],
+            ):
+                sub = pl.tensor.slice(data, [16, 8], [0, 0])
+                out[0:16, 0:8] = sub
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        assert _find_first_call_to(kernel, "tile.load") is not None
+        assert _find_first_call_to(kernel, "tensor.slice") is None
+
+    def test_cast_on_window_slice(self):
+        """Issue #1694 follow-on: ``pl.cast`` must be polymorphic over a window
+        slice. The cast reads the window as local GM and writes fresh local
+        data, lowering to ``tile.load`` + ``tile.cast`` — its result is a plain
+        tile, not a window view."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                routed: pl.InOut[pld.DistributedTensor[[1, 64], pl.BF16]],
+                out: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
+            ):
+                y_slice = pl.tensor.slice(routed, [1, 64], [0, 0])
+                y_f32 = pl.cast(y_slice, pl.FP32)
+                out[0:1, 0:64] = y_f32
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        cast_call = _find_first_call_to(kernel, "tile.cast")
+        assert cast_call is not None, "cast on a window slice must lower to tile.cast"
+        # Cast produces fresh data: the result is a plain tile, not a window view.
+        assert isinstance(cast_call.type, ir.TileType)
+        assert _find_first_call_to(kernel, "tensor.cast") is None
+
+    def test_combine_ep_reduce_on_window(self):
+        """Issue #1694 follow-on (combine_ep): the whole ``sh + cast(window)``
+        reduce authored at tensor level — ``cast`` and ``add`` both consume a
+        window-derived operand — must lower without any ``pl.load`` / ``pl.store``
+        fallback (tile.load + tile.cast + tile.add + tile.store)."""
+
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def kernel(
+                self,
+                sh: pl.Tensor[[1, 64], pl.FP32],
+                routed: pl.InOut[pld.DistributedTensor[[4, 64], pl.BF16]],
+                out: pl.InOut[pl.Tensor[[1, 64], pl.FP32]],
+            ):
+                y_slice = pl.tensor.slice(routed, [1, 64], [0, 0])
+                y_f32 = pl.cast(y_slice, pl.FP32)
+                acc = pl.add(sh, y_f32)
+                out[0:1, 0:64] = acc
+                return  # noqa: PLR1711  (DSL return terminator)
+
+        After = passes.convert_tensor_to_tile_ops()(Before)
+        kernel = After.get_function("kernel")
+        assert kernel is not None, "kernel function missing after conversion"
+        assert _find_first_call_to(kernel, "tile.cast") is not None
+        assert _find_first_call_to(kernel, "tile.add") is not None, (
+            "add over a window-derived operand must lower to tile.add"
+        )
+        # No tensor-level compute may survive.
+        assert _find_first_call_to(kernel, "tensor.cast") is None
+        assert _find_first_call_to(kernel, "tensor.add") is None
+        assert _find_first_call_to(kernel, "tensor.slice") is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -38,14 +38,18 @@ TypePtr DeduceTensorOpElementwiseBinaryType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
-  // Try TensorType first
-  auto tensor_type1 = As<TensorType>(args[0]->GetType());
-  auto tensor_type2 = As<TensorType>(args[1]->GetType());
+  // ``AsTensorTypeLike`` accepts ``DistributedTensorType`` (window) operands the
+  // same as plain tensors (issue #1694): an elementwise op reads a window as
+  // this rank's local GM and writes fresh local data. The broadcast result is a
+  // plain ``TensorType`` — the sum/product is new data, not a window view.
+  auto tensor_type1 = AsTensorTypeLike(args[0]->GetType());
+  auto tensor_type2 = AsTensorTypeLike(args[1]->GetType());
 
-  CHECK(tensor_type1) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+  CHECK(tensor_type1) << "The operator " << op_name
+                      << " requires first argument to be a TensorType or DistributedTensorType, but got "
                       << args[0]->GetType()->TypeName();
   CHECK(tensor_type2) << "The operator " << op_name
-                      << " requires second argument to be a TensorType, but got "
+                      << " requires second argument to be a TensorType or DistributedTensorType, but got "
                       << args[1]->GetType()->TypeName();
 
   auto result_dtype = PromoteDataTypes(tensor_type1->dtype_, tensor_type2->dtype_);
@@ -66,10 +70,11 @@ TypePtr DeduceTensorOpElementwiseScalarType(const std::vector<ExprPtr>& args,
   CHECK(args.size() == 2) << "The operator " << op_name << " requires exactly 2 arguments, but got "
                           << args.size();
 
-  auto tensor_type1 = As<TensorType>(args[0]->GetType());
+  auto tensor_type1 = AsTensorTypeLike(args[0]->GetType());  // accepts a window (issue #1694)
   auto scalar_type2 = As<ScalarType>(args[1]->GetType());
 
-  CHECK(tensor_type1) << "The operator " << op_name << " requires first argument to be a TensorType, but got "
+  CHECK(tensor_type1) << "The operator " << op_name
+                      << " requires first argument to be a TensorType or DistributedTensorType, but got "
                       << args[0]->GetType()->TypeName();
   CHECK(scalar_type2) << "The operator " << op_name
                       << " requires second argument to be a ScalarType, but got "
@@ -176,7 +181,7 @@ REGISTER_OP("tensor.maximum")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 2) << "The operator tensor.maximum requires exactly 2 arguments, but got "
                               << args.size();
-      if (As<TensorType>(args[1]->GetType())) {
+      if (AsTensorTypeLike(args[1]->GetType())) {  // window operand routes to binary path (issue #1694)
         return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.maximum");
       }
       return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.maximum");
@@ -191,7 +196,7 @@ REGISTER_OP("tensor.minimum")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 2) << "The operator tensor.minimum requires exactly 2 arguments, but got "
                               << args.size();
-      if (As<TensorType>(args[1]->GetType())) {
+      if (AsTensorTypeLike(args[1]->GetType())) {  // window operand routes to binary path (issue #1694)
         return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.minimum");
       }
       return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.minimum");
@@ -207,7 +212,7 @@ REGISTER_OP("tensor.cmp")
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       CHECK(args.size() == 2) << "The operator tensor.cmp requires exactly 2 arguments, but got "
                               << args.size();
-      if (As<TensorType>(args[1]->GetType())) {
+      if (AsTensorTypeLike(args[1]->GetType())) {  // window operand routes to binary path (issue #1694)
         return DeduceTensorOpElementwiseBinaryType(args, kwargs, "tensor.cmp");
       }
       return DeduceTensorOpElementwiseScalarType(args, kwargs, "tensor.cmp");

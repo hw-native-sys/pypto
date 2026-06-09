@@ -279,7 +279,13 @@ void OpConversionRegistry::RegisterMemoryOps() {
           }
         }
 
-        auto tensor_type = As<TensorType>(input->GetType());
+        // ``AsTensorTypeLike`` matches both ``TensorType`` and
+        // ``DistributedTensorType`` (issue #1694): inside an InCore scope a
+        // window is just this rank's local GM, so slicing it lowers to a
+        // ``tile.load`` exactly like a plain tensor slice. The exact-kind
+        // ``As<TensorType>`` would miss the window and trip the unreachable
+        // guard below.
+        auto tensor_type = AsTensorTypeLike(input->GetType());
         auto tile_type = As<TileType>(input->GetType());
 
         if (tensor_type) {
@@ -322,8 +328,13 @@ void OpConversionRegistry::RegisterMemoryOps() {
         const auto& source = args[1];
         const auto& offset = args[2];
 
+        // ``AsTensorTypeLike`` matches a ``DistributedTensorType`` window the
+        // same way it does a plain tensor (issue #1694): a slice-assign whose
+        // target is a local window must lower to ``tile.store`` into that
+        // window, not fall through to the unconverted fallback (which the
+        // InCore verifier then rejects).
         auto source_tile_type = As<TileType>(source->GetType());
-        auto target_tensor_type = As<TensorType>(target->GetType());
+        auto target_tensor_type = AsTensorTypeLike(target->GetType());
         auto target_tile_type = As<TileType>(target->GetType());
 
         // Optional atomic-add combine mode. Valid only on the GM-store path
@@ -351,7 +362,9 @@ void OpConversionRegistry::RegisterMemoryOps() {
 
         if (target_tile_type && !source_tile_type) {
           INTERNAL_CHECK_SPAN(!atomic_add, span) << kAtomicTileToTileMsg;
-          auto source_tensor_type = As<TensorType>(source->GetType());
+          // A window (DistributedTensorType) source stages into the tile target
+          // through the same local tile.load path as a plain tensor (issue #1694).
+          auto source_tensor_type = AsTensorTypeLike(source->GetType());
           INTERNAL_CHECK_SPAN(source_tensor_type, span)
               << "tensor.assemble: source must be TensorType or TileType, but got "
               << source->GetType()->TypeName();

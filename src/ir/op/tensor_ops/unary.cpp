@@ -36,7 +36,7 @@ TypePtr DeduceTensorNegType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.neg requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.neg requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -48,7 +48,7 @@ TypePtr DeduceTensorAbsType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.abs requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.abs requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -60,7 +60,7 @@ TypePtr DeduceTensorRecipType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.recip requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.recip requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -77,7 +77,7 @@ TypePtr DeduceTensorExpType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.exp requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.exp requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -96,7 +96,7 @@ TypePtr DeduceTensorLogType(const std::vector<ExprPtr>& args,
                             const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.log requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.log requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -114,7 +114,7 @@ TypePtr DeduceTensorSqrtType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.sqrt requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.sqrt requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -132,7 +132,7 @@ TypePtr DeduceTensorRsqrtType(const std::vector<ExprPtr>& args,
                               const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.rsqrt requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << "tensor.rsqrt requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -152,7 +152,7 @@ TypePtr DeduceTensorFP32OnlyType(const std::string& op_name, const std::vector<E
                                  const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << op_name << " requires exactly 1 argument, but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
   CHECK(tensor_type) << op_name << " requires first argument to be a TensorType, but got "
                      << args[0]->GetType()->TypeName();
 
@@ -168,8 +168,13 @@ TypePtr DeduceTensorCastType(const std::vector<ExprPtr>& args,
                              const std::vector<std::pair<std::string, std::any>>& kwargs) {
   CHECK(args.size() == 1) << "tensor.cast requires exactly 1 argument (input), but got " << args.size();
 
-  auto tensor_type = As<TensorType>(args[0]->GetType());
-  CHECK(tensor_type) << "tensor.cast requires first argument to be a TensorType, but got "
+  // ``AsTensorTypeLike`` accepts a ``DistributedTensorType`` (window) slice the
+  // same as a plain tensor (issue #1694): an elementwise op reads its window
+  // input as this rank's local GM and writes fresh local data — so the result
+  // is a plain ``TensorType`` (a cast is not a view into the window).
+  auto tensor_type = AsTensorTypeLike(args[0]->GetType());
+  CHECK(tensor_type) << "tensor.cast requires first argument to be a TensorType or DistributedTensorType, "
+                        "but got "
                      << args[0]->GetType()->TypeName();
 
   // Read target_type from kwargs
