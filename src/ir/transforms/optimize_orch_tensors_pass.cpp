@@ -2186,10 +2186,12 @@ class OutWindowExternalizer {
         const auto& iter_arg = loop->iter_args_[i];
         const auto& return_var = loop->return_vars_[i];
         if (!iter_arg || !iter_arg->initValue_ || !return_var) continue;
+        if (return_var.get() == iter_arg.get()) continue;
         if (!AsTensorTypeLike(return_var->GetType())) continue;
         auto parent_expr = ResolveLoopInitExpr(iter_arg->initValue_);
         if (!AsVarLike(parent_expr)) continue;
         loop_iter_init_subst_[return_var.get()] = parent_expr;
+        loop_return_init_subst_[return_var.get()] = parent_expr;
       }
     }
 
@@ -2276,7 +2278,7 @@ class OutWindowExternalizer {
         }
         auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
 
-        ExprPtr parent_expr = VisitExpr(call->args_[input.in_param_index]);
+        ExprPtr parent_expr = MaterializeWindowParentExpr(call->args_[input.in_param_index]);
         auto slice_call = OpRegistry::GetInstance().Create(
             "tensor.slice", {parent_expr, shape_tuple, offset_tuple}, call_assign->span_);
         auto slice_var =
@@ -2305,7 +2307,7 @@ class OutWindowExternalizer {
         }
         auto offset_tuple = std::make_shared<MakeTuple>(offset_exprs, call_assign->span_);
 
-        ExprPtr parent_expr = VisitExpr(call->args_[output.out_param_index]);
+        ExprPtr parent_expr = MaterializeWindowParentExpr(call->args_[output.out_param_index]);
         auto slice_call = OpRegistry::GetInstance().Create(
             "tensor.slice", {parent_expr, shape_tuple, offset_tuple}, call_assign->span_);
         auto slice_var =
@@ -2327,7 +2329,7 @@ class OutWindowExternalizer {
         if (slice_it != slices_by_out_index.end()) {
           new_args.push_back(slice_it->second.slice_var);
         } else {
-          new_args.push_back(VisitExpr(call->args_[i]));
+          new_args.push_back(MaterializeCallArgExpr(call->args_[i]));
         }
       }
 
@@ -2676,6 +2678,24 @@ class OutWindowExternalizer {
       return current;
     }
 
+    ExprPtr ResolveLoopReturnInitExpr(const ExprPtr& expr) const {
+      ExprPtr current = expr;
+      std::unordered_set<const Var*> seen;
+      while (auto var = AsVarLike(current)) {
+        if (!seen.insert(var.get()).second) break;
+        auto it = loop_return_init_subst_.find(var.get());
+        if (it == loop_return_init_subst_.end()) break;
+        current = it->second;
+      }
+      return current;
+    }
+
+    ExprPtr MaterializeWindowParentExpr(const ExprPtr& expr) {
+      return VisitExpr(ResolveLoopReturnInitExpr(expr));
+    }
+
+    ExprPtr MaterializeCallArgExpr(const ExprPtr& expr) { return VisitExpr(ResolveLoopReturnInitExpr(expr)); }
+
     ExprPtr VisitExpr_(const TupleGetItemExprPtr& op) override {
       auto tuple_var = AsVarLike(op->tuple_);
       if (tuple_var) {
@@ -2694,6 +2714,7 @@ class OutWindowExternalizer {
     std::vector<ForStmtPtr> sequential_loops_;
     std::vector<std::unordered_set<const Var*>> loop_local_allocs_;
     std::unordered_map<const Var*, ExprPtr> loop_iter_init_subst_;
+    std::unordered_map<const Var*, ExprPtr> loop_return_init_subst_;
     std::unordered_map<const Var*, ExprPtr> scalar_defs_;
     std::unordered_map<const Var*, std::vector<ExprPtr>> tuple_result_subst_;
     std::unordered_map<const Var*, size_t> sibling_output_parent_counts_;
