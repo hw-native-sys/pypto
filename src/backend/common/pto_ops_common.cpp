@@ -2312,13 +2312,10 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
   }
 
   std::string peer_view = codegen.NewTemp();
-  std::ostringstream view_type;
-  view_type << "!pto.tensor_view<";
-  for (size_t i = 0; i < rank; ++i) {
-    if (i > 0) view_type << "x";
-    view_type << "?";
-  }
-  view_type << "x" << dtype_str << ">";
+  // Issue #1533: delegate to GetTensorViewTypeString so the textual encoding
+  // (static ConstInt dims vs `?` for symbolic) stays in lockstep with every
+  // other tensor_view emission site (function-param views, scf.if results).
+  const std::string view_type_str = codegen.GetTensorViewTypeString(target.type.get());
 
   std::ostringstream mv;
   mv << peer_view << " = pto.make_tensor_view " << peer_ptr << ", shape = [";
@@ -2331,10 +2328,10 @@ PeerViewInfo EmitCommRemoteView(const DistTensorBinding& target, const ExprPtr& 
     if (i > 0) mv << ", ";
     mv << stride_ssa[i];
   }
-  mv << "] {layout = #pto.layout<nd>} : " << view_type.str();
+  mv << "] {layout = #pto.layout<nd>} : " << view_type_str;
   codegen.Emit(mv.str());
 
-  return {peer_view, view_type.str()};
+  return {peer_view, view_type_str};
 }
 
 }  // namespace
@@ -3074,12 +3071,10 @@ void RegisterPTOOps(Backend& backend, const std::unordered_set<std::string>& exc
       oss << stride_names[j];
     }
     oss << "] {layout = #pto.layout<" << layout_str << ">}";
-    oss << ": !pto.tensor_view<";
-    for (size_t j = 0; j < rank; ++j) {
-      if (j > 0) oss << "x";
-      oss << "?";
-    }
-    oss << "x" << codegen.GetTypeString(lhs_type->dtype_) << ">";
+    // Issue #1533: delegate type emission to GetTensorViewTypeString so the
+    // textual encoding (static ConstInt dims vs `?` for symbolic) stays in
+    // lockstep with every other tensor_view emission site.
+    oss << ": " << codegen.GetTensorViewTypeString(lhs_type.get());
     return oss.str();
   });
 

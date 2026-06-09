@@ -253,7 +253,61 @@ def test_pto_codegen_tensor_parameters():
     assert "pto.make_tensor_view" in mlir_code
     assert "shape = [%c64_index, %c64_index]" in mlir_code or "shape = [%c32_index, %c32_index]" in mlir_code
     assert "strides = " in mlir_code
-    assert "!pto.tensor_view<?x?xf32>" in mlir_code
+    # Issue #1533: static dims propagate into the tensor_view type signature.
+    assert "!pto.tensor_view<64x64xf32>" in mlir_code
+
+
+def test_pto_codegen_tensor_view_type_preserves_static_dims():
+    """Regression for #1533: tensor_view type encodes ConstInt dims, fallback `?` for symbolic.
+
+    Before the fix, ``GetTensorViewTypeString`` emitted ``<?x?x…>`` regardless
+    of the IR shape. That stripped shape info from the type signature, so when
+    a tensor_view SSA flowed out of an ``scf.if`` / ``scf.for`` phi (whose
+    producer ptoas cannot trace back through), downstream ``pto.partition_view``
+    failed because the operand type lost all dim info.
+
+    The fix: emit ``ConstInt`` dim values inline and reserve ``?`` for genuinely
+    symbolic dims. This test pins both behaviours on the function-parameter
+    ``pto.make_tensor_view`` emission path (the same helper backs scf.if /
+    scf.for result types via PTOCodegen::VisitStmt_).
+    """
+    mixed_dyn = pl.dynamic("MIXED_M")
+
+    @pl.program
+    class StaticShape:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[64, 128], pl.FP32],
+            out: pl.Tensor[[64, 128], pl.FP32],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            t = pl.load(a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+            return pl.store(t, [0, 0], out)
+
+    static_mlir = _generate_default_mlir(StaticShape)
+    assert "!pto.tensor_view<64x128xf32>" in static_mlir, (
+        f"Static [64, 128] tensor must encode dims in tensor_view type:\n{static_mlir}"
+    )
+    assert "!pto.tensor_view<?x?xf32>" not in static_mlir, (
+        f"Static dims must not regress to fully-dynamic encoding:\n{static_mlir}"
+    )
+
+    @pl.program
+    class MixedShape:
+        @pl.function(type=pl.FunctionType.InCore)
+        def kernel(
+            self,
+            a: pl.Tensor[[64, mixed_dyn], pl.FP32],
+            out: pl.Tensor[[64, mixed_dyn], pl.FP32],
+        ) -> pl.Tensor[[64, mixed_dyn], pl.FP32]:
+            t = pl.load(a, [0, 0], [16, 16], target_memory=pl.MemorySpace.Vec)
+            return pl.store(t, [0, 0], out)
+
+    mixed_mlir = _generate_default_mlir(MixedShape)
+    # The static dim becomes a literal, the symbolic dim stays `?`.
+    assert "!pto.tensor_view<64x?xf32>" in mixed_mlir, (
+        f"Mixed-shape tensor must encode static dim and leave symbolic dim as `?`:\n{mixed_mlir}"
+    )
 
 
 def test_pto_codegen_collects_dynamic_var_from_shape_expr():

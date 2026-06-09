@@ -214,7 +214,7 @@ For each `TensorType` parameter, the codegen generates:
      shape = [%c32_index, %c32_index]
      strides = [%c32_index, %c1_index]
      {layout = #pto.layout<nd>}
-     : !pto.tensor_view<?x?xf32>
+     : !pto.tensor_view<32x32xf32>
 ```
 
 **Key aspects**:
@@ -222,7 +222,11 @@ For each `TensorType` parameter, the codegen generates:
 - Shape from `TensorType.shape_`
 - Strides computed as row-major: `[dim1, 1]` for 2D tensors
 - Constants (`%c32_index`, `%c1_index`) auto-generated
-- Tensor view type uses `?` for each dimension (e.g., `?x?xf32` for 2D)
+- Tensor view type encodes `ConstInt` dims directly (e.g. `32x32xf32`), and
+  uses `?` only for symbolic dims (e.g. `64x?xf32` for a tensor with one
+  static and one dynamic dim). Keeping static dims on the type lets ptoas
+  resolve shapes even when the SSA producer is an `scf.if` / `scf.for` phi
+  whose shape operands cannot be traced back through.
 
 #### Layout Handling for 2D Tensors
 
@@ -249,7 +253,7 @@ Example for a `[16, 1]` column vector (no DN annotation in DSL):
 %col_view = pto.make_tensor_view %arg1,
     shape = [%c16_index, %c1_index], strides = [%c1_index, %c16_index]
     {layout = #pto.layout<dn>}
-    : !pto.tensor_view<?x?xf32>
+    : !pto.tensor_view<16x1xf32>
 ```
 
 ### Allocation Generation
@@ -287,7 +291,7 @@ tile_a = pl.load(tensor_a, [0, 0], [32, 32])
 # 1. Create partition view
 %3 = pto.partition_view %tensor_view, offsets = [%c0_index, %c0_index],
                  sizes = [%c32_index, %c32_index]
-                 : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
+                 : !pto.tensor_view<32x32xf32> -> !pto.partition_tensor_view<32x32xf32>
 
 # 2. Load into tile buffer
 pto.tload ins(%3 : !pto.partition_tensor_view<32x32xf32>)
@@ -314,7 +318,7 @@ pl.store(tile_c, [0, 0], tensor_out)
 # 1. Create partition view for output
 %5 = pto.partition_view %output_view, offsets = [%c0_index, %c0_index],
                  sizes = [%c32_index, %c32_index]
-                 : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
+                 : !pto.tensor_view<32x32xf32> -> !pto.partition_tensor_view<32x32xf32>
 
 # 2. Store from tile buffer
 pto.tstore ins(%tile_buf : !pto.tile_buf<loc=vec, ...>)
@@ -384,11 +388,11 @@ module {
 
     // Tensor views
     %3 = pto.make_tensor_view %arg0, shape = [%c32_index, %c32_index]
-         strides = [%c32_index, %c1_index] : !pto.tensor_view<?x?xf32>
+         strides = [%c32_index, %c1_index] : !pto.tensor_view<32x32xf32>
     %4 = pto.make_tensor_view %arg1, shape = [%c32_index, %c32_index]
-         strides = [%c32_index, %c1_index] : !pto.tensor_view<?x?xf32>
+         strides = [%c32_index, %c1_index] : !pto.tensor_view<32x32xf32>
     %5 = pto.make_tensor_view %arg2, shape = [%c32_index, %c32_index]
-         strides = [%c32_index, %c1_index] : !pto.tensor_view<?x?xf32>
+         strides = [%c32_index, %c1_index] : !pto.tensor_view<32x32xf32>
 
     // Allocations
     %0 = pto.alloc_tile : !pto.tile_buf<loc=vec, dtype=f32, rows=32, cols=32, ...>
@@ -397,13 +401,13 @@ module {
 
     // Load tile_a
     %6 = pto.partition_view %3, offsets = [%c0_index, %c0_index], sizes = [%c32_index, %c32_index]
-         : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
+         : !pto.tensor_view<32x32xf32> -> !pto.partition_tensor_view<32x32xf32>
     pto.tload ins(%6 : !pto.partition_tensor_view<32x32xf32>)
               outs(%0 : !pto.tile_buf<...>)
 
     // Load tile_b
     %7 = pto.partition_view %4, offsets = [%c0_index, %c0_index], sizes = [%c32_index, %c32_index]
-         : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
+         : !pto.tensor_view<32x32xf32> -> !pto.partition_tensor_view<32x32xf32>
     pto.tload ins(%7 : !pto.partition_tensor_view<32x32xf32>)
               outs(%1 : !pto.tile_buf<...>)
 
@@ -413,7 +417,7 @@ module {
 
     // Store tile_c
     %8 = pto.partition_view %5, offsets = [%c0_index, %c0_index], sizes = [%c32_index, %c32_index]
-         : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x32xf32>
+         : !pto.tensor_view<32x32xf32> -> !pto.partition_tensor_view<32x32xf32>
     pto.tstore ins(%2 : !pto.tile_buf<...>)
                outs(%8 : !pto.partition_tensor_view<32x32xf32>)
 
