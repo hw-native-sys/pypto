@@ -362,16 +362,26 @@ def test_distributed_worker_call_stores_last_run_timing():
 
     rt = DistributedWorker.__new__(DistributedWorker)  # bypass __init__/Worker setup
     rt._closed = False
-    # Minimal stand-in: __call__ only reads ``.name`` off each param info.
-    rt._param_infos = cast(Any, [SimpleNamespace(name="x")])
-    rt._base_tensors = {}
+    rt._multi_program = False
     rt._w = MagicMock(name="worker")
-    rt._entry_fn = MagicMock(name="entry_fn")
-    rt._chip_cids = {}
-    rt._sub_ids = {}
-    rt._call_config = MagicMock(name="call_config")
     rt.dc = cast(Any, SimpleNamespace(device_ids=[0]))
     rt.last_run_timing = None
+    # Single-program stand-in: ``__call__`` dispatches ``self._compiled`` through its
+    # ``self._states`` entry. ``_run_compiled`` reads ``.name``/``.shape`` off each
+    # param info, then forwards the per-program state to the patched ``_dispatch``.
+    compiled = cast(Any, object())
+    rt._compiled = compiled
+    rt._states = {
+        compiled: {
+            "param_infos": (SimpleNamespace(name="x", shape=[2]),),
+            "base_tensors": {},
+            "entry_fn": MagicMock(name="entry_fn"),
+            "chip_cids": {},
+            "sub_ids": {},
+            "call_config": MagicMock(name="call_config"),
+            "device_nums": 1,
+        }
+    }
 
     shared = torch.zeros(2).share_memory_()  # DistributedWorker rejects non-shared host tensors
     with patch(
