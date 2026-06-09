@@ -294,7 +294,13 @@ class Prog:
         with pytest.raises(Exception, match=r"(?i)length|match"):
             pl.parse(code)
 
-    def test_attrs_kwarg_unknown_key_rejected(self):
+    def test_attrs_kwarg_non_bespoke_key_round_trips(self):
+        """The ``attrs={...}`` dict has no key allowlist: any machine attr key is
+        accepted and preserved via the generic attr path. The printer emits such
+        keys (e.g. ``arg_direction_overrides``) generically, so the parser must
+        recover them rather than reject — dropping them would break the
+        print -> parse round-trip. (Previously every non-allowlisted key raised.)
+        """
         code = """
 import pypto.language as pl
 
@@ -308,11 +314,13 @@ class Prog:
 
     @pl.function
     def main(self, x: pl.Tensor[[64], pl.FP32]) -> pl.Tensor[[64], pl.FP32]:
-        r: pl.Tensor[[64], pl.FP32] = self.kernel(x, attrs={"bogus": [pl.adir.input]})
+        r: pl.Tensor[[64], pl.FP32] = self.kernel(x, attrs={"arg_direction_overrides": [0]})
         return r
 """
-        with pytest.raises(Exception, match="bogus"):
-            pl.parse(code)
+        prog = pl.parse(code)
+        calls = _user_calls(prog, "kernel")
+        assert len(calls) == 1
+        assert calls[0].attrs["arg_direction_overrides"] == [0]
 
     def test_other_keyword_args_still_rejected(self):
         code = """
