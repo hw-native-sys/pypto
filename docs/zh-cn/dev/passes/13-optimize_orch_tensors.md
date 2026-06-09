@@ -127,6 +127,7 @@ result = self.consumer__windowed(in_window, ...)
 - pass 不添加 explicit dependency edges
 - pass 不重新引入 later full-parent-read guard
 - pass 不预生成全局 window descriptor 数组
+- pass 不拆分 SPMD launch，也不 externalize per-block SPMD window
 - unsupported consumer，包括 full-tensor reader，保持 baseline/full-tensor input
 - `DeriveCallDirections` 保持现有 sound 的顺序 `Out -> InOut` 规则；Pattern 5 只是在该 pass 运行前显式化可证明的局部窗口
 
@@ -202,7 +203,7 @@ class After:
 | `AssembleParentStridesOptimizer` | 模式 2 — 通过 TensorView 附加父张量步长 |
 | `SliceInputStridesOptimizer` | 模式 4 — 通过 TensorView 为切片输入的 In 参数附加父张量步长 |
 | `AssembleLoopRewriter` | 模式 3 — 将 tile.assemble 循环重写为 tile.store 循环 |
-| `OutWindowExternalizer` | 模式 5 — 将 eligible 的局部 Out 写和纯 In-window consumer 改写为显式 callsite slice |
+| `OutWindowExternalizer` | 模式 5 — 将 eligible 的局部 Out 写和 eligible In-window consumer 改写为显式 callsite slice |
 | `BuildOutParamReturnMappings` | 共享辅助函数 — 通过 tile.store 映射 Out 参数到返回索引 |
 | `ComputeRowMajorStrides` | 共享辅助函数 — 从形状计算行主序步长 |
 

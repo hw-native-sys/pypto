@@ -127,6 +127,7 @@ Non-goals and dependence model:
 - the pass does not add explicit dependency edges
 - the pass does not reintroduce a later full-parent-read guard
 - the pass does not precompute global window descriptor arrays
+- the pass does not split SPMD launches or externalize per-block SPMD windows
 - unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
 
@@ -202,7 +203,7 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 | `AssembleParentStridesOptimizer` | Pattern 2 — attaches parent strides via TensorView |
 | `SliceInputStridesOptimizer` | Pattern 4 — attaches parent strides to In params via TensorView for slice patterns |
 | `AssembleLoopRewriter` | Pattern 3 — rewrites tile.assemble loops to tile.store loops |
-| `OutWindowExternalizer` | Pattern 5 — rewrites eligible local Out writes and pure In-window consumers to explicit call-site slices |
+| `OutWindowExternalizer` | Pattern 5 — rewrites eligible local Out writes and eligible In-window consumers to explicit call-site slices |
 | `BuildOutParamReturnMappings` | Shared helper — maps Out params to return indices via tile.store |
 | `ComputeRowMajorStrides` | Shared helper — computes row-major strides from a shape |
 
