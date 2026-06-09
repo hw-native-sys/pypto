@@ -84,6 +84,8 @@ out_window_next = self.kernel__windowed(..., out_window)
 out = pl.tensor.assemble(out, out_window_next, offset)
 ```
 
+The same local-slice materialization is also used for a narrow class of pure input-window consumers: if every use of an `In` tensor parameter is the same local `tile.load`/`tensor.slice` window, the call site passes a sliced input tensor and the clone localizes the internal read offset to zero. This input path is intentionally conservative and does not run for callees that full-read the input, for normal output-window producers, or when the call result is later assembled into a parent tensor.
+
 Supported rewrite shapes:
 
 - `FinalStore`: the callee returns the result of a final `tile.store(...)` into one local window
@@ -94,7 +96,6 @@ Safety rules:
 - only statically provable affine offsets are accepted
 - multi-`Out` rewrite is all-or-nothing
 - sequential-loop siblings are rewritten only when every rewritten `Out` can be proven disjoint across sibling iterations
-- call-site externalization is skipped when a rewritten window output's buffer root is later read as a full-parent tensor in the enclosing orchestration scope; until the runtime has root-aware view/parent dependency tracking, this preserves auto dependency tracking on the same parent `Tensor`
 - `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only makes disjoint windows explicit before that pass runs
 
 ## Example (Pattern 1)

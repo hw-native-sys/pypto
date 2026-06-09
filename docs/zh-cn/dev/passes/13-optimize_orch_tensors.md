@@ -84,6 +84,8 @@ out_window_next = self.kernel__windowed(..., out_window)
 out = pl.tensor.assemble(out, out_window_next, offset)
 ```
 
+同样的局部 slice 物化也用于一类非常受限的纯输入窗口 consumer：如果某个 `In` 张量参数的所有使用都是同一个局部 `tile.load`/`tensor.slice` 窗口，则调用点传入切片后的输入张量，clone 内部把读取 offset 局部化为零。这个输入路径是保守的：如果 callee 会完整读取该输入、属于普通输出窗口 producer，或者调用结果随后会 assemble 回父张量，则不会启用该路径。
+
 支持的改写形态：
 
 - `FinalStore`：callee 返回一次写入局部窗口的最终 `tile.store(...)` 结果
@@ -94,7 +96,6 @@ out = pl.tensor.assemble(out, out_window_next, offset)
 - 只接受静态可证明的仿射 offset
 - multi-`Out` 改写采用全有或全无策略
 - 顺序循环 sibling 只有在每个被改写 `Out` 都能证明跨 sibling iteration 不重叠时才改写
-- 如果被改写的窗口输出所属 buffer root 后续会在外围 orchestration scope 中以完整 parent tensor 形式读取，则跳过该 call-site externalization；在 runtime 尚未具备 view/parent root-aware 依赖跟踪前，这能让自动依赖继续落在同一个 parent `Tensor` 上
 - `DeriveCallDirections` 保持现有 sound 的顺序 `Out -> InOut` 规则；Pattern 5 只是在该 pass 运行前显式化不重叠窗口
 
 ## 示例（模式 1）

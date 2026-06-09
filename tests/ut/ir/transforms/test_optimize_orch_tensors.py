@@ -1004,6 +1004,116 @@ class TestSliceInputStrides:
 class TestOutWindowExternalizer:
     """Pattern 5: static out-window externalization."""
 
+    def test_pure_input_window_consumer_rewrites_to_windowed_clone(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                score: pl.Tensor[[64, 128], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[32, 64], pl.FP32]:
+                block: pl.Tensor[[32, 64], pl.FP32] = pl.tensor.slice(score, [32, 64], [row_offset, 0])
+                return block
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                score: pl.Tensor[[64, 128], pl.FP32],
+            ) -> pl.Tensor[[32, 64], pl.FP32]:
+                row: pl.Scalar[pl.INDEX] = 32
+                return self.consume(score, row)
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("consume__windowed") is not None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "pl.tensor.slice(score" in printed_main
+        assert "consume__windowed(score__ssa_v0__window, 32, ret0__out)" in printed_main
+
+        printed_windowed = ir.python_print(_get_function(After, "consume__windowed"))
+        assert "pl.Tensor[[32, 64], pl.FP32, pl.TensorView(stride=[128, 1]" in printed_windowed
+        assert "pl.tile.load(score__ssa_v0, [0, 0]" in printed_windowed
+
+    def test_input_full_read_blocks_input_window_rewrite(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def consume(
+                self,
+                score: pl.Tensor[[64, 128], pl.FP32],
+                row_offset: pl.Scalar[pl.INDEX],
+            ) -> tuple[pl.Tensor[[32, 64], pl.FP32], pl.Tensor[[64, 128], pl.FP32]]:
+                block: pl.Tensor[[32, 64], pl.FP32] = pl.tensor.slice(score, [32, 64], [row_offset, 0])
+                return block, score
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                score: pl.Tensor[[64, 128], pl.FP32],
+            ) -> tuple[pl.Tensor[[32, 64], pl.FP32], pl.Tensor[[64, 128], pl.FP32]]:
+                row: pl.Scalar[pl.INDEX] = 32
+                return self.consume(score, row)
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        assert After.get_function("consume__windowed") is None
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "pl.tensor.slice(score" not in printed_main
+
+    def test_indexer_score_writes_window_but_topk_score_read_stays_full(self):
+        @pl.program
+        class Before:
+            @pl.function(type=pl.FunctionType.InCore)
+            def score_writer(
+                self,
+                score: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
+                t0: pl.Scalar[pl.INDEX],
+                cache0: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[4, 16], pl.FP32]:
+                score_tile: pl.Tile[[2, 4], pl.FP32] = pl.tile.full([2, 4], dtype=pl.FP32, value=1.0)
+                score_next: pl.Tensor[[4, 16], pl.FP32] = pl.tile.store(score_tile, [t0, cache0], score)
+                return score_next
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def topk_like(
+                self,
+                topk: pl.Out[pl.Tensor[[4, 16], pl.INT32]],
+                t0: pl.Scalar[pl.INDEX],
+                score: pl.Tensor[[4, 16], pl.FP32],
+            ) -> pl.Tensor[[4, 16], pl.INT32]:
+                invalid: pl.Tile[[1, 16], pl.INT32] = pl.tile.full([1, 16], dtype=pl.INT32, value=-1)
+                topk_init: pl.Tensor[[4, 16], pl.INT32] = pl.tile.store(invalid, [t0, 0], topk)
+                score_row: pl.Tile[[1, 16], pl.FP32] = pl.tile.load(score, [t0, 0], [1, 16], [1, 16])
+                idx_tile: pl.Tile[[1, 16], pl.INT32] = pl.tile.cast(score_row, target_type=pl.INT32)
+                topk_next: pl.Tensor[[4, 16], pl.INT32] = pl.tile.store(idx_tile, [t0, 0], topk_init)
+                return topk_next
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                score: pl.Out[pl.Tensor[[4, 16], pl.FP32]],
+                topk: pl.Out[pl.Tensor[[4, 16], pl.INT32]],
+            ) -> tuple[pl.Tensor[[4, 16], pl.FP32], pl.Tensor[[4, 16], pl.INT32]]:
+                for b, (score_iter, topk_iter) in pl.parallel(2, init_values=(score, topk)):
+                    t0: pl.Scalar[pl.INDEX] = b * 2
+                    for cb, (score_iter2,) in pl.parallel(4, init_values=(score_iter,)):
+                        cache0: pl.Scalar[pl.INDEX] = cb * 4
+                        score_next: pl.Tensor[[4, 16], pl.FP32] = self.score_writer(score_iter2, t0, cache0)
+                        score_rv = pl.yield_(score_next)
+                    topk_next: pl.Tensor[[4, 16], pl.INT32] = self.topk_like(topk_iter, t0, score_rv)
+                    score_out, topk_out = pl.yield_(score_rv, topk_next)
+                return score_out, topk_out
+
+        After = _run_to_optimize_orch_tensors(Before)
+
+        printed_main = ir.python_print(_get_function(After, "main"))
+        assert "score_writer__windowed" in printed_main
+        assert "score_writer__windowed(score_iter2__window" in printed_main
+        assert "topk_like(topk_iter, t0__ssa_v0, score_rv)" in printed_main
+        assert "topk_like__windowed" not in printed_main
+        assert "score_rv__window" not in printed_main
+
     def test_direct_out_call_rewrites_to_windowed_clone(self):
         @pl.program
         class Before:
@@ -1278,7 +1388,7 @@ class TestOutWindowExternalizer:
         After = _run_to_optimize_orch_tensors(Before)
         ir.assert_structural_equal(After, Expected)
 
-    def test_return_reordered_multi_out_later_parent_read_stays_baseline(self):
+    def test_return_reordered_multi_out_later_parent_read_still_externalizes(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1317,12 +1427,12 @@ class TestOutWindowExternalizer:
 
         After = _run_to_optimize_orch_tensors(Before)
 
-        assert After.get_function("kv_stripe__windowed") is None
+        assert After.get_function("kv_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
-        assert "pl.tensor.slice(k_out" not in printed_main
-        assert "pl.tensor.slice(v_out" not in printed_main
+        assert "pl.tensor.slice(k_out" in printed_main
+        assert "pl.tensor.slice(v_out" in printed_main
 
-    def test_tensor_full_root_later_parent_read_stays_baseline(self):
+    def test_tensor_full_root_later_parent_read_still_externalizes(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1355,11 +1465,11 @@ class TestOutWindowExternalizer:
 
         After = _run_to_optimize_orch_tensors(Before)
 
-        assert After.get_function("kernel_stripe__windowed") is None
+        assert After.get_function("kernel_stripe__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
-        assert "pl.tensor.slice(out" not in printed_main
+        assert "pl.tensor.slice(out" in printed_main
 
-    def test_loop_returned_output_later_parent_read_stays_baseline(self):
+    def test_loop_returned_output_later_parent_read_still_externalizes(self):
         @pl.program
         class Before:
             @pl.function(type=pl.FunctionType.InCore)
@@ -1395,9 +1505,9 @@ class TestOutWindowExternalizer:
 
         After = _run_to_optimize_orch_tensors(Before)
 
-        assert After.get_function("kernel_rows__windowed") is None
+        assert After.get_function("kernel_rows__windowed") is not None
         printed_main = ir.python_print(_get_function(After, "main"))
-        assert "pl.tensor.slice(out" not in printed_main
+        assert "pl.tensor.slice(out" in printed_main
 
     def test_multi_out_final_store_all_or_nothing_stays_baseline(self):
         @pl.program
@@ -2475,16 +2585,8 @@ class TestOutWindowSubmitCall:
         assert "pl.tensor.slice(out" in printed_main
         assert "kernel_stripe__windowed" in printed_main
 
-    def test_submit_windowable_suppressed_by_later_full_submit_read(self):
-        """The later-full-parent-read safety guard must see Submit readers.
-
-        A windowed submit writes a 64x64 window of ``out``; a *later* submit
-        reads the full ``out``. ``HasLaterFullParentReadOfRewrittenOutput`` is
-        fed by ``AddFullRootReadsFromStmt``, whose reverse scan must treat the
-        later Submit reader like a Call (via ``SubmitToCallView``) — otherwise
-        the first submit gets externalized even though the equivalent plain-call
-        safety check would keep it baseline (regression for the Submit-blind
-        reverse scan, #1616 review)."""
+    def test_submit_windowable_with_later_full_submit_read_still_externalizes(self):
+        """Later full-parent Submit reads no longer suppress output windows."""
 
         @pl.program
         class Before:
@@ -2525,11 +2627,8 @@ class TestOutWindowSubmitCall:
 
         After = passes.optimize_orch_tensors()(Before)
         printed_main = ir.python_print(_get_function(After, "main"))
-        # Externalizing the windowed first submit would be unsafe — the guard
-        # keeps it baseline: no windowed-clone call and no Out-param slice at the
-        # call site.
-        assert "kernel_stripe__windowed" not in printed_main
-        assert "pl.tensor.slice(out" not in printed_main
+        assert "kernel_stripe__windowed" in printed_main
+        assert "pl.tensor.slice(out" in printed_main
 
 
 if __name__ == "__main__":
