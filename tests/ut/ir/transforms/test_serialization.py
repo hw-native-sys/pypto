@@ -193,6 +193,68 @@ class TestSubmitSerialization:
         ir.assert_structural_equal(Prog, restored, enable_auto_mapping=True)
 
 
+class TestCommDomainScopeStmtSerialization:
+    """Round-trip the CommDomainScopeStmt scope node synthesized by
+    ``MaterializeCommDomainScopes`` — covers the ``devices`` int-list and
+    ``slots`` WindowBuffer-vector fields the pass adds on top of ScopeStmt.
+
+    Direct construction (mirroring ``tests/ut/ir/core/test_comm_group_schema``)
+    rather than a full pass-driven program: the pass output doesn't print/parse
+    round-trip (see ``test_materialize_comm_domain_scopes`` autouse fixture),
+    so an end-to-end ``@pl.program`` test would collide with the global
+    roundtrip verification instrument. Direct construction exercises the same
+    serializer/deserializer dispatch entries without that conflict."""
+
+    @staticmethod
+    def _window_buffer(name: str, size: int) -> ir.WindowBuffer:
+        base = ir.Var(name, ir.PtrType(), ir.Span.unknown())
+        sz = ir.ConstInt(size, DataType.INDEX, ir.Span.unknown())
+        return ir.WindowBuffer(base, sz)
+
+    @staticmethod
+    def _scope(devices: list[int], slots: list[ir.WindowBuffer]) -> ir.CommDomainScopeStmt:
+        body = ir.SeqStmts([], ir.Span.unknown())
+        return ir.CommDomainScopeStmt(devices, slots, "g0", body=body, span=ir.Span.unknown())
+
+    def test_serialize_comm_domain_scope_subset_devices(self):
+        """A subset ``devices`` list with one slot round-trips: the int64 list
+        and the WindowBuffer slot survive the dispatch + reflection path."""
+        wb = self._window_buffer("buf", 1024)
+        scope = self._scope([0, 1], [wb])
+
+        restored = cast(ir.CommDomainScopeStmt, ir.deserialize(ir.serialize(scope)))
+        ir.assert_structural_equal(scope, restored, enable_auto_mapping=True)
+        assert list(restored.devices) == [0, 1]
+        assert len(restored.slots) == 1
+        assert restored.slots[0].name_hint == "buf"
+        assert cast(ir.ConstInt, restored.slots[0].size).value == 1024
+        assert restored.name_hint == "g0"
+
+    def test_serialize_comm_domain_scope_all_devices_empty_list(self):
+        """``devices=[]`` is the wire-encoding for kAll — distinct from a
+        non-empty subset list and must survive the round-trip as empty."""
+        scope = self._scope([], [self._window_buffer("buf", 512)])
+
+        restored = cast(ir.CommDomainScopeStmt, ir.deserialize(ir.serialize(scope)))
+        ir.assert_structural_equal(scope, restored, enable_auto_mapping=True)
+        assert list(restored.devices) == []
+
+    def test_serialize_comm_domain_scope_multi_slot(self):
+        """Slot order is alloc-order and load-bearing for codegen — multiple
+        slots must come back in the same sequence."""
+        slots = [
+            self._window_buffer("a", 256),
+            self._window_buffer("b", 512),
+            self._window_buffer("c", 1024),
+        ]
+        scope = self._scope([0, 1, 2, 3], slots)
+
+        restored = cast(ir.CommDomainScopeStmt, ir.deserialize(ir.serialize(scope)))
+        ir.assert_structural_equal(scope, restored, enable_auto_mapping=True)
+        assert [s.name_hint for s in restored.slots] == ["a", "b", "c"]
+        assert [cast(ir.ConstInt, s.size).value for s in restored.slots] == [256, 512, 1024]
+
+
 class TestCapturedScopeAttrSerialization:
     """Round-trip un-outlined captured/deps scopes whose ScopeStmt.attrs_ carry the
     reserved Var-valued attrs ``task_id_var`` (a ``VarPtr``) and ``manual_dep_edges``
