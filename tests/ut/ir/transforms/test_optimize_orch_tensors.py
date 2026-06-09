@@ -1270,18 +1270,76 @@ class TestOutWindowExternalizer:
                 row: pl.Scalar[pl.INDEX] = 0
                 return self.aggregate_with_header(out, data, header, row)
 
+        @pl.program
+        class Expected:
+            @pl.function(type=pl.FunctionType.InCore)
+            def aggregate_with_header(
+                self,
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+                data: pl.Tensor[[16, 256], pl.FP32],
+                header: pl.Tensor[[16, 256], pl.FP32],
+                row: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                header_tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    header, [row, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                for h, (out_iter,) in pl.range(4, init_values=(out,)):
+                    col: pl.Scalar[pl.INDEX] = h * 64
+                    data_tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                        data, [row, col], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                    )
+                    mixed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(data_tile, header_tile)
+                    out_next: pl.Tensor[[16, 256], pl.FP32] = pl.tile.store(mixed, [row, col], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.InCore)
+            def aggregate_with_header__windowed(
+                self,
+                out: pl.Out[
+                    pl.Tensor[[16, 256], pl.FP32, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)]
+                ],
+                data: pl.Tensor[
+                    [16, 256], pl.FP32, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)
+                ],
+                header: pl.Tensor[
+                    [16, 64], pl.FP32, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)
+                ],
+                row: pl.Scalar[pl.INDEX],
+            ) -> pl.Tensor[[16, 256], pl.FP32, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)]:
+                header_tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                    header, [0, 0], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                )
+                for h, (out_iter,) in pl.range(4, init_values=(out,)):
+                    col: pl.Scalar[pl.INDEX] = h * 64
+                    data_tile: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.load(
+                        data, [0, col], [16, 64], [16, 64], target_memory=pl.Mem.Vec, transpose=False
+                    )
+                    mixed: pl.Tile[[16, 64], pl.FP32, pl.Mem.Vec] = pl.tile.add(data_tile, header_tile)
+                    out_next: pl.Tensor[
+                        [16, 256], pl.FP32, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)
+                    ] = pl.tile.store(mixed, [0, col], out_iter)
+                    out_rv = pl.yield_(out_next)
+                return out_rv
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                data: pl.Tensor[[16, 256], pl.FP32],
+                header: pl.Tensor[[16, 256], pl.FP32],
+                out: pl.Out[pl.Tensor[[16, 256], pl.FP32]],
+            ) -> pl.Tensor[[16, 256], pl.FP32]:
+                header__window: pl.Tensor[[16, 64], pl.FP32] = pl.tensor.slice(header, [16, 64], [0, 0])
+                data__window: pl.Tensor[[16, 256], pl.FP32] = pl.tensor.slice(data, [16, 256], [0, 0])
+                out__window: pl.Tensor[[16, 256], pl.FP32] = pl.tensor.slice(out, [16, 256], [0, 0])
+                result__windowed: pl.Tensor[
+                    [16, 256], pl.FP32, pl.TensorView(stride=[256, 1], layout=pl.TensorLayout.ND)
+                ] = self.aggregate_with_header__windowed(out__window, data__window, header__window, 0)
+                result: pl.Tensor[[16, 256], pl.FP32] = pl.tensor.assemble(out, result__windowed, [0, 0])
+                return result
+
         After = _run_to_optimize_orch_tensors(Before)
-
-        printed_main = ir.python_print(_get_function(After, "main"))
-        assert "aggregate_with_header__windowed" in printed_main
-        assert "pl.tensor.slice(data" in printed_main
-        assert "pl.tensor.slice(header" in printed_main
-
-        printed_windowed = ir.python_print(_get_function(After, "aggregate_with_header__windowed"))
-        assert "data__ssa_v0: pl.Tensor[[16, 256], pl.FP32" in printed_windowed
-        assert "header__ssa_v0: pl.Tensor[[16, 64], pl.FP32" in printed_windowed
-        assert "pl.tile.load(header__ssa_v0, [0, 0]" in printed_windowed
-        assert "pl.tile.load(data__ssa_v0, [0, col__ssa_v0]" in printed_windowed
+        ir.assert_structural_equal(After, Expected)
 
     def test_direct_out_call_rewrites_to_windowed_clone(self):
         @pl.program
@@ -1387,6 +1445,7 @@ class TestOutWindowExternalizer:
 
         After = _run_to_optimize_orch_tensors(Before)
 
+        assert After.get_function("kernel_stripe__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "kernel_stripe__windowed" not in printed_main
         assert "pl.tensor.slice(out" not in printed_main
@@ -1435,6 +1494,8 @@ class TestOutWindowExternalizer:
 
         After = _run_to_optimize_orch_tensors(Before)
 
+        assert After.get_function("multi_stripe__windowed") is None
+        assert After.get_function("kernel_stripe__windowed") is None
         printed_main = ir.python_print(_get_function(After, "main"))
         assert "multi_stripe__windowed" not in printed_main
         assert "kernel_stripe__windowed" not in printed_main
