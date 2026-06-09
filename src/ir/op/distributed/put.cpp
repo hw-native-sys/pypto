@@ -258,11 +258,12 @@ TypePtr DeducePutTileType(const std::vector<ExprPtr>& args,
 
 REGISTER_OP("pld.tensor.put")
     .set_description(
-        "Cross-rank put: synchronously write the local window-bound DistributedTensor `src` "
-        "into the `peer` rank's slice of the window-bound DistributedTensor `dst`. `atomic` "
-        "selects plain-store vs atomic-add combine semantics. Lowered by ConvertTensorToTileOps "
-        "to a `tile.create`-allocated VEC staging tile plus a `pld.tile.put` call, so the "
-        "staging tile flows through PyPTO's memory allocator (required at --pto-level=level3).")
+        "Cross-rank put: synchronously write local source `src` "
+        "(window-bound DistributedTensor or plain Tensor) into the `peer` rank's slice of "
+        "the window-bound DistributedTensor `dst`. `atomic` selects plain-store vs atomic-add "
+        "combine semantics. Lowered by ConvertTensorToTileOps to a `tile.create`-allocated "
+        "VEC staging tile plus a `pld.tile.put` call, so the staging tile flows through "
+        "PyPTO's memory allocator (required at --pto-level=level3).")
     .set_op_category("DistributedOp")
     .add_argument("dst", "Remote (peer) window-bound DistributedTensor destination")
     .add_argument("peer", "Peer rank index (ScalarType, integer)")

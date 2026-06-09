@@ -6,10 +6,15 @@ The N6 distributed op family gives the Python DSL direct, typed access to the
 hardware's cross-rank communication primitives. Every op operates against a
 **window-bound** [`DistributedTensorType`](ir/02-types.md) — a tensor whose
 storage is a slice of a symmetric, per-rank communication window allocated by
-`pld.alloc_window_buffer`. A plain `TensorType` is *rejected* by every verifier
-in this family (strict kind-trait matching — `As<DistributedTensorType>` does
+`pld.alloc_window_buffer`. Verifiers in this family generally reject plain
+`TensorType` (strict kind-trait matching — `As<DistributedTensorType>` does
 not match a plain `TensorType`), so a non-window-bound tensor can never be fed
-into a cross-rank operation by accident.
+into a cross-rank slot by accident. **One documented exception:**
+`pld.tensor.put` (and its lowered `pld.tile.put`) accepts a plain `Tensor` on
+the `src` side via `AsTensorTypeLike` — TPUT only needs a readable local GM
+region for the source, so kernels can push directly from host-backed inputs
+without first staging through a window buffer; `dst` still requires a
+window-bound `DistributedTensor`.
 
 There are **six ops** and **three ABI enums**:
 

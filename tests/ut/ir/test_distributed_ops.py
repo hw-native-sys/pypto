@@ -751,20 +751,21 @@ def test_put_rejects_plain_tensor_dst():
         )
 
 
-def test_put_rejects_plain_tensor_src():
-    """Negative: a plain pl.Tensor src is refused — must be window-bound."""
+def test_put_accepts_plain_tensor_src():
+    """Positive: plain pl.Tensor src is accepted — TPUT only needs a readable
+    local GM region on the source side, no window membership required."""
     span = ir.Span.unknown()
     dst = _make_distributed_tensor_var("dst", [16], DataType.FP16, span)
     peer = ir.Var("peer", ir.ScalarType(DataType.INT32), span)
     plain = ir.Var("x", ir.TensorType([ir.ConstInt(16, DataType.INT64, span)], DataType.FP16), span)
 
-    with pytest.raises(Exception, match="DistributedTensor"):
-        ir.create_op_call(
-            "pld.tensor.put",
-            [dst, peer, plain],
-            {"atomic": ir.AtomicType.None_},
-            span,
-        )
+    call = ir.create_op_call(
+        "pld.tensor.put",
+        [dst, peer, plain],
+        {"atomic": ir.AtomicType.None_},
+        span,
+    )
+    assert isinstance(call.type, ir.UnknownType)
 
 
 def test_put_rejects_dtype_mismatch():

@@ -18,11 +18,14 @@ Layout mirrors the ``tile.alloc`` / ``MemRef`` / ``TileType`` triple:
   in an :class:`ir.WindowBuffer` Var subclass.
 * ``window`` lifts that Ptr handle into a :class:`ir.DistributedTensorType`
   view by specifying the per-rank ``shape`` and ``dtype``.
-* ``put`` is a synchronous cross-rank bulk write (HCCL TPUT): both ``dst`` and
-  ``src`` are window-bound :class:`pld.DistributedTensor` (GM/tensor-level)
-  views. ``ConvertTensorToTileOps`` rewrites it to a ``tile.create`` VEC
-  staging tile plus a ``pld.tile.put`` call so the stage participates in
-  memory allocation/lowering before backend codegen.
+* ``put`` is a synchronous cross-rank bulk write (HCCL TPUT): ``dst`` must be
+  a window-bound :class:`pld.DistributedTensor` (the peer needs a window slot
+  to receive into), while ``src`` may be either a window-bound
+  :class:`pld.DistributedTensor` or a plain :class:`pl.Tensor` — TPUT only
+  needs a readable local GM region on the source side. ``ConvertTensorToTileOps``
+  rewrites it to a ``tile.create`` VEC staging tile plus a ``pld.tile.put``
+  call so the stage participates in memory allocation/lowering before backend
+  codegen.
 * ``get`` is a synchronous cross-rank bulk read: both ``dst`` and ``src`` are
   window-bound :class:`pld.DistributedTensor` (GM/tensor-level) views — the
   VEC staging tile that TGET bounces through is synthesised at codegen, so it

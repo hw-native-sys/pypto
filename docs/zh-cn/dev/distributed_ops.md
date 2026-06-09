@@ -4,9 +4,13 @@
 
 N6 分布式算子族为 Python DSL 提供了对硬件跨 rank（cross-rank）通信原语的直接、带类型的访问。族内每个算子都作用于一个**窗口绑定的（window-bound）**
 [`DistributedTensorType`](ir/02-types.md) —— 其存储是 `pld.alloc_window_buffer`
-分配的对称、按 rank 划分的通信窗口的一个切片。普通 `TensorType` 会被族内每个
-verifier *拒绝*（严格的 kind-trait 匹配 —— `As<DistributedTensorType>` 不匹配普通
-`TensorType`），因此非窗口绑定的 tensor 永远不会被误传入跨 rank 操作。
+分配的对称、按 rank 划分的通信窗口的一个切片。族内 verifier 通常会拒绝普通
+`TensorType`（严格的 kind-trait 匹配 —— `As<DistributedTensorType>` 不匹配普通
+`TensorType`），以保证非窗口绑定的 tensor 永远不会被误传入跨 rank 槽位。
+**唯一明确的例外：** `pld.tensor.put`（以及它下降出的 `pld.tile.put`）的
+`src` 参数通过 `AsTensorTypeLike` 接受普通 `Tensor` —— TPUT 在源端只需要一段
+可读的本地 GM 区域,因此 kernel 可以直接从 host 输入推送,不必先经过窗口缓冲
+中转；`dst` 仍然必须是窗口绑定的 `DistributedTensor`。
 
 共有**六个算子**和**三个 ABI 枚举**：
 
