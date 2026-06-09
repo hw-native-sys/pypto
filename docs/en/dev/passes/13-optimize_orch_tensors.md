@@ -4,7 +4,7 @@ Optimizes tensor buffer usage across orchestration and InCore functions by elimi
 
 ## Overview
 
-After `ConvertTensorToTileOps`, orchestration functions allocate output tensors (`tensor.create`) at every InCore call site, even inside loops where the same buffer could be reused. This pass applies five optimization patterns to reduce allocations, improve buffer layout information, and make statically provable local Out-window writes explicit.
+After `ConvertTensorToTileOps`, orchestration functions allocate output tensors (`tensor.create`) at every InCore call site, even inside loops where the same buffer could be reused. This pass applies five optimization patterns to reduce allocations, improve buffer layout information, and make statically provable local tensor windows explicit at orchestration call sites.
 
 **Requirements**:
 
@@ -72,11 +72,11 @@ for i in pl.range(N, init_values=[init_buf]):
 
 **Solution**: Analyze `tensor.slice(parent, size, offset)` patterns in orchestration. When a slice result is passed as an `In` argument to an InCore call, attach the parent tensor's shape-derived strides via `TensorView` on the InCore function's `In` param type, so `tile.load` uses the correct memory layout.
 
-### Pattern 5: Static Out-Window Externalization (OutWindowExternalizer)
+### Pattern 5: Static Window Externalization (OutWindowExternalizer)
 
-**Problem**: An outlined callee may write only a statically provable local window of a large `Out` tensor, but the call site still passes the whole tensor. Downstream dependence analysis then sees a whole-buffer writer and adds unnecessary serialization.
+**Problem**: An outlined callee may write only a statically provable local window of a large `Out` tensor, or consume only a statically provable local window of a large `In` tensor, but the call site still passes the whole tensor. Downstream dependence analysis then sees whole-buffer accesses and may add unnecessary serialization.
 
-**Solution**: Clone the callee to a `__windowed` variant with narrowed rewritten `Out` parameter types, narrowed rewritten return types, and localized internal `tile.store` offsets. Rewrite the orchestration call site to explicit `slice + __windowed call + assemble`:
+**Solution**: Clone the callee to a `__windowed` variant with narrowed rewritten tensor parameter types and localized internal offsets. Rewrite the orchestration call site to explicit local slices. Output windows use `slice + __windowed call + assemble`:
 
 ```python
 out_window = pl.tensor.slice(out, shape, offset)
@@ -84,19 +84,48 @@ out_window_next = self.kernel__windowed(..., out_window)
 out = pl.tensor.assemble(out, out_window_next, offset)
 ```
 
-The same local-slice materialization is also used for a narrow class of pure input-window consumers: if every use of an `In` tensor parameter is the same local `tile.load`/`tensor.slice` window, the call site passes a sliced input tensor and the clone localizes the internal read offset to zero. This input path is intentionally conservative and does not run for callees that full-read the input, for normal output-window producers, or when the call result is later assembled into a parent tensor.
+Input windows use the same call-site-local slice materialization, without an assemble:
+
+```python
+in_window = pl.tensor.slice(inp, shape, offset)
+result = self.consumer__windowed(in_window, ...)
+```
+
+This pass intentionally keeps window eligibility conservative. It does not special-case operator names such as `topk`; a tensor is windowed only when the callee body proves the access pattern below.
 
 Supported rewrite shapes:
 
 - `FinalStore`: the callee returns the result of a final `tile.store(...)` into one local window
 - `AggregateWindowLoop`: the callee carries one or more `Out` tensors through a loop and writes a statically provable aggregate window, such as the outlined `kv_proj` group shape
+- `PureInputWindowConsumer`: an `In` tensor parameter is used only through the same local input window
 
-Safety rules:
+Output-window eligibility:
 
-- only statically provable affine offsets are accepted
-- multi-`Out` rewrite is all-or-nothing
+- the write must be a statically provable local `tile.store` window or aggregate window loop
+- window shape and offset must be statically known enough to materialize a `tensor.slice`
+- offsets must be affine in the surrounding loop variables accepted by the pass
+- multi-`Out` rewrites are all-or-nothing
 - sequential-loop siblings are rewritten only when every rewritten `Out` can be proven disjoint across sibling iterations
-- `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only makes disjoint windows explicit before that pass runs
+- later full-parent reads do not disable output windowing; correctness is delegated to runtime TensorMap overlap dependence once the call site exposes the actual window tensor
+
+Input-window eligibility:
+
+- the parameter must be an `In` tensor
+- every reference to that parameter inside the callee must match the same local window
+- supported references are `tile.load` and `tensor.slice`
+- transpose loads are rejected
+- the `tile.load` read shape must equal the candidate window shape
+- all matched references must agree on window shape and offset
+- if any reference is unsupported, the whole input parameter stays full-tensor
+- if the matched window is full shape at zero offset, the pass skips it because slicing would not expose a narrower dependency
+
+Non-goals and dependence model:
+
+- the pass does not add explicit dependency edges
+- the pass does not reintroduce a later full-parent-read guard
+- the pass does not precompute global window descriptor arrays
+- unsupported consumers, including full-tensor readers, remain baseline/full-tensor inputs
+- `DeriveCallDirections` keeps its existing sound sequential `Out -> InOut` rule; Pattern 5 only exposes proven local windows before that pass runs
 
 ## Example (Pattern 1)
 
@@ -170,7 +199,7 @@ The `tensor.create` is eliminated; the iter-arg buffer is reused across iteratio
 | `AssembleParentStridesOptimizer` | Pattern 2 — attaches parent strides via TensorView |
 | `SliceInputStridesOptimizer` | Pattern 4 — attaches parent strides to In params via TensorView for slice patterns |
 | `AssembleLoopRewriter` | Pattern 3 — rewrites tile.assemble loops to tile.store loops |
-| `OutWindowExternalizer` | Pattern 5 — rewrites statically provable local Out-window writes to explicit `slice + call + assemble` |
+| `OutWindowExternalizer` | Pattern 5 — rewrites eligible local Out writes and pure In-window consumers to explicit call-site slices |
 | `BuildOutParamReturnMappings` | Shared helper — maps Out params to return indices via tile.store |
 | `ComputeRowMajorStrides` | Shared helper — computes row-major strides from a shape |
 
