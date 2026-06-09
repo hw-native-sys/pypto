@@ -88,8 +88,10 @@ def test_execute_on_device_returns_timing_one_shot_path():
 
     with (
         patch("pypto.runtime.device_runner.Worker", fake_worker_cls),
-        # No active ChipWorker → take the one-shot path.
-        patch("pypto.runtime.worker.Worker.current", return_value=None),
+        # No active ChipWorker → take the one-shot path. ``execute_on_device``
+        # resolves the active worker via ``ChipWorker.current`` (imported as
+        # ``_PyptoWorker``), so that is the attribute to stub.
+        patch("pypto.runtime.worker.ChipWorker.current", return_value=None),
     ):
         timing = execute_on_device(
             MagicMock(name="chip_callable"),
@@ -112,7 +114,7 @@ def test_execute_on_device_returns_timing_reuse_path():
     active_worker = MagicMock(name="active_chip_worker")
     active_worker._run_chip.return_value = _TIMING_SENTINEL
 
-    with patch("pypto.runtime.worker.Worker.current", return_value=active_worker):
+    with patch("pypto.runtime.worker.ChipWorker.current", return_value=active_worker):
         timing = execute_on_device(
             MagicMock(name="chip_callable"),
             MagicMock(name="orch_args"),
@@ -154,6 +156,75 @@ def test_execute_compiled_returns_timing(tmp_path):
         timing = execute_compiled(tmp_path, [], platform="a2a3sim", device_id=0)
 
     assert timing is _TIMING_SENTINEL
+
+
+# ---------------------------------------------------------------------------
+# _execute_on_device (harness-shared path) — returns the RunTiming so the
+# golden harness can surface device/host wall on RunResult (issue #1679)
+# ---------------------------------------------------------------------------
+
+
+@requires_simpler
+def test_internal_execute_on_device_returns_timing(tmp_path):
+    """``runner._execute_on_device`` returns ``execute_on_device``'s timing.
+
+    ``test_runner.py`` (the golden harness) builds ``RunResult`` from this
+    helper, so the timing must reach the caller rather than being discarded.
+    """
+    import torch  # noqa: PLC0415
+
+    golden = tmp_path / "golden.py"
+    golden.write_text(
+        "import torch\n"
+        "__outputs__ = ['c']\n"
+        "RTOL = 1e-5\n"
+        "ATOL = 1e-5\n"
+        "def generate_inputs(params):\n"
+        "    return [('a', torch.zeros(1)), ('c', torch.zeros(1))]\n"
+        "def compute_golden(tensors, params):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    from pypto.runtime.runner import _execute_on_device  # noqa: PLC0415
+
+    with (
+        patch(
+            "pypto.runtime.device_runner.build_orch_args_from_inputs",
+            return_value=(MagicMock(name="orch_args"), {}, {}, {"c": torch.zeros(1)}),
+        ),
+        patch(
+            "pypto.runtime.device_runner.execute_on_device",
+            return_value=_TIMING_SENTINEL,
+        ),
+        patch("pypto.runtime.device_runner.validate_golden"),
+    ):
+        timing = _execute_on_device(
+            tmp_path,
+            golden,
+            MagicMock(name="chip_callable"),
+            "host_build_graph",
+            "a2a3sim",
+            0,
+        )
+
+    assert timing is _TIMING_SENTINEL
+
+
+@requires_simpler
+def test_runtiming_reexported_from_package_root():
+    """``RunTiming`` resolves from the ``pypto.runtime`` package root (issue #1679).
+
+    Users read ``RunTiming`` off ``last_run_timing`` / ``execute_compiled``, so
+    it must be discoverable from the package root — not only the deep
+    ``pypto.runtime.task_interface`` path. The re-export stays lazy (via
+    ``__getattr__``) so importing ``pypto.runtime`` does not pull in simpler.
+    """
+    import pypto.runtime as rt  # noqa: PLC0415
+    from pypto.runtime.task_interface import RunTiming as _DeepRunTiming  # noqa: PLC0415
+
+    assert rt.RunTiming is _DeepRunTiming
+    assert "RunTiming" in rt.__all__
 
 
 # ---------------------------------------------------------------------------

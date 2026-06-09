@@ -74,8 +74,11 @@ def patched_execute_on_device():
     with (
         patch("pypto.runtime.device_runner.CallConfig", return_value=spy_cfg),
         patch("pypto.runtime.device_runner.Worker", fake_worker_cls),
-        # Disable active-Worker lookup so the one-shot path runs.
-        patch("pypto.runtime.worker.Worker.current", return_value=None),
+        # Disable active-Worker lookup so the one-shot path runs. The
+        # ``current`` classmethod lives on ``ChipWorker`` (``execute_on_device``
+        # calls ``ChipWorker.current`` via the ``_PyptoWorker`` alias), not on
+        # the ABC base ``Worker``.
+        patch("pypto.runtime.worker.ChipWorker.current", return_value=None),
     ):
         yield spy_cfg
 

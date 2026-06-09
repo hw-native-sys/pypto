@@ -321,9 +321,10 @@ def _invoke_compiled(
     Returns a ``(outputs, timing)`` pair: *outputs* is ``None`` for in-place
     calls or the packed return tensors otherwise; *timing* is the simpler
     ``RunTiming`` from :func:`pypto.runtime.execute_compiled` (``host_wall_us``
-    / ``device_wall_us``), or ``None`` if dispatch produced no timing. Callers
-    surface *timing* via ``last_run_timing`` and return *outputs* unchanged so
-    the public call signature stays backward compatible.
+    / ``device_wall_us``) — always a ``RunTiming``, never ``None``, since the
+    dispatch always produces one. Callers surface *timing* via
+    ``last_run_timing`` and return *outputs* unchanged so the public call
+    signature stays backward compatible.
     """
     coerced, return_style = _coerce_args(
         args, param_infos, output_indices, return_types, caller_name=caller_name

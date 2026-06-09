@@ -42,13 +42,12 @@ import pypto.language as pl
 import pytest
 import torch
 from pypto import ir
-from pypto.runtime import ChipWorker, RunConfig, execute_compiled
+from pypto.runtime import ChipWorker, RunConfig, RunTiming, execute_compiled
 from pypto.runtime.device_runner import (
     build_orch_args_from_inputs,
     compile_and_assemble,
     execute_on_device,
 )
-from pypto.runtime.task_interface import RunTiming
 
 _M = 128
 
@@ -256,6 +255,69 @@ class TestL2RunTimingSurface:
 
         torch.testing.assert_close(outputs["c"], _EXPECTED, rtol=1e-5, atol=1e-5)
         _assert_l2_semantics(timing, "execute_on_device (reuse)")
+
+    def test_harness_execute_on_device_surfaces_timing_on_run_result(self, test_config, tmp_path):
+        """(G) The golden-harness path surfaces device time on ``RunResult`` (issue #1679).
+
+        ``_execute_on_device`` is the helper the harness (``test_runner.py``)
+        shares — it loads ``golden.py``, dispatches, and validates. Issue #1679's
+        named consumer is this path: previously the harness only had a Python
+        wall-clock (``RunResult.execution_time``) mixing compile + golden +
+        validate overhead, with no way to isolate device time. This asserts the
+        returned ``RunTiming`` carries real L2 timing *and* that the
+        ``RunResult.device_wall_us`` / ``host_wall_us`` fields the harness builds
+        from it actually preserve it.
+        """
+        from pypto.runtime import RunResult  # noqa: PLC0415
+        from pypto.runtime.runner import _execute_on_device  # noqa: PLC0415
+
+        _, work_dir = _compile_add(test_config, tmp_path)
+        chip_callable, runtime_name, _ = compile_and_assemble(
+            work_dir, test_config.platform, pto_isa_commit=test_config.pto_isa_commit
+        )
+
+        # Minimal golden.py matching the harness contract: generate_inputs ->
+        # (name, value) tuples, __outputs__ names the Out param, compute_golden
+        # fills it in place (a + b).
+        golden_path = work_dir / "golden.py"
+        golden_path.write_text(
+            "import torch\n"
+            "__outputs__ = ['c']\n"
+            "RTOL = 1e-5\n"
+            "ATOL = 1e-5\n"
+            f"_M = {_M}\n"
+            "def generate_inputs(params):\n"
+            "    a = torch.full((_M, _M), 2.0, dtype=torch.float32)\n"
+            "    b = torch.full((_M, _M), 3.0, dtype=torch.float32)\n"
+            "    c = torch.zeros((_M, _M), dtype=torch.float32)\n"
+            "    return [('a', a), ('b', b), ('c', c)]\n"
+            "def compute_golden(tensors, params):\n"
+            "    tensors['c'][...] = tensors['a'] + tensors['b']\n",
+            encoding="utf-8",
+        )
+
+        timing = _execute_on_device(
+            work_dir,
+            golden_path,
+            chip_callable,
+            runtime_name,
+            test_config.platform,
+            test_config.device_id,
+        )
+        _assert_l2_semantics(timing, "_execute_on_device (harness path)")
+
+        # The harness copies the returned timing onto RunResult — assert the
+        # device/host wall survive and stay distinct from the mixed wall-clock.
+        result = RunResult(
+            passed=True,
+            test_name="harness_timing",
+            execution_time=1.0,
+            device_wall_us=timing.device_wall_us,
+            host_wall_us=timing.host_wall_us,
+        )
+        assert result.device_wall_us == timing.device_wall_us
+        assert result.host_wall_us == timing.host_wall_us
+        assert result.device_wall_us is not None and result.device_wall_us > 0.0
 
 
 if __name__ == "__main__":
