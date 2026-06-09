@@ -164,24 +164,37 @@ scale_conv.u64 = orch_args.scalar(0);
 float scale = scale_conv.val;
 ```
 
-### Alias Generation
+### Output Aliasing (emit-name remap)
 
-When an InCore call returns a value with a different name than the `Out` argument, the codegen emits a C++ reference alias:
+A kernel/submit output is the in-place `Out`/`InOut` arg it writes — the *same
+physical tensor*. So when the result Var has a different name than that arg, the
+codegen does **not** mint a `const Tensor& result = ext_output;` rename; it
+remaps the result Var's emit name to the source, and every downstream reference
+resolves directly to the source name. (This is the same strategy
+`tensor.assemble` uses, applied uniformly.)
 
 ```python
 # Python IR
 result = self.kernel_add(a, b, output)  # result ≠ output
+consumer = self.kernel_use(result)
 ```
 
 ```cpp
-// Generated C++
+// Generated C++ — `result` is remapped to ext_output; the consumer reads it directly
 Arg params_t0;
 params_t0.add_output(ext_output);
 rt_submit_aiv_task(0, params_t0);
-const Tensor& result = ext_output;  // alias — result refers to ext_output
+
+Arg params_t1;
+params_t1.add_input(ext_output);  // `result` -> ext_output (no alias decl)
 ```
 
-If the return name matches the `Out`/`InOut` arg name, no alias is needed.
+Excluded from remap: a phi/loop-carry reassignment (it rebinds an lvalue the
+enclosing `if`/loop owns) keeps its `<name> = <src>;` form; and a tensor whose
+source is not valid in the reader's C++ scope (a manual-scope-local source —
+see *Cross-scope tensors and `manual_scope`* below) keeps the decl path. A
+runtime-allocated output bound to `task_<n>_outs.get_ref(k)` likewise keeps its
+`const Tensor&` binding.
 
 ### Core Type Inference
 

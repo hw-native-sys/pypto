@@ -847,14 +847,18 @@ class TestOrchestration:
         # inout_t is InOut (written in place) but not part of the return tuple.
         assert "params_t0.add_inout(ext_inout_t)" in code
 
-        # Each tuple result aliases to its OWN arg — not shifted onto inout_t.
-        assert "const Tensor& o1 = ext_ta;" in code
-        assert "const Tensor& o2 = ext_tb;" in code
-        assert "const Tensor& o3 = ext_tc;" in code
-        # The scrambled (shifted-by-one) bindings must NOT appear.
-        assert "const Tensor& o1 = ext_inout_t;" not in code
-        assert "const Tensor& o2 = ext_ta;" not in code
-        assert "const Tensor& o3 = ext_tb;" not in code
+        # Each tuple result is the in-place arg it writes, so it remaps to that
+        # arg (no per-output ``const Tensor&`` alias is minted). The consumer
+        # ``combine`` reads ta/tb/tc — each result mapped to its OWN arg, NOT
+        # shifted onto inout_t (issue #1573).
+        ia = code.index("params_t1.add_input(ext_ta)")
+        ib = code.index("params_t1.add_input(ext_tb)")
+        ic = code.index("params_t1.add_input(ext_tc)")
+        assert ia < ib < ic, code
+        # The scrambled (shifted-by-one) mapping must NOT appear: combine must
+        # not read inout_t, and no const-ref output alias is emitted.
+        assert "add_input(ext_inout_t)" not in code
+        assert "const Tensor& o1" not in code and "const Tensor& o2" not in code
 
     @staticmethod
     def _manual_cross_scope_code(create_inside: bool) -> str:
@@ -1959,7 +1963,11 @@ class TestOrchestration:
         # OutputExisting (→ add_output) rather than promoting to InOut.
         assert "params_t0.add_output(ret0__out)" in code
         assert "params_t1.add_output(ret0__out_1)" in code
-        assert "const Tensor& first = ret0__out;" in code
+        # ``first`` is kernel_add's in-place output buffer ret0__out, so it
+        # remaps to ret0__out (no ``const Tensor& first = ...`` alias is minted);
+        # the second call reads that buffer directly.
+        assert "params_t1.add_input(ret0__out)" in code
+        assert "const Tensor& first" not in code
         assert "const Tensor& second" not in code
 
     def test_unused_alias_not_emitted(self):
@@ -5274,8 +5282,14 @@ class TestTupleReturnNameHintCollision:
 
         input_a = ir.Var("input_a", tensor_type, span)
         input_b = ir.Var("input_b", tensor_type, span)
-        first_out = ir.Var("first_out", tensor_type, span)
-        second_out = ir.Var("second_out", tensor_type, span)
+        # Distinct Out tensors per call, so the two tuple results' element->call
+        # attachment is observable in the consumer's inputs under emit-name
+        # remap (the alias-decl form this test predates is no longer emitted).
+        out_a1 = ir.Var("out_a1", tensor_type, span)
+        out_a2 = ir.Var("out_a2", tensor_type, span)
+        out_b1 = ir.Var("out_b1", tensor_type, span)
+        out_b2 = ir.Var("out_b2", tensor_type, span)
+        final_out = ir.Var("final_out", tensor_type, span)
         kernel_a_input = ir.Var("input_a", tensor_type, span)
         kernel_a_first = ir.Var("first_out", tensor_type, span)
         kernel_a_second = ir.Var("second_out", tensor_type, span)
@@ -5342,7 +5356,7 @@ class TestTupleReturnNameHintCollision:
 
         call_a = ir.Call(
             ir.GlobalVar("kernel_a"),
-            [input_a, first_out, second_out],
+            [input_a, out_a1, out_a2],
             {},
             {
                 "arg_directions": [
@@ -5356,7 +5370,7 @@ class TestTupleReturnNameHintCollision:
         )
         call_b = ir.Call(
             ir.GlobalVar("kernel_b"),
-            [input_b, first_out, second_out],
+            [input_b, out_b1, out_b2],
             {},
             {
                 "arg_directions": [
@@ -5370,7 +5384,7 @@ class TestTupleReturnNameHintCollision:
         )
         call_consume = ir.Call(
             ir.GlobalVar("kernel_consume"),
-            [first_a, second_a, first_b, second_b, first_out],
+            [first_a, second_a, first_b, second_b, final_out],
             {},
             {
                 "arg_directions": [
@@ -5403,8 +5417,11 @@ class TestTupleReturnNameHintCollision:
             [
                 (input_a, ir.ParamDirection.In),
                 (input_b, ir.ParamDirection.In),
-                (first_out, ir.ParamDirection.Out),
-                (second_out, ir.ParamDirection.Out),
+                (out_a1, ir.ParamDirection.Out),
+                (out_a2, ir.ParamDirection.Out),
+                (out_b1, ir.ParamDirection.Out),
+                (out_b2, ir.ParamDirection.Out),
+                (final_out, ir.ParamDirection.Out),
             ],
             [tensor_type],
             orch_body,
@@ -5419,18 +5436,22 @@ class TestTupleReturnNameHintCollision:
 
         code = codegen.generate_orchestration(program, orch).code
 
-        assert "const Tensor& first_a = ext_first_out;" in code, code
-        assert "const Tensor& second_a = ext_second_out;" in code, code
-        assert "const Tensor& first_b = ext_first_out;" in code, code
-        assert "const Tensor& second_b = ext_second_out;" in code, code
-
-        task_0 = code.index("// Task 0: kernel_a")
-        task_1 = code.index("// Task 1: kernel_b")
-        task_2 = code.index("// Task 2: kernel_consume")
-        # With name_hint-keyed tuple metadata, first_a/second_a are attached
-        # to the second call because tmp_first and tmp_second share name_hint.
-        assert code.index("const Tensor& first_a", task_0) < task_1, code
-        assert task_1 < code.index("const Tensor& first_b", task_1) < task_2, code
+        # tmp_first and tmp_second share the name_hint "ret__tmp_v0"; the tuple
+        # metadata must still attach each call's elements to that call. Each
+        # element is the in-place Out arg of its call, so it remaps to that arg
+        # (no ``const Tensor& first_a = ...`` alias is minted). The consumer
+        # reading first_a/second_a/first_b/second_b therefore reads call_a's
+        # outs then call_b's outs, in order — not cross-contaminated.
+        i_a1 = code.index("// Task 2: kernel_consume")
+        consume = code[i_a1:]
+        a1 = consume.index("add_input(ext_out_a1)")
+        a2 = consume.index("add_input(ext_out_a2)")
+        b1 = consume.index("add_input(ext_out_b1)")
+        b2 = consume.index("add_input(ext_out_b2)")
+        assert a1 < a2 < b1 < b2, code
+        # No per-element const-ref alias survives the remap.
+        for name in ("first_a", "second_a", "first_b", "second_b"):
+            assert f"const Tensor& {name} " not in code, code
 
         declared_names = re.findall(
             r"^\s*(?:const\s+Tensor&|Tensor)\s+([A-Za-z_]\w*)\s*=",

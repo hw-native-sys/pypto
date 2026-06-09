@@ -163,24 +163,33 @@ scale_conv.u64 = orch_args.scalar(0);
 float scale = scale_conv.val;
 ```
 
-### 别名生成
+### 输出别名（emit 名重映射）
 
-当 InCore 调用的返回值名称与 `Out` 参数名称不同时，代码生成器会发出 C++ 引用别名：
+kernel/submit 的输出就是它原地写入的 `Out`/`InOut` 参数——即*同一物理张量*。因此当
+结果 Var 的名字与该参数不同时，代码生成器**不**再生成 `const Tensor& result =
+ext_output;` 这样的重命名，而是把结果 Var 的 emit 名重映射到源，下游所有引用都直接
+解析到源名。（这正是 `tensor.assemble` 采用的策略，现统一应用。）
 
 ```python
 # Python IR
 result = self.kernel_add(a, b, output)  # result ≠ output
+consumer = self.kernel_use(result)
 ```
 
 ```cpp
-// 生成的 C++
+// 生成的 C++ —— result 被重映射到 ext_output，消费者直接读取它
 Arg params_t0;
 params_t0.add_output(ext_output);
 rt_submit_aiv_task(0, params_t0);
-const Tensor& result = ext_output;  // 别名 — result 引用 ext_output
+
+Arg params_t1;
+params_t1.add_input(ext_output);  // result -> ext_output（无别名声明）
 ```
 
-如果返回名称与 `Out`/`InOut` 参数名称匹配，则不需要别名。
+不参与重映射的情形：phi/循环 carry 的重赋值（它重新绑定外层 `if`/循环所拥有的左值）
+保留 `<name> = <src>;` 形式；源在读取者的 C++ 作用域中无效的张量（manual scope 局部
+的源——见下文*跨作用域张量与 `manual_scope`*）保留声明路径；绑定到
+`task_<n>_outs.get_ref(k)` 的运行时分配输出同样保留其 `const Tensor&` 绑定。
 
 ### 核心类型推断
 

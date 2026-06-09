@@ -2506,27 +2506,31 @@ class OrchestrationStmtCodegen : public CodegenBase {
     std::string out_name = GetExternalTensorName(out_arg);
     const bool mutable_alias = IsMutableTensorNameInCurrentScope(alias_name);
 
-    // Inside a ``pl.manual_scope``, a caller-allocated output that aliases an
-    // enclosing-scope-valid source is NOT given its own ``const Tensor&`` decl.
-    // Instead we remap the result Var's emit name to the source, so every
-    // reference — including a task placed AFTER the scope — resolves directly to
-    // the enclosing-scope source name (issue #1697). This is the strategy
-    // ``tensor.assemble`` already uses (HandleTensorAssembleAssign), and it
-    // sidesteps the dead-alias problem at its root: there is no
-    // manual-scope-internal identifier that can fall out of C++ scope at the
-    // closing brace. The result is the same physical tensor as its source (an
-    // in-place write), so a shared name is exactly correct.
+    // A caller-allocated kernel/submit output aliases an arg it writes in place
+    // — it is the *same physical tensor* as that arg. Rather than mint a
+    // ``const Tensor& <result> = <source>;`` rename, we remap the result Var's
+    // emit name to the source, so every reference resolves directly to the
+    // source name. This is the strategy ``tensor.assemble`` already uses
+    // (HandleTensorAssembleAssign); applying it uniformly drops the redundant
+    // alias decls and, for ``pl.manual_scope``, fixes the dead-alias bug at its
+    // root: a task placed AFTER the block references the enclosing-scope source
+    // name, with no manual-scope-internal identifier to fall out of C++ scope
+    // (issue #1697).
     //
-    // Two cases are intentionally excluded:
-    //   * A phi reassignment (``mutable_alias``) rebinds an lvalue the enclosing
-    //     if/loop owns — remapping it would erase the merge point, breaking loop
-    //     carries. It keeps its ``<name> = <src>;`` reassignment.
-    //   * A source first reserved *inside* the block that was not hoisted out
-    //     (``IsEnclosingScopeValid`` false) — a manual-scope-local create whose
-    //     allocation could not be hoisted, or a runtime-allocated submit output
-    //     bound to ``task_<n>_outs.get_ref(...)``. Remapping to it would not
-    //     help an after-scope reader. It keeps the decl path.
-    if (result_var != nullptr && !mutable_alias && IsEnclosingScopeValid(out_arg)) {
+    // The source must be valid in C++ scope at every use of the result. Outside
+    // a manual scope that always holds — the result is consumed in the same
+    // lexical scope as the source, or escapes via a phi (handled below). Inside
+    // a manual scope the source must additionally be enclosing-scope-valid, so a
+    // reader placed after the block still resolves it (``IsEnclosingScopeValid``;
+    // ``manual_local_names_`` is null outside a manual scope).
+    //
+    // A phi reassignment (``mutable_alias``) is excluded: it rebinds an lvalue
+    // the enclosing if/loop owns, so remapping it would erase the merge point and
+    // break loop carries. It keeps its ``<name> = <src>;`` reassignment. A
+    // manual-scope-local source that could not be hoisted also keeps the decl
+    // path (remapping to it would not help an after-scope reader).
+    const bool source_in_scope = manual_local_names_ == nullptr || IsEnclosingScopeValid(out_arg);
+    if (result_var != nullptr && !mutable_alias && source_in_scope) {
       emit_name_map_[result_var] = out_name;
       return;
     }
