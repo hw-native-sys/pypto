@@ -402,6 +402,16 @@ const Var* TraceVarToParam(const Var* var, const ReturnAndDefCollector& collecto
     if (op_name == "tensor.set_validshape" && !call->args_.empty()) {
       return TraceReturnedToParam(call->args_[0], collector, lineage, program, visited);
     }
+    // tensor.slice(source, shape, offset) / tensor.reshape(source, shape[, valid])
+    // are shape-only views over the source buffer (args[0]); a kernel that writes
+    // its Out param through such a view and returns the result would otherwise
+    // leave the return untraceable, so FindReturnedParamIndex falls back to
+    // out_indices[0] (the first Out/InOut, often per-block scratch) and aliases
+    // the call site to the WRONG output (issue #1702). Follow the view to its
+    // source so the return resolves to the real Out param.
+    if ((op_name == "tensor.slice" || op_name == "tensor.reshape") && !call->args_.empty()) {
+      return TraceReturnedToParam(call->args_[0], collector, lineage, program, visited);
+    }
   }
   return nullptr;
 }

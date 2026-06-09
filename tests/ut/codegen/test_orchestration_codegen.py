@@ -865,6 +865,87 @@ class TestOrchestration:
         assert "add_input(ext_inout_t)" not in code
         assert all(f"const Tensor& o{i}" not in code for i in (1, 2, 3)), code
 
+    def test_spmd_single_return_aliases_returned_output_not_first_inout(self):
+        """Regression for #1702: a ``pl.spmd`` scope whose kernel writes an InOut
+        ``scratch`` in place (NOT returned, sorts first in the Out/InOut list) plus
+        an Out ``result`` written through a SLICED VIEW, and returns a single value.
+
+        The single-return alias path (``GenerateSingleReturnAlias``) asks
+        ``FindReturnedParamIndex`` which Out/InOut param the scope returns. Because
+        the kernel writes ``result`` through ``pl.slice`` (a view), the return-trace
+        cannot follow the ``tile.store`` target (a Call, not a Var) back to a param,
+        so it returns ``nullopt`` and the code fell back to ``out_indices[0]`` -- the
+        FIRST Out/InOut, which is the in-place ``scratch`` ([64, 32], numel 2048),
+        NOT the returned ``result`` ([64, 64], numel 4096). The downstream
+        ``pl.reshape`` then bound to ``ext_scratch`` and reshaping 2048 elements to
+        [32, 128] (4096) fails the AICPU ``valid_reshape`` assert -> scheduler
+        GLOBAL_STUCK -> host 507018. The alias must bind to the actually-returned
+        output ``result``, recovered by buffer-root identity, not a positional guess.
+        """
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.Ascend910B)
+
+        @pl.program
+        class SpmdSingleReturnViewProgram:
+            @pl.function(type=pl.FunctionType.AIV)
+            def kernel(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                scratch: pl.InOut[pl.Tensor[[64, 32], pl.FP32]],  # in-place InOut, sorts first
+                result: pl.Out[pl.Tensor[[64, 64], pl.FP32]],  # the returned output, written via a view
+            ) -> pl.Tensor[[64, 64], pl.FP32]:
+                sc: pl.Tile[[64, 32], pl.FP32] = pl.load(scratch, [0, 0], [64, 32])
+                _io: pl.Tensor[[64, 32], pl.FP32] = pl.store(sc, [0, 0], scratch)
+                ta: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
+                # Write ``result`` through a sliced view: the store target is a
+                # tensor.slice (a Call, not a Var), which the return-trace cannot
+                # follow back to the ``result`` param.
+                rview: pl.Tensor[[64, 64], pl.FP32] = pl.slice(result, [64, 64], [0, 0])
+                r: pl.Tensor[[64, 64], pl.FP32] = pl.store(pl.add(ta, ta), [0, 0], rview)
+                return r
+
+            @pl.function(type=pl.FunctionType.AIV)
+            def consumer(
+                self,
+                x: pl.Tensor[[32, 128], pl.FP32],
+                out: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
+            ) -> pl.Tensor[[32, 128], pl.FP32]:
+                t: pl.Tile[[32, 128], pl.FP32] = pl.load(x, [0, 0], [32, 128])
+                return pl.store(t, [0, 0], out)
+
+            @pl.function(type=pl.FunctionType.Orchestration)
+            def main(
+                self,
+                a: pl.Tensor[[64, 64], pl.FP32],
+                scratch: pl.InOut[pl.Tensor[[64, 32], pl.FP32]],
+                result: pl.Out[pl.Tensor[[64, 64], pl.FP32]],
+                final: pl.Out[pl.Tensor[[32, 128], pl.FP32]],
+            ) -> pl.Tensor[[32, 128], pl.FP32]:
+                with pl.spmd(4, name_hint="multi_out"):
+                    rv0 = self.kernel(a, scratch, result)
+                # Consume the scope's single return downstream so the alias is
+                # actually emitted: reshape the returned ``result`` (numel 4096).
+                rv: pl.Tensor[[32, 128], pl.FP32] = pl.reshape(rv0, [32, 128])
+                final = self.consumer(rv, final)
+                return final
+
+        program = passes.materialize_runtime_scopes()(
+            passes.derive_call_directions()(
+                PassManager.get_strategy(OptimizationStrategy.Default).run_passes(SpmdSingleReturnViewProgram)
+            )
+        )
+        code = None
+        for func in program.functions.values():
+            if func.func_type == ir.FunctionType.Orchestration:
+                code = codegen.generate_orchestration(program, func).code
+        assert code is not None, "no orchestration function generated"
+
+        # The scope's single return feeds a reshape. It must alias the actually
+        # returned output ``result`` (numel 4096), NOT the first-sorted in-place
+        # InOut ``scratch`` (numel 2048).
+        assert "ext_result.reshape(" in code, code
+        assert "ext_scratch.reshape(" not in code, code
+
     @staticmethod
     def _manual_cross_scope_code(create_inside: bool) -> str:
         """Orchestration code for a tensor written inside a ``pl.manual_scope``
