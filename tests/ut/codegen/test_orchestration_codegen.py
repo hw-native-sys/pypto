@@ -100,12 +100,20 @@ def _out_of_scope_tensor_refs(code: str) -> list[str]:
         an ``add_*``-only checker missed, #1713)
       * ``... = X;`` / ``... = X.method(...)``        — assignment-RHS reads
 
-    Only identifiers *declared* as tensors anywhere in the program are
-    considered, so numeric literals (``= 0;``), casts, and keywords never yield
-    false positives.
+    A used name out of scope is flagged when it is *either* declared as a tensor
+    somewhere (``declared_anywhere``) *or* an SSA-versioned tensor temp
+    (``__ssa_v``/``__rv``/``__window``/...). The latter is checked independently
+    so a dangling reference to a name whose declaration was wrongly *collapsed
+    away* — which would never land in ``declared_anywhere`` — is still reported.
+    Numeric literals (``= 0;``), casts, and scalar locals carry neither marker,
+    so they never yield false positives.
     """
     decl_re = re.compile(r"\b(?:const\s+Tensor\s*&|Tensor|TaskOutputTensors|Arg)\s+(\w+)")
     declared_anywhere = set(decl_re.findall(code))
+    # An SSA-versioned tensor temp is unambiguously a tensor regardless of whether
+    # its declaration still exists, so an out-of-scope reference to one is always
+    # a bug worth flagging (independent of declared_anywhere).
+    ssa_tensor = re.compile(r"__(?:ssa_v\d|rv\b|rv_v\d|window|windowed|assembled)")
     use_add = re.compile(r"\badd_(?:input|output|inout|no_dep)\(\s*(\w+)\s*\)")
     use_method = re.compile(r"\b(\w+)\s*\.(?:reshape|view|transpose|assemble|slice|get_ref)\s*\(")
     use_rhs = re.compile(r"=\s*(\w+)\s*[;.]")
@@ -123,7 +131,9 @@ def _out_of_scope_tensor_refs(code: str) -> list[str]:
         names += [m.group(1) for m in use_method.finditer(line)]
         names += [m.group(1) for m in use_rhs.finditer(line)]
         for name in names:
-            if name in declared_anywhere and not any(name in s for s in scopes):
+            if any(name in s for s in scopes):
+                continue
+            if name in declared_anywhere or ssa_tensor.search(name):
                 bad.append(name)
         # Apply braces in source order so a ``} else {`` line closes the prior
         # block then opens a fresh one (counting separately would mis-nest it).
@@ -1116,12 +1126,14 @@ class TestOrchestration:
         # The windowed externalization actually fired (exercises Pattern-5).
         assert "produce__windowed" in code, code
         manual_open = code.index("PTO2_SCOPE(PTO2ScopeMode::MANUAL)")
-        # The mutable carry decl ``Tensor <name>_rv = <init>;`` is hoisted AHEAD
-        # of the manual block header (declared in the enclosing scope).
+        # The mutable carry for ``acc`` (``Tensor acc_rv = acc;``) is hoisted AHEAD
+        # of the manual block header (declared in the enclosing scope). Anchor the
+        # match to the ``acc`` carry initialised from ``acc`` so an unrelated
+        # ``_rv`` temp emitted earlier can't be picked by mistake.
         carry_decls = list(
-            re.finditer(r"^\s*Tensor\s+(\w*_rv\w*)\s*=\s*\w+;", code[:manual_open], flags=re.MULTILINE)
+            re.finditer(r"^\s*Tensor\s+(acc\w*_rv\w*)\s*=\s*acc;", code[:manual_open], flags=re.MULTILINE)
         )
-        assert carry_decls, code[:manual_open]
+        assert len(carry_decls) == 1, code[:manual_open]
         carry_name = carry_decls[0].group(1)
         # The after-scope kernel reads the hoisted carry directly; the chained
         # ``acc__ssa_v<N>`` post-loop copy collapsed away entirely.

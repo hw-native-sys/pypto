@@ -1372,14 +1372,19 @@ class OrchestrationStmtCodegen : public CodegenBase {
   /// ``std::get_temporary_buffer`` for a non-trivially-relocatable element type,
   /// which trips ``clang-diagnostic-deprecated-declarations`` under
   /// ``-warnings-as-errors``. Param lists are short, so the extra pass is free.
-  static std::vector<ParamEntry> ReorderTensorsBeforeScalars(const std::vector<ParamEntry>& params) {
+  static std::vector<ParamEntry> ReorderTensorsBeforeScalars(std::vector<ParamEntry> params) {
+    // ``params`` is taken by value (callers pass a local about to be destroyed),
+    // so the two passes move each element exactly once — pass 1 the non-scalars,
+    // pass 2 the scalars — avoiding a copy of each entry's ``std::string value``.
+    // ``direction`` is a trivially-copyable enum, so it stays readable on an
+    // element whose string was already moved out.
     std::vector<ParamEntry> ordered;
     ordered.reserve(params.size());
-    for (const auto& p : params) {
-      if (p.direction != ArgDirection::Scalar) ordered.push_back(p);
+    for (auto& p : params) {
+      if (p.direction != ArgDirection::Scalar) ordered.push_back(std::move(p));
     }
-    for (const auto& p : params) {
-      if (p.direction == ArgDirection::Scalar) ordered.push_back(p);
+    for (auto& p : params) {
+      if (p.direction == ArgDirection::Scalar) ordered.push_back(std::move(p));
     }
     return ordered;
   }
