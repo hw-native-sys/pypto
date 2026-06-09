@@ -56,7 +56,11 @@ def __getattr__(name: str) -> Any:
     must not become a hard import-time dependency of ``pypto.runtime``.
     """
     if name == "RunTiming":
-        from .task_interface import RunTiming  # noqa: PLC0415
+        # pyright: ignore — RunTiming is re-exported from the stub-less
+        # ``simpler.worker``, so pyright cannot resolve the symbol.
+        from .task_interface import (  # noqa: PLC0415
+            RunTiming,  # pyright: ignore[reportAttributeAccessIssue]
+        )
 
         return RunTiming
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

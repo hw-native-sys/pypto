@@ -221,7 +221,9 @@ def test_runtiming_reexported_from_package_root():
     ``__getattr__``) so importing ``pypto.runtime`` does not pull in simpler.
     """
     import pypto.runtime as rt  # noqa: PLC0415
-    from pypto.runtime.task_interface import RunTiming as _DeepRunTiming  # noqa: PLC0415
+    from pypto.runtime.task_interface import (  # noqa: PLC0415
+        RunTiming as _DeepRunTiming,  # pyright: ignore[reportAttributeAccessIssue]
+    )
 
     assert rt.RunTiming is _DeepRunTiming
     assert "RunTiming" in rt.__all__
